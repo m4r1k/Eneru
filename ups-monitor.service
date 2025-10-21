@@ -1,0 +1,23 @@
+[Unit]
+Description=UPS Monitor Service
+After=network-online.target libvirtd.service docker.service
+Wants=network-online.target
+Documentation=man:systemd.service(5)
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ups-monitor.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Required capabilities for shutdown
+AmbientCapabilities=CAP_SYS_BOOT
+
+[Install]
+WantedBy=multi-user.target
