@@ -1,23 +1,32 @@
 [Unit]
-Description=UPS Monitor Service
+Description=UPS Monitor 3.0 Service (Python)
+# Ensure dependencies are started first
 After=network-online.target libvirtd.service docker.service
 Wants=network-online.target
-Documentation=man:systemd.service(5)
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/ups-monitor.sh
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /opt/ups-monitor/ups-monitor.py
+# Automatically restart the script if it crashes
 Restart=always
-RestartSec=10
+RestartSec=5
 StandardOutput=journal
 StandardError=journal
 
-# Security hardening
+# Ensure Python output is not buffered (important for real-time logging)
+Environment=PYTHONUNBUFFERED=1
+
+# Shutdown Behavior Configuration
+# Wait up to 120 seconds for the script to finish if stopped (e.g., during system shutdown)
+TimeoutStopSec=120
+# Send the signal only to the main script process, not its children (like virsh/docker commands)
+KillMode=mixed
+
+# Basic Security hardening
 NoNewPrivileges=true
 PrivateTmp=true
-
-# Required capabilities for shutdown
-AmbientCapabilities=CAP_SYS_BOOT
 
 [Install]
 WantedBy=multi-user.target
