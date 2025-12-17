@@ -1,0 +1,138 @@
+# UPS Monitor Configuration File
+# All sections are optional - features are disabled if not configured
+
+# ==============================================================================
+# UPS CONNECTION
+# ==============================================================================
+ups:
+  # UPS identifier in format NAME@HOST or just NAME for local
+  name: "UPS@192.168.178.11"
+  # Seconds between status checks
+  check_interval: 1
+  # Number of stale data attempts before declaring connection lost
+  max_stale_data_tolerance: 3
+
+# ==============================================================================
+# SHUTDOWN TRIGGERS
+# ==============================================================================
+triggers:
+  # Shutdown when battery percentage falls below this value
+  low_battery_threshold: 20
+  
+  # Shutdown when estimated runtime falls below this (seconds)
+  # 600 = 10 minutes
+  critical_runtime_threshold: 600
+  
+  # Battery depletion tracking
+  depletion:
+    # Window for calculating depletion rate (seconds)
+    window: 300
+    # Shutdown when depletion rate exceeds this (%/minute)
+    critical_rate: 15.0
+    # Grace period after power loss before enforcing depletion rate (seconds)
+    grace_period: 90
+  
+  # Extended time on battery safety net
+  extended_time:
+    # Enable shutdown after extended time on battery
+    enabled: true
+    # Time threshold (seconds) - 900 = 15 minutes
+    threshold: 900
+
+# ==============================================================================
+# BEHAVIOR
+# ==============================================================================
+behavior:
+  # Dry-run mode - log actions but don't execute them
+  dry_run: false
+
+# ==============================================================================
+# LOGGING
+# ==============================================================================
+logging:
+  # Log file path (leave empty to disable file logging)
+  file: "/var/log/ups-monitor.log"
+  # State file for current UPS status
+  state_file: "/var/run/ups-monitor.state"
+  # Battery history file for depletion tracking
+  battery_history_file: "/var/run/ups-battery-history"
+
+# ==============================================================================
+# NOTIFICATIONS
+# ==============================================================================
+# Remove this section entirely to disable all notifications
+notifications:
+  discord:
+    # Discord webhook URL (leave empty to disable Discord notifications)
+    webhook_url: "https://discord.com/api/webhooks/YOUR_WEBHOOK_HERE"
+    # Timeout for non-blocking notifications (seconds)
+    timeout: 3
+    # Timeout during shutdown sequence (seconds)
+    timeout_blocking: 10
+
+# ==============================================================================
+# SHUTDOWN SEQUENCE
+# ==============================================================================
+# Each section can be removed or set to enabled: false to skip
+
+# Virtual Machines (libvirt/KVM)
+virtual_machines:
+  enabled: true
+  # Maximum time to wait for graceful shutdown before force-destroying (seconds)
+  max_wait: 30
+
+# Docker Containers
+docker:
+  enabled: true
+  # Timeout for docker stop command (seconds)
+  stop_timeout: 60
+
+# Filesystem Operations
+filesystems:
+  # Sync filesystems before shutdown
+  sync_enabled: true
+  
+  # Unmount configuration
+  unmount:
+    enabled: true
+    # Timeout per mount point (seconds)
+    timeout: 15
+    # List of mount points to unmount
+    # Format: path or {path: "/mnt/path", options: "-l"}
+    mounts:
+      - "/mnt/media"
+      - path: "/mnt/nas"
+        options: "-l"  # lazy unmount for network mounts
+      - "/mnt/backup"
+
+# Remote Server Shutdown
+# Define multiple remote servers to shutdown via SSH
+remote_servers:
+  - name: "Synology NAS"
+    enabled: true
+    host: "192.168.178.229"
+    user: "nas-admin"
+    # SSH connection timeout (seconds)
+    connect_timeout: 10
+    # Command execution timeout (seconds)
+    command_timeout: 30
+    # Shutdown command (default: "sudo shutdown -h now")
+    shutdown_command: "sudo -i synoshutdown -s"
+    # SSH options (optional)
+    ssh_options:
+      - "-o StrictHostKeyChecking=no"
+  
+  # Example: Another server with default shutdown command
+  # - name: "Backup Server"
+  #   enabled: true
+  #   host: "192.168.178.230"
+  #   user: "admin"
+  #   # Uses default: "sudo shutdown -h now"
+
+# Local Server Shutdown
+local_shutdown:
+  enabled: true
+  # Shutdown command (default: "shutdown -h now")
+  command: "shutdown -h now"
+  # Additional message for shutdown command
+  message: "UPS battery critical - emergency shutdown"
