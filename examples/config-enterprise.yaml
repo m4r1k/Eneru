@@ -1,0 +1,77 @@
+# Enterprise configuration with multiple remote servers
+ups:
+  name: "UPS@ups-server.local"
+  check_interval: 1
+  max_stale_data_tolerance: 5
+
+triggers:
+  low_battery_threshold: 30
+  critical_runtime_threshold: 1200
+  depletion:
+    window: 300
+    critical_rate: 10.0
+    grace_period: 120
+  extended_time:
+    enabled: true
+    threshold: 900
+
+behavior:
+  dry_run: false
+
+logging:
+  file: "/var/log/ups-monitor.log"
+
+notifications:
+  discord:
+    webhook_url: "YOUR_WEBHOOK_URL"
+    timeout: 5
+    timeout_blocking: 15
+
+virtual_machines:
+  enabled: true
+  max_wait: 120
+
+docker:
+  enabled: true
+  stop_timeout: 90
+
+filesystems:
+  sync_enabled: true
+  unmount:
+    enabled: true
+    timeout: 30
+    mounts:
+      - "/mnt/storage1"
+      - "/mnt/storage2"
+      - path: "/mnt/nfs-share"
+        options: "-l"
+
+remote_servers:
+  - name: "Primary NAS"
+    enabled: true
+    host: "nas1.local"
+    user: "admin"
+    shutdown_command: "sudo -i synoshutdown -s"
+    
+  - name: "Backup NAS"
+    enabled: true
+    host: "nas2.local"
+    user: "admin"
+    shutdown_command: "sudo -i synoshutdown -s"
+    
+  - name: "Database Server"
+    enabled: true
+    host: "db.local"
+    user: "root"
+    shutdown_command: "sudo shutdown -h now"
+    
+  - name: "Application Server"
+    enabled: true
+    host: "app.local"
+    user: "root"
+    shutdown_command: "sudo shutdown -h now"
+
+local_shutdown:
+  enabled: true
+  command: "shutdown -h now"
+  message: "UPS Tower emergency shutdown"

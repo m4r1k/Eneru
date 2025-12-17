@@ -1,0 +1,40 @@
+# Homelab configuration with VMs, Docker, NAS, and Discord
+ups:
+  name: "UPS@192.168.1.100"
+  check_interval: 1
+
+triggers:
+  low_battery_threshold: 25
+  critical_runtime_threshold: 900
+  extended_time:
+    enabled: true
+    threshold: 600
+
+notifications:
+  discord:
+    webhook_url: "YOUR_WEBHOOK_URL"
+
+virtual_machines:
+  enabled: true
+  max_wait: 60
+
+docker:
+  enabled: true
+
+filesystems:
+  sync_enabled: true
+  unmount:
+    enabled: true
+    mounts:
+      - path: "/mnt/nas"
+        options: "-l"
+
+remote_servers:
+  - name: "Synology NAS"
+    enabled: true
+    host: "192.168.1.50"
+    user: "admin"
+    shutdown_command: "sudo -i synoshutdown -s"
+
+local_shutdown:
+  enabled: true

@@ -1,0 +1,10 @@
+# Minimal configuration - single UPS, local shutdown only
+ups:
+  name: "UPS@localhost"
+
+triggers:
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+
+local_shutdown:
+  enabled: true

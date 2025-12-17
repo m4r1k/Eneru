@@ -1,111 +1,54 @@
-# UPS Monitor - Installation and Configuration Guide
+<div align="center">
 
-A Python-based UPS monitoring daemon that watches UPS status via Network UPS Tools (NUT) and executes configurable shutdown sequences to protect infrastructure during power events.
+# 🔋 UPS Tower
 
-## Version History
+**Intelligent UPS Monitoring & Shutdown Orchestration for NUT**
 
-### Version 4.0 (Current) - External Configuration
-Complete refactoring to support external YAML configuration file, making the program fully generic and configurable without code changes.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![NUT Compatible](https://img.shields.io/badge/NUT-compatible-green.svg)](https://networkupstools.org/)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
-### Version 3.0 - Python Rewrite
-Complete rewrite from Bash to Python, offering improved reliability, maintainability, and native handling of JSON, math operations, and complex data structures.
+<p align="center">
+  <img src="docs/images/ups-tower-diagram.png" alt="UPS Tower Architecture" width="600">
+</p>
 
-### Version 2.0 - Enhanced Bash
-Major improvements including Discord notifications, stateful event tracking, dynamic VM wait times, hang-proof unmounting, and SSH key-based authentication for remote NAS shutdown.
+A Python-based UPS monitoring daemon that watches UPS status via [Network UPS Tools (NUT)](https://networkupstools.org/) and executes configurable shutdown sequences to protect your entire infrastructure during power events.
 
-### Version 1.0 - Original Bash
-Initial implementation with basic UPS monitoring, battery depletion tracking, and shutdown sequence for VMs, Docker, and remote NAS.
+[Features](#features) •
+[Installation](#Installation) •
+[Configuration](#configuration) •
+[Usage](#usage) •
+[Troubleshooting](#troubleshooting) •
+[Version History](#version-history)
+
+</div>
 
 ---
 
-## What's New in Each Version
+## ✨ Why UPS Tower?
 
-### Version 4.0 Changes (from 3.0)
+Most UPS shutdown solutions are **single-system focused**. UPS Tower is designed for **modern infrastructure**:
 
-| Feature | Version 3.0 | Version 4.0 |
-|---------|-------------|-------------|
-| Configuration | Python dataclass in code | External YAML file |
-| Remote Servers | Single hardcoded NAS | Multiple configurable servers |
-| Shutdown Commands | Hardcoded per system type | Customizable per server |
-| Feature Toggles | Edit source code | Enable/disable in config |
-| CLI Options | None | `--config`, `--dry-run`, `--validate-config` |
-| Dependencies | Hard failure if missing | Graceful degradation |
-| Installation | Overwrites config | Preserves existing config |
-| License | Apache 2.0 | MIT |
+| Challenge | UPS Tower Solution |
+|-----------|-------------------|
+| Multiple servers need coordinated shutdown | ✅ Orchestrated multi-server shutdown via SSH |
+| VMs and containers need graceful stop | ✅ Libvirt VM and Docker container handling |
+| Network mounts hang during power loss | ✅ Timeout-protected unmounting |
+| No visibility during power events | ✅ Real-time Discord notifications |
+| Different systems need different commands | ✅ Per-server custom shutdown commands |
+| Battery estimates are unreliable | ✅ Multi-vector shutdown triggers |
 
-**New Features in 4.0:**
-- External YAML configuration file (`/etc/ups-monitor/config.yaml`)
-- All features independently enable/disable without code changes
-- Multiple remote servers with individual settings
-- Custom shutdown commands per remote server
-- Per-server SSH options and timeouts
-- Command-line argument support
-- Configuration validation (`--validate-config`)
-- Graceful degradation when optional dependencies missing
-- Modular configuration classes
-- Enhanced install script with package manager detection
-- Config preservation on reinstall
+---
 
-**Removed in 4.0:**
-- Hardcoded configuration values in source code
-- Single remote NAS limitation
-- Apache 2.0 license (now MIT)
+## 🎯 Built For
 
-### Version 3.0 Changes (from 2.0)
-
-| Feature | Version 2.0 (Bash) | Version 3.0 (Python) |
-|---------|-------------------|---------------------|
-| Language | Bash 4.0+ | Python 3.9+ |
-| JSON Handling | External `jq` dependency | Native Python (`requests` library) |
-| Math Operations | External `bc` dependency | Native Python |
-| Configuration | Shell variables | Python dataclass with type hints |
-| State Management | File-based with shell parsing | In-memory with file persistence |
-| Type Safety | None | Full type hints |
-| Error Handling | Shell traps | Python exceptions |
-| String Formatting | Shell variable expansion | Python string concatenation |
-
-**Removed Dependencies in 3.0:**
-- `jq` - JSON now handled natively
-- `bc` - Math now handled natively
-- `awk` - Text processing now handled natively
-- `grep` - Pattern matching now handled natively
-
-**New Dependencies in 3.0:**
-- `python3-requests` - For Discord webhook notifications
-
-### Version 2.0 Changes (from 1.0)
-
-| Feature | Version 1.0 | Version 2.0 |
-|---------|-------------|-------------|
-| Notifications | None | Discord webhooks with rich embeds |
-| Event Tracking | Basic logging | Stateful tracking (prevents log spam) |
-| VM Shutdown | Fixed 10s wait | Dynamic wait up to 30s with force destroy |
-| NAS Authentication | Password in script (`sshpass`) | SSH key-based (no passwords stored) |
-| Unmounting | Basic unmount | Timeout-protected unmount (hang-proof) |
-| Voltage Monitoring | Relative change detection | Absolute threshold-based detection |
-| Depletion Rate | 60-second window, 15 samples | 300-second window, 30 samples, grace period |
-| AVR Monitoring | None | Boost/Trim detection |
-| Connection Handling | Basic retry | Stale data detection, failsafe shutdown |
-| Crisis Reporting | None | Elevated notifications during shutdown |
-| Shutdown Triggers | 4 triggers | 4 triggers + FSD flag detection |
-| Configuration | Minimal | Comprehensive with mount options |
-
-**New Features in 2.0:**
-- Discord webhook integration with color-coded embeds
-- Depletion rate grace period (prevents false triggers on power loss)
-- Failsafe Battery Protection (FSB) - shutdown if connection lost while on battery
-- FSD (Forced Shutdown) flag detection from UPS
-- Configurable mount list with per-mount options (e.g., lazy unmount)
-- Overload state tracking with resolution detection
-- Bypass mode detection
-- Service stop notifications
-- Bash 4.0+ requirement for associative arrays
-- `jq` requirement for robust JSON generation
-
-**Security Improvements in 2.0:**
-- Removed `sshpass` and password storage
-- SSH key-based authentication for NAS
-- Passwordless sudo configuration guide
+- 🏠 **Homelabs** - Protect your self-hosted infrastructure
+- 🖥️ **Virtualization Hosts** - Graceful VM shutdown before power loss
+- 🐳 **Container Hosts** - Stop Docker/Podman containers safely
+- 📦 **NAS Systems** - Coordinate shutdown of Synology, QNAP, TrueNAS
+- 🏢 **Small Business** - Multi-server environments with single UPS
+- ☁️ **Hybrid Setups** - Mix of physical and virtual infrastructure
 
 ---
 
@@ -557,6 +500,113 @@ The service requires root for:
 The systemd service includes basic hardening:
 - `NoNewPrivileges=true`
 - `PrivateTmp=true`
+
+---
+
+## Version History
+
+### Version 4.0 (Current) - External Configuration
+Complete refactoring to support external YAML configuration file, making the program fully generic and configurable without code changes.
+
+### Version 3.0 - Python Rewrite
+Complete rewrite from Bash to Python, offering improved reliability, maintainability, and native handling of JSON, math operations, and complex data structures.
+
+### Version 2.0 - Enhanced Bash
+Major improvements including Discord notifications, stateful event tracking, dynamic VM wait times, hang-proof unmounting, and SSH key-based authentication for remote NAS shutdown.
+
+### Version 1.0 - Original Bash
+Initial implementation with basic UPS monitoring, battery depletion tracking, and shutdown sequence for VMs, Docker, and remote NAS.
+
+---
+
+## What's New in Each Version
+
+### Version 4.0 Changes (from 3.0)
+
+| Feature | Version 3.0 | Version 4.0 |
+|---------|-------------|-------------|
+| Configuration | Python dataclass in code | External YAML file |
+| Remote Servers | Single hardcoded NAS | Multiple configurable servers |
+| Shutdown Commands | Hardcoded per system type | Customizable per server |
+| Feature Toggles | Edit source code | Enable/disable in config |
+| CLI Options | None | `--config`, `--dry-run`, `--validate-config` |
+| Dependencies | Hard failure if missing | Graceful degradation |
+| Installation | Overwrites config | Preserves existing config |
+| License | Apache 2.0 | MIT |
+
+**New Features in 4.0:**
+- External YAML configuration file (`/etc/ups-monitor/config.yaml`)
+- All features independently enable/disable without code changes
+- Multiple remote servers with individual settings
+- Custom shutdown commands per remote server
+- Per-server SSH options and timeouts
+- Command-line argument support
+- Configuration validation (`--validate-config`)
+- Graceful degradation when optional dependencies missing
+- Modular configuration classes
+- Enhanced install script with package manager detection
+- Config preservation on reinstall
+
+**Removed in 4.0:**
+- Hardcoded configuration values in source code
+- Single remote NAS limitation
+- Apache 2.0 license (now MIT)
+
+### Version 3.0 Changes (from 2.0)
+
+| Feature | Version 2.0 (Bash) | Version 3.0 (Python) |
+|---------|-------------------|---------------------|
+| Language | Bash 4.0+ | Python 3.9+ |
+| JSON Handling | External `jq` dependency | Native Python (`requests` library) |
+| Math Operations | External `bc` dependency | Native Python |
+| Configuration | Shell variables | Python dataclass with type hints |
+| State Management | File-based with shell parsing | In-memory with file persistence |
+| Type Safety | None | Full type hints |
+| Error Handling | Shell traps | Python exceptions |
+| String Formatting | Shell variable expansion | Python string concatenation |
+
+**Removed Dependencies in 3.0:**
+- `jq` - JSON now handled natively
+- `bc` - Math now handled natively
+- `awk` - Text processing now handled natively
+- `grep` - Pattern matching now handled natively
+
+**New Dependencies in 3.0:**
+- `python3-requests` - For Discord webhook notifications
+
+### Version 2.0 Changes (from 1.0)
+
+| Feature | Version 1.0 | Version 2.0 |
+|---------|-------------|-------------|
+| Notifications | None | Discord webhooks with rich embeds |
+| Event Tracking | Basic logging | Stateful tracking (prevents log spam) |
+| VM Shutdown | Fixed 10s wait | Dynamic wait up to 30s with force destroy |
+| NAS Authentication | Password in script (`sshpass`) | SSH key-based (no passwords stored) |
+| Unmounting | Basic unmount | Timeout-protected unmount (hang-proof) |
+| Voltage Monitoring | Relative change detection | Absolute threshold-based detection |
+| Depletion Rate | 60-second window, 15 samples | 300-second window, 30 samples, grace period |
+| AVR Monitoring | None | Boost/Trim detection |
+| Connection Handling | Basic retry | Stale data detection, failsafe shutdown |
+| Crisis Reporting | None | Elevated notifications during shutdown |
+| Shutdown Triggers | 4 triggers | 4 triggers + FSD flag detection |
+| Configuration | Minimal | Comprehensive with mount options |
+
+**New Features in 2.0:**
+- Discord webhook integration with color-coded embeds
+- Depletion rate grace period (prevents false triggers on power loss)
+- Failsafe Battery Protection (FSB) - shutdown if connection lost while on battery
+- FSD (Forced Shutdown) flag detection from UPS
+- Configurable mount list with per-mount options (e.g., lazy unmount)
+- Overload state tracking with resolution detection
+- Bypass mode detection
+- Service stop notifications
+- Bash 4.0+ requirement for associative arrays
+- `jq` requirement for robust JSON generation
+
+**Security Improvements in 2.0:**
+- Removed `sshpass` and password storage
+- SSH key-based authentication for NAS
+- Passwordless sudo configuration guide
 
 ---
 
