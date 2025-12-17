@@ -106,8 +106,8 @@ All components are optional and independently configurable:
 
 ```bash
 # Clone or download the repository
-git clone https://github.com/yourusername/ups-monitor.git
-cd ups-monitor
+git clone https://github.com/m4r1k/Eneru.git
+cd Eneru
 
 # Run the installer
 sudo ./install.sh
