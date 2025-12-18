@@ -74,7 +74,7 @@ Multiple shutdown conditions with configurable thresholds:
 All components are optional and independently configurable:
 
 1. **Virtual Machines (libvirt/KVM):** Graceful shutdown with force-destroy fallback
-2. **Docker Containers:** Stop all running containers
+2. **Containers (Docker/Podman):** Stop all running containers with auto-detection
 3. **Filesystem Sync:** Flush buffers to disk
 4. **Filesystem Unmount:** Hang-proof unmounting with per-mount options
 5. **Remote Servers:** SSH-based shutdown of multiple remote systems
@@ -222,10 +222,15 @@ virtual_machines:
   enabled: true
   max_wait: 30
 
-# Docker Containers
-docker:
+# Container Runtime (Docker/Podman)
+containers:
   enabled: true
+  # Runtime to use: "auto", "docker", or "podman"
+  # auto = detect available runtime (prefers podman)
+  runtime: "auto"
   stop_timeout: 60
+  # For Podman: stop rootless user containers as well
+  include_user_containers: false
 
 # Filesystem Operations
 filesystems:
@@ -283,6 +288,14 @@ local_shutdown:
 | `depletion.grace_period` | `90` | Seconds before enforcing depletion rate |
 | `extended_time.enabled` | `true` | Enable extended time shutdown |
 | `extended_time.threshold` | `900` | Seconds on battery before shutdown |
+
+#### Containers Section
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `false` | Enable container shutdown |
+| `runtime` | `auto` | Runtime: `auto`, `docker`, or `podman` |
+| `stop_timeout` | `60` | Seconds to wait for graceful stop |
+| `include_user_containers` | `false` | Podman only: stop rootless user containers |
 
 #### Remote Servers
 | Key | Default | Description |

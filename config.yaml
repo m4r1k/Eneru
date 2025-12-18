@@ -81,11 +81,17 @@ virtual_machines:
   # Maximum time to wait for graceful shutdown before force-destroying (seconds)
   max_wait: 30
 
-# Docker Containers
-docker:
+# Container Runtime (Docker/Podman)
+containers:
   enabled: true
-  # Timeout for docker stop command (seconds)
+  # Runtime to use: "auto", "docker", or "podman"
+  # auto = detect available runtime (prefers podman)
+  runtime: "auto"
+  # Timeout for stop command (seconds)
   stop_timeout: 60
+  # For Podman: stop all user containers as well (rootless)
+  # Requires running as root with loginctl enable-linger for each user
+  include_user_containers: false
 
 # Filesystem Operations
 filesystems:

@@ -99,10 +99,12 @@ class VMConfig:
 
 
 @dataclass
-class DockerConfig:
-    """Docker container shutdown configuration."""
+class ContainersConfig:
+    """Container runtime shutdown configuration."""
     enabled: bool = False
+    runtime: str = "auto"  # "auto", "docker", or "podman"
     stop_timeout: int = 60
+    include_user_containers: bool = False
 
 
 @dataclass
@@ -156,7 +158,7 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     virtual_machines: VMConfig = field(default_factory=VMConfig)
-    docker: DockerConfig = field(default_factory=DockerConfig)
+    containers: ContainersConfig = field(default_factory=ContainersConfig)
     filesystems: FilesystemsConfig = field(default_factory=FilesystemsConfig)
     remote_servers: List[RemoteServerConfig] = field(default_factory=list)
     local_shutdown: LocalShutdownConfig = field(default_factory=LocalShutdownConfig)
@@ -304,13 +306,26 @@ class ConfigLoader:
                 max_wait=vm_data.get('max_wait', 30),
             )
 
-        # Docker Configuration
-        if 'docker' in data:
-            docker_data = data['docker']
-            config.docker = DockerConfig(
-                enabled=docker_data.get('enabled', False),
-                stop_timeout=docker_data.get('stop_timeout', 60),
-            )
+        # Containers Configuration (supports both 'containers' and legacy 'docker')
+        containers_data = data.get('containers', data.get('docker', {}))
+        if containers_data:
+            # Handle legacy 'docker' section format
+            if 'docker' in data and 'containers' not in data:
+                # Legacy format: docker.enabled, docker.stop_timeout
+                config.containers = ContainersConfig(
+                    enabled=containers_data.get('enabled', False),
+                    runtime="docker",  # Legacy config assumes docker
+                    stop_timeout=containers_data.get('stop_timeout', 60),
+                    include_user_containers=False,
+                )
+            else:
+                # New format: containers section
+                config.containers = ContainersConfig(
+                    enabled=containers_data.get('enabled', False),
+                    runtime=containers_data.get('runtime', 'auto'),
+                    stop_timeout=containers_data.get('stop_timeout', 60),
+                    include_user_containers=containers_data.get('include_user_containers', False),
+                )
 
         # Filesystems Configuration
         if 'filesystems' in data:
@@ -514,6 +529,7 @@ class UPSMonitor:
         self._shutdown_flag_path = Path(config.logging.shutdown_flag_file)
         self._battery_history_path = Path(config.logging.battery_history_file)
         self._state_file_path = Path(config.logging.state_file)
+        self._container_runtime: Optional[str] = None
 
     def run(self):
         """Main entry point."""
@@ -568,8 +584,12 @@ class UPSMonitor:
 
         if self.config.virtual_machines.enabled:
             features.append("VMs")
-        if self.config.docker.enabled:
-            features.append("Docker")
+        if self.config.containers.enabled:
+            runtime = self.config.containers.runtime
+            if runtime == "auto":
+                features.append("Containers (auto-detect)")
+            else:
+                features.append(f"Containers ({runtime})")
         if self.config.filesystems.sync_enabled:
             features.append("FS Sync")
         if self.config.filesystems.unmount.enabled:
@@ -733,6 +753,34 @@ class UPSMonitor:
         if discord_message:
             self._send_notification(discord_message, discord_color)
 
+    def _detect_container_runtime(self) -> Optional[str]:
+        """Detect available container runtime."""
+        runtime_config = self.config.containers.runtime.lower()
+
+        if runtime_config == "docker":
+            if command_exists("docker"):
+                return "docker"
+            self._log_message("⚠️ WARNING: Docker specified but not found")
+            return None
+
+        elif runtime_config == "podman":
+            if command_exists("podman"):
+                return "podman"
+            self._log_message("⚠️ WARNING: Podman specified but not found")
+            return None
+
+        elif runtime_config == "auto":
+            # Auto-detect: prefer podman (more common on modern RHEL/Fedora)
+            if command_exists("podman"):
+                return "podman"
+            elif command_exists("docker"):
+                return "docker"
+            return None
+
+        else:
+            self._log_message(f"⚠️ WARNING: Unknown container runtime '{runtime_config}'")
+            return None
+
     def _check_dependencies(self):
         """Check for required and optional dependencies."""
         required_cmds = ["upsc", "sync", "shutdown", "logger"]
@@ -754,9 +802,14 @@ class UPSMonitor:
             self._log_message("⚠️ WARNING: 'virsh' not found but VM shutdown is enabled. VMs will be skipped.")
             self.config.virtual_machines.enabled = False
 
-        if self.config.docker.enabled and not command_exists("docker"):
-            self._log_message("⚠️ WARNING: 'docker' not found but Docker shutdown is enabled. Containers will be skipped.")
-            self.config.docker.enabled = False
+        # Container runtime detection
+        if self.config.containers.enabled:
+            self._container_runtime = self._detect_container_runtime()
+            if self._container_runtime:
+                self._log_message(f"🐳 Container runtime detected: {self._container_runtime}")
+            else:
+                self._log_message("⚠️ WARNING: No container runtime found. Container shutdown will be skipped.")
+                self.config.containers.enabled = False
 
         enabled_servers = [s for s in self.config.remote_servers if s.enabled]
         if enabled_servers and not command_exists("ssh"):
@@ -961,35 +1014,94 @@ class UPSMonitor:
 
         self._log_message(" ✅ All VMs shutdown complete")
 
-    def _shutdown_docker_containers(self):
-        """Stop all Docker containers."""
-        if not self.config.docker.enabled:
+    def _shutdown_containers(self):
+        """Stop all containers using detected runtime (Docker/Podman)."""
+        if not self.config.containers.enabled:
             return
 
-        self._log_message("🐋 Stopping all Docker containers...")
-
-        if not command_exists("docker"):
-            self._log_message(" ℹ️ docker not available, skipping container shutdown")
+        if not self._container_runtime:
             return
 
-        exit_code, stdout, _ = run_command(["docker", "ps", "-q"])
+        runtime = self._container_runtime
+        runtime_display = runtime.capitalize()
+
+        self._log_message(f"🐳 Stopping all {runtime_display} containers...")
+
+        # Get list of running containers
+        exit_code, stdout, _ = run_command([runtime, "ps", "-q"])
         if exit_code != 0:
-            self._log_message(" ⚠️ Failed to get container list")
+            self._log_message(f" ⚠️ Failed to get {runtime_display} container list")
             return
 
         container_ids = [cid.strip() for cid in stdout.strip().split('\n') if cid.strip()]
 
         if not container_ids:
-            self._log_message(" ℹ️ No running Docker containers found")
-            return
+            self._log_message(f" ℹ️ No running {runtime_display} containers found")
+        else:
+            if self.config.behavior.dry_run:
+                exit_code, stdout, _ = run_command([runtime, "ps", "--format", "{{.Names}}"])
+                names = stdout.strip().replace('\n', ' ')
+                self._log_message(f" 🧪 [DRY-RUN] Would stop {runtime_display} containers: {names}")
+            else:
+                # Stop containers with timeout
+                stop_cmd = [runtime, "stop", "-t", str(self.config.containers.stop_timeout)]
+                stop_cmd.extend(container_ids)
+                run_command(stop_cmd, timeout=self.config.containers.stop_timeout + 30)
+                self._log_message(f" ✅ {runtime_display} containers stopped")
+
+        # Handle Podman rootless containers if configured
+        if runtime == "podman" and self.config.containers.include_user_containers:
+            self._shutdown_podman_user_containers()
+
+    def _shutdown_podman_user_containers(self):
+        """Stop Podman containers running as non-root users."""
+        self._log_message(" 🔍 Checking for rootless Podman containers...")
 
         if self.config.behavior.dry_run:
-            exit_code, stdout, _ = run_command(["docker", "ps", "--format", "{{.Names}}"])
-            names = stdout.strip().replace('\n', ' ')
-            self._log_message(f" 🧪 [DRY-RUN] Would stop Docker containers: {names}")
-        else:
-            run_command(["docker", "stop"] + container_ids, timeout=self.config.docker.stop_timeout)
-            self._log_message(" ✅ Docker containers stopped")
+            self._log_message(" 🧪 [DRY-RUN] Would stop rootless Podman containers for all users")
+            return
+
+        # Get list of users with active Podman containers
+        # This requires loginctl and users with linger enabled
+        exit_code, stdout, _ = run_command(["loginctl", "list-users", "--no-legend"])
+        if exit_code != 0:
+            self._log_message(" ⚠️ Failed to list users for rootless container check")
+            return
+
+        for line in stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+
+            parts = line.split()
+            if len(parts) >= 2:
+                uid = parts[0]
+                username = parts[1]
+
+                # Skip system users (UID < 1000)
+                try:
+                    if int(uid) < 1000:
+                        continue
+                except ValueError:
+                    continue
+
+                # Check for running containers as this user
+                exit_code, stdout, _ = run_command([
+                    "sudo", "-u", username,
+                    "podman", "ps", "-q"
+                ], timeout=10)
+
+                if exit_code == 0 and stdout.strip():
+                    container_ids = [cid.strip() for cid in stdout.strip().split('\n') if cid.strip()]
+                    if container_ids:
+                        self._log_message(f" 👤 Stopping {len(container_ids)} container(s) for user '{username}'")
+                        stop_cmd = [
+                            "sudo", "-u", username,
+                            "podman", "stop", "-t", str(self.config.containers.stop_timeout)
+                        ]
+                        stop_cmd.extend(container_ids)
+                        run_command(stop_cmd, timeout=self.config.containers.stop_timeout + 30)
+
+        self._log_message(" ✅ Rootless Podman containers stopped")
 
     def _sync_filesystems(self):
         """Sync all filesystems."""
@@ -1116,7 +1228,7 @@ class UPSMonitor:
         run_command(["wall", wall_msg])
 
         self._shutdown_vms()
-        self._shutdown_docker_containers()
+        self._shutdown_containers()
         self._sync_filesystems()
         self._unmount_filesystems()
         self._shutdown_remote_servers()
@@ -1552,7 +1664,11 @@ def main():
         print(f"  UPS: {config.ups.name}")
         print(f"  Dry-run: {config.behavior.dry_run}")
         print(f"  VMs enabled: {config.virtual_machines.enabled}")
-        print(f"  Docker enabled: {config.docker.enabled}")
+        print(f"  Containers enabled: {config.containers.enabled}", end="")
+        if config.containers.enabled:
+            print(f" (runtime: {config.containers.runtime})")
+        else:
+            print()
         print(f"  Remote servers: {len([s for s in config.remote_servers if s.enabled])}")
         print(f"  Notifications: {config.notifications.discord is not None and bool(config.notifications.discord.webhook_url)}")
         sys.exit(0)

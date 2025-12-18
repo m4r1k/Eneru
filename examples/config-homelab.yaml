@@ -18,8 +18,11 @@ virtual_machines:
   enabled: true
   max_wait: 60
 
-docker:
+# Container Runtime (Docker/Podman)
+containers:
   enabled: true
+  runtime: "auto"  # auto-detects docker or podman
+  stop_timeout: 60
 
 filesystems:
   sync_enabled: true

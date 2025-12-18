@@ -31,9 +31,13 @@ virtual_machines:
   enabled: true
   max_wait: 120
 
-docker:
+# Container Runtime (Docker/Podman)
+containers:
   enabled: true
+  runtime: "podman"
   stop_timeout: 90
+  # For Podman: also stop rootless user containers
+  include_user_containers: true
 
 filesystems:
   sync_enabled: true
