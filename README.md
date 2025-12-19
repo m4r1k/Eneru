@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🔋 UPS Tower
+# ⚡ Eneru
 
 **Intelligent UPS Monitoring & Shutdown Orchestration for NUT**
 
@@ -10,7 +10,7 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
 <p align="center">
-  <img src="docs/images/ups-tower-diagram.png" alt="UPS Tower Architecture" width="600">
+  <img src="docs/images/ups-tower-diagram.png" alt="Eneru Architecture" width="600">
 </p>
 
 A Python-based UPS monitoring daemon that watches UPS status via [Network UPS Tools (NUT)](https://networkupstools.org/) and executes configurable shutdown sequences to protect your entire infrastructure during power events.
@@ -23,16 +23,24 @@ A Python-based UPS monitoring daemon that watches UPS status via [Network UPS To
 [Troubleshooting](#troubleshooting) •
 [Changelog](CHANGELOG.md)
 
+---
+
+### ⚡ The Name
+
+<img src="https://i.redd.it/yj458fqu3ab21.jpg" alt="Eneru from One Piece" width="120" align="right">
+
+Named after [Eneru (エネル)](https://onepiece.fandom.com/wiki/Enel) from *One Piece*—the self-proclaimed God of Skypiea who ate the Goro Goro no Mi (Rumble-Rumble Fruit), granting him absolute control over electricity. Just as Eneru commands lightning from the sky, this tool commands your infrastructure when the power from the grid fails. *Unlimited power... management!* ⚡
+
 </div>
 
 ---
 
-## ✨ Why UPS Tower?
+## ✨ Why Eneru?
 
-Most UPS shutdown solutions are **single-system focused**. UPS Tower is designed for **modern infrastructure**:
+Most UPS shutdown solutions are **single-system focused**. Eneru is designed for **modern infrastructure**:
 
-| Challenge | UPS Tower Solution |
-|-----------|-------------------|
+| Challenge | Eneru Solution |
+|-----------|----------------|
 | Multiple servers need coordinated shutdown | ✅ Orchestrated multi-server shutdown via SSH |
 | VMs and containers need graceful stop | ✅ Libvirt VM and Docker/Podman container handling |
 | Network mounts hang during power loss | ✅ Timeout-protected unmounting |
@@ -316,7 +324,7 @@ local_shutdown:
 
 ## Shutdown Triggers Explained
 
-UPS Tower uses multiple independent triggers to decide when to initiate an emergency shutdown. This multi-vector approach ensures protection even when individual metrics are unreliable (e.g., aged batteries with inaccurate runtime estimates).
+Eneru uses multiple independent triggers to decide when to initiate an emergency shutdown. This multi-vector approach ensures protection even when individual metrics are unreliable (e.g., aged batteries with inaccurate runtime estimates).
 
 ### Trigger Priority
 
@@ -571,7 +579,7 @@ Extended time never reached—faster trigger caught it.
 
 ### Failsafe Battery Protection (FSB)
 
-Beyond the configured triggers, UPS Tower includes a hardcoded failsafe:
+Beyond the configured triggers, Eneru includes a hardcoded failsafe:
 
 **If connection to the UPS is lost while running on battery, immediate shutdown is triggered.**
 

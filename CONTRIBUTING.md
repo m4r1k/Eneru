@@ -1,6 +1,6 @@
-# Contributing to UPS Tower
+# Contributing to Eneru
 
-First off, thank you for considering contributing to UPS Tower! 🎉
+First off, thank you for considering contributing to Eneru! 🎉
 
 ## How Can I Contribute?
 

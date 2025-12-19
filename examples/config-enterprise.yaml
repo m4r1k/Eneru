@@ -78,4 +78,4 @@ remote_servers:
 local_shutdown:
   enabled: true
   command: "shutdown -h now"
-  message: "UPS Tower emergency shutdown"
+  message: "Eneru emergency shutdown"
