@@ -10,7 +10,7 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
 <p align="center">
-  <img src="docs/images/ups-tower-diagram.png" alt="Eneru Architecture" width="600">
+  <img src="docs/images/eneru-diagram.png" alt="Eneru Architecture" width="600">
 </p>
 
 A Python-based UPS monitoring daemon that watches UPS status via [Network UPS Tools (NUT)](https://networkupstools.org/) and executes configurable shutdown sequences to protect your entire infrastructure during power events.
