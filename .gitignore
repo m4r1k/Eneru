@@ -1,0 +1,159 @@
+# ==============================================================================
+# Editor and IDE
+# ==============================================================================
+
+# Vim
+*.swp
+*.swo
+*.swn
+*~
+.netrwhist
+
+# Emacs
+*~
+\#*\#
+.#*
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# JetBrains (PyCharm, IntelliJ)
+.idea/
+*.iml
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Notepad++
+*.bak
+
+# ==============================================================================
+# Python
+# ==============================================================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+env/
+.env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+pytest_cache/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Ruff
+.ruff_cache/
+
+# pytype
+.pytype/
+
+# ==============================================================================
+# OS Generated
+# ==============================================================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+.directory
+.Trash-*
+
+# ==============================================================================
+# Project Specific
+# ==============================================================================
+
+# Local configuration (users should copy from config.yaml)
+config.local.yaml
+config.dev.yaml
+*.local.yaml
+
+# Runtime files (normally in /var/run/)
+*.state
+*.pid
+ups-battery-history
+ups-shutdown-scheduled
+
+# Log files
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# Test configurations with secrets
+test-config.yaml
+config.test.yaml
+
+# ==============================================================================
+# Secrets (never commit these)
+# ==============================================================================
+
+# SSH keys
+*.pem
+*.key
+id_rsa
+id_ed25519
+id_ups_shutdown
+
+# Environment files with secrets
+.env
+.env.*
+!.env.example
+
+# Webhook URLs or tokens
+secrets.yaml
+secrets.json
