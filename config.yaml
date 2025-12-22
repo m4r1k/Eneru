@@ -18,11 +18,11 @@ ups:
 triggers:
   # Shutdown when battery percentage falls below this value
   low_battery_threshold: 20
-  
+
   # Shutdown when estimated runtime falls below this (seconds)
   # 600 = 10 minutes
   critical_runtime_threshold: 600
-  
+
   # Battery depletion tracking
   depletion:
     # Window for calculating depletion rate (seconds)
@@ -31,7 +31,7 @@ triggers:
     critical_rate: 15.0
     # Grace period after power loss before enforcing depletion rate (seconds)
     grace_period: 90
-  
+
   # Extended time on battery safety net
   extended_time:
     # Enable shutdown after extended time on battery
@@ -58,17 +58,63 @@ logging:
   battery_history_file: "/var/run/ups-battery-history"
 
 # ==============================================================================
-# NOTIFICATIONS
+# NOTIFICATIONS (via Apprise)
 # ==============================================================================
-# Remove this section entirely to disable all notifications
+# Apprise supports 100+ notification services
+# See: https://github.com/caronc/apprise/wiki
 notifications:
-  discord:
-    # Discord webhook URL (leave empty to disable Discord notifications)
-    webhook_url: "https://discord.com/api/webhooks/YOUR_WEBHOOK_HERE"
-    # Timeout for non-blocking notifications (seconds)
-    timeout: 3
-    # Timeout during shutdown sequence (seconds)
-    timeout_blocking: 10
+  # Optional title - omit or set to null for no title
+  # Useful for multi-instance deployments to identify the source system
+  title: "⚡ Homelab UPS"  # or null for no title
+
+  # Avatar/icon URL (supported by Discord, Slack, and others)
+  avatar_url: "https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-avatar.png"
+
+  # Timeout for notification delivery (seconds)
+  timeout: 10
+
+  # Notification service URLs
+  urls:
+    # Discord
+    - "discord://webhook_id/webhook_token"
+
+    # Telegram
+    # - "telegram://bot_token/chat_id"
+
+    # Slack
+    # - "slack://token_a/token_b/token_c/#channel"
+
+    # ntfy (self-hosted or ntfy.sh)
+    # - "ntfy://topic"
+    # - "ntfy://user:password@hostname/topic"
+
+    # Pushover
+    # - "pushover://user_key@app_token"
+
+    # Gotify
+    # - "gotify://hostname/token"
+
+    # Matrix
+    # - "matrix://user:password@hostname/#room"
+
+    # Email
+    # - "mailto://user:password@smtp.example.com?to=admin@example.com"
+
+    # Home Assistant
+    # - "hassio://hostname/access_token"
+
+    # Generic Webhook
+    # - "json://hostname/path"
+
+# ==============================================================================
+# LEGACY DISCORD SUPPORT (automatically converted to Apprise)
+# ==============================================================================
+# If you have an existing Discord configuration, it will be automatically
+# converted to use Apprise. You can keep using this format:
+#
+# discord:
+#   webhook_url: "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+#   timeout: 3
 
 # ==============================================================================
 # SHUTDOWN SEQUENCE
@@ -97,7 +143,7 @@ containers:
 filesystems:
   # Sync filesystems before shutdown
   sync_enabled: true
-  
+
   # Unmount configuration
   unmount:
     enabled: true
@@ -127,7 +173,7 @@ remote_servers:
     # SSH options (optional)
     ssh_options:
       - "-o StrictHostKeyChecking=no"
-  
+
   # Example: Another server with default shutdown command
   # - name: "Backup Server"
   #   enabled: true

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-UPS Monitor - Generic UPS Monitoring and Shutdown Management
+Eneru - Generic UPS Monitoring and Shutdown Management
 Monitors UPS status via NUT and triggers configurable shutdown sequences.
+https://github.com/m4r1k/Eneru
 """
 
 import subprocess
@@ -13,10 +14,11 @@ import logging
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple, List, Union
+from typing import Optional, Dict, Any, Tuple, List
 from collections import deque
 from dataclasses import dataclass, field
 import threading
+import queue
 
 # Optional imports with graceful degradation
 try:
@@ -26,10 +28,10 @@ except ImportError:
     YAML_AVAILABLE = False
 
 try:
-    import requests
-    REQUESTS_AVAILABLE = True
+    import apprise
+    APPRISE_AVAILABLE = True
 except ImportError:
-    REQUESTS_AVAILABLE = False
+    APPRISE_AVAILABLE = False
 
 
 # ==============================================================================
@@ -78,17 +80,13 @@ class LoggingConfig:
 
 
 @dataclass
-class DiscordConfig:
-    """Discord notification configuration."""
-    webhook_url: str = ""
-    timeout: int = 3
-    timeout_blocking: int = 10
-
-
-@dataclass
 class NotificationsConfig:
-    """Notifications configuration."""
-    discord: Optional[DiscordConfig] = None
+    """Notifications configuration using Apprise."""
+    enabled: bool = False
+    urls: List[str] = field(default_factory=list)
+    title: Optional[str] = None  # None = no title sent
+    avatar_url: Optional[str] = None
+    timeout: int = 10
 
 
 @dataclass
@@ -163,12 +161,11 @@ class Config:
     remote_servers: List[RemoteServerConfig] = field(default_factory=list)
     local_shutdown: LocalShutdownConfig = field(default_factory=LocalShutdownConfig)
 
-    # Discord embed colors (not configurable via file)
-    COLOR_RED: int = 15158332
-    COLOR_GREEN: int = 3066993
-    COLOR_YELLOW: int = 15844367
-    COLOR_ORANGE: int = 15105570
-    COLOR_BLUE: int = 3447003
+    # Notification types mapped to colors/severity
+    NOTIFY_FAILURE: str = "failure"
+    NOTIFY_WARNING: str = "warning"
+    NOTIFY_SUCCESS: str = "success"
+    NOTIFY_INFO: str = "info"
 
 
 # ==============================================================================
@@ -199,7 +196,7 @@ class ConfigLoader:
         if config_path:
             path = Path(config_path)
             if not path.exists():
-                print(f"Warning: Config file not found: {config_path}")
+                print(f"Warning: Config file not found: {path}")
                 print("Using default configuration.")
                 return config
         else:
@@ -228,6 +225,44 @@ class ConfigLoader:
         return config
 
     @classmethod
+    def _convert_discord_webhook_to_apprise(cls, webhook_url: str) -> str:
+        """Convert Discord webhook URL to Apprise format."""
+        if webhook_url.startswith("https://discord.com/api/webhooks/"):
+            parts = webhook_url.replace("https://discord.com/api/webhooks/", "").split("/")
+            if len(parts) >= 2:
+                webhook_id = parts[0]
+                webhook_token = parts[1]
+                return f"discord://{webhook_id}/{webhook_token}/"
+        return webhook_url
+
+    @classmethod
+    def _append_avatar_to_url(cls, url: str, avatar_url: str) -> str:
+        """Append avatar_url parameter to notification URLs that support it."""
+        if not avatar_url:
+            return url
+
+        # Services that support avatar_url parameter
+        avatar_supported_schemes = [
+            'discord://',
+            'slack://',
+            'mattermost://',
+            'guilded://',
+            'zulip://',
+        ]
+
+        url_lower = url.lower()
+        for scheme in avatar_supported_schemes:
+            if url_lower.startswith(scheme):
+                # Check if URL already has parameters
+                separator = '&' if '?' in url else '?'
+                # URL encode the avatar URL
+                from urllib.parse import quote
+                encoded_avatar = quote(avatar_url, safe='')
+                return f"{url}{separator}avatar_url={encoded_avatar}"
+
+        return url
+
+    @classmethod
     def _parse_config(cls, data: Dict[str, Any]) -> Config:
         """Parse configuration dictionary into Config object."""
         config = Config()
@@ -239,7 +274,7 @@ class ConfigLoader:
                 name=ups_data.get('name', config.ups.name),
                 check_interval=ups_data.get('check_interval', config.ups.check_interval),
                 max_stale_data_tolerance=ups_data.get('max_stale_data_tolerance',
-                                                       config.ups.max_stale_data_tolerance),
+                                                      config.ups.max_stale_data_tolerance),
             )
 
         # Triggers Configuration
@@ -252,7 +287,7 @@ class ConfigLoader:
                 low_battery_threshold=triggers_data.get('low_battery_threshold',
                                                         config.triggers.low_battery_threshold),
                 critical_runtime_threshold=triggers_data.get('critical_runtime_threshold',
-                                                              config.triggers.critical_runtime_threshold),
+                                                             config.triggers.critical_runtime_threshold),
                 depletion=DepletionConfig(
                     window=depletion_data.get('window', config.triggers.depletion.window),
                     critical_rate=depletion_data.get('critical_rate',
@@ -280,23 +315,60 @@ class ConfigLoader:
                 file=logging_data.get('file', config.logging.file),
                 state_file=logging_data.get('state_file', config.logging.state_file),
                 battery_history_file=logging_data.get('battery_history_file',
-                                                       config.logging.battery_history_file),
+                                                      config.logging.battery_history_file),
                 shutdown_flag_file=logging_data.get('shutdown_flag_file',
-                                                     config.logging.shutdown_flag_file),
+                                                    config.logging.shutdown_flag_file),
             )
 
         # Notifications Configuration
+        # Support both new 'notifications' format and legacy 'discord' format
+        notif_urls = []
+        notif_title = None
+        avatar_url = None
+        notif_timeout = 10
+
         if 'notifications' in data:
             notif_data = data['notifications']
+
+            # Get configuration options
+            notif_title = notif_data.get('title')
+            avatar_url = notif_data.get('avatar_url')
+            notif_timeout = notif_data.get('timeout', 10)
+
+            # New Apprise-style configuration
+            if 'urls' in notif_data:
+                for url in notif_data.get('urls', []):
+                    notif_urls.append(cls._append_avatar_to_url(url, avatar_url))
+
+            # Legacy Discord configuration within notifications
             if 'discord' in notif_data:
                 discord_data = notif_data['discord']
-                config.notifications = NotificationsConfig(
-                    discord=DiscordConfig(
-                        webhook_url=discord_data.get('webhook_url', ''),
-                        timeout=discord_data.get('timeout', 3),
-                        timeout_blocking=discord_data.get('timeout_blocking', 10),
-                    )
-                )
+                webhook_url = discord_data.get('webhook_url', '')
+                if webhook_url:
+                    apprise_url = cls._convert_discord_webhook_to_apprise(webhook_url)
+                    apprise_url = cls._append_avatar_to_url(apprise_url, avatar_url)
+                    if apprise_url not in notif_urls:
+                        notif_urls.insert(0, apprise_url)
+                notif_timeout = discord_data.get('timeout', notif_timeout)
+
+        # Top-level legacy Discord configuration (backwards compatibility)
+        if 'discord' in data and 'notifications' not in data:
+            discord_data = data['discord']
+            webhook_url = discord_data.get('webhook_url', '')
+            if webhook_url:
+                apprise_url = cls._convert_discord_webhook_to_apprise(webhook_url)
+                apprise_url = cls._append_avatar_to_url(apprise_url, avatar_url)
+                if apprise_url not in notif_urls:
+                    notif_urls.insert(0, apprise_url)
+                notif_timeout = discord_data.get('timeout', notif_timeout)
+
+        config.notifications = NotificationsConfig(
+            enabled=len(notif_urls) > 0,
+            urls=notif_urls,
+            title=notif_title,
+            avatar_url=avatar_url,
+            timeout=notif_timeout,
+        )
 
         # Virtual Machines Configuration
         if 'virtual_machines' in data:
@@ -380,6 +452,30 @@ class ConfigLoader:
 
         return config
 
+    @classmethod
+    def validate_config(cls, config: Config) -> List[str]:
+        """Validate configuration and return list of warnings/info messages."""
+        messages = []
+
+        # Check Apprise availability
+        if config.notifications.enabled and not APPRISE_AVAILABLE:
+            messages.append(
+                "WARNING: Notifications enabled but apprise package not installed. "
+                "Notifications will be disabled. Install with: pip install apprise"
+            )
+
+        # Check for legacy Discord configuration
+        has_legacy_discord = any(
+            'discord://' in url.lower() for url in config.notifications.urls
+        )
+        if has_legacy_discord:
+            messages.append(
+                "INFO: Discord webhook detected. Using Apprise for notifications. "
+                "Native Discord embeds are now handled via Apprise."
+            )
+
+        return messages
+
 
 # ==============================================================================
 # STATE TRACKING
@@ -448,6 +544,154 @@ class UPSLogger:
     def log(self, message: str):
         """Log a message with timezone info."""
         self.logger.info(message)
+
+
+# ==============================================================================
+# NOTIFICATION WORKER
+# ==============================================================================
+
+class NotificationWorker:
+    """Non-blocking notification worker using a background thread and queue.
+
+    This worker ensures that notifications never block the main monitoring loop
+    or shutdown sequence. During power outages, network connectivity is often
+    unreliable, so notifications are sent on a best-effort basis without
+    delaying critical shutdown operations.
+    """
+
+    def __init__(self, config: Config):
+        self.config = config
+        self._queue: queue.Queue = queue.Queue()
+        self._worker_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._apprise_instance: Optional[Any] = None
+        self._initialized = False
+
+    def start(self) -> bool:
+        """Initialize Apprise and start the background worker thread."""
+        if not self.config.notifications.enabled:
+            return False
+
+        if not APPRISE_AVAILABLE:
+            return False
+
+        if not self.config.notifications.urls:
+            return False
+
+        # Initialize Apprise
+        self._apprise_instance = apprise.Apprise()
+
+        for url in self.config.notifications.urls:
+            if not self._apprise_instance.add(url):
+                print(f"Warning: Failed to add notification URL: {url}")
+
+        if len(self._apprise_instance) == 0:
+            print("Warning: No valid notification URLs configured")
+            return False
+
+        # Start background worker thread (daemon=True ensures it won't block shutdown)
+        self._stop_event.clear()
+        self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self._worker_thread.start()
+        self._initialized = True
+
+        return True
+
+    def stop(self):
+        """Stop the background worker thread gracefully."""
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._stop_event.set()
+            # Add sentinel to unblock the queue
+            self._queue.put(None)
+            # Don't wait too long - we might be shutting down
+            self._worker_thread.join(timeout=2)
+
+    def send(self, body: str, notify_type: str = "info", blocking: bool = False):
+        """
+        Queue a notification for sending.
+
+        Args:
+            body: Notification body
+            notify_type: One of 'info', 'success', 'warning', 'failure'
+            blocking: If True, wait for notification to be sent.
+                      NOTE: This should only be used for test notifications,
+                      never during shutdown sequences where network may be down.
+        """
+        if not self._initialized:
+            return
+
+        notification = {
+            'title': self.config.notifications.title,  # Can be None
+            'body': body,
+            'notify_type': notify_type,
+            'blocking_event': threading.Event() if blocking else None,
+        }
+
+        self._queue.put(notification)
+
+        # If blocking, wait for the notification to be processed
+        # This should ONLY be used for --test-notifications, never during shutdown
+        if blocking and notification['blocking_event']:
+            notification['blocking_event'].wait(timeout=self.config.notifications.timeout + 5)
+
+    def _worker_loop(self):
+        """Background worker that processes the notification queue."""
+        while not self._stop_event.is_set():
+            try:
+                notification = self._queue.get(timeout=1)
+
+                if notification is None:
+                    # Sentinel value, exit loop
+                    break
+
+                self._send_notification(notification)
+
+            except queue.Empty:
+                continue
+            except Exception:
+                # Silently ignore errors - notifications should never crash the monitor
+                pass
+
+    def _send_notification(self, notification: Dict[str, Any]):
+        """Actually send the notification via Apprise."""
+        if not self._apprise_instance:
+            return
+
+        try:
+            # Map notify_type string to Apprise NotifyType
+            type_map = {
+                "info": apprise.NotifyType.INFO,
+                "success": apprise.NotifyType.SUCCESS,
+                "warning": apprise.NotifyType.WARNING,
+                "failure": apprise.NotifyType.FAILURE,
+            }
+            notify_type = type_map.get(notification['notify_type'], apprise.NotifyType.INFO)
+
+            # Build notification parameters
+            notify_kwargs = {
+                'body': notification['body'],
+                'notify_type': notify_type,
+            }
+
+            # Only add title if configured (not None/empty)
+            if notification.get('title'):
+                notify_kwargs['title'] = notification['title']
+
+            self._apprise_instance.notify(**notify_kwargs)
+
+        except Exception:
+            # Silently ignore - network might be down during power outage
+            pass
+        finally:
+            # Signal completion if blocking
+            if notification.get('blocking_event'):
+                notification['blocking_event'].set()
+
+    def get_service_count(self) -> int:
+        """Return the number of configured notification services."""
+        if self._apprise_instance:
+            return len(self._apprise_instance)
+        return 0
 
 
 # ==============================================================================
@@ -530,6 +774,7 @@ class UPSMonitor:
         self._battery_history_path = Path(config.logging.battery_history_file)
         self._state_file_path = Path(config.logging.state_file)
         self._container_runtime: Optional[str] = None
+        self._notification_worker: Optional[NotificationWorker] = None
 
     def run(self):
         """Main entry point."""
@@ -540,7 +785,10 @@ class UPSMonitor:
             self._cleanup_and_exit(signal.SIGINT, None)
         except Exception as e:
             self._log_message(f"❌ FATAL ERROR: {e}")
-            self._send_notification(f"❌ **FATAL ERROR:** {e}", self.config.COLOR_RED)
+            self._send_notification(
+                f"❌ **FATAL ERROR**\nError: {e}",
+                self.config.NOTIFY_FAILURE
+            )
             raise
 
     def _initialize(self):
@@ -563,12 +811,15 @@ class UPSMonitor:
         except PermissionError:
             self._log_message(f"⚠️ WARNING: Cannot write to {self._battery_history_path}")
 
+        # Initialize notification worker
+        self._initialize_notifications()
+
         self._check_dependencies()
 
-        self._log_message(f"🚀 UPS Monitor starting - monitoring {self.config.ups.name}")
+        self._log_message(f"🚀 Eneru starting - monitoring {self.config.ups.name}")
         self._send_notification(
-            f"🚀 **UPS Monitor Service Started.**\nMonitoring {self.config.ups.name}.",
-            self.config.COLOR_BLUE
+            f"🚀 **Eneru Service Started**\nMonitoring {self.config.ups.name}",
+            self.config.NOTIFY_INFO
         )
 
         if self.config.behavior.dry_run:
@@ -577,6 +828,26 @@ class UPSMonitor:
         self._log_enabled_features()
         self._wait_for_initial_connection()
         self._initialize_voltage_thresholds()
+
+    def _initialize_notifications(self):
+        """Initialize the notification worker."""
+        if not self.config.notifications.enabled:
+            self._log_message("📢 Notifications: disabled")
+            return
+
+        if not APPRISE_AVAILABLE:
+            self._log_message("⚠️ WARNING: Notifications enabled but apprise not installed. "
+                              "Install with: pip install apprise")
+            self.config.notifications.enabled = False
+            return
+
+        self._notification_worker = NotificationWorker(self.config)
+        if self._notification_worker.start():
+            service_count = self._notification_worker.get_service_count()
+            self._log_message(f"📢 Notifications: enabled ({service_count} service(s))")
+        else:
+            self._log_message("⚠️ WARNING: Failed to initialize notifications")
+            self.config.notifications.enabled = False
 
     def _log_enabled_features(self):
         """Log which features are enabled."""
@@ -602,20 +873,7 @@ class UPSMonitor:
         if self.config.local_shutdown.enabled:
             features.append("Local Shutdown")
 
-        if self._is_notifications_enabled():
-            features.append("Discord")
-
         self._log_message(f"📋 Enabled features: {', '.join(features) if features else 'None'}")
-
-    def _is_notifications_enabled(self) -> bool:
-        """Check if notifications are enabled."""
-        if not REQUESTS_AVAILABLE:
-            return False
-        if not self.config.notifications:
-            return False
-        if not self.config.notifications.discord:
-            return False
-        return bool(self.config.notifications.discord.webhook_url)
 
     def _log_message(self, message: str):
         """Log a message using the logger."""
@@ -626,51 +884,46 @@ class UPSMonitor:
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             print(f"{timestamp} {tz_name} - {message}")
 
+        # During shutdown, also send log messages as notifications (non-blocking)
         if self._shutdown_flag_path.exists():
             discord_safe_message = message.replace('`', '\\`')
-            notification_text = f"ℹ️ **Shutdown Detail:** {discord_safe_message}"
-            self._send_notification(notification_text, self.config.COLOR_BLUE)
+            self._send_notification(
+                f"ℹ️ **Shutdown Detail:** {discord_safe_message}",
+                self.config.NOTIFY_INFO
+            )
 
-    def _send_notification(self, message: str, color: Optional[int] = None):
-        """Send a Discord notification."""
-        if not self._is_notifications_enabled():
+    def _send_notification(self, body: str, notify_type: str = "info",
+                           blocking: bool = False):
+        """Send a notification via the notification worker.
+
+        IMPORTANT: During shutdown sequences, notifications are ALWAYS non-blocking.
+        This ensures that network failures (common during power outages) do not
+        delay the critical shutdown process. The blocking parameter is only
+        honored for non-shutdown scenarios like --test-notifications.
+
+        Args:
+            body: Notification body text
+            notify_type: One of 'info', 'success', 'warning', 'failure'
+            blocking: If True AND not during shutdown, wait for send completion.
+                      Ignored during shutdown to prevent delays.
+        """
+        if not self._notification_worker:
             return
 
-        if color is None:
-            color = self.config.COLOR_YELLOW
+        # Add footer with UPS info and timestamp
+        footer = f"\n\n---\n⚡ UPS: {self.config.ups.name}\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')}"
+        full_body = body + footer
 
-        discord_config = self.config.notifications.discord
-        payload = {
-            "embeds": [{
-                "title": "UPS Monitor Alert",
-                "description": message,
-                "color": int(color),
-                "footer": {"text": f"UPS: {self.config.ups.name}"},
-                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-            }]
-        }
-
+        # CRITICAL: During shutdown, NEVER block on notifications
+        # Network is likely unreliable during power outages
         is_shutdown = self._shutdown_flag_path.exists()
-        timeout_val = discord_config.timeout_blocking if is_shutdown else discord_config.timeout
+        actual_blocking = blocking and not is_shutdown
 
-        def send_request():
-            try:
-                requests.post(
-                    discord_config.webhook_url,
-                    json=payload,
-                    timeout=timeout_val,
-                    headers={"Content-Type": "application/json"}
-                )
-                if is_shutdown:
-                    time.sleep(0.5)
-            except Exception:
-                pass
-
-        if is_shutdown:
-            send_request()
-        else:
-            thread = threading.Thread(target=send_request, daemon=True)
-            thread.start()
+        self._notification_worker.send(
+            body=full_body,
+            notify_type=notify_type,
+            blocking=actual_blocking
+        )
 
     def _log_power_event(self, event: str, details: str):
         """Log power events with centralized notification logic."""
@@ -687,99 +940,73 @@ class UPSMonitor:
         if self._shutdown_flag_path.exists():
             return
 
-        discord_message: Optional[str] = None
-        discord_color = self.config.COLOR_YELLOW
+        notification: Optional[Tuple[str, str]] = None  # (body, type)
 
         event_handlers = {
             "ON_BATTERY": (
                 f"⚠️ **POWER FAILURE DETECTED!**\nSystem running on battery.\nDetails: {details}",
-                self.config.COLOR_ORANGE
+                self.config.NOTIFY_WARNING
             ),
             "POWER_RESTORED": (
-                f"✅ **POWER RESTORED.**\nSystem back on line power/charging.\nDetails: {details}",
-                self.config.COLOR_GREEN
+                f"✅ **POWER RESTORED**\nSystem back on line power/charging.\nDetails: {details}",
+                self.config.NOTIFY_SUCCESS
             ),
             "BROWNOUT_DETECTED": (
                 f"⚠️ **VOLTAGE ISSUE:** {event}\nDetails: {details}",
-                self.config.COLOR_ORANGE
+                self.config.NOTIFY_WARNING
             ),
             "OVER_VOLTAGE_DETECTED": (
                 f"⚠️ **VOLTAGE ISSUE:** {event}\nDetails: {details}",
-                self.config.COLOR_ORANGE
+                self.config.NOTIFY_WARNING
             ),
             "AVR_BOOST_ACTIVE": (
                 f"⚡ **AVR ACTIVE:** {event}\nDetails: {details}",
-                self.config.COLOR_YELLOW
+                self.config.NOTIFY_WARNING
             ),
             "AVR_TRIM_ACTIVE": (
                 f"⚡ **AVR ACTIVE:** {event}\nDetails: {details}",
-                self.config.COLOR_YELLOW
+                self.config.NOTIFY_WARNING
             ),
             "BYPASS_MODE_ACTIVE": (
                 f"🚨 **UPS IN BYPASS MODE!**\nNo protection active!\nDetails: {details}",
-                self.config.COLOR_RED
+                self.config.NOTIFY_FAILURE
             ),
             "BYPASS_MODE_INACTIVE": (
-                f"✅ **Bypass Mode Inactive.**\nProtection restored.\nDetails: {details}",
-                self.config.COLOR_GREEN
+                f"✅ **Bypass Mode Inactive**\nProtection restored.\nDetails: {details}",
+                self.config.NOTIFY_SUCCESS
             ),
             "OVERLOAD_ACTIVE": (
                 f"🚨 **UPS OVERLOAD DETECTED!**\nDetails: {details}",
-                self.config.COLOR_RED
+                self.config.NOTIFY_FAILURE
             ),
             "OVERLOAD_RESOLVED": (
-                f"✅ **Overload Resolved.**\nDetails: {details}",
-                self.config.COLOR_GREEN
+                f"✅ **Overload Resolved**\nDetails: {details}",
+                self.config.NOTIFY_SUCCESS
             ),
             "CONNECTION_LOST": (
                 f"❌ **ERROR: Connection Lost**\n{details}",
-                self.config.COLOR_RED
+                self.config.NOTIFY_FAILURE
             ),
             "CONNECTION_RESTORED": (
-                f"✅ **Connection Restored.**\n{details}",
-                self.config.COLOR_GREEN
+                f"✅ **Connection Restored**\n{details}",
+                self.config.NOTIFY_SUCCESS
             ),
         }
 
-        # Skip these events for Discord
+        # Skip these events for notifications
         if event in ("VOLTAGE_NORMALIZED", "AVR_INACTIVE"):
             return
 
         if event in event_handlers:
-            discord_message, discord_color = event_handlers[event]
+            notification = event_handlers[event]
         else:
-            discord_message = f"⚡ **Event:** {event}\nDetails: {details}"
+            notification = (
+                f"⚡ **Event:** {event}\nDetails: {details}",
+                self.config.NOTIFY_INFO
+            )
 
-        if discord_message:
-            self._send_notification(discord_message, discord_color)
-
-    def _detect_container_runtime(self) -> Optional[str]:
-        """Detect available container runtime."""
-        runtime_config = self.config.containers.runtime.lower()
-
-        if runtime_config == "docker":
-            if command_exists("docker"):
-                return "docker"
-            self._log_message("⚠️ WARNING: Docker specified but not found")
-            return None
-
-        elif runtime_config == "podman":
-            if command_exists("podman"):
-                return "podman"
-            self._log_message("⚠️ WARNING: Podman specified but not found")
-            return None
-
-        elif runtime_config == "auto":
-            # Auto-detect: prefer podman (more common on modern RHEL/Fedora)
-            if command_exists("podman"):
-                return "podman"
-            elif command_exists("docker"):
-                return "docker"
-            return None
-
-        else:
-            self._log_message(f"⚠️ WARNING: Unknown container runtime '{runtime_config}'")
-            return None
+        if notification:
+            self._send_notification(*notification)
 
     def _check_dependencies(self):
         """Check for required and optional dependencies."""
@@ -789,12 +1016,6 @@ class UPSMonitor:
         if missing:
             error_msg = f"❌ FATAL ERROR: Missing required commands: {', '.join(missing)}"
             print(error_msg)
-            self._shutdown_flag_path.touch()
-            self._send_notification(
-                f"❌ **FATAL ERROR:** Missing dependencies: {', '.join(missing)}. Script cannot start.",
-                self.config.COLOR_RED
-            )
-            self._shutdown_flag_path.unlink(missing_ok=True)
             sys.exit(1)
 
         # Check optional dependencies based on enabled features
@@ -816,6 +1037,33 @@ class UPSMonitor:
             self._log_message("⚠️ WARNING: 'ssh' not found but remote servers are configured. Remote shutdown will be skipped.")
             for server in self.config.remote_servers:
                 server.enabled = False
+
+    def _detect_container_runtime(self) -> Optional[str]:
+        """Detect available container runtime."""
+        runtime_config = self.config.containers.runtime.lower()
+
+        if runtime_config == "docker":
+            if command_exists("docker"):
+                return "docker"
+            self._log_message("⚠️ WARNING: Docker specified but not found")
+            return None
+
+        elif runtime_config == "podman":
+            if command_exists("podman"):
+                return "podman"
+            self._log_message("⚠️ WARNING: Podman specified but not found")
+            return None
+
+        elif runtime_config == "auto":
+            if command_exists("podman"):
+                return "podman"
+            elif command_exists("docker"):
+                return "docker"
+            return None
+
+        else:
+            self._log_message(f"⚠️ WARNING: Unknown container runtime '{runtime_config}'")
+            return None
 
     def _get_ups_var(self, var_name: str) -> Optional[str]:
         """Get a single UPS variable using upsc."""
@@ -961,34 +1209,34 @@ class UPSMonitor:
         self._log_message("🖥️ Shutting down all libvirt virtual machines...")
 
         if not command_exists("virsh"):
-            self._log_message(" ℹ️ virsh not available, skipping VM shutdown")
+            self._log_message("  ℹ️ virsh not available, skipping VM shutdown")
             return
 
         exit_code, stdout, _ = run_command(["virsh", "list", "--name", "--state-running"])
         if exit_code != 0:
-            self._log_message(" ⚠️ Failed to get VM list")
+            self._log_message("  ⚠️ Failed to get VM list")
             return
 
         running_vms = [vm.strip() for vm in stdout.strip().split('\n') if vm.strip()]
 
         if not running_vms:
-            self._log_message(" ℹ️ No running VMs found")
+            self._log_message("  ℹ️ No running VMs found")
             return
 
         for vm in running_vms:
-            self._log_message(f" ⏹️ Shutting down VM: {vm}")
+            self._log_message(f"  ⏹️ Shutting down VM: {vm}")
             if self.config.behavior.dry_run:
-                self._log_message(f" 🧪 [DRY-RUN] Would shutdown VM: {vm}")
+                self._log_message(f"  🧪 [DRY-RUN] Would shutdown VM: {vm}")
             else:
                 exit_code, stdout, stderr = run_command(["virsh", "shutdown", vm])
                 if stdout.strip():
-                    self._log_message(f"  {stdout.strip()}")
+                    self._log_message(f"    {stdout.strip()}")
 
         if self.config.behavior.dry_run:
             return
 
         max_wait = self.config.virtual_machines.max_wait
-        self._log_message(f" ⏳ Waiting up to {max_wait}s for VMs to shutdown gracefully...")
+        self._log_message(f"  ⏳ Waiting up to {max_wait}s for VMs to shutdown gracefully...")
         wait_interval = 5
         time_waited = 0
         remaining_vms: List[str] = []
@@ -999,20 +1247,20 @@ class UPSMonitor:
             remaining_vms = [vm for vm in running_vms if vm in still_running]
 
             if not remaining_vms:
-                self._log_message(f" ✅ All VMs stopped gracefully after {time_waited}s.")
+                self._log_message(f"  ✅ All VMs stopped gracefully after {time_waited}s.")
                 break
 
-            self._log_message(f" 🕒 Still waiting for: {' '.join(remaining_vms)} (Waited {time_waited}s)")
+            self._log_message(f"  🕒 Still waiting for: {' '.join(remaining_vms)} (Waited {time_waited}s)")
             time.sleep(wait_interval)
             time_waited += wait_interval
 
         if remaining_vms:
-            self._log_message(" ⚠️ Timeout reached. Force destroying remaining VMs.")
+            self._log_message("  ⚠️ Timeout reached. Force destroying remaining VMs.")
             for vm in remaining_vms:
-                self._log_message(f" ⚡ Force destroying VM: {vm}")
+                self._log_message(f"  ⚡ Force destroying VM: {vm}")
                 run_command(["virsh", "destroy", vm])
 
-        self._log_message(" ✅ All VMs shutdown complete")
+        self._log_message("  ✅ All VMs shutdown complete")
 
     def _shutdown_containers(self):
         """Stop all containers using detected runtime (Docker/Podman)."""
@@ -1030,24 +1278,24 @@ class UPSMonitor:
         # Get list of running containers
         exit_code, stdout, _ = run_command([runtime, "ps", "-q"])
         if exit_code != 0:
-            self._log_message(f" ⚠️ Failed to get {runtime_display} container list")
+            self._log_message(f"  ⚠️ Failed to get {runtime_display} container list")
             return
 
         container_ids = [cid.strip() for cid in stdout.strip().split('\n') if cid.strip()]
 
         if not container_ids:
-            self._log_message(f" ℹ️ No running {runtime_display} containers found")
+            self._log_message(f"  ℹ️ No running {runtime_display} containers found")
         else:
             if self.config.behavior.dry_run:
                 exit_code, stdout, _ = run_command([runtime, "ps", "--format", "{{.Names}}"])
                 names = stdout.strip().replace('\n', ' ')
-                self._log_message(f" 🧪 [DRY-RUN] Would stop {runtime_display} containers: {names}")
+                self._log_message(f"  🧪 [DRY-RUN] Would stop {runtime_display} containers: {names}")
             else:
                 # Stop containers with timeout
                 stop_cmd = [runtime, "stop", "-t", str(self.config.containers.stop_timeout)]
                 stop_cmd.extend(container_ids)
                 run_command(stop_cmd, timeout=self.config.containers.stop_timeout + 30)
-                self._log_message(f" ✅ {runtime_display} containers stopped")
+                self._log_message(f"  ✅ {runtime_display} containers stopped")
 
         # Handle Podman rootless containers if configured
         if runtime == "podman" and self.config.containers.include_user_containers:
@@ -1055,17 +1303,17 @@ class UPSMonitor:
 
     def _shutdown_podman_user_containers(self):
         """Stop Podman containers running as non-root users."""
-        self._log_message(" 🔍 Checking for rootless Podman containers...")
+        self._log_message("  🔍 Checking for rootless Podman containers...")
 
         if self.config.behavior.dry_run:
-            self._log_message(" 🧪 [DRY-RUN] Would stop rootless Podman containers for all users")
+            self._log_message("  🧪 [DRY-RUN] Would stop rootless Podman containers for all users")
             return
 
         # Get list of users with active Podman containers
         # This requires loginctl and users with linger enabled
         exit_code, stdout, _ = run_command(["loginctl", "list-users", "--no-legend"])
         if exit_code != 0:
-            self._log_message(" ⚠️ Failed to list users for rootless container check")
+            self._log_message("  ⚠️ Failed to list users for rootless container check")
             return
 
         for line in stdout.strip().split('\n'):
@@ -1093,7 +1341,7 @@ class UPSMonitor:
                 if exit_code == 0 and stdout.strip():
                     container_ids = [cid.strip() for cid in stdout.strip().split('\n') if cid.strip()]
                     if container_ids:
-                        self._log_message(f" 👤 Stopping {len(container_ids)} container(s) for user '{username}'")
+                        self._log_message(f"  👤 Stopping {len(container_ids)} container(s) for user '{username}'")
                         stop_cmd = [
                             "sudo", "-u", username,
                             "podman", "stop", "-t", str(self.config.containers.stop_timeout)
@@ -1101,7 +1349,7 @@ class UPSMonitor:
                         stop_cmd.extend(container_ids)
                         run_command(stop_cmd, timeout=self.config.containers.stop_timeout + 30)
 
-        self._log_message(" ✅ Rootless Podman containers stopped")
+        self._log_message("  ✅ Rootless Podman containers stopped")
 
     def _sync_filesystems(self):
         """Sync all filesystems."""
@@ -1110,10 +1358,10 @@ class UPSMonitor:
 
         self._log_message("💾 Syncing all filesystems...")
         if self.config.behavior.dry_run:
-            self._log_message(" 🧪 [DRY-RUN] Would sync filesystems")
+            self._log_message("  🧪 [DRY-RUN] Would sync filesystems")
         else:
             os.sync()
-            self._log_message(" ✅ Filesystems synced")
+            self._log_message("  ✅ Filesystems synced")
 
     def _unmount_filesystems(self):
         """Unmount configured filesystems."""
@@ -1134,11 +1382,11 @@ class UPSMonitor:
                 continue
 
             options_display = f" {options}" if options else ""
-            self._log_message(f" ➡️ Unmounting {mount_point}{options_display}")
+            self._log_message(f"  ➡️ Unmounting {mount_point}{options_display}")
 
             if self.config.behavior.dry_run:
                 self._log_message(
-                    f" 🧪 [DRY-RUN] Would execute: timeout {timeout}s umount {options} {mount_point}"
+                    f"  🧪 [DRY-RUN] Would execute: timeout {timeout}s umount {options} {mount_point}"
                 )
                 continue
 
@@ -1150,21 +1398,21 @@ class UPSMonitor:
             exit_code, _, stderr = run_command(cmd, timeout=timeout)
 
             if exit_code == 0:
-                self._log_message(f" ✅ {mount_point} unmounted successfully")
+                self._log_message(f"  ✅ {mount_point} unmounted successfully")
             elif exit_code == 124:
                 self._log_message(
-                    f" ⚠️ {mount_point} unmount timed out "
+                    f"  ⚠️ {mount_point} unmount timed out "
                     "(device may be busy/unreachable). Proceeding anyway."
                 )
             else:
                 check_code, _, _ = run_command(["mountpoint", "-q", mount_point])
                 if check_code == 0:
                     self._log_message(
-                        f" ❌ Failed to unmount {mount_point} "
+                        f"  ❌ Failed to unmount {mount_point} "
                         f"(Error code {exit_code}). Proceeding anyway."
                     )
                 else:
-                    self._log_message(f" ℹ️ {mount_point} was likely not mounted.")
+                    self._log_message(f"  ℹ️ {mount_point} was likely not mounted.")
 
     def _shutdown_remote_servers(self):
         """Shutdown all enabled remote servers via SSH."""
@@ -1183,7 +1431,7 @@ class UPSMonitor:
 
         if self.config.behavior.dry_run:
             self._log_message(
-                f" 🧪 [DRY-RUN] Would send command '{server.shutdown_command}' to "
+                f"  🧪 [DRY-RUN] Would send command '{server.shutdown_command}' to "
                 f"{server.user}@{server.host}"
             )
             return
@@ -1192,7 +1440,10 @@ class UPSMonitor:
 
         # Add configured SSH options
         for opt in server.ssh_options:
-            ssh_cmd.extend(["-o", opt.lstrip("-o ").lstrip("-o")] if opt.startswith("-o") else [opt])
+            if opt.startswith("-o"):
+                ssh_cmd.append(opt)
+            else:
+                ssh_cmd.extend(["-o", opt])
 
         ssh_cmd.extend([
             "-o", f"ConnectTimeout={server.connect_timeout}",
@@ -1203,14 +1454,14 @@ class UPSMonitor:
         exit_code, stdout, stderr = run_command(ssh_cmd, timeout=server.command_timeout)
 
         if exit_code == 0:
-            self._log_message(f" ✅ {display_name} shutdown command sent successfully")
+            self._log_message(f"  ✅ {display_name} shutdown command sent successfully")
         else:
             self._log_message(
-                f" ❌ WARNING: Failed to execute shutdown command on {display_name} "
+                f"  ❌ WARNING: Failed to execute shutdown command on {display_name} "
                 f"(Error code {exit_code})"
             )
             if stderr.strip():
-                self._log_message(f"  Error: {stderr.strip()}")
+                self._log_message(f"    Error: {stderr.strip()}")
 
     def _execute_shutdown_sequence(self):
         """Execute the controlled shutdown sequence."""
@@ -1236,10 +1487,10 @@ class UPSMonitor:
         if self.config.filesystems.sync_enabled:
             self._log_message("💾 Final filesystem sync...")
             if self.config.behavior.dry_run:
-                self._log_message(" 🧪 [DRY-RUN] Would perform final sync")
+                self._log_message("  🧪 [DRY-RUN] Would perform final sync")
             else:
                 os.sync()
-                self._log_message(" ✅ Final sync complete")
+                self._log_message("  ✅ Final sync complete")
 
         if self.config.local_shutdown.enabled:
             self._log_message("🔌 Shutting down local server NOW")
@@ -1250,11 +1501,14 @@ class UPSMonitor:
                 self._log_message("🧪 [DRY-RUN] Shutdown sequence completed successfully (no actual shutdown)")
                 self._shutdown_flag_path.unlink(missing_ok=True)
             else:
+                # Send final notification (non-blocking - fire and forget)
                 self._send_notification(
-                    "🛑 **Shutdown Sequence Complete.**\nShutting down local server NOW.",
-                    self.config.COLOR_RED
+                    "🛑 **Shutdown Sequence Complete**\nShutting down local server NOW.",
+                    self.config.NOTIFY_FAILURE
                 )
-                # Parse command and add message
+                # Give notification time to send
+                time.sleep(5)
+
                 cmd_parts = self.config.local_shutdown.command.split()
                 if self.config.local_shutdown.message:
                     cmd_parts.append(self.config.local_shutdown.message)
@@ -1270,11 +1524,12 @@ class UPSMonitor:
 
         self._shutdown_flag_path.touch()
 
+        # Send notification (non-blocking - fire and forget)
         self._send_notification(
             f"🚨 **EMERGENCY SHUTDOWN INITIATED!**\n"
             f"Reason: {reason}\n"
-            "Executing shutdown tasks (VMs, Docker, NAS).",
-            self.config.COLOR_RED
+            "Executing shutdown tasks (VMs, Containers, Remote Servers).",
+            self.config.NOTIFY_FAILURE
         )
 
         self._log_message(f"🚨 CRITICAL: Triggering immediate shutdown. Reason: {reason}")
@@ -1288,15 +1543,22 @@ class UPSMonitor:
     def _cleanup_and_exit(self, signum: int, frame):
         """Handle clean exit on signals."""
         if self._shutdown_flag_path.exists():
+            if self._notification_worker:
+                self._notification_worker.stop()
             sys.exit(0)
 
         self._shutdown_flag_path.touch()
 
         self._log_message("🛑 Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
+
+        # Send notification (non-blocking - fire and forget)
         self._send_notification(
-            "🛑 **UPS Monitor Service Stopped.**\nMonitoring is now inactive.",
-            self.config.COLOR_ORANGE
+            "🛑 **Eneru Service Stopped**\nMonitoring is now inactive.",
+            self.config.NOTIFY_WARNING
         )
+
+        if self._notification_worker:
+            self._notification_worker.stop()
 
         self._shutdown_flag_path.unlink(missing_ok=True)
         sys.exit(0)
@@ -1414,7 +1676,7 @@ class UPSMonitor:
             battery_int = int(float(battery_charge))
             if battery_int < self.config.triggers.low_battery_threshold:
                 shutdown_reason = (
-                    f"Battery charge {battery_charge}% below threshold "
+                    f"Battery charge {battery_int}% below threshold "
                     f"{self.config.triggers.low_battery_threshold}%"
                 )
         else:
@@ -1547,11 +1809,12 @@ class UPSMonitor:
                         "🚨 FAILSAFE TRIGGERED (FSB): Connection lost or data persistently stale "
                         "while On Battery. Initiating emergency shutdown."
                     )
+                    # Send notification (non-blocking - fire and forget)
                     self._send_notification(
                         "🚨 **FAILSAFE (FSB) TRIGGERED!**\n"
                         "Connection to UPS lost or data stale while system was running On Battery.\n"
                         "Assuming critical failure. Executing immediate shutdown.",
-                        self.config.COLOR_RED
+                        self.config.NOTIFY_FAILURE
                     )
                     self._execute_shutdown_sequence()
 
@@ -1631,7 +1894,7 @@ class UPSMonitor:
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="UPS Monitor - Monitor UPS status and trigger safe shutdown on power events"
+        description="Eneru - Intelligent UPS Monitoring & Shutdown Orchestration for NUT"
     )
     parser.add_argument(
         "-c", "--config",
@@ -1648,6 +1911,11 @@ def main():
         action="store_true",
         help="Validate configuration file and exit"
     )
+    parser.add_argument(
+        "--test-notifications",
+        action="store_true",
+        help="Send a test notification and exit"
+    )
 
     args = parser.parse_args()
 
@@ -1658,20 +1926,124 @@ def main():
     if args.dry_run:
         config.behavior.dry_run = True
 
-    # Validate config and exit if requested
-    if args.validate_config:
-        print("Configuration is valid.")
-        print(f"  UPS: {config.ups.name}")
-        print(f"  Dry-run: {config.behavior.dry_run}")
-        print(f"  VMs enabled: {config.virtual_machines.enabled}")
-        print(f"  Containers enabled: {config.containers.enabled}", end="")
-        if config.containers.enabled:
-            print(f" (runtime: {config.containers.runtime})")
-        else:
-            print()
-        print(f"  Remote servers: {len([s for s in config.remote_servers if s.enabled])}")
-        print(f"  Notifications: {config.notifications.discord is not None and bool(config.notifications.discord.webhook_url)}")
-        sys.exit(0)
+    # Handle --validate-config and/or --test-notifications
+    if args.validate_config or args.test_notifications:
+        exit_code = 0
+
+        # Validate config if requested
+        if args.validate_config:
+            print("Configuration is valid.")
+            print(f"  UPS: {config.ups.name}")
+            print(f"  Dry-run: {config.behavior.dry_run}")
+            print(f"  VMs enabled: {config.virtual_machines.enabled}")
+            print(f"  Containers enabled: {config.containers.enabled}", end="")
+            if config.containers.enabled:
+                print(f" (runtime: {config.containers.runtime})")
+            else:
+                print()
+            print(f"  Remote servers: {len([s for s in config.remote_servers if s.enabled])}")
+
+            # Notification status
+            print(f"  Notifications:")
+            if config.notifications.enabled and config.notifications.urls:
+                if APPRISE_AVAILABLE:
+                    print(f"    Enabled: {len(config.notifications.urls)} service(s)")
+                    for url in config.notifications.urls:
+                        if '://' in url:
+                            scheme = url.split('://')[0]
+                            print(f"      - {scheme}://***")
+                        else:
+                            print(f"      - {url[:20]}...")
+                    if config.notifications.title:
+                        print(f"    Title: {config.notifications.title}")
+                    else:
+                        print(f"    Title: (none)")
+                    if config.notifications.avatar_url:
+                        print(f"    Avatar URL: {config.notifications.avatar_url[:50]}...")
+                else:
+                    print(f"    ⚠️ Apprise not installed - notifications disabled")
+                    print(f"    Install with: pip install apprise")
+            else:
+                print(f"    Disabled")
+
+            # Run validation checks and print warnings/info
+            messages = ConfigLoader.validate_config(config)
+            if messages:
+                print()
+                for msg in messages:
+                    print(f"  ℹ️ {msg}")
+
+        # Test notifications if requested
+        if args.test_notifications:
+            if args.validate_config:
+                print()  # Add separator between outputs
+                print("-" * 50)
+                print()
+
+            print("Testing notifications...")
+
+            if not config.notifications.enabled or not config.notifications.urls:
+                print("❌ No notification URLs configured.")
+                print("   Add URLs to the 'notifications.urls' section in your config file.")
+                exit_code = 1
+            elif not APPRISE_AVAILABLE:
+                print("❌ Apprise is not installed.")
+                print("   Install with: pip install apprise")
+                exit_code = 1
+            else:
+                # Initialize Apprise
+                apobj = apprise.Apprise()
+                valid_urls = 0
+
+                for url in config.notifications.urls:
+                    if apobj.add(url):
+                        valid_urls += 1
+                        # Extract scheme without avatar params for display
+                        scheme = url.split('://')[0] if '://' in url else 'unknown'
+                        print(f"  ✅ Added: {scheme}://***")
+                    else:
+                        print(f"  ❌ Invalid URL: {url[:30]}...")
+
+                if valid_urls == 0:
+                    print("❌ No valid notification URLs found.")
+                    exit_code = 1
+                else:
+                    print(f"\nSending test notification to {valid_urls} service(s)...")
+
+                    if config.notifications.title:
+                        print(f"  Title: {config.notifications.title}")
+                    if config.notifications.avatar_url:
+                        print(f"  Avatar: {config.notifications.avatar_url[:50]}...")
+
+                    # Send test notification
+                    test_body = (
+                        "🧪 **Test Notification**\n"
+                        "This is a test notification from Eneru.\n"
+                        "If you see this, notifications are working correctly!\n"
+                        f"\n---\n⚡ UPS: {config.ups.name}\n"
+                        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')}"
+                    )
+
+                    # Build notify kwargs
+                    notify_kwargs = {
+                        'body': test_body,
+                        'notify_type': apprise.NotifyType.INFO,
+                    }
+
+                    # Only add title if configured
+                    if config.notifications.title:
+                        notify_kwargs['title'] = config.notifications.title
+
+                    result = apobj.notify(**notify_kwargs)
+
+                    if result:
+                        print("✅ Test notification sent successfully!")
+                    else:
+                        print("❌ Failed to send test notification.")
+                        print("   Check your notification URLs and network connectivity.")
+                        exit_code = 1
+
+        sys.exit(exit_code)
 
     # Run monitor
     monitor = UPSMonitor(config)

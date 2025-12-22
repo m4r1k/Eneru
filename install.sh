@@ -31,15 +31,15 @@ echo "Installing systemd service..."
 # Detect package manager and install dependencies
 echo "Installing dependencies..."
 if command -v dnf &> /dev/null; then
-    dnf install -y python3 python3-pyyaml python3-requests nut-client openssh-clients util-linux coreutils
+    dnf install -y python3 python3-pyyaml python3-apprise apprise nut-client openssh-clients util-linux coreutils
 elif command -v apt-get &> /dev/null; then
     apt-get update
-    apt-get install -y python3 python3-yaml python3-requests nut-client openssh-client util-linux coreutils
+    apt-get install -y python3 python3-yaml apprise nut-client openssh-client util-linux coreutils
 elif command -v pacman &> /dev/null; then
-    pacman -S --noconfirm python python-yaml python-requests nut openssh util-linux coreutils
+    pacman -S --noconfirm python python-yaml apprise nut openssh util-linux coreutils
 else
     echo "Unknown package manager. Please install dependencies manually:"
-    echo "  python3, python3-yaml (pyyaml), python3-requests, nut-client, openssh, util-linux, coreutils"
+    echo "  python3, python3-yaml (pyyaml), python3-apprise, nut-client, openssh, util-linux, coreutils"
 fi
 
 # Validate configuration

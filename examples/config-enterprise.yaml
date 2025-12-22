@@ -1,4 +1,6 @@
-# Enterprise configuration with multiple remote servers
+# Enterprise configuration with multiple remote servers and multi-channel notifications
+# For production environments requiring high reliability and comprehensive alerting
+
 ups:
   name: "UPS@ups-server.local"
   check_interval: 1
@@ -21,11 +23,39 @@ behavior:
 logging:
   file: "/var/log/ups-monitor.log"
 
+# ==============================================================================
+# NOTIFICATIONS (via Apprise)
+# ==============================================================================
+# Enterprise setup with multiple notification channels for redundancy
+# See: https://github.com/caronc/apprise/wiki
 notifications:
-  discord:
-    webhook_url: "YOUR_WEBHOOK_URL"
-    timeout: 5
-    timeout_blocking: 15
+  # Identify the datacenter/location in notification titles
+  title: "🏢 DC1 Primary UPS"
+
+  # Corporate branding
+  avatar_url: "https://company.example.com/assets/ups-icon.png"
+
+  # Timeout for each notification attempt
+  timeout: 15
+
+  urls:
+    # Primary: Slack - Operations channel
+    - "slack://xoxb-token/CHANNEL_ID?footer=no"
+
+    # Secondary: PagerDuty - Critical alerts
+    # - "pagerduty://INTEGRATION_KEY@ROUTING_KEY"
+
+    # Tertiary: Email - Infrastructure team distribution list
+    - "mailto://ups-alerts:password@smtp.company.com?to=infrastructure@company.com"
+
+    # Backup: Microsoft Teams - IT Operations team
+    # - "msteams://TEAM_TOKEN_A/TEAM_TOKEN_B/TEAM_TOKEN_C"
+
+    # Monitoring: Splunk HEC for log aggregation
+    # - "splunk://HEC_TOKEN@splunk.company.com:8088/services/collector"
+
+    # On-call: Opsgenie
+    # - "opsgenie://API_KEY/TEAM_ID"
 
 virtual_machines:
   enabled: true
@@ -56,19 +86,19 @@ remote_servers:
     host: "nas1.local"
     user: "admin"
     shutdown_command: "sudo -i synoshutdown -s"
-    
+
   - name: "Backup NAS"
     enabled: true
     host: "nas2.local"
     user: "admin"
     shutdown_command: "sudo -i synoshutdown -s"
-    
+
   - name: "Database Server"
     enabled: true
     host: "db.local"
     user: "root"
     shutdown_command: "sudo shutdown -h now"
-    
+
   - name: "Application Server"
     enabled: true
     host: "app.local"

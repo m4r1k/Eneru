@@ -44,9 +44,10 @@ Most UPS shutdown solutions are **single-system focused**. Eneru is designed for
 | Multiple servers need coordinated shutdown | ✅ Orchestrated multi-server shutdown via SSH |
 | VMs and containers need graceful stop | ✅ Libvirt VM and Docker/Podman container handling |
 | Network mounts hang during power loss | ✅ Timeout-protected unmounting |
-| No visibility during power events | ✅ Real-time Discord notifications |
+| No visibility during power events | ✅ Real-time notifications via 100+ services |
 | Different systems need different commands | ✅ Per-server custom shutdown commands |
 | Battery estimates are unreliable | ✅ Multi-vector shutdown triggers |
+| Network down during outage might block/slow down shutdown | ✅ Non-blocking notification architecture |
 
 ---
 
@@ -91,9 +92,10 @@ All components are optional and independently configurable:
 5. **Remote Servers:** SSH-based shutdown of multiple remote systems
 6. **Local Shutdown:** Configurable shutdown command
 
-### Real-Time Notifications
-- **Discord Webhooks:** Color-coded notifications for all power events
-- **Crisis Reporting:** Elevated notifications during shutdown sequence
+### Real-Time Notifications (via Apprise)
+- **100+ Notification Services:** Discord, Slack, Telegram, ntfy, Pushover, Email, and [many more](https://github.com/caronc/apprise/wiki)
+- **Non-Blocking Architecture:** Notifications never delay critical shutdown operations
+- **Power Event Alerts:** Color-coded notifications for all power events
 - **Service Lifecycle:** Notifications when service starts/stops
 
 ### Power Quality Monitoring
@@ -140,10 +142,10 @@ sudo cp ups-monitor.service /etc/systemd/system/
 sudo chmod +x /opt/ups-monitor/ups-monitor.py
 
 # Install dependencies (RHEL/Fedora)
-sudo dnf install -y python3 python3-pyyaml python3-requests nut-client openssh-clients
+sudo dnf install -y python3 python3-pyyaml python3-apprise apprise nut-client openssh-clients
 
 # Install dependencies (Debian/Ubuntu)
-sudo apt install -y python3 python3-yaml python3-requests nut-client openssh-client
+sudo apt install -y python3 python3-yaml apprise nut-client openssh-client
 
 # Enable and start
 sudo systemctl daemon-reload
@@ -216,13 +218,30 @@ logging:
   battery_history_file: "/var/run/ups-battery-history"
 
 # ==============================================================================
-# NOTIFICATIONS
+# NOTIFICATIONS (via Apprise)
 # ==============================================================================
+# Apprise supports 100+ notification services
+# See: https://github.com/caronc/apprise/wiki
 notifications:
-  discord:
-    webhook_url: "https://discord.com/api/webhooks/YOUR_WEBHOOK_HERE"
-    timeout: 3
-    timeout_blocking: 10
+  # Optional title for notifications
+  title: "⚡ Homelab UPS"
+
+  # Avatar/icon URL (supported by Discord, Slack, and others)
+  avatar_url: "https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-avatar.png"
+
+  # Timeout for notification delivery (seconds)
+  timeout: 10
+
+  # Notification service URLs
+  urls:
+    # Discord
+    - "discord://webhook_id/webhook_token"
+
+    # Slack
+    # - "slack://token_a/token_b/token_c/#channel"
+
+    # Telegram
+    # - "telegram://bot_token/chat_id"
 
 # ==============================================================================
 # SHUTDOWN SEQUENCE
@@ -299,6 +318,14 @@ local_shutdown:
 | `depletion.grace_period` | `90` | Seconds before enforcing depletion rate |
 | `extended_time.enabled` | `true` | Enable extended time shutdown |
 | `extended_time.threshold` | `900` | Seconds on battery before shutdown |
+
+#### Notifications Section
+| Key | Default | Description |
+|-----|---------|-------------|
+| `title` | `null` | Optional title for notifications |
+| `avatar_url` | `null` | Avatar URL for supported services |
+| `timeout` | `10` | Notification delivery timeout |
+| `urls` | `[]` | List of Apprise notification URLs |
 
 #### Containers Section
 | Key | Default | Description |
@@ -738,6 +765,96 @@ Maximizes runtime, accepts higher risk. Only recommended with reliable UPS and n
 
 ---
 
+## Non-Blocking Notification Architecture
+
+During power outages, network connectivity is often unreliable or completely unavailable. Eneru uses a **fire-and-forget** notification system that ensures shutdown operations are never delayed by notification failures.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     ENERU NOTIFICATION ARCHITECTURE                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   MAIN THREAD (Critical Path)          WORKER THREAD (Best-Effort)          │
+│   ═══════════════════════════          ════════════════════════════         │
+│                                                                             │
+│   ┌─────────────────────┐                                                   │
+│   │ Shutdown Triggered  │                                                   │
+│   └──────────┬──────────┘                                                   │
+│              │                                                              │
+│              ▼                                                              │
+│   ┌─────────────────────┐         ┌─────────────────────┐                   │
+│   │ Queue Notification  │────────▶│  Notification Queue │                   │
+│   │ (non-blocking)      │         │  ┌───┬───┬───┬───┐  │                   │
+│   └──────────┬──────────┘         │  │ N │ N │ N │...│  │                   │
+│              │                    │  └───┴───┴───┴───┘  │                   │
+│              │ continues          └──────────┬──────────┘                   │
+│              │ immediately                   │                              │
+│              ▼                               ▼                              │
+│   ┌─────────────────────┐         ┌─────────────────────┐                   │
+│   │ Stop VMs            │         │ Send to Discord     │──▶ Success/Fail   │
+│   └──────────┬──────────┘         │ Send to Slack       │──▶ Success/Fail   │
+│              │                    │ Send to Telegram    │──▶ Success/Fail   │
+│              ▼                    └─────────────────────┘                   │
+│   ┌─────────────────────┐                   │                               │
+│   │ Stop Containers     │                   │ Network down?                 │
+│   └──────────┬──────────┘                   │ Timeout? No problem!          │
+│              │                              │ Worker handles it silently    │
+│              ▼                              ▼                               │
+│   ┌─────────────────────┐         ┌─────────────────────┐                   │
+│   │ Unmount Filesystems │         │ Thread terminates   │                   │
+│   └──────────┬──────────┘         │ with process exit   │                   │
+│              │                    └─────────────────────┘                   │
+│              ▼                                                              │
+│   ┌─────────────────────┐                                                   │
+│   │ Shutdown Remote     │         ┌─────────────────────┐                   │
+│   │ Servers             │         │    KEY BENEFITS     │                   │
+│   └──────────┬──────────┘         ├─────────────────────┤                   │
+│              │                    │ ✓ Zero blocking     │                   │
+│              ▼                    │ ✓ Graceful failure  │                   │
+│   ┌─────────────────────┐         │ ✓ Best-effort send  │                   │
+│   │ 5-Second Grace      │         │ ✓ No data loss risk │                   │
+│   │ (flush queue)       │         │ ✓ Daemon thread     │                   │
+│   └──────────┬──────────┘         └─────────────────────┘                   │
+│              │                                                              │
+│              ▼                                                              │
+│   ┌─────────────────────┐                                                   │
+│   │ shutdown -h now     │                                                   │
+│   └─────────────────────┘                                                   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why Non-Blocking Matters
+
+| Scenario | Blocking Notifications | Eneru (Non-Blocking) |
+|----------|------------------------|----------------------|
+| Network down during outage | ❌ Shutdown delayed by timeout (10-30s per notification) | ✅ Shutdown proceeds immediately |
+| Discord rate-limited | ❌ Waits for retry | ✅ Continues without waiting |
+| DNS resolution fails | ❌ Hangs until timeout | ✅ Worker handles silently |
+| Multiple notification services | ❌ Sequential delays compound | ✅ All queued instantly |
+| Power about to fail | ❌ Risk of incomplete shutdown | ✅ Critical operations prioritized |
+
+### The 5-Second Grace Period
+
+After all critical shutdown operations complete, Eneru waits 5 seconds before issuing the final `shutdown -h now` command. This grace period allows queued notifications to be sent if the network is available, without risking data loss if it's not.
+
+```
+Timeline (worst case - network down):
+─────────────────────────────────────────────────────────────────
+0s     │ Shutdown triggered, notification queued (instant)
+0.1s   │ VMs stopping...
+15s    │ VMs stopped, containers stopping...
+30s    │ Containers stopped, filesystems synced...
+45s    │ Remote servers notified...
+50s    │ All critical operations complete
+50-55s │ Grace period (notifications attempted)
+55s    │ shutdown -h now executed
+─────────────────────────────────────────────────────────────────
+        Total: ~55 seconds (network issues added 0 seconds delay)
+```
+
+---
+
 ## Remote Server Setup
 
 For secure remote shutdown, configure SSH key authentication and passwordless sudo.
@@ -808,6 +925,9 @@ sudo tail -f /var/log/ups-monitor.log
 # Validate configuration
 python3 /opt/ups-monitor/ups-monitor.py --validate-config
 
+# Test notifications
+python3 /opt/ups-monitor/ups-monitor.py --test-notifications
+
 # Use alternate config file
 python3 /opt/ups-monitor/ups-monitor.py --config /path/to/config.yaml
 
@@ -823,12 +943,22 @@ Always test with dry-run mode before production deployment:
 2. Optionally lower `extended_time.threshold` to trigger shutdown faster
 3. Simulate power failure (unplug UPS input)
 4. Watch logs for `[DRY-RUN]` prefixed actions
-5. Verify Discord notifications arrive correctly
+5. Verify notifications arrive correctly
 
 ```bash
 # Quick dry-run test
 sudo systemctl stop ups-monitor.service
 sudo python3 /opt/ups-monitor/ups-monitor.py --dry-run --config /etc/ups-monitor/config.yaml
+```
+
+### Testing Notifications
+
+```bash
+# Send a test notification to verify configuration
+sudo python3 /opt/ups-monitor/ups-monitor.py --test-notifications
+
+# Combine with config validation
+sudo python3 /opt/ups-monitor/ups-monitor.py --validate-config --test-notifications
 ```
 
 ### Manually Clear Shutdown State
@@ -853,7 +983,8 @@ journalctl -u ups-monitor.service -e
 python3 --version
 
 # Check dependencies
-python3 -c "import yaml; import requests; print('OK')"
+python3 -c "import yaml; print('PyYAML OK')"
+python3 -c "import apprise; print('Apprise OK')"
 
 # Validate syntax
 python3 -m py_compile /opt/ups-monitor/ups-monitor.py
@@ -872,16 +1003,19 @@ systemctl status nut-server
 ping 192.168.178.11
 ```
 
-### Discord Notifications Not Working
+### Notifications Not Working
 
 ```bash
-# Test webhook manually
-curl -H "Content-Type: application/json" \
-     -d '{"content": "Test"}' \
-     "YOUR_WEBHOOK_URL"
+# Test with built-in command
+python3 /opt/ups-monitor/ups-monitor.py --test-notifications
 
-# Check Python can reach Discord
-python3 -c "import requests; print(requests.get('https://discord.com').status_code)"
+# Test Apprise directly
+python3 -c "
+import apprise
+ap = apprise.Apprise()
+ap.add('discord://webhook_id/webhook_token')
+ap.notify(body='Test from Apprise', title='Test')
+"
 ```
 
 ### Remote Shutdown Fails

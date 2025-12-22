@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.2.0] - 2025-12-22
+
+### Added
+- **Apprise Integration:** Support for 100+ notification services (Discord, Slack, Telegram, ntfy, Pushover, Email, Matrix, and more)
+- **Non-Blocking Notification Architecture:** Notifications never delay critical shutdown operations
+- **Background Notification Worker:** Dedicated thread processes notifications asynchronously
+- **`--test-notifications` CLI Option:** Send test notification to verify configuration
+- **Avatar URL Support:** Configurable avatar/icon for supported services (Discord, Slack, etc.)
+- **Notification Title Option:** Optional custom title for multi-instance deployments
+- **5-Second Grace Period:** Final grace period before shutdown allows queued notifications to send
+- **Architecture Documentation:** ASCII diagram explaining non-blocking notification flow
+
+### Changed
+- **Notification System:** Migrated from native Discord webhooks to Apprise library
+- **Notification Behavior:** All shutdown-related notifications are now fire-and-forget
+- **Configuration Format:** New `notifications.urls` array replaces `notifications.discord.webhook_url`
+- **Dependency:** `requests` library replaced with `apprise` library
+
+### Removed
+- **Native Discord Integration:** Replaced by Apprise (Discord still fully supported via Apprise)
+- **`timeout_blocking` Config:** No longer needed with non-blocking architecture
+
+### Backwards Compatibility
+- Legacy `discord.webhook_url` configuration automatically converted to Apprise format
+- Legacy `notifications.discord` section still supported and auto-migrated
+- All existing functionality preserved
+
+### Why Non-Blocking Matters
+During power outages, network connectivity is often unreliable. The previous blocking implementation could delay shutdown by 10-30+ seconds per notification if the network was down. The new architecture queues notifications instantly and processes them in the background, ensuring critical shutdown operations are never delayed.
+
+---
+
 ## [4.1.0] - 2025-12-19
 
 ### Added
@@ -177,6 +209,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ## Version Comparison
+
+### v4.2 vs v4.1
+
+| Feature | v4.1 | v4.2 |
+|---------|------|------|
+| Notification Backend | Native Discord (requests) | Apprise (100+ services) |
+| Supported Services | Discord only | Discord, Slack, Telegram, ntfy, Email, 100+ more |
+| Notification Behavior | Blocking during shutdown | Non-blocking (fire-and-forget) |
+| Network Failure Impact | Delays shutdown 10-30s+ | Zero delay |
+| Test Command | None | `--test-notifications` |
+| Avatar Support | Hardcoded | Configurable per-service |
+| Title Support | Hardcoded | Optional, configurable |
 
 ### v4.1 vs v4.0
 

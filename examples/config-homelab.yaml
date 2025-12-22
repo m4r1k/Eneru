@@ -10,9 +10,29 @@ triggers:
     enabled: true
     threshold: 600
 
+# ==============================================================================
+# NOTIFICATIONS (via Apprise)
+# ==============================================================================
 notifications:
-  discord:
-    webhook_url: "YOUR_WEBHOOK_URL"
+  # Custom title to identify this system in notifications
+  title: "⚡ Homelab UPS"
+
+  # Custom avatar for Discord/Slack
+  avatar_url: "https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-avatar.png"
+
+  urls:
+    # Discord - get webhook URL from Server Settings > Integrations > Webhooks
+    - "discord://YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+
+    # ntfy.sh - free, self-hostable push notifications
+    # - "ntfy://mytopic"
+    # - "ntfy://user:pass@ntfy.example.com/mytopic"
+
+    # Telegram - create bot via @BotFather
+    # - "tgram://BOT_TOKEN/CHAT_ID"
+
+    # Pushover - reliable mobile push notifications
+    # - "pover://USER_KEY@APP_TOKEN"
 
 virtual_machines:
   enabled: true
