@@ -27,7 +27,7 @@ A Python-based UPS monitoring daemon that watches UPS status via [Network UPS To
 
 ### ⚡ The Name
 
-<img src="https://i.redd.it/yj458fqu3ab21.jpg" alt="Eneru from One Piece" width="120" align="right">
+<img src="docs/images/eneru.jpg" alt="Eneru from One Piece" width="120" align="right">
 
 Named after [Eneru (エネル)](https://onepiece.fandom.com/wiki/Enel) from *One Piece*—the self-proclaimed God of Skypiea who ate the Goro Goro no Mi (Rumble-Rumble Fruit), granting him absolute control over electricity. Just as Eneru commands lightning from the sky, this tool commands your infrastructure when the power from the grid fails. *Unlimited power... management!* ⚡
 
