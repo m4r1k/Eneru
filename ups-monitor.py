@@ -910,17 +910,13 @@ class UPSMonitor:
         if not self._notification_worker:
             return
 
-        # Add footer with UPS info and timestamp
-        footer = f"\n\n---\n⚡ UPS: {self.config.ups.name}\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')}"
-        full_body = body + footer
-
         # CRITICAL: During shutdown, NEVER block on notifications
         # Network is likely unreliable during power outages
         is_shutdown = self._shutdown_flag_path.exists()
         actual_blocking = blocking and not is_shutdown
 
         self._notification_worker.send(
-            body=full_body,
+            body=body,
             notify_type=notify_type,
             blocking=actual_blocking
         )
