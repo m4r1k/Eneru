@@ -961,6 +961,31 @@ sudo python3 /opt/ups-monitor/ups_monitor.py --test-notifications
 sudo python3 /opt/ups-monitor/ups_monitor.py --validate-config --test-notifications
 ```
 
+### Running Tests
+
+Eneru includes a comprehensive test suite. To run tests locally:
+
+```bash
+# Install test dependencies
+dnf install python3-pytest python3-pytest-cov python3-pytest-mock python3-pytest-timeout python3-pyyaml python3-apprise
+
+# Run all tests
+pytest -v
+
+# Run with coverage report
+pytest --cov=ups_monitor --cov-report=term -v
+
+# Run only unit tests (fast)
+pytest -m unit -v
+
+# Run only integration tests
+pytest -m integration -v
+
+# Generate HTML coverage report
+pytest --cov=ups_monitor --cov-report=html
+# Open htmlcov/index.html in browser
+```
+
 ### Manually Clear Shutdown State
 
 If a shutdown sequence is interrupted:
