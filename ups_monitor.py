@@ -910,13 +910,16 @@ class UPSMonitor:
         if not self._notification_worker:
             return
 
+        # Escape @ symbols to prevent Discord mentions (e.g., UPS@192.168.1.1)
+        escaped_body = body.replace("@", "@\u200B")  # Zero-width space after @
+
         # CRITICAL: During shutdown, NEVER block on notifications
         # Network is likely unreliable during power outages
         is_shutdown = self._shutdown_flag_path.exists()
         actual_blocking = blocking and not is_shutdown
 
         self._notification_worker.send(
-            body=body,
+            body=escaped_body,
             notify_type=notify_type,
             blocking=actual_blocking
         )
