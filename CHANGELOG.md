@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [4.2.0] - 2025-12-22
+## [4.2.0] - 2025-12-23
 
 ### Added
 - **Apprise Integration:** Support for 100+ notification services (Discord, Slack, Telegram, ntfy, Pushover, Email, Matrix, and more)
@@ -18,11 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Notification Title Option:** Optional custom title for multi-instance deployments
 - **5-Second Grace Period:** Final grace period before shutdown allows queued notifications to send
 - **Architecture Documentation:** ASCII diagram explaining non-blocking notification flow
+- **Test Suite:** Comprehensive pytest test suite with 80+ unit and integration tests
+- **Code Coverage:** Codecov integration for tracking test coverage
 
 ### Changed
 - **Notification System:** Migrated from native Discord webhooks to Apprise library
 - **Notification Behavior:** All shutdown-related notifications are now fire-and-forget
 - **Configuration Format:** New `notifications.urls` array replaces `notifications.discord.webhook_url`
+- **Script Filename:** Renamed `ups-monitor.py` to `ups_monitor.py` for Python module compatibility
 - **Dependency:** `requests` library replaced with `apprise` library
 
 ### Removed
@@ -33,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Legacy `discord.webhook_url` configuration automatically converted to Apprise format
 - Legacy `notifications.discord` section still supported and auto-migrated
 - All existing functionality preserved
+- Service file and install script updated for new filename
 
 ### Why Non-Blocking Matters
 During power outages, network connectivity is often unreliable. The previous blocking implementation could delay shutdown by 10-30+ seconds per notification if the network was down. The new architecture queues notifications instantly and processes them in the background, ensuring critical shutdown operations are never delayed.
@@ -221,6 +225,9 @@ During power outages, network connectivity is often unreliable. The previous blo
 | Test Command | None | `--test-notifications` |
 | Avatar Support | Hardcoded | Configurable per-service |
 | Title Support | Hardcoded | Optional, configurable |
+| Test Suite | None | 80+ pytest tests |
+| Code Coverage | None | Codecov integration |
+| Script Filename | `ups-monitor.py` | `ups_monitor.py` |
 
 ### v4.1 vs v4.0
 
