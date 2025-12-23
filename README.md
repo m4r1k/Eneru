@@ -134,12 +134,12 @@ sudo mkdir -p /opt/ups-monitor
 sudo mkdir -p /etc/ups-monitor
 
 # Copy files
-sudo cp ups-monitor.py /opt/ups-monitor/
+sudo cp ups_monitor.py /opt/ups-monitor/
 sudo cp config.yaml /etc/ups-monitor/
 sudo cp ups-monitor.service /etc/systemd/system/
 
 # Make executable
-sudo chmod +x /opt/ups-monitor/ups-monitor.py
+sudo chmod +x /opt/ups-monitor/ups_monitor.py
 
 # Install dependencies (RHEL/Fedora)
 sudo dnf install -y python3 python3-pyyaml python3-apprise apprise nut-client openssh-clients
@@ -923,16 +923,16 @@ sudo tail -f /var/log/ups-monitor.log
 
 ```bash
 # Validate configuration
-python3 /opt/ups-monitor/ups-monitor.py --validate-config
+python3 /opt/ups-monitor/ups_monitor.py --validate-config
 
 # Test notifications
-python3 /opt/ups-monitor/ups-monitor.py --test-notifications
+python3 /opt/ups-monitor/ups_monitor.py --test-notifications
 
 # Use alternate config file
-python3 /opt/ups-monitor/ups-monitor.py --config /path/to/config.yaml
+python3 /opt/ups-monitor/ups_monitor.py --config /path/to/config.yaml
 
 # Force dry-run mode
-python3 /opt/ups-monitor/ups-monitor.py --dry-run
+python3 /opt/ups-monitor/ups_monitor.py --dry-run
 ```
 
 ### Testing with Dry-Run Mode
@@ -948,17 +948,17 @@ Always test with dry-run mode before production deployment:
 ```bash
 # Quick dry-run test
 sudo systemctl stop ups-monitor.service
-sudo python3 /opt/ups-monitor/ups-monitor.py --dry-run --config /etc/ups-monitor/config.yaml
+sudo python3 /opt/ups-monitor/ups_monitor.py --dry-run --config /etc/ups-monitor/config.yaml
 ```
 
 ### Testing Notifications
 
 ```bash
 # Send a test notification to verify configuration
-sudo python3 /opt/ups-monitor/ups-monitor.py --test-notifications
+sudo python3 /opt/ups-monitor/ups_monitor.py --test-notifications
 
 # Combine with config validation
-sudo python3 /opt/ups-monitor/ups-monitor.py --validate-config --test-notifications
+sudo python3 /opt/ups-monitor/ups_monitor.py --validate-config --test-notifications
 ```
 
 ### Manually Clear Shutdown State
@@ -987,7 +987,7 @@ python3 -c "import yaml; print('PyYAML OK')"
 python3 -c "import apprise; print('Apprise OK')"
 
 # Validate syntax
-python3 -m py_compile /opt/ups-monitor/ups-monitor.py
+python3 -m py_compile /opt/ups-monitor/ups_monitor.py
 ```
 
 ### Cannot Connect to UPS
@@ -1007,7 +1007,7 @@ ping 192.168.178.11
 
 ```bash
 # Test with built-in command
-python3 /opt/ups-monitor/ups-monitor.py --test-notifications
+python3 /opt/ups-monitor/ups_monitor.py --test-notifications
 
 # Test Apprise directly
 python3 -c "
@@ -1037,7 +1037,7 @@ ls -la ~/.ssh/id_*
 
 | File | Purpose |
 |------|---------|
-| `/opt/ups-monitor/ups-monitor.py` | Main script |
+| `/opt/ups-monitor/ups_monitor.py` | Main script |
 | `/etc/ups-monitor/config.yaml` | Configuration file |
 | `/etc/systemd/system/ups-monitor.service` | Systemd service |
 | `/var/log/ups-monitor.log` | Log file |

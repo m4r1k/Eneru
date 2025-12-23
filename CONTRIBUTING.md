@@ -68,7 +68,7 @@ source venv/bin/activate
 pip install pyyaml requests
 
 # Run in dry-run mode for testing
-python3 ups-monitor.py --dry-run --config config.yaml
+python3 ups_monitor.py --dry-run --config config.yaml
 ```
 
 ## Testing Checklist
@@ -77,7 +77,7 @@ Before submitting a PR, ensure:
 
 - [ ] `--validate-config` passes
 - [ ] `--dry-run` mode works correctly
-- [ ] No Python syntax errors (`python3 -m py_compile ups-monitor.py`)
+- [ ] No Python syntax errors (`python3 -m py_compile ups_monitor.py`)
 - [ ] Existing features still work
 - [ ] New configuration options are documented
 
