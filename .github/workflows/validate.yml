@@ -27,14 +27,14 @@ jobs:
         pip install pyyaml requests
 
     - name: Check syntax
-      run: python -m py_compile ups-monitor.py
+      run: python -m py_compile ups_monitor.py
 
     - name: Validate default config
-      run: python ups-monitor.py --validate-config --config config.yaml
+      run: python ups_monitor.py --validate-config --config config.yaml
 
     - name: Validate example configs
       run: |
         for config in examples/*.yaml; do
           echo "Validating $config..."
-          python ups-monitor.py --validate-config --config "$config"
+          python ups_monitor.py --validate-config --config "$config"
         done
