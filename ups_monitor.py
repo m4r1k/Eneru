@@ -822,7 +822,7 @@ class UPSMonitor:
 
         self._log_message(f"🚀 Eneru v{__version__} starting - monitoring {self.config.ups.name}")
         self._send_notification(
-            f"🚀 **Eneru Service Started**\nMonitoring {self.config.ups.name}",
+            f"🚀 **Eneru v{__version__} Started**\nMonitoring {self.config.ups.name}",
             self.config.NOTIFY_INFO
         )
 
