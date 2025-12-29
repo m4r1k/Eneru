@@ -1,0 +1,36 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: Eneru
+Label: Eneru
+Suite: stable
+Codename: stable
+Architectures: all
+Components: main
+Description: Eneru UPS Monitor packages
+Date: Mon, 29 Dec 2025 15:00:47 +0000
+MD5Sum:
+ 1bb0227ae26f4642dd1c4df62bdf725b 753 main/binary-all/Packages
+ 9cbfcec8ad8c8fd84ecaaca3332107b9 537 main/binary-all/Packages.gz
+SHA1:
+ 70b7a91b5afe23c0f13a26ce4f5e9c92899964eb 753 main/binary-all/Packages
+ 2b80f86066c95974616d16050c340cfa17615892 537 main/binary-all/Packages.gz
+SHA256:
+ a9dcefbc4bbcbac455618fc12d2d0fc56b6637993e40d08cad0cfd32eaa6e029 753 main/binary-all/Packages
+ d95fff3bd5cf60bb03a69516fb3215dc7ec58fa24e6ae86c9374b134bc820db7 537 main/binary-all/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEWVbOf3R4twP7zVv0hAK87i1Wf24FAmlSl58ACgkQhAK87i1W
+f26dhxAArUoKUEKQpjZZgsQ4WXYQmDA/BgV8HWS1I1ZL+zMQwT1rMSWgYFt7aY8P
+3iBZbx/NzIeedMPg7gqhqkCdqkotyGt9qhgmo/nst8kMXxT2F7ZB4VAYL/co8P1b
+ojlpaAkChNa8FAOPEPnxLjUE8CG5LH7BbUv+WdhC6/CfHNpdSEocTgXOD1zVmmwz
+frTu1YljqeyoDB8PdAhsq2qmMaY9W7DbYSfuVFch0bIUsonJBm3R78bkQBk8Kxuc
+YT2nnU1RDOEmhHvJ9zcVzEsLPZnC5DqS4aNh0vFfdpt1g0LyKJlytf/N7DJlDXF9
+3soIVCHVn7A0syiNe2EOpC7+ucox2N15kOMWhLVyZml5efsdLB/G/Ecg+D8EBixL
++8HHUrolX4mcgAq4LvNNdqTJGiwDRmzVrzNJIIQyQ04OA2v3srKmOv+4+T9REC5q
+oxkg4jSDZhHfknfg1+eXojj+1hd2LXknZL6PQEaO0T0tU84mt33X3iQ9pc6Df4z7
+wHiD/4sdCv34Ht0eggnuP1HEH8cZVUx2BzyjcCfTTuXMeT3fptSQM4nZ0UpG7ve8
+Fm+q6kR1UUSoJmsVVvSzRNP3Y04sXOv1izCyWGuuezQR5Tv0HWetjqEzA6VD87hA
+BlFTMntrV+VkBuPNPv/dtnvcKyucFJg1nJ5SJfwYYWU7OQIBJPA=
+=uEH1
+-----END PGP SIGNATURE-----
