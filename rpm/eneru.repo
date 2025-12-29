@@ -1,0 +1,6 @@
+[eneru]
+name=Eneru UPS Monitor
+baseurl=https://m4r1k.github.io/Eneru/rpm
+enabled=1
+gpgcheck=1
+gpgkey=https://m4r1k.github.io/Eneru/KEY.gpg

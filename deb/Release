@@ -1,0 +1,17 @@
+Origin: Eneru
+Label: Eneru
+Suite: stable
+Codename: stable
+Architectures: all
+Components: main
+Description: Eneru UPS Monitor packages
+Date: Mon, 29 Dec 2025 14:07:53 +0000
+MD5Sum:
+ cc6c011400d26f7b6bedb41c57b1e4be  Packages
+ b2d98d5e648f6b86229d3713560dcf06  Packages.gz
+SHA1:
+ 4750fe5b849740ccf6c06a6818dedf32a7a7f35e  Packages
+ a7e5bc2bdb364aa3139027385d72ef64754c61a3  Packages.gz
+SHA256:
+ 3758057831890c1075f7d6ff24080cea486bf94cfd4ba35ea1cac0c3a9ca0af1  Packages
+ f7883f1b4a62d848daebf4aaf36d1bd8d6ecf04c0ff6769601eec9178fa4ef91  Packages.gz
