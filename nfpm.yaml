@@ -59,8 +59,8 @@ contents:
       group: root
 
   # Systemd service file (use /lib for packages, not /etc)
-  - src: ups-monitor.service
-    dst: /lib/systemd/system/ups-monitor.service
+  - src: eneru.service
+    dst: /lib/systemd/system/eneru.service
     file_info:
       mode: 0644
       owner: root

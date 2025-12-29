@@ -18,7 +18,7 @@ was_enabled=false
 if [ -n "$1" ]; then
     if [ "$1" = "configure" ]; then
         # DEB upgrade detection: check if service existed before
-        if systemctl list-unit-files ups-monitor.service &>/dev/null; then
+        if systemctl list-unit-files eneru.service &>/dev/null; then
             is_upgrade=true
         fi
     elif [ "$1" -ge 2 ] 2>/dev/null; then
@@ -28,10 +28,10 @@ if [ -n "$1" ]; then
 fi
 
 # Check current service state (before we potentially restart)
-if systemctl is-active --quiet ups-monitor.service 2>/dev/null; then
+if systemctl is-active --quiet eneru.service 2>/dev/null; then
     was_running=true
 fi
-if systemctl is-enabled --quiet ups-monitor.service 2>/dev/null; then
+if systemctl is-enabled --quiet eneru.service 2>/dev/null; then
     was_enabled=true
 fi
 
@@ -39,7 +39,7 @@ if [ "$is_upgrade" = true ]; then
     # UPGRADE: Restart service if it was running, otherwise leave it alone
     if [ "$was_running" = true ]; then
         echo "Restarting ups-monitor service..."
-        systemctl restart ups-monitor.service
+        systemctl restart eneru.service
     fi
     # Silent upgrade - no instructions needed
 else
@@ -52,7 +52,7 @@ else
     echo "Next steps:"
     echo "  1. Edit configuration: nano /etc/ups-monitor/config.yaml"
     echo "  2. Validate config:    python3 /opt/ups-monitor/ups_monitor.py --validate-config"
-    echo "  3. Enable the service: systemctl enable ups-monitor.service"
-    echo "  4. Start the service:  systemctl start ups-monitor.service"
+    echo "  3. Enable the service: systemctl enable eneru.service"
+    echo "  4. Start the service:  systemctl start eneru.service"
     echo ""
 fi

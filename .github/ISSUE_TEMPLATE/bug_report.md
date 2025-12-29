@@ -24,7 +24,7 @@ What actually happened.
 
 ## Logs
 ```
-Paste relevant logs from: journalctl -u ups-monitor.service
+Paste relevant logs from: journalctl -u eneru.service
 ```
 
 ## Environment

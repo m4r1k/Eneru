@@ -178,8 +178,8 @@ sudo nano /etc/ups-monitor/config.yaml
 sudo python3 /opt/ups-monitor/ups_monitor.py --validate-config
 
 # 3. Enable and start the service
-sudo systemctl enable ups-monitor.service
-sudo systemctl start ups-monitor.service
+sudo systemctl enable eneru.service
+sudo systemctl start eneru.service
 ```
 
 ### Manual Installation
@@ -205,7 +205,7 @@ sudo mkdir -p /etc/ups-monitor
 # Copy files
 sudo cp ups_monitor.py /opt/ups-monitor/
 sudo cp config.yaml /etc/ups-monitor/
-sudo cp ups-monitor.service /etc/systemd/system/
+sudo cp eneru.service /etc/systemd/system/
 
 # Make executable
 sudo chmod +x /opt/ups-monitor/ups_monitor.py
@@ -976,15 +976,15 @@ sudo ssh user@remote-server "sudo shutdown -h now"  # CAUTION: Actually shuts do
 
 ```bash
 # Start/stop/restart
-sudo systemctl start ups-monitor.service
-sudo systemctl stop ups-monitor.service
-sudo systemctl restart ups-monitor.service
+sudo systemctl start eneru.service
+sudo systemctl stop eneru.service
+sudo systemctl restart eneru.service
 
 # Check status
-sudo systemctl status ups-monitor.service
+sudo systemctl status eneru.service
 
 # View logs
-sudo journalctl -u ups-monitor.service -f
+sudo journalctl -u eneru.service -f
 sudo tail -f /var/log/ups-monitor.log
 ```
 
@@ -1016,7 +1016,7 @@ Always test with dry-run mode before production deployment:
 
 ```bash
 # Quick dry-run test
-sudo systemctl stop ups-monitor.service
+sudo systemctl stop eneru.service
 sudo python3 /opt/ups-monitor/ups_monitor.py --dry-run --config /etc/ups-monitor/config.yaml
 ```
 
@@ -1071,7 +1071,7 @@ sudo rm -f /var/run/ups-shutdown-scheduled
 
 ```bash
 # Check for errors
-journalctl -u ups-monitor.service -e
+journalctl -u eneru.service -e
 
 # Validate Python version (must be 3.9+)
 python3 --version
@@ -1133,7 +1133,7 @@ ls -la ~/.ssh/id_*
 |------|---------|
 | `/opt/ups-monitor/ups_monitor.py` | Main script |
 | `/etc/ups-monitor/config.yaml` | Configuration file |
-| `/etc/systemd/system/ups-monitor.service` | Systemd service |
+| `/etc/systemd/system/eneru.service` | Systemd service |
 | `/var/log/ups-monitor.log` | Log file |
 | `/var/run/ups-monitor.state` | Current UPS state |
 | `/var/run/ups-shutdown-scheduled` | Shutdown in progress flag |

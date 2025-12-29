@@ -24,14 +24,14 @@ fi
 
 if [ "$is_removal" = true ]; then
     # ACTUAL REMOVAL: Stop and disable the service
-    if systemctl is-active --quiet ups-monitor.service 2>/dev/null; then
+    if systemctl is-active --quiet eneru.service 2>/dev/null; then
         echo "Stopping ups-monitor service..."
-        systemctl stop ups-monitor.service
+        systemctl stop eneru.service
     fi
 
-    if systemctl is-enabled --quiet ups-monitor.service 2>/dev/null; then
+    if systemctl is-enabled --quiet eneru.service 2>/dev/null; then
         echo "Disabling ups-monitor service..."
-        systemctl disable ups-monitor.service
+        systemctl disable eneru.service
     fi
 fi
 # UPGRADE: Do nothing - let postinstall of new package handle restart

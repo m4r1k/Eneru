@@ -1,5 +1,5 @@
 [Unit]
-Description=UPS Monitor Service
+Description=Eneru - Intelligent UPS Monitoring & Shutdown Orchestration
 # Ensure dependencies are started first
 After=network-online.target libvirtd.service docker.service
 Wants=network-online.target

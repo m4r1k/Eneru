@@ -26,7 +26,7 @@ fi
 
 # Copy the SystemD unit
 echo "Installing systemd service..."
-/usr/bin/cp -af ./ups-monitor.service /etc/systemd/system/ups-monitor.service
+/usr/bin/cp -af ./eneru.service /etc/systemd/system/eneru.service
 
 # Detect package manager and install dependencies
 echo "Installing dependencies..."
@@ -51,17 +51,17 @@ python3 /opt/ups-monitor/ups_monitor.py --validate-config --config /etc/ups-moni
 # Enable and start service
 echo "Enabling service..."
 systemctl daemon-reload
-systemctl enable --now ups-monitor.service
+systemctl enable --now eneru.service
 
 echo ""
 echo "=== Installation Complete ==="
 echo ""
 echo "Next steps:"
 echo "  1. Edit configuration: nano /etc/ups-monitor/config.yaml"
-echo "  2. Start the service:  systemctl start ups-monitor.service"
-echo "  3. Check status:       systemctl status ups-monitor.service"
-echo "  4. View logs:          journalctl -u ups-monitor.service -f"
+echo "  2. Start the service:  systemctl start eneru.service"
+echo "  3. Check status:       systemctl status eneru.service"
+echo "  4. View logs:          journalctl -u eneru.service -f"
 echo ""
 echo "For dry-run testing:"
-echo "  systemctl stop ups-monitor.service"
+echo "  systemctl stop eneru.service"
 echo "  python3 /opt/ups-monitor/ups_monitor.py --dry-run --config /etc/ups-monitor/config.yaml"

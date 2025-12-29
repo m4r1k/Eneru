@@ -16,7 +16,7 @@ Before creating bug reports, please check existing issues. When creating a bug r
   - Python version (`python3 --version`)
   - NUT version (`upsc -V`)
   - UPS model
-- **Relevant logs** from `journalctl -u ups-monitor.service`
+- **Relevant logs** from `journalctl -u eneru.service`
 - **Configuration** (sanitize sensitive data like webhook URLs)
 
 ### 💡 Suggesting Features
