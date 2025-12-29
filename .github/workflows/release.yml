@@ -175,14 +175,19 @@ jobs:
           gpg --batch --yes --armor --detach-sign -o repodata/repomd.xml.asc repodata/repomd.xml
 
           # Create repo file for easy installation
-          cat > eneru.repo <<EOF
+          # Note: gpgcheck=0 because individual RPMs are not signed,
+          # but repo metadata (repomd.xml) is signed and served over HTTPS
+          cat > eneru.repo << 'REPOFILE'
           [eneru]
           name=Eneru UPS Monitor
           baseurl=https://m4r1k.github.io/Eneru/rpm
           enabled=1
-          gpgcheck=1
+          gpgcheck=0
+          repo_gpgcheck=1
           gpgkey=https://m4r1k.github.io/Eneru/KEY.gpg
-          EOF
+          REPOFILE
+          # Remove leading spaces from the repo file
+          sed -i 's/^          //' eneru.repo
 
       - name: Create index.html
         run: |
@@ -223,9 +228,6 @@ jobs:
               <pre>
           # RHEL 8/9: Enable EPEL first (required for apprise dependency)
           sudo dnf install -y epel-release
-
-          # Import GPG key
-          sudo rpm --import https://m4r1k.github.io/Eneru/KEY.gpg
 
           # Add repository
           sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo

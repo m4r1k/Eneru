@@ -141,9 +141,6 @@ sudo apt install eneru
 # RHEL 8/9: Enable EPEL first (required for apprise dependency)
 sudo dnf install -y epel-release
 
-# Import GPG key
-sudo rpm --import https://m4r1k.github.io/Eneru/KEY.gpg
-
 # Add repository
 sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
 
