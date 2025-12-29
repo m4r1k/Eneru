@@ -114,13 +114,15 @@ jobs:
           cd gh-pages
 
           # Create directory structure (preserve existing packages)
-          mkdir -p deb/pool rpm
+          # APT: pool for packages, dists for metadata
+          mkdir -p deb/pool/main deb/dists/stable/main/binary-all
+          mkdir -p rpm
 
           # Export public GPG key
           gpg --armor --export > KEY.gpg
 
           # Copy new packages (keep existing ones in pool)
-          cp ../*.deb deb/pool/
+          cp ../*.deb deb/pool/main/
           cp ../*.rpm rpm/
 
       - name: Build APT repository
@@ -131,11 +133,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y dpkg-dev
 
-          # Generate Packages file from ALL packages in pool
-          dpkg-scanpackages pool /dev/null > Packages
-          gzip -k -f Packages
+          # Generate Packages file in the correct location
+          # Path is relative to deb/ directory
+          dpkg-scanpackages --arch all pool/main /dev/null > dists/stable/main/binary-all/Packages
+          gzip -k -f dists/stable/main/binary-all/Packages
 
-          # Generate Release file
+          # Generate Release file for the suite
+          cd dists/stable
           cat > Release <<EOF
           Origin: Eneru
           Label: Eneru
@@ -147,14 +151,14 @@ jobs:
           Date: $(date -Ru)
           EOF
 
-          # Add checksums to Release
+          # Add checksums to Release (paths relative to dists/stable/)
           {
             echo "MD5Sum:"
-            md5sum Packages Packages.gz | sed 's/^/ /'
+            find main -type f \( -name "Packages" -o -name "Packages.gz" \) -exec sh -c 'echo " $(md5sum "$1" | cut -d" " -f1) $(stat -c%s "$1") $1"' _ {} \;
             echo "SHA1:"
-            sha1sum Packages Packages.gz | sed 's/^/ /'
+            find main -type f \( -name "Packages" -o -name "Packages.gz" \) -exec sh -c 'echo " $(sha1sum "$1" | cut -d" " -f1) $(stat -c%s "$1") $1"' _ {} \;
             echo "SHA256:"
-            sha256sum Packages Packages.gz | sed 's/^/ /'
+            find main -type f \( -name "Packages" -o -name "Packages.gz" \) -exec sh -c 'echo " $(sha256sum "$1" | cut -d" " -f1) $(stat -c%s "$1") $1"' _ {} \;
           } >> Release
 
           # Sign the Release file
