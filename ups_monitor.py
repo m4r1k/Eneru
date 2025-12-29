@@ -5,6 +5,10 @@ Monitors UPS status via NUT and triggers configurable shutdown sequences.
 https://github.com/m4r1k/Eneru
 """
 
+# Version is set at build time via git describe --tags
+# Format: "4.3.0" for tagged releases, "4.3.0-5-gabcdef1" for dev builds
+__version__ = "4.3.0-rc0"
+
 import subprocess
 import sys
 import os
@@ -816,7 +820,7 @@ class UPSMonitor:
 
         self._check_dependencies()
 
-        self._log_message(f"🚀 Eneru starting - monitoring {self.config.ups.name}")
+        self._log_message(f"🚀 Eneru v{__version__} starting - monitoring {self.config.ups.name}")
         self._send_notification(
             f"🚀 **Eneru Service Started**\nMonitoring {self.config.ups.name}",
             self.config.NOTIFY_INFO
@@ -1915,6 +1919,11 @@ def main():
         action="store_true",
         help="Send a test notification and exit"
     )
+    parser.add_argument(
+        "-v", "--version",
+        action="version",
+        version=f"Eneru v{__version__}"
+    )
 
     args = parser.parse_args()
 
@@ -1931,6 +1940,7 @@ def main():
 
         # Validate config if requested
         if args.validate_config:
+            print(f"Eneru v{__version__}")
             print("Configuration is valid.")
             print(f"  UPS: {config.ups.name}")
             print(f"  Dry-run: {config.behavior.dry_run}")

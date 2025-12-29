@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.3.0] - 2025-12-29
+
+### Added
+- **Native Package Distribution:** Official `.deb` and `.rpm` packages for easy installation
+- **APT/DNF Repository:** Packages available via GitHub Pages hosted repository for Debian, Ubuntu, RHEL, and Fedora
+- **Version CLI Option:** New `-v`/`--version` flag to display current version
+- **Version Display:** Version now shown at service startup and during config validation
+- **nFPM Build System:** Automated package building using nFPM for both Debian and RPM formats
+- **GitHub Release Automation:** Packages automatically built and published on GitHub releases
+- **GPG Signed Packages:** All repository metadata is GPG signed for security
+
+### Changed
+- **Installation Method:** Package installation (deb/rpm) is now the recommended method
+- **Service Behavior:** Packages install but do not auto-enable or auto-start the service (config must be edited first)
+- **Config File Handling:** Package upgrades preserve existing `/etc/ups-monitor/config.yaml` (marked as conffile)
+- **Service File Location:** Moved from `/etc/systemd/system/` to `/lib/systemd/system/` for proper package management
+- **`__version__` Variable:** Version now embedded in source code and updated at build time from git tags
+
+### Fixed
+- **Discord Mention Prevention:** Added zero-width space after `@` symbols in notification messages to prevent Discord from interpreting UPS names (e.g., `UPS@192.168.1.1`) as user mentions
+
+### Installation
+
+Install via package manager (after adding the repository):
+```bash
+# Debian/Ubuntu
+apt install eneru
+
+# RHEL/Fedora
+dnf install eneru
+```
+
+Or download packages directly from GitHub releases.
+
+---
+
 ## [4.2.0] - 2025-12-23
 
 ### Added
@@ -213,6 +249,19 @@ During power outages, network connectivity is often unreliable. The previous blo
 ---
 
 ## Version Comparison
+
+### v4.3 vs v4.2
+
+| Feature | v4.2 | v4.3 |
+|---------|------|------|
+| Installation Method | Manual (install.sh) | Native packages (.deb/.rpm) |
+| Package Repository | None | GitHub Pages (GPG signed) |
+| Version Display | None | `-v`/`--version` flag |
+| Service Auto-Start | Yes (via install.sh) | No (manual enable required) |
+| Config on Upgrade | May overwrite | Preserved (conffile) |
+| Discord @ Mentions | Could trigger false mentions | Escaped with zero-width space |
+| Build System | None | nFPM + GitHub Actions |
+| Distribution | GitHub clone only | apt/dnf + GitHub releases |
 
 ### v4.2 vs v4.1
 

@@ -115,7 +115,79 @@ All components are optional and independently configurable:
 - SSH client (for remote server shutdown)
 - Root privileges
 
-### Quick Install
+### Package Installation (Recommended)
+
+Native `.deb` and `.rpm` packages are available for easy installation.
+
+#### Option 1: APT/DNF Repository (Recommended)
+
+Add the repository to get automatic updates:
+
+**Debian/Ubuntu:**
+```bash
+# Import GPG key
+curl -fsSL https://m4r1k.github.io/Eneru/KEY.gpg | sudo gpg --dearmor -o /usr/share/keyrings/eneru.gpg
+
+# Add repository
+echo "deb [signed-by=/usr/share/keyrings/eneru.gpg] https://m4r1k.github.io/Eneru/deb stable main" | sudo tee /etc/apt/sources.list.d/eneru.list
+
+# Install
+sudo apt update
+sudo apt install eneru
+```
+
+**RHEL/Fedora:**
+```bash
+# RHEL 8/9: Enable EPEL first (required for apprise dependency)
+sudo dnf install -y epel-release
+
+# Import GPG key
+sudo rpm --import https://m4r1k.github.io/Eneru/KEY.gpg
+
+# Add repository
+sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
+
+# Install
+sudo dnf install eneru
+```
+
+#### Option 2: Direct Download from GitHub Releases
+
+Download the latest package from [GitHub Releases](https://github.com/m4r1k/Eneru/releases):
+
+**Debian/Ubuntu:**
+```bash
+sudo dpkg -i eneru_4.3.0_all.deb
+sudo apt install -f  # Install dependencies if needed
+```
+
+**RHEL/Fedora:**
+```bash
+# RHEL 8/9: Enable EPEL first (required for apprise dependency)
+sudo dnf install -y epel-release
+
+sudo dnf install ./eneru-4.3.0.noarch.rpm
+```
+
+#### After Installation
+
+The package installs but does **not** auto-enable or auto-start the service (configuration must be completed first):
+
+```bash
+# 1. Edit configuration
+sudo nano /etc/ups-monitor/config.yaml
+
+# 2. Validate configuration
+sudo python3 /opt/ups-monitor/ups_monitor.py --validate-config
+
+# 3. Enable and start the service
+sudo systemctl enable ups-monitor.service
+sudo systemctl start ups-monitor.service
+```
+
+### Manual Installation
+
+For development or systems without package manager support:
 
 ```bash
 # Clone or download the repository
@@ -126,7 +198,7 @@ cd Eneru
 sudo ./install.sh
 ```
 
-### Manual Installation
+Or install manually:
 
 ```bash
 # Create directories
@@ -141,15 +213,15 @@ sudo cp ups-monitor.service /etc/systemd/system/
 # Make executable
 sudo chmod +x /opt/ups-monitor/ups_monitor.py
 
-# Install dependencies (RHEL/Fedora)
-sudo dnf install -y python3 python3-pyyaml python3-apprise apprise nut-client openssh-clients
+# Install dependencies (RHEL/Fedora - EPEL required for apprise)
+sudo dnf install -y epel-release
+sudo dnf install -y python3 python3-pyyaml apprise nut-client openssh-clients
 
 # Install dependencies (Debian/Ubuntu)
 sudo apt install -y python3 python3-yaml apprise nut-client openssh-client
 
-# Enable and start
+# Reload systemd
 sudo systemctl daemon-reload
-sudo systemctl enable --now ups-monitor.service
 ```
 
 ---

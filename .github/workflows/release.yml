@@ -1,0 +1,255 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-packages:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml apprise pytest pytest-cov pytest-mock
+
+      - name: Run tests
+        run: pytest -v
+
+      - name: Validate configuration
+        run: python ups_monitor.py --validate-config --config config.yaml
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          # Extract version from tag (e.g., v4.3.0 -> 4.3.0)
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
+      - name: Update version in script
+        run: |
+          # Update __version__ in the Python script
+          sed -i "s/^__version__ = .*/__version__ = \"${{ steps.version.outputs.VERSION }}\"/" ups_monitor.py
+          # Verify the change
+          grep "__version__" ups_monitor.py
+
+      - name: Install nFPM
+        run: |
+          echo "Installing nFPM..."
+          curl -sfL https://install.goreleaser.com/github.com/goreleaser/nfpm.sh | sh -s -- -b /usr/local/bin
+
+      - name: Build .deb package
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager deb --target .
+          ls -la *.deb
+
+      - name: Build .rpm package
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager rpm --target .
+          ls -la *.rpm
+
+      - name: Upload packages to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            *.deb
+            *.rpm
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Import GPG key
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+
+      - name: Checkout gh-pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+        continue-on-error: true
+
+      - name: Initialize gh-pages if needed
+        run: |
+          if [ ! -d "gh-pages" ]; then
+            mkdir -p gh-pages
+            cd gh-pages
+            git init
+            git checkout -b gh-pages
+          fi
+
+      - name: Prepare repository structure
+        run: |
+          cd gh-pages
+
+          # Create directory structure
+          mkdir -p deb/pool rpm
+
+          # Export public GPG key
+          gpg --armor --export > KEY.gpg
+
+          # Copy packages
+          cp ../*.deb deb/pool/
+          cp ../*.rpm rpm/
+
+      - name: Build APT repository
+        run: |
+          cd gh-pages/deb
+
+          # Install dpkg-dev for dpkg-scanpackages
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev
+
+          # Generate Packages file
+          dpkg-scanpackages pool /dev/null > Packages
+          gzip -k -f Packages
+
+          # Generate Release file
+          cat > Release <<EOF
+          Origin: Eneru
+          Label: Eneru
+          Suite: stable
+          Codename: stable
+          Architectures: all
+          Components: main
+          Description: Eneru UPS Monitor packages
+          Date: $(date -Ru)
+          EOF
+
+          # Add checksums to Release
+          {
+            echo "MD5Sum:"
+            md5sum Packages Packages.gz | sed 's/^/ /'
+            echo "SHA1:"
+            sha1sum Packages Packages.gz | sed 's/^/ /'
+            echo "SHA256:"
+            sha256sum Packages Packages.gz | sed 's/^/ /'
+          } >> Release
+
+          # Sign the Release file
+          gpg --batch --yes --armor --detach-sign -o Release.gpg Release
+          gpg --batch --yes --clearsign -o InRelease Release
+
+      - name: Build RPM repository
+        run: |
+          cd gh-pages/rpm
+
+          # Install createrepo
+          sudo apt-get install -y createrepo-c
+
+          # Create repository metadata
+          createrepo_c .
+
+          # Sign the repomd.xml
+          gpg --batch --yes --armor --detach-sign -o repodata/repomd.xml.asc repodata/repomd.xml
+
+          # Create repo file for easy installation
+          cat > eneru.repo <<EOF
+          [eneru]
+          name=Eneru UPS Monitor
+          baseurl=https://m4r1k.github.io/Eneru/rpm
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://m4r1k.github.io/Eneru/KEY.gpg
+          EOF
+
+      - name: Create index.html
+        run: |
+          cd gh-pages
+          cat > index.html <<'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Eneru Package Repository</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
+              h1 { color: #333; }
+              pre { background: #f4f4f4; padding: 15px; border-radius: 5px; overflow-x: auto; }
+              code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
+              .section { margin: 30px 0; }
+            </style>
+          </head>
+          <body>
+            <h1>⚡ Eneru Package Repository</h1>
+            <p>Official package repository for <a href="https://github.com/m4r1k/Eneru">Eneru</a> - Intelligent UPS Monitoring & Shutdown Orchestration for NUT.</p>
+
+            <div class="section">
+              <h2>Debian / Ubuntu</h2>
+              <pre>
+          # Import GPG key
+          curl -fsSL https://m4r1k.github.io/Eneru/KEY.gpg | sudo gpg --dearmor -o /usr/share/keyrings/eneru.gpg
+
+          # Add repository
+          echo "deb [signed-by=/usr/share/keyrings/eneru.gpg] https://m4r1k.github.io/Eneru/deb stable main" | sudo tee /etc/apt/sources.list.d/eneru.list
+
+          # Install
+          sudo apt update
+          sudo apt install eneru</pre>
+            </div>
+
+            <div class="section">
+              <h2>RHEL / Fedora</h2>
+              <pre>
+          # RHEL 8/9: Enable EPEL first (required for apprise dependency)
+          sudo dnf install -y epel-release
+
+          # Import GPG key
+          sudo rpm --import https://m4r1k.github.io/Eneru/KEY.gpg
+
+          # Add repository
+          sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
+
+          # Install
+          sudo dnf install eneru</pre>
+            </div>
+
+            <div class="section">
+              <h2>Direct Downloads</h2>
+              <p>Download packages directly from <a href="https://github.com/m4r1k/Eneru/releases">GitHub Releases</a>.</p>
+            </div>
+
+            <div class="section">
+              <h2>Repository Contents</h2>
+              <ul>
+                <li><a href="KEY.gpg">KEY.gpg</a> - GPG public key</li>
+                <li><a href="deb/">deb/</a> - Debian/Ubuntu packages</li>
+                <li><a href="rpm/">rpm/</a> - RHEL/Fedora packages</li>
+              </ul>
+            </div>
+          </body>
+          </html>
+          EOF
+
+      - name: Deploy to gh-pages
+        run: |
+          cd gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Update repository for v${{ steps.version.outputs.VERSION }}" || echo "No changes to commit"
+          git push -f https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git gh-pages
+
+      - name: Summary
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ steps.version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Packages Built" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ls -la *.deb *.rpm >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Package Repository" >> $GITHUB_STEP_SUMMARY
+          echo "Published to: https://m4r1k.github.io/Eneru/" >> $GITHUB_STEP_SUMMARY

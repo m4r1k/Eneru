@@ -1,0 +1,98 @@
+# nFPM configuration for building .deb and .rpm packages
+# https://nfpm.goreleaser.com/configuration/
+
+name: eneru
+arch: all
+platform: linux
+version: "${VERSION}"
+section: admin
+priority: optional
+maintainer: Eneru Maintainers <noreply@github.com>
+description: |
+  Intelligent UPS Monitoring & Shutdown Orchestration for NUT.
+  Monitors UPS status via Network UPS Tools (NUT) and executes configurable
+  shutdown sequences to protect your entire infrastructure during power events.
+vendor: Eneru
+homepage: https://github.com/m4r1k/Eneru
+license: MIT
+
+# Dependencies
+depends:
+  - python3
+  - nut-client
+
+# Recommended packages (not required but useful)
+recommends:
+  - openssh-client
+
+# Suggested packages
+suggests:
+  - apprise
+
+# Override package-specific dependencies
+overrides:
+  deb:
+    depends:
+      - python3
+      - python3-yaml
+      - nut-client
+    recommends:
+      - apprise
+      - openssh-client
+  rpm:
+    depends:
+      - python3
+      - python3-pyyaml
+      - nut-client
+    recommends:
+      - apprise
+      - openssh-clients
+
+# Files to include in the package
+contents:
+  # Main script
+  - src: ups_monitor.py
+    dst: /opt/ups-monitor/ups_monitor.py
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Systemd service file (use /lib for packages, not /etc)
+  - src: ups-monitor.service
+    dst: /lib/systemd/system/ups-monitor.service
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  # Default configuration file (marked as config file - won't be overwritten)
+  - src: config.yaml
+    dst: /etc/ups-monitor/config.yaml
+    type: config|noreplace
+    file_info:
+      mode: 0640
+      owner: root
+      group: root
+
+  # Create the /opt/ups-monitor directory
+  - dst: /opt/ups-monitor
+    type: dir
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Create the /etc/ups-monitor directory
+  - dst: /etc/ups-monitor
+    type: dir
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+# Scripts executed during package lifecycle
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh
