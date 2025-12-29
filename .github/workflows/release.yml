@@ -3,6 +3,12 @@ name: Release
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., 4.3.0-rc0)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -30,11 +36,16 @@ jobs:
       - name: Validate configuration
         run: python ups_monitor.py --validate-config --config config.yaml
 
-      - name: Extract version from tag
+      - name: Extract version
         id: version
         run: |
-          # Extract version from tag (e.g., v4.3.0 -> 4.3.0)
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual trigger - use input version
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            # Release trigger - extract from tag (e.g., v4.3.0 -> 4.3.0)
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION"
 
@@ -61,6 +72,7 @@ jobs:
           ls -la *.rpm
 
       - name: Upload packages to GitHub Release
+        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v1
         with:
           files: |
@@ -78,6 +90,7 @@ jobs:
         with:
           ref: gh-pages
           path: gh-pages
+          fetch-depth: 0
         continue-on-error: true
 
       - name: Initialize gh-pages if needed
@@ -93,13 +106,13 @@ jobs:
         run: |
           cd gh-pages
 
-          # Create directory structure
+          # Create directory structure (preserve existing packages)
           mkdir -p deb/pool rpm
 
           # Export public GPG key
           gpg --armor --export > KEY.gpg
 
-          # Copy packages
+          # Copy new packages (keep existing ones in pool)
           cp ../*.deb deb/pool/
           cp ../*.rpm rpm/
 
@@ -111,7 +124,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y dpkg-dev
 
-          # Generate Packages file
+          # Generate Packages file from ALL packages in pool
           dpkg-scanpackages pool /dev/null > Packages
           gzip -k -f Packages
 
@@ -148,7 +161,7 @@ jobs:
           # Install createrepo
           sudo apt-get install -y createrepo-c
 
-          # Create repository metadata
+          # Create repository metadata from ALL packages
           createrepo_c .
 
           # Sign the repomd.xml
@@ -245,10 +258,17 @@ jobs:
           echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Version:** ${{ steps.version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Packages Built" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           ls -la *.deb *.rpm >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### All Packages in Repository" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ls -la gh-pages/deb/pool/*.deb >> $GITHUB_STEP_SUMMARY || echo "No deb packages yet"
+          ls -la gh-pages/rpm/*.rpm >> $GITHUB_STEP_SUMMARY || echo "No rpm packages yet"
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Package Repository" >> $GITHUB_STEP_SUMMARY
