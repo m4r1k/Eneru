@@ -13,20 +13,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Native Package Distribution:** Official `.deb` and `.rpm` packages for easy installation
 - **APT/DNF Repository:** Packages available via GitHub Pages hosted repository for Debian, Ubuntu, RHEL, and Fedora
 - **Version CLI Option:** New `-v`/`--version` flag to display current version
-- **Version Display:** Version now shown at service startup and during config validation
+- **Version Display:** Version now shown at service startup and in notifications
 - **nFPM Build System:** Automated package building using nFPM for both Debian and RPM formats
 - **GitHub Release Automation:** Packages automatically built and published on GitHub releases
-- **GPG Signed Packages:** All repository metadata is GPG signed for security
+- **GPG Signed Repository:** Repository metadata is GPG signed for security
+- **requirements.txt:** Added for pip-based installations (`PyYAML>=5.4.1`, `apprise>=1.9.6`)
+- **No Docker Documentation:** Explained why Eneru runs as a systemd daemon (chicken-and-egg problem with container shutdown)
 
 ### Changed
+- **Service Name:** Renamed from `ups-monitor.service` to `eneru.service` to avoid conflict with nut-client's service
 - **Installation Method:** Package installation (deb/rpm) is now the recommended method
 - **Service Behavior:** Packages install but do not auto-enable or auto-start the service (config must be edited first)
 - **Config File Handling:** Package upgrades preserve existing `/etc/ups-monitor/config.yaml` (marked as conffile)
+- **Upgrade Behavior:** Smart detection ensures running service restarts on upgrade, stopped service stays stopped
 - **Service File Location:** Moved from `/etc/systemd/system/` to `/lib/systemd/system/` for proper package management
-- **`__version__` Variable:** Version now embedded in source code and updated at build time from git tags
 
 ### Fixed
 - **Discord Mention Prevention:** Added zero-width space after `@` symbols in notification messages to prevent Discord from interpreting UPS names (e.g., `UPS@192.168.1.1`) as user mentions
+- **APT Repository Structure:** Proper `dists/stable/main/binary-all/` hierarchy for Debian/Ubuntu compatibility
+- **RPM Repository GPG:** Fixed gpgcheck configuration (repo metadata signed, individual packages served over HTTPS)
+
+### Migration from v4.2
+
+If you installed manually, update your systemd service reference:
+```bash
+# Stop old service
+sudo systemctl stop ups-monitor.service
+sudo systemctl disable ups-monitor.service
+
+# Remove old service file
+sudo rm /etc/systemd/system/ups-monitor.service
+
+# Install new package (recommended) or copy new service file
+sudo cp eneru.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable eneru.service
+sudo systemctl start eneru.service
+```
 
 ### Installation
 

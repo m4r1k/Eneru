@@ -62,6 +62,22 @@ Most UPS shutdown solutions are **single-system focused**. Eneru is designed for
 
 ---
 
+## 🤔 Why an Old-Fashioned Systemd Daemon? (No Docker)
+
+You might wonder why Eneru runs as a traditional systemd service instead of a container. This is intentional:
+
+**The Chicken-and-Egg Problem:** Eneru's job is to gracefully shut down Docker/Podman containers during power events. If Eneru itself ran inside a container, it would be stopped during its own shutdown sequence—potentially stalling the entire process and leaving the host in an undefined state.
+
+Running as a systemd daemon ensures:
+- **Eneru survives container shutdown** - It can orchestrate the full sequence without being killed
+- **Direct host access** - Native access to systemd, virsh, SSH, and filesystem operations
+- **Reliability** - No container runtime dependency that could fail during a power event
+- **Simplicity** - While it's technically possible to code Eneru to run inside a container (with careful self-exclusion logic during shutdown), this would significantly increase codebase complexity and still introduce the possibility that something goes wrong—leaving Eneru unable to complete its job
+
+This is the same reason critical infrastructure services like NUT itself run as system daemons, not containers.
+
+---
+
 ## Features
 
 ### High-Performance Monitoring
