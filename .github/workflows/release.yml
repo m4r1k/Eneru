@@ -59,7 +59,14 @@ jobs:
       - name: Install nFPM
         run: |
           echo "Installing nFPM..."
-          curl -sfL https://install.goreleaser.com/github.com/goreleaser/nfpm.sh | sh -s -- -b /usr/local/bin
+          # Download latest nFPM release directly from GitHub
+          NFPM_VERSION=$(curl -s https://api.github.com/repos/goreleaser/nfpm/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
+          echo "Installing nFPM version: $NFPM_VERSION"
+          curl -sLO "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          tar -xzf "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" nfpm
+          sudo mv nfpm /usr/local/bin/
+          rm "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          nfpm --version
 
       - name: Build .deb package
         run: |
