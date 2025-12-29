@@ -25,12 +25,12 @@ fi
 if [ "$is_removal" = true ]; then
     # ACTUAL REMOVAL: Stop and disable the service
     if systemctl is-active --quiet eneru.service 2>/dev/null; then
-        echo "Stopping ups-monitor service..."
+        echo "Stopping Eneru service..."
         systemctl stop eneru.service
     fi
 
     if systemctl is-enabled --quiet eneru.service 2>/dev/null; then
-        echo "Disabling ups-monitor service..."
+        echo "Disabling Eneru service..."
         systemctl disable eneru.service
     fi
 fi

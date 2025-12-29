@@ -38,7 +38,7 @@ fi
 if [ "$is_upgrade" = true ]; then
     # UPGRADE: Restart service if it was running, otherwise leave it alone
     if [ "$was_running" = true ]; then
-        echo "Restarting ups-monitor service..."
+        echo "Restarting Eneru service..."
         systemctl restart eneru.service
     fi
     # Silent upgrade - no instructions needed
