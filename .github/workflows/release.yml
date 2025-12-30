@@ -82,6 +82,7 @@ jobs:
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ github.event.release.tag_name }}
           files: |
             *.deb
             *.rpm
