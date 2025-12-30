@@ -7,7 +7,7 @@ https://github.com/m4r1k/Eneru
 
 # Version is set at build time via git describe --tags
 # Format: "4.3.0" for tagged releases, "4.3.0-5-gabcdef1" for dev builds
-__version__ = "4.3.0-rc0"
+__version__ = "4.5.0-rc0"
 
 import subprocess
 import sys
@@ -101,11 +101,20 @@ class VMConfig:
 
 
 @dataclass
+class ComposeFileConfig:
+    """Configuration for a single compose file."""
+    path: str = ""
+    stop_timeout: Optional[int] = None  # None = use global timeout
+
+
+@dataclass
 class ContainersConfig:
     """Container runtime shutdown configuration."""
     enabled: bool = False
     runtime: str = "auto"  # "auto", "docker", or "podman"
     stop_timeout: int = 60
+    compose_files: List[ComposeFileConfig] = field(default_factory=list)
+    shutdown_all_remaining_containers: bool = True
     include_user_containers: bool = False
 
 
@@ -385,6 +394,18 @@ class ConfigLoader:
         # Containers Configuration (supports both 'containers' and legacy 'docker')
         containers_data = data.get('containers', data.get('docker', {}))
         if containers_data:
+            # Parse compose_files - normalize both string and dict formats
+            compose_files_raw = containers_data.get('compose_files') or []
+            compose_files = []
+            for cf in compose_files_raw:
+                if isinstance(cf, str):
+                    compose_files.append(ComposeFileConfig(path=cf))
+                elif isinstance(cf, dict):
+                    compose_files.append(ComposeFileConfig(
+                        path=cf.get('path', ''),
+                        stop_timeout=cf.get('stop_timeout'),
+                    ))
+
             # Handle legacy 'docker' section format
             if 'docker' in data and 'containers' not in data:
                 # Legacy format: docker.enabled, docker.stop_timeout
@@ -392,6 +413,9 @@ class ConfigLoader:
                     enabled=containers_data.get('enabled', False),
                     runtime="docker",  # Legacy config assumes docker
                     stop_timeout=containers_data.get('stop_timeout', 60),
+                    compose_files=compose_files,
+                    shutdown_all_remaining_containers=containers_data.get(
+                        'shutdown_all_remaining_containers', True),
                     include_user_containers=False,
                 )
             else:
@@ -400,6 +424,9 @@ class ConfigLoader:
                     enabled=containers_data.get('enabled', False),
                     runtime=containers_data.get('runtime', 'auto'),
                     stop_timeout=containers_data.get('stop_timeout', 60),
+                    compose_files=compose_files,
+                    shutdown_all_remaining_containers=containers_data.get(
+                        'shutdown_all_remaining_containers', True),
                     include_user_containers=containers_data.get('include_user_containers', False),
                 )
 
@@ -778,6 +805,7 @@ class UPSMonitor:
         self._battery_history_path = Path(config.logging.battery_history_file)
         self._state_file_path = Path(config.logging.state_file)
         self._container_runtime: Optional[str] = None
+        self._compose_available: bool = False
         self._notification_worker: Optional[NotificationWorker] = None
 
     def run(self):
@@ -861,14 +889,25 @@ class UPSMonitor:
             features.append("VMs")
         if self.config.containers.enabled:
             runtime = self.config.containers.runtime
+            compose_count = len(self.config.containers.compose_files)
             if runtime == "auto":
-                features.append("Containers (auto-detect)")
+                if compose_count > 0:
+                    features.append(f"Containers (auto-detect, {compose_count} compose)")
+                else:
+                    features.append("Containers (auto-detect)")
             else:
-                features.append(f"Containers ({runtime})")
+                if compose_count > 0:
+                    features.append(f"Containers ({runtime}, {compose_count} compose)")
+                else:
+                    features.append(f"Containers ({runtime})")
+        # Filesystem features
+        fs_parts = []
         if self.config.filesystems.sync_enabled:
-            features.append("FS Sync")
+            fs_parts.append("sync")
         if self.config.filesystems.unmount.enabled:
-            features.append(f"Unmount ({len(self.config.filesystems.unmount.mounts)} mounts)")
+            fs_parts.append(f"unmount ({len(self.config.filesystems.unmount.mounts)} mounts)")
+        if fs_parts:
+            features.append(f"FS ({', '.join(fs_parts)})")
 
         enabled_servers = [s for s in self.config.remote_servers if s.enabled]
         if enabled_servers:
@@ -1031,6 +1070,19 @@ class UPSMonitor:
             self._container_runtime = self._detect_container_runtime()
             if self._container_runtime:
                 self._log_message(f"🐳 Container runtime detected: {self._container_runtime}")
+                # Check compose availability if compose_files are configured
+                if self.config.containers.compose_files:
+                    self._compose_available = self._check_compose_available()
+                    if self._compose_available:
+                        self._log_message(
+                            f"🐳 Compose support: enabled ({self._container_runtime} compose, "
+                            f"{len(self.config.containers.compose_files)} file(s))"
+                        )
+                    else:
+                        self._log_message(
+                            f"⚠️ WARNING: compose_files configured but '{self._container_runtime} compose' "
+                            "not available. Compose shutdown will be skipped."
+                        )
             else:
                 self._log_message("⚠️ WARNING: No container runtime found. Container shutdown will be skipped.")
                 self.config.containers.enabled = False
@@ -1067,6 +1119,18 @@ class UPSMonitor:
         else:
             self._log_message(f"⚠️ WARNING: Unknown container runtime '{runtime_config}'")
             return None
+
+    def _check_compose_available(self) -> bool:
+        """Check if compose subcommand is available for the detected runtime."""
+        if not self._container_runtime:
+            return False
+
+        # Try running 'docker/podman compose version' to check availability
+        exit_code, _, _ = run_command(
+            [self._container_runtime, "compose", "version"],
+            timeout=10
+        )
+        return exit_code == 0
 
     def _get_ups_var(self, var_name: str) -> Optional[str]:
         """Get a single UPS variable using upsc."""
@@ -1265,8 +1329,68 @@ class UPSMonitor:
 
         self._log_message("  ✅ All VMs shutdown complete")
 
+    def _shutdown_compose_stacks(self):
+        """Shutdown docker/podman compose stacks in order (best effort)."""
+        if not self._compose_available:
+            return
+
+        if not self.config.containers.compose_files:
+            return
+
+        runtime = self._container_runtime
+        runtime_display = runtime.capitalize()
+
+        self._log_message(
+            f"🐳 Stopping {runtime_display} Compose stacks "
+            f"({len(self.config.containers.compose_files)} file(s))..."
+        )
+
+        for compose_file in self.config.containers.compose_files:
+            file_path = compose_file.path
+            if not file_path:
+                continue
+
+            # Determine timeout: per-file or global
+            timeout = compose_file.stop_timeout
+            if timeout is None:
+                timeout = self.config.containers.stop_timeout
+
+            # Check if file exists (best effort - warn if not)
+            if not Path(file_path).exists():
+                self._log_message(f"  ⚠️ Compose file not found: {file_path} (skipping)")
+                continue
+
+            self._log_message(f"  ➡️ Stopping: {file_path} (timeout: {timeout}s)")
+
+            if self.config.behavior.dry_run:
+                self._log_message(
+                    f"  🧪 [DRY-RUN] Would execute: {runtime} compose -f {file_path} down"
+                )
+                continue
+
+            # Run compose down
+            compose_cmd = [runtime, "compose", "-f", file_path, "down"]
+            exit_code, stdout, stderr = run_command(compose_cmd, timeout=timeout + 30)
+
+            if exit_code == 0:
+                self._log_message(f"  ✅ {file_path} stopped successfully")
+            elif exit_code == 124:
+                self._log_message(
+                    f"  ⚠️ {file_path} compose down timed out after {timeout}s (continuing)"
+                )
+            else:
+                error_msg = stderr.strip() if stderr.strip() else f"exit code {exit_code}"
+                self._log_message(f"  ⚠️ {file_path} compose down failed: {error_msg} (continuing)")
+
+        self._log_message("  ✅ Compose stacks shutdown complete")
+
     def _shutdown_containers(self):
-        """Stop all containers using detected runtime (Docker/Podman)."""
+        """Stop all containers using detected runtime (Docker/Podman).
+
+        Execution order:
+        1. Shutdown compose stacks (best effort, in order)
+        2. Shutdown all remaining containers (if shutdown_all_remaining_containers is True)
+        """
         if not self.config.containers.enabled:
             return
 
@@ -1276,7 +1400,15 @@ class UPSMonitor:
         runtime = self._container_runtime
         runtime_display = runtime.capitalize()
 
-        self._log_message(f"🐳 Stopping all {runtime_display} containers...")
+        # Phase 1: Shutdown compose stacks first (best effort)
+        self._shutdown_compose_stacks()
+
+        # Phase 2: Shutdown all remaining containers
+        if not self.config.containers.shutdown_all_remaining_containers:
+            self._log_message(f"🐳 Skipping remaining {runtime_display} container shutdown (disabled)")
+            return
+
+        self._log_message(f"🐳 Stopping all remaining {runtime_display} containers...")
 
         # Get list of running containers
         exit_code, stdout, _ = run_command([runtime, "ps", "-q"])
@@ -1947,7 +2079,17 @@ def main():
             print(f"  VMs enabled: {config.virtual_machines.enabled}")
             print(f"  Containers enabled: {config.containers.enabled}", end="")
             if config.containers.enabled:
-                print(f" (runtime: {config.containers.runtime})")
+                compose_count = len(config.containers.compose_files)
+                if compose_count > 0:
+                    print(f" (runtime: {config.containers.runtime}, {compose_count} compose file(s))")
+                else:
+                    print(f" (runtime: {config.containers.runtime})")
+            else:
+                print()
+            print(f"  Filesystems sync: {config.filesystems.sync_enabled}", end="")
+            if config.filesystems.unmount.enabled:
+                mount_count = len(config.filesystems.unmount.mounts)
+                print(f", unmount: {mount_count} mount(s)")
             else:
                 print()
             print(f"  Remote servers: {len([s for s in config.remote_servers if s.enabled])}")

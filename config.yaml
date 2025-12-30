@@ -135,6 +135,20 @@ containers:
   runtime: "auto"
   # Timeout for stop command (seconds)
   stop_timeout: 60
+
+  # Compose files to shutdown (in order, best effort)
+  # Each file is processed with 'docker/podman compose -f <path> down'
+  # Compose files are stopped BEFORE remaining containers
+  # Format: path string or {path: "/path", stop_timeout: 120}
+  compose_files:
+  #  - "/opt/critical-db/docker-compose.yml"
+  #  - path: "/opt/app-stack/docker-compose.yml"
+  #    stop_timeout: 120  # Override global timeout for this file
+
+  # After compose files are stopped, shutdown all remaining containers
+  # Set to false if you only want to stop compose stacks
+  shutdown_all_remaining_containers: true
+
   # For Podman: stop all user containers as well (rootless)
   # Requires running as root with loginctl enable-linger for each user
   include_user_containers: false

@@ -44,6 +44,15 @@ containers:
   runtime: "auto"  # auto-detects docker or podman
   stop_timeout: 60
 
+  # Compose stacks to shutdown first (in order)
+  compose_files:
+    - path: "/opt/database/docker-compose.yml"
+      stop_timeout: 120  # Give database more time
+    - "/opt/apps/docker-compose.yml"
+
+  # Shutdown remaining containers after compose stacks
+  shutdown_all_remaining_containers: true
+
 filesystems:
   sync_enabled: true
   unmount:
