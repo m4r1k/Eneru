@@ -62,15 +62,12 @@ filesystems:
         options: "-l"
 
 # Remote servers with optional pre-shutdown commands
+# Servers are processed in two phases:
+#   1. Sequential: Servers with parallel: false are shutdown one by one (in config order)
+#   2. Parallel: Remaining servers (parallel: true, the default) are shutdown concurrently
 remote_servers:
-  # Simple NAS - just shutdown command
-  - name: "Synology NAS"
-    enabled: true
-    host: "192.168.1.50"
-    user: "admin"
-    shutdown_command: "sudo -i synoshutdown -s"
-
   # Proxmox hypervisor - gracefully stop VMs/CTs before shutdown
+  # Runs in parallel (default) with other parallel servers
   - name: "Proxmox Host"
     enabled: true
     host: "192.168.1.60"
@@ -83,6 +80,15 @@ remote_servers:
         timeout: 60
       - action: "sync"
     shutdown_command: "shutdown -h now"
+
+  # NAS - shutdown LAST since other servers may mount its storage
+  # parallel: false ensures this runs after all parallel servers complete
+  - name: "Synology NAS"
+    enabled: true
+    host: "192.168.1.50"
+    user: "admin"
+    parallel: false  # Shutdown sequentially (after parallel batch)
+    shutdown_command: "sudo -i synoshutdown -s"
 
 local_shutdown:
   enabled: true

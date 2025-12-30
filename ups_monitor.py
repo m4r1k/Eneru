@@ -7,7 +7,7 @@ https://github.com/m4r1k/Eneru
 
 # Version is set at build time via git describe --tags
 # Format: "4.3.0" for tagged releases, "4.3.0-5-gabcdef1" for dev builds
-__version__ = "4.5.0-rc2"
+__version__ = "4.5.0-rc4"
 
 import subprocess
 import sys
@@ -154,6 +154,7 @@ class RemoteServerConfig:
     shutdown_command: str = "sudo shutdown -h now"
     ssh_options: List[str] = field(default_factory=list)
     pre_shutdown_commands: List[RemoteCommandConfig] = field(default_factory=list)
+    parallel: bool = True  # If False, server is shutdown sequentially before parallel batch
 
 
 @dataclass
@@ -492,6 +493,7 @@ class ConfigLoader:
                     shutdown_command=server_data.get('shutdown_command', 'sudo shutdown -h now'),
                     ssh_options=server_data.get('ssh_options', []),
                     pre_shutdown_commands=pre_cmds,
+                    parallel=server_data.get('parallel', True),
                 ))
             config.remote_servers = servers
 
@@ -1676,71 +1678,104 @@ class UPSMonitor:
                     self._log_message(f"  ℹ️ {mount_point} was likely not mounted.")
 
     def _shutdown_remote_servers(self):
-        """Shutdown all enabled remote servers via SSH in parallel.
+        """Shutdown all enabled remote servers via SSH.
 
-        All remote servers are shut down concurrently using threads to avoid
-        sequential timeouts blocking the shutdown sequence. This is critical
-        when a server is unreachable - waiting 60+ seconds per dead host could
-        mean the UPS battery dies before reaching other servers.
+        Servers are processed in two phases:
+        1. Sequential phase: Servers with parallel=False are shutdown one by one
+           in config order. Use this for servers with dependencies (e.g., a server
+           that hosts storage used by other servers should be shutdown last).
+        2. Parallel phase: Remaining servers (parallel=True, the default) are
+           shutdown concurrently using threads to avoid sequential timeouts.
+
+        This hybrid approach ensures dependency order while still benefiting from
+        parallel execution for independent servers.
         """
         enabled_servers = [s for s in self.config.remote_servers if s.enabled]
 
         if not enabled_servers:
             return
 
+        # Separate servers into sequential and parallel groups
+        sequential_servers = [s for s in enabled_servers if not s.parallel]
+        parallel_servers = [s for s in enabled_servers if s.parallel]
+
         server_count = len(enabled_servers)
-        self._log_message(f"🌐 Shutting down {server_count} remote server(s) in parallel...")
+        seq_count = len(sequential_servers)
+        par_count = len(parallel_servers)
 
-        # Calculate max timeout for all servers (for the join timeout)
-        # Each server's max time = sum of pre_shutdown timeouts + shutdown timeout + buffer
-        def calc_server_timeout(server: RemoteServerConfig) -> int:
-            pre_cmd_time = sum(
-                (cmd.timeout or server.command_timeout) for cmd in server.pre_shutdown_commands
+        if seq_count > 0 and par_count > 0:
+            self._log_message(
+                f"🌐 Shutting down {server_count} remote server(s) "
+                f"({seq_count} sequential, {par_count} parallel)..."
             )
-            return pre_cmd_time + server.command_timeout + server.connect_timeout + 60
+        elif seq_count > 0:
+            self._log_message(f"🌐 Shutting down {server_count} remote server(s) sequentially...")
+        else:
+            self._log_message(f"🌐 Shutting down {server_count} remote server(s) in parallel...")
 
-        max_timeout = max(calc_server_timeout(s) for s in enabled_servers)
+        completed = 0
 
-        # Track results for logging
-        results: Dict[str, Tuple[bool, str]] = {}
-        results_lock = threading.Lock()
-
-        def shutdown_server_thread(server: RemoteServerConfig):
-            """Thread worker for shutting down a single server."""
+        # Phase 1: Sequential servers (in config order)
+        for server in sequential_servers:
             display_name = server.name or server.host
             try:
                 self._shutdown_remote_server(server)
-                with results_lock:
-                    results[display_name] = (True, "")
+                completed += 1
             except Exception as e:
-                with results_lock:
-                    results[display_name] = (False, str(e))
+                self._log_message(f"  ❌ {display_name} shutdown failed: {e}")
 
-        # Start all threads
-        threads: List[threading.Thread] = []
-        for server in enabled_servers:
-            t = threading.Thread(
-                target=shutdown_server_thread,
-                args=(server,),
-                name=f"remote-shutdown-{server.name or server.host}"
-            )
-            t.start()
-            threads.append(t)
+        # Phase 2: Parallel servers
+        if parallel_servers:
+            # Calculate max timeout for parallel servers (for the join timeout)
+            def calc_server_timeout(server: RemoteServerConfig) -> int:
+                pre_cmd_time = sum(
+                    (cmd.timeout or server.command_timeout) for cmd in server.pre_shutdown_commands
+                )
+                return pre_cmd_time + server.command_timeout + server.connect_timeout + 60
 
-        # Wait for all threads to complete with global timeout
-        for t in threads:
-            t.join(timeout=max_timeout)
+            max_timeout = max(calc_server_timeout(s) for s in parallel_servers)
 
-        # Check for any threads that are still running (timed out)
-        still_running = [t for t in threads if t.is_alive()]
-        if still_running:
-            self._log_message(
-                f"  ⚠️ {len(still_running)} remote shutdown(s) still in progress "
-                "(continuing with local shutdown)"
-            )
+            # Track results for logging
+            results: Dict[str, Tuple[bool, str]] = {}
+            results_lock = threading.Lock()
+
+            def shutdown_server_thread(server: RemoteServerConfig):
+                """Thread worker for shutting down a single server."""
+                display_name = server.name or server.host
+                try:
+                    self._shutdown_remote_server(server)
+                    with results_lock:
+                        results[display_name] = (True, "")
+                except Exception as e:
+                    with results_lock:
+                        results[display_name] = (False, str(e))
+
+            # Start all threads
+            threads: List[threading.Thread] = []
+            for server in parallel_servers:
+                t = threading.Thread(
+                    target=shutdown_server_thread,
+                    args=(server,),
+                    name=f"remote-shutdown-{server.name or server.host}"
+                )
+                t.start()
+                threads.append(t)
+
+            # Wait for all threads to complete with global timeout
+            for t in threads:
+                t.join(timeout=max_timeout)
+
+            # Check for any threads that are still running (timed out)
+            still_running = [t for t in threads if t.is_alive()]
+            if still_running:
+                self._log_message(
+                    f"  ⚠️ {len(still_running)} remote shutdown(s) still in progress "
+                    "(continuing with local shutdown)"
+                )
+
+            completed += par_count - len(still_running)
 
         # Log summary
-        completed = server_count - len(still_running)
         self._log_message(f"  ✅ Remote shutdown complete ({completed}/{server_count} servers)")
 
     def _run_remote_command(

@@ -655,6 +655,72 @@ remote_servers:
         server = config.remote_servers[0]
         assert server.pre_shutdown_commands == []
 
+    @pytest.mark.unit
+    def test_parallel_option_default_true(self, temp_config_file):
+        """Test that parallel defaults to True when not specified."""
+        config_data = """
+remote_servers:
+  - name: "Server Without Parallel"
+    enabled: true
+    host: "192.168.1.50"
+    user: "admin"
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        server = config.remote_servers[0]
+        assert server.parallel is True
+
+    @pytest.mark.unit
+    def test_parallel_option_explicit_false(self, temp_config_file):
+        """Test setting parallel to False."""
+        config_data = """
+remote_servers:
+  - name: "Sequential Server"
+    enabled: true
+    host: "192.168.1.50"
+    user: "admin"
+    parallel: false
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        server = config.remote_servers[0]
+        assert server.parallel is False
+
+    @pytest.mark.unit
+    def test_parallel_option_mixed(self, temp_config_file):
+        """Test mixed parallel and sequential servers."""
+        config_data = """
+remote_servers:
+  - name: "Parallel Server 1"
+    enabled: true
+    host: "192.168.1.50"
+    user: "admin"
+    shutdown_command: "shutdown -h now"
+  - name: "Sequential Server"
+    enabled: true
+    host: "192.168.1.51"
+    user: "admin"
+    parallel: false
+    shutdown_command: "shutdown -h now"
+  - name: "Parallel Server 2"
+    enabled: true
+    host: "192.168.1.52"
+    user: "admin"
+    parallel: true
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        assert len(config.remote_servers) == 3
+        assert config.remote_servers[0].parallel is True
+        assert config.remote_servers[1].parallel is False
+        assert config.remote_servers[2].parallel is True
+
 
 class TestConfigValidation:
     """Test configuration validation."""
