@@ -2535,9 +2535,12 @@ def main():
                         f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')}"
                     )
 
+                    # Escape @ symbols to prevent Discord mentions (e.g., UPS@192.168.1.1)
+                    escaped_body = test_body.replace("@", "@\u200B")  # Zero-width space after @
+
                     # Build notify kwargs
                     notify_kwargs = {
-                        'body': test_body,
+                        'body': escaped_body,
                         'notify_type': apprise.NotifyType.INFO,
                     }
 
