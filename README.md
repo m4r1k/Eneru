@@ -36,6 +36,7 @@ Most UPS shutdown solutions are **single-system focused**. Eneru is designed for
 | Network mounts hang during power loss | ✅ Timeout-protected unmounting |
 | No visibility during power events | ✅ Real-time notifications via 100+ services |
 | Different systems need different commands | ✅ Per-server custom shutdown commands |
+| Hypervisors need graceful VM shutdown | ✅ Pre-shutdown actions (Proxmox, ESXi, XCP-ng, libvirt) |
 | Battery estimates are unreliable | ✅ Multi-vector shutdown triggers |
 | Network down during outage | ✅ Non-blocking notification architecture |
 

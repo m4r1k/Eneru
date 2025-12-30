@@ -10,6 +10,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.5.0] - 2025-12-30
+
+### Added
+- **Docker/Podman Compose Shutdown:** Ordered shutdown of compose stacks before individual containers
+    - New `containers.compose_files` configuration for defining compose files to stop
+    - Per-file timeout override support (`stop_timeout`)
+    - New `containers.shutdown_all_remaining_containers` option (default: true)
+- **Remote Server Pre-Shutdown Commands:** Execute commands on remote servers before shutdown
+    - New `remote_servers[].pre_shutdown_commands` configuration
+    - Predefined actions: `stop_containers`, `stop_vms`, `stop_proxmox_vms`, `stop_proxmox_cts`, `stop_xcpng_vms`, `stop_esxi_vms`, `stop_compose`, `sync`
+    - Custom command support with per-command timeout
+- **Parallel Remote Server Shutdown:** Concurrent shutdown of multiple remote servers using threads
+    - New `remote_servers[].parallel` option (default: true)
+    - Servers with `parallel: false` shutdown sequentially first, then parallel batch runs concurrently
+
+### Changed
+- **Sync Hardening:** Added 2-second sleep after `os.sync()` for storage controller cache flush
+- **Notification Worker:** Now logs pending message count when stopping during shutdown
+
+---
+
 ## [4.4.0] - 2025-12-30
 
 ### Added

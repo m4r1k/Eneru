@@ -13,21 +13,29 @@ Eneru can shut down remote servers via SSH during a power event. This is useful 
 
 ```yaml
 remote_servers:
+  # Proxmox hypervisor - stop VMs/CTs before shutdown
+  - name: "Proxmox Host"
+    enabled: true
+    host: "192.168.1.60"
+    user: "root"
+    command_timeout: 30
+    pre_shutdown_commands:
+      - action: "stop_proxmox_vms"
+        timeout: 180
+      - action: "stop_proxmox_cts"
+        timeout: 60
+      - action: "sync"
+    shutdown_command: "shutdown -h now"
+
+  # NAS - shutdown LAST since other servers mount its storage
   - name: "Synology NAS"
     enabled: true
-    host: "192.168.178.229"
-    user: "nas-admin"
-    connect_timeout: 10
-    command_timeout: 30
+    host: "192.168.1.50"
+    user: "admin"
+    parallel: false  # Shutdown after all parallel servers
     shutdown_command: "sudo -i synoshutdown -s"
     ssh_options:
       - "-o StrictHostKeyChecking=no"
-
-  - name: "Backup Server"
-    enabled: true
-    host: "192.168.178.230"
-    user: "admin"
-    shutdown_command: "sudo shutdown -h now"
 ```
 
 ### Configuration Options
@@ -39,9 +47,118 @@ remote_servers:
 | `host` | (required) | Hostname or IP address |
 | `user` | (required) | SSH username |
 | `connect_timeout` | `10` | SSH connection timeout in seconds |
-| `command_timeout` | `30` | Command execution timeout in seconds |
-| `shutdown_command` | `sudo shutdown -h now` | Command to execute |
+| `command_timeout` | `30` | Default timeout for commands in seconds |
+| `shutdown_command` | `sudo shutdown -h now` | Final shutdown command |
 | `ssh_options` | `[]` | Additional SSH options |
+| `pre_shutdown_commands` | `[]` | Commands to run before shutdown |
+| `parallel` | `true` | Shutdown concurrently with other parallel servers |
+
+---
+
+## Pre-Shutdown Commands
+
+Before executing the final shutdown command, Eneru can run a sequence of commands on remote servers. This is useful for gracefully stopping services, VMs, or containers before the server powers off.
+
+### Predefined Actions
+
+| Action | Description |
+|--------|-------------|
+| `stop_containers` | Stop all Docker/Podman containers |
+| `stop_vms` | Gracefully shutdown libvirt/KVM VMs (then force-destroy remaining) |
+| `stop_proxmox_vms` | Gracefully shutdown Proxmox QEMU VMs (then force-stop remaining) |
+| `stop_proxmox_cts` | Gracefully shutdown Proxmox LXC containers (then force-stop remaining) |
+| `stop_xcpng_vms` | Gracefully shutdown XCP-ng/XenServer VMs (then force-shutdown remaining) |
+| `stop_esxi_vms` | Gracefully shutdown VMware ESXi VMs (then force-off remaining) |
+| `stop_compose` | Stop a compose stack (requires `path` parameter) |
+| `sync` | Sync filesystems before shutdown |
+
+### Example: Proxmox Server
+
+```yaml
+- name: "Proxmox Host"
+  enabled: true
+  host: "192.168.1.60"
+  user: "root"
+  pre_shutdown_commands:
+    - action: "stop_proxmox_vms"
+      timeout: 180  # Give VMs 3 minutes for graceful shutdown
+    - action: "stop_proxmox_cts"
+      timeout: 60
+    - action: "sync"
+  shutdown_command: "shutdown -h now"
+```
+
+### Example: Docker Server with Custom Commands
+
+```yaml
+- name: "Docker Server"
+  enabled: true
+  host: "192.168.1.70"
+  user: "root"
+  command_timeout: 30  # Default timeout for commands
+  pre_shutdown_commands:
+    - action: "stop_compose"
+      path: "/opt/myapp/docker-compose.yml"
+      timeout: 120
+    - action: "stop_containers"
+      timeout: 60
+    - command: "systemctl stop my-critical-service"  # Custom command
+      timeout: 30
+    - action: "sync"
+  shutdown_command: "shutdown -h now"
+```
+
+### Error Handling
+
+Pre-shutdown commands are **best-effort**:
+
+- Errors are logged but don't prevent the shutdown sequence from continuing
+- Timeouts are logged with a warning, then the next command runs
+- The final shutdown command always runs (unless SSH connection fails entirely)
+
+---
+
+## Parallel vs Sequential Shutdown
+
+By default, all enabled remote servers are shutdown concurrently using threads. This prevents one slow/unreachable server from blocking others.
+
+### Dependency Ordering
+
+Some servers have dependencies on others. For example, if multiple servers mount NFS shares from a NAS, the NAS should shutdown **last**.
+
+Use `parallel: false` to mark servers that should shutdown sequentially:
+
+```yaml
+remote_servers:
+  # These shutdown in parallel (default)
+  - name: "App Server 1"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_command: "shutdown -h now"
+
+  - name: "App Server 2"
+    enabled: true
+    host: "192.168.1.11"
+    user: "root"
+    shutdown_command: "shutdown -h now"
+
+  # This shuts down AFTER all parallel servers complete
+  - name: "NAS"
+    enabled: true
+    host: "192.168.1.50"
+    user: "admin"
+    parallel: false  # Sequential - waits for parallel batch
+    shutdown_command: "sudo -i synoshutdown -s"
+```
+
+### Execution Order
+
+1. **Sequential phase**: Servers with `parallel: false` shutdown one-by-one in config order
+2. **Parallel phase**: Remaining servers (default `parallel: true`) shutdown concurrently
+
+!!! tip "Dependency Tip"
+    Put servers with dependencies (like NAS/storage) at the end of your config with `parallel: false`.
 
 ---
 

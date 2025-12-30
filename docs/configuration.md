@@ -90,6 +90,16 @@ containers:
   # auto = detect available runtime (prefers podman)
   runtime: "auto"
   stop_timeout: 60
+
+  # Compose files to shutdown first (in order, best effort)
+  compose_files:
+    - path: "/opt/database/docker-compose.yml"
+      stop_timeout: 120  # Override global timeout for this file
+    - "/opt/apps/docker-compose.yml"  # Uses global stop_timeout
+
+  # Shutdown remaining containers after compose stacks (default: true)
+  shutdown_all_remaining_containers: true
+
   # For Podman: stop rootless user containers as well
   include_user_containers: false
 
@@ -106,22 +116,33 @@ filesystems:
       - "/mnt/backup"
 
 # Remote Server Shutdown
+# Servers are shutdown in two phases:
+#   1. Sequential: Servers with parallel: false (in config order)
+#   2. Parallel: Remaining servers (parallel: true, the default)
 remote_servers:
+  # Proxmox host with pre-shutdown commands
+  - name: "Proxmox Host"
+    enabled: true
+    host: "192.168.178.100"
+    user: "root"
+    command_timeout: 30
+    pre_shutdown_commands:
+      - action: "stop_proxmox_vms"
+        timeout: 180
+      - action: "stop_proxmox_cts"
+        timeout: 60
+      - action: "sync"
+    shutdown_command: "shutdown -h now"
+
+  # NAS with dependency - shutdown LAST
   - name: "Synology NAS"
     enabled: true
     host: "192.168.178.229"
     user: "nas-admin"
-    connect_timeout: 10
-    command_timeout: 30
+    parallel: false  # Shutdown after all parallel servers
     shutdown_command: "sudo -i synoshutdown -s"
     ssh_options:
       - "-o StrictHostKeyChecking=no"
-
-  - name: "Backup Server"
-    enabled: false
-    host: "192.168.178.230"
-    user: "admin"
-    shutdown_command: "sudo shutdown -h now"
 
 # Local Server Shutdown
 local_shutdown:
@@ -194,8 +215,19 @@ See [Notifications](notifications.md) for setup instructions.
 |-----|---------|-------------|
 | `enabled` | `false` | Enable container shutdown |
 | `runtime` | `auto` | Runtime: `auto`, `docker`, or `podman` |
-| `stop_timeout` | `60` | Seconds to wait for graceful stop |
+| `stop_timeout` | `60` | Default seconds to wait for graceful stop |
+| `compose_files` | `[]` | List of compose files to shutdown first (in order) |
+| `shutdown_all_remaining_containers` | `true` | Shutdown remaining containers after compose stacks |
 | `include_user_containers` | `false` | Podman only: also stop rootless user containers |
+
+Compose files can be specified as strings or objects with custom timeout:
+
+```yaml
+compose_files:
+  - "/opt/apps/docker-compose.yml"       # Uses global stop_timeout
+  - path: "/opt/database/docker-compose.yml"
+    stop_timeout: 120                    # Custom timeout for this file
+```
 
 ### Filesystems Section
 
@@ -226,9 +258,49 @@ mounts:
 | `host` | (required) | Hostname or IP address |
 | `user` | (required) | SSH username |
 | `connect_timeout` | `10` | SSH connection timeout in seconds |
-| `command_timeout` | `30` | Command execution timeout in seconds |
-| `shutdown_command` | `sudo shutdown -h now` | Command to execute |
+| `command_timeout` | `30` | Default timeout for commands in seconds |
+| `shutdown_command` | `sudo shutdown -h now` | Final shutdown command |
 | `ssh_options` | `[]` | Additional SSH options |
+| `pre_shutdown_commands` | `[]` | Commands to run before shutdown (see below) |
+| `parallel` | `true` | Shutdown concurrently with other parallel servers |
+
+#### Pre-Shutdown Commands
+
+Run commands on remote servers before the final shutdown. Supports predefined actions and custom commands:
+
+```yaml
+pre_shutdown_commands:
+  # Predefined actions
+  - action: "stop_proxmox_vms"
+    timeout: 180
+  - action: "sync"
+
+  # Custom commands
+  - command: "systemctl stop my-service"
+    timeout: 30
+```
+
+**Predefined Actions:**
+
+| Action | Description |
+|--------|-------------|
+| `stop_containers` | Stop all Docker/Podman containers |
+| `stop_vms` | Gracefully shutdown libvirt/KVM VMs |
+| `stop_proxmox_vms` | Gracefully shutdown Proxmox QEMU VMs |
+| `stop_proxmox_cts` | Gracefully shutdown Proxmox LXC containers |
+| `stop_xcpng_vms` | Gracefully shutdown XCP-ng/XenServer VMs |
+| `stop_esxi_vms` | Gracefully shutdown VMware ESXi VMs |
+| `stop_compose` | Stop a compose stack (requires `path` parameter) |
+| `sync` | Sync filesystems |
+
+#### Parallel vs Sequential Shutdown
+
+Servers are shutdown in two phases:
+
+1. **Sequential**: Servers with `parallel: false` shutdown one-by-one in config order
+2. **Parallel**: Remaining servers (default `parallel: true`) shutdown concurrently
+
+Use `parallel: false` for servers with dependencies (e.g., NAS that other servers mount).
 
 See [Remote Servers](remote-servers.md) for SSH setup instructions.
 

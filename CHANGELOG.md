@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.5.0] - 2025-12-30
+
+### Added
+- **Docker/Podman Compose Shutdown:** Ordered shutdown of compose stacks before individual containers
+  - New `containers.compose_files` configuration for defining compose files to stop
+  - Per-file timeout override support (`stop_timeout`)
+  - New `containers.shutdown_all_remaining_containers` option (default: true)
+  - Compose availability check at startup with graceful fallback
+- **Remote Server Pre-Shutdown Commands:** Execute commands on remote servers before shutdown
+  - New `remote_servers[].pre_shutdown_commands` configuration
+  - Predefined actions: `stop_containers`, `stop_vms`, `stop_proxmox_vms`, `stop_proxmox_cts`, `stop_xcpng_vms`, `stop_esxi_vms`, `stop_compose`, `sync`
+  - Custom command support with per-command timeout
+  - All pre-shutdown commands are best-effort (log and continue on failure)
+- **Parallel Remote Server Shutdown:** Concurrent shutdown of multiple remote servers using threads
+  - New `remote_servers[].parallel` option (default: true)
+  - Servers with `parallel: false` shutdown sequentially first, then parallel batch runs concurrently
+  - Useful for dependency ordering (e.g., shutdown NAS last after other servers unmount)
+
+### Changed
+- **Sync Hardening:** Added 2-second sleep after `os.sync()` to allow storage controller caches (especially battery-backed RAID) to flush before power is cut
+- **Notification Worker:** Now logs pending message count when stopping during shutdown
+
+### Fixed
+- **GitHub Release Workflow:** Added explicit `tag_name` to gh-release action
+
+---
+
 ## [4.4.0] - 2025-12-30
 
 ### Added
@@ -294,6 +321,18 @@ During power outages, network connectivity is often unreliable. The previous blo
 ---
 
 ## Version Comparison
+
+### v4.5 vs v4.4
+
+| Feature | v4.4 | v4.5 |
+|---------|------|------|
+| Compose Shutdown | Not supported | Ordered compose file shutdown with per-file timeout |
+| Container Shutdown | Stop all containers | Compose first → remaining containers (configurable) |
+| Remote Pre-Shutdown | Direct shutdown only | Pre-shutdown commands (actions + custom) |
+| Remote Shutdown | Sequential | Parallel (threaded) with `parallel` option |
+| Predefined Actions | None | 8 actions (stop_containers, stop_vms, stop_proxmox_*, etc.) |
+| Dependency Ordering | Not possible | `parallel: false` for sequential servers |
+| Filesystem Sync | `os.sync()` only | `os.sync()` + 2s sleep for controller cache flush |
 
 ### v4.4 vs v4.3
 
