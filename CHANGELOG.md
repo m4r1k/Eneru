@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.4.0] - 2025-12-30
+
+### Added
+- **Read The Docs Integration:** Documentation now hosted on Read The Docs with MkDocs Material theme
+- **Dark Mode Documentation:** Material theme with automatic dark mode support
+- **Improved Search:** Full-text search across all documentation pages
+- **Code Copy Buttons:** One-click copy for all code blocks in documentation
+- **Tabbed Installation Instructions:** Distro-specific tabs for Debian/Ubuntu, RHEL/Fedora, and manual install
+- **Upgrade/Uninstall Instructions:** Previously missing documentation for upgrading and removing Eneru
+- **Dedicated Documentation Pages:**
+  - Getting Started guide with step-by-step installation
+  - Configuration reference with all options
+  - Shutdown Triggers deep-dive with diagrams
+  - Notifications guide for Apprise setup
+  - Remote Servers SSH setup guide
+  - Troubleshooting with real log examples
+
+### Changed
+- **README Slimmed Down:** Reduced from ~1200 lines to ~145 lines, linking to RTD for details
+
+---
+
 ## [4.3.0] - 2025-12-29
 
 ### Added
@@ -272,6 +294,19 @@ During power outages, network connectivity is often unreliable. The previous blo
 ---
 
 ## Version Comparison
+
+### v4.4 vs v4.3
+
+| Feature | v4.3 | v4.4 |
+|---------|------|------|
+| Documentation | README only (~1200 lines) | Read The Docs + slim README (~145 lines) |
+| Documentation Theme | GitHub markdown | MkDocs Material (dark mode) |
+| Documentation Search | None | Full-text search |
+| Code Blocks | Basic | Copy buttons, syntax highlighting |
+| Installation Docs | Single section | Tabbed by distro |
+| Upgrade/Uninstall | Undocumented | Dedicated instructions |
+| Content Organization | Monolithic README | 7 focused pages |
+| Navigation | Scroll through README | Sidebar navigation |
 
 ### v4.3 vs v4.2
 
