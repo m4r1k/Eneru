@@ -7,7 +7,7 @@ https://github.com/m4r1k/Eneru
 
 # Version is set at build time via git describe --tags
 # Format: "4.3.0" for tagged releases, "4.3.0-5-gabcdef1" for dev builds
-__version__ = "4.5.0-rc1"
+__version__ = "4.5.0-rc2"
 
 import subprocess
 import sys
@@ -738,8 +738,18 @@ class NotificationWorker:
         return True
 
     def stop(self):
-        """Stop the background worker thread gracefully."""
+        """Stop the background worker thread gracefully.
+
+        Note: During shutdown, network may be unreliable. Pending notifications
+        in the queue will be dropped if the worker can't send them in time.
+        This is by design - shutdown priority > notification delivery.
+        """
         if self._worker_thread and self._worker_thread.is_alive():
+            # Log pending notifications that will likely be dropped
+            pending = self._queue.qsize()
+            if pending > 0:
+                print(f"⚠️ Stopping notification worker with {pending} message(s) pending (may be dropped)")
+
             self._stop_event.set()
             # Add sentinel to unblock the queue
             self._queue.put(None)
@@ -1596,7 +1606,13 @@ class UPSMonitor:
         self._log_message("  ✅ Rootless Podman containers stopped")
 
     def _sync_filesystems(self):
-        """Sync all filesystems."""
+        """Sync all filesystems.
+
+        Note: os.sync() schedules buffers to be flushed but may return before
+        physical write completion on some systems. The 2-second sleep allows
+        storage controllers (especially battery-backed RAID) to flush their
+        write-back caches before power is cut.
+        """
         if not self.config.filesystems.sync_enabled:
             return
 
@@ -1605,6 +1621,7 @@ class UPSMonitor:
             self._log_message("  🧪 [DRY-RUN] Would sync filesystems")
         else:
             os.sync()
+            time.sleep(2)  # Allow storage controller caches to flush
             self._log_message("  ✅ Filesystems synced")
 
     def _unmount_filesystems(self):
@@ -1659,14 +1676,72 @@ class UPSMonitor:
                     self._log_message(f"  ℹ️ {mount_point} was likely not mounted.")
 
     def _shutdown_remote_servers(self):
-        """Shutdown all enabled remote servers via SSH."""
+        """Shutdown all enabled remote servers via SSH in parallel.
+
+        All remote servers are shut down concurrently using threads to avoid
+        sequential timeouts blocking the shutdown sequence. This is critical
+        when a server is unreachable - waiting 60+ seconds per dead host could
+        mean the UPS battery dies before reaching other servers.
+        """
         enabled_servers = [s for s in self.config.remote_servers if s.enabled]
 
         if not enabled_servers:
             return
 
+        server_count = len(enabled_servers)
+        self._log_message(f"🌐 Shutting down {server_count} remote server(s) in parallel...")
+
+        # Calculate max timeout for all servers (for the join timeout)
+        # Each server's max time = sum of pre_shutdown timeouts + shutdown timeout + buffer
+        def calc_server_timeout(server: RemoteServerConfig) -> int:
+            pre_cmd_time = sum(
+                (cmd.timeout or server.command_timeout) for cmd in server.pre_shutdown_commands
+            )
+            return pre_cmd_time + server.command_timeout + server.connect_timeout + 60
+
+        max_timeout = max(calc_server_timeout(s) for s in enabled_servers)
+
+        # Track results for logging
+        results: Dict[str, Tuple[bool, str]] = {}
+        results_lock = threading.Lock()
+
+        def shutdown_server_thread(server: RemoteServerConfig):
+            """Thread worker for shutting down a single server."""
+            display_name = server.name or server.host
+            try:
+                self._shutdown_remote_server(server)
+                with results_lock:
+                    results[display_name] = (True, "")
+            except Exception as e:
+                with results_lock:
+                    results[display_name] = (False, str(e))
+
+        # Start all threads
+        threads: List[threading.Thread] = []
         for server in enabled_servers:
-            self._shutdown_remote_server(server)
+            t = threading.Thread(
+                target=shutdown_server_thread,
+                args=(server,),
+                name=f"remote-shutdown-{server.name or server.host}"
+            )
+            t.start()
+            threads.append(t)
+
+        # Wait for all threads to complete with global timeout
+        for t in threads:
+            t.join(timeout=max_timeout)
+
+        # Check for any threads that are still running (timed out)
+        still_running = [t for t in threads if t.is_alive()]
+        if still_running:
+            self._log_message(
+                f"  ⚠️ {len(still_running)} remote shutdown(s) still in progress "
+                "(continuing with local shutdown)"
+            )
+
+        # Log summary
+        completed = server_count - len(still_running)
+        self._log_message(f"  ✅ Remote shutdown complete ({completed}/{server_count} servers)")
 
     def _run_remote_command(
         self,
