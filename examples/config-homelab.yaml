@@ -61,12 +61,28 @@ filesystems:
       - path: "/mnt/nas"
         options: "-l"
 
+# Remote servers with optional pre-shutdown commands
 remote_servers:
+  # Simple NAS - just shutdown command
   - name: "Synology NAS"
     enabled: true
     host: "192.168.1.50"
     user: "admin"
     shutdown_command: "sudo -i synoshutdown -s"
+
+  # Proxmox hypervisor - gracefully stop VMs/CTs before shutdown
+  - name: "Proxmox Host"
+    enabled: true
+    host: "192.168.1.60"
+    user: "root"
+    command_timeout: 30
+    pre_shutdown_commands:
+      - action: "stop_proxmox_vms"
+        timeout: 180  # VMs may need time for graceful shutdown
+      - action: "stop_proxmox_cts"
+        timeout: 60
+      - action: "sync"
+    shutdown_command: "shutdown -h now"
 
 local_shutdown:
   enabled: true

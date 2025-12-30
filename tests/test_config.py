@@ -12,6 +12,8 @@ from ups_monitor import (
     NotificationsConfig,
     ContainersConfig,
     ComposeFileConfig,
+    RemoteServerConfig,
+    RemoteCommandConfig,
 )
 
 
@@ -487,6 +489,171 @@ remote_servers:
         assert server2.command_timeout == 45
         assert server2.shutdown_command == "poweroff"
         assert "-o StrictHostKeyChecking=no" in server2.ssh_options
+
+    @pytest.mark.unit
+    def test_pre_shutdown_commands_with_actions(self, temp_config_file):
+        """Test pre_shutdown_commands with predefined actions."""
+        config_data = """
+remote_servers:
+  - name: "Proxmox Host"
+    enabled: true
+    host: "192.168.1.60"
+    user: "root"
+    pre_shutdown_commands:
+      - action: "stop_proxmox_vms"
+        timeout: 120
+      - action: "stop_proxmox_cts"
+        timeout: 60
+      - action: "sync"
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        assert len(config.remote_servers) == 1
+        server = config.remote_servers[0]
+        assert len(server.pre_shutdown_commands) == 3
+
+        cmd1 = server.pre_shutdown_commands[0]
+        assert cmd1.action == "stop_proxmox_vms"
+        assert cmd1.timeout == 120
+        assert cmd1.command is None
+
+        cmd2 = server.pre_shutdown_commands[1]
+        assert cmd2.action == "stop_proxmox_cts"
+        assert cmd2.timeout == 60
+
+        cmd3 = server.pre_shutdown_commands[2]
+        assert cmd3.action == "sync"
+        assert cmd3.timeout is None  # Uses server default
+
+    @pytest.mark.unit
+    def test_pre_shutdown_commands_with_custom_command(self, temp_config_file):
+        """Test pre_shutdown_commands with custom commands."""
+        config_data = """
+remote_servers:
+  - name: "Docker Server"
+    enabled: true
+    host: "192.168.1.70"
+    user: "root"
+    pre_shutdown_commands:
+      - command: "systemctl stop my-service"
+        timeout: 30
+      - command: "docker stop $(docker ps -q)"
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        server = config.remote_servers[0]
+        assert len(server.pre_shutdown_commands) == 2
+
+        cmd1 = server.pre_shutdown_commands[0]
+        assert cmd1.command == "systemctl stop my-service"
+        assert cmd1.timeout == 30
+        assert cmd1.action is None
+
+        cmd2 = server.pre_shutdown_commands[1]
+        assert cmd2.command == "docker stop $(docker ps -q)"
+        assert cmd2.timeout is None
+
+    @pytest.mark.unit
+    def test_pre_shutdown_commands_with_compose_path(self, temp_config_file):
+        """Test pre_shutdown_commands with stop_compose action and path."""
+        config_data = """
+remote_servers:
+  - name: "Docker Server"
+    enabled: true
+    host: "192.168.1.70"
+    user: "root"
+    pre_shutdown_commands:
+      - action: "stop_compose"
+        path: "/opt/myapp/docker-compose.yml"
+        timeout: 120
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        server = config.remote_servers[0]
+        assert len(server.pre_shutdown_commands) == 1
+
+        cmd = server.pre_shutdown_commands[0]
+        assert cmd.action == "stop_compose"
+        assert cmd.path == "/opt/myapp/docker-compose.yml"
+        assert cmd.timeout == 120
+
+    @pytest.mark.unit
+    def test_pre_shutdown_commands_mixed(self, temp_config_file):
+        """Test pre_shutdown_commands with mixed actions and commands."""
+        config_data = """
+remote_servers:
+  - name: "Mixed Server"
+    enabled: true
+    host: "192.168.1.80"
+    user: "root"
+    command_timeout: 45
+    pre_shutdown_commands:
+      - action: "stop_containers"
+        timeout: 90
+      - command: "systemctl stop nginx"
+        timeout: 15
+      - action: "sync"
+    shutdown_command: "poweroff"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        server = config.remote_servers[0]
+        assert server.command_timeout == 45
+        assert len(server.pre_shutdown_commands) == 3
+
+        # Action with custom timeout
+        assert server.pre_shutdown_commands[0].action == "stop_containers"
+        assert server.pre_shutdown_commands[0].timeout == 90
+
+        # Custom command
+        assert server.pre_shutdown_commands[1].command == "systemctl stop nginx"
+        assert server.pre_shutdown_commands[1].timeout == 15
+
+        # Action without timeout (uses server default)
+        assert server.pre_shutdown_commands[2].action == "sync"
+        assert server.pre_shutdown_commands[2].timeout is None
+
+    @pytest.mark.unit
+    def test_pre_shutdown_commands_empty(self, temp_config_file):
+        """Test server with empty pre_shutdown_commands."""
+        config_data = """
+remote_servers:
+  - name: "Simple Server"
+    enabled: true
+    host: "192.168.1.50"
+    user: "admin"
+    pre_shutdown_commands: []
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        server = config.remote_servers[0]
+        assert server.pre_shutdown_commands == []
+
+    @pytest.mark.unit
+    def test_pre_shutdown_commands_not_specified(self, temp_config_file):
+        """Test server without pre_shutdown_commands field (backward compatible)."""
+        config_data = """
+remote_servers:
+  - name: "Legacy Server"
+    enabled: true
+    host: "192.168.1.50"
+    user: "admin"
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        server = config.remote_servers[0]
+        assert server.pre_shutdown_commands == []
 
 
 class TestConfigValidation:

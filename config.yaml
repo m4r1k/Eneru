@@ -173,6 +173,7 @@ filesystems:
 
 # Remote Server Shutdown
 # Define multiple remote servers to shutdown via SSH
+# Each server can have pre_shutdown_commands to gracefully stop services before shutdown
 remote_servers:
   - name: "Synology NAS"
     enabled: true
@@ -180,7 +181,7 @@ remote_servers:
     user: "nas-admin"
     # SSH connection timeout (seconds)
     connect_timeout: 10
-    # Command execution timeout (seconds)
+    # Command execution timeout (seconds) - default for pre_shutdown_commands
     command_timeout: 30
     # Shutdown command (default: "sudo shutdown -h now")
     shutdown_command: "sudo -i synoshutdown -s"
@@ -188,12 +189,38 @@ remote_servers:
     ssh_options:
       - "-o StrictHostKeyChecking=no"
 
-  # Example: Another server with default shutdown command
-  # - name: "Backup Server"
+  # Example: Proxmox server with VMs and containers
+  # - name: "Proxmox Host"
   #   enabled: true
-  #   host: "192.168.178.230"
-  #   user: "admin"
-  #   # Uses default: "sudo shutdown -h now"
+  #   host: "192.168.178.100"
+  #   user: "root"
+  #   command_timeout: 30
+  #   # Pre-shutdown commands run in order before the final shutdown
+  #   # Predefined actions: stop_containers, stop_vms, stop_proxmox_vms,
+  #   #   stop_proxmox_cts, stop_xcpng_vms, stop_esxi_vms, stop_compose, sync
+  #   pre_shutdown_commands:
+  #     - action: "stop_proxmox_vms"
+  #       timeout: 120  # Override default timeout
+  #     - action: "stop_proxmox_cts"
+  #       timeout: 60
+  #     - action: "sync"
+  #   shutdown_command: "shutdown -h now"
+
+  # Example: Docker server with compose stacks
+  # - name: "Docker Server"
+  #   enabled: true
+  #   host: "192.168.178.101"
+  #   user: "root"
+  #   pre_shutdown_commands:
+  #     - action: "stop_compose"
+  #       path: "/opt/myapp/docker-compose.yml"
+  #       timeout: 120
+  #     - action: "stop_containers"
+  #       timeout: 60
+  #     - command: "systemctl stop my-critical-service"  # Custom command
+  #       timeout: 30
+  #     - action: "sync"
+  #   shutdown_command: "shutdown -h now"
 
 # Local Server Shutdown
 local_shutdown:

@@ -7,7 +7,7 @@ https://github.com/m4r1k/Eneru
 
 # Version is set at build time via git describe --tags
 # Format: "4.3.0" for tagged releases, "4.3.0-5-gabcdef1" for dev builds
-__version__ = "4.5.0-rc0"
+__version__ = "4.5.0-rc1"
 
 import subprocess
 import sys
@@ -134,6 +134,15 @@ class FilesystemsConfig:
 
 
 @dataclass
+class RemoteCommandConfig:
+    """Configuration for a single remote pre-shutdown command."""
+    action: Optional[str] = None  # predefined action name
+    command: Optional[str] = None  # custom command
+    timeout: Optional[int] = None  # per-command timeout (None = use server default)
+    path: Optional[str] = None  # for stop_compose action
+
+
+@dataclass
 class RemoteServerConfig:
     """Remote server shutdown configuration."""
     name: str = ""
@@ -144,6 +153,7 @@ class RemoteServerConfig:
     command_timeout: int = 30
     shutdown_command: str = "sudo shutdown -h now"
     ssh_options: List[str] = field(default_factory=list)
+    pre_shutdown_commands: List[RemoteCommandConfig] = field(default_factory=list)
 
 
 @dataclass
@@ -460,6 +470,18 @@ class ConfigLoader:
         if 'remote_servers' in data:
             servers = []
             for server_data in data['remote_servers']:
+                # Parse pre_shutdown_commands
+                pre_cmds_raw = server_data.get('pre_shutdown_commands') or []
+                pre_cmds = []
+                for cmd_data in pre_cmds_raw:
+                    if isinstance(cmd_data, dict):
+                        pre_cmds.append(RemoteCommandConfig(
+                            action=cmd_data.get('action'),
+                            command=cmd_data.get('command'),
+                            timeout=cmd_data.get('timeout'),
+                            path=cmd_data.get('path'),
+                        ))
+
                 servers.append(RemoteServerConfig(
                     name=server_data.get('name', ''),
                     enabled=server_data.get('enabled', False),
@@ -469,6 +491,7 @@ class ConfigLoader:
                     command_timeout=server_data.get('command_timeout', 30),
                     shutdown_command=server_data.get('shutdown_command', 'sudo shutdown -h now'),
                     ssh_options=server_data.get('ssh_options', []),
+                    pre_shutdown_commands=pre_cmds,
                 ))
             config.remote_servers = servers
 
@@ -506,6 +529,92 @@ class ConfigLoader:
             )
 
         return messages
+
+
+# ==============================================================================
+# REMOTE ACTION TEMPLATES
+# ==============================================================================
+
+# Predefined actions for remote pre-shutdown commands
+# {timeout} is replaced with the command timeout in seconds
+# {path} is replaced with the compose file path (for stop_compose)
+REMOTE_ACTIONS: Dict[str, str] = {
+    # Stop all Docker/Podman containers
+    "stop_containers": (
+        't={timeout}; '
+        'docker ps -q | xargs -r docker stop -t $t 2>/dev/null; '
+        'podman ps -q | xargs -r podman stop -t $t 2>/dev/null; '
+        'true'
+    ),
+
+    # Stop libvirt/KVM VMs with graceful shutdown, then force destroy
+    "stop_vms": (
+        'virsh list --name --state-running | xargs -r -n1 virsh shutdown; '
+        'end=$((SECONDS+{timeout})); '
+        'while [ $SECONDS -lt $end ] && virsh list --name --state-running | grep -q .; do sleep 1; done; '
+        'virsh list --name --state-running | xargs -r -n1 virsh destroy 2>/dev/null; '
+        'true'
+    ),
+
+    # Stop Proxmox QEMU VMs with graceful shutdown, then force stop
+    "stop_proxmox_vms": (
+        'qm list | awk \'NR>1 && $3=="running" {{print $1}}\' | xargs -r -n1 qm shutdown --timeout {timeout}; '
+        'end=$((SECONDS+{timeout})); '
+        'while [ $SECONDS -lt $end ] && qm list | awk \'$3=="running"\' | grep -q .; do sleep 1; done; '
+        'qm list | awk \'NR>1 && $3=="running" {{print $1}}\' | xargs -r -n1 qm stop 2>/dev/null; '
+        'true'
+    ),
+
+    # Stop Proxmox LXC containers with graceful shutdown, then force stop
+    "stop_proxmox_cts": (
+        'pct list | awk \'NR>1 && $2=="running" {{print $1}}\' | xargs -r -n1 pct shutdown --timeout {timeout}; '
+        'end=$((SECONDS+{timeout})); '
+        'while [ $SECONDS -lt $end ] && pct list | awk \'$2=="running"\' | grep -q .; do sleep 1; done; '
+        'pct list | awk \'NR>1 && $2=="running" {{print $1}}\' | xargs -r -n1 pct stop 2>/dev/null; '
+        'true'
+    ),
+
+    # Stop XCP-ng/XenServer VMs with graceful shutdown, then force
+    "stop_xcpng_vms": (
+        'ids=$(xe vm-list power-state=running is-control-domain=false --minimal); '
+        '[ -z "$ids" ] && exit 0; '
+        'echo "$ids" | tr \',\' \'\\n\' | xargs -r -n1 xe vm-shutdown uuid= 2>/dev/null; '
+        'end=$((SECONDS+{timeout})); '
+        'while [ $SECONDS -lt $end ]; do '
+        'ids=$(xe vm-list power-state=running is-control-domain=false --minimal); '
+        '[ -z "$ids" ] && break; sleep 1; done; '
+        'xe vm-list power-state=running is-control-domain=false --minimal | tr \',\' \'\\n\' | '
+        'xargs -r -n1 xe vm-shutdown uuid= --force 2>/dev/null; '
+        'true'
+    ),
+
+    # Stop VMware ESXi VMs with graceful shutdown, then force power-off
+    "stop_esxi_vms": (
+        'for i in $(vim-cmd vmsvc/getallvms 2>/dev/null | awk \'NR>1 {{print $1}}\'); do '
+        'vim-cmd vmsvc/power.shutdown $i 2>/dev/null; done; '
+        'c=0; while [ $c -lt {timeout} ]; do '
+        '[ $(vim-cmd vmsvc/getallvms 2>/dev/null | awk \'NR>1\' | wc -l) -eq 0 ] && break; '
+        'pwr=$(vim-cmd vmsvc/getallvms 2>/dev/null | awk \'NR>1 {{print $1}}\' | '
+        'while read i; do vim-cmd vmsvc/power.getstate $i 2>/dev/null; done | grep -c "Powered on"); '
+        '[ "$pwr" -eq 0 ] && break; sleep 1; c=$((c+1)); done; '
+        'for i in $(vim-cmd vmsvc/getallvms 2>/dev/null | awk \'NR>1 {{print $1}}\'); do '
+        'vim-cmd vmsvc/power.off $i 2>/dev/null; done; '
+        'true'
+    ),
+
+    # Stop docker/podman compose stack
+    "stop_compose": (
+        't={timeout}; '
+        'if command -v docker &>/dev/null && docker compose version &>/dev/null; then '
+        'docker compose -f "{path}" down -t $t; '
+        'elif command -v podman &>/dev/null; then '
+        'podman compose -f "{path}" down -t $t; fi; '
+        'true'
+    ),
+
+    # Sync filesystems
+    "sync": 'sync; sync; sleep 2',
+}
 
 
 # ==============================================================================
@@ -1559,17 +1668,19 @@ class UPSMonitor:
         for server in enabled_servers:
             self._shutdown_remote_server(server)
 
-    def _shutdown_remote_server(self, server: RemoteServerConfig):
-        """Shutdown a single remote server via SSH."""
-        display_name = server.name or server.host
-        self._log_message(f"🌐 Initiating remote shutdown: {display_name} ({server.host})...")
+    def _run_remote_command(
+        self,
+        server: RemoteServerConfig,
+        command: str,
+        timeout: int,
+        description: str
+    ) -> Tuple[bool, str]:
+        """Run a single command on a remote server via SSH.
 
-        if self.config.behavior.dry_run:
-            self._log_message(
-                f"  🧪 [DRY-RUN] Would send command '{server.shutdown_command}' to "
-                f"{server.user}@{server.host}"
-            )
-            return
+        Returns:
+            Tuple of (success, error_message)
+        """
+        display_name = server.name or server.host
 
         ssh_cmd = ["ssh"]
 
@@ -1582,21 +1693,160 @@ class UPSMonitor:
 
         ssh_cmd.extend([
             "-o", f"ConnectTimeout={server.connect_timeout}",
+            "-o", "BatchMode=yes",  # Prevent password prompts from hanging
             f"{server.user}@{server.host}",
-            server.shutdown_command
+            command
         ])
 
-        exit_code, stdout, stderr = run_command(ssh_cmd, timeout=server.command_timeout)
+        # Add buffer to timeout to account for SSH connection overhead
+        exit_code, stdout, stderr = run_command(ssh_cmd, timeout=timeout + 30)
 
         if exit_code == 0:
+            return True, ""
+        elif exit_code == 124:
+            return False, f"timed out after {timeout}s"
+        else:
+            error_msg = stderr.strip() if stderr.strip() else f"exit code {exit_code}"
+            return False, error_msg
+
+    def _execute_remote_pre_shutdown(self, server: RemoteServerConfig) -> bool:
+        """Execute pre-shutdown commands on a remote server.
+
+        Returns:
+            True if all commands executed (success or best-effort failure)
+            False if SSH connection failed entirely
+        """
+        if not server.pre_shutdown_commands:
+            return True
+
+        display_name = server.name or server.host
+        cmd_count = len(server.pre_shutdown_commands)
+
+        self._log_message(f"  📋 Executing {cmd_count} pre-shutdown command(s)...")
+
+        for idx, cmd_config in enumerate(server.pre_shutdown_commands, 1):
+            # Determine timeout
+            timeout = cmd_config.timeout
+            if timeout is None:
+                timeout = server.command_timeout
+
+            # Handle predefined action
+            if cmd_config.action:
+                action_name = cmd_config.action.lower()
+
+                if action_name not in REMOTE_ACTIONS:
+                    self._log_message(
+                        f"    ⚠️ [{idx}/{cmd_count}] Unknown action: {action_name} (skipping)"
+                    )
+                    continue
+
+                # Get command template and substitute placeholders
+                command_template = REMOTE_ACTIONS[action_name]
+                command = command_template.format(
+                    timeout=timeout,
+                    path=cmd_config.path or ""
+                )
+                description = action_name
+
+                # Validate stop_compose has path
+                if action_name == "stop_compose" and not cmd_config.path:
+                    self._log_message(
+                        f"    ⚠️ [{idx}/{cmd_count}] stop_compose requires 'path' parameter (skipping)"
+                    )
+                    continue
+
+            # Handle custom command
+            elif cmd_config.command:
+                command = cmd_config.command
+                # Truncate long commands for display
+                if len(command) > 50:
+                    description = command[:47] + "..."
+                else:
+                    description = command
+
+            else:
+                self._log_message(
+                    f"    ⚠️ [{idx}/{cmd_count}] No action or command specified (skipping)"
+                )
+                continue
+
+            # Log what we're about to do
+            self._log_message(f"    ➡️ [{idx}/{cmd_count}] {description} (timeout: {timeout}s)")
+
+            if self.config.behavior.dry_run:
+                self._log_message(f"    🧪 [DRY-RUN] Would execute on {display_name}")
+                continue
+
+            # Execute the command
+            success, error_msg = self._run_remote_command(
+                server, command, timeout, description
+            )
+
+            if success:
+                self._log_message(f"    ✅ [{idx}/{cmd_count}] {description} completed")
+            else:
+                self._log_message(
+                    f"    ⚠️ [{idx}/{cmd_count}] {description} failed: {error_msg} (continuing)"
+                )
+
+        return True
+
+    def _shutdown_remote_server(self, server: RemoteServerConfig):
+        """Shutdown a single remote server via SSH.
+
+        Execution order:
+        1. Execute pre_shutdown_commands (if any) - best effort
+        2. Execute shutdown_command
+        """
+        display_name = server.name or server.host
+        has_pre_cmds = len(server.pre_shutdown_commands) > 0
+
+        self._log_message(f"🌐 Initiating remote shutdown: {display_name} ({server.host})...")
+
+        # Send notification for remote server shutdown start
+        self._send_notification(
+            f"🌐 **Remote Shutdown Starting:** {display_name}\n"
+            f"Host: {server.host}",
+            self.config.NOTIFY_INFO
+        )
+
+        # Execute pre-shutdown commands first
+        if has_pre_cmds:
+            self._execute_remote_pre_shutdown(server)
+
+        # Execute final shutdown command
+        self._log_message(f"  🔌 Sending shutdown command: {server.shutdown_command}")
+
+        if self.config.behavior.dry_run:
+            self._log_message(
+                f"  🧪 [DRY-RUN] Would send command '{server.shutdown_command}' to "
+                f"{server.user}@{server.host}"
+            )
+            return
+
+        success, error_msg = self._run_remote_command(
+            server,
+            server.shutdown_command,
+            server.command_timeout,
+            "shutdown"
+        )
+
+        if success:
             self._log_message(f"  ✅ {display_name} shutdown command sent successfully")
+            self._send_notification(
+                f"✅ **Remote Shutdown Sent:** {display_name}\n"
+                f"Server is shutting down.",
+                self.config.NOTIFY_SUCCESS
+            )
         else:
             self._log_message(
-                f"  ❌ WARNING: Failed to execute shutdown command on {display_name} "
-                f"(Error code {exit_code})"
+                f"  ❌ WARNING: Failed to execute shutdown command on {display_name}: {error_msg}"
             )
-            if stderr.strip():
-                self._log_message(f"    Error: {stderr.strip()}")
+            self._send_notification(
+                f"❌ **Remote Shutdown Failed:** {display_name}\n"
+                f"Error: {error_msg}",
+                self.config.NOTIFY_FAILURE
+            )
 
     def _execute_shutdown_sequence(self):
         """Execute the controlled shutdown sequence."""
