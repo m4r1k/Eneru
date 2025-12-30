@@ -110,7 +110,7 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 
 ---
 
-## 🤔 Why No Docker?
+## 🤔 Why an Old-Fashioned Systemd Daemon? (No Docker)
 
 Eneru runs as a systemd daemon, not a container. This is intentional—Eneru's job is to shut down Docker/Podman containers during power events. If Eneru ran inside a container, it would be killed during its own shutdown sequence.
 
