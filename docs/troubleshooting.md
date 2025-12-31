@@ -67,7 +67,7 @@ sudo dnf install python3-pyyaml apprise
 ### Validate Script Syntax
 
 ```bash
-python3 -m py_compile /opt/ups-monitor/ups_monitor.py
+python3 -m py_compile /opt/ups-monitor/eneru.py
 ```
 
 If this produces errors, the script file may be corrupted. Reinstall the package.
@@ -75,7 +75,7 @@ If this produces errors, the script file may be corrupted. Reinstall the package
 ### Validate Configuration
 
 ```bash
-sudo python3 /opt/ups-monitor/ups_monitor.py --validate-config
+sudo python3 /opt/ups-monitor/eneru.py --validate-config
 ```
 
 This checks for YAML syntax errors and invalid configuration values.
@@ -129,7 +129,7 @@ This lists all UPS names on that server.
 ### Test Built-in Command
 
 ```bash
-sudo python3 /opt/ups-monitor/ups_monitor.py --test-notifications
+sudo python3 /opt/ups-monitor/eneru.py --test-notifications
 ```
 
 ### Test Apprise Directly
@@ -202,7 +202,7 @@ behavior:
 ### Option 2: Command Line
 
 ```bash
-sudo python3 /opt/ups-monitor/ups_monitor.py --dry-run
+sudo python3 /opt/ups-monitor/eneru.py --dry-run
 ```
 
 In dry-run mode, all actions are logged with `[DRY-RUN]` prefix but not executed.
@@ -289,8 +289,8 @@ Dec 22 22:21:17 nuc.local python3[1274572]: 2025-12-22 22:21:17 CET - ⚡ POWER 
 Eneru monitors one UPS per instance. For multiple UPS units, run multiple instances with different config files:
 
 ```bash
-sudo python3 /opt/ups-monitor/ups_monitor.py --config /etc/ups-monitor/ups1.yaml
-sudo python3 /opt/ups-monitor/ups_monitor.py --config /etc/ups-monitor/ups2.yaml
+sudo python3 /opt/ups-monitor/eneru.py --config /etc/ups-monitor/ups1.yaml
+sudo python3 /opt/ups-monitor/eneru.py --config /etc/ups-monitor/ups2.yaml
 ```
 
 ### UPS Compatibility

@@ -10,6 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.6.0] - 2025-12-31
+
+### Added
+- **Modern Python Packaging:** Added `pyproject.toml` for PEP 517/518 compliant packaging
+    - Can now be installed via `pip install .` from repository root
+    - Entry point: `eneru` command available after pip install
+    - Optional dependencies: `[notifications]`, `[dev]`, `[docs]`
+- **Package Structure:** Reorganized codebase into proper Python package
+    - Source code moved to `src/eneru/` directory
+    - `__init__.py` exports all public APIs
+    - `__main__.py` enables `python -m eneru` invocation
+- **Comprehensive Test Suite:** Expanded to 178 tests
+
+### Changed
+- **Script Renamed:** `ups_monitor.py` → `src/eneru/monitor.py`
+- **Installed Path:** `/opt/ups-monitor/ups_monitor.py` → `/opt/ups-monitor/eneru.py`
+
+---
+
 ## [4.5.0] - 2025-12-30
 
 ### Added

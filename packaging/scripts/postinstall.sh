@@ -51,7 +51,7 @@ else
     echo ""
     echo "Next steps:"
     echo "  1. Edit configuration: nano /etc/ups-monitor/config.yaml"
-    echo "  2. Validate config:    python3 /opt/ups-monitor/ups_monitor.py --validate-config"
+    echo "  2. Validate config:    python3 /opt/ups-monitor/eneru.py --validate-config"
     echo "  3. Enable the service: systemctl enable eneru.service"
     echo "  4. Start the service:  systemctl start eneru.service"
     echo ""

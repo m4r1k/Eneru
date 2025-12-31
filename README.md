@@ -78,7 +78,7 @@ sudo dnf install eneru
 sudo nano /etc/ups-monitor/config.yaml
 
 # Validate and start
-sudo python3 /opt/ups-monitor/ups_monitor.py --validate-config
+sudo python3 /opt/ups-monitor/eneru.py --validate-config
 sudo systemctl enable --now eneru.service
 ```
 

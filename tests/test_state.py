@@ -4,7 +4,7 @@ import pytest
 import time
 from unittest.mock import patch, MagicMock
 
-from ups_monitor import (
+from eneru import (
     UPSMonitor,
     MonitorState,
 )
@@ -38,7 +38,7 @@ class TestStateTransitions:
         }
 
         with patch.object(monitor, "_log_power_event") as mock_log:
-            with patch("ups_monitor.run_command", return_value=(0, "", "")):
+            with patch("eneru.monitor.run_command", return_value=(0, "", "")):
                 monitor._handle_on_battery(ups_data)
 
                 mock_log.assert_called_once()
@@ -58,7 +58,7 @@ class TestStateTransitions:
         }
 
         with patch.object(monitor, "_log_power_event") as mock_log:
-            with patch("ups_monitor.run_command", return_value=(0, "", "")):
+            with patch("eneru.monitor.run_command", return_value=(0, "", "")):
                 monitor._handle_on_line(ups_data)
 
                 mock_log.assert_called_once()
@@ -82,7 +82,7 @@ class TestStateTransitions:
         before_time = int(time.time())
 
         with patch.object(monitor, "_log_power_event"):
-            with patch("ups_monitor.run_command", return_value=(0, "", "")):
+            with patch("eneru.monitor.run_command", return_value=(0, "", "")):
                 monitor._handle_on_battery(ups_data)
 
         after_time = int(time.time())
@@ -104,7 +104,7 @@ class TestStateTransitions:
         }
 
         with patch.object(monitor, "_log_power_event"):
-            with patch("ups_monitor.run_command", return_value=(0, "", "")):
+            with patch("eneru.monitor.run_command", return_value=(0, "", "")):
                 monitor._handle_on_line(ups_data)
 
         assert len(monitor.state.battery_history) == 0

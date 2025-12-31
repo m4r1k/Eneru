@@ -28,11 +28,11 @@ jobs:
         pip install pytest pytest-cov pytest-mock
 
     - name: Check syntax
-      run: python -m py_compile ups_monitor.py
+      run: python -m py_compile src/eneru/monitor.py
 
     - name: Run tests
       run: |
-        pytest --cov=ups_monitor --cov-report=xml --cov-report=term -v
+        pytest --cov=src/eneru --cov-report=xml --cov-report=term -v
 
     - name: Upload coverage to Codecov
       if: matrix.python-version == '3.11'
@@ -45,11 +45,11 @@ jobs:
         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
     - name: Validate default config
-      run: python ups_monitor.py --validate-config --config config.yaml
+      run: python src/eneru/monitor.py --validate-config --config config.yaml
 
     - name: Validate example configs
       run: |
         for config in examples/*.yaml; do
           echo "Validating $config..."
-          python ups_monitor.py --validate-config --config "$config"
+          python src/eneru/monitor.py --validate-config --config "$config"
         done

@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from ups_monitor import (
+from eneru import (
     UPSMonitor,
     ConfigLoader,
     Config,
@@ -72,7 +72,7 @@ local_shutdown:
         minimal_config.logging.shutdown_flag_file = str(tmp_path / "flag")
         minimal_config.logging.file = None
 
-        with patch("ups_monitor.run_command") as mock_run:
+        with patch("eneru.monitor.run_command") as mock_run:
             # Mock upsc responses
             mock_run.return_value = (0, """ups.status: OL CHRG
 battery.charge: 100
@@ -84,7 +84,7 @@ input.transfer.low: 180
 input.transfer.high: 270
 """, "")
 
-            with patch("ups_monitor.command_exists", return_value=True):
+            with patch("eneru.monitor.command_exists", return_value=True):
                 monitor = UPSMonitor(minimal_config)
 
                 # Initialize without running the main loop
@@ -130,7 +130,7 @@ class TestShutdownSequence:
     @pytest.mark.integration
     def test_dry_run_shutdown_sequence(self, shutdown_monitor):
         """Test that dry-run shutdown sequence executes without errors."""
-        with patch("ups_monitor.run_command") as mock_run:
+        with patch("eneru.monitor.run_command") as mock_run:
             mock_run.return_value = (0, "", "")
 
             with patch("os.sync"):
@@ -155,7 +155,7 @@ class TestShutdownSequence:
 
         assert not flag_path.exists()
 
-        with patch("ups_monitor.run_command", return_value=(0, "", "")):
+        with patch("eneru.monitor.run_command", return_value=(0, "", "")):
             with patch("os.sync"):
                 # Mock _execute_shutdown_sequence to prevent full execution
                 # but still test that _trigger_immediate_shutdown sets the flag
@@ -203,7 +203,7 @@ class TestShutdownSequence:
                 flag_was_created = True
             return (0, "", "")
 
-        with patch("ups_monitor.run_command", side_effect=check_flag_exists):
+        with patch("eneru.monitor.run_command", side_effect=check_flag_exists):
             with patch("os.sync"):
                 shutdown_monitor._execute_shutdown_sequence()
 
@@ -213,7 +213,7 @@ class TestShutdownSequence:
     @pytest.mark.integration
     def test_shutdown_logs_dry_run_message(self, shutdown_monitor):
         """Test that dry-run mode is clearly indicated in logs."""
-        with patch("ups_monitor.run_command", return_value=(0, "", "")):
+        with patch("eneru.monitor.run_command", return_value=(0, "", "")):
             with patch("os.sync"):
                 shutdown_monitor._execute_shutdown_sequence()
 

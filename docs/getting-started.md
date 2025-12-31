@@ -80,7 +80,7 @@ The package installs but does **not** auto-enable or auto-start the service. You
 sudo nano /etc/ups-monitor/config.yaml
 
 # 2. Validate configuration
-sudo python3 /opt/ups-monitor/ups_monitor.py --validate-config
+sudo python3 /opt/ups-monitor/eneru.py --validate-config
 
 # 3. Enable and start the service
 sudo systemctl enable eneru.service
@@ -110,12 +110,12 @@ sudo mkdir -p /opt/ups-monitor
 sudo mkdir -p /etc/ups-monitor
 
 # Copy files
-sudo cp ups_monitor.py /opt/ups-monitor/
+sudo cp src/eneru/monitor.py /opt/ups-monitor/eneru.py
 sudo cp config.yaml /etc/ups-monitor/
 sudo cp eneru.service /etc/systemd/system/
 
 # Make executable
-sudo chmod +x /opt/ups-monitor/ups_monitor.py
+sudo chmod +x /opt/ups-monitor/eneru.py
 
 # Install dependencies (RHEL/Fedora - EPEL required for apprise)
 sudo dnf install -y epel-release

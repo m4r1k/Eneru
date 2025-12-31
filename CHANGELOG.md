@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.6.0] - 2025-12-31
+
+### Added
+- **Modern Python Packaging:** Added `pyproject.toml` for PEP 517/518 compliant packaging
+  - Can now be installed via `pip install .` from repository root
+  - Entry point: `eneru` command available after pip install
+  - Optional dependencies: `[notifications]`, `[dev]`, `[docs]`
+- **Package Structure:** Reorganized codebase into proper Python package
+  - Source code moved to `src/eneru/` directory
+  - `__init__.py` exports all public APIs
+  - `__main__.py` enables `python -m eneru` invocation
+- **Comprehensive Test Suite:** Expanded to 178 tests covering:
+  - `run_command` and `command_exists` helper functions
+  - CLI validation (`--validate-config`, `--test-notifications`)
+  - Remote pre-shutdown command templating
+  - Configuration parsing edge cases
+
+### Changed
+- **Script Renamed:** `ups_monitor.py` → `src/eneru/monitor.py`
+- **Installed Path:** `/opt/ups-monitor/ups_monitor.py` → `/opt/ups-monitor/eneru.py`
+- **Test Imports:** Updated to use `from eneru import ...` instead of `from ups_monitor import ...`
+- **Coverage Path:** CI now reports coverage for `src/eneru` module
+
+### Migration Notes
+- Existing installations via packages (deb/rpm) will be updated automatically
+- Manual installations should update paths in any custom scripts or systemd overrides
+- The installed script path changed from `ups_monitor.py` to `eneru.py`
+
+---
+
 ## [4.5.0] - 2025-12-30
 
 ### Added
@@ -321,6 +351,21 @@ During power outages, network connectivity is often unreliable. The previous blo
 ---
 
 ## Version Comparison
+
+### v4.6 vs v4.5
+
+| Feature | v4.5 | v4.6 |
+|---------|------|------|
+| Package Structure | Single file at root (`ups_monitor.py`) | Python package (`src/eneru/`) |
+| Installation | Script copy only | pip installable (`pip install .`) + script |
+| Entry Points | `python3 ups_monitor.py` | `eneru` command, `python -m eneru` |
+| Installed Script Path | `/opt/ups-monitor/ups_monitor.py` | `/opt/ups-monitor/eneru.py` |
+| Packaging Config | None | `pyproject.toml` (PEP 517/518) |
+| Optional Dependencies | Manual installation | `[notifications]`, `[dev]`, `[docs]` extras |
+| Test Count | ~98 tests | 178 tests |
+| Test Imports | `from ups_monitor import ...` | `from eneru import ...` |
+| Module Invocation | Not supported | `python -m eneru` supported |
+| Public API | Direct script import | `__init__.py` exports all public APIs |
 
 ### v4.5 vs v4.4
 

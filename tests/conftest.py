@@ -9,14 +9,14 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
 from collections import deque
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add src directory to path for eneru package imports
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 # Add tests directory to path for test_constants
 sys.path.insert(0, str(Path(__file__).parent))
 
 from test_constants import TEST_DISCORD_APPRISE_URL
 
-from ups_monitor import (
+from eneru import (
     Config,
     UPSConfig,
     TriggersConfig,
@@ -164,7 +164,7 @@ def sample_ups_data_on_battery() -> Dict[str, str]:
 @pytest.fixture
 def mock_run_command():
     """Mock the run_command function."""
-    with patch("ups_monitor.run_command") as mock:
+    with patch("eneru.monitor.run_command") as mock:
         mock.return_value = (0, "", "")
         yield mock
 
@@ -172,7 +172,7 @@ def mock_run_command():
 @pytest.fixture
 def mock_apprise():
     """Mock the Apprise library."""
-    with patch("ups_monitor.apprise") as mock:
+    with patch("eneru.monitor.apprise") as mock:
         mock_instance = MagicMock()
         mock.Apprise.return_value = mock_instance
         mock_instance.add.return_value = True

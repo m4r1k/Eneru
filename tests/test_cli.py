@@ -6,7 +6,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from ups_monitor import main, ConfigLoader, __version__
+from eneru import main, ConfigLoader, __version__
 from test_constants import (
     TEST_DISCORD_APPRISE_URL,
     TEST_SLACK_APPRISE_URL,
@@ -20,7 +20,7 @@ class TestCLIVersion:
     @pytest.mark.unit
     def test_version_flag(self):
         """Test --version shows version and exits."""
-        with patch.object(sys, "argv", ["ups_monitor.py", "--version"]):
+        with patch.object(sys, "argv", ["eneru", "--version"]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -29,7 +29,7 @@ class TestCLIVersion:
     @pytest.mark.unit
     def test_short_version_flag(self):
         """Test -v shows version and exits."""
-        with patch.object(sys, "argv", ["ups_monitor.py", "-v"]):
+        with patch.object(sys, "argv", ["eneru", "-v"]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -53,7 +53,7 @@ behavior:
 """)
 
         with patch.object(sys, "argv", [
-            "ups_monitor.py", "--validate-config", "-c", str(config_file)
+            "eneru", "--validate-config", "-c", str(config_file)
         ]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -92,7 +92,7 @@ remote_servers:
 """)
 
         with patch.object(sys, "argv", [
-            "ups_monitor.py", "--validate-config", "-c", str(config_file)
+            "eneru", "--validate-config", "-c", str(config_file)
         ]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -122,9 +122,9 @@ notifications:
 """)
 
         with patch.object(sys, "argv", [
-            "ups_monitor.py", "--validate-config", "-c", str(config_file)
+            "eneru", "--validate-config", "-c", str(config_file)
         ]):
-            with patch("ups_monitor.APPRISE_AVAILABLE", True):
+            with patch("eneru.monitor.APPRISE_AVAILABLE", True):
                 with pytest.raises(SystemExit) as exc_info:
                     main()
 
@@ -141,7 +141,7 @@ notifications:
     def test_validate_config_nonexistent_file(self, capsys):
         """Test validating a non-existent configuration file."""
         with patch.object(sys, "argv", [
-            "ups_monitor.py", "--validate-config", "-c", "/nonexistent/path/config.yaml"
+            "eneru", "--validate-config", "-c", "/nonexistent/path/config.yaml"
         ]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -166,9 +166,9 @@ notifications:
 """)
 
         with patch.object(sys, "argv", [
-            "ups_monitor.py", "--validate-config", "-c", str(config_file)
+            "eneru", "--validate-config", "-c", str(config_file)
         ]):
-            with patch("ups_monitor.APPRISE_AVAILABLE", False):
+            with patch("eneru.monitor.APPRISE_AVAILABLE", False):
                 with pytest.raises(SystemExit) as exc_info:
                     main()
 
@@ -196,7 +196,7 @@ filesystems:
 """)
 
         with patch.object(sys, "argv", [
-            "ups_monitor.py", "--validate-config", "-c", str(config_file)
+            "eneru", "--validate-config", "-c", str(config_file)
         ]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -224,7 +224,7 @@ notifications:
 """)
 
         with patch.object(sys, "argv", [
-            "ups_monitor.py", "--test-notifications", "-c", str(config_file)
+            "eneru", "--test-notifications", "-c", str(config_file)
         ]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -248,9 +248,9 @@ notifications:
 """)
 
         with patch.object(sys, "argv", [
-            "ups_monitor.py", "--test-notifications", "-c", str(config_file)
+            "eneru", "--test-notifications", "-c", str(config_file)
         ]):
-            with patch("ups_monitor.APPRISE_AVAILABLE", False):
+            with patch("eneru.monitor.APPRISE_AVAILABLE", False):
                 with pytest.raises(SystemExit) as exc_info:
                     main()
 
@@ -281,11 +281,11 @@ notifications:
         mock_apprise.NotifyType.INFO = "info"
 
         with patch.object(sys, "argv", [
-            "ups_monitor.py", "--test-notifications", "-c", str(config_file)
+            "eneru", "--test-notifications", "-c", str(config_file)
         ]):
-            with patch("ups_monitor.APPRISE_AVAILABLE", True):
+            with patch("eneru.monitor.APPRISE_AVAILABLE", True):
                 with patch.dict(sys.modules, {"apprise": mock_apprise}):
-                    with patch("ups_monitor.apprise", mock_apprise):
+                    with patch("eneru.monitor.apprise", mock_apprise):
                         with pytest.raises(SystemExit) as exc_info:
                             main()
 
@@ -315,11 +315,11 @@ notifications:
         mock_apprise.NotifyType.INFO = "info"
 
         with patch.object(sys, "argv", [
-            "ups_monitor.py", "--test-notifications", "-c", str(config_file)
+            "eneru", "--test-notifications", "-c", str(config_file)
         ]):
-            with patch("ups_monitor.APPRISE_AVAILABLE", True):
+            with patch("eneru.monitor.APPRISE_AVAILABLE", True):
                 with patch.dict(sys.modules, {"apprise": mock_apprise}):
-                    with patch("ups_monitor.apprise", mock_apprise):
+                    with patch("eneru.monitor.apprise", mock_apprise):
                         with pytest.raises(SystemExit) as exc_info:
                             main()
 
@@ -348,11 +348,11 @@ notifications:
         mock_apprise.NotifyType.INFO = "info"
 
         with patch.object(sys, "argv", [
-            "ups_monitor.py", "--test-notifications", "-c", str(config_file)
+            "eneru", "--test-notifications", "-c", str(config_file)
         ]):
-            with patch("ups_monitor.APPRISE_AVAILABLE", True):
+            with patch("eneru.monitor.APPRISE_AVAILABLE", True):
                 with patch.dict(sys.modules, {"apprise": mock_apprise}):
-                    with patch("ups_monitor.apprise", mock_apprise):
+                    with patch("eneru.monitor.apprise", mock_apprise):
                         with pytest.raises(SystemExit) as exc_info:
                             main()
 
@@ -386,14 +386,14 @@ notifications:
         mock_apprise.NotifyType.INFO = "info"
 
         with patch.object(sys, "argv", [
-            "ups_monitor.py",
+            "eneru",
             "--validate-config",
             "--test-notifications",
             "-c", str(config_file)
         ]):
-            with patch("ups_monitor.APPRISE_AVAILABLE", True):
+            with patch("eneru.monitor.APPRISE_AVAILABLE", True):
                 with patch.dict(sys.modules, {"apprise": mock_apprise}):
-                    with patch("ups_monitor.apprise", mock_apprise):
+                    with patch("eneru.monitor.apprise", mock_apprise):
                         with pytest.raises(SystemExit) as exc_info:
                             main()
 
@@ -445,7 +445,7 @@ ups:
 """)
 
         with patch.object(sys, "argv", [
-            "ups_monitor.py", "--validate-config", "-c", str(config_file)
+            "eneru", "--validate-config", "-c", str(config_file)
         ]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -465,7 +465,7 @@ ups:
 """)
 
         with patch.object(sys, "argv", [
-            "ups_monitor.py", "--validate-config", "--config", str(config_file)
+            "eneru", "--validate-config", "--config", str(config_file)
         ]):
             with pytest.raises(SystemExit) as exc_info:
                 main()

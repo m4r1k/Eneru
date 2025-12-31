@@ -10,8 +10,8 @@ mkdir -p /etc/ups-monitor
 
 # Copy script
 echo "Installing script..."
-/usr/bin/cp -af ./ups_monitor.py /opt/ups-monitor/ups_monitor.py
-chmod +x /opt/ups-monitor/ups_monitor.py
+/usr/bin/cp -af ./src/eneru/monitor.py /opt/ups-monitor/eneru.py
+chmod +x /opt/ups-monitor/eneru.py
 
 # Install config if it doesn't exist (don't overwrite existing config)
 if [ ! -f /etc/ups-monitor/config.yaml ]; then
@@ -44,7 +44,7 @@ fi
 
 # Validate configuration
 echo "Validating configuration..."
-python3 /opt/ups-monitor/ups_monitor.py --validate-config --config /etc/ups-monitor/config.yaml || {
+python3 /opt/ups-monitor/eneru.py --validate-config --config /etc/ups-monitor/config.yaml || {
     echo "WARNING: Configuration validation failed. Please check /etc/ups-monitor/config.yaml"
 }
 
@@ -64,4 +64,4 @@ echo "  4. View logs:          journalctl -u eneru.service -f"
 echo ""
 echo "For dry-run testing:"
 echo "  systemctl stop eneru.service"
-echo "  python3 /opt/ups-monitor/ups_monitor.py --dry-run --config /etc/ups-monitor/config.yaml"
+echo "  python3 /opt/ups-monitor/eneru.py --dry-run --config /etc/ups-monitor/config.yaml"

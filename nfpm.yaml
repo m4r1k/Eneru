@@ -51,8 +51,8 @@ overrides:
 # Files to include in the package
 contents:
   # Main script
-  - src: ups_monitor.py
-    dst: /opt/ups-monitor/ups_monitor.py
+  - src: src/eneru/monitor.py
+    dst: /opt/ups-monitor/eneru.py
     file_info:
       mode: 0755
       owner: root

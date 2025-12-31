@@ -318,7 +318,7 @@ See [Remote Servers](remote-servers.md) for SSH setup instructions.
 
 | File | Purpose |
 |------|---------|
-| `/opt/ups-monitor/ups_monitor.py` | Main script |
+| `/opt/ups-monitor/eneru.py` | Main script |
 | `/etc/ups-monitor/config.yaml` | Configuration file |
 | `/etc/systemd/system/eneru.service` | Systemd service |
 | `/var/log/ups-monitor.log` | Log file |
@@ -333,7 +333,7 @@ See [Remote Servers](remote-servers.md) for SSH setup instructions.
 Always validate your configuration before starting the service:
 
 ```bash
-sudo python3 /opt/ups-monitor/ups_monitor.py --validate-config
+sudo python3 /opt/ups-monitor/eneru.py --validate-config
 ```
 
 This checks for:

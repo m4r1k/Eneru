@@ -4,7 +4,7 @@ import pytest
 import time
 from collections import deque
 
-from ups_monitor import (
+from eneru import (
     is_numeric,
     format_seconds,
     UPSMonitor,

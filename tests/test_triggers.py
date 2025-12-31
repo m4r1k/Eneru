@@ -4,7 +4,7 @@ import pytest
 import time
 from unittest.mock import patch, MagicMock
 
-from ups_monitor import (
+from eneru import (
     UPSMonitor,
     Config,
     MonitorState,

@@ -34,7 +34,7 @@ jobs:
         run: pytest -v
 
       - name: Validate configuration
-        run: python ups_monitor.py --validate-config --config config.yaml
+        run: python src/eneru/monitor.py --validate-config --config config.yaml
 
       - name: Extract version
         id: version
@@ -52,9 +52,9 @@ jobs:
       - name: Update version in script
         run: |
           # Update __version__ in the Python script
-          sed -i "s/^__version__ = .*/__version__ = \"${{ steps.version.outputs.VERSION }}\"/" ups_monitor.py
+          sed -i "s/^__version__ = .*/__version__ = \"${{ steps.version.outputs.VERSION }}\"/" src/eneru/monitor.py
           # Verify the change
-          grep "__version__" ups_monitor.py
+          grep "__version__" src/eneru/monitor.py
 
       - name: Install nFPM
         run: |
@@ -281,7 +281,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### All Packages in Repository" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          ls -la gh-pages/deb/pool/*.deb >> $GITHUB_STEP_SUMMARY || echo "No deb packages yet"
+          ls -la gh-pages/deb/pool/main/*.deb >> $GITHUB_STEP_SUMMARY || echo "No deb packages yet"
           ls -la gh-pages/rpm/*.rpm >> $GITHUB_STEP_SUMMARY || echo "No rpm packages yet"
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY

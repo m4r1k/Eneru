@@ -5,7 +5,7 @@ import time
 import threading
 from unittest.mock import patch, MagicMock
 
-from ups_monitor import (
+from eneru import (
     NotificationWorker,
     Config,
     NotificationsConfig,
@@ -54,8 +54,8 @@ class TestNotificationWorker:
         assert result is False
 
     @pytest.mark.unit
-    @patch("ups_monitor.APPRISE_AVAILABLE", True)
-    @patch("ups_monitor.apprise")
+    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
+    @patch("eneru.monitor.apprise")
     def test_worker_starts_with_valid_config(self, mock_apprise, notification_config):
         """Test that worker starts with valid configuration."""
         mock_instance = MagicMock()
@@ -74,8 +74,8 @@ class TestNotificationWorker:
         worker.stop()
 
     @pytest.mark.unit
-    @patch("ups_monitor.APPRISE_AVAILABLE", True)
-    @patch("ups_monitor.apprise")
+    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
+    @patch("eneru.monitor.apprise")
     def test_send_queues_notification(self, mock_apprise, notification_config):
         """Test that send() queues notification without blocking."""
         mock_instance = MagicMock()
@@ -96,8 +96,8 @@ class TestNotificationWorker:
         worker.stop()
 
     @pytest.mark.unit
-    @patch("ups_monitor.APPRISE_AVAILABLE", True)
-    @patch("ups_monitor.apprise")
+    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
+    @patch("eneru.monitor.apprise")
     def test_send_with_blocking(self, mock_apprise, notification_config):
         """Test that blocking send waits for completion."""
         mock_instance = MagicMock()
@@ -127,8 +127,8 @@ class TestNotificationWorker:
         worker.stop()
 
     @pytest.mark.unit
-    @patch("ups_monitor.APPRISE_AVAILABLE", True)
-    @patch("ups_monitor.apprise")
+    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
+    @patch("eneru.monitor.apprise")
     def test_worker_stop_graceful(self, mock_apprise, notification_config):
         """Test that worker stops gracefully."""
         mock_instance = MagicMock()
@@ -160,8 +160,8 @@ class TestNotificationWorker:
         worker.send("Test message", "info")
 
     @pytest.mark.unit
-    @patch("ups_monitor.APPRISE_AVAILABLE", True)
-    @patch("ups_monitor.apprise")
+    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
+    @patch("eneru.monitor.apprise")
     def test_get_service_count(self, mock_apprise, notification_config):
         """Test getting service count."""
         mock_instance = MagicMock()
@@ -181,8 +181,8 @@ class TestNotificationTypes:
     """Test notification type mapping."""
 
     @pytest.mark.unit
-    @patch("ups_monitor.APPRISE_AVAILABLE", True)
-    @patch("ups_monitor.apprise")
+    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
+    @patch("eneru.monitor.apprise")
     def test_notify_type_mapping(self, mock_apprise):
         """Test that notify types are correctly mapped."""
         mock_instance = MagicMock()

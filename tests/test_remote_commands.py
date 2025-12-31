@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import patch, MagicMock, call
 
-from ups_monitor import (
+from eneru import (
     UPSMonitor,
     Config,
     RemoteServerConfig,
@@ -452,7 +452,7 @@ class TestRunRemoteCommand:
             ssh_options=["-o StrictHostKeyChecking=no"],
         )
 
-        with patch("ups_monitor.run_command") as mock_run:
+        with patch("eneru.monitor.run_command") as mock_run:
             mock_run.return_value = (0, "", "")
 
             ssh_monitor._run_remote_command(server, "echo test", 30, "test")
@@ -474,7 +474,7 @@ class TestRunRemoteCommand:
         """Test successful remote command execution."""
         server = RemoteServerConfig(host="192.168.1.50", user="root")
 
-        with patch("ups_monitor.run_command") as mock_run:
+        with patch("eneru.monitor.run_command") as mock_run:
             mock_run.return_value = (0, "output", "")
 
             success, error = ssh_monitor._run_remote_command(
@@ -489,7 +489,7 @@ class TestRunRemoteCommand:
         """Test failed remote command execution."""
         server = RemoteServerConfig(host="192.168.1.50", user="root")
 
-        with patch("ups_monitor.run_command") as mock_run:
+        with patch("eneru.monitor.run_command") as mock_run:
             mock_run.return_value = (1, "", "permission denied")
 
             success, error = ssh_monitor._run_remote_command(
@@ -504,7 +504,7 @@ class TestRunRemoteCommand:
         """Test remote command timeout."""
         server = RemoteServerConfig(host="192.168.1.50", user="root")
 
-        with patch("ups_monitor.run_command") as mock_run:
+        with patch("eneru.monitor.run_command") as mock_run:
             mock_run.return_value = (124, "", "timed out")
 
             success, error = ssh_monitor._run_remote_command(
@@ -528,7 +528,7 @@ class TestRunRemoteCommand:
             ],
         )
 
-        with patch("ups_monitor.run_command") as mock_run:
+        with patch("eneru.monitor.run_command") as mock_run:
             mock_run.return_value = (0, "", "")
 
             ssh_monitor._run_remote_command(server, "test", 30, "test")
@@ -545,7 +545,7 @@ class TestRunRemoteCommand:
         """Test that timeout passed to run_command includes buffer."""
         server = RemoteServerConfig(host="192.168.1.50", user="root")
 
-        with patch("ups_monitor.run_command") as mock_run:
+        with patch("eneru.monitor.run_command") as mock_run:
             mock_run.return_value = (0, "", "")
 
             ssh_monitor._run_remote_command(server, "test", 30, "test")

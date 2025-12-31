@@ -4,7 +4,7 @@ import pytest
 import yaml
 from pathlib import Path
 
-from ups_monitor import (
+from eneru import (
     Config,
     ConfigLoader,
     UPSConfig,
