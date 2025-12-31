@@ -11,6 +11,10 @@ from collections import deque
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add tests directory to path for test_constants
+sys.path.insert(0, str(Path(__file__).parent))
+
+from test_constants import TEST_DISCORD_APPRISE_URL
 
 from ups_monitor import (
     Config,
@@ -77,7 +81,7 @@ def full_config() -> Config:
     config.behavior = BehaviorConfig(dry_run=True)
     config.notifications = NotificationsConfig(
         enabled=True,
-        urls=["discord://test/test"],
+        urls=[TEST_DISCORD_APPRISE_URL],
         title="Test UPS",
         timeout=10,
     )
