@@ -221,7 +221,7 @@ Timeline (worst case - network down):
 
 ### 30-Second Power Blip
 
-During a brief power blip, power may be restored within seconds or minutes — well before any shutdown triggers fire. However, public Internet often remains unreachable for several more minutes while local network equipment boots up (router, modem, switches, WiFi APs).
+During a brief power blip, power may be restored within seconds or minutes — well before any shutdown triggers fire. However, public Internet often remains unreachable for several more minutes while local network equipment boots up (router, modem, switches, WiFi APs etc).
 
 The persistent retry architecture handles this gracefully: notifications queue instantly and the worker keeps retrying every `retry_interval` seconds. As soon as the network is back, all messages are delivered in order — giving you full visibility into what happened.
 
@@ -229,16 +229,17 @@ The persistent retry architecture handles this gracefully: notifications queue i
 Timeline (brief power blip, network slow to recover):
 ─────────────────────────────────────────────────────────────────
 0s     │ Power lost, "Power Lost" notification queued
-5s     │ Retry #1 - network down (router booting)
+5s     │ Retry #1 - network down
 10s    │ Retry #2 - still failing
 15s    │ Retry #3 - still failing
 20s    │ Retry #4 - still failing
 28s    │ Power restored, "Power Restored" notification queued
 35s    │ Retry #5 - still failing (switches coming up)
-40s    │ Retry #6 - still failing (WiFi AP booting)
-50s    │ Retry #7 - still failing (ISP modem syncing)
+40s    | Retry #6 - still failing (router booting)
+45s    │ Retry #7 - still failing (WiFi AP booting)
+50s    │ Retry #8 - still failing (ISP modem syncing)
 60s    │ Network is back!
-60s    │ Retry #8 - SUCCESS! ✓ "Power Lost" delivered
+60s    │ Retry #9 - SUCCESS! ✓ "Power Lost" delivered
 60s    │ ✓ "Power Restored" delivered (next in queue)
 ─────────────────────────────────────────────────────────────────
         Both notifications delivered despite 60-second network outage
