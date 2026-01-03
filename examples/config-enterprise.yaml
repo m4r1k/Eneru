@@ -38,24 +38,26 @@ notifications:
   # Timeout for each notification attempt
   timeout: 15
 
+  # Seconds between retry attempts for failed notifications (default: 5)
+  retry_interval: 5
+
   urls:
-    # Primary: Slack - Operations channel
-    - "slack://xoxb-token/CHANNEL_ID?footer=no"
+  # Primary: Slack - Operations channel
+  - "slack://xoxb-token/CHANNEL_ID?footer=no"
 
-    # Secondary: PagerDuty - Critical alerts
-    # - "pagerduty://INTEGRATION_KEY@ROUTING_KEY"
+  # Secondary: PagerDuty - Critical alerts
+  # - "pagerduty://INTEGRATION_KEY@ROUTING_KEY"
 
-    # Tertiary: Email - Infrastructure team distribution list
-    - "mailto://ups-alerts:password@smtp.company.com?to=infrastructure@company.com"
+  # Tertiary: Email - Infrastructure team distribution list
+  - "mailto://ups-alerts:password@smtp.company.com?to=infrastructure@company.com"
+  # Backup: Microsoft Teams - IT Operations team
+  # - "msteams://TEAM_TOKEN_A/TEAM_TOKEN_B/TEAM_TOKEN_C"
 
-    # Backup: Microsoft Teams - IT Operations team
-    # - "msteams://TEAM_TOKEN_A/TEAM_TOKEN_B/TEAM_TOKEN_C"
+  # Monitoring: Splunk HEC for log aggregation
+  # - "splunk://HEC_TOKEN@splunk.company.com:8088/services/collector"
 
-    # Monitoring: Splunk HEC for log aggregation
-    # - "splunk://HEC_TOKEN@splunk.company.com:8088/services/collector"
-
-    # On-call: Opsgenie
-    # - "opsgenie://API_KEY/TEAM_ID"
+  # On-call: Opsgenie
+  # - "opsgenie://API_KEY/TEAM_ID"
 
 virtual_machines:
   enabled: true
@@ -75,35 +77,35 @@ filesystems:
     enabled: true
     timeout: 30
     mounts:
-      - "/mnt/storage1"
-      - "/mnt/storage2"
-      - path: "/mnt/nfs-share"
-        options: "-l"
+    - "/mnt/storage1"
+    - "/mnt/storage2"
+    - path: "/mnt/nfs-share"
+      options: "-l"
 
 remote_servers:
-  - name: "Primary NAS"
-    enabled: true
-    host: "nas1.local"
-    user: "admin"
-    shutdown_command: "sudo -i synoshutdown -s"
+- name: "Primary NAS"
+  enabled: true
+  host: "nas1.local"
+  user: "admin"
+  shutdown_command: "sudo -i synoshutdown -s"
 
-  - name: "Backup NAS"
-    enabled: true
-    host: "nas2.local"
-    user: "admin"
-    shutdown_command: "sudo -i synoshutdown -s"
+- name: "Backup NAS"
+  enabled: true
+  host: "nas2.local"
+  user: "admin"
+  shutdown_command: "sudo -i synoshutdown -s"
 
-  - name: "Database Server"
-    enabled: true
-    host: "db.local"
-    user: "root"
-    shutdown_command: "sudo shutdown -h now"
+- name: "Database Server"
+  enabled: true
+  host: "db.local"
+  user: "root"
+  shutdown_command: "sudo shutdown -h now"
 
-  - name: "Application Server"
-    enabled: true
-    host: "app.local"
-    user: "root"
-    shutdown_command: "sudo shutdown -h now"
+- name: "Application Server"
+  enabled: true
+  host: "app.local"
+  user: "root"
+  shutdown_command: "sudo shutdown -h now"
 
 local_shutdown:
   enabled: true

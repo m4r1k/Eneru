@@ -63,6 +63,9 @@ notifications:
   # Timeout for notification delivery (seconds)
   timeout: 10
 
+  # Seconds between retry attempts for failed notifications (default: 5)
+  retry_interval: 5
+
   # Notification service URLs
   urls:
     # Discord

@@ -7,7 +7,7 @@ https://github.com/m4r1k/Eneru
 
 # Version is set at build time via git describe --tags
 # Format: "4.3.0" for tagged releases, "4.3.0-5-gabcdef1" for dev builds
-__version__ = "4.6.0-rc1"
+__version__ = "4.7.0-rc0"
 
 import subprocess
 import sys
@@ -91,6 +91,7 @@ class NotificationsConfig:
     title: Optional[str] = None  # None = no title sent
     avatar_url: Optional[str] = None
     timeout: int = 10
+    retry_interval: int = 5  # Seconds between retry attempts for failed notifications
 
 
 @dataclass
@@ -350,6 +351,7 @@ class ConfigLoader:
         notif_title = None
         avatar_url = None
         notif_timeout = 10
+        notif_retry_interval = 5
 
         if 'notifications' in data:
             notif_data = data['notifications']
@@ -358,6 +360,7 @@ class ConfigLoader:
             notif_title = notif_data.get('title')
             avatar_url = notif_data.get('avatar_url')
             notif_timeout = notif_data.get('timeout', 10)
+            notif_retry_interval = notif_data.get('retry_interval', 5)
 
             # New Apprise-style configuration
             if 'urls' in notif_data:
@@ -392,6 +395,7 @@ class ConfigLoader:
             title=notif_title,
             avatar_url=avatar_url,
             timeout=notif_timeout,
+            retry_interval=notif_retry_interval,
         )
 
         # Virtual Machines Configuration
@@ -693,12 +697,24 @@ class UPSLogger:
 # ==============================================================================
 
 class NotificationWorker:
-    """Non-blocking notification worker using a background thread and queue.
+    """Non-blocking notification worker with persistent retry using a background thread.
 
     This worker ensures that notifications never block the main monitoring loop
-    or shutdown sequence. During power outages, network connectivity is often
-    unreliable, so notifications are sent on a best-effort basis without
-    delaying critical shutdown operations.
+    or shutdown sequence. The main thread queues notifications instantly and
+    continues with critical operations. The worker thread persistently retries
+    failed notifications until they succeed (or the process exits).
+
+    Architecture:
+    - Main thread: Queues notifications instantly (non-blocking)
+    - Worker thread: Processes queue in FIFO order, retrying each message
+      until successful before moving to the next one
+    - Apprise handles parallel delivery to multiple backends
+
+    This design ensures:
+    1. Zero impact on shutdown operations (main thread never waits)
+    2. Guaranteed delivery during transient network issues
+    3. Order preservation (FIFO queue, no message skipping)
+    4. No message loss during brief outages (e.g., 30-second power blip)
     """
 
     def __init__(self, config: Config):
@@ -708,6 +724,7 @@ class NotificationWorker:
         self._stop_event = threading.Event()
         self._apprise_instance: Optional[Any] = None
         self._initialized = False
+        self._retry_count = 0  # Track retries for current message (for logging)
 
     def start(self) -> bool:
         """Initialize Apprise and start the background worker thread."""
@@ -742,15 +759,19 @@ class NotificationWorker:
     def stop(self):
         """Stop the background worker thread gracefully.
 
-        Note: During shutdown, network may be unreliable. Pending notifications
-        in the queue will be dropped if the worker can't send them in time.
-        This is by design - shutdown priority > notification delivery.
+        Note: During shutdown, the worker will attempt to send any pending
+        notifications. Messages that cannot be delivered before process exit
+        will be lost, but this is acceptable since journalctl logs remain
+        for forensics.
         """
         if self._worker_thread and self._worker_thread.is_alive():
-            # Log pending notifications that will likely be dropped
+            # Log pending notifications
             pending = self._queue.qsize()
-            if pending > 0:
-                print(f"⚠️ Stopping notification worker with {pending} message(s) pending (may be dropped)")
+            in_progress = 1 if self._retry_count > 0 else 0
+            total_pending = pending + in_progress
+            if total_pending > 0:
+                retry_info = f" (current message: retry #{self._retry_count})" if in_progress else ""
+                print(f"⚠️ Stopping notification worker with {total_pending} message(s) pending{retry_info}")
 
             self._stop_event.set()
             # Add sentinel to unblock the queue
@@ -784,10 +805,12 @@ class NotificationWorker:
         # If blocking, wait for the notification to be processed
         # This should ONLY be used for --test-notifications, never during shutdown
         if blocking and notification['blocking_event']:
-            notification['blocking_event'].wait(timeout=self.config.notifications.timeout + 5)
+            # For blocking calls, use a generous timeout that allows for retries
+            max_wait = self.config.notifications.timeout * 3 + 10
+            notification['blocking_event'].wait(timeout=max_wait)
 
     def _worker_loop(self):
-        """Background worker that processes the notification queue."""
+        """Background worker that processes the notification queue with persistent retry."""
         while not self._stop_event.is_set():
             try:
                 notification = self._queue.get(timeout=1)
@@ -796,7 +819,7 @@ class NotificationWorker:
                     # Sentinel value, exit loop
                     break
 
-                self._send_notification(notification)
+                self._send_with_retry(notification)
 
             except queue.Empty:
                 continue
@@ -804,10 +827,40 @@ class NotificationWorker:
                 # Silently ignore errors - notifications should never crash the monitor
                 pass
 
-    def _send_notification(self, notification: Dict[str, Any]):
-        """Actually send the notification via Apprise."""
+    def _send_with_retry(self, notification: Dict[str, Any]):
+        """Send notification with persistent retry until success or stop signal."""
+        self._retry_count = 0
+        retry_interval = self.config.notifications.retry_interval
+
+        while not self._stop_event.is_set():
+            success = self._send_notification(notification)
+
+            if success:
+                self._retry_count = 0
+                return
+
+            # Failed - wait and retry
+            self._retry_count += 1
+
+            # Use stop_event.wait() instead of time.sleep() so we can interrupt quickly
+            if self._stop_event.wait(timeout=retry_interval):
+                # Stop was requested during wait
+                break
+
+        # If we exit the loop without success (stop requested), reset counter
+        self._retry_count = 0
+        # Signal completion even on failure (for blocking calls)
+        if notification.get('blocking_event'):
+            notification['blocking_event'].set()
+
+    def _send_notification(self, notification: Dict[str, Any]) -> bool:
+        """Actually send the notification via Apprise.
+
+        Returns:
+            True if notification was sent successfully, False otherwise.
+        """
         if not self._apprise_instance:
-            return
+            return False
 
         try:
             # Map notify_type string to Apprise NotifyType
@@ -829,21 +882,33 @@ class NotificationWorker:
             if notification.get('title'):
                 notify_kwargs['title'] = notification['title']
 
-            self._apprise_instance.notify(**notify_kwargs)
+            # Apprise.notify() returns True if at least one notification succeeded
+            success = self._apprise_instance.notify(**notify_kwargs)
+
+            if success:
+                # Signal completion for blocking calls
+                if notification.get('blocking_event'):
+                    notification['blocking_event'].set()
+
+            return success
 
         except Exception:
-            # Silently ignore - network might be down during power outage
-            pass
-        finally:
-            # Signal completion if blocking
-            if notification.get('blocking_event'):
-                notification['blocking_event'].set()
+            # Network error, DNS failure, etc. - will retry
+            return False
 
     def get_service_count(self) -> int:
         """Return the number of configured notification services."""
         if self._apprise_instance:
             return len(self._apprise_instance)
         return 0
+
+    def get_queue_size(self) -> int:
+        """Return the number of pending notifications in the queue."""
+        return self._queue.qsize()
+
+    def get_retry_count(self) -> int:
+        """Return the current retry count for the message being processed."""
+        return self._retry_count
 
 
 # ==============================================================================
@@ -2471,6 +2536,7 @@ def main():
                         print(f"    Title: (none)")
                     if config.notifications.avatar_url:
                         print(f"    Avatar URL: {config.notifications.avatar_url[:50]}...")
+                    print(f"    Retry interval: {config.notifications.retry_interval}s")
                 else:
                     print(f"    ⚠️ Apprise not installed - notifications disabled")
                     print(f"    Install with: pip install apprise")

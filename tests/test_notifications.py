@@ -177,6 +177,216 @@ class TestNotificationWorker:
         worker.stop()
 
 
+class TestNotificationRetry:
+    """Test notification retry behavior."""
+
+    @pytest.mark.unit
+    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
+    @patch("eneru.monitor.apprise")
+    def test_retry_on_failure(self, mock_apprise):
+        """Test that notifications are retried on failure."""
+        mock_instance = MagicMock()
+        mock_apprise.Apprise.return_value = mock_instance
+        mock_instance.add.return_value = True
+        mock_instance.__len__ = lambda self: 1
+
+        # Fail twice, then succeed
+        mock_instance.notify.side_effect = [False, False, True]
+
+        mock_apprise.NotifyType = MagicMock()
+        mock_apprise.NotifyType.INFO = "info"
+
+        config = Config()
+        config.notifications = NotificationsConfig(
+            enabled=True,
+            urls=["discord://test/token"],
+            title="Test",
+            timeout=5,
+            retry_interval=0.1,  # Short interval for testing
+        )
+
+        worker = NotificationWorker(config)
+        worker.start()
+        time.sleep(0.1)
+
+        worker.send("Test message", "info", blocking=True)
+
+        # Should have been called 3 times (2 failures + 1 success)
+        assert mock_instance.notify.call_count == 3
+
+        worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
+    @patch("eneru.monitor.apprise")
+    def test_retry_count_tracked(self, mock_apprise):
+        """Test that retry count is tracked during retries."""
+        mock_instance = MagicMock()
+        mock_apprise.Apprise.return_value = mock_instance
+        mock_instance.add.return_value = True
+        mock_instance.__len__ = lambda self: 1
+
+        # Keep failing
+        mock_instance.notify.return_value = False
+
+        mock_apprise.NotifyType = MagicMock()
+        mock_apprise.NotifyType.INFO = "info"
+
+        config = Config()
+        config.notifications = NotificationsConfig(
+            enabled=True,
+            urls=["discord://test/token"],
+            title="Test",
+            timeout=5,
+            retry_interval=0.1,
+        )
+
+        worker = NotificationWorker(config)
+        worker.start()
+        time.sleep(0.05)
+
+        worker.send("Test message", "info", blocking=False)
+
+        # Wait for some retries
+        time.sleep(0.35)
+
+        # Should have non-zero retry count
+        assert worker.get_retry_count() > 0
+
+        worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
+    @patch("eneru.monitor.apprise")
+    def test_retry_respects_stop_signal(self, mock_apprise):
+        """Test that retry loop exits when stop is requested."""
+        mock_instance = MagicMock()
+        mock_apprise.Apprise.return_value = mock_instance
+        mock_instance.add.return_value = True
+        mock_instance.__len__ = lambda self: 1
+        mock_instance.notify.return_value = False  # Always fail
+
+        mock_apprise.NotifyType = MagicMock()
+        mock_apprise.NotifyType.INFO = "info"
+
+        config = Config()
+        config.notifications = NotificationsConfig(
+            enabled=True,
+            urls=["discord://test/token"],
+            title="Test",
+            timeout=5,
+            retry_interval=0.5,
+        )
+
+        worker = NotificationWorker(config)
+        worker.start()
+        time.sleep(0.05)
+
+        worker.send("Test message", "info", blocking=False)
+
+        # Wait a bit then stop
+        time.sleep(0.1)
+        start_time = time.time()
+        worker.stop()
+        elapsed = time.time() - start_time
+
+        # Stop should be quick (not waiting for retry interval)
+        assert elapsed < 0.5
+
+    @pytest.mark.unit
+    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
+    @patch("eneru.monitor.apprise")
+    def test_queue_size_tracked(self, mock_apprise):
+        """Test that queue size is tracked."""
+        mock_instance = MagicMock()
+        mock_apprise.Apprise.return_value = mock_instance
+        mock_instance.add.return_value = True
+        mock_instance.__len__ = lambda self: 1
+        mock_instance.notify.return_value = False  # Always fail to block processing
+
+        mock_apprise.NotifyType = MagicMock()
+        mock_apprise.NotifyType.INFO = "info"
+
+        config = Config()
+        config.notifications = NotificationsConfig(
+            enabled=True,
+            urls=["discord://test/token"],
+            title="Test",
+            timeout=5,
+            retry_interval=10,  # Long interval so messages queue up
+        )
+
+        worker = NotificationWorker(config)
+        worker.start()
+        time.sleep(0.05)
+
+        # Queue several messages
+        for i in range(3):
+            worker.send(f"Message {i}", "info", blocking=False)
+
+        time.sleep(0.1)
+
+        # Should have messages in queue (one being processed, rest waiting)
+        # The first one is being retried, so 2 should be in queue
+        assert worker.get_queue_size() >= 2
+
+        worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
+    @patch("eneru.monitor.apprise")
+    def test_fifo_order_preserved(self, mock_apprise):
+        """Test that notifications are processed in FIFO order."""
+        mock_instance = MagicMock()
+        mock_apprise.Apprise.return_value = mock_instance
+        mock_instance.add.return_value = True
+        mock_instance.__len__ = lambda self: 1
+        mock_instance.notify.return_value = True
+
+        mock_apprise.NotifyType = MagicMock()
+        mock_apprise.NotifyType.INFO = "info"
+
+        config = Config()
+        config.notifications = NotificationsConfig(
+            enabled=True,
+            urls=["discord://test/token"],
+            title="Test",
+            timeout=5,
+            retry_interval=0.1,
+        )
+
+        worker = NotificationWorker(config)
+        worker.start()
+        time.sleep(0.05)
+
+        messages = ["First", "Second", "Third"]
+        for msg in messages:
+            worker.send(msg, "info", blocking=False)
+
+        # Wait for all to be processed
+        time.sleep(0.5)
+
+        # Check that messages were sent in order
+        calls = mock_instance.notify.call_args_list
+        bodies = [call[1]['body'] for call in calls]
+
+        assert bodies == messages
+
+        worker.stop()
+
+    @pytest.mark.unit
+    def test_retry_interval_config_default(self):
+        """Test that retry_interval has correct default."""
+        config = NotificationsConfig()
+        assert config.retry_interval == 5
+
+    @pytest.mark.unit
+    def test_retry_interval_config_custom(self):
+        """Test that retry_interval can be configured."""
+        config = NotificationsConfig(retry_interval=10)
+        assert config.retry_interval == 10
+
+
 class TestNotificationTypes:
     """Test notification type mapping."""
 

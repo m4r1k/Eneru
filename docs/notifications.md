@@ -17,6 +17,9 @@ notifications:
   # Timeout for notification delivery (seconds)
   timeout: 10
 
+  # Seconds between retry attempts for failed notifications (default: 5)
+  retry_interval: 5
+
   # Notification service URLs
   urls:
     - "discord://webhook_id/webhook_token"
@@ -112,17 +115,23 @@ sudo python3 /opt/ups-monitor/eneru.py --validate-config --test-notifications
 
 ---
 
-## Non-Blocking Architecture
+## Persistent Retry Architecture
 
-During power outages, network connectivity is often unreliable or completely unavailable. Eneru uses a **fire-and-forget** notification system that ensures shutdown operations are never delayed by notification failures.
+During power outages, network connectivity is often temporarily unavailable. Eneru uses a **non-blocking persistent retry** notification system that:
+
+1. **Never blocks shutdown operations** - main thread queues instantly and continues
+2. **Retries until success** - worker thread persistently retries failed notifications
+3. **Preserves order** - FIFO queue ensures messages arrive in the correct sequence
+
+This design ensures you receive all notifications about power events, even during brief outages where the network recovers before the system shuts down.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                     ENERU NOTIFICATION ARCHITECTURE                         │
+│                ENERU NOTIFICATION ARCHITECTURE.                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│   MAIN THREAD (Critical Path)          WORKER THREAD (Best-Effort)          │
-│   ═══════════════════════════          ════════════════════════════         │
+│   MAIN THREAD (Critical Path)          WORKER THREAD (Persistent Retry)     │
+│   ═══════════════════════════          ════════════════════════════════     │
 │                                                                             │
 │   ┌─────────────────────┐                                                   │
 │   │ Shutdown Triggered  │                                                   │
@@ -132,54 +141,64 @@ During power outages, network connectivity is often unreliable or completely una
 │   ┌─────────────────────┐         ┌─────────────────────┐                   │
 │   │ Queue Notification  │────────▶│  Notification Queue │                   │
 │   │ (non-blocking)      │         │  ┌───┬───┬───┬───┐  │                   │
-│   └──────────┬──────────┘         │  │ N │ N │ N │...│  │                   │
+│   └──────────┬──────────┘         │  │ 1 │ 2 │ 3 │...│  │  FIFO Order       │
 │              │                    │  └───┴───┴───┴───┘  │                   │
 │              │ continues          └──────────┬──────────┘                   │
 │              │ immediately                   │                              │
 │              ▼                               ▼                              │
 │   ┌─────────────────────┐         ┌─────────────────────┐                   │
-│   │ Stop VMs            │         │ Send to Discord     │──▶ Success/Fail   │
-│   └──────────┬──────────┘         │ Send to Slack       │──▶ Success/Fail   │
-│              │                    │ Send to Telegram    │──▶ Success/Fail   │
-│              ▼                    └─────────────────────┘                   │
-│   ┌─────────────────────┐                   │                               │
-│   │ Stop Containers     │                   │ Network down?                 │
-│   └──────────┬──────────┘                   │ Timeout? No problem!          │
-│              │                              │ Worker handles it silently    │
-│              ▼                              ▼                               │
+│   │ Stop VMs            │         │ Attempt Send        │                   │
+│   └──────────┬──────────┘         └──────────┬──────────┘                   │
+│              │                               │                              │
+│              ▼                               ▼                              │
+│   ┌─────────────────────┐              ┌─────────┐                          │
+│   │ Stop Containers     │              │ Success?│                          │
+│   └──────────┬──────────┘              └────┬────┘                          │
+│              │                         YES/ \NO                             │
+│              ▼                            /   \                             │
+│   ┌─────────────────────┐         ┌─────┐     ┌──────────────┐              │
+│   │ Unmount Filesystems │         │ ACK │     │ Wait & Retry │              │
+│   └──────────┬──────────┘         │ ──▶ │     │ (5s default) │              │
+│              │                    │Next │     └──────┬───────┘              │
+│              ▼                    │ Msg │            │                      │
+│   ┌─────────────────────┐         └─────┘            │                      │
+│   │ Shutdown Remote     │                            ▼                      │
+│   │ Servers             │                   ┌────────────────┐              │
+│   └──────────┬──────────┘                   │ Network back?  │──▶ Retry     │
+│              │                              └────────────────┘              │
+│              ▼                                                              │
 │   ┌─────────────────────┐         ┌─────────────────────┐                   │
-│   │ Unmount Filesystems │         │ Thread terminates   │                   │
-│   └──────────┬──────────┘         │ with process exit   │                   │
-│              │                    └─────────────────────┘                   │
-│              ▼                                                              │
-│   ┌─────────────────────┐                                                   │
-│   │ Shutdown Remote     │         ┌─────────────────────┐                   │
-│   │ Servers             │         │    KEY BENEFITS     │                   │
-│   └──────────┬──────────┘         ├─────────────────────┤                   │
-│              │                    │ ✓ Zero blocking     │                   │
-│              ▼                    │ ✓ Graceful failure  │                   │
-│   ┌─────────────────────┐         │ ✓ Best-effort send  │                   │
-│   │ 5-Second Grace      │         │ ✓ No data loss risk │                   │
-│   │ (flush queue)       │         │ ✓ Daemon thread     │                   │
-│   └──────────┬──────────┘         └─────────────────────┘                   │
-│              │                                                              │
-│              ▼                                                              │
-│   ┌─────────────────────┐                                                   │
-│   │ shutdown -h now     │                                                   │
-│   └─────────────────────┘                                                   │
-│                                                                             │
+│   │ 5-Second Grace      │         │    KEY BENEFITS     │                   │
+│   │ (retry window)      │         ├─────────────────────┤                   │
+│   └──────────┬──────────┘         │ ✓ Zero blocking     │                   │
+│              │                    │ ✓ Persistent retry  │                   │
+│              ▼                    │ ✓ FIFO ordering     │                   │
+│   ┌─────────────────────┐         │ ✓ No message loss*  │                   │
+│   │ shutdown -h now     │         │ ✓ Graceful stop     │                   │
+│   └─────────────────────┘         └─────────────────────┘                   │
+│                                   * until process exit                      │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Why Non-Blocking Matters
+### Configuration
 
-| Scenario | Blocking Notifications | Eneru (Non-Blocking) |
-|----------|------------------------|----------------------|
-| Network down during outage | ❌ Shutdown delayed by timeout (10-30s per notification) | ✅ Shutdown proceeds immediately |
-| Discord rate-limited | ❌ Waits for retry | ✅ Continues without waiting |
-| DNS resolution fails | ❌ Hangs until timeout | ✅ Worker handles silently |
-| Multiple notification services | ❌ Sequential delays compound | ✅ All queued instantly |
-| Power about to fail | ❌ Risk of incomplete shutdown | ✅ Critical operations prioritized |
+```yaml
+notifications:
+  # ... other settings ...
+
+  # Seconds between retry attempts (default: 5)
+  retry_interval: 5
+```
+
+### Why Persistent Retry Matters
+
+| Scenario | Fire-and-Forget (v4.6) | Persistent Retry (v4.7+) |
+|----------|------------------------|--------------------------|
+| 30-second network blip | Notifications lost | Retried and delivered |
+| Router reboot during outage | Notifications lost | Retried and delivered |
+| Transient DNS failure | Notifications lost | Retried and delivered |
+| Network down until shutdown | Messages dropped at exit | Same (logs in journalctl) |
+| Multiple services configured | All fail simultaneously | Apprise retries to all |
 
 ### The 5-Second Grace Period
 
@@ -198,6 +217,31 @@ Timeline (worst case - network down):
 55s    │ shutdown -h now executed
 ─────────────────────────────────────────────────────────────────
         Total: ~55 seconds (network issues added 0 seconds delay)
+```
+
+### 30-Second Power Blip
+
+During a brief power blip, power may be restored within seconds or minutes — well before any shutdown triggers fire. However, public Internet often remains unreachable for several more minutes while local network equipment boots up (router, modem, switches, WiFi APs).
+
+The persistent retry architecture handles this gracefully: notifications queue instantly and the worker keeps retrying every `retry_interval` seconds. As soon as the network is back, all messages are delivered in order — giving you full visibility into what happened.
+
+```
+Timeline (brief power blip, network slow to recover):
+─────────────────────────────────────────────────────────────────
+0s     │ Power lost, "Power Lost" notification queued
+5s     │ Retry #1 - network down (router booting)
+10s    │ Retry #2 - still failing
+15s    │ Retry #3 - still failing
+20s    │ Retry #4 - still failing
+28s    │ Power restored, "Power Restored" notification queued
+35s    │ Retry #5 - still failing (switches coming up)
+40s    │ Retry #6 - still failing (WiFi AP booting)
+50s    │ Retry #7 - still failing (ISP modem syncing)
+60s    │ Network is back!
+60s    │ Retry #8 - SUCCESS! ✓ "Power Lost" delivered
+60s    │ ✓ "Power Restored" delivered (next in queue)
+─────────────────────────────────────────────────────────────────
+        Both notifications delivered despite 60-second network outage
 ```
 
 ---

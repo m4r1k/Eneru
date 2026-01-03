@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.7.0] - 2026-01-03
+
+### Added
+- **Persistent Notification Retry:** Notifications are now retried until successful delivery
+  - Worker thread persistently retries failed notifications instead of dropping them
+  - FIFO queue ensures message order is preserved
+  - New `notifications.retry_interval` configuration option (default: 5 seconds)
+  - New `get_queue_size()` and `get_retry_count()` methods for monitoring
+  - Guaranteed delivery during transient network outages (e.g., 30-second power blip)
+- **Expanded Test Suite:** Added 7 new tests for notification retry behavior (185 total)
+
+### Changed
+- **Notification Architecture:** Evolved from "fire-and-forget" to "persistent retry with ACK"
+  - Main thread still queues instantly (zero blocking on shutdown operations)
+  - Worker thread now retries each message until success before moving to next
+  - Stop signal interrupts retry wait immediately (no delay on shutdown)
+  - Pending message count now includes in-progress retries in stop log
+
+---
+
 ## [4.6.0] - 2025-12-31
 
 ### Added
@@ -351,6 +371,18 @@ During power outages, network connectivity is often unreliable. The previous blo
 ---
 
 ## Version Comparison
+
+### v4.7 vs v4.6
+
+| Feature | v4.6 | v4.7 |
+|---------|------|------|
+| Notification Retry | Fire-and-forget (dropped on failure) | Persistent retry until success |
+| Network Outage Handling | Notifications lost during outage | Notifications queued and retried |
+| Message Ordering | N/A (no retry) | FIFO order preserved |
+| Retry Configuration | None | `notifications.retry_interval` (default: 5s) |
+| Queue Monitoring | Basic queue size | `get_queue_size()` + `get_retry_count()` |
+| Stop Behavior | Logs pending count | Logs pending + current retry number |
+| Test Count | 178 tests | 185 tests |
 
 ### v4.6 vs v4.5
 

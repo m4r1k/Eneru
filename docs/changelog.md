@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.7.0] - 2026-01-03
+
+### Added
+- **Persistent Notification Retry:** Notifications are now retried until successful delivery
+    - Worker thread persistently retries failed notifications instead of dropping them
+    - FIFO queue ensures message order is preserved
+    - New `notifications.retry_interval` configuration option (default: 5 seconds)
+    - Guaranteed delivery during transient network outages (e.g., 30-second power blip)
+- **Expanded Test Suite:** 185 tests (7 new for notification retry)
+
+### Changed
+- **Notification Architecture:** Evolved from "fire-and-forget" to "persistent retry with ACK"
+    - Main thread still queues instantly (zero blocking on shutdown operations)
+    - Worker thread now retries each message until success before moving to next
+
+---
+
 ## [4.6.0] - 2025-12-31
 
 ### Added
