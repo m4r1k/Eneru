@@ -38,7 +38,7 @@ Most UPS shutdown solutions are **single-system focused**. Eneru is designed for
 | Different systems need different commands | ✅ Per-server custom shutdown commands |
 | Hypervisors need graceful VM shutdown | ✅ Pre-shutdown actions (Proxmox, ESXi, XCP-ng, libvirt) |
 | Battery estimates are unreliable | ✅ Multi-vector shutdown triggers |
-| Network down during outage | ✅ Non-blocking notification architecture |
+| Network down during outage | ✅ Non-blocking notifications with persistent retry |
 
 ---
 
@@ -105,7 +105,7 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 - **Multi-vector shutdown triggers** - Battery %, runtime, depletion rate, time on battery, FSD flag
 - **Orchestrated shutdown** - VMs, containers, remote servers, filesystems, local system
 - **100+ notification services** - Discord, Slack, Telegram, ntfy, Email via [Apprise](https://github.com/caronc/apprise/wiki)
-- **Non-blocking notifications** - Never delays critical shutdown operations
+- **Non-blocking notifications** - Persistent retry without delaying shutdown
 - **Power quality monitoring** - Voltage, AVR, bypass, and overload detection
 - **Dry-run mode** - Test your configuration safely
 
