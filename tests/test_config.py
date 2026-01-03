@@ -727,11 +727,39 @@ class TestConfigValidation:
     """Test configuration validation."""
 
     @pytest.mark.unit
-    def test_validate_config_with_apprise(self, full_config):
-        """Test validation returns info about Apprise."""
+    def test_validate_config_with_modern_discord(self, full_config):
+        """Test validation with modern discord:// URL format."""
         messages = ConfigLoader.validate_config(full_config)
-        # Should have message about Discord via Apprise
-        assert any("Discord" in msg or "Apprise" in msg for msg in messages)
+        # Modern discord:// URLs should not trigger legacy warning
+        assert not any("Legacy" in msg for msg in messages)
+
+    @pytest.mark.unit
+    def test_validate_config_with_legacy_discord(self, full_config):
+        """Test validation returns info about legacy Discord webhook_url."""
+        # Simulate raw config data with legacy discord.webhook_url
+        raw_data = {
+            'notifications': {
+                'discord': {
+                    'webhook_url': 'https://discord.com/api/webhooks/123/abc'
+                }
+            }
+        }
+        messages = ConfigLoader.validate_config(full_config, raw_data)
+        # Should have message about legacy Discord webhook_url
+        assert any("Legacy Discord webhook_url" in msg for msg in messages)
+
+    @pytest.mark.unit
+    def test_validate_config_with_toplevel_legacy_discord(self, full_config):
+        """Test validation detects top-level legacy discord config."""
+        # Simulate raw config data with top-level legacy discord section
+        raw_data = {
+            'discord': {
+                'webhook_url': 'https://discord.com/api/webhooks/456/def'
+            }
+        }
+        messages = ConfigLoader.validate_config(full_config, raw_data)
+        # Should have message about legacy Discord webhook_url
+        assert any("Legacy Discord webhook_url" in msg for msg in messages)
 
     @pytest.mark.unit
     def test_validate_config_empty_notifications(self, minimal_config):

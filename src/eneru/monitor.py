@@ -7,7 +7,7 @@ https://github.com/m4r1k/Eneru
 
 # Version is set at build time via git describe --tags
 # Format: "4.3.0" for tagged releases, "4.3.0-5-gabcdef1" for dev builds
-__version__ = "4.7.0-rc0"
+__version__ = "4.7.0-rc1"
 
 import subprocess
 import sys
@@ -513,7 +513,7 @@ class ConfigLoader:
         return config
 
     @classmethod
-    def validate_config(cls, config: Config) -> List[str]:
+    def validate_config(cls, config: Config, raw_data: Optional[Dict[str, Any]] = None) -> List[str]:
         """Validate configuration and return list of warnings/info messages."""
         messages = []
 
@@ -524,14 +524,23 @@ class ConfigLoader:
                 "Notifications will be disabled. Install with: pip install apprise"
             )
 
-        # Check for legacy Discord configuration
-        has_legacy_discord = any(
-            'discord://' in url.lower() for url in config.notifications.urls
-        )
+        # Check for legacy Discord configuration (webhook_url in discord section)
+        has_legacy_discord = False
+        if raw_data:
+            # Check for legacy discord.webhook_url in notifications section
+            if 'notifications' in raw_data:
+                notif_data = raw_data['notifications']
+                if 'discord' in notif_data and notif_data['discord'].get('webhook_url'):
+                    has_legacy_discord = True
+            # Check for top-level legacy discord section
+            if 'discord' in raw_data and 'notifications' not in raw_data:
+                if raw_data['discord'].get('webhook_url'):
+                    has_legacy_discord = True
+
         if has_legacy_discord:
             messages.append(
-                "INFO: Discord webhook detected. Using Apprise for notifications. "
-                "Native Discord embeds are now handled via Apprise."
+                "INFO: Legacy Discord webhook_url detected. Using Apprise for notifications. "
+                "Consider migrating to the 'notifications.urls' format."
             )
 
         return messages
