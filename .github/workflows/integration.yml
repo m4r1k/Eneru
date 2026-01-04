@@ -101,7 +101,7 @@ jobs:
             name: Ubuntu 24.04 (Noble)
           - distro: ubuntu
             version: '26.04'
-            name: Ubuntu 26.04 (Plucky)
+            name: Ubuntu 26.04 (Resolute)
     container:
       image: ${{ matrix.distro }}:${{ matrix.version }}
     steps:
@@ -149,15 +149,15 @@ jobs:
         include:
           - version: '8'
             image: registry.access.redhat.com/ubi8/ubi
-            name: RHEL 8 (UBI)
+            name: RHEL 8 (Ootpa)
             python_pkg: python39 python39-pyyaml
           - version: '9'
             image: registry.access.redhat.com/ubi9/ubi
-            name: RHEL 9 (UBI)
+            name: RHEL 9 (Plow)
             python_pkg: python3 python3-pyyaml
           - version: '10'
             image: registry.access.redhat.com/ubi10/ubi
-            name: RHEL 10 (UBI)
+            name: RHEL 10 (Coughlan)
             python_pkg: python3 python3-pyyaml
     container:
       image: ${{ matrix.image }}
@@ -206,7 +206,7 @@ jobs:
             version: '26.04'
             name: Ubuntu 26.04
           - image: registry.access.redhat.com/ubi10/ubi
-            name: RHEL 10 (UBI)
+            name: RHEL 10 (Coughlan)
     container:
       image: ${{ matrix.image || format('{0}:{1}', matrix.distro, matrix.version) }}
     steps:

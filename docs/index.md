@@ -87,6 +87,10 @@ See [Notifications](notifications.md) for the architecture and setup guide.
 - **Bypass Detection:** Alerts when UPS protection is inactive
 - **Overload Detection:** Load threshold monitoring
 
+### Tested on Every Commit
+
+Every commit triggers the full test suite across 7 Linux distributions (Debian, Ubuntu, RHEL) and 6 Python versions, ensuring no regressions. Before each release, Eneru is validated on real hardware with actual UPS units and simulated power events. See [Testing](testing.md) for details.
+
 ---
 
 ## 🤔 Why a Systemd Daemon? (No Docker)

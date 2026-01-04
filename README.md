@@ -108,6 +108,7 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 - **Non-blocking notifications** - Persistent retry without delaying shutdown
 - **Power quality monitoring** - Voltage, AVR, bypass, and overload detection
 - **Dry-run mode** - Test your configuration safely
+- **Tested on every commit** - Full test suite across 7 Linux distros ensures no regressions
 
 ---
 
