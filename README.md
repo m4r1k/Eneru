@@ -9,6 +9,7 @@
 [![NUT Compatible](https://img.shields.io/badge/NUT-compatible-green.svg)](https://networkupstools.org/)
 [![codecov](https://codecov.io/gh/m4r1k/Eneru/branch/main/graph/badge.svg)](https://codecov.io/gh/m4r1k/Eneru)
 [![Documentation](https://img.shields.io/badge/docs-Read%20The%20Docs-blue.svg)](https://eneru.readthedocs.io/)
+[![PyPI](https://img.shields.io/pypi/v/eneru.svg)](https://pypi.org/project/eneru/)
 
 <p align="center">
   <img src="docs/images/eneru-diagram.png" alt="Eneru Architecture" width="600">
@@ -56,6 +57,11 @@ Most UPS shutdown solutions are **single-system focused**. Eneru is designed for
 ## 🚀 Quick Start
 
 ### Installation
+
+**PyPI:**
+```bash
+pip install eneru[notifications]
+```
 
 **Debian/Ubuntu:**
 ```bash

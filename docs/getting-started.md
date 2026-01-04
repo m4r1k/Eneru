@@ -49,14 +49,34 @@ Add the repository to get automatic updates:
     sudo dnf install eneru
     ```
 
-### Option 2: Direct Download from GitHub Releases
+### Option 2: PyPI (pip)
+
+Install from PyPI for a quick setup:
+
+```bash
+pip install eneru
+
+# With notification support (recommended)
+pip install eneru[notifications]
+```
+
+!!! note "System packages still recommended for production"
+    The pip installation doesn't include the systemd service file. For production deployments, use the native packages which set up the service automatically.
+
+After pip install, you'll need to:
+
+1. Create the config directory: `sudo mkdir -p /etc/ups-monitor`
+2. Create a config file: `sudo nano /etc/ups-monitor/config.yaml`
+3. Run manually or set up your own service: `eneru --config /etc/ups-monitor/config.yaml`
+
+### Option 3: Direct Download from GitHub Releases
 
 Download the latest package from [GitHub Releases](https://github.com/m4r1k/Eneru/releases):
 
 === "Debian/Ubuntu"
 
     ```bash
-    sudo dpkg -i eneru_4.3.0_all.deb
+    sudo dpkg -i eneru_*.deb
     sudo apt install -f  # Install dependencies if needed
     ```
 
@@ -66,7 +86,7 @@ Download the latest package from [GitHub Releases](https://github.com/m4r1k/Ener
     # RHEL 8/9: Enable EPEL first (required for apprise dependency)
     sudo dnf install -y epel-release
 
-    sudo dnf install ./eneru-4.3.0.noarch.rpm
+    sudo dnf install ./eneru-*.noarch.rpm
     ```
 
 ---
@@ -85,47 +105,6 @@ sudo python3 /opt/ups-monitor/eneru.py --validate-config
 # 3. Enable and start the service
 sudo systemctl enable eneru.service
 sudo systemctl start eneru.service
-```
-
----
-
-## Manual Installation
-
-For development or systems without package manager support:
-
-```bash
-# Clone or download the repository
-git clone https://github.com/m4r1k/Eneru.git
-cd Eneru
-
-# Run the installer
-sudo ./install.sh
-```
-
-Or install manually:
-
-```bash
-# Create directories
-sudo mkdir -p /opt/ups-monitor
-sudo mkdir -p /etc/ups-monitor
-
-# Copy files
-sudo cp src/eneru/monitor.py /opt/ups-monitor/eneru.py
-sudo cp config.yaml /etc/ups-monitor/
-sudo cp eneru.service /etc/systemd/system/
-
-# Make executable
-sudo chmod +x /opt/ups-monitor/eneru.py
-
-# Install dependencies (RHEL/Fedora - EPEL required for apprise)
-sudo dnf install -y epel-release
-sudo dnf install -y python3 python3-pyyaml apprise nut-client openssh-clients
-
-# Install dependencies (Debian/Ubuntu)
-sudo apt install -y python3 python3-yaml apprise nut-client openssh-client
-
-# Reload systemd
-sudo systemctl daemon-reload
 ```
 
 ---
@@ -200,6 +179,12 @@ If new configuration options are added in a release, check the [Changelog](chang
 
     ```bash
     sudo dnf remove eneru
+    ```
+
+=== "pip"
+
+    ```bash
+    pip uninstall eneru
     ```
 
 Configuration files in `/etc/ups-monitor/` may be preserved after uninstall. Remove them manually if desired.

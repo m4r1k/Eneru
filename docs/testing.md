@@ -179,12 +179,14 @@ journalctl -u eneru.service -f
 | Validate | `.github/workflows/validate.yml` | Push, PR |
 | Integration | `.github/workflows/integration.yml` | Push, PR |
 | Release | `.github/workflows/release.yml` | Release published |
+| PyPI | `.github/workflows/pypi.yml` | Release published |
 
 ### Viewing Results
 
 - [Validate Workflow Runs](https://github.com/m4r1k/Eneru/actions/workflows/validate.yml)
 - [Integration Workflow Runs](https://github.com/m4r1k/Eneru/actions/workflows/integration.yml)
 - [Release Workflow Runs](https://github.com/m4r1k/Eneru/actions/workflows/release.yml)
+- [PyPI Workflow Runs](https://github.com/m4r1k/Eneru/actions/workflows/pypi.yml)
 
 ---
 
