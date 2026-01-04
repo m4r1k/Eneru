@@ -1,0 +1,244 @@
+name: Integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Build packages once, then test on multiple OSes
+  build-packages:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep -oP '__version__\s*=\s*"\K[^"]+' src/eneru/monitor.py)
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
+      - name: Install nFPM
+        run: |
+          NFPM_VERSION=$(curl -s https://api.github.com/repos/goreleaser/nfpm/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
+          curl -sLO "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          tar -xzf "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" nfpm
+          sudo mv nfpm /usr/local/bin/
+          rm "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+
+      - name: Build .deb package
+        run: VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager deb --target .
+
+      - name: Build .rpm package
+        run: VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager rpm --target .
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: |
+            *.deb
+            *.rpm
+          retention-days: 1
+
+  # Test pip installation across Python versions
+  test-pip-install:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install via pip
+        run: pip install ".[notifications]"
+
+      - name: Verify installation
+        run: |
+          eneru --version
+          eneru --validate-config --config config.yaml
+
+      - name: Validate example configs
+        run: |
+          for config in examples/*.yaml; do
+            echo "Validating $config..."
+            eneru --validate-config --config "$config"
+          done
+
+  # Test .deb package installation on Debian/Ubuntu
+  test-deb:
+    needs: build-packages
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: debian
+            version: '12'
+            name: Debian 12 (Bookworm)
+          - distro: debian
+            version: '13'
+            name: Debian 13 (Trixie)
+          - distro: ubuntu
+            version: '24.04'
+            name: Ubuntu 24.04 (Noble)
+          - distro: ubuntu
+            version: '26.04'
+            name: Ubuntu 26.04 (Plucky)
+    container:
+      image: ${{ matrix.distro }}:${{ matrix.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          name: packages
+
+      - name: Install dependencies and package
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y python3 python3-yaml
+          # Install the .deb package (ignore dependency on nut-client for CI)
+          dpkg --force-depends -i eneru_*.deb || true
+          apt-get install -f -y --no-install-recommends || true
+
+      - name: Verify installation
+        run: |
+          # Check the script is installed
+          test -f /opt/ups-monitor/eneru.py
+          test -f /etc/ups-monitor/config.yaml
+          # Run validation
+          python3 /opt/ups-monitor/eneru.py --version
+          python3 /opt/ups-monitor/eneru.py --validate-config --config /etc/ups-monitor/config.yaml
+
+      - name: Validate example configs
+        run: |
+          for config in examples/*.yaml; do
+            echo "Validating $config..."
+            python3 /opt/ups-monitor/eneru.py --validate-config --config "$config"
+          done
+
+  # Test .rpm package installation on RHEL UBI
+  test-rpm:
+    needs: build-packages
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: '8'
+            image: registry.access.redhat.com/ubi8/ubi
+            name: RHEL 8 (UBI)
+            python_pkg: python39 python39-pyyaml
+          - version: '9'
+            image: registry.access.redhat.com/ubi9/ubi
+            name: RHEL 9 (UBI)
+            python_pkg: python3 python3-pyyaml
+          - version: '10'
+            image: registry.access.redhat.com/ubi10/ubi
+            name: RHEL 10 (UBI)
+            python_pkg: python3 python3-pyyaml
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          name: packages
+
+      - name: Install dependencies and package
+        run: |
+          dnf install -y ${{ matrix.python_pkg }}
+          # Install the .rpm package (ignore dependency on nut-client for CI)
+          rpm -ivh --nodeps eneru-*.rpm || dnf install -y ./eneru-*.rpm --skip-broken || true
+
+      - name: Verify installation
+        run: |
+          # Check the script is installed
+          test -f /opt/ups-monitor/eneru.py
+          test -f /etc/ups-monitor/config.yaml
+          # Run validation
+          python3 /opt/ups-monitor/eneru.py --version
+          python3 /opt/ups-monitor/eneru.py --validate-config --config /etc/ups-monitor/config.yaml
+
+      - name: Validate example configs
+        run: |
+          for config in examples/*.yaml; do
+            echo "Validating $config..."
+            python3 /opt/ups-monitor/eneru.py --validate-config --config "$config"
+          done
+
+  # Test pip installation inside containers (ensures pyproject.toml works on real distros)
+  test-pip-in-container:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: debian
+            version: '13'
+            name: Debian 13
+          - distro: ubuntu
+            version: '26.04'
+            name: Ubuntu 26.04
+          - image: registry.access.redhat.com/ubi10/ubi
+            name: RHEL 10 (UBI)
+    container:
+      image: ${{ matrix.image || format('{0}:{1}', matrix.distro, matrix.version) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install pip and dependencies (Debian/Ubuntu)
+        if: matrix.distro != ''
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y python3 python3-pip
+
+      - name: Install pip and dependencies (RHEL)
+        if: matrix.image != ''
+        run: |
+          dnf install -y python3 python3-pip
+
+      - name: Install via pip
+        run: |
+          python3 -m pip install --break-system-packages ".[notifications]" || \
+          python3 -m pip install ".[notifications]"
+
+      - name: Verify installation
+        run: |
+          eneru --version
+          eneru --validate-config --config config.yaml
+
+      - name: Validate example configs
+        run: |
+          for config in examples/*.yaml; do
+            echo "Validating $config..."
+            eneru --validate-config --config "$config"
+          done
