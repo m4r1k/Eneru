@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.8.0] - 2026-01-04
+
+### Added
+- **PyPI Publishing:** Eneru is now available on PyPI (`pip install eneru`)
+    - Automated publishing workflow on GitHub releases
+    - Optional `[notifications]` extra for Apprise support
+    - Supports Python 3.9, 3.10, 3.11, 3.12, 3.13, and 3.14
+- **Integration Testing Workflow:** New CI workflow tests package installation on real Linux distributions
+    - `.deb` package testing on Debian 12/13, Ubuntu 24.04/26.04
+    - `.rpm` package testing on RHEL 8/9/10
+    - `pip install` testing across 6 Python versions and 3 container distros
+- **Testing Documentation:** New [Testing](testing.md) page documenting CI/CD strategy
+
+### Changed
+- **Python Version:** Minimum required Python version is now 3.9 (was 3.8)
+- **Installation Options:** PyPI is now listed as a primary installation method alongside native packages
+
+### Removed
+- **Manual Installation Script:** Removed `install.sh` in favor of native packages and pip
+
+---
+
 ## [4.7.0] - 2026-01-03
 
 ### Added
