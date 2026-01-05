@@ -7,7 +7,7 @@ https://github.com/m4r1k/Eneru
 
 # Version is set at build time via git describe --tags
 # Format: "4.3.0" for tagged releases, "4.3.0-5-gabcdef1" for dev builds
-__version__ = "4.9.0-rc1"
+__version__ = "4.9.0-rc2"
 
 import subprocess
 import sys
@@ -2042,11 +2042,11 @@ class UPSMonitor:
         if self.config.behavior.dry_run:
             self._log_message("🧪 *** DRY-RUN MODE: No actual shutdown will occur ***")
 
-        wall_msg = "🚨 CRITICAL: Executing emergency UPS shutdown sequence NOW!"
-        if self.config.behavior.dry_run:
-            wall_msg = "[DRY-RUN] " + wall_msg
-
-        run_command(["wall", wall_msg])
+        if not self.config.behavior.dry_run:
+            run_command([
+                "wall",
+                "🚨 CRITICAL: Executing emergency UPS shutdown sequence NOW!"
+            ])
 
         self._shutdown_vms()
         self._shutdown_containers()
@@ -2108,10 +2108,11 @@ class UPSMonitor:
         )
 
         self._log_message(f"🚨 CRITICAL: Triggering immediate shutdown. Reason: {reason}")
-        run_command([
-            "wall",
-            f"🚨 CRITICAL: UPS battery critical! Immediate shutdown initiated! Reason: {reason}"
-        ])
+        if not self.config.behavior.dry_run:
+            run_command([
+                "wall",
+                f"🚨 CRITICAL: UPS battery critical! Immediate shutdown initiated! Reason: {reason}"
+            ])
 
         self._execute_shutdown_sequence()
 
@@ -2234,11 +2235,12 @@ class UPSMonitor:
                 "ON_BATTERY",
                 f"Battery: {battery_charge}%, Runtime: {battery_runtime} seconds, Load: {ups_load}%"
             )
-            run_command([
-                "wall",
-                f"⚠️ WARNING: Power failure detected! System running on UPS battery "
-                f"({battery_charge}% remaining, {format_seconds(battery_runtime)} runtime)"
-            ])
+            if not self.config.behavior.dry_run:
+                run_command([
+                    "wall",
+                    f"⚠️ WARNING: Power failure detected! System running on UPS battery "
+                    f"({battery_charge}% remaining, {format_seconds(battery_runtime)} runtime)"
+                ])
 
         current_time = int(time.time())
         time_on_battery = current_time - self.state.on_battery_start_time
@@ -2322,11 +2324,12 @@ class UPSMonitor:
                 f"Battery: {battery_charge}% (Status: {ups_status}), "
                 f"Input: {input_voltage}V, Outage duration: {format_seconds(time_on_battery)}"
             )
-            run_command([
-                "wall",
-                f"✅ Power has been restored. UPS Status: {ups_status}. "
-                f"Battery at {battery_charge}%."
-            ])
+            if not self.config.behavior.dry_run:
+                run_command([
+                    "wall",
+                    f"✅ Power has been restored. UPS Status: {ups_status}. "
+                    f"Battery at {battery_charge}%."
+                ])
 
             self.state.on_battery_start_time = 0
             self.state.extended_time_logged = False
