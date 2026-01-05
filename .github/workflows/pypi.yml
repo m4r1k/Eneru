@@ -28,12 +28,23 @@ jobs:
         id: version
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
+
+          # Get short commit hash for code version
+          # Use + for PEP 440 local version identifier
+          SHORT_HASH=$(git rev-parse --short HEAD)
+          VERSION_FULL="${VERSION}+${SHORT_HASH}"
+
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "Publishing version: $VERSION"
+          echo "VERSION_FULL=$VERSION_FULL" >> $GITHUB_OUTPUT
+          echo "Publishing package version: $VERSION"
+          echo "Code version: $VERSION_FULL"
 
       - name: Update version in script
         run: |
-          sed -i "s/^__version__ = .*/__version__ = \"${{ steps.version.outputs.VERSION }}\"/" src/eneru/monitor.py
+          # Update __version__ with full version including git hash
+          # PyPI strips local version (+hash) from package metadata,
+          # but the installed code will show the full version
+          sed -i "s/^__version__ = .*/__version__ = \"${{ steps.version.outputs.VERSION_FULL }}\"/" src/eneru/monitor.py
           grep "__version__" src/eneru/monitor.py
 
       - name: Build package
