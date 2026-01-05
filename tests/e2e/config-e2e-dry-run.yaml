@@ -1,0 +1,67 @@
+# Eneru E2E Test Configuration - Dry Run Mode
+# Used for testing detection logic without executing shutdown actions
+
+ups:
+  name: "TestUPS@localhost:3493"
+  check_interval: 1
+  max_stale_data_tolerance: 3
+
+triggers:
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+  depletion:
+    window: 300
+    critical_rate: 15.0
+    grace_period: 30
+  extended_time:
+    enabled: false
+
+behavior:
+  dry_run: true  # Only simulate, don't execute
+
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-state"
+  battery_history_file: "/tmp/eneru-e2e-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-shutdown-flag"
+
+notifications:
+  enabled: false
+  urls: []
+
+virtual_machines:
+  enabled: false
+
+containers:
+  enabled: true
+  runtime: docker
+  stop_timeout: 10
+  compose_files: []
+  # Safe to enable in dry-run mode - validates the feature without actually stopping containers
+  shutdown_all_remaining_containers: true
+
+filesystems:
+  sync_enabled: true
+  unmount:
+    enabled: true
+    timeout: 5
+    mounts:
+      - path: "/tmp/eneru-e2e-tmpfs"
+        options: ""
+
+remote_servers:
+  - name: "E2E SSH Target"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    connect_timeout: 5
+    command_timeout: 10
+    shutdown_command: "sudo shutdown -h now"
+    ssh_options:
+      - "-o Port=2222"
+      - "-o StrictHostKeyChecking=no"
+      - "-o UserKnownHostsFile=/dev/null"
+      - "-o IdentityFile=/tmp/e2e-ssh-key"
+
+local_shutdown:
+  enabled: false

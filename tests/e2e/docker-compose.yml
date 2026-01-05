@@ -1,0 +1,53 @@
+# E2E Test Environment for Eneru
+# Provides: NUT server, SSH target, Docker containers to stop, tmpfs mount
+
+services:
+  # NUT Server with dummy driver
+  nut-server:
+    build:
+      context: ./nut-dummy
+      dockerfile: Dockerfile
+    container_name: eneru-e2e-nut
+    ports:
+      - "3493:3493"
+    volumes:
+      - ./scenarios:/scenarios:rw
+    networks:
+      - eneru-e2e
+
+  # SSH target server (simulates remote server for shutdown)
+  ssh-target:
+    build:
+      context: ./ssh-target
+      dockerfile: Dockerfile
+    container_name: eneru-e2e-ssh
+    ports:
+      - "2222:22"
+    volumes:
+      - ./ssh-target/authorized_keys:/home/testuser/.ssh/authorized_keys:ro
+    networks:
+      - eneru-e2e
+
+  # Target containers that Eneru will stop during shutdown sequence
+  target-nginx:
+    image: nginx:alpine
+    container_name: eneru-target-nginx
+    networks:
+      - eneru-e2e
+
+  target-redis:
+    image: redis:alpine
+    container_name: eneru-target-redis
+    networks:
+      - eneru-e2e
+
+  target-alpine:
+    image: alpine:latest
+    container_name: eneru-target-alpine
+    command: ["sleep", "infinity"]
+    networks:
+      - eneru-e2e
+
+networks:
+  eneru-e2e:
+    driver: bridge

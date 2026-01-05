@@ -1,0 +1,18 @@
+# Scenario: AVR Boost mode - low input voltage being compensated
+ups.status: OL BOOST
+ups.load: 25
+
+battery.charge: 100
+battery.runtime: 1800
+battery.voltage: 54.0
+
+input.voltage: 195.0
+input.voltage.nominal: 230
+input.frequency: 50.0
+input.transfer.low: 170
+input.transfer.high: 280
+
+output.voltage: 230.0
+
+device.mfr: Eneru
+device.model: E2E Test UPS

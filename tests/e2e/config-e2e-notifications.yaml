@@ -1,0 +1,73 @@
+# Eneru E2E Test Configuration - With Notifications
+# This configuration includes notification testing
+
+ups:
+  name: "TestUPS@localhost:3493"
+  check_interval: 1
+  max_stale_data_tolerance: 3
+
+triggers:
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+  depletion:
+    window: 300
+    critical_rate: 15.0
+    grace_period: 30
+  extended_time:
+    enabled: false
+
+behavior:
+  dry_run: false
+
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-state"
+  battery_history_file: "/tmp/eneru-e2e-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-shutdown-flag"
+
+notifications:
+  enabled: true
+  # URL will be injected from E2E_NOTIFICATION_URL secret
+  urls:
+    - "${E2E_NOTIFICATION_URL}"
+  title: "Eneru E2E Test"
+  timeout: 10
+  retry_interval: 5
+
+virtual_machines:
+  enabled: false
+
+containers:
+  enabled: true
+  runtime: docker
+  stop_timeout: 10
+  compose_files: []
+  # NOTE: Must be false for E2E tests - setting to true would stop the NUT server
+  # container (eneru-e2e-nut), causing connection loss and failsafe (FSB) trigger
+  shutdown_all_remaining_containers: false
+
+filesystems:
+  sync_enabled: true
+  unmount:
+    enabled: true
+    timeout: 5
+    mounts:
+      - path: "/tmp/eneru-e2e-tmpfs"
+        options: ""
+
+remote_servers:
+  - name: "E2E SSH Target"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    connect_timeout: 5
+    command_timeout: 10
+    shutdown_command: "sudo shutdown -h now"
+    ssh_options:
+      - "-o Port=2222"
+      - "-o StrictHostKeyChecking=no"
+      - "-o UserKnownHostsFile=/dev/null"
+      - "-o IdentityFile=/tmp/e2e-ssh-key"
+
+local_shutdown:
+  enabled: false

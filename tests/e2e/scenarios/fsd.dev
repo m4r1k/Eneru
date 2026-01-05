@@ -1,0 +1,18 @@
+# Scenario: Forced Shutdown - UPS signals immediate shutdown required
+ups.status: OB FSD
+ups.load: 45
+
+battery.charge: 10
+battery.runtime: 60
+battery.voltage: 42.0
+
+input.voltage: 0.0
+input.voltage.nominal: 230
+input.frequency: 0.0
+input.transfer.low: 170
+input.transfer.high: 280
+
+output.voltage: 225.0
+
+device.mfr: Eneru
+device.model: E2E Test UPS

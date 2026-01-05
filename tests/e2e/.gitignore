@@ -1,0 +1,7 @@
+# E2E test artifacts
+scenarios/apply.dev
+*.log
+
+# SSH keys (generated during tests)
+ssh-target/authorized_keys
+ssh-target/id_*

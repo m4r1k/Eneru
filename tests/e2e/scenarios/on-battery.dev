@@ -1,0 +1,18 @@
+# Scenario: On battery, discharging - power failure but battery OK
+ups.status: OB DISCHRG
+ups.load: 30
+
+battery.charge: 85
+battery.runtime: 1200
+battery.voltage: 52.0
+
+input.voltage: 0.0
+input.voltage.nominal: 230
+input.frequency: 0.0
+input.transfer.low: 170
+input.transfer.high: 280
+
+output.voltage: 230.0
+
+device.mfr: Eneru
+device.model: E2E Test UPS

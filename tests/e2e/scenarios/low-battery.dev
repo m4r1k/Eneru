@@ -1,0 +1,18 @@
+# Scenario: Low battery - should trigger shutdown (below 20% threshold)
+ups.status: OB DISCHRG LB
+ups.load: 35
+
+battery.charge: 15
+battery.runtime: 180
+battery.voltage: 44.0
+
+input.voltage: 0.0
+input.voltage.nominal: 230
+input.frequency: 0.0
+input.transfer.low: 170
+input.transfer.high: 280
+
+output.voltage: 228.0
+
+device.mfr: Eneru
+device.model: E2E Test UPS

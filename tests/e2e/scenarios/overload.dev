@@ -1,0 +1,18 @@
+# Scenario: Overload condition
+ups.status: OL OVER
+ups.load: 110
+
+battery.charge: 100
+battery.runtime: 1800
+battery.voltage: 54.0
+
+input.voltage: 230.0
+input.voltage.nominal: 230
+input.frequency: 50.0
+input.transfer.low: 170
+input.transfer.high: 280
+
+output.voltage: 228.0
+
+device.mfr: Eneru
+device.model: E2E Test UPS

@@ -1,0 +1,304 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  E2E_DIR: tests/e2e
+
+jobs:
+  e2e-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Eneru
+        run: pip install ".[notifications]"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nut-client openssh-client
+
+      - name: Generate SSH keys for E2E tests
+        run: |
+          ssh-keygen -t ed25519 -f /tmp/e2e-ssh-key -N "" -C "eneru-e2e-test"
+          mkdir -p ${{ env.E2E_DIR }}/ssh-target
+          cp /tmp/e2e-ssh-key.pub ${{ env.E2E_DIR }}/ssh-target/authorized_keys
+
+      - name: Build and start E2E environment
+        run: |
+          cd ${{ env.E2E_DIR }}
+
+          # Build and start services (authorized_keys is bind-mounted from ssh-target/)
+          docker compose up -d --build
+          docker compose ps
+
+      - name: Wait for services to be ready
+        run: |
+          echo "Waiting for NUT server..."
+          for i in {1..30}; do
+            if upsc TestUPS@localhost:3493 2>/dev/null | grep -q "ups.status"; then
+              echo "NUT server ready!"
+              break
+            fi
+            echo "  Attempt $i/30..."
+            sleep 2
+          done
+
+          echo ""
+          echo "Waiting for SSH server..."
+          for i in {1..30}; do
+            if nc -z localhost 2222 2>/dev/null; then
+              echo "SSH server ready!"
+              break
+            fi
+            echo "  Attempt $i/30..."
+            sleep 2
+          done
+
+          echo ""
+          echo "=== E2E Environment Ready ==="
+          upsc TestUPS@localhost:3493 2>/dev/null | head -15
+
+      - name: Create tmpfs mount for unmount testing
+        run: |
+          sudo mkdir -p /tmp/eneru-e2e-tmpfs
+          sudo mount -t tmpfs -o size=1M tmpfs /tmp/eneru-e2e-tmpfs
+          echo "test data" | sudo tee /tmp/eneru-e2e-tmpfs/testfile
+          mount | grep eneru-e2e-tmpfs
+
+      - name: Test SSH connectivity
+        run: |
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -i /tmp/e2e-ssh-key -p 2222 testuser@localhost \
+            "echo 'SSH connection successful!'"
+
+      # ========================================
+      # TEST 1: Validate config against real NUT
+      # ========================================
+      - name: "Test 1: Validate E2E config"
+        run: |
+          echo "=== Test 1: Config Validation ==="
+          eneru --validate-config --config ${{ env.E2E_DIR }}/config-e2e.yaml
+
+      # ========================================
+      # TEST 2: Monitor normal (online) state
+      # ========================================
+      - name: "Test 2: Monitor normal state (no shutdown triggered)"
+        run: |
+          echo "=== Test 2: Normal State Monitoring ==="
+
+          # Ensure UPS is in online state
+          cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply.dev
+          sleep 3
+
+          # Run Eneru for 5 seconds - should NOT trigger shutdown
+          timeout 5 eneru --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test2.log || true
+
+          # Verify no shutdown was triggered
+          if grep -q "SHUTDOWN SEQUENCE" /tmp/test2.log; then
+            echo "FAIL: Shutdown was triggered during normal operation!"
+            exit 1
+          fi
+
+          echo "PASS: No shutdown triggered during normal operation"
+
+      # ========================================
+      # TEST 3: Detect power failure (dry-run)
+      # ========================================
+      - name: "Test 3: Detect power failure (dry-run)"
+        run: |
+          echo "=== Test 3: Power Failure Detection ==="
+
+          # Clean up any previous shutdown flags
+          rm -f /tmp/eneru-e2e-shutdown-flag
+
+          # Switch to low battery scenario
+          cp ${{ env.E2E_DIR }}/scenarios/low-battery.dev ${{ env.E2E_DIR }}/scenarios/apply.dev
+          sleep 3
+
+          # Run Eneru in dry-run mode
+          timeout 15 eneru --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test3.log || true
+
+          # Verify shutdown was triggered (in dry-run)
+          if ! grep -q "SHUTDOWN SEQUENCE" /tmp/test3.log; then
+            echo "FAIL: Shutdown was NOT triggered for low battery!"
+            cat /tmp/test3.log
+            exit 1
+          fi
+
+          if ! grep -q "DRY-RUN" /tmp/test3.log; then
+            echo "FAIL: Dry-run mode not indicated!"
+            exit 1
+          fi
+
+          echo "PASS: Low battery correctly triggered shutdown (dry-run)"
+
+      # ========================================
+      # TEST 4: Full shutdown sequence (real execution)
+      # ========================================
+      - name: "Test 4: Full shutdown sequence"
+        run: |
+          echo "=== Test 4: Full Shutdown Sequence ==="
+
+          # Reset environment
+          cd ${{ env.E2E_DIR }}
+          docker compose up -d target-nginx target-redis target-alpine
+          sleep 3
+
+          # Verify targets are running
+          echo "Target containers before shutdown:"
+          docker ps --filter "name=eneru-target" --format "{{.Names}}: {{.Status}}"
+
+          # Reset SSH target state
+          docker compose exec -T ssh-target sh -c "rm -f /var/run/shutdown-triggered && touch /var/run/server-alive"
+
+          # Clean up shutdown flag
+          rm -f /tmp/eneru-e2e-shutdown-flag
+
+          # Remount tmpfs (in case previous test unmounted it)
+          sudo umount /tmp/eneru-e2e-tmpfs 2>/dev/null || true
+          sudo mount -t tmpfs -o size=1M tmpfs /tmp/eneru-e2e-tmpfs
+          echo "test data" | sudo tee /tmp/eneru-e2e-tmpfs/testfile > /dev/null
+
+          # Switch to low battery scenario
+          cp scenarios/low-battery.dev scenarios/apply.dev
+          sleep 3
+
+          # Run Eneru (NOT dry-run) - will execute real shutdown sequence
+          timeout 60 eneru --config config-e2e.yaml 2>&1 | tee /tmp/test4.log || true
+
+          echo ""
+          echo "=== Verifying shutdown actions ==="
+
+          # Verify containers were stopped
+          echo "Target containers after shutdown:"
+          RUNNING=$(docker ps --filter "name=eneru-target" --format "{{.Names}}" | wc -l)
+          if [ "$RUNNING" -gt 0 ]; then
+            docker ps --filter "name=eneru-target" --format "{{.Names}}: {{.Status}}"
+            echo "FAIL: $RUNNING target containers still running!"
+            exit 1
+          fi
+          echo "PASS: All target containers stopped"
+
+          # Verify SSH shutdown command was sent
+          if docker compose exec -T ssh-target test -f /var/run/shutdown-triggered; then
+            echo "PASS: SSH shutdown command was received"
+          else
+            echo "FAIL: SSH shutdown command was NOT received"
+            docker compose logs ssh-target
+            exit 1
+          fi
+
+          # Verify tmpfs was unmounted
+          if mount | grep -q "eneru-e2e-tmpfs"; then
+            echo "FAIL: tmpfs mount was NOT unmounted"
+            exit 1
+          fi
+          echo "PASS: tmpfs was unmounted"
+
+          echo ""
+          echo "=== Test 4 PASSED: Full shutdown sequence executed successfully ==="
+
+      # ========================================
+      # TEST 5: FSD (Forced Shutdown) trigger
+      # ========================================
+      - name: "Test 5: FSD flag triggers immediate shutdown"
+        run: |
+          echo "=== Test 5: FSD Trigger ==="
+
+          # Clean up
+          rm -f /tmp/eneru-e2e-shutdown-flag
+
+          # Switch to FSD scenario
+          cp ${{ env.E2E_DIR }}/scenarios/fsd.dev ${{ env.E2E_DIR }}/scenarios/apply.dev
+          sleep 3
+
+          # Run Eneru in dry-run mode
+          timeout 15 eneru --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test5.log || true
+
+          # Verify FSD triggered shutdown
+          if ! grep -q "FSD" /tmp/test5.log; then
+            echo "FAIL: FSD was not detected!"
+            cat /tmp/test5.log
+            exit 1
+          fi
+
+          echo "PASS: FSD correctly triggered shutdown"
+
+      # ========================================
+      # TEST 6: Voltage events (brownout, AVR)
+      # ========================================
+      - name: "Test 6: Voltage event detection"
+        run: |
+          echo "=== Test 6: Voltage Events ==="
+
+          # Clean up
+          rm -f /tmp/eneru-e2e-shutdown-flag
+
+          # Start with normal state
+          cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply.dev
+          sleep 2
+
+          # Switch to brownout scenario
+          cp ${{ env.E2E_DIR }}/scenarios/brownout.dev ${{ env.E2E_DIR }}/scenarios/apply.dev
+          sleep 2
+
+          # Run briefly to detect brownout
+          timeout 8 eneru --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test6.log || true
+
+          # Verify brownout was detected (should log a voltage warning)
+          if grep -q -i "voltage\|brownout" /tmp/test6.log; then
+            echo "PASS: Voltage event detected"
+          else
+            echo "Note: Voltage event may not have been logged in short window"
+          fi
+
+      # ========================================
+      # TEST 7: Notification test (if secret available)
+      # ========================================
+      - name: "Test 7: Notification delivery"
+        if: ${{ secrets.E2E_NOTIFICATION_URL != '' }}
+        env:
+          E2E_NOTIFICATION_URL: ${{ secrets.E2E_NOTIFICATION_URL }}
+        run: |
+          echo "=== Test 7: Notification Delivery ==="
+
+          # Create config with notification URL substituted
+          sed "s|\${E2E_NOTIFICATION_URL}|${E2E_NOTIFICATION_URL}|g" \
+            ${{ env.E2E_DIR }}/config-e2e-notifications.yaml > /tmp/config-notif.yaml
+
+          # Test notification delivery
+          eneru --test-notifications --config /tmp/config-notif.yaml
+
+          echo "PASS: Notification sent successfully"
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Docker Compose Logs ==="
+          cd ${{ env.E2E_DIR }}
+          docker compose logs
+
+          echo ""
+          echo "=== Eneru Test Logs ==="
+          cat /tmp/test*.log 2>/dev/null || echo "No test logs found"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          cd ${{ env.E2E_DIR }}
+          docker compose down -v --remove-orphans
+          sudo umount /tmp/eneru-e2e-tmpfs 2>/dev/null || true

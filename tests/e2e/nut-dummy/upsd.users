@@ -1,0 +1,10 @@
+# upsd users for E2E testing
+
+[admin]
+    password = testpass
+    actions = SET
+    instcmds = ALL
+
+[monitor]
+    password = testpass
+    upsmon master
