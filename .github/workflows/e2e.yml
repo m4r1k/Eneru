@@ -270,11 +270,15 @@ jobs:
       # TEST 7: Notification test (if secret available)
       # ========================================
       - name: "Test 7: Notification delivery"
-        if: ${{ secrets.E2E_NOTIFICATION_URL != '' }}
         env:
           E2E_NOTIFICATION_URL: ${{ secrets.E2E_NOTIFICATION_URL }}
         run: |
           echo "=== Test 7: Notification Delivery ==="
+
+          if [ -z "$E2E_NOTIFICATION_URL" ]; then
+            echo "SKIP: E2E_NOTIFICATION_URL secret not configured"
+            exit 0
+          fi
 
           # Create config with notification URL substituted
           sed "s|\${E2E_NOTIFICATION_URL}|${E2E_NOTIFICATION_URL}|g" \
