@@ -3,10 +3,13 @@
 
 set -e
 
-# If authorized_keys is mounted, try to set proper permissions (may be read-only mount)
-if [ -f /home/testuser/.ssh/authorized_keys ]; then
-    chmod 600 /home/testuser/.ssh/authorized_keys 2>/dev/null || true
-    chown testuser:testuser /home/testuser/.ssh/authorized_keys 2>/dev/null || true
+# Copy authorized_keys from mount point and set correct permissions
+# (bind-mounted files have host UID which SSH rejects)
+if [ -f /tmp/host-authorized-keys ]; then
+    cp /tmp/host-authorized-keys /home/testuser/.ssh/authorized_keys
+    chmod 600 /home/testuser/.ssh/authorized_keys
+    chown testuser:testuser /home/testuser/.ssh/authorized_keys
+    echo "SSH authorized_keys installed for testuser"
 fi
 
 # Reset state on startup

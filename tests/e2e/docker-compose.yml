@@ -24,7 +24,8 @@ services:
     ports:
       - "2222:22"
     volumes:
-      - ./ssh-target/authorized_keys:/home/testuser/.ssh/authorized_keys:ro
+      # Mount to temp location; entrypoint copies with correct ownership
+      - ./ssh-target/authorized_keys:/tmp/host-authorized-keys:ro
     networks:
       - eneru-e2e
 
