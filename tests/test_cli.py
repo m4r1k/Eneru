@@ -432,6 +432,84 @@ behavior:
         assert config.behavior.dry_run is True
 
 
+class TestCLIExitAfterShutdown:
+    """Test --exit-after-shutdown CLI flag."""
+
+    @pytest.mark.unit
+    def test_exit_after_shutdown_flag_sets_monitor_attribute(self, tmp_path):
+        """Test that --exit-after-shutdown flag is passed to UPSMonitor."""
+        from eneru import UPSMonitor, Config
+
+        config = Config()
+        config.ups.name = "TestUPS@localhost"
+
+        # Without the flag (default)
+        monitor = UPSMonitor(config)
+        assert monitor._exit_after_shutdown is False
+
+        # With the flag
+        monitor_with_flag = UPSMonitor(config, exit_after_shutdown=True)
+        assert monitor_with_flag._exit_after_shutdown is True
+
+    @pytest.mark.unit
+    def test_exit_after_shutdown_triggers_exit(self, tmp_path):
+        """Test that shutdown sequence exits when flag is set."""
+        from eneru import UPSMonitor, Config, MonitorState
+
+        config = Config()
+        config.ups.name = "TestUPS@localhost"
+        config.behavior.dry_run = True
+        config.local_shutdown.enabled = False
+        config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
+        config.logging.state_file = str(tmp_path / "state")
+        config.logging.battery_history_file = str(tmp_path / "history")
+        config.virtual_machines.enabled = False
+        config.containers.enabled = False
+        config.filesystems.sync_enabled = False
+        config.filesystems.unmount.enabled = False
+
+        monitor = UPSMonitor(config, exit_after_shutdown=True)
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+        monitor._notification_worker = MagicMock()
+
+        # Mock _cleanup_and_exit to verify it gets called
+        with patch.object(monitor, "_cleanup_and_exit") as mock_exit:
+            monitor._execute_shutdown_sequence()
+
+            # Should have called _cleanup_and_exit due to --exit-after-shutdown
+            mock_exit.assert_called_once()
+
+    @pytest.mark.unit
+    def test_no_exit_without_flag(self, tmp_path):
+        """Test that shutdown sequence does NOT exit when flag is not set."""
+        from eneru import UPSMonitor, Config, MonitorState
+
+        config = Config()
+        config.ups.name = "TestUPS@localhost"
+        config.behavior.dry_run = True
+        config.local_shutdown.enabled = False
+        config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
+        config.logging.state_file = str(tmp_path / "state")
+        config.logging.battery_history_file = str(tmp_path / "history")
+        config.virtual_machines.enabled = False
+        config.containers.enabled = False
+        config.filesystems.sync_enabled = False
+        config.filesystems.unmount.enabled = False
+
+        monitor = UPSMonitor(config, exit_after_shutdown=False)  # Default
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+        monitor._notification_worker = MagicMock()
+
+        # Mock _cleanup_and_exit to verify it does NOT get called
+        with patch.object(monitor, "_cleanup_and_exit") as mock_exit:
+            monitor._execute_shutdown_sequence()
+
+            # Should NOT have called _cleanup_and_exit
+            mock_exit.assert_not_called()
+
+
 class TestCLIConfigPath:
     """Test -c/--config CLI flag."""
 

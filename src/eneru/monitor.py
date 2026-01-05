@@ -7,7 +7,7 @@ https://github.com/m4r1k/Eneru
 
 # Version is set at build time via git describe --tags
 # Format: "4.3.0" for tagged releases, "4.3.0-5-gabcdef1" for dev builds
-__version__ = "4.9.0-rc0"
+__version__ = "4.9.0-rc1"
 
 import subprocess
 import sys
@@ -992,7 +992,7 @@ def format_seconds(seconds: Any) -> str:
 class UPSMonitor:
     """Main UPS Monitor class."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, exit_after_shutdown: bool = False):
         self.config = config
         self.state = MonitorState()
         self.logger: Optional[UPSLogger] = None
@@ -1002,6 +1002,7 @@ class UPSMonitor:
         self._container_runtime: Optional[str] = None
         self._compose_available: bool = False
         self._notification_worker: Optional[NotificationWorker] = None
+        self._exit_after_shutdown = exit_after_shutdown
 
     def run(self):
         """Main entry point."""
@@ -2086,6 +2087,11 @@ class UPSMonitor:
             self._log_message("✅ ========== SHUTDOWN SEQUENCE COMPLETE (local shutdown disabled) ==========")
             self._shutdown_flag_path.unlink(missing_ok=True)
 
+            # Exit if --exit-after-shutdown was specified
+            if self._exit_after_shutdown:
+                self._log_message("🛑 Exiting after shutdown sequence")
+                self._cleanup_and_exit(None, None)
+
     def _trigger_immediate_shutdown(self, reason: str):
         """Trigger an immediate shutdown if not already in progress."""
         if self._shutdown_flag_path.exists():
@@ -2490,6 +2496,11 @@ def main():
         action="version",
         version=f"Eneru v{__version__}"
     )
+    parser.add_argument(
+        "--exit-after-shutdown",
+        action="store_true",
+        help="Exit after completing shutdown sequence (useful for testing/scripting)"
+    )
 
     args = parser.parse_args()
 
@@ -2635,7 +2646,7 @@ def main():
         sys.exit(exit_code)
 
     # Run monitor
-    monitor = UPSMonitor(config)
+    monitor = UPSMonitor(config, exit_after_shutdown=args.exit_after_shutdown)
     monitor.run()
 
 

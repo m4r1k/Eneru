@@ -130,7 +130,7 @@ jobs:
           sleep 3
 
           # Run Eneru in dry-run mode
-          timeout 15 eneru --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test3.log || true
+          eneru --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test3.log || true
 
           # Verify shutdown was triggered (in dry-run)
           if ! grep -q "SHUTDOWN SEQUENCE" /tmp/test3.log; then
@@ -169,7 +169,7 @@ jobs:
           sleep 3
 
           # Run Eneru briefly - will trigger shutdown and send SSH command
-          timeout 15 eneru --config config-e2e.yaml 2>&1 | tee /tmp/test4.log || true
+          eneru --config config-e2e.yaml --exit-after-shutdown 2>&1 | tee /tmp/test4.log || true
 
           echo ""
           echo "=== Verifying SSH shutdown ==="
@@ -205,7 +205,7 @@ jobs:
           sleep 3
 
           # Run Eneru in dry-run mode
-          timeout 15 eneru --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test5.log || true
+          eneru --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test5.log || true
 
           # Verify FSD triggered shutdown
           if ! grep -q "FSD" /tmp/test5.log; then
