@@ -18,8 +18,8 @@
 A Python-based UPS monitoring daemon that watches UPS status via [Network UPS Tools (NUT)](https://networkupstools.org/) and executes configurable shutdown sequences to protect your entire infrastructure during power events.
 
 [Documentation](https://eneru.readthedocs.io/) •
-[Getting Started](https://eneru.readthedocs.io/getting-started/) •
-[Configuration](https://eneru.readthedocs.io/configuration/) •
+[Getting Started](https://eneru.readthedocs.io/latest/getting-started/) •
+[Configuration](https://eneru.readthedocs.io/latest/configuration/) •
 [Changelog](CHANGELOG.md)
 
 </div>
@@ -138,12 +138,13 @@ Named after [Eneru (エネル)](https://onepiece.fandom.com/wiki/Enel) from *One
 
 Full documentation is available at **[eneru.readthedocs.io](https://eneru.readthedocs.io/)**:
 
-- [Getting Started](https://eneru.readthedocs.io/getting-started/) - Installation and basic setup
-- [Configuration](https://eneru.readthedocs.io/configuration/) - Full configuration reference
-- [Shutdown Triggers](https://eneru.readthedocs.io/triggers/) - How shutdown decisions are made
-- [Notifications](https://eneru.readthedocs.io/notifications/) - Setting up Discord, Slack, Telegram, etc.
-- [Remote Servers](https://eneru.readthedocs.io/remote-servers/) - SSH setup for NAS and other servers
-- [Troubleshooting](https://eneru.readthedocs.io/troubleshooting/) - Common issues and solutions
+- [Getting Started](https://eneru.readthedocs.io/latest/getting-started/) - Installation and basic setup
+- [Configuration](https://eneru.readthedocs.io/latest/configuration/) - Full configuration reference
+- [Shutdown Triggers](https://eneru.readthedocs.io/latest/triggers/) - How shutdown decisions are made
+- [Notifications](https://eneru.readthedocs.io/latest/notifications/) - Setting up Discord, Slack, Telegram, etc.
+- [Remote Servers](https://eneru.readthedocs.io/latest/remote-servers/) - SSH setup for NAS and other servers
+- [Testing](https://eneru.readthedocs.io/latest/testing/) - Testing strategy and coverage
+- [Troubleshooting](https://eneru.readthedocs.io/latest/troubleshooting/) - Common issues and solutions
 
 ---
 
