@@ -46,13 +46,21 @@ jobs:
             # Release trigger - extract from tag (e.g., v4.3.0 -> 4.3.0)
             VERSION="${GITHUB_REF#refs/tags/v}"
           fi
+
+          # Get short commit hash for code version
+          SHORT_HASH=$(git rev-parse --short HEAD)
+          VERSION_FULL="${VERSION}-${SHORT_HASH}"
+
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "Building version: $VERSION"
+          echo "VERSION_FULL=$VERSION_FULL" >> $GITHUB_OUTPUT
+          echo "Building packages version: $VERSION"
+          echo "Code version: $VERSION_FULL"
 
       - name: Update version in script
         run: |
-          # Update __version__ in the Python script
-          sed -i "s/^__version__ = .*/__version__ = \"${{ steps.version.outputs.VERSION }}\"/" src/eneru/monitor.py
+          # Update __version__ with full version including git hash
+          # This only affects the code display (--version, logs), not package versions
+          sed -i "s/^__version__ = .*/__version__ = \"${{ steps.version.outputs.VERSION_FULL }}\"/" src/eneru/monitor.py
           # Verify the change
           grep "__version__" src/eneru/monitor.py
 
@@ -271,7 +279,8 @@ jobs:
         run: |
           echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Version:** ${{ steps.version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Package Version:** ${{ steps.version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Code Version:** ${{ steps.version.outputs.VERSION_FULL }}" >> $GITHUB_STEP_SUMMARY
           echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Packages Built" >> $GITHUB_STEP_SUMMARY
