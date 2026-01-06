@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.9.0] - 2026-01-06
+
+### Added
+- **End-to-End (E2E) Test Suite:** Comprehensive E2E testing infrastructure with real services
+    - NUT server with dummy driver for UPS state simulation (8 scenarios)
+    - SSH target container for remote shutdown command verification
+    - Docker Compose test environment for local and CI testing
+    - 7 automated tests covering config validation, power failure detection, SSH shutdown, FSD triggers, voltage events, and notifications
+    - New GitHub Actions workflow (`.github/workflows/e2e.yml`) runs on every push/PR
+- **`--exit-after-shutdown` CLI Flag:** Exit after completing shutdown sequence instead of continuing to monitor
+    - Useful for E2E testing and scripting scenarios
+    - Enables clean test completion in CI environments
+
+### Fixed
+- **Dry-run Mode:** Wall broadcast messages are now skipped in dry-run mode to avoid false alerts during testing
+
+---
+
 ## [4.8.0] - 2026-01-04
 
 ### Added
@@ -393,6 +411,17 @@ During power outages, network connectivity is often unreliable. The previous blo
 ---
 
 ## Version Comparison
+
+### v4.9 vs v4.8
+
+| Feature | v4.8 | v4.9 |
+|---------|------|------|
+| E2E Testing | Not available | Full E2E suite with NUT, SSH, Docker |
+| UPS Simulation | Manual testing only | 8 automated scenarios (dummy driver) |
+| `--exit-after-shutdown` | Not available | Exit after shutdown for scripting/testing |
+| Dry-run Wall Broadcast | Sent wall messages | Skipped in dry-run mode |
+| CI Workflows | 4 (validate, integration, release, pypi) | 5 (+ e2e) |
+| Test Automation | Unit + package install | Unit + package install + E2E |
 
 ### v4.8 vs v4.7
 

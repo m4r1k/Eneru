@@ -331,6 +331,41 @@ See [Remote Servers](remote-servers.md) for SSH setup instructions.
 
 ---
 
+## Command-Line Options
+
+Eneru supports the following command-line options:
+
+| Option | Description |
+|--------|-------------|
+| `-h`, `--help` | Show help message and exit |
+| `-c CONFIG`, `--config CONFIG` | Path to configuration file (default: `/etc/ups-monitor/config.yaml`) |
+| `--dry-run` | Run in dry-run mode (overrides config file setting) |
+| `--validate-config` | Validate configuration file and exit |
+| `--test-notifications` | Send a test notification and exit |
+| `-v`, `--version` | Show version number and exit |
+| `--exit-after-shutdown` | Exit after completing shutdown sequence (useful for testing/scripting) |
+
+### Examples
+
+```bash
+# Validate configuration
+eneru --validate-config
+
+# Run with custom config file
+eneru --config /path/to/config.yaml
+
+# Test in dry-run mode
+eneru --dry-run
+
+# Send a test notification
+eneru --test-notifications
+
+# Run once and exit after shutdown (for scripting/testing)
+eneru --exit-after-shutdown
+```
+
+---
+
 ## Validating Configuration
 
 Always validate your configuration before starting the service:

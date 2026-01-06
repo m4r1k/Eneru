@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.9.0] - 2026-01-06
+
+### Added
+- **End-to-End (E2E) Test Suite:** Comprehensive E2E testing with real NUT, SSH, and Docker services
+    - 8 UPS scenarios (online, low-battery, FSD, brownout, etc.)
+    - 7 automated tests running on every push/PR
+    - Docker Compose environment for local testing
+- **`--exit-after-shutdown` CLI Flag:** Exit after shutdown sequence for testing/scripting
+
+### Fixed
+- **Dry-run Mode:** Wall broadcast messages skipped in dry-run mode
+
+---
+
 ## [4.8.0] - 2026-01-04
 
 ### Added

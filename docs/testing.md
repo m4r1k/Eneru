@@ -1,6 +1,6 @@
 # Testing
 
-Eneru uses a comprehensive testing strategy to ensure reliability across different environments. **Every commit triggers the full test suite**—unit tests, integration tests across 7 Linux distributions, and configuration validation—ensuring no regressions reach users.
+Eneru uses a comprehensive testing strategy to ensure reliability across different environments. **Every commit triggers the full test suite**—unit tests, integration tests across 7 Linux distributions, end-to-end tests with real NUT/SSH/Docker services, and configuration validation—ensuring no regressions reach users.
 
 This page documents the automated test suite and the manual validation performed before each release.
 
@@ -12,33 +12,36 @@ This page documents the automated test suite and the manual validation performed
                           ▲
                          ╱ ╲
                         ╱   ╲
-                       ╱Real ╲
-                      ╱  UPS  ╲
-                     ╱  Power  ╲
-                    ╱  Events   ╲
-                   ╱─────────────╲
-                  ╱  Integration  ╲
-                 ╱  Package & Pip  ╲
-                ╱   Linux Distros   ╲
-               ╱─────────────────────╲
-              ╱      Unit Tests       ╲
-             ╱   pytest + Coverage     ╲
-            ╱     Python Versions       ╲
-           ╱─────────────────────────────╲
-          ╱       Static Analysis         ╲
-         ╱    Syntax Check + Validation    ╲
-        ╱───────────────────────────────────╲
-       ╱          AI-Assisted Dev            ╲
-      ╱      Claude Code Review & QA          ╲
-     ╱─────────────────────────────────────────╲
+                       ╱ UPS ╲
+                      ╱ Power ╲
+                     ╱  Events ╲
+                    ╱───────────╲
+                   ╱  End-to-End ╲
+                  ╱ NUT+SSH+Docker╲
+                 ╱─────────────────╲
+                ╱    Integration    ╲
+               ╱Package & Pip Install╲
+              ╱    7 Linux Distros    ╲
+             ╱─────────────────────────╲
+            ╱         Unit Tests        ╲
+           ╱   pytest + Coverage (185+)  ╲
+          ╱      6 Python Versions        ╲
+         ╱─────────────────────────────────╲
+        ╱          Static Analysis          ╲
+       ╱   Syntax Check + Config Validation  ╲
+      ╱───────────────────────────────────────╲
+     ╱          AI-Assisted Development        ╲
+    ╱   Claude Code Review & Quality Assurance  ╲
+   ╱─────────────────────────────────────────────╲
 ```
 
 | Layer | Frequency | What It Tests |
 |-------|-----------|---------------|
 | **AI-Assisted Dev** | Continuous | Code review, implementation guidance |
 | **Static Analysis** | Every commit | Python syntax, config validation |
-| **Unit Tests** | Every commit | Logic, state machine, edge cases |
-| **Integration** | Every commit | Package install on real distros |
+| **Unit Tests** | Every commit | Logic, state machine, edge cases (185+ tests) |
+| **Integration** | Every commit | Package install on 7 Linux distros |
+| **E2E Tests** | Every commit | Full workflow with real NUT, SSH, Docker |
 | **Real UPS** | Pre-release | Actual hardware, power events |
 
 ---
@@ -123,6 +126,104 @@ pytest tests/test_config.py -v
 
 ---
 
+## End-to-End (E2E) Testing
+
+In addition to unit and integration tests, Eneru includes a comprehensive E2E test suite that validates the full monitoring and shutdown workflow using real services.
+
+### E2E Test Environment
+
+The E2E tests spin up a complete test environment with Docker Compose:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Test Environment                         │
+│                                                             │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐   │
+│  │  NUT Server  │    │  SSH Target  │    │   Target     │   │
+│  │  (dummy-ups) │    │   (sshd)     │    │  Containers  │   │
+│  │  :3493       │    │   :2222      │    │              │   │
+│  └──────────────┘    └──────────────┘    └──────────────┘   │
+│         │                   │                   │           │
+│         └───────────────────┼───────────────────┘           │
+│                             │                               │
+│                     ┌───────▼───────┐                       │
+│                     │    Eneru      │                       │
+│                     │  (under test) │                       │
+│                     └───────────────┘                       │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- **NUT Server** with dummy driver - Simulates UPS states without real hardware
+- **SSH Target** container - Receives and logs shutdown commands
+- **Target Containers** - Docker containers that Eneru can shut down
+- **tmpfs Mount** - For testing filesystem unmount operations
+
+### UPS Scenarios
+
+The E2E tests use scenario files to simulate different UPS states:
+
+| Scenario | Description | Triggers Shutdown? |
+|----------|-------------|-------------------|
+| `online-charging.dev` | Normal operation, fully charged | No |
+| `on-battery.dev` | On battery, battery OK | No |
+| `low-battery.dev` | Battery below 20% threshold | Yes |
+| `critical-runtime.dev` | Runtime below 600s threshold | Yes |
+| `fsd.dev` | UPS signals Forced Shutdown | Yes |
+| `avr-boost.dev` | AVR boosting low voltage | No |
+| `brownout.dev` | Voltage below warning threshold | No |
+| `overload.dev` | UPS overloaded | No |
+
+### E2E Test Cases
+
+The E2E workflow (`.github/workflows/e2e.yml`) runs 7 tests on every push and PR:
+
+| Test | Description |
+|------|-------------|
+| **Test 1** | Validate E2E config against real NUT server |
+| **Test 2** | Monitor normal state - verify no false shutdown triggers |
+| **Test 3** | Detect power failure in dry-run mode |
+| **Test 4** | SSH remote shutdown with real command execution |
+| **Test 5** | FSD (Forced Shutdown) flag triggers immediate shutdown |
+| **Test 6** | Voltage event detection (brownout, AVR) |
+| **Test 7** | Notification delivery (if `E2E_NOTIFICATION_URL` secret configured) |
+
+### Running E2E Tests Locally
+
+You can run the E2E tests on your local machine:
+
+```bash
+# From repository root
+cd tests/e2e
+
+# Generate SSH keys for the test
+ssh-keygen -t ed25519 -f /tmp/e2e-ssh-key -N ""
+cp /tmp/e2e-ssh-key.pub ssh-target/authorized_keys
+
+# Start the test environment
+docker compose up -d --build
+
+# Wait for services to be ready
+sleep 10
+
+# Verify NUT is working
+upsc TestUPS@localhost:3493
+
+# Run Eneru in dry-run mode
+eneru --validate-config --config config-e2e-dry-run.yaml
+
+# Simulate a power failure
+cp scenarios/low-battery.dev scenarios/apply.dev
+eneru --config config-e2e-dry-run.yaml --exit-after-shutdown
+
+# Cleanup
+docker compose down -v
+```
+
+See `tests/e2e/README.md` for more details.
+
+---
+
 ## Pre-Release Validation
 
 !!! important "Real Hardware Testing"
@@ -178,6 +279,7 @@ journalctl -u eneru.service -f
 |----------|------|---------|
 | Validate | `.github/workflows/validate.yml` | Push, PR |
 | Integration | `.github/workflows/integration.yml` | Push, PR |
+| E2E | `.github/workflows/e2e.yml` | Push, PR |
 | Release | `.github/workflows/release.yml` | Release published |
 | PyPI | `.github/workflows/pypi.yml` | Release published |
 
@@ -185,6 +287,7 @@ journalctl -u eneru.service -f
 
 - [Validate Workflow Runs](https://github.com/m4r1k/Eneru/actions/workflows/validate.yml)
 - [Integration Workflow Runs](https://github.com/m4r1k/Eneru/actions/workflows/integration.yml)
+- [E2E Workflow Runs](https://github.com/m4r1k/Eneru/actions/workflows/e2e.yml)
 - [Release Workflow Runs](https://github.com/m4r1k/Eneru/actions/workflows/release.yml)
 - [PyPI Workflow Runs](https://github.com/m4r1k/Eneru/actions/workflows/pypi.yml)
 

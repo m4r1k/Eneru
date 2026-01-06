@@ -89,7 +89,13 @@ See [Notifications](notifications.md) for the architecture and setup guide.
 
 ### Tested on Every Commit
 
-Every commit triggers the full test suite across 7 Linux distributions (Debian, Ubuntu, RHEL) and 6 Python versions, ensuring no regressions. Before each release, Eneru is validated on real hardware with actual UPS units and simulated power events. See [Testing](testing.md) for details.
+Every commit triggers the full test suite:
+
+- **185+ unit tests** across 6 Python versions (3.9-3.14)
+- **Integration tests** verifying package installation on 7 Linux distributions (Debian, Ubuntu, RHEL)
+- **End-to-end tests** with real NUT server, SSH target, and Docker containers in CI
+
+The E2E test suite simulates 8 UPS scenarios (online, low-battery, FSD, brownout, etc.) and validates the complete shutdown workflow—from power failure detection to SSH remote shutdown execution. Before each release, Eneru is also validated on real hardware with actual UPS units and simulated power events. See [Testing](testing.md) for details.
 
 ---
 
