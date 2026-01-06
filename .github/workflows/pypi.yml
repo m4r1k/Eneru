@@ -3,6 +3,17 @@ name: PyPI
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g., 4.3.0-rc0)'
+        required: true
+        type: string
+      ref:
+        description: 'Git ref to checkout (tag, branch, or commit SHA)'
+        required: true
+        type: string
+        default: 'main'
 
 jobs:
   publish:
@@ -13,6 +24,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -24,27 +37,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install build twine
 
-      - name: Extract version from tag
+      - name: Extract version
         id: version
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-
-          # Get short commit hash for code version
-          # Use + for PEP 440 local version identifier
-          SHORT_HASH=$(git rev-parse --short HEAD)
-          VERSION_FULL="${VERSION}+${SHORT_HASH}"
-
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual trigger - use input version
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            # Release trigger - extract from tag (e.g., v4.9 -> 4.9)
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "VERSION_FULL=$VERSION_FULL" >> $GITHUB_OUTPUT
           echo "Publishing package version: $VERSION"
-          echo "Code version: $VERSION_FULL"
 
       - name: Update version in script
         run: |
-          # Update __version__ with full version including git hash
-          # PyPI strips local version (+hash) from package metadata,
-          # but the installed code will show the full version
-          sed -i "s/^__version__ = .*/__version__ = \"${{ steps.version.outputs.VERSION_FULL }}\"/" src/eneru/monitor.py
+          # Update __version__ with clean version for PyPI
+          # PyPI does not allow local version identifiers (+hash)
+          sed -i "s/^__version__ = .*/__version__ = \"${{ steps.version.outputs.VERSION }}\"/" src/eneru/monitor.py
           grep "__version__" src/eneru/monitor.py
 
       - name: Build package
