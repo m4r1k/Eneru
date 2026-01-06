@@ -55,7 +55,7 @@ eneru = "eneru:main"
 
 [project.urls]
 Homepage = "https://github.com/m4r1k/Eneru"
-Documentation = "https://eneru.readthedocs.io/en/latest/"
+Documentation = "https://eneru.readthedocs.io/latest/"
 Repository = "https://github.com/m4r1k/Eneru.git"
 Issues = "https://github.com/m4r1k/Eneru/issues"
 Changelog = "https://github.com/m4r1k/Eneru/blob/main/CHANGELOG.md"
