@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to publish (e.g., 4.3.0-rc0)'
+        description: 'Version to publish (e.g., 4.9)'
         required: true
         type: string
       ref:
