@@ -6,9 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to build (e.g., 4.3.0-rc0)'
+        description: 'Version to build (e.g., 4.9)'
         required: true
         type: string
+      ref:
+        description: 'Git ref to checkout (tag, branch, or commit SHA)'
+        required: true
+        type: string
+        default: 'main'
 
 permissions:
   contents: write
@@ -19,6 +24,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
