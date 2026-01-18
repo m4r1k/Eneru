@@ -50,11 +50,89 @@ overrides:
 
 # Files to include in the package
 contents:
-  # Main script
-  - src: src/eneru/monitor.py
+  # Wrapper script (entry point)
+  - src: packaging/eneru-wrapper.py
     dst: /opt/ups-monitor/eneru.py
     file_info:
       mode: 0755
+      owner: root
+      group: root
+
+  # Eneru package modules
+  - src: src/eneru/__init__.py
+    dst: /opt/ups-monitor/eneru/__init__.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/__main__.py
+    dst: /opt/ups-monitor/eneru/__main__.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/version.py
+    dst: /opt/ups-monitor/eneru/version.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/config.py
+    dst: /opt/ups-monitor/eneru/config.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/state.py
+    dst: /opt/ups-monitor/eneru/state.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/logger.py
+    dst: /opt/ups-monitor/eneru/logger.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/notifications.py
+    dst: /opt/ups-monitor/eneru/notifications.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/utils.py
+    dst: /opt/ups-monitor/eneru/utils.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/actions.py
+    dst: /opt/ups-monitor/eneru/actions.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/monitor.py
+    dst: /opt/ups-monitor/eneru/monitor.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/cli.py
+    dst: /opt/ups-monitor/eneru/cli.py
+    file_info:
+      mode: 0644
       owner: root
       group: root
 
@@ -77,6 +155,14 @@ contents:
 
   # Create the /opt/ups-monitor directory
   - dst: /opt/ups-monitor
+    type: dir
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Create the /opt/ups-monitor/eneru package directory
+  - dst: /opt/ups-monitor/eneru
     type: dir
     file_info:
       mode: 0755
