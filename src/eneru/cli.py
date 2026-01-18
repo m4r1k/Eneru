@@ -108,7 +108,7 @@ def main():
                         print(f"    Avatar URL: {config.notifications.avatar_url[:50]}...")
                     print(f"    Retry interval: {config.notifications.retry_interval}s")
                 else:
-                    print(f"    Apprise not installed - notifications disabled")
+                    print(f"    ⚠️ Apprise not installed - notifications disabled")
                     print(f"    Install with: pip install apprise")
             else:
                 print(f"    Disabled")
@@ -130,11 +130,11 @@ def main():
             print("Testing notifications...")
 
             if not config.notifications.enabled or not config.notifications.urls:
-                print("No notification URLs configured.")
+                print("❌ No notification URLs configured.")
                 print("   Add URLs to the 'notifications.urls' section in your config file.")
                 exit_code = 1
             elif not APPRISE_AVAILABLE:
-                print("Apprise is not installed.")
+                print("❌ Apprise is not installed.")
                 print("   Install with: pip install apprise")
                 exit_code = 1
             else:
@@ -147,12 +147,12 @@ def main():
                         valid_urls += 1
                         # Extract scheme without avatar params for display
                         scheme = url.split('://')[0] if '://' in url else 'unknown'
-                        print(f"  Added: {scheme}://***")
+                        print(f"  ✅ Added: {scheme}://***")
                     else:
-                        print(f"  Invalid URL: {url[:30]}...")
+                        print(f"  ❌ Invalid URL: {url[:30]}...")
 
                 if valid_urls == 0:
-                    print("No valid notification URLs found.")
+                    print("❌ No valid notification URLs found.")
                     exit_code = 1
                 else:
                     print(f"\nSending test notification to {valid_urls} service(s)...")
@@ -167,7 +167,7 @@ def main():
                         "**Test Notification**\n"
                         "This is a test notification from Eneru.\n"
                         "If you see this, notifications are working correctly!\n"
-                        f"\n---\nUPS: {config.ups.name}\n"
+                        f"\n---\n⚡ UPS: {config.ups.name}\n"
                         f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')}"
                     )
 
@@ -187,9 +187,9 @@ def main():
                     result = apobj.notify(**notify_kwargs)
 
                     if result:
-                        print("Test notification sent successfully!")
+                        print("✅ Test notification sent successfully!")
                     else:
-                        print("Failed to send test notification.")
+                        print("❌ Failed to send test notification.")
                         print("   Check your notification URLs and network connectivity.")
                         exit_code = 1
 

@@ -102,6 +102,18 @@ README.md                       # Project overview
 - PEP 8 compliant
 - Docstrings for public functions/classes
 - Tests in `tests/` following `test_*.py` pattern
+- **Emojis in logs/notifications**: The codebase uses emojis for visual clarity in log messages and notifications:
+  - ⚡ Power events, UPS info
+  - 🔋 Battery status
+  - ⚠️ Warnings
+  - ❌ Errors/failures
+  - ✅ Success/completion
+  - 📢 Notifications
+  - 🖥️ VMs
+  - 🐳 Containers
+  - 🌐 Remote servers
+  - 🔌 Shutdown/power
+  - 🛑 Service stop
 
 ## Conventions
 

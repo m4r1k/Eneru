@@ -73,9 +73,9 @@ class UPSMonitor:
         except KeyboardInterrupt:
             self._cleanup_and_exit(signal.SIGINT, None)
         except Exception as e:
-            self._log_message(f"FATAL ERROR: {e}")
+            self._log_message(f"❌ FATAL ERROR: {e}")
             self._send_notification(
-                f"**FATAL ERROR**\nError: {e}",
+                f"❌ **FATAL ERROR**\nError: {e}",
                 self.config.NOTIFY_FAILURE
             )
             raise
@@ -98,7 +98,7 @@ class UPSMonitor:
         try:
             self._battery_history_path.write_text("")
         except PermissionError:
-            self._log_message(f"WARNING: Cannot write to {self._battery_history_path}")
+            self._log_message(f"⚠️ WARNING: Cannot write to {self._battery_history_path}")
 
         # Initialize notification worker
         self._initialize_notifications()
@@ -121,11 +121,11 @@ class UPSMonitor:
     def _initialize_notifications(self):
         """Initialize the notification worker."""
         if not self.config.notifications.enabled:
-            self._log_message("Notifications: disabled")
+            self._log_message("📢 Notifications: disabled")
             return
 
         if not APPRISE_AVAILABLE:
-            self._log_message("WARNING: Notifications enabled but apprise not installed. "
+            self._log_message("⚠️ WARNING: Notifications enabled but apprise not installed. "
                               "Install with: pip install apprise")
             self.config.notifications.enabled = False
             return
@@ -133,9 +133,9 @@ class UPSMonitor:
         self._notification_worker = NotificationWorker(self.config)
         if self._notification_worker.start():
             service_count = self._notification_worker.get_service_count()
-            self._log_message(f"Notifications: enabled ({service_count} service(s))")
+            self._log_message(f"📢 Notifications: enabled ({service_count} service(s))")
         else:
-            self._log_message("WARNING: Failed to initialize notifications")
+            self._log_message("⚠️ WARNING: Failed to initialize notifications")
             self.config.notifications.enabled = False
 
     def _log_enabled_features(self):
@@ -226,12 +226,12 @@ class UPSMonitor:
 
     def _log_power_event(self, event: str, details: str):
         """Log power events with centralized notification logic."""
-        self._log_message(f"POWER EVENT: {event} - {details}")
+        self._log_message(f"⚡ POWER EVENT: {event} - {details}")
 
         try:
             run_command([
                 "logger", "-t", "ups-monitor", "-p", "daemon.warning",
-                f"POWER EVENT: {event} - {details}"
+                f"⚡ POWER EVENT: {event} - {details}"
             ])
         except Exception:
             pass
@@ -243,51 +243,51 @@ class UPSMonitor:
 
         event_handlers = {
             "ON_BATTERY": (
-                f"**POWER FAILURE DETECTED!**\nSystem running on battery.\nDetails: {details}",
+                f"⚠️ **POWER FAILURE DETECTED!**\nSystem running on battery.\nDetails: {details}",
                 self.config.NOTIFY_WARNING
             ),
             "POWER_RESTORED": (
-                f"**POWER RESTORED**\nSystem back on line power/charging.\nDetails: {details}",
+                f"✅ **POWER RESTORED**\nSystem back on line power/charging.\nDetails: {details}",
                 self.config.NOTIFY_SUCCESS
             ),
             "BROWNOUT_DETECTED": (
-                f"**VOLTAGE ISSUE:** {event}\nDetails: {details}",
+                f"⚠️ **VOLTAGE ISSUE:** {event}\nDetails: {details}",
                 self.config.NOTIFY_WARNING
             ),
             "OVER_VOLTAGE_DETECTED": (
-                f"**VOLTAGE ISSUE:** {event}\nDetails: {details}",
+                f"⚠️ **VOLTAGE ISSUE:** {event}\nDetails: {details}",
                 self.config.NOTIFY_WARNING
             ),
             "AVR_BOOST_ACTIVE": (
-                f"**AVR ACTIVE:** {event}\nDetails: {details}",
+                f"⚡ **AVR ACTIVE:** {event}\nDetails: {details}",
                 self.config.NOTIFY_WARNING
             ),
             "AVR_TRIM_ACTIVE": (
-                f"**AVR ACTIVE:** {event}\nDetails: {details}",
+                f"⚡ **AVR ACTIVE:** {event}\nDetails: {details}",
                 self.config.NOTIFY_WARNING
             ),
             "BYPASS_MODE_ACTIVE": (
-                f"**UPS IN BYPASS MODE!**\nNo protection active!\nDetails: {details}",
+                f"⚠️ **UPS IN BYPASS MODE!**\nNo protection active!\nDetails: {details}",
                 self.config.NOTIFY_FAILURE
             ),
             "BYPASS_MODE_INACTIVE": (
-                f"**Bypass Mode Inactive**\nProtection restored.\nDetails: {details}",
+                f"✅ **Bypass Mode Inactive**\nProtection restored.\nDetails: {details}",
                 self.config.NOTIFY_SUCCESS
             ),
             "OVERLOAD_ACTIVE": (
-                f"**UPS OVERLOAD DETECTED!**\nDetails: {details}",
+                f"⚠️ **UPS OVERLOAD DETECTED!**\nDetails: {details}",
                 self.config.NOTIFY_FAILURE
             ),
             "OVERLOAD_RESOLVED": (
-                f"**Overload Resolved**\nDetails: {details}",
+                f"✅ **Overload Resolved**\nDetails: {details}",
                 self.config.NOTIFY_SUCCESS
             ),
             "CONNECTION_LOST": (
-                f"**ERROR: Connection Lost**\n{details}",
+                f"❌ **ERROR: Connection Lost**\n{details}",
                 self.config.NOTIFY_FAILURE
             ),
             "CONNECTION_RESTORED": (
-                f"**Connection Restored**\n{details}",
+                f"✅ **Connection Restored**\n{details}",
                 self.config.NOTIFY_SUCCESS
             ),
         }
@@ -300,7 +300,7 @@ class UPSMonitor:
             notification = event_handlers[event]
         else:
             notification = (
-                f"**Event:** {event}\nDetails: {details}",
+                f"⚡ **Event:** {event}\nDetails: {details}",
                 self.config.NOTIFY_INFO
             )
 
@@ -313,40 +313,40 @@ class UPSMonitor:
         missing = [cmd for cmd in required_cmds if not command_exists(cmd)]
 
         if missing:
-            error_msg = f"FATAL ERROR: Missing required commands: {', '.join(missing)}"
+            error_msg = f"❌ FATAL ERROR: Missing required commands: {', '.join(missing)}"
             print(error_msg)
             sys.exit(1)
 
         # Check optional dependencies based on enabled features
         if self.config.virtual_machines.enabled and not command_exists("virsh"):
-            self._log_message("WARNING: 'virsh' not found but VM shutdown is enabled. VMs will be skipped.")
+            self._log_message("⚠️ WARNING: 'virsh' not found but VM shutdown is enabled. VMs will be skipped.")
             self.config.virtual_machines.enabled = False
 
         # Container runtime detection
         if self.config.containers.enabled:
             self._container_runtime = self._detect_container_runtime()
             if self._container_runtime:
-                self._log_message(f"Container runtime detected: {self._container_runtime}")
+                self._log_message(f"🐳 Container runtime detected: {self._container_runtime}")
                 # Check compose availability if compose_files are configured
                 if self.config.containers.compose_files:
                     self._compose_available = self._check_compose_available()
                     if self._compose_available:
                         self._log_message(
-                            f"Compose support: enabled ({self._container_runtime} compose, "
+                            f"🐳 Compose support: enabled ({self._container_runtime} compose, "
                             f"{len(self.config.containers.compose_files)} file(s))"
                         )
                     else:
                         self._log_message(
-                            f"WARNING: compose_files configured but '{self._container_runtime} compose' "
+                            f"⚠️ WARNING: compose_files configured but '{self._container_runtime} compose' "
                             "not available. Compose shutdown will be skipped."
                         )
             else:
-                self._log_message("WARNING: No container runtime found. Container shutdown will be skipped.")
+                self._log_message("⚠️ WARNING: No container runtime found. Container shutdown will be skipped.")
                 self.config.containers.enabled = False
 
         enabled_servers = [s for s in self.config.remote_servers if s.enabled]
         if enabled_servers and not command_exists("ssh"):
-            self._log_message("WARNING: 'ssh' not found but remote servers are configured. Remote shutdown will be skipped.")
+            self._log_message("⚠️ WARNING: 'ssh' not found but remote servers are configured. Remote shutdown will be skipped.")
             for server in self.config.remote_servers:
                 server.enabled = False
 
@@ -357,13 +357,13 @@ class UPSMonitor:
         if runtime_config == "docker":
             if command_exists("docker"):
                 return "docker"
-            self._log_message("WARNING: Docker specified but not found")
+            self._log_message("⚠️ WARNING: Docker specified but not found")
             return None
 
         elif runtime_config == "podman":
             if command_exists("podman"):
                 return "podman"
-            self._log_message("WARNING: Podman specified but not found")
+            self._log_message("⚠️ WARNING: Podman specified but not found")
             return None
 
         elif runtime_config == "auto":
@@ -374,7 +374,7 @@ class UPSMonitor:
             return None
 
         else:
-            self._log_message(f"WARNING: Unknown container runtime '{runtime_config}'")
+            self._log_message(f"⚠️ WARNING: Unknown container runtime '{runtime_config}'")
             return None
 
     def _check_compose_available(self) -> bool:
@@ -454,14 +454,14 @@ class UPSMonitor:
             success, _, _ = self._get_all_ups_data()
             if success:
                 connected = True
-                self._log_message("Initial connection successful.")
+                self._log_message("✅ Initial connection successful.")
                 break
             time.sleep(wait_interval)
             time_waited += wait_interval
 
         if not connected:
             self._log_message(
-                f"WARNING: Failed to connect to {self.config.ups.name} "
+                f"⚠️ WARNING: Failed to connect to {self.config.ups.name} "
                 f"within {max_wait}s. Proceeding, but voltage thresholds may default."
             )
 
@@ -530,7 +530,7 @@ class UPSMonitor:
         if not self.config.virtual_machines.enabled:
             return
 
-        self._log_message("Shutting down all libvirt virtual machines...")
+        self._log_message("🖥️ Shutting down all libvirt virtual machines...")
 
         if not command_exists("virsh"):
             self._log_message("  virsh not available, skipping VM shutdown")
@@ -538,7 +538,7 @@ class UPSMonitor:
 
         exit_code, stdout, _ = run_command(["virsh", "list", "--name", "--state-running"])
         if exit_code != 0:
-            self._log_message("  Failed to get VM list")
+            self._log_message("  ⚠️ Failed to get VM list")
             return
 
         running_vms = [vm.strip() for vm in stdout.strip().split('\n') if vm.strip()]
@@ -571,7 +571,7 @@ class UPSMonitor:
             remaining_vms = [vm for vm in running_vms if vm in still_running]
 
             if not remaining_vms:
-                self._log_message(f"  All VMs stopped gracefully after {time_waited}s.")
+                self._log_message(f"  ✅ All VMs stopped gracefully after {time_waited}s.")
                 break
 
             self._log_message(f"  Still waiting for: {' '.join(remaining_vms)} (Waited {time_waited}s)")
@@ -579,12 +579,12 @@ class UPSMonitor:
             time_waited += wait_interval
 
         if remaining_vms:
-            self._log_message("  Timeout reached. Force destroying remaining VMs.")
+            self._log_message("  ⚠️ Timeout reached. Force destroying remaining VMs.")
             for vm in remaining_vms:
-                self._log_message(f"  Force destroying VM: {vm}")
+                self._log_message(f"  ⚡ Force destroying VM: {vm}")
                 run_command(["virsh", "destroy", vm])
 
-        self._log_message("  All VMs shutdown complete")
+        self._log_message("  ✅ All VMs shutdown complete")
 
     def _shutdown_compose_stacks(self):
         """Shutdown docker/podman compose stacks in order (best effort)."""
@@ -598,7 +598,7 @@ class UPSMonitor:
         runtime_display = runtime.capitalize()
 
         self._log_message(
-            f"Stopping {runtime_display} Compose stacks "
+            f"🐳 Stopping {runtime_display} Compose stacks "
             f"({len(self.config.containers.compose_files)} file(s))..."
         )
 
@@ -614,7 +614,7 @@ class UPSMonitor:
 
             # Check if file exists (best effort - warn if not)
             if not Path(file_path).exists():
-                self._log_message(f"  Compose file not found: {file_path} (skipping)")
+                self._log_message(f"  ⚠️ Compose file not found: {file_path} (skipping)")
                 continue
 
             self._log_message(f"  Stopping: {file_path} (timeout: {timeout}s)")
@@ -630,16 +630,16 @@ class UPSMonitor:
             exit_code, stdout, stderr = run_command(compose_cmd, timeout=timeout + 30)
 
             if exit_code == 0:
-                self._log_message(f"  {file_path} stopped successfully")
+                self._log_message(f"  ✅ {file_path} stopped successfully")
             elif exit_code == 124:
                 self._log_message(
-                    f"  {file_path} compose down timed out after {timeout}s (continuing)"
+                    f"  ⚠️ {file_path} compose down timed out after {timeout}s (continuing)"
                 )
             else:
                 error_msg = stderr.strip() if stderr.strip() else f"exit code {exit_code}"
-                self._log_message(f"  {file_path} compose down failed: {error_msg} (continuing)")
+                self._log_message(f"  ⚠️ {file_path} compose down failed: {error_msg} (continuing)")
 
-        self._log_message("  Compose stacks shutdown complete")
+        self._log_message("  ✅ Compose stacks shutdown complete")
 
     def _shutdown_containers(self):
         """Stop all containers using detected runtime (Docker/Podman).
@@ -662,15 +662,15 @@ class UPSMonitor:
 
         # Phase 2: Shutdown all remaining containers
         if not self.config.containers.shutdown_all_remaining_containers:
-            self._log_message(f"Skipping remaining {runtime_display} container shutdown (disabled)")
+            self._log_message(f"🐳 Skipping remaining {runtime_display} container shutdown (disabled)")
             return
 
-        self._log_message(f"Stopping all remaining {runtime_display} containers...")
+        self._log_message(f"🐳 Stopping all remaining {runtime_display} containers...")
 
         # Get list of running containers
         exit_code, stdout, _ = run_command([runtime, "ps", "-q"])
         if exit_code != 0:
-            self._log_message(f"  Failed to get {runtime_display} container list")
+            self._log_message(f"  ⚠️ Failed to get {runtime_display} container list")
             return
 
         container_ids = [cid.strip() for cid in stdout.strip().split('\n') if cid.strip()]
@@ -687,7 +687,7 @@ class UPSMonitor:
                 stop_cmd = [runtime, "stop", "-t", str(self.config.containers.stop_timeout)]
                 stop_cmd.extend(container_ids)
                 run_command(stop_cmd, timeout=self.config.containers.stop_timeout + 30)
-                self._log_message(f"  {runtime_display} containers stopped")
+                self._log_message(f"  ✅ {runtime_display} containers stopped")
 
         # Handle Podman rootless containers if configured
         if runtime == "podman" and self.config.containers.include_user_containers:
@@ -705,7 +705,7 @@ class UPSMonitor:
         # This requires loginctl and users with linger enabled
         exit_code, stdout, _ = run_command(["loginctl", "list-users", "--no-legend"])
         if exit_code != 0:
-            self._log_message("  Failed to list users for rootless container check")
+            self._log_message("  ⚠️ Failed to list users for rootless container check")
             return
 
         for line in stdout.strip().split('\n'):
@@ -741,7 +741,7 @@ class UPSMonitor:
                         stop_cmd.extend(container_ids)
                         run_command(stop_cmd, timeout=self.config.containers.stop_timeout + 30)
 
-        self._log_message("  Rootless Podman containers stopped")
+        self._log_message("  ✅ Rootless Podman containers stopped")
 
     def _sync_filesystems(self):
         """Sync all filesystems.
@@ -760,7 +760,7 @@ class UPSMonitor:
         else:
             os.sync()
             time.sleep(2)  # Allow storage controller caches to flush
-            self._log_message("  Filesystems synced")
+            self._log_message("  ✅ Filesystems synced")
 
     def _unmount_filesystems(self):
         """Unmount configured filesystems."""
@@ -797,17 +797,17 @@ class UPSMonitor:
             exit_code, _, stderr = run_command(cmd, timeout=timeout)
 
             if exit_code == 0:
-                self._log_message(f"  {mount_point} unmounted successfully")
+                self._log_message(f"  ✅ {mount_point} unmounted successfully")
             elif exit_code == 124:
                 self._log_message(
-                    f"  {mount_point} unmount timed out "
+                    f"  ⚠️ {mount_point} unmount timed out "
                     "(device may be busy/unreachable). Proceeding anyway."
                 )
             else:
                 check_code, _, _ = run_command(["mountpoint", "-q", mount_point])
                 if check_code == 0:
                     self._log_message(
-                        f"  Failed to unmount {mount_point} "
+                        f"  ❌ Failed to unmount {mount_point} "
                         f"(Error code {exit_code}). Proceeding anyway."
                     )
                 else:
@@ -841,13 +841,13 @@ class UPSMonitor:
 
         if seq_count > 0 and par_count > 0:
             self._log_message(
-                f"Shutting down {server_count} remote server(s) "
+                f"🌐 Shutting down {server_count} remote server(s) "
                 f"({seq_count} sequential, {par_count} parallel)..."
             )
         elif seq_count > 0:
-            self._log_message(f"Shutting down {server_count} remote server(s) sequentially...")
+            self._log_message(f"🌐 Shutting down {server_count} remote server(s) sequentially...")
         else:
-            self._log_message(f"Shutting down {server_count} remote server(s) in parallel...")
+            self._log_message(f"🌐 Shutting down {server_count} remote server(s) in parallel...")
 
         completed = 0
 
@@ -858,7 +858,7 @@ class UPSMonitor:
                 self._shutdown_remote_server(server)
                 completed += 1
             except Exception as e:
-                self._log_message(f"  {display_name} shutdown failed: {e}")
+                self._log_message(f"  ❌ {display_name} shutdown failed: {e}")
 
         # Phase 2: Parallel servers
         if parallel_servers:
@@ -905,14 +905,14 @@ class UPSMonitor:
             still_running = [t for t in threads if t.is_alive()]
             if still_running:
                 self._log_message(
-                    f"  {len(still_running)} remote shutdown(s) still in progress "
+                    f"  ⚠️ {len(still_running)} remote shutdown(s) still in progress "
                     "(continuing with local shutdown)"
                 )
 
             completed += par_count - len(still_running)
 
         # Log summary
-        self._log_message(f"  Remote shutdown complete ({completed}/{server_count} servers)")
+        self._log_message(f"  ✅ Remote shutdown complete ({completed}/{server_count} servers)")
 
     def _run_remote_command(
         self,
@@ -982,7 +982,7 @@ class UPSMonitor:
 
                 if action_name not in REMOTE_ACTIONS:
                     self._log_message(
-                        f"    [{idx}/{cmd_count}] Unknown action: {action_name} (skipping)"
+                        f"    ⚠️ [{idx}/{cmd_count}] Unknown action: {action_name} (skipping)"
                     )
                     continue
 
@@ -997,7 +997,7 @@ class UPSMonitor:
                 # Validate stop_compose has path
                 if action_name == "stop_compose" and not cmd_config.path:
                     self._log_message(
-                        f"    [{idx}/{cmd_count}] stop_compose requires 'path' parameter (skipping)"
+                        f"    ⚠️ [{idx}/{cmd_count}] stop_compose requires 'path' parameter (skipping)"
                     )
                     continue
 
@@ -1012,7 +1012,7 @@ class UPSMonitor:
 
             else:
                 self._log_message(
-                    f"    [{idx}/{cmd_count}] No action or command specified (skipping)"
+                    f"    ⚠️ [{idx}/{cmd_count}] No action or command specified (skipping)"
                 )
                 continue
 
@@ -1029,10 +1029,10 @@ class UPSMonitor:
             )
 
             if success:
-                self._log_message(f"    [{idx}/{cmd_count}] {description} completed")
+                self._log_message(f"    ✅ [{idx}/{cmd_count}] {description} completed")
             else:
                 self._log_message(
-                    f"    [{idx}/{cmd_count}] {description} failed: {error_msg} (continuing)"
+                    f"    ⚠️ [{idx}/{cmd_count}] {description} failed: {error_msg} (continuing)"
                 )
 
         return True
@@ -1047,11 +1047,11 @@ class UPSMonitor:
         display_name = server.name or server.host
         has_pre_cmds = len(server.pre_shutdown_commands) > 0
 
-        self._log_message(f"Initiating remote shutdown: {display_name} ({server.host})...")
+        self._log_message(f"🌐 Initiating remote shutdown: {display_name} ({server.host})...")
 
         # Send notification for remote server shutdown start
         self._send_notification(
-            f"**Remote Shutdown Starting:** {display_name}\n"
+            f"🌐 **Remote Shutdown Starting:** {display_name}\n"
             f"Host: {server.host}",
             self.config.NOTIFY_INFO
         )
@@ -1061,7 +1061,7 @@ class UPSMonitor:
             self._execute_remote_pre_shutdown(server)
 
         # Execute final shutdown command
-        self._log_message(f"  Sending shutdown command: {server.shutdown_command}")
+        self._log_message(f"  🔌 Sending shutdown command: {server.shutdown_command}")
 
         if self.config.behavior.dry_run:
             self._log_message(
@@ -1078,18 +1078,18 @@ class UPSMonitor:
         )
 
         if success:
-            self._log_message(f"  {display_name} shutdown command sent successfully")
+            self._log_message(f"  ✅ {display_name} shutdown command sent successfully")
             self._send_notification(
-                f"**Remote Shutdown Sent:** {display_name}\n"
+                f"✅ **Remote Shutdown Sent:** {display_name}\n"
                 f"Server is shutting down.",
                 self.config.NOTIFY_SUCCESS
             )
         else:
             self._log_message(
-                f"  WARNING: Failed to execute shutdown command on {display_name}: {error_msg}"
+                f"  ❌ WARNING: Failed to execute shutdown command on {display_name}: {error_msg}"
             )
             self._send_notification(
-                f"**Remote Shutdown Failed:** {display_name}\n"
+                f"❌ **Remote Shutdown Failed:** {display_name}\n"
                 f"Error: {error_msg}",
                 self.config.NOTIFY_FAILURE
             )
@@ -1121,11 +1121,11 @@ class UPSMonitor:
                 self._log_message("  [DRY-RUN] Would perform final sync")
             else:
                 os.sync()
-                self._log_message("  Final sync complete")
+                self._log_message("  ✅ Final sync complete")
 
         if self.config.local_shutdown.enabled:
-            self._log_message("Shutting down local server NOW")
-            self._log_message("========== SHUTDOWN SEQUENCE COMPLETE ==========")
+            self._log_message("🔌 Shutting down local server NOW")
+            self._log_message("✅ ========== SHUTDOWN SEQUENCE COMPLETE ==========")
 
             if self.config.behavior.dry_run:
                 self._log_message(f"[DRY-RUN] Would execute: {self.config.local_shutdown.command}")
@@ -1134,7 +1134,7 @@ class UPSMonitor:
             else:
                 # Send final notification (non-blocking - fire and forget)
                 self._send_notification(
-                    "**Shutdown Sequence Complete**\nShutting down local server NOW.",
+                    "🛑 **Shutdown Sequence Complete**\nShutting down local server NOW.",
                     self.config.NOTIFY_FAILURE
                 )
                 # Give notification time to send
@@ -1145,12 +1145,12 @@ class UPSMonitor:
                     cmd_parts.append(self.config.local_shutdown.message)
                 run_command(cmd_parts)
         else:
-            self._log_message("========== SHUTDOWN SEQUENCE COMPLETE (local shutdown disabled) ==========")
+            self._log_message("✅ ========== SHUTDOWN SEQUENCE COMPLETE (local shutdown disabled) ==========")
             self._shutdown_flag_path.unlink(missing_ok=True)
 
             # Exit if --exit-after-shutdown was specified
             if self._exit_after_shutdown:
-                self._log_message("Exiting after shutdown sequence")
+                self._log_message("🛑 Exiting after shutdown sequence")
                 self._cleanup_and_exit(None, None)
 
     def _trigger_immediate_shutdown(self, reason: str):
@@ -1186,11 +1186,11 @@ class UPSMonitor:
 
         self._shutdown_flag_path.touch()
 
-        self._log_message("Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
+        self._log_message("🛑 Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
 
         # Send notification (non-blocking - fire and forget)
         self._send_notification(
-            "**Eneru Service Stopped**\nMonitoring is now inactive.",
+            "🛑 **Eneru Service Stopped**\nMonitoring is now inactive.",
             self.config.NOTIFY_WARNING
         )
 
@@ -1299,7 +1299,7 @@ class UPSMonitor:
             if not self.config.behavior.dry_run:
                 run_command([
                     "wall",
-                    f"WARNING: Power failure detected! System running on UPS battery "
+                    f"⚠️ WARNING: Power failure detected! System running on UPS battery "
                     f"({battery_charge}% remaining, {format_seconds(battery_runtime)} runtime)"
                 ])
 
@@ -1318,7 +1318,7 @@ class UPSMonitor:
                     f"{self.config.triggers.low_battery_threshold}%"
                 )
         else:
-            self._log_message(f"WARNING: Received non-numeric battery charge value: '{battery_charge}'")
+            self._log_message(f"⚠️ WARNING: Received non-numeric battery charge value: '{battery_charge}'")
 
         # T2. Critical runtime remaining
         if not shutdown_reason and is_numeric(battery_runtime):
@@ -1364,7 +1364,7 @@ class UPSMonitor:
         # Log status every 5 seconds
         if int(time.time()) % 5 == 0:
             self._log_message(
-                f"On battery: {battery_charge}% ({format_seconds(battery_runtime)}), "
+                f"🔋 On battery: {battery_charge}% ({format_seconds(battery_runtime)}), "
                 f"Load: {ups_load}%, Depletion: {depletion_rate}%/min, "
                 f"Time on battery: {format_seconds(time_on_battery)}"
             )
@@ -1388,7 +1388,7 @@ class UPSMonitor:
             if not self.config.behavior.dry_run:
                 run_command([
                     "wall",
-                    f"Power has been restored. UPS Status: {ups_status}. "
+                    f"✅ Power has been restored. UPS Status: {ups_status}. "
                     f"Battery at {battery_charge}%."
                 ])
 
@@ -1412,7 +1412,7 @@ class UPSMonitor:
                     self.state.stale_data_count += 1
                     if self.state.connection_state != "FAILED":
                         self._log_message(
-                            f"WARNING: Data stale from UPS {self.config.ups.name} "
+                            f"⚠️ WARNING: Data stale from UPS {self.config.ups.name} "
                             f"(Attempt {self.state.stale_data_count}/{self.config.ups.max_stale_data_tolerance})."
                         )
 
@@ -1428,7 +1428,7 @@ class UPSMonitor:
                 else:
                     if self.state.connection_state != "FAILED":
                         self._log_message(
-                            f"ERROR: Cannot connect to UPS {self.config.ups.name}. Output: {error_msg}"
+                            f"❌ ERROR: Cannot connect to UPS {self.config.ups.name}. Output: {error_msg}"
                         )
                     self.state.stale_data_count = 0
 
@@ -1477,7 +1477,7 @@ class UPSMonitor:
 
             if not ups_status:
                 self._log_message(
-                    "ERROR: Received data from UPS but 'ups.status' is missing. "
+                    "❌ ERROR: Received data from UPS but 'ups.status' is missing. "
                     "Check NUT configuration."
                 )
                 time.sleep(5)

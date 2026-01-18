@@ -90,7 +90,7 @@ class NotificationWorker:
             total_pending = pending + in_progress
             if total_pending > 0:
                 retry_info = f" (current message: retry #{self._retry_count})" if in_progress else ""
-                print(f"Warning: Stopping notification worker with {total_pending} message(s) pending{retry_info}")
+                print(f"⚠️ Stopping notification worker with {total_pending} message(s) pending{retry_info}")
 
             self._stop_event.set()
             # Add sentinel to unblock the queue
