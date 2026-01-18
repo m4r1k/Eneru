@@ -64,13 +64,17 @@ sudo apt install python3-yaml apprise
 sudo dnf install python3-pyyaml apprise
 ```
 
-### Validate Script Syntax
+### Validate Package Syntax
 
 ```bash
-python3 -m py_compile /opt/ups-monitor/eneru.py
+# For installed package
+python3 -c "import eneru; print('OK')"
+
+# For development (from repository root)
+python3 -m py_compile src/eneru/*.py
 ```
 
-If this produces errors, the script file may be corrupted. Reinstall the package.
+If this produces errors, the package may be corrupted. Reinstall it.
 
 ### Validate Configuration
 

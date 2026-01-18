@@ -174,6 +174,43 @@ When releasing a new version, update both files. The comparison table format:
 | Feature Name | Old behavior | New behavior |
 ```
 
+## Installation Paths
+
+Eneru has two installation methods with different invocation paths:
+
+### Package Installation (deb/rpm)
+
+Installs to `/opt/ups-monitor/`:
+```
+/opt/ups-monitor/
+  eneru.py              # Wrapper script (packaging/eneru-wrapper.py)
+  eneru/                # Package modules
+    __init__.py
+    cli.py
+    monitor.py
+    ...
+```
+
+**Invocation:** `sudo python3 /opt/ups-monitor/eneru.py [options]`
+
+The wrapper script (`eneru.py`) adds `/opt/ups-monitor` to `sys.path` and calls `eneru.cli.main()`.
+
+### Pip Installation
+
+Installs as a Python package with entry points defined in `pyproject.toml`.
+
+**Invocation:** `eneru [options]` or `python -m eneru [options]`
+
+### Documentation Guidelines
+
+When writing documentation, use the correct invocation style for the context:
+
+| Context | Command Style | Example |
+|---------|---------------|---------|
+| Package users (README, troubleshooting) | `/opt/ups-monitor/eneru.py` | `sudo python3 /opt/ups-monitor/eneru.py --validate-config` |
+| Developers (CONTRIBUTING, testing) | `python -m eneru` or `eneru` | `python -m eneru --dry-run --config config.yaml` |
+| PyPI users | `eneru` | `eneru --validate-config` |
+
 ## Key Dependencies
 
 - PyYAML: Configuration parsing

@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.10.0] - 2026-01-18
+
+### Changed
+- **Modular Architecture:** Split monolithic `monitor.py` into 9 focused modules for better maintainability
+    - `version.py`, `config.py`, `state.py`, `logger.py`, `notifications.py`, `utils.py`, `actions.py`, `monitor.py`, `cli.py`
+- **Developer Documentation:** Add `CLAUDE.md` for Claude Code
+
+### Technical Details
+- No breaking changes to public API or configuration format
+- All 190 tests pass, E2E testing, and over two weeks of real-world testing
+- Module imports maintain backwards compatibility via `__init__.py` exports
+
+---
+
 ## [4.9.0] - 2026-01-06
 
 ### Added

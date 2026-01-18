@@ -60,24 +60,46 @@ Improvements to documentation are always welcome:
 git clone https://github.com/m4r1k/Eneru.git
 cd Eneru
 
-# Create virtual environment (optional but recommended)
-python3 -m venv venv
-source venv/bin/activate
+# Create virtual environment using uv (recommended for speed)
+uv venv /tmp/eneru-venv
+source /tmp/eneru-venv/bin/activate
 
-# Install dependencies
-pip install pyyaml requests
+# Install package with all dev dependencies
+uv pip install -e ".[dev,notifications,docs]"
 
 # Run in dry-run mode for testing
-python3 src/eneru/monitor.py --dry-run --config config.yaml
+python -m eneru --dry-run --config config.yaml
+# Or use the entry point:
+eneru --dry-run --config config.yaml
+```
+
+### Project Structure (v4.10+)
+
+Eneru uses a modular architecture with focused modules:
+
+```
+src/eneru/
+  __init__.py         # Public API exports
+  __main__.py         # CLI entry point (python -m eneru)
+  version.py          # Version string
+  config.py           # Configuration dataclasses + ConfigLoader
+  state.py            # MonitorState dataclass
+  logger.py           # TimezoneFormatter + UPSLogger
+  notifications.py    # NotificationWorker (Apprise integration)
+  utils.py            # Helper functions (run_command, etc.)
+  actions.py          # REMOTE_ACTIONS templates
+  monitor.py          # UPSMonitor class (core daemon)
+  cli.py              # CLI argument parsing + main()
 ```
 
 ## Testing Checklist
 
 Before submitting a PR, ensure:
 
-- [ ] `--validate-config` passes
+- [ ] All tests pass (`pytest`)
+- [ ] `--validate-config` passes (`python -m eneru --validate-config`)
 - [ ] `--dry-run` mode works correctly
-- [ ] No Python syntax errors (`python3 -m py_compile src/eneru/monitor.py`)
+- [ ] No Python syntax errors (`python -m py_compile src/eneru/*.py`)
 - [ ] Existing features still work
 - [ ] New configuration options are documented
 

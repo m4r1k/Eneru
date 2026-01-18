@@ -24,7 +24,7 @@ This page documents the automated test suite and the manual validation performed
               ╱    7 Linux Distros    ╲
              ╱─────────────────────────╲
             ╱         Unit Tests        ╲
-           ╱   pytest + Coverage (185+)  ╲
+           ╱   pytest + Coverage (190)   ╲
           ╱      6 Python Versions        ╲
          ╱─────────────────────────────────╲
         ╱          Static Analysis          ╲
@@ -39,7 +39,7 @@ This page documents the automated test suite and the manual validation performed
 |-------|-----------|---------------|
 | **AI-Assisted Dev** | Continuous | Code review, implementation guidance |
 | **Static Analysis** | Every commit | Python syntax, config validation |
-| **Unit Tests** | Every commit | Logic, state machine, edge cases (185+ tests) |
+| **Unit Tests** | Every commit | Logic, state machine, edge cases (190 tests) |
 | **Integration** | Every commit | Package install on 7 Linux distros |
 | **E2E Tests** | Every commit | Full workflow with real NUT, SSH, Docker |
 | **Real UPS** | Pre-release | Actual hardware, power events |
@@ -306,7 +306,9 @@ When contributing new features or bug fixes:
 pytest -v
 
 # Validate your config changes
-python src/eneru/monitor.py --validate-config --config config.yaml
+python -m eneru --validate-config --config config.yaml
+# Or using the entry point:
+eneru --validate-config --config config.yaml
 ```
 
 See the [GitHub repository](https://github.com/m4r1k/Eneru) for contribution guidelines.

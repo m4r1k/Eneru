@@ -91,11 +91,21 @@ See [Notifications](notifications.md) for the architecture and setup guide.
 
 Every commit triggers the full test suite:
 
-- **185+ unit tests** across 6 Python versions (3.9-3.14)
+- **190 unit tests** across 6 Python versions (3.9-3.14)
 - **Integration tests** verifying package installation on 7 Linux distributions (Debian, Ubuntu, RHEL)
 - **End-to-end tests** with real NUT server, SSH target, and Docker containers in CI
 
 The E2E test suite simulates 8 UPS scenarios (online, low-battery, FSD, brownout, etc.) and validates the complete shutdown workflow—from power failure detection to SSH remote shutdown execution. Before each release, Eneru is also validated on real hardware with actual UPS units and simulated power events. See [Testing](testing.md) for details.
+
+### Modular Architecture (v4.10+)
+
+Clean separation of concerns with 9 focused modules:
+
+- `config.py` - Configuration dataclasses and YAML loader
+- `monitor.py` - Core UPS monitoring logic
+- `notifications.py` - Non-blocking notification worker
+- `cli.py` - Command-line interface
+- Plus: `version.py`, `state.py`, `logger.py`, `utils.py`, `actions.py`
 
 ---
 

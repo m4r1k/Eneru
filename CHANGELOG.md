@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.10.0] - 2026-01-18
+
+### Changed
+- **Modular Architecture:** Split monolithic `monitor.py` into focused modules for better maintainability
+    - `version.py` - Version string (single source of truth)
+    - `config.py` - Configuration dataclasses + ConfigLoader
+    - `state.py` - MonitorState dataclass
+    - `logger.py` - TimezoneFormatter + UPSLogger
+    - `notifications.py` - NotificationWorker (Apprise integration)
+    - `utils.py` - Helper functions (run_command, command_exists, is_numeric, format_seconds)
+    - `actions.py` - REMOTE_ACTIONS templates for remote pre-shutdown commands
+    - `monitor.py` - UPSMonitor class (core daemon logic)
+    - `cli.py` - CLI argument parsing + main()
+- **Developer Documentation:** Add `CLAUDE.md` for Claude Code
+
+### Technical Details
+- No breaking changes to public API or configuration format
+- All 190 tests pass, E2E testing, and over two weeks of real-world testing
+- Module imports maintain backwards compatibility via `__init__.py` exports
+
+---
+
 ## [4.9.0] - 2026-01-06
 
 ### Added
@@ -411,6 +433,17 @@ During power outages, network connectivity is often unreliable. The previous blo
 ---
 
 ## Version Comparison
+
+### v4.10 vs v4.9
+
+| Feature | v4.9 | v4.10 |
+|---------|------|-------|
+| Code Structure | Single `monitor.py` (~2500 lines) | 9 focused modules |
+| Module Count | 1 main module | 9 modules (`version`, `config`, `state`, `logger`, `notifications`, `utils`, `actions`, `monitor`, `cli`) |
+| Developer Documentation | Basic emoji list | Comprehensive categorized emoji reference |
+| Emoji Reference | 11 emojis listed | 20+ emojis with semantic meanings |
+| Test Count | 190 tests | 190 tests |
+| Breaking Changes | N/A | None (backwards compatible imports) |
 
 ### v4.9 vs v4.8
 
