@@ -118,7 +118,7 @@ def main():
             if messages:
                 print()
                 for msg in messages:
-                    print(f"  {msg}")
+                    print(f"  ℹ️ {msg}")
 
         # Test notifications if requested
         if args.test_notifications:
@@ -164,11 +164,11 @@ def main():
 
                     # Send test notification
                     test_body = (
-                        "**Test Notification**\n"
+                        "🧪 **Test Notification**\n"
                         "This is a test notification from Eneru.\n"
                         "If you see this, notifications are working correctly!\n"
                         f"\n---\n⚡ UPS: {config.ups.name}\n"
-                        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')}"
+                        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')}"
                     )
 
                     # Escape @ symbols to prevent Discord mentions (e.g., UPS@192.168.1.1)

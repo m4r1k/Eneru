@@ -105,14 +105,14 @@ class UPSMonitor:
 
         self._check_dependencies()
 
-        self._log_message(f"Eneru v{__version__} starting - monitoring {self.config.ups.name}")
+        self._log_message(f"🚀 Eneru v{__version__} starting - monitoring {self.config.ups.name}")
         self._send_notification(
-            f"**Eneru v{__version__} Started**\nMonitoring {self.config.ups.name}",
+            f"🚀 **Eneru v{__version__} Started**\nMonitoring {self.config.ups.name}",
             self.config.NOTIFY_INFO
         )
 
         if self.config.behavior.dry_run:
-            self._log_message("*** RUNNING IN DRY-RUN MODE - NO ACTUAL SHUTDOWN WILL OCCUR ***")
+            self._log_message("🧪 *** RUNNING IN DRY-RUN MODE - NO ACTUAL SHUTDOWN WILL OCCUR ***")
 
         self._log_enabled_features()
         self._wait_for_initial_connection()
@@ -173,7 +173,7 @@ class UPSMonitor:
         if self.config.local_shutdown.enabled:
             features.append("Local Shutdown")
 
-        self._log_message(f"Enabled features: {', '.join(features) if features else 'None'}")
+        self._log_message(f"📋 Enabled features: {', '.join(features) if features else 'None'}")
 
     def _log_message(self, message: str):
         """Log a message using the logger."""
@@ -188,7 +188,7 @@ class UPSMonitor:
         if self._shutdown_flag_path.exists():
             discord_safe_message = message.replace('`', '\\`')
             self._send_notification(
-                f"**Shutdown Detail:** {discord_safe_message}",
+                f"ℹ️ **Shutdown Detail:** {discord_safe_message}",
                 self.config.NOTIFY_INFO
             )
 
@@ -436,14 +436,14 @@ class UPSMonitor:
             self.state.voltage_warning_high = self.state.nominal_voltage * 1.1
 
         self._log_message(
-            f"Voltage Monitoring Active. Nominal: {self.state.nominal_voltage}V. "
+            f"📊 Voltage Monitoring Active. Nominal: {self.state.nominal_voltage}V. "
             f"Low Warning: {self.state.voltage_warning_low}V. "
             f"High Warning: {self.state.voltage_warning_high}V."
         )
 
     def _wait_for_initial_connection(self):
         """Wait for initial connection to NUT server."""
-        self._log_message(f"Checking initial connection to {self.config.ups.name}...")
+        self._log_message(f"⏳ Checking initial connection to {self.config.ups.name}...")
 
         max_wait = 30
         wait_interval = 5
@@ -533,7 +533,7 @@ class UPSMonitor:
         self._log_message("🖥️ Shutting down all libvirt virtual machines...")
 
         if not command_exists("virsh"):
-            self._log_message("  virsh not available, skipping VM shutdown")
+            self._log_message("  ℹ️ virsh not available, skipping VM shutdown")
             return
 
         exit_code, stdout, _ = run_command(["virsh", "list", "--name", "--state-running"])
@@ -544,13 +544,13 @@ class UPSMonitor:
         running_vms = [vm.strip() for vm in stdout.strip().split('\n') if vm.strip()]
 
         if not running_vms:
-            self._log_message("  No running VMs found")
+            self._log_message("  ℹ️ No running VMs found")
             return
 
         for vm in running_vms:
-            self._log_message(f"  Shutting down VM: {vm}")
+            self._log_message(f"  ⏹️ Shutting down VM: {vm}")
             if self.config.behavior.dry_run:
-                self._log_message(f"  [DRY-RUN] Would shutdown VM: {vm}")
+                self._log_message(f"  🧪 [DRY-RUN] Would shutdown VM: {vm}")
             else:
                 exit_code, stdout, stderr = run_command(["virsh", "shutdown", vm])
                 if stdout.strip():
@@ -560,7 +560,7 @@ class UPSMonitor:
             return
 
         max_wait = self.config.virtual_machines.max_wait
-        self._log_message(f"  Waiting up to {max_wait}s for VMs to shutdown gracefully...")
+        self._log_message(f"  ⏳ Waiting up to {max_wait}s for VMs to shutdown gracefully...")
         wait_interval = 5
         time_waited = 0
         remaining_vms: List[str] = []
@@ -574,7 +574,7 @@ class UPSMonitor:
                 self._log_message(f"  ✅ All VMs stopped gracefully after {time_waited}s.")
                 break
 
-            self._log_message(f"  Still waiting for: {' '.join(remaining_vms)} (Waited {time_waited}s)")
+            self._log_message(f"  🕒 Still waiting for: {' '.join(remaining_vms)} (Waited {time_waited}s)")
             time.sleep(wait_interval)
             time_waited += wait_interval
 
@@ -617,11 +617,11 @@ class UPSMonitor:
                 self._log_message(f"  ⚠️ Compose file not found: {file_path} (skipping)")
                 continue
 
-            self._log_message(f"  Stopping: {file_path} (timeout: {timeout}s)")
+            self._log_message(f"  ➡️ Stopping: {file_path} (timeout: {timeout}s)")
 
             if self.config.behavior.dry_run:
                 self._log_message(
-                    f"  [DRY-RUN] Would execute: {runtime} compose -f {file_path} down"
+                    f"  🧪 [DRY-RUN] Would execute: {runtime} compose -f {file_path} down"
                 )
                 continue
 
@@ -676,12 +676,12 @@ class UPSMonitor:
         container_ids = [cid.strip() for cid in stdout.strip().split('\n') if cid.strip()]
 
         if not container_ids:
-            self._log_message(f"  No running {runtime_display} containers found")
+            self._log_message(f"  ℹ️ No running {runtime_display} containers found")
         else:
             if self.config.behavior.dry_run:
                 exit_code, stdout, _ = run_command([runtime, "ps", "--format", "{{.Names}}"])
                 names = stdout.strip().replace('\n', ' ')
-                self._log_message(f"  [DRY-RUN] Would stop {runtime_display} containers: {names}")
+                self._log_message(f"  🧪 [DRY-RUN] Would stop {runtime_display} containers: {names}")
             else:
                 # Stop containers with timeout
                 stop_cmd = [runtime, "stop", "-t", str(self.config.containers.stop_timeout)]
@@ -695,10 +695,10 @@ class UPSMonitor:
 
     def _shutdown_podman_user_containers(self):
         """Stop Podman containers running as non-root users."""
-        self._log_message("  Checking for rootless Podman containers...")
+        self._log_message("  🔍 Checking for rootless Podman containers...")
 
         if self.config.behavior.dry_run:
-            self._log_message("  [DRY-RUN] Would stop rootless Podman containers for all users")
+            self._log_message("  🧪 [DRY-RUN] Would stop rootless Podman containers for all users")
             return
 
         # Get list of users with active Podman containers
@@ -733,7 +733,7 @@ class UPSMonitor:
                 if exit_code == 0 and stdout.strip():
                     container_ids = [cid.strip() for cid in stdout.strip().split('\n') if cid.strip()]
                     if container_ids:
-                        self._log_message(f"  Stopping {len(container_ids)} container(s) for user '{username}'")
+                        self._log_message(f"  👤 Stopping {len(container_ids)} container(s) for user '{username}'")
                         stop_cmd = [
                             "sudo", "-u", username,
                             "podman", "stop", "-t", str(self.config.containers.stop_timeout)
@@ -754,9 +754,9 @@ class UPSMonitor:
         if not self.config.filesystems.sync_enabled:
             return
 
-        self._log_message("Syncing all filesystems...")
+        self._log_message("💾 Syncing all filesystems...")
         if self.config.behavior.dry_run:
-            self._log_message("  [DRY-RUN] Would sync filesystems")
+            self._log_message("  🧪 [DRY-RUN] Would sync filesystems")
         else:
             os.sync()
             time.sleep(2)  # Allow storage controller caches to flush
@@ -771,7 +771,7 @@ class UPSMonitor:
             return
 
         timeout = self.config.filesystems.unmount.timeout
-        self._log_message(f"Unmounting filesystems (Max wait: {timeout}s)...")
+        self._log_message(f"📤 Unmounting filesystems (Max wait: {timeout}s)...")
 
         for mount in self.config.filesystems.unmount.mounts:
             mount_point = mount.get('path', '')
@@ -781,11 +781,11 @@ class UPSMonitor:
                 continue
 
             options_display = f" {options}" if options else ""
-            self._log_message(f"  Unmounting {mount_point}{options_display}")
+            self._log_message(f"  ➡️ Unmounting {mount_point}{options_display}")
 
             if self.config.behavior.dry_run:
                 self._log_message(
-                    f"  [DRY-RUN] Would execute: timeout {timeout}s umount {options} {mount_point}"
+                    f"  🧪 [DRY-RUN] Would execute: timeout {timeout}s umount {options} {mount_point}"
                 )
                 continue
 
@@ -811,7 +811,7 @@ class UPSMonitor:
                         f"(Error code {exit_code}). Proceeding anyway."
                     )
                 else:
-                    self._log_message(f"  {mount_point} was likely not mounted.")
+                    self._log_message(f"  ℹ️ {mount_point} was likely not mounted.")
 
     def _shutdown_remote_servers(self):
         """Shutdown all enabled remote servers via SSH.
@@ -968,7 +968,7 @@ class UPSMonitor:
         display_name = server.name or server.host
         cmd_count = len(server.pre_shutdown_commands)
 
-        self._log_message(f"  Executing {cmd_count} pre-shutdown command(s)...")
+        self._log_message(f"  📋 Executing {cmd_count} pre-shutdown command(s)...")
 
         for idx, cmd_config in enumerate(server.pre_shutdown_commands, 1):
             # Determine timeout
@@ -1017,10 +1017,10 @@ class UPSMonitor:
                 continue
 
             # Log what we're about to do
-            self._log_message(f"    [{idx}/{cmd_count}] {description} (timeout: {timeout}s)")
+            self._log_message(f"    ➡️ [{idx}/{cmd_count}] {description} (timeout: {timeout}s)")
 
             if self.config.behavior.dry_run:
-                self._log_message(f"    [DRY-RUN] Would execute on {display_name}")
+                self._log_message(f"    🧪 [DRY-RUN] Would execute on {display_name}")
                 continue
 
             # Execute the command
@@ -1065,7 +1065,7 @@ class UPSMonitor:
 
         if self.config.behavior.dry_run:
             self._log_message(
-                f"  [DRY-RUN] Would send command '{server.shutdown_command}' to "
+                f"  🧪 [DRY-RUN] Would send command '{server.shutdown_command}' to "
                 f"{server.user}@{server.host}"
             )
             return
@@ -1098,15 +1098,15 @@ class UPSMonitor:
         """Execute the controlled shutdown sequence."""
         self._shutdown_flag_path.touch()
 
-        self._log_message("========== INITIATING EMERGENCY SHUTDOWN SEQUENCE ==========")
+        self._log_message("🚨 ========== INITIATING EMERGENCY SHUTDOWN SEQUENCE ==========")
 
         if self.config.behavior.dry_run:
-            self._log_message("*** DRY-RUN MODE: No actual shutdown will occur ***")
+            self._log_message("🧪 *** DRY-RUN MODE: No actual shutdown will occur ***")
 
         if not self.config.behavior.dry_run:
             run_command([
                 "wall",
-                "CRITICAL: Executing emergency UPS shutdown sequence NOW!"
+                "🚨 CRITICAL: Executing emergency UPS shutdown sequence NOW!"
             ])
 
         self._shutdown_vms()
@@ -1116,9 +1116,9 @@ class UPSMonitor:
         self._shutdown_remote_servers()
 
         if self.config.filesystems.sync_enabled:
-            self._log_message("Final filesystem sync...")
+            self._log_message("💾 Final filesystem sync...")
             if self.config.behavior.dry_run:
-                self._log_message("  [DRY-RUN] Would perform final sync")
+                self._log_message("  🧪 [DRY-RUN] Would perform final sync")
             else:
                 os.sync()
                 self._log_message("  ✅ Final sync complete")
@@ -1128,8 +1128,8 @@ class UPSMonitor:
             self._log_message("✅ ========== SHUTDOWN SEQUENCE COMPLETE ==========")
 
             if self.config.behavior.dry_run:
-                self._log_message(f"[DRY-RUN] Would execute: {self.config.local_shutdown.command}")
-                self._log_message("[DRY-RUN] Shutdown sequence completed successfully (no actual shutdown)")
+                self._log_message(f"🧪 [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
+                self._log_message("🧪 [DRY-RUN] Shutdown sequence completed successfully (no actual shutdown)")
                 self._shutdown_flag_path.unlink(missing_ok=True)
             else:
                 # Send final notification (non-blocking - fire and forget)
@@ -1162,17 +1162,17 @@ class UPSMonitor:
 
         # Send notification (non-blocking - fire and forget)
         self._send_notification(
-            f"**EMERGENCY SHUTDOWN INITIATED!**\n"
+            f"🚨 **EMERGENCY SHUTDOWN INITIATED!**\n"
             f"Reason: {reason}\n"
             "Executing shutdown tasks (VMs, Containers, Remote Servers).",
             self.config.NOTIFY_FAILURE
         )
 
-        self._log_message(f"CRITICAL: Triggering immediate shutdown. Reason: {reason}")
+        self._log_message(f"🚨 CRITICAL: Triggering immediate shutdown. Reason: {reason}")
         if not self.config.behavior.dry_run:
             run_command([
                 "wall",
-                f"CRITICAL: UPS battery critical! Immediate shutdown initiated! Reason: {reason}"
+                f"🚨 CRITICAL: UPS battery critical! Immediate shutdown initiated! Reason: {reason}"
             ])
 
         self._execute_shutdown_sequence()
@@ -1334,7 +1334,7 @@ class UPSMonitor:
             if depletion_rate > self.config.triggers.depletion.critical_rate:
                 if time_on_battery < self.config.triggers.depletion.grace_period:
                     self._log_message(
-                        f"INFO: High depletion rate ({depletion_rate}%/min) ignored during "
+                        f"🕒 INFO: High depletion rate ({depletion_rate}%/min) ignored during "
                         f"grace period ({time_on_battery}s/{self.config.triggers.depletion.grace_period}s)."
                     )
                 else:
@@ -1352,7 +1352,7 @@ class UPSMonitor:
                 )
             elif not self.state.extended_time_logged:
                 self._log_message(
-                    f"INFO: System on battery for {format_seconds(time_on_battery)} "
+                    f"⏳ INFO: System on battery for {format_seconds(time_on_battery)} "
                     f"exceeded threshold ({format_seconds(self.config.triggers.extended_time.threshold)}) - "
                     "extended time shutdown disabled"
                 )
@@ -1445,12 +1445,12 @@ class UPSMonitor:
                 if is_failsafe_trigger and "OB" in self.state.previous_status:
                     self._shutdown_flag_path.touch()
                     self._log_message(
-                        "FAILSAFE TRIGGERED (FSB): Connection lost or data persistently stale "
+                        "🚨 FAILSAFE TRIGGERED (FSB): Connection lost or data persistently stale "
                         "while On Battery. Initiating emergency shutdown."
                     )
                     # Send notification (non-blocking - fire and forget)
                     self._send_notification(
-                        "**FAILSAFE (FSB) TRIGGERED!**\n"
+                        "🚨 **FAILSAFE (FSB) TRIGGERED!**\n"
                         "Connection to UPS lost or data stale while system was running On Battery.\n"
                         "Assuming critical failure. Executing immediate shutdown.",
                         self.config.NOTIFY_FAILURE
@@ -1491,7 +1491,7 @@ class UPSMonitor:
                 battery_runtime = ups_data.get('battery.runtime', '')
                 ups_load = ups_data.get('ups.load', '')
                 self._log_message(
-                    f"Status changed: {self.state.previous_status} -> {ups_status} "
+                    f"🔄 Status changed: {self.state.previous_status} -> {ups_status} "
                     f"(Battery: {battery_charge}%, Runtime: {format_seconds(battery_runtime)}, "
                     f"Load: {ups_load}%)"
                 )

@@ -102,18 +102,49 @@ README.md                       # Project overview
 - PEP 8 compliant
 - Docstrings for public functions/classes
 - Tests in `tests/` following `test_*.py` pattern
-- **Emojis in logs/notifications**: The codebase uses emojis for visual clarity in log messages and notifications:
-  - ⚡ Power events, UPS info
-  - 🔋 Battery status
+- **Emojis in logs/notifications**: The codebase uses emojis for visual clarity in log messages and notifications. Each emoji has a specific semantic meaning - use them consistently:
+
+  **System State:**
+  - 🚀 Service startup
+  - 🛑 Service stop, exiting
+
+  **Modes:**
+  - 🧪 Dry-run mode indicators
+
+  **Configuration & Info:**
+  - 📢 Notification status
+  - 📋 Feature lists, pre-shutdown command lists
+  - 📊 Voltage monitoring statistics
+  - ℹ️ Informational messages (indented)
+
+  **Status Messages:**
   - ⚠️ Warnings
-  - ❌ Errors/failures
-  - ✅ Success/completion
-  - 📢 Notifications
-  - 🖥️ VMs
-  - 🐳 Containers
-  - 🌐 Remote servers
-  - 🔌 Shutdown/power
-  - 🛑 Service stop
+  - ❌ Errors, failures
+  - ✅ Success, completion
+  - 🚨 Critical alerts, emergency shutdown
+
+  **Power & UPS:**
+  - ⚡ Power events, AVR activity, force actions (e.g., force destroy VM)
+  - 🔋 Battery status (periodic updates)
+  - 🔄 UPS status changes
+
+  **Shutdown Components:**
+  - 🖥️ Virtual machines (section header)
+  - ⏹️ Stopping individual VM
+  - 🐳 Containers - Docker/Podman (section header)
+  - 🌐 Remote servers (section header and per-server)
+  - 💾 Filesystem sync
+  - 📤 Unmounting filesystems (section header)
+  - 🔌 Shutdown commands (local and remote)
+
+  **Actions & Progress:**
+  - ⏳ Starting a wait / initial wait state
+  - 🕒 Still waiting / progress during wait
+  - ➡️ Actions in progress (stopping compose, unmounting, pre-shutdown commands)
+  - 🔍 Checking/searching (e.g., rootless containers)
+
+  **Users:**
+  - 👤 User-specific containers
 
 ## Conventions
 
