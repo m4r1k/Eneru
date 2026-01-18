@@ -24,7 +24,7 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          VERSION=$(grep -oP '__version__\s*=\s*"\K[^"]+' src/eneru/monitor.py)
+          VERSION=$(grep -oP '__version__\s*=\s*"\K[^"]+' src/eneru/version.py)
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION"
 
