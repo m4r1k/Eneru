@@ -172,7 +172,7 @@ def mock_run_command():
 @pytest.fixture
 def mock_apprise():
     """Mock the Apprise library."""
-    with patch("eneru.monitor.apprise") as mock:
+    with patch("eneru.notifications.apprise") as mock:
         mock_instance = MagicMock()
         mock.Apprise.return_value = mock_instance
         mock_instance.add.return_value = True

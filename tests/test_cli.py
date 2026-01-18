@@ -124,7 +124,7 @@ notifications:
         with patch.object(sys, "argv", [
             "eneru", "--validate-config", "-c", str(config_file)
         ]):
-            with patch("eneru.monitor.APPRISE_AVAILABLE", True):
+            with patch("eneru.cli.APPRISE_AVAILABLE", True):
                 with pytest.raises(SystemExit) as exc_info:
                     main()
 
@@ -168,7 +168,7 @@ notifications:
         with patch.object(sys, "argv", [
             "eneru", "--validate-config", "-c", str(config_file)
         ]):
-            with patch("eneru.monitor.APPRISE_AVAILABLE", False):
+            with patch("eneru.cli.APPRISE_AVAILABLE", False):
                 with pytest.raises(SystemExit) as exc_info:
                     main()
 
@@ -250,7 +250,7 @@ notifications:
         with patch.object(sys, "argv", [
             "eneru", "--test-notifications", "-c", str(config_file)
         ]):
-            with patch("eneru.monitor.APPRISE_AVAILABLE", False):
+            with patch("eneru.cli.APPRISE_AVAILABLE", False):
                 with pytest.raises(SystemExit) as exc_info:
                     main()
 
@@ -283,9 +283,9 @@ notifications:
         with patch.object(sys, "argv", [
             "eneru", "--test-notifications", "-c", str(config_file)
         ]):
-            with patch("eneru.monitor.APPRISE_AVAILABLE", True):
+            with patch("eneru.cli.APPRISE_AVAILABLE", True):
                 with patch.dict(sys.modules, {"apprise": mock_apprise}):
-                    with patch("eneru.monitor.apprise", mock_apprise):
+                    with patch("eneru.cli.apprise", mock_apprise):
                         with pytest.raises(SystemExit) as exc_info:
                             main()
 
@@ -317,9 +317,9 @@ notifications:
         with patch.object(sys, "argv", [
             "eneru", "--test-notifications", "-c", str(config_file)
         ]):
-            with patch("eneru.monitor.APPRISE_AVAILABLE", True):
+            with patch("eneru.cli.APPRISE_AVAILABLE", True):
                 with patch.dict(sys.modules, {"apprise": mock_apprise}):
-                    with patch("eneru.monitor.apprise", mock_apprise):
+                    with patch("eneru.cli.apprise", mock_apprise):
                         with pytest.raises(SystemExit) as exc_info:
                             main()
 
@@ -350,9 +350,9 @@ notifications:
         with patch.object(sys, "argv", [
             "eneru", "--test-notifications", "-c", str(config_file)
         ]):
-            with patch("eneru.monitor.APPRISE_AVAILABLE", True):
+            with patch("eneru.cli.APPRISE_AVAILABLE", True):
                 with patch.dict(sys.modules, {"apprise": mock_apprise}):
-                    with patch("eneru.monitor.apprise", mock_apprise):
+                    with patch("eneru.cli.apprise", mock_apprise):
                         with pytest.raises(SystemExit) as exc_info:
                             main()
 
@@ -391,9 +391,9 @@ notifications:
             "--test-notifications",
             "-c", str(config_file)
         ]):
-            with patch("eneru.monitor.APPRISE_AVAILABLE", True):
+            with patch("eneru.cli.APPRISE_AVAILABLE", True):
                 with patch.dict(sys.modules, {"apprise": mock_apprise}):
-                    with patch("eneru.monitor.apprise", mock_apprise):
+                    with patch("eneru.cli.apprise", mock_apprise):
                         with pytest.raises(SystemExit) as exc_info:
                             main()
 

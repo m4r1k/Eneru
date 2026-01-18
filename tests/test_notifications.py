@@ -54,8 +54,8 @@ class TestNotificationWorker:
         assert result is False
 
     @pytest.mark.unit
-    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
-    @patch("eneru.monitor.apprise")
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
     def test_worker_starts_with_valid_config(self, mock_apprise, notification_config):
         """Test that worker starts with valid configuration."""
         mock_instance = MagicMock()
@@ -74,8 +74,8 @@ class TestNotificationWorker:
         worker.stop()
 
     @pytest.mark.unit
-    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
-    @patch("eneru.monitor.apprise")
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
     def test_send_queues_notification(self, mock_apprise, notification_config):
         """Test that send() queues notification without blocking."""
         mock_instance = MagicMock()
@@ -96,8 +96,8 @@ class TestNotificationWorker:
         worker.stop()
 
     @pytest.mark.unit
-    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
-    @patch("eneru.monitor.apprise")
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
     def test_send_with_blocking(self, mock_apprise, notification_config):
         """Test that blocking send waits for completion."""
         mock_instance = MagicMock()
@@ -127,8 +127,8 @@ class TestNotificationWorker:
         worker.stop()
 
     @pytest.mark.unit
-    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
-    @patch("eneru.monitor.apprise")
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
     def test_worker_stop_graceful(self, mock_apprise, notification_config):
         """Test that worker stops gracefully."""
         mock_instance = MagicMock()
@@ -160,8 +160,8 @@ class TestNotificationWorker:
         worker.send("Test message", "info")
 
     @pytest.mark.unit
-    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
-    @patch("eneru.monitor.apprise")
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
     def test_get_service_count(self, mock_apprise, notification_config):
         """Test getting service count."""
         mock_instance = MagicMock()
@@ -181,8 +181,8 @@ class TestNotificationRetry:
     """Test notification retry behavior."""
 
     @pytest.mark.unit
-    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
-    @patch("eneru.monitor.apprise")
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
     def test_retry_on_failure(self, mock_apprise):
         """Test that notifications are retried on failure."""
         mock_instance = MagicMock()
@@ -217,8 +217,8 @@ class TestNotificationRetry:
         worker.stop()
 
     @pytest.mark.unit
-    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
-    @patch("eneru.monitor.apprise")
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
     def test_retry_count_tracked(self, mock_apprise):
         """Test that retry count is tracked during retries."""
         mock_instance = MagicMock()
@@ -256,8 +256,8 @@ class TestNotificationRetry:
         worker.stop()
 
     @pytest.mark.unit
-    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
-    @patch("eneru.monitor.apprise")
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
     def test_retry_respects_stop_signal(self, mock_apprise):
         """Test that retry loop exits when stop is requested."""
         mock_instance = MagicMock()
@@ -294,8 +294,8 @@ class TestNotificationRetry:
         assert elapsed < 0.5
 
     @pytest.mark.unit
-    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
-    @patch("eneru.monitor.apprise")
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
     def test_queue_size_tracked(self, mock_apprise):
         """Test that queue size is tracked."""
         mock_instance = MagicMock()
@@ -333,8 +333,8 @@ class TestNotificationRetry:
         worker.stop()
 
     @pytest.mark.unit
-    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
-    @patch("eneru.monitor.apprise")
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
     def test_fifo_order_preserved(self, mock_apprise):
         """Test that notifications are processed in FIFO order."""
         mock_instance = MagicMock()
@@ -391,8 +391,8 @@ class TestNotificationTypes:
     """Test notification type mapping."""
 
     @pytest.mark.unit
-    @patch("eneru.monitor.APPRISE_AVAILABLE", True)
-    @patch("eneru.monitor.apprise")
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
     def test_notify_type_mapping(self, mock_apprise):
         """Test that notify types are correctly mapped."""
         mock_instance = MagicMock()

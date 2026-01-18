@@ -137,7 +137,7 @@ class TestCommandExists:
     @pytest.mark.unit
     def test_command_exists_uses_which(self):
         """Test that command_exists uses 'which' internally."""
-        with patch("eneru.monitor.run_command") as mock_run:
+        with patch("eneru.utils.run_command") as mock_run:
             mock_run.return_value = (0, "/usr/bin/test", "")
 
             result = command_exists("test_cmd")
@@ -148,7 +148,7 @@ class TestCommandExists:
     @pytest.mark.unit
     def test_command_not_exists_which_fails(self):
         """Test that command_exists returns False when which fails."""
-        with patch("eneru.monitor.run_command") as mock_run:
+        with patch("eneru.utils.run_command") as mock_run:
             mock_run.return_value = (1, "", "")
 
             result = command_exists("missing_cmd")

@@ -25,8 +25,8 @@ pytest -m integration               # Integration tests only
 pytest --cov=src/eneru              # With coverage
 
 # Development
-python src/eneru/monitor.py --validate-config --config config.yaml
-python src/eneru/monitor.py --dry-run --config config.yaml
+python -m eneru --validate-config --config config.yaml
+python -m eneru --dry-run --config config.yaml
 
 # Documentation
 mkdocs serve                        # Local docs preview
@@ -38,7 +38,15 @@ mkdocs serve                        # Local docs preview
 src/eneru/                      # Main package
   __init__.py                   # Public API exports
   __main__.py                   # CLI entry point (python -m eneru)
-  monitor.py                    # Core monitoring daemon
+  version.py                    # Version string (single source of truth)
+  config.py                     # Configuration dataclasses + ConfigLoader
+  state.py                      # MonitorState dataclass
+  logger.py                     # TimezoneFormatter + UPSLogger
+  notifications.py              # NotificationWorker (Apprise integration)
+  utils.py                      # Helper functions (run_command, etc.)
+  actions.py                    # REMOTE_ACTIONS templates
+  monitor.py                    # UPSMonitor class (core daemon)
+  cli.py                        # CLI argument parsing + main()
 
 tests/                          # pytest tests
   conftest.py                   # Shared fixtures
