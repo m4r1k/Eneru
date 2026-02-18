@@ -3,6 +3,6 @@ pytest-cov>=4.0.0
 pytest-mock>=3.10.0
 pytest-timeout>=2.1.0
 PyYAML>=5.4.1
-apprise>=1.9.6
+apprise>=1.9.7
 mkdocs>=1.6.1
 mkdocs-material>=9.7.1

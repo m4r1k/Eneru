@@ -10,4 +10,4 @@ PyYAML>=5.4.1
 
 # Optional - for notifications (100+ services via Apprise)
 # Remove this line if you don't need notifications
-apprise>=1.9.6
+apprise>=1.9.7
