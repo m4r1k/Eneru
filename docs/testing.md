@@ -25,7 +25,7 @@ This page documents the automated test suite and the manual validation performed
              ╱─────────────────────────╲
             ╱         Unit Tests        ╲
            ╱   pytest + Coverage (190)   ╲
-          ╱      6 Python Versions        ╲
+          ╱      7 Python Versions        ╲
          ╱─────────────────────────────────╲
         ╱          Static Analysis          ╲
        ╱   Syntax Check + Config Validation  ╲
@@ -60,7 +60,7 @@ The **Validate** workflow runs on every push and pull request to `main`:
 | **Unit Tests** | Runs the full pytest test suite with coverage |
 | **Configuration Validation** | Validates the default and example configs |
 
-**Python Versions Tested:** 3.9, 3.10, 3.11, 3.12, 3.13, 3.14
+**Python Versions Tested:** 3.9, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15-dev
 
 ### Integration Workflow
 
@@ -93,7 +93,7 @@ Tests `pip install .` to ensure `pyproject.toml` is valid:
 
 | Environment | Python Versions |
 |-------------|-----------------|
-| Ubuntu runner | 3.9, 3.10, 3.11, 3.12, 3.13, 3.14 |
+| Ubuntu runner | 3.9, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15-dev |
 | Debian 13 container | System Python |
 | Ubuntu 26.04 container | System Python |
 | RHEL 10 container | System Python |

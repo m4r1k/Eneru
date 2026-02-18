@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.11.0] - Unreleased
+
+### Changed
+- **Apprise Dependency:** Bumped minimum version from 1.9.6 to 1.9.7
+- **CI Python 3.15:** Added Python 3.15-dev to test matrix as non-blocking
+
+---
+
 ## [4.10.0] - 2026-01-18
 
 ### Changed

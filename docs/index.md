@@ -91,7 +91,7 @@ See [Notifications](notifications.md) for the architecture and setup guide.
 
 Every commit triggers the full test suite:
 
-- **190 unit tests** across 6 Python versions (3.9-3.14)
+- **190 unit tests** across 7 Python versions (3.9-3.14, plus 3.15-dev)
 - **Integration tests** verifying package installation on 7 Linux distributions (Debian, Ubuntu, RHEL)
 - **End-to-end tests** with real NUT server, SSH target, and Docker containers in CI
 
