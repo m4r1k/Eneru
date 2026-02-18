@@ -57,7 +57,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14', '3.15-dev']
+    continue-on-error: ${{ matrix.python-version == '3.15-dev' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -66,6 +67,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
 
       - name: Install via pip
         run: pip install ".[notifications]"
