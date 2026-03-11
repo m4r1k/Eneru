@@ -4,7 +4,7 @@ All configuration is stored in `/etc/ups-monitor/config.yaml`. Features are disa
 
 ---
 
-## Full Configuration Example
+## Full configuration example
 
 ```yaml
 # UPS Monitor Configuration File
@@ -156,9 +156,9 @@ local_shutdown:
 
 ---
 
-## Configuration Reference
+## Configuration reference
 
-### UPS Section
+### UPS section
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -166,7 +166,7 @@ local_shutdown:
 | `check_interval` | `1` | Seconds between status checks |
 | `max_stale_data_tolerance` | `3` | Stale data attempts before connection is marked lost |
 
-### Triggers Section
+### Triggers section
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -178,15 +178,15 @@ local_shutdown:
 | `extended_time.enabled` | `true` | Enable extended time on battery shutdown |
 | `extended_time.threshold` | `900` | Seconds on battery before shutdown |
 
-See [Shutdown Triggers](triggers.md) for detailed explanations of each trigger.
+See [Shutdown triggers](triggers.md) for details on each trigger.
 
-### Behavior Section
+### Behavior section
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `dry_run` | `false` | Log actions without executing them |
 
-### Logging Section
+### Logging section
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -194,7 +194,7 @@ See [Shutdown Triggers](triggers.md) for detailed explanations of each trigger.
 | `state_file` | `/var/run/ups-monitor.state` | Current UPS state file |
 | `battery_history_file` | `/var/run/ups-battery-history` | Battery depletion history file |
 
-### Notifications Section
+### Notifications section
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -205,14 +205,14 @@ See [Shutdown Triggers](triggers.md) for detailed explanations of each trigger.
 
 See [Notifications](notifications.md) for setup instructions.
 
-### Virtual Machines Section
+### Virtual machines section
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `enabled` | `false` | Enable VM shutdown |
 | `max_wait` | `30` | Seconds to wait for graceful shutdown before force-destroy |
 
-### Containers Section
+### Containers section
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -232,7 +232,7 @@ compose_files:
     stop_timeout: 120                    # Custom timeout for this file
 ```
 
-### Filesystems Section
+### Filesystems section
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -252,7 +252,7 @@ mounts:
     options: "-f"              # Force unmount
 ```
 
-### Remote Servers Section
+### Remote servers section
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -267,9 +267,9 @@ mounts:
 | `pre_shutdown_commands` | `[]` | Commands to run before shutdown (see below) |
 | `parallel` | `true` | Shutdown concurrently with other parallel servers |
 
-#### Pre-Shutdown Commands
+#### Pre-shutdown commands
 
-Run commands on remote servers before the final shutdown. Supports predefined actions and custom commands:
+Commands to run on remote servers before the final shutdown:
 
 ```yaml
 pre_shutdown_commands:
@@ -283,7 +283,7 @@ pre_shutdown_commands:
     timeout: 30
 ```
 
-**Predefined Actions:**
+**Predefined actions:**
 
 | Action | Description |
 |--------|-------------|
@@ -296,7 +296,7 @@ pre_shutdown_commands:
 | `stop_compose` | Stop a compose stack (requires `path` parameter) |
 | `sync` | Sync filesystems |
 
-#### Parallel vs Sequential Shutdown
+#### Parallel vs sequential shutdown
 
 Servers are shutdown in two phases:
 
@@ -307,7 +307,7 @@ Use `parallel: false` for servers with dependencies (e.g., NAS that other server
 
 See [Remote Servers](remote-servers.md) for SSH setup instructions.
 
-### Local Shutdown Section
+### Local shutdown section
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -317,7 +317,7 @@ See [Remote Servers](remote-servers.md) for SSH setup instructions.
 
 ---
 
-## File Locations
+## File locations
 
 | File | Purpose |
 |------|---------|
@@ -331,9 +331,7 @@ See [Remote Servers](remote-servers.md) for SSH setup instructions.
 
 ---
 
-## Command-Line Options
-
-Eneru supports the following command-line options:
+## Command-line options
 
 | Option | Description |
 |--------|-------------|
@@ -366,7 +364,7 @@ eneru --exit-after-shutdown
 
 ---
 
-## Validating Configuration
+## Validating configuration
 
 Always validate your configuration before starting the service:
 

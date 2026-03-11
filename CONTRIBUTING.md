@@ -1,10 +1,10 @@
 # Contributing to Eneru
 
-First off, thank you for considering contributing to Eneru! 🎉
+Thanks for your interest in contributing to Eneru.
 
-## How Can I Contribute?
+## How to contribute
 
-### 🐛 Reporting Bugs
+### Reporting bugs
 
 Before creating bug reports, please check existing issues. When creating a bug report, include:
 
@@ -19,15 +19,15 @@ Before creating bug reports, please check existing issues. When creating a bug r
 - **Relevant logs** from `journalctl -u eneru.service`
 - **Configuration** (sanitize sensitive data like webhook URLs)
 
-### 💡 Suggesting Features
+### Suggesting features
 
-Feature requests are welcome! Please include:
+Feature requests are welcome. Please include:
 
 - **Use case** - Why do you need this feature?
 - **Proposed solution** - How do you envision it working?
 - **Alternatives considered** - Other approaches you've thought about
 
-### 🔧 Pull Requests
+### Pull requests
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
@@ -37,23 +37,23 @@ Feature requests are welcome! Please include:
 6. Push to your branch (`git push origin feature/amazing-feature`)
 7. Open a Pull Request
 
-#### Code Style
+#### Code style
 
 - Follow PEP 8 for Python code
 - Use type hints where possible
 - Add docstrings for new functions/classes
 - Keep configuration options well-documented
 
-### 📖 Documentation
+### Documentation
 
-Improvements to documentation are always welcome:
+Documentation improvements are welcome:
 
 - Fix typos or unclear explanations
 - Add examples for different use cases
 - Translate documentation
 - Add troubleshooting tips
 
-## Development Setup
+## Development setup
 
 ```bash
 # Clone your fork
@@ -73,9 +73,9 @@ python -m eneru --dry-run --config config.yaml
 eneru --dry-run --config config.yaml
 ```
 
-### Project Structure (v4.10+)
+### Project structure (v4.10+)
 
-Eneru uses a modular architecture with focused modules:
+Eneru is split into focused modules:
 
 ```
 src/eneru/
@@ -92,7 +92,7 @@ src/eneru/
   cli.py              # CLI argument parsing + main()
 ```
 
-## Testing Checklist
+## Testing checklist
 
 Before submitting a PR, ensure:
 
@@ -105,4 +105,4 @@ Before submitting a PR, ensure:
 
 ## Questions?
 
-Feel free to open an issue for any questions about contributing!
+Open an issue if you have questions about contributing.

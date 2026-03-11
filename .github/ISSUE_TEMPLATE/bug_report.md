@@ -6,20 +6,20 @@ labels: bug
 assignees: ''
 ---
 
-## Describe the Bug
+## Describe the bug
 A clear description of what the bug is.
 
-## To Reproduce
+## To reproduce
 Steps to reproduce the behavior:
 1. Configure '...'
 2. Run '...'
 3. Trigger '...'
 4. See error
 
-## Expected Behavior
+## Expected behavior
 What you expected to happen.
 
-## Actual Behavior
+## Actual behavior
 What actually happened.
 
 ## Logs
@@ -38,5 +38,5 @@ Paste relevant logs from: journalctl -u eneru.service
 # Paste your config.yaml here (remove sensitive data like webhook URLs)
 ```
 
-## Additional Context
+## Additional context
 Any other context about the problem.

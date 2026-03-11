@@ -4,9 +4,9 @@ This guide covers common issues and how to resolve them.
 
 ---
 
-## Service Management
+## Service management
 
-### Basic Commands
+### Basic commands
 
 ```bash
 # Start/stop/restart
@@ -29,15 +29,15 @@ sudo tail -f /var/log/ups-monitor.log
 
 ---
 
-## Service Won't Start
+## Service won't start
 
-### Check for Errors
+### Check for errors
 
 ```bash
 journalctl -u eneru.service -e
 ```
 
-### Validate Python Version
+### Validate Python version
 
 Eneru requires Python 3.9 or higher:
 
@@ -47,7 +47,7 @@ python3 --version
 
 If your version is older, you'll need to upgrade Python or use a distribution with a newer version.
 
-### Check Dependencies
+### Check dependencies
 
 ```bash
 python3 -c "import yaml; print('PyYAML OK')"
@@ -64,7 +64,7 @@ sudo apt install python3-yaml apprise
 sudo dnf install python3-pyyaml apprise
 ```
 
-### Validate Package Syntax
+### Validate package syntax
 
 ```bash
 # For installed package
@@ -76,7 +76,7 @@ python3 -m py_compile src/eneru/*.py
 
 If this produces errors, the package may be corrupted. Reinstall it.
 
-### Validate Configuration
+### Validate configuration
 
 ```bash
 sudo python3 /opt/ups-monitor/eneru.py --validate-config
@@ -86,9 +86,9 @@ This checks for YAML syntax errors and invalid configuration values.
 
 ---
 
-## Cannot Connect to UPS
+## Cannot connect to UPS
 
-### Test NUT Connection
+### Test NUT connection
 
 ```bash
 upsc UPS@192.168.178.11
@@ -116,7 +116,7 @@ This should display all UPS variables. If it fails:
 4. **Check firewall:**
    NUT uses port 3493 by default.
 
-### Verify UPS Name
+### Verify UPS name
 
 The UPS name in your config must match exactly what NUT reports:
 
@@ -128,15 +128,15 @@ This lists all UPS names on that server.
 
 ---
 
-## Notifications Not Working
+## Notifications not working
 
-### Test Built-in Command
+### Test built-in command
 
 ```bash
 sudo python3 /opt/ups-monitor/eneru.py --test-notifications
 ```
 
-### Test Apprise Directly
+### Test Apprise directly
 
 ```bash
 python3 -c "
@@ -148,7 +148,7 @@ print('Success' if result else 'Failed')
 "
 ```
 
-### Common Issues
+### Common issues
 
 1. **Wrong URL format:** Each service has a specific format. Check the [Apprise Wiki](https://github.com/caronc/apprise/wiki).
 
@@ -163,18 +163,18 @@ print('Success' if result else 'Failed')
 
 ---
 
-## Remote Shutdown Fails
+## Remote shutdown fails
 
-See also: [Remote Servers](remote-servers.md#troubleshooting)
+See also: [Remote servers](remote-servers.md#troubleshooting)
 
-### Test SSH Connection
+### Test SSH connection
 
 ```bash
 # As root (Eneru runs as root)
 sudo ssh user@remote-server "echo OK"
 ```
 
-### Test Sudo Access
+### Test sudo access
 
 ```bash
 sudo ssh user@remote-server "sudo -n true && echo 'sudo OK'"
@@ -182,7 +182,7 @@ sudo ssh user@remote-server "sudo -n true && echo 'sudo OK'"
 
 If this prompts for a password, the sudoers rule is not configured correctly.
 
-### Check SSH Key Permissions
+### Check SSH key permissions
 
 ```bash
 ls -la ~/.ssh/id_*
@@ -192,18 +192,18 @@ Keys should be mode 600 (readable only by owner).
 
 ---
 
-## Dry-Run Mode for Testing
+## Dry-run mode for testing
 
 Test the full shutdown sequence without actually shutting anything down:
 
-### Option 1: Config File
+### Option 1: Config file
 
 ```yaml
 behavior:
   dry_run: true
 ```
 
-### Option 2: Command Line
+### Option 2: Command line
 
 ```bash
 sudo python3 /opt/ups-monitor/eneru.py --dry-run
@@ -211,7 +211,7 @@ sudo python3 /opt/ups-monitor/eneru.py --dry-run
 
 In dry-run mode, all actions are logged with `[DRY-RUN]` prefix but not executed.
 
-### Simulate Power Failure
+### Simulate power failure
 
 1. Enable dry-run mode
 2. Optionally lower `extended_time.threshold` to trigger faster
@@ -226,7 +226,7 @@ sudo journalctl -u eneru.service -f
 
 ---
 
-## Clear Shutdown State
+## Clear shutdown state
 
 If a shutdown sequence is interrupted (e.g., you restored power mid-sequence during dry-run testing), clear the state file:
 
@@ -238,7 +238,7 @@ This allows Eneru to trigger a new shutdown sequence if needed.
 
 ---
 
-## Check Current UPS State
+## Check current UPS state
 
 View what Eneru sees from the UPS:
 
@@ -250,9 +250,9 @@ This shows the current battery percentage, runtime, status, and other metrics.
 
 ---
 
-## Example Log Output
+## Example log output
 
-### Normal Operation (Service Startup)
+### Normal operation (service startup)
 
 ```
 Dec 29 17:13:10 nuc.local python3[3366019]: Configuration loaded from: /etc/ups-monitor/config.yaml
@@ -265,7 +265,7 @@ Dec 29 17:13:10 nuc.local python3[3366019]: 2025-12-29 17:13:10 CET - ✅ Initia
 Dec 29 17:13:10 nuc.local python3[3366019]: 2025-12-29 17:13:10 CET - 📊 Voltage Monitoring Active. Nominal: 230.0V. Low Warning: 175.0V. High Warning: 275.0V.
 ```
 
-### Power Failure Event
+### Power failure event
 
 ```
 Dec 22 22:19:07 nuc.local python3[1274572]: 2025-12-22 22:19:07 CET - 🔄 Status changed: OL CHRG -> OB DISCHRG (Battery: 100%, Runtime: 28m 9s, Load: 29%)
@@ -277,7 +277,7 @@ Dec 22 22:20:45 nuc.local python3[1274572]: 2025-12-22 22:20:45 CET - 🔋 On ba
 Dec 22 22:21:15 nuc.local python3[1274572]: 2025-12-22 22:21:15 CET - 🔋 On battery: 93% (18m 1s), Load: 23%, Depletion: 3.28%/min, Time on battery: 2m 8s
 ```
 
-### Power Restored
+### Power restored
 
 ```
 Dec 22 22:21:17 nuc.local python3[1274572]: 2025-12-22 22:21:17 CET - 🔄 Status changed: OB DISCHRG -> OL CHRG (Battery: 65%, Runtime: 17m 59s, Load: 18%)
@@ -286,9 +286,9 @@ Dec 22 22:21:17 nuc.local python3[1274572]: 2025-12-22 22:21:17 CET - ⚡ POWER 
 
 ---
 
-## Known Limitations
+## Known limitations
 
-### Single UPS Only
+### Single UPS only
 
 Eneru monitors one UPS per instance. For multiple UPS units, run multiple instances with different config files:
 
@@ -297,7 +297,7 @@ sudo python3 /opt/ups-monitor/eneru.py --config /etc/ups-monitor/ups1.yaml
 sudo python3 /opt/ups-monitor/eneru.py --config /etc/ups-monitor/ups2.yaml
 ```
 
-### UPS Compatibility
+### UPS compatibility
 
 Eneru works with any UPS supported by NUT. However, some UPS models may:
 
@@ -305,11 +305,11 @@ Eneru works with any UPS supported by NUT. However, some UPS models may:
 - Have delayed battery percentage updates
 - Not support all status flags
 
-The multi-vector trigger system is designed to compensate for these issues.
+The multi-trigger system compensates for these issues.
 
 ---
 
-## Getting Help
+## Getting help
 
 If you're still stuck:
 

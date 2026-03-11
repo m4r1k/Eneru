@@ -1,12 +1,12 @@
 # Testing
 
-Eneru uses a comprehensive testing strategy to ensure reliability across different environments. **Every commit triggers the full test suite**—unit tests, integration tests across 7 Linux distributions, end-to-end tests with real NUT/SSH/Docker services, and configuration validation—ensuring no regressions reach users.
+Every commit triggers the full test suite: unit tests, integration tests across 7 Linux distributions, end-to-end tests with real NUT/SSH/Docker services, and configuration validation.
 
 This page documents the automated test suite and the manual validation performed before each release.
 
 ---
 
-## Testing Strategy
+## Testing strategy
 
 ```
                           ▲
@@ -46,11 +46,11 @@ This page documents the automated test suite and the manual validation performed
 
 ---
 
-## Automated Testing
+## Automated testing
 
 Every commit and pull request triggers automated testing via GitHub Actions.
 
-### Validate Workflow
+### Validate workflow
 
 The **Validate** workflow runs on every push and pull request to `main`:
 
@@ -60,13 +60,13 @@ The **Validate** workflow runs on every push and pull request to `main`:
 | **Unit Tests** | Runs the full pytest test suite with coverage |
 | **Configuration Validation** | Validates the default and example configs |
 
-**Python Versions Tested:** 3.9, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15-dev
+**Python versions tested:** 3.9, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15-dev
 
-### Integration Workflow
+### Integration workflow
 
-The **Integration** workflow performs OS-level testing to ensure packages install and work correctly on real distributions:
+The **Integration** workflow tests package installation on real distributions:
 
-#### Package Installation Testing
+#### Package installation testing
 
 Tests `.deb` and `.rpm` package installation:
 
@@ -87,7 +87,7 @@ Each test:
 3. Runs `--version` to confirm the script executes
 4. Validates the default and example configurations
 
-#### Pip Installation Testing
+#### Pip installation testing
 
 Tests `pip install .` to ensure `pyproject.toml` is valid:
 
@@ -100,7 +100,7 @@ Tests `pip install .` to ensure `pyproject.toml` is valid:
 
 ---
 
-## Test Coverage
+## Test coverage
 
 The test suite covers:
 
@@ -126,11 +126,11 @@ pytest tests/test_config.py -v
 
 ---
 
-## End-to-End (E2E) Testing
+## End-to-end (E2E) testing
 
-In addition to unit and integration tests, Eneru includes a comprehensive E2E test suite that validates the full monitoring and shutdown workflow using real services.
+The E2E test suite validates the full monitoring and shutdown workflow using real services.
 
-### E2E Test Environment
+### E2E test environment
 
 The E2E tests spin up a complete test environment with Docker Compose:
 
@@ -159,7 +159,7 @@ The E2E tests spin up a complete test environment with Docker Compose:
 - **Target Containers** - Docker containers that Eneru can shut down
 - **tmpfs Mount** - For testing filesystem unmount operations
 
-### UPS Scenarios
+### UPS scenarios
 
 The E2E tests use scenario files to simulate different UPS states:
 
@@ -174,7 +174,7 @@ The E2E tests use scenario files to simulate different UPS states:
 | `brownout.dev` | Voltage below warning threshold | No |
 | `overload.dev` | UPS overloaded | No |
 
-### E2E Test Cases
+### E2E test cases
 
 The E2E workflow (`.github/workflows/e2e.yml`) runs 7 tests on every push and PR:
 
@@ -188,7 +188,7 @@ The E2E workflow (`.github/workflows/e2e.yml`) runs 7 tests on every push and PR
 | **Test 6** | Voltage event detection (brownout, AVR) |
 | **Test 7** | Notification delivery (if `E2E_NOTIFICATION_URL` secret configured) |
 
-### Running E2E Tests Locally
+### Running E2E tests locally
 
 You can run the E2E tests on your local machine:
 
@@ -224,21 +224,21 @@ See `tests/e2e/README.md` for more details.
 
 ---
 
-## Pre-Release Validation
+## Pre-release validation
 
-!!! important "Real Hardware Testing"
+!!! important "Real hardware testing"
     Before each official release, Eneru is tested on real hardware with actual UPS units and simulated power events.
 
-### Test Environment
+### Test environment
 
-The pre-release validation environment includes:
+The pre-release validation environment:
 
 - Physical UPS units connected via USB and network
 - NUT server configured and serving UPS data
 - Multiple test systems (physical and virtual)
 - Real power event simulation (unplugging UPS from mains)
 
-### Validation Checklist
+### Validation checklist
 
 Before each release:
 
@@ -251,7 +251,7 @@ Before each release:
 - [ ] **Local shutdown** - System powers off cleanly
 - [ ] **Recovery** - Service resumes monitoring after power restoration
 
-### Simulating Power Events
+### Simulating power events
 
 To test without actually losing power:
 
@@ -266,14 +266,14 @@ upsdrvctl -t stop
 journalctl -u eneru.service -f
 ```
 
-!!! warning "Test Responsibly"
+!!! warning "Test responsibly"
     When testing shutdown sequences, ensure you have console access to the system. Remote SSH sessions may be terminated during the shutdown process.
 
 ---
 
-## Continuous Integration
+## Continuous integration
 
-### Workflow Files
+### Workflow files
 
 | Workflow | File | Trigger |
 |----------|------|---------|
@@ -283,7 +283,7 @@ journalctl -u eneru.service -f
 | Release | `.github/workflows/release.yml` | Release published |
 | PyPI | `.github/workflows/pypi.yml` | Release published |
 
-### Viewing Results
+### Viewing results
 
 - [Validate Workflow Runs](https://github.com/m4r1k/Eneru/actions/workflows/validate.yml)
 - [Integration Workflow Runs](https://github.com/m4r1k/Eneru/actions/workflows/integration.yml)
@@ -293,7 +293,7 @@ journalctl -u eneru.service -f
 
 ---
 
-## Contributing Tests
+## Contributing tests
 
 When contributing new features or bug fixes:
 

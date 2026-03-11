@@ -1,10 +1,10 @@
-# Shutdown Triggers
+# Shutdown triggers
 
-Eneru uses multiple independent triggers to decide when to initiate an emergency shutdown. This multi-vector approach ensures protection even when individual metrics are unreliable (e.g., aged batteries with inaccurate runtime estimates).
+Eneru uses multiple independent triggers to decide when to shut down. This way, if one metric is unreliable (e.g., aged batteries with bad runtime estimates), other triggers can still catch the problem.
 
 ---
 
-## Trigger Priority
+## Trigger priority
 
 When on battery power, triggers are evaluated in this order. The **first** condition met initiates shutdown:
 
@@ -16,11 +16,10 @@ When on battery power, triggers are evaluated in this order. The **first** condi
 | 4 | Depletion Rate | 15%/min | Battery draining dangerously fast |
 | 5 | Extended Time | 15 min | Safety net for prolonged outages |
 
-Each trigger serves a specific purpose and catches different failure scenarios.
 
 ---
 
-## Low Battery Threshold
+## Low battery threshold
 
 ```yaml
 triggers:
@@ -39,7 +38,7 @@ triggers:
 
 ---
 
-## Critical Runtime Threshold
+## Critical runtime threshold
 
 ```yaml
 triggers:
@@ -54,7 +53,7 @@ triggers:
 - UPS calculates runtime based on actual power draw
 - More accurate than battery percentage alone under varying loads
 
-### How Runtime is Calculated by the UPS
+### How runtime is calculated by the UPS
 
 The UPS continuously measures current battery capacity, power draw (load), and battery voltage curve to estimate: *"At this load, the battery will last X more seconds."*
 
@@ -75,11 +74,11 @@ With threshold at 10 minutes (600s), shutdown triggers.
 - Some UPS models provide unreliable estimates
 - Sudden load changes can cause estimate jumps
 
-This is why multiple triggers exist—they compensate for each other's weaknesses.
+This is why multiple triggers exist. They compensate for each other's weaknesses.
 
 ---
 
-## Depletion Rate
+## Depletion rate
 
 ```yaml
 triggers:
@@ -91,7 +90,7 @@ triggers:
 
 The depletion rate measures **how fast the battery is actually draining** based on observed data, independent of UPS estimates.
 
-### How Depletion Rate is Calculated
+### How depletion rate is calculated
 
 The script maintains a rolling history of battery readings within the configured window (default: 5 minutes).
 
@@ -127,7 +126,7 @@ Depletion rate     = 15% ÷ 5 min = 3%/min
 
 If rate exceeds threshold (default: 15%/min) and grace period has passed, trigger shutdown.
 
-### Minimum Data Requirement
+### Minimum data requirement
 
 The script requires at least 30 readings before calculating a rate. With 1-second intervals, this means 30 seconds of data minimum. This prevents:
 
@@ -135,7 +134,7 @@ The script requires at least 30 readings before calculating a rate. With 1-secon
 - Startup false positives
 - Statistical noise in short samples
 
-### The Grace Period
+### The grace period
 
 **Problem:** When power fails, battery readings are often unstable for the first 30-90 seconds as the UPS recalibrates:
 
@@ -166,7 +165,7 @@ Time     On Battery   Rate        Action
 120s     120s         18%/min     SHUTDOWN TRIGGERED
 ```
 
-### When Depletion Rate Helps
+### When depletion rate helps
 
 - **Aged batteries:** Old batteries may show 50% charge but drain to 0% in minutes
 - **Inaccurate UPS estimates:** Some UPS models have unreliable runtime calculations
@@ -175,7 +174,7 @@ Time     On Battery   Rate        Action
 
 ---
 
-## Extended Time on Battery
+## Extended time on battery
 
 ```yaml
 triggers:
@@ -188,12 +187,12 @@ triggers:
 
 **When it helps:**
 
-- **Ultimate safety net:** Even if battery shows 80% after 15 minutes, something may be wrong
+- **Safety net:** Even if battery shows 80% after 15 minutes, something may be wrong
 - **Aged battery protection:** Old batteries can suddenly fail after appearing stable
 - **UPS malfunction detection:** Catches scenarios where UPS reports incorrect data
-- **Prolonged outage protection:** Ensures graceful shutdown before potential battery failure
+- **Prolonged outage protection:** Shuts down gracefully before potential battery failure
 
-### Example Scenarios
+### Example scenarios
 
 **Scenario 1: Reliable data, extended outage**
 
@@ -204,7 +203,7 @@ Runtime estimate: 20 minutes
 Depletion rate: 3%/min
 
 All metrics look fine, but extended time threshold reached.
-Shutdown triggered—better safe than sorry.
+Shutdown triggered. Better safe than sorry.
 ```
 
 **Scenario 2: Unreliable UPS data**
@@ -219,7 +218,7 @@ Something is wrong with UPS reporting.
 Extended time safety net catches this and triggers shutdown.
 ```
 
-### Disabling Extended Time
+### Disabling extended time
 
 For environments where long outages are expected and battery capacity is sufficient:
 
@@ -233,9 +232,9 @@ When disabled, the script logs when the threshold is exceeded but does not trigg
 
 ---
 
-## Critical Runtime vs Extended Time
+## Critical runtime vs extended time
 
-These triggers serve **different purposes** and complement each other:
+These two triggers complement each other:
 
 | Trigger | Based On | Catches |
 |---------|----------|---------|
@@ -249,7 +248,7 @@ Runtime estimate: 2 hours (high—low load)
 Actual time on battery: 20 minutes
 
 Critical runtime won't trigger (estimate is high).
-Extended time triggers at 15 minutes—safety net works.
+Extended time triggers at 15 minutes, catching what runtime missed.
 ```
 
 **Example: High load, short outage**
@@ -259,16 +258,16 @@ Runtime estimate: 5 minutes (low—high load)
 Actual time on battery: 3 minutes
 
 Critical runtime triggers at 10-minute threshold.
-Extended time never reached—faster trigger caught it.
+Extended time never reached because the faster trigger caught it.
 ```
 
 ---
 
-## Failsafe Battery Protection (FSB)
+## Failsafe battery protection (FSB)
 
-Beyond the configured triggers, Eneru includes a hardcoded failsafe:
+Eneru also has a hardcoded failsafe beyond the configured triggers:
 
-!!! warning "Immediate Shutdown"
+!!! warning "Immediate shutdown"
     If connection to the UPS is lost while running on battery, immediate shutdown is triggered.
 
 This catches:
@@ -290,7 +289,7 @@ Timeline:
 
 ---
 
-## FSD (Forced Shutdown) Flag
+## FSD (forced shutdown) flag
 
 The highest priority trigger. When the UPS itself signals FSD, shutdown is immediate.
 
@@ -304,7 +303,7 @@ The highest priority trigger. When the UPS itself signals FSD, shutdown is immed
 
 ---
 
-## Why Multiple Triggers?
+## Why multiple triggers?
 
 Each trigger catches scenarios the others might miss:
 
@@ -321,7 +320,7 @@ Each trigger catches scenarios the others might miss:
 
 ---
 
-## Trigger Evaluation Flow
+## Trigger evaluation flow
 
 ```
                     ┌─────────────────────┐
@@ -374,9 +373,9 @@ Each trigger catches scenarios the others might miss:
 
 ---
 
-## Recommended Configurations
+## Recommended configurations
 
-### Conservative (Maximum Protection)
+### Conservative (maximum protection)
 
 ```yaml
 triggers:
@@ -410,7 +409,7 @@ triggers:
 
 Good balance between protection and avoiding unnecessary shutdowns.
 
-### Aggressive (Maximum Runtime)
+### Aggressive (maximum runtime)
 
 ```yaml
 triggers:

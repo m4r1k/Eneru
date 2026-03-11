@@ -1,8 +1,8 @@
-# Getting Started
+# Getting started
 
 ## Prerequisites
 
-Before installing Eneru, ensure you have:
+Before installing Eneru, you need:
 
 - **Python 3.9 or higher**
 - **NUT (Network UPS Tools) client** - Your UPS must already be configured with NUT
@@ -14,11 +14,11 @@ Before installing Eneru, ensure you have:
 
 ---
 
-## Package Installation (Recommended)
+## Package installation (recommended)
 
-Native `.deb` and `.rpm` packages are available for easy installation.
+Native `.deb` and `.rpm` packages are available.
 
-### Option 1: APT/DNF Repository (Recommended)
+### Option 1: APT/DNF repository (recommended)
 
 Add the repository to get automatic updates:
 
@@ -69,7 +69,7 @@ After pip install, you'll need to:
 2. Create a config file: `sudo nano /etc/ups-monitor/config.yaml`
 3. Run manually or set up your own service: `eneru --config /etc/ups-monitor/config.yaml`
 
-### Option 3: Direct Download from GitHub Releases
+### Option 3: Direct download from GitHub releases
 
 Download the latest package from [GitHub Releases](https://github.com/m4r1k/Eneru/releases):
 
@@ -91,7 +91,7 @@ Download the latest package from [GitHub Releases](https://github.com/m4r1k/Ener
 
 ---
 
-## After Installation
+## After installation
 
 The package installs but does **not** auto-enable or auto-start the service. You must complete configuration first:
 
@@ -109,9 +109,9 @@ sudo systemctl start eneru.service
 
 ---
 
-## Minimal Configuration
+## Minimal configuration
 
-Here's the simplest working configuration:
+The simplest working configuration:
 
 ```yaml
 # /etc/ups-monitor/config.yaml
@@ -140,7 +140,7 @@ For full configuration options, see [Configuration](configuration.md).
 
 ---
 
-## Verify Installation
+## Verify installation
 
 After starting the service, verify it's working:
 
@@ -191,8 +191,8 @@ Configuration files in `/etc/ups-monitor/` may be preserved after uninstall. Rem
 
 ---
 
-## Next Steps
+## Next steps
 
 - [Configuration](configuration.md) - Full configuration reference
-- [Shutdown Triggers](triggers.md) - Understand how shutdown decisions are made
+- [Shutdown triggers](triggers.md) - How shutdown decisions work
 - [Notifications](notifications.md) - Set up Discord, Slack, Telegram, and more

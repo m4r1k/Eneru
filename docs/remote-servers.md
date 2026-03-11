@@ -1,4 +1,4 @@
-# Remote Server Setup
+# Remote server setup
 
 Eneru can shut down remote servers via SSH during a power event. This is useful for:
 
@@ -38,7 +38,7 @@ remote_servers:
       - "-o StrictHostKeyChecking=no"
 ```
 
-### Configuration Options
+### Configuration options
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -55,11 +55,11 @@ remote_servers:
 
 ---
 
-## Pre-Shutdown Commands
+## Pre-shutdown commands
 
-Before executing the final shutdown command, Eneru can run a sequence of commands on remote servers. This is useful for gracefully stopping services, VMs, or containers before the server powers off.
+Eneru can run a sequence of commands on remote servers before the final shutdown command. This is useful for stopping services, VMs, or containers before the server powers off.
 
-### Predefined Actions
+### Predefined actions
 
 | Action | Description |
 |--------|-------------|
@@ -72,7 +72,7 @@ Before executing the final shutdown command, Eneru can run a sequence of command
 | `stop_compose` | Stop a compose stack (requires `path` parameter) |
 | `sync` | Sync filesystems before shutdown |
 
-### Example: Proxmox Server
+### Example: Proxmox server
 
 ```yaml
 - name: "Proxmox Host"
@@ -88,7 +88,7 @@ Before executing the final shutdown command, Eneru can run a sequence of command
   shutdown_command: "shutdown -h now"
 ```
 
-### Example: Docker Server with Custom Commands
+### Example: Docker server with custom commands
 
 ```yaml
 - name: "Docker Server"
@@ -108,7 +108,7 @@ Before executing the final shutdown command, Eneru can run a sequence of command
   shutdown_command: "shutdown -h now"
 ```
 
-### Error Handling
+### Error handling
 
 Pre-shutdown commands are **best-effort**:
 
@@ -118,11 +118,11 @@ Pre-shutdown commands are **best-effort**:
 
 ---
 
-## Parallel vs Sequential Shutdown
+## Parallel vs sequential shutdown
 
 By default, all enabled remote servers are shutdown concurrently using threads. This prevents one slow/unreachable server from blocking others.
 
-### Dependency Ordering
+### Dependency ordering
 
 Some servers have dependencies on others. For example, if multiple servers mount NFS shares from a NAS, the NAS should shutdown **last**.
 
@@ -152,21 +152,21 @@ remote_servers:
     shutdown_command: "sudo -i synoshutdown -s"
 ```
 
-### Execution Order
+### Execution order
 
 1. **Sequential phase**: Servers with `parallel: false` shutdown one-by-one in config order
 2. **Parallel phase**: Remaining servers (default `parallel: true`) shutdown concurrently
 
-!!! tip "Dependency Tip"
+!!! tip "Dependency tip"
     Put servers with dependencies (like NAS/storage) at the end of your config with `parallel: false`.
 
 ---
 
-## SSH Key Setup
+## SSH key setup
 
 For secure, passwordless authentication, set up SSH keys:
 
-### 1. Generate SSH Key
+### 1. Generate SSH key
 
 As root on the Eneru server (since Eneru runs as root):
 
@@ -177,13 +177,13 @@ ssh-keygen -t ed25519 -f ~/.ssh/id_ups_shutdown -C "ups-monitor@$(hostname)"
 
 Press Enter for no passphrase (required for unattended operation).
 
-### 2. Copy Key to Remote Server
+### 2. Copy key to remote server
 
 ```bash
 ssh-copy-id -i ~/.ssh/id_ups_shutdown.pub user@remote-server
 ```
 
-### 3. Test Connection
+### 3. Test connection
 
 ```bash
 # Should connect without password prompt
@@ -192,11 +192,11 @@ sudo ssh -i ~/.ssh/id_ups_shutdown user@remote-server "echo OK"
 
 ---
 
-## Passwordless Sudo
+## Passwordless sudo
 
 The shutdown command typically requires root privileges. Configure passwordless sudo for the specific command:
 
-### Standard Linux
+### Standard linux
 
 On the remote server:
 
@@ -212,7 +212,7 @@ echo "username ALL=(ALL) NOPASSWD: /usr/syno/sbin/synoshutdown -s" | sudo tee /e
 sudo chmod 0440 /etc/sudoers.d/ups_shutdown
 ```
 
-!!! warning "Synology Note"
+!!! warning "Synology note"
     Synology DSM resets `/etc/sudoers.d/` on updates. You may need to re-apply this after DSM updates, or use a scheduled task to maintain it.
 
 ### QNAP QTS
@@ -230,7 +230,7 @@ TrueNAS uses a different approach. Configure via the web UI:
 
 ---
 
-## Common Shutdown Commands
+## Common shutdown commands
 
 | System | Command |
 |--------|---------|
@@ -245,7 +245,7 @@ TrueNAS uses a different approach. Configure via the web UI:
 
 ---
 
-## Testing Remote Shutdown
+## Testing remote shutdown
 
 !!! danger "This will actually shut down the server!"
     Only run this when you're prepared for the server to go offline.
@@ -265,9 +265,9 @@ sudo ssh user@remote-server "sudo whoami"
 
 ---
 
-## Security Considerations
+## Security considerations
 
-### Host Key Verification
+### Host key verification
 
 The example config includes `-o StrictHostKeyChecking=no` for convenience during initial setup. For production:
 
@@ -284,11 +284,11 @@ The example config includes `-o StrictHostKeyChecking=no` for convenience during
 
 This ensures that if a server's host key changes unexpectedly (potential MITM attack), the connection will fail rather than proceeding silently.
 
-### Limiting Sudo Access
+### Limiting sudo access
 
-The sudoers rules above grant access only to the specific shutdown command, not full root access. This follows the principle of least privilege.
+The sudoers rules above grant access only to the specific shutdown command, not full root access.
 
-### SSH Key Security
+### SSH key security
 
 - Store keys in `/root/.ssh/` with restrictive permissions (600)
 - Consider using a dedicated key (`id_ups_shutdown`) rather than the default key
@@ -298,7 +298,7 @@ The sudoers rules above grant access only to the specific shutdown command, not 
 
 ## Troubleshooting
 
-### Connection Timeout
+### Connection timeout
 
 ```
 ERROR: SSH connection to 192.168.178.229 timed out
@@ -309,7 +309,7 @@ ERROR: SSH connection to 192.168.178.229 timed out
 - Verify firewall allows SSH (port 22)
 - Increase `connect_timeout` if network is slow
 
-### Permission Denied
+### Permission denied
 
 ```
 ERROR: Permission denied (publickey,password)
@@ -319,7 +319,7 @@ ERROR: Permission denied (publickey,password)
 - Check key permissions: `ls -la ~/.ssh/id_ups_shutdown` (should be 600)
 - Ensure you're running as root: `sudo ssh ...`
 
-### Sudo Password Required
+### Sudo password required
 
 ```
 sudo: a password is required
@@ -329,7 +329,7 @@ sudo: a password is required
 - Check rule syntax: `sudo visudo -c`
 - Ensure the command in sudoers matches exactly what Eneru runs
 
-### Command Not Found
+### Command not found
 
 ```
 synoshutdown: command not found

@@ -2,7 +2,7 @@
 
 # ⚡ Eneru
 
-**Intelligent UPS Monitoring & Shutdown Orchestration for NUT**
+**UPS monitoring and shutdown orchestration for NUT**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
@@ -26,9 +26,9 @@ A Python-based UPS monitoring daemon that watches UPS status via [Network UPS To
 
 ---
 
-## ✨ Why Eneru?
+## Why Eneru?
 
-Most UPS shutdown solutions are **single-system focused**. Eneru is designed for **modern infrastructure**:
+Most UPS shutdown solutions handle a single system. Eneru handles multi-system environments:
 
 | Challenge | Eneru Solution |
 |-----------|----------------|
@@ -43,18 +43,18 @@ Most UPS shutdown solutions are **single-system focused**. Eneru is designed for
 
 ---
 
-## 🎯 Built For
+## Built for
 
-- 🏠 **Homelabs** - Protect your self-hosted infrastructure
-- 🖥️ **Virtualization Hosts** - Graceful VM shutdown before power loss
-- 🐳 **Container Hosts** - Stop Docker/Podman containers safely
-- 📦 **NAS Systems** - Coordinate shutdown of Synology, QNAP, TrueNAS
-- 🏢 **Small Business** - Multi-server environments with single UPS
-- ☁️ **Hybrid Setups** - Mix of physical and virtual infrastructure
+- **Homelabs** - Protect your self-hosted infrastructure
+- **Virtualization hosts** - Graceful VM shutdown before power loss
+- **Container hosts** - Stop Docker/Podman containers safely
+- **NAS systems** - Coordinate shutdown of Synology, QNAP, TrueNAS
+- **Small business** - Multi-server environments with single UPS
+- **Hybrid setups** - Mix of physical and virtual infrastructure
 
 ---
 
-## 🚀 Quick Start
+## Quick start
 
 ### Installation
 
@@ -106,37 +106,37 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 
 ---
 
-## ✨ Features
+## Features
 
 - **Multi-vector shutdown triggers** - Battery %, runtime, depletion rate, time on battery, FSD flag
 - **Orchestrated shutdown** - VMs, containers, remote servers, filesystems, local system
-- **100+ notification services** - Discord, Slack, Telegram, ntfy, Email via [Apprise](https://github.com/caronc/apprise/wiki)
+- **100+ notification services** - Discord, Slack, Telegram, ntfy, email via [Apprise](https://github.com/caronc/apprise/wiki)
 - **Non-blocking notifications** - Persistent retry without delaying shutdown
 - **Power quality monitoring** - Voltage, AVR, bypass, and overload detection
 - **Dry-run mode** - Test your configuration safely
-- **Comprehensive testing** - Unit tests, integration tests across 7 Linux distros, and E2E tests with real NUT/SSH/Docker services on every commit
+- **Tested on every commit** - Unit tests, integration tests across 7 Linux distros, and E2E tests with real NUT/SSH/Docker services
 
 ---
 
-## 🤔 Why an Old-Fashioned Systemd Daemon? (No Docker)
+## Why a systemd daemon? (No Docker)
 
-Eneru runs as a systemd daemon, not a container. This is intentional—Eneru's job is to shut down Docker/Podman containers during power events. If Eneru ran inside a container, it would be killed during its own shutdown sequence.
+Eneru runs as a systemd daemon, not a container. Its job is to shut down Docker/Podman containers during power events, so running inside a container would mean getting killed during its own shutdown sequence.
 
 See the [documentation](https://eneru.readthedocs.io/#why-a-systemd-daemon-no-docker) for the full explanation.
 
 ---
 
-## ⚡ The Name
+## The name
 
 <img src="https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru.jpg" alt="Eneru from One Piece" width="120" align="right">
 
-Named after [Eneru (エネル)](https://onepiece.fandom.com/wiki/Enel) from *One Piece*—the self-proclaimed God of Skypiea who ate the Goro Goro no Mi (Rumble-Rumble Fruit), granting him absolute control over electricity. Just as Eneru commands lightning from the sky, this tool commands your infrastructure when the power from the grid fails. *Unlimited power... management!* ⚡
+Named after [Eneru (エネル)](https://onepiece.fandom.com/wiki/Enel) from *One Piece*, the self-proclaimed God of Skypiea who ate the Goro Goro no Mi (Rumble-Rumble Fruit) and can control electricity. When the power from the grid fails, this tool takes over and shuts everything down safely. *Unlimited power... management!*
 
 ---
 
-## 📚 Documentation
+## Documentation
 
-Full documentation is available at **[eneru.readthedocs.io](https://eneru.readthedocs.io/)**:
+Full documentation at [eneru.readthedocs.io](https://eneru.readthedocs.io/):
 
 - [Getting Started](https://eneru.readthedocs.io/latest/getting-started/) - Installation and basic setup
 - [Configuration](https://eneru.readthedocs.io/latest/configuration/) - Full configuration reference
@@ -148,6 +148,6 @@ Full documentation is available at **[eneru.readthedocs.io](https://eneru.readth
 
 ---
 
-## 📄 License
+## License
 
 MIT License - See [LICENSE](LICENSE) file for details.

@@ -11,7 +11,7 @@ These tests spin up a complete test environment:
 - **Docker Containers** (targets for container shutdown)
 - **tmpfs Mount** (for unmount testing)
 
-## Running Locally
+## Running locally
 
 ### Prerequisites
 
@@ -19,7 +19,7 @@ These tests spin up a complete test environment:
 - Python 3.9+
 - NUT client (`apt install nut-client` or `dnf install nut`)
 
-### Quick Start
+### Quick start
 
 ```bash
 # From repository root
@@ -42,7 +42,7 @@ upsc TestUPS@localhost:3493
 eneru --validate-config --config config-e2e-dry-run.yaml
 ```
 
-### Simulating Scenarios
+### Simulating scenarios
 
 Apply different UPS states by copying scenario files:
 
@@ -63,7 +63,7 @@ cp scenarios/fsd.dev scenarios/apply.dev
 docker compose down -v
 ```
 
-## Test Scenarios
+## Test scenarios
 
 | File | Description | Triggers Shutdown? |
 |------|-------------|-------------------|
@@ -76,7 +76,7 @@ docker compose down -v
 | `brownout.dev` | Voltage below warning threshold | No |
 | `overload.dev` | UPS overloaded | No |
 
-## Configuration Files
+## Configuration files
 
 | File | Purpose |
 |------|---------|
@@ -84,11 +84,11 @@ docker compose down -v
 | `config-e2e-dry-run.yaml` | Detection testing (no real actions) |
 | `config-e2e-notifications.yaml` | Notification testing |
 
-## GitHub Actions
+## GitHub actions
 
 The E2E tests run automatically on push/PR to main via `.github/workflows/e2e.yml`.
 
-### Notification Testing
+### Notification testing
 
 To test notifications in CI, add the `E2E_NOTIFICATION_URL` secret to your repository.
 This should be an Apprise-compatible URL (e.g., Discord webhook, Slack, etc.).

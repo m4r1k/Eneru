@@ -4,15 +4,15 @@
   <img src="images/eneru-diagram.svg" alt="Eneru Architecture" width="600">
 </p>
 
-**Intelligent UPS Monitoring & Shutdown Orchestration for NUT**
+**UPS monitoring and shutdown orchestration for NUT**
 
-A Python-based UPS monitoring daemon that watches UPS status via [Network UPS Tools (NUT)](https://networkupstools.org/) and executes configurable shutdown sequences to protect your entire infrastructure during power events.
+A Python-based UPS monitoring daemon that watches UPS status via [Network UPS Tools (NUT)](https://networkupstools.org/) and runs configurable shutdown sequences to protect your infrastructure during power events.
 
 ---
 
 ## Why Eneru?
 
-Most UPS shutdown solutions are **single-system focused**. Eneru is designed for **modern infrastructure**:
+Most UPS shutdown solutions handle a single system. Eneru handles multi-system environments:
 
 | Challenge | Eneru Solution |
 |-----------|----------------|
@@ -27,67 +27,67 @@ Most UPS shutdown solutions are **single-system focused**. Eneru is designed for
 
 ---
 
-## 🎯 Built For
+## Built for
 
-- 🏠 **Homelabs** - Protect your self-hosted infrastructure
-- 🖥️ **Virtualization Hosts** - Graceful VM shutdown before power loss
-- 🐳 **Container Hosts** - Stop Docker/Podman containers safely
-- 📦 **NAS Systems** - Coordinate shutdown of Synology, QNAP, TrueNAS
-- 🏢 **Small Business** - Multi-server environments with single UPS
-- ☁️ **Hybrid Setups** - Mix of physical and virtual infrastructure
+- **Homelabs** - Protect your self-hosted infrastructure
+- **Virtualization hosts** - Graceful VM shutdown before power loss
+- **Container hosts** - Stop Docker/Podman containers safely
+- **NAS systems** - Coordinate shutdown of Synology, QNAP, TrueNAS
+- **Small business** - Multi-server environments with single UPS
+- **Hybrid setups** - Mix of physical and virtual infrastructure
 
 ---
 
-## ✨ Features
+## Features
 
-### High-Performance Monitoring
+### Monitoring
 
-- **Optimized Polling:** Fetches all UPS metrics in a single network call with configurable intervals
-- **Robust Error Handling:** Comprehensive input validation prevents failures from corrupted or transient data
-- **Atomic State Updates:** Uses atomic file operations for data integrity
-- **Connection Resilience:** Automatic recovery from network issues with stale data detection
+- **Single-call polling:** Fetches all UPS metrics in one network call with configurable intervals
+- **Input validation:** Prevents failures from corrupted or transient data
+- **Atomic state updates:** Uses atomic file operations for data integrity
+- **Connection recovery:** Automatic reconnection with stale data detection
 
-### Intelligent Shutdown Triggers
+### Shutdown triggers
 
 Multiple shutdown conditions with configurable thresholds:
 
-1. **FSD Flag:** UPS signals forced shutdown (highest priority)
-2. **Critical Battery Level:** Battery percentage below threshold (default: 20%)
-3. **Critical Runtime:** Estimated runtime below threshold (default: 10 minutes)
-4. **Dangerous Depletion Rate:** Battery draining faster than threshold (default: 15%/min)
-5. **Extended Time on Battery:** Safety net for aged batteries (default: 15 minutes)
+1. **FSD flag:** UPS signals forced shutdown (highest priority)
+2. **Critical battery level:** Battery percentage below threshold (default: 20%)
+3. **Critical runtime:** Estimated runtime below threshold (default: 10 minutes)
+4. **Dangerous depletion rate:** Battery draining faster than threshold (default: 15%/min)
+5. **Extended time on battery:** Safety net for aged batteries (default: 15 minutes)
 6. **Failsafe (FSB):** Connection lost while on battery triggers immediate shutdown
 
-See [Shutdown Triggers](triggers.md) for detailed documentation.
+See [Shutdown triggers](triggers.md) for details.
 
-### Configurable Shutdown Sequence
+### Shutdown sequence
 
 All components are optional and independently configurable:
 
-1. **Virtual Machines (libvirt/KVM):** Graceful shutdown with force-destroy fallback
+1. **Virtual machines (libvirt/KVM):** Graceful shutdown with force-destroy fallback
 2. **Containers (Docker/Podman):** Stop all running containers with auto-detection
-3. **Filesystem Sync:** Flush buffers to disk
-4. **Filesystem Unmount:** Hang-proof unmounting with per-mount options
-5. **Remote Servers:** SSH-based shutdown of multiple remote systems
-6. **Local Shutdown:** Configurable shutdown command
+3. **Filesystem sync:** Flush buffers to disk
+4. **Filesystem unmount:** Hang-proof unmounting with per-mount options
+5. **Remote servers:** SSH-based shutdown of multiple remote systems
+6. **Local shutdown:** Configurable shutdown command
 
-### Real-Time Notifications (via Apprise)
+### Notifications (via Apprise)
 
-- **100+ Notification Services:** Discord, Slack, Telegram, ntfy, Pushover, Email, and [many more](https://github.com/caronc/apprise/wiki)
-- **Non-Blocking with Persistent Retry:** Notifications never delay shutdown, retried until delivered
-- **Power Event Alerts:** Color-coded notifications for all power events
-- **Service Lifecycle:** Notifications when service starts/stops
+- **100+ services:** Discord, Slack, Telegram, ntfy, Pushover, email, and [many more](https://github.com/caronc/apprise/wiki)
+- **Non-blocking with persistent retry:** Notifications never delay shutdown, retried until delivered
+- **Power event alerts:** Color-coded notifications for all power events
+- **Service lifecycle:** Notifications when service starts/stops
 
-See [Notifications](notifications.md) for the architecture and setup guide.
+See [Notifications](notifications.md) for setup.
 
-### Power Quality Monitoring
+### Power quality monitoring
 
-- **Voltage Monitoring:** Brownout and over-voltage detection
-- **AVR Tracking:** Boost/Trim mode detection
-- **Bypass Detection:** Alerts when UPS protection is inactive
-- **Overload Detection:** Load threshold monitoring
+- **Voltage monitoring:** Brownout and over-voltage detection
+- **AVR tracking:** Boost/Trim mode detection
+- **Bypass detection:** Alerts when UPS protection is inactive
+- **Overload detection:** Load threshold monitoring
 
-### Tested on Every Commit
+### Tested on every commit
 
 Every commit triggers the full test suite:
 
@@ -95,11 +95,11 @@ Every commit triggers the full test suite:
 - **Integration tests** verifying package installation on 7 Linux distributions (Debian, Ubuntu, RHEL)
 - **End-to-end tests** with real NUT server, SSH target, and Docker containers in CI
 
-The E2E test suite simulates 8 UPS scenarios (online, low-battery, FSD, brownout, etc.) and validates the complete shutdown workflow—from power failure detection to SSH remote shutdown execution. Before each release, Eneru is also validated on real hardware with actual UPS units and simulated power events. See [Testing](testing.md) for details.
+The E2E test suite simulates 8 UPS scenarios (online, low-battery, FSD, brownout, etc.) and validates the complete shutdown workflow, from power failure detection to SSH remote shutdown. Before each release, Eneru is also validated on real hardware with actual UPS units and simulated power events. See [Testing](testing.md) for details.
 
-### Modular Architecture (v4.10+)
+### Modular architecture (v4.10+)
 
-Clean separation of concerns with 9 focused modules:
+9 focused modules:
 
 - `config.py` - Configuration dataclasses and YAML loader
 - `monitor.py` - Core UPS monitoring logic
@@ -109,31 +109,31 @@ Clean separation of concerns with 9 focused modules:
 
 ---
 
-## 🤔 Why a Systemd Daemon? (No Docker)
+## Why a systemd daemon? (No Docker)
 
-You might wonder why Eneru runs as a traditional systemd service instead of a container. This is intentional:
+Eneru runs as a systemd service, not a container. This is intentional.
 
-**The Chicken-and-Egg Problem:** Eneru's job is to gracefully shut down Docker/Podman containers during power events. If Eneru itself ran inside a container, it would be stopped during its own shutdown sequence—potentially stalling the entire process and leaving the host in an undefined state.
+Eneru's job is to shut down Docker/Podman containers during power events. If Eneru itself ran inside a container, it would be stopped during its own shutdown sequence, potentially stalling the process and leaving the host in an undefined state.
 
-Running as a systemd daemon ensures:
+Running as a systemd daemon means:
 
-- **Eneru survives container shutdown** - It can orchestrate the full sequence without being killed
+- **Survives container shutdown** - It can orchestrate the full sequence without being killed
 - **Direct host access** - Native access to systemd, virsh, SSH, and filesystem operations
-- **Reliability** - No container runtime dependency that could fail during a power event
-- **Simplicity** - While it's technically possible to code Eneru to run inside a container (with careful self-exclusion logic during shutdown), this would significantly increase codebase complexity and still introduce the possibility that something goes wrong—leaving Eneru unable to complete its job
+- **No runtime dependency** - The container runtime itself could fail during a power event
+- **Less complexity** - Running inside a container would require self-exclusion logic during shutdown, adding complexity and failure modes
 
-This is the same reason critical infrastructure services like NUT itself run as system daemons, not containers.
+NUT itself runs as a system daemon for the same reasons.
 
 ---
 
-## ⚡ The Name
+## The name
 
 <img src="images/eneru.jpg" alt="Eneru from One Piece" width="120" align="right">
 
-Named after [Eneru (エネル)](https://onepiece.fandom.com/wiki/Enel) from *One Piece*—the self-proclaimed God of Skypiea who ate the Goro Goro no Mi (Rumble-Rumble Fruit), granting him absolute control over electricity. Just as Eneru commands lightning from the sky, this tool commands your infrastructure when the power from the grid fails. *Unlimited power... management!* ⚡
+Named after [Eneru (エネル)](https://onepiece.fandom.com/wiki/Enel) from *One Piece*, the self-proclaimed God of Skypiea who ate the Goro Goro no Mi (Rumble-Rumble Fruit) and can control electricity. When the power from the grid fails, this tool takes over and shuts everything down safely. *Unlimited power... management!*
 
 ---
 
-## Quick Start
+## Quick start
 
-Ready to get started? Head to [Getting Started](getting-started.md) for installation instructions.
+See [Getting started](getting-started.md) for installation instructions.

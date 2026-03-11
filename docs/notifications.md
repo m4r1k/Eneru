@@ -29,7 +29,7 @@ notifications:
 
 ---
 
-## Popular Services
+## Popular services
 
 ### Discord
 
@@ -95,13 +95,13 @@ urls:
   - "mailto://user:password@smtp.gmail.com:587?to=recipient@example.com"
 ```
 
-### More Services
+### More services
 
 Apprise supports 100+ notification services. See the [Apprise Wiki](https://github.com/caronc/apprise/wiki) for the complete list and URL formats.
 
 ---
 
-## Testing Notifications
+## Testing notifications
 
 Before relying on notifications during a power event, test them:
 
@@ -115,15 +115,15 @@ sudo python3 /opt/ups-monitor/eneru.py --validate-config --test-notifications
 
 ---
 
-## Persistent Retry Architecture
+## Persistent retry architecture
 
-During power outages, network connectivity is often temporarily unavailable. Eneru uses a **non-blocking persistent retry** notification system that:
+During power outages, network connectivity is often temporarily down. Eneru uses a non-blocking persistent retry system:
 
-1. **Never blocks shutdown operations** - main thread queues instantly and continues
-2. **Retries until success** - worker thread persistently retries failed notifications
-3. **Preserves order** - FIFO queue ensures messages arrive in the correct sequence
+1. **Never blocks shutdown** - the main thread queues instantly and continues
+2. **Retries until success** - a worker thread retries failed notifications
+3. **Preserves order** - FIFO queue keeps messages in sequence
 
-This design ensures you receive all notifications about power events, even during brief outages where the network recovers before the system shuts down.
+You get all notifications about power events as long as the network recovers before the system shuts down.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -190,7 +190,7 @@ notifications:
   retry_interval: 5
 ```
 
-### Why Persistent Retry Matters
+### Why persistent retry matters
 
 | Scenario | Fire-and-Forget (v4.6) | Persistent Retry (v4.7+) |
 |----------|------------------------|--------------------------|
@@ -200,7 +200,7 @@ notifications:
 | Network down until shutdown | Messages dropped at exit | Same (logs in journalctl) |
 | Multiple services configured | All fail simultaneously | Apprise retries to all |
 
-### The 5-Second Grace Period
+### The 5-second grace period
 
 After all critical shutdown operations complete, Eneru waits 5 seconds before issuing the final `shutdown -h now` command. This grace period allows queued notifications to be sent if the network is available, without risking data loss if it's not.
 
@@ -219,11 +219,11 @@ Timeline (worst case - network down):
         Total: ~55 seconds (network issues added 0 seconds delay)
 ```
 
-### 30-Second Power Blip
+### 30-second power blip
 
-During a brief power blip, power may be restored within seconds or minutes — well before any shutdown triggers fire. However, public Internet often remains unreachable for several more minutes while local network equipment boots up (router, modem, switches, WiFi APs etc).
+During a brief power blip, power may be restored within seconds or minutes, well before any shutdown triggers fire. But public Internet often stays unreachable for several more minutes while local network equipment boots up (router, modem, switches, WiFi APs, etc).
 
-The persistent retry architecture handles this gracefully: notifications queue instantly and the worker keeps retrying every `retry_interval` seconds. As soon as the network is back, all messages are delivered in order — giving you full visibility into what happened.
+Notifications queue instantly and the worker keeps retrying every `retry_interval` seconds. Once the network is back, all messages are delivered in order.
 
 ```
 Timeline (brief power blip, network slow to recover):
@@ -247,7 +247,7 @@ Timeline (brief power blip, network slow to recover):
 
 ---
 
-## Notification Events
+## Notification events
 
 Eneru sends notifications for:
 
@@ -265,7 +265,7 @@ Eneru sends notifications for:
 
 ## Troubleshooting
 
-### Notifications Not Arriving
+### Notifications not arriving
 
 1. **Test Apprise directly:**
    ```bash
@@ -287,6 +287,6 @@ Eneru sends notifications for:
 
 4. **Check logs:** Notification errors are logged to `/var/log/ups-monitor.log`.
 
-### Rate Limiting
+### Rate limiting
 
 Some services (especially Discord) have rate limits. If you're testing frequently, you may hit these limits. In production, power events are infrequent enough that this shouldn't be an issue.
