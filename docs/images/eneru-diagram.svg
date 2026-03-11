@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400">
+  <title>Eneru Architecture Diagram</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 6" refX="0" refY="3" markerWidth="8" markerHeight="6" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#C8977A"/>
+    </marker>
+  </defs>
+
+  <!-- ZONES -->
+  <g id="zones">
+    <!-- Source Zone -->
+    <rect x="20" y="30" width="210" height="200" rx="12" ry="12" fill="#E07A5F" fill-opacity="0.07" stroke="#E07A5F" stroke-opacity="0.15" stroke-width="1"/>
+    <text x="125" y="56" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#A09080" letter-spacing="2">SOURCE</text>
+
+    <!-- Monitor Zone -->
+    <rect x="280" y="30" width="210" height="340" rx="12" ry="12" fill="#E07A5F" fill-opacity="0.07" stroke="#E07A5F" stroke-opacity="0.15" stroke-width="1"/>
+    <text x="385" y="56" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#A09080" letter-spacing="2">MONITOR</text>
+
+    <!-- Targets Zone -->
+    <rect x="540" y="30" width="240" height="340" rx="12" ry="12" fill="#E07A5F" fill-opacity="0.07" stroke="#E07A5F" stroke-opacity="0.15" stroke-width="1"/>
+    <text x="660" y="56" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#A09080" letter-spacing="2">TARGETS</text>
+  </g>
+
+  <!-- CONNECTORS -->
+  <g id="connectors">
+    <!-- UPS → NUT Server: line ends 8px before NUT box, arrowhead fills the gap -->
+    <line x1="112" y1="130" x2="130" y2="130" stroke="#C8977A" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+    <!-- NUT Server → Eneru: line ends 8px before Eneru box -->
+    <line x1="218" y1="130" x2="312" y2="130" stroke="#C8977A" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+    <!-- Eneru → Pre-shutdown Commands -->
+    <line x1="385" y1="158" x2="385" y2="192" stroke="#C8977A" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <!-- Pre-shutdown Commands → Alerts -->
+    <line x1="385" y1="234" x2="385" y2="272" stroke="#C8977A" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+    <!-- Eneru → Targets fan-out -->
+    <!-- Horizontal trunk from Eneru (no arrowhead) -->
+    <line x1="450" y1="130" x2="520" y2="130" stroke="#C8977A" stroke-width="1.8"/>
+    <!-- Vertical backbone (no arrowhead) -->
+    <line x1="520" y1="95" x2="520" y2="335" stroke="#C8977A" stroke-width="1.8"/>
+    <!-- Junction circle -->
+    <circle cx="520" cy="130" r="3" fill="#C8977A"/>
+
+    <!-- Branches: lines end 8px before target boxes, arrowheads fill the gap -->
+    <line x1="520" y1="95" x2="570" y2="95" stroke="#C8977A" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <line x1="520" y1="155" x2="570" y2="155" stroke="#C8977A" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <line x1="520" y1="215" x2="570" y2="215" stroke="#C8977A" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <line x1="520" y1="275" x2="570" y2="275" stroke="#C8977A" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <line x1="520" y1="335" x2="570" y2="335" stroke="#C8977A" stroke-width="1.8" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- COMPONENTS -->
+  <g id="components">
+    <!-- UPS Box (centered in Source zone: margin 12px each side) -->
+    <rect x="32" y="105" width="80" height="50" rx="6" ry="6" fill="#FFFAF6" stroke="#D4BBA8" stroke-width="1.2"/>
+    <!-- Lightning bolt icon -->
+    <path d="M58,118 L53,128 L57,128 L52,138" fill="none" stroke="#3D3632" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="76" y="135" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="600" fill="#3D3632">UPS</text>
+
+    <!-- NUT Server Box (centered in Source zone: margin 12px each side) -->
+    <rect x="138" y="105" width="80" height="50" rx="6" ry="6" fill="#FFFAF6" stroke="#D4BBA8" stroke-width="1.2"/>
+    <!-- Server rack icon -->
+    <path d="M155,119 L155,137 M155,119 L165,119 L165,137 L155,137 M155,125 L165,125 M155,131 L165,131" fill="none" stroke="#3D3632" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="192" y="128" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#3D3632">NUT</text>
+    <text x="192" y="141" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="10" font-weight="400" fill="#8A7A6A">Server</text>
+
+    <!-- Eneru Box (focal) -->
+    <rect x="320" y="102" width="130" height="56" rx="8" ry="8" fill="#E07A5F"/>
+    <!-- Lightning bolt icon (white, larger) -->
+    <path d="M348,117 L341,130 L347,130 L340,143" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="392" y="135" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="20" font-weight="700" fill="#FFFFFF">Eneru</text>
+
+    <!-- Pre-shutdown Commands Box -->
+    <rect x="330" y="200" width="110" height="34" rx="6" ry="6" fill="#FFFAF6" stroke="#D4BBA8" stroke-width="1.2"/>
+    <!-- List icon (three horizontal lines) -->
+    <path d="M340,211 L348,211 M340,217 L348,217 M340,223 L348,223" fill="none" stroke="#3D3632" stroke-width="1.5" stroke-linecap="round"/>
+    <text x="396" y="214" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#3D3632">Pre-shutdown</text>
+    <text x="396" y="226" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="10" font-weight="400" fill="#8A7A6A">Commands</text>
+
+    <!-- Alerts Box -->
+    <rect x="325" y="280" width="120" height="56" rx="6" ry="6" fill="#F5DDD5" stroke="#D4BBA8" stroke-width="1.2"/>
+    <!-- Bell icon -->
+    <path d="M351,299 Q351,293 356,293 Q361,293 361,299 L362,307 L350,307 Z M354,310 Q356,312 358,310" fill="none" stroke="#3D3632" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="393" y="306" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="600" fill="#3D3632">Alerts</text>
+    <text x="393" y="320" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="10" font-weight="400" fill="#8A7A6A">100+ services</text>
+
+    <!-- Virtual Machines -->
+    <rect x="578" y="75" width="180" height="40" rx="6" ry="6" fill="#FFFAF6" stroke="#D4BBA8" stroke-width="1.2"/>
+    <!-- Stacked layers icon -->
+    <path d="M596,89 L604,85 L612,89 L604,93 Z M596,93 L604,97 L612,93 M596,97 L604,101 L612,97" fill="none" stroke="#3D3632" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="668" y="100" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="600" fill="#3D3632">Virtual Machines</text>
+
+    <!-- Containers -->
+    <rect x="578" y="135" width="180" height="40" rx="6" ry="6" fill="#FFFAF6" stroke="#D4BBA8" stroke-width="1.2"/>
+    <!-- Cube/box icon -->
+    <path d="M596,149 L604,145 L612,149 L612,157 L604,161 L596,157 Z M604,145 L604,153 M596,149 L604,153 L612,149" fill="none" stroke="#3D3632" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="668" y="160" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="600" fill="#3D3632">Containers</text>
+
+    <!-- Remote Servers -->
+    <rect x="578" y="195" width="180" height="40" rx="6" ry="6" fill="#FFFAF6" stroke="#D4BBA8" stroke-width="1.2"/>
+    <!-- Globe icon -->
+    <circle cx="604" cy="215" r="7" fill="none" stroke="#3D3632" stroke-width="1.3"/>
+    <path d="M597,215 L611,215 M604,208 Q601,212 601,215 Q601,218 604,222 M604,208 Q607,212 607,215 Q607,218 604,222" fill="none" stroke="#3D3632" stroke-width="1.1" stroke-linecap="round"/>
+    <text x="668" y="220" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="600" fill="#3D3632">Remote Servers</text>
+
+    <!-- NAS Systems -->
+    <rect x="578" y="255" width="180" height="40" rx="6" ry="6" fill="#FFFAF6" stroke="#D4BBA8" stroke-width="1.2"/>
+    <!-- Storage drive icon -->
+    <path d="M596,268 L612,268 L612,282 L596,282 Z M596,275 L612,275 M608,279 L610,279" fill="none" stroke="#3D3632" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="668" y="280" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="600" fill="#3D3632">NAS Systems</text>
+
+    <!-- Local System -->
+    <rect x="578" y="315" width="180" height="40" rx="6" ry="6" fill="#FFFAF6" stroke="#D4BBA8" stroke-width="1.2"/>
+    <!-- Monitor icon -->
+    <path d="M596,326 L612,326 L612,338 L596,338 Z M601,342 L607,342 M604,338 L604,342" fill="none" stroke="#3D3632" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="668" y="340" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="600" fill="#3D3632">Local System</text>
+  </g>
+</svg>

@@ -12,7 +12,7 @@
 [![PyPI](https://img.shields.io/pypi/v/eneru.svg)](https://pypi.org/project/eneru/)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-diagram.png" alt="Eneru Architecture" width="600">
+  <img src="https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-diagram.svg" alt="Eneru Architecture" width="600">
 </p>
 
 A Python-based UPS monitoring daemon that watches UPS status via [Network UPS Tools (NUT)](https://networkupstools.org/) and executes configurable shutdown sequences to protect your entire infrastructure during power events.

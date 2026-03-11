@@ -1,7 +1,7 @@
 # Eneru
 
 <p align="center">
-  <img src="images/eneru-diagram.png" alt="Eneru Architecture" width="600">
+  <img src="images/eneru-diagram.svg" alt="Eneru Architecture" width="600">
 </p>
 
 **Intelligent UPS Monitoring & Shutdown Orchestration for NUT**
