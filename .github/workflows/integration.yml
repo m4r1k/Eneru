@@ -93,11 +93,17 @@ jobs:
       matrix:
         include:
           - distro: debian
+            version: '11'
+            name: Debian 11 (Bullseye)
+          - distro: debian
             version: '12'
             name: Debian 12 (Bookworm)
           - distro: debian
             version: '13'
             name: Debian 13 (Trixie)
+          - distro: ubuntu
+            version: '22.04'
+            name: Ubuntu 22.04 (Jammy)
           - distro: ubuntu
             version: '24.04'
             name: Ubuntu 24.04 (Noble)
@@ -202,8 +208,15 @@ jobs:
       matrix:
         include:
           - distro: debian
+            version: '11'
+            name: Debian 11
+          - distro: debian
             version: '13'
             name: Debian 13
+          # Ubuntu 22.04 skipped: system pip 22.0.2 has a regression with
+          # pyproject.toml dynamic version metadata, building UNKNOWN-0.0.0.
+          # Upgrading pip fixes it, but that no longer tests the real system.
+          # Ubuntu 22.04 is covered by the test-deb job instead.
           - distro: ubuntu
             version: '26.04'
             name: Ubuntu 26.04

@@ -1,6 +1,6 @@
 # Testing
 
-Every commit runs unit tests, integration tests across 7 Linux distributions, end-to-end tests with real NUT/SSH/Docker services, and configuration validation.
+Every commit runs unit tests, integration tests across 9 Linux distributions, end-to-end tests with real NUT/SSH/Docker services, and configuration validation.
 
 ---
 
@@ -70,8 +70,10 @@ Tests `.deb` and `.rpm` package installation:
 
 | Distribution | Version | Package |
 |--------------|---------|---------|
+| Debian | 11 (Bullseye) | .deb |
 | Debian | 12 (Bookworm) | .deb |
 | Debian | 13 (Trixie) | .deb |
+| Ubuntu | 22.04 (Jammy) | .deb |
 | Ubuntu | 24.04 (Noble) | .deb |
 | Ubuntu | 26.04 (Resolute) | .deb |
 | RHEL | 8 (Ootpa) | .rpm |
@@ -85,6 +87,9 @@ Each test:
 3. Runs `--version` to confirm the script executes
 4. Validates the default and example configurations
 
+!!! note "Debian 11 and PyYAML"
+    Debian 11 ships PyYAML 5.3.1, which is below the `>=5.4.1` requirement in `pyproject.toml`. The `.deb` package does not enforce a PyYAML version, and Eneru only uses `yaml.safe_load()` which is identical across both versions, so CI passes. However, all real-world testing and production deployments have used PyYAML 5.4.1 or newer. If you run into YAML parsing issues on Debian 11, upgrade PyYAML first: `pip install --upgrade PyYAML`.
+
 #### Pip installation testing
 
 Tests `pip install .` to ensure `pyproject.toml` is valid:
@@ -92,9 +97,13 @@ Tests `pip install .` to ensure `pyproject.toml` is valid:
 | Environment | Python Versions |
 |-------------|-----------------|
 | Ubuntu runner | 3.9, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15-dev |
+| Debian 11 container | System Python (3.9) |
 | Debian 13 container | System Python |
 | Ubuntu 26.04 container | System Python |
 | RHEL 10 container | System Python |
+
+!!! note "Ubuntu 22.04 not tested with pip"
+    Ubuntu 22.04 ships pip 22.0.2, which has a known regression with `pyproject.toml` dynamic version metadata. `pip install eneru` produces an `UNKNOWN-0.0.0` package and no `eneru` entry point. Upgrading pip fixes it, but that no longer tests the real system environment, so Ubuntu 22.04 is excluded from pip-in-container tests. It is still tested with `.deb` package installation. If you need pip install on Ubuntu 22.04, upgrade pip first (`pip install --upgrade pip`) or use a virtualenv.
 
 ---
 

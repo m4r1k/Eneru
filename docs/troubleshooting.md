@@ -76,6 +76,27 @@ python3 -m py_compile src/eneru/*.py
 
 If this produces errors, the package may be corrupted. Reinstall it.
 
+### Pip install shows UNKNOWN-0.0.0 (Ubuntu 22.04)
+
+Ubuntu 22.04 ships pip 22.0.2, which has a regression with `pyproject.toml` dynamic version metadata. Running `pip install eneru` produces an `UNKNOWN-0.0.0` package and the `eneru` command is not available.
+
+Fix by upgrading pip first:
+
+```bash
+pip install --upgrade pip
+pip install eneru
+```
+
+Or use a virtualenv, which typically includes a newer pip:
+
+```bash
+python3 -m venv ~/.venv/eneru
+source ~/.venv/eneru/bin/activate
+pip install eneru
+```
+
+This does not affect `.deb` package installation, which works on Ubuntu 22.04 without issues.
+
 ### Validate configuration
 
 ```bash
