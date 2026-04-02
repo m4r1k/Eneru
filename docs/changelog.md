@@ -12,9 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [4.11.0] - Unreleased
 
+### Added
+- **Connection Loss Grace Period:** Delays `CONNECTION_LOST` notifications for flaky NUT servers
+    - Configurable grace period (default 60s) before firing `CONNECTION_LOST` notifications
+    - If connection recovers within the window, no notification is sent
+    - Flap detection sends a `WARNING` after repeated recoveries (default 5 within 24h)
+    - Failsafe (connection lost while on battery) bypasses the grace period
+    - 26 new tests (216 total)
+
 ### Changed
 - **Apprise Dependency:** Bumped minimum version from 1.9.6 to 1.9.7
 - **CI Python 3.15:** Added Python 3.15-dev to test matrix as non-blocking
+- **Documentation:** Replaced PNG diagram with SVG, fixed documentation formatting
 
 ---
 

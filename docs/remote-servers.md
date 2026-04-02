@@ -1,11 +1,6 @@
 # Remote server setup
 
-Eneru can shut down remote servers via SSH during a power event. This is useful for:
-
-- NAS devices (Synology, QNAP, TrueNAS)
-- Additional servers sharing the same UPS
-- Network equipment with SSH access
-- Any system that needs coordinated shutdown
+Eneru can shut down remote servers via SSH during a power event: NAS devices (Synology, QNAP, TrueNAS), additional servers sharing the same UPS, network equipment with SSH access, or any system that needs coordinated shutdown.
 
 ---
 
@@ -57,7 +52,7 @@ remote_servers:
 
 ## Pre-shutdown commands
 
-Eneru can run a sequence of commands on remote servers before the final shutdown command. This is useful for stopping services, VMs, or containers before the server powers off.
+Eneru can run a sequence of commands on remote servers before the final shutdown command.
 
 ### Predefined actions
 
@@ -120,11 +115,11 @@ Pre-shutdown commands are **best-effort**:
 
 ## Parallel vs sequential shutdown
 
-By default, all enabled remote servers are shutdown concurrently using threads. This prevents one slow/unreachable server from blocking others.
+By default, all enabled remote servers shut down concurrently using threads, so one slow or unreachable server does not block others.
 
 ### Dependency ordering
 
-Some servers have dependencies on others. For example, if multiple servers mount NFS shares from a NAS, the NAS should shutdown **last**.
+If multiple servers mount NFS shares from a NAS, the NAS must shut down **last**.
 
 Use `parallel: false` to mark servers that should shutdown sequentially:
 
@@ -154,8 +149,8 @@ remote_servers:
 
 ### Execution order
 
-1. **Sequential phase**: Servers with `parallel: false` shutdown one-by-one in config order
-2. **Parallel phase**: Remaining servers (default `parallel: true`) shutdown concurrently
+1. Servers with `parallel: false` shut down one-by-one in config order
+2. Remaining servers (default `parallel: true`) shut down concurrently
 
 !!! tip "Dependency tip"
     Put servers with dependencies (like NAS/storage) at the end of your config with `parallel: false`.
@@ -164,7 +159,7 @@ remote_servers:
 
 ## SSH key setup
 
-For secure, passwordless authentication, set up SSH keys:
+Passwordless SSH keys are required for unattended operation.
 
 ### 1. Generate SSH key
 
@@ -194,7 +189,7 @@ sudo ssh -i ~/.ssh/id_ups_shutdown user@remote-server "echo OK"
 
 ## Passwordless sudo
 
-The shutdown command typically requires root privileges. Configure passwordless sudo for the specific command:
+The shutdown command requires root privileges. Configure passwordless sudo for the specific command:
 
 ### Standard linux
 
@@ -224,7 +219,7 @@ sudo chmod 0440 /etc/sudoers.d/ups_shutdown
 
 ### TrueNAS
 
-TrueNAS uses a different approach. Configure via the web UI:
+TrueNAS does not use sudoers. Configure via the web UI:
 1. Go to **System → Advanced → Init/Shutdown Scripts**
 2. Or use the API to grant shutdown permissions
 
@@ -269,7 +264,7 @@ sudo ssh user@remote-server "sudo whoami"
 
 ### Host key verification
 
-The example config includes `-o StrictHostKeyChecking=no` for convenience during initial setup. For production:
+The example config includes `-o StrictHostKeyChecking=no` for initial setup. For production:
 
 1. **Manually accept host keys once:**
    ```bash
@@ -282,17 +277,17 @@ The example config includes `-o StrictHostKeyChecking=no` for convenience during
    ssh_options: []  # or remove the line entirely
    ```
 
-This ensures that if a server's host key changes unexpectedly (potential MITM attack), the connection will fail rather than proceeding silently.
+If a server's host key changes unexpectedly (potential MITM attack), the connection will fail rather than proceeding silently.
 
 ### Limiting sudo access
 
-The sudoers rules above grant access only to the specific shutdown command, not full root access.
+The sudoers rules above grant access only to the specific shutdown command.
 
 ### SSH key security
 
-- Store keys in `/root/.ssh/` with restrictive permissions (600)
-- Consider using a dedicated key (`id_ups_shutdown`) rather than the default key
-- The key has no passphrase by design (unattended operation), so protect access to the Eneru server
+- Store keys in `/root/.ssh/` with permissions `600`
+- Use a dedicated key (`id_ups_shutdown`) rather than the default key
+- The key has no passphrase (required for unattended operation), so protect access to the Eneru server
 
 ---
 

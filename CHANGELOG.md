@@ -9,9 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [4.11.0] - Unreleased
 
+### Added
+- **Connection Loss Grace Period:** Delays `CONNECTION_LOST` notifications for flaky NUT servers
+    - New `ups.connection_loss_grace_period` configuration section
+    - Holds notifications during brief outages (default: 60 seconds)
+    - If connection recovers within the grace period, no notification is sent
+    - After grace period expires, `CONNECTION_LOST` notification fires as normal
+    - **Flap Detection:** Sends a `WARNING` after repeated grace-period recoveries (default: 5 flaps within 24 hours)
+    - **Failsafe Unaffected:** Failsafe (connection lost while on battery = immediate shutdown) bypasses the grace period
+    - New connection state: `GRACE_PERIOD` (between `OK` and `FAILED`)
+    - 26 new tests for grace period scenarios
+
 ### Changed
 - **Apprise Dependency:** Bumped minimum version from 1.9.6 to 1.9.7
 - **CI Python 3.15:** Added Python 3.15-dev to test matrix as non-blocking (`continue-on-error`)
+- **Documentation:** Replaced PNG architecture diagram with SVG, fixed documentation formatting
+
+### Technical Details
+- No breaking changes -- grace period is enabled by default
+- All 216 tests pass (190 existing + 26 new)
+- Flap counter uses a 24-hour TTL so rare, spread-out flaps do not trigger false warnings
 
 ---
 
@@ -441,6 +458,19 @@ During power outages, network connectivity is often unreliable. The previous blo
 ---
 
 ## Version Comparison
+
+### v4.11 vs v4.10
+
+| Feature | v4.10 | v4.11 |
+|---------|-------|-------|
+| Connection Loss Handling | Immediate notification on every failure | Configurable grace period (default 60s) |
+| Flap Detection | Not available | WARNING after N recoveries within 24h |
+| Transient Failure Handling | None | Grace period skips notifications for brief outages |
+| Connection States | `OK`, `FAILED` | `OK`, `GRACE_PERIOD`, `FAILED` |
+| Failsafe (FSB) | Immediate shutdown on battery | Unchanged (grace period bypassed) |
+| Apprise Minimum | 1.9.6 | 1.9.7 |
+| CI Python Versions | 3.9-3.14 | 3.9-3.15-dev |
+| Test Count | 190 tests | 216 tests |
 
 ### v4.10 vs v4.9
 

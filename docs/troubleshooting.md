@@ -1,6 +1,6 @@
 # Troubleshooting
 
-This guide covers common issues and how to resolve them.
+Common issues and how to resolve them.
 
 ---
 
@@ -96,25 +96,24 @@ upsc UPS@192.168.178.11
 
 This should display all UPS variables. If it fails:
 
-1. **Check NUT server is running:**
+1. Check that the NUT server is running:
    ```bash
    systemctl status nut-server
    ```
 
-2. **Verify network connectivity:**
+2. Verify network connectivity:
    ```bash
    ping 192.168.178.11
    ```
 
-3. **Check NUT server allows remote connections:**
+3. Check that the NUT server allows remote connections.
    On the NUT server, verify `/etc/nut/upsd.conf` has:
    ```
    LISTEN 0.0.0.0 3493
    ```
    And `/etc/nut/upsd.users` has appropriate user configuration.
 
-4. **Check firewall:**
-   NUT uses port 3493 by default.
+4. Check the firewall. NUT uses port 3493 by default.
 
 ### Verify UPS name
 
@@ -125,6 +124,26 @@ upsc -l 192.168.178.11
 ```
 
 This lists all UPS names on that server.
+
+### Flaky NUT server (intermittent connection drops)
+
+Some UPS devices with integrated NUT servers can be intermittently unreachable, causing notification storms. Eneru has a connection loss grace period that suppresses notifications during brief outages:
+
+```yaml
+ups:
+  connection_loss_grace_period:
+    enabled: true    # Suppress transient connection failures
+    duration: 60     # Wait 60s before sending CONNECTION_LOST notification
+    flap_threshold: 5  # Warn after 5 recoveries within 24h
+```
+
+If your NUT server flaps frequently, check:
+
+1. Network stability between Eneru and the NUT server
+2. NUT server logs for driver or USB errors (`journalctl -u nut-driver`)
+3. UPS firmware updates from the manufacturer
+
+See [Connection loss grace period](configuration.md#connection-loss-grace-period) for details.
 
 ---
 
@@ -150,16 +169,16 @@ print('Success' if result else 'Failed')
 
 ### Common issues
 
-1. **Wrong URL format:** Each service has a specific format. Check the [Apprise Wiki](https://github.com/caronc/apprise/wiki).
+1. Wrong URL format. Each service has a specific format; check the [Apprise Wiki](https://github.com/caronc/apprise/wiki).
 
-2. **Network issues:** Can the server reach the notification service?
+2. Network issues. Can the server reach the notification service?
    ```bash
    curl -I https://discord.com
    ```
 
-3. **Rate limiting:** If testing frequently, you may hit service rate limits.
+3. Rate limiting. If testing frequently, you may hit service rate limits.
 
-4. **Firewall blocking outbound:** Ensure HTTPS (443) is allowed outbound.
+4. Firewall blocking outbound. Ensure HTTPS (443) is allowed outbound.
 
 ---
 
@@ -313,6 +332,6 @@ The multi-trigger system compensates for these issues.
 
 If you're still stuck:
 
-1. **Check the logs** - Most issues are visible in the logs
-2. **Enable dry-run** - Test safely without consequences
-3. **Open an issue** - [GitHub Issues](https://github.com/m4r1k/Eneru/issues) with logs and config (redact sensitive data)
+1. Check the logs. Most issues are visible there.
+2. Enable dry-run mode to test safely.
+3. Open a [GitHub issue](https://github.com/m4r1k/Eneru/issues) with logs and config (redact sensitive data).

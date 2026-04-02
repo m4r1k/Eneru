@@ -45,7 +45,7 @@ Most UPS shutdown solutions handle a single system. Eneru handles multi-system e
 - **Single-call polling:** Fetches all UPS metrics in one network call with configurable intervals
 - **Input validation:** Prevents failures from corrupted or transient data
 - **Atomic state updates:** Uses atomic file operations for data integrity
-- **Connection recovery:** Automatic reconnection with stale data detection
+- **Connection recovery:** Automatic reconnection with stale data detection and [grace period](configuration.md#connection-loss-grace-period) to suppress notification storms from flaky NUT servers
 
 ### Shutdown triggers
 

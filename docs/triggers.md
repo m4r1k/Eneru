@@ -26,13 +26,13 @@ triggers:
   low_battery_threshold: 20  # percentage
 ```
 
-**What it does:** Triggers shutdown when battery charge falls below the configured percentage.
+Triggers shutdown when battery charge falls below the configured percentage.
 
 **When it helps:**
 
-- Simple, reliable metric available on all UPS devices
+- Available on all UPS devices
 - Works when runtime estimates are unavailable or inaccurate
-- Provides a hard floor regardless of load conditions
+- Hard floor regardless of load conditions
 
 **Example:** With threshold at 20%, shutdown triggers when battery reports 19% or lower.
 
@@ -45,12 +45,11 @@ triggers:
   critical_runtime_threshold: 600  # seconds (10 minutes)
 ```
 
-**What it does:** Triggers shutdown when the UPS-estimated remaining runtime falls below the configured value.
+Triggers shutdown when the UPS-estimated remaining runtime falls below the configured value.
 
 **When it helps:**
 
-- Accounts for current load conditions
-- UPS calculates runtime based on actual power draw
+- Accounts for current load, since the UPS calculates runtime from actual power draw
 - More accurate than battery percentage alone under varying loads
 
 ### How runtime is calculated by the UPS
@@ -70,11 +69,11 @@ With threshold at 10 minutes (600s), shutdown triggers.
 
 **Limitations:**
 
-- Runtime estimates can be inaccurate, especially with aged batteries
+- Estimates can be inaccurate with aged batteries
 - Some UPS models provide unreliable estimates
-- Sudden load changes can cause estimate jumps
+- Sudden load changes cause estimate jumps
 
-This is why multiple triggers exist. They compensate for each other's weaknesses.
+Multiple triggers compensate for each other's weaknesses.
 
 ---
 
@@ -88,11 +87,11 @@ triggers:
     grace_period: 90    # seconds
 ```
 
-The depletion rate measures **how fast the battery is actually draining** based on observed data, independent of UPS estimates.
+The depletion rate measures **how fast the battery is draining** based on observed data, independent of UPS estimates.
 
 ### How depletion rate is calculated
 
-The script maintains a rolling history of battery readings within the configured window (default: 5 minutes).
+The daemon maintains a rolling history of battery readings within the configured window (default: 5 minutes).
 
 **Step 1: Collect Data**
 
@@ -128,15 +127,11 @@ If rate exceeds threshold (default: 15%/min) and grace period has passed, trigge
 
 ### Minimum data requirement
 
-The script requires at least 30 readings before calculating a rate. With 1-second intervals, this means 30 seconds of data minimum. This prevents:
-
-- Single bad readings from skewing results
-- Startup false positives
-- Statistical noise in short samples
+At least 30 readings are required before calculating a rate. With 1-second intervals, this means 30 seconds of data minimum. This prevents false positives from single bad readings, startup transients, or statistical noise in short samples.
 
 ### The grace period
 
-**Problem:** When power fails, battery readings are often unstable for the first 30-90 seconds as the UPS recalibrates:
+When power fails, battery readings are often unstable for the first 30-90 seconds as the UPS recalibrates:
 
 ```
 Time 0s:   Power fails
@@ -148,9 +143,9 @@ Time 30s:  Battery reads 93%   ← Stabilizing
 Time 90s:  Battery reads 91%   ← Reliable now
 ```
 
-Without a grace period, the initial 100% → 91% drop in 10 seconds would calculate as **54%/min**—triggering a false shutdown.
+Without a grace period, the initial 100% to 91% drop in 10 seconds would calculate as **54%/min**, triggering a false shutdown.
 
-**Solution:** The grace period (default: 90 seconds) ignores high depletion rates immediately after power loss:
+The grace period (default: 90 seconds) ignores high depletion rates immediately after power loss:
 
 ```
 Timeline with 90s grace period:
@@ -167,10 +162,10 @@ Time     On Battery   Rate        Action
 
 ### When depletion rate helps
 
-- **Aged batteries:** Old batteries may show 50% charge but drain to 0% in minutes
-- **Inaccurate UPS estimates:** Some UPS models have unreliable runtime calculations
-- **Sudden load increases:** Catches scenarios where load spikes mid-outage
-- **Real-world validation:** Uses observed data rather than UPS predictions
+- Old batteries may show 50% charge but drain to 0% in minutes
+- Some UPS models have unreliable runtime calculations
+- Catches load spikes mid-outage
+- Uses observed data rather than UPS predictions
 
 ---
 
@@ -183,14 +178,14 @@ triggers:
     threshold: 900  # seconds (15 minutes)
 ```
 
-**What it does:** Triggers shutdown after the system has been running on battery for the configured duration, regardless of battery level or runtime estimates.
+Triggers shutdown after the system has been running on battery for the configured duration, regardless of battery level or runtime estimates.
 
 **When it helps:**
 
-- **Safety net:** Even if battery shows 80% after 15 minutes, something may be wrong
-- **Aged battery protection:** Old batteries can suddenly fail after appearing stable
-- **UPS malfunction detection:** Catches scenarios where UPS reports incorrect data
-- **Prolonged outage protection:** Shuts down gracefully before potential battery failure
+- If battery still shows 80% after 15 minutes, something may be wrong
+- Old batteries can suddenly fail after appearing stable
+- Catches scenarios where UPS reports incorrect data
+- Shuts down gracefully before potential battery cliff
 
 ### Example scenarios
 
@@ -203,7 +198,7 @@ Runtime estimate: 20 minutes
 Depletion rate: 3%/min
 
 All metrics look fine, but extended time threshold reached.
-Shutdown triggered. Better safe than sorry.
+Shutdown triggered as a precaution.
 ```
 
 **Scenario 2: Unreliable UPS data**
@@ -228,13 +223,13 @@ triggers:
     enabled: false
 ```
 
-When disabled, the script logs when the threshold is exceeded but does not trigger shutdown.
+When disabled, Eneru logs when the threshold is exceeded but does not trigger shutdown.
 
 ---
 
 ## Critical runtime vs extended time
 
-These two triggers complement each other:
+These two triggers cover different failure modes:
 
 | Trigger | Based On | Catches |
 |---------|----------|---------|
@@ -244,28 +239,28 @@ These two triggers complement each other:
 **Example: Low load, long outage**
 
 ```
-Runtime estimate: 2 hours (high—low load)
+Runtime estimate: 2 hours (high, low load)
 Actual time on battery: 20 minutes
 
 Critical runtime won't trigger (estimate is high).
-Extended time triggers at 15 minutes, catching what runtime missed.
+Extended time triggers at 15 minutes.
 ```
 
 **Example: High load, short outage**
 
 ```
-Runtime estimate: 5 minutes (low—high load)
+Runtime estimate: 5 minutes (low, high load)
 Actual time on battery: 3 minutes
 
 Critical runtime triggers at 10-minute threshold.
-Extended time never reached because the faster trigger caught it.
+Extended time never reached.
 ```
 
 ---
 
 ## Failsafe battery protection (FSB)
 
-Eneru also has a hardcoded failsafe beyond the configured triggers:
+Eneru has a hardcoded failsafe beyond the configured triggers:
 
 !!! warning "Immediate shutdown"
     If connection to the UPS is lost while running on battery, immediate shutdown is triggered.
@@ -277,15 +272,18 @@ This catches:
 - USB cable disconnect
 - UPS communication failure
 
-**The logic:** If we were on battery and suddenly can't confirm UPS status, assume the worst and shut down safely.
+If the system was on battery and can no longer confirm UPS status, it assumes the worst and shuts down.
 
 ```
 Timeline:
 1. Power fails, system on battery (OB status)
 2. UPS connection lost (network issue, NUT crash, etc.)
 3. Script detects stale/missing data
-4. FSB triggers: "We were on battery and lost visibility—shut down NOW"
+4. FSB triggers: "Was on battery and lost visibility, shut down NOW"
 ```
+
+!!! note "Grace period does not affect FSB"
+    The [connection loss grace period](configuration.md#connection-loss-grace-period) only suppresses notifications when the UPS is on line power. If the system is on battery when the connection is lost, FSB triggers immediately regardless of grace period settings.
 
 ---
 
@@ -293,13 +291,13 @@ Timeline:
 
 The highest priority trigger. When the UPS itself signals FSD, shutdown is immediate.
 
-**What causes FSD:**
+FSD is set when:
 
-- UPS battery critically low (UPS-determined)
-- UPS commanding connected systems to shut down
-- UPS about to cut power
+- UPS battery is critically low (UPS-determined)
+- UPS is commanding connected systems to shut down
+- UPS is about to cut power
 
-**Why it's highest priority:** The UPS has direct knowledge of its state and may cut power imminently. All other triggers defer to FSD.
+The UPS has direct knowledge of its own state and may cut power imminently, so all other triggers defer to FSD.
 
 ---
 
@@ -407,7 +405,7 @@ triggers:
     threshold: 900  # 15 minutes
 ```
 
-Good balance between protection and avoiding unnecessary shutdowns.
+Balances protection against unnecessary shutdowns.
 
 ### Aggressive (maximum runtime)
 

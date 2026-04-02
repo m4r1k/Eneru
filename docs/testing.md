@@ -1,8 +1,6 @@
 # Testing
 
-Every commit triggers the full test suite: unit tests, integration tests across 7 Linux distributions, end-to-end tests with real NUT/SSH/Docker services, and configuration validation.
-
-This page documents the automated test suite and the manual validation performed before each release.
+Every commit runs unit tests, integration tests across 7 Linux distributions, end-to-end tests with real NUT/SSH/Docker services, and configuration validation.
 
 ---
 
@@ -48,7 +46,7 @@ This page documents the automated test suite and the manual validation performed
 
 ## Automated testing
 
-Every commit and pull request triggers automated testing via GitHub Actions.
+All automated tests run via GitHub Actions on every commit and pull request.
 
 ### Validate workflow
 
@@ -104,12 +102,12 @@ Tests `pip install .` to ensure `pyproject.toml` is valid:
 
 The test suite covers:
 
-- **Configuration parsing and validation** - All YAML options, defaults, and error handling
-- **Trigger logic** - Battery level, runtime, depletion rate, time on battery, FSD
-- **State machine** - Transitions between monitoring states
-- **Notification formatting** - Message templates and Apprise integration
-- **Shutdown sequence** - Command execution order and error handling
-- **Edge cases** - Missing UPS data, connection failures, malformed input
+- Configuration parsing and validation: all YAML options, defaults, and error handling
+- Trigger logic: battery level, runtime, depletion rate, time on battery, FSD
+- State machine transitions between monitoring states
+- Notification formatting, message templates, and Apprise integration
+- Shutdown sequence: command execution order and error handling
+- Edge cases: missing UPS data, connection failures, malformed input
 
 To run tests locally:
 
@@ -128,11 +126,11 @@ pytest tests/test_config.py -v
 
 ## End-to-end (E2E) testing
 
-The E2E test suite validates the full monitoring and shutdown workflow using real services.
+The E2E tests run the full monitoring and shutdown workflow using real services.
 
 ### E2E test environment
 
-The E2E tests spin up a complete test environment with Docker Compose:
+The E2E tests spin up a test environment with Docker Compose:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -154,10 +152,10 @@ The E2E tests spin up a complete test environment with Docker Compose:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-- **NUT Server** with dummy driver - Simulates UPS states without real hardware
-- **SSH Target** container - Receives and logs shutdown commands
-- **Target Containers** - Docker containers that Eneru can shut down
-- **tmpfs Mount** - For testing filesystem unmount operations
+- NUT server with dummy driver, simulating UPS states without real hardware
+- SSH target container that receives and logs shutdown commands
+- Target containers that Eneru can shut down
+- tmpfs mount for testing filesystem unmount operations
 
 ### UPS scenarios
 
@@ -190,7 +188,7 @@ The E2E workflow (`.github/workflows/e2e.yml`) runs 7 tests on every push and PR
 
 ### Running E2E tests locally
 
-You can run the E2E tests on your local machine:
+To run the E2E tests locally:
 
 ```bash
 # From repository root
@@ -231,7 +229,7 @@ See `tests/e2e/README.md` for more details.
 
 ### Test environment
 
-The pre-release validation environment:
+The pre-release environment consists of:
 
 - Physical UPS units connected via USB and network
 - NUT server configured and serving UPS data
@@ -242,14 +240,14 @@ The pre-release validation environment:
 
 Before each release:
 
-- [ ] **Power loss detection** - UPS status correctly transitions to `OB` (on battery)
-- [ ] **Trigger thresholds** - Shutdown initiates at configured battery/runtime levels
-- [ ] **Notification delivery** - Alerts are sent to configured services
-- [ ] **Remote server shutdown** - SSH-based shutdown executes successfully
-- [ ] **Container shutdown** - Docker/Podman containers stop gracefully
-- [ ] **VM shutdown** - Libvirt VMs shut down before host
-- [ ] **Local shutdown** - System powers off cleanly
-- [ ] **Recovery** - Service resumes monitoring after power restoration
+- [ ] Power loss detection: UPS status correctly transitions to `OB` (on battery)
+- [ ] Trigger thresholds: shutdown initiates at configured battery/runtime levels
+- [ ] Notification delivery: alerts sent to configured services
+- [ ] Remote server shutdown: SSH-based shutdown executes successfully
+- [ ] Container shutdown: Docker/Podman containers stop gracefully
+- [ ] VM shutdown: libvirt VMs shut down before host
+- [ ] Local shutdown: system powers off cleanly
+- [ ] Recovery: service resumes monitoring after power restoration
 
 ### Simulating power events
 
@@ -297,9 +295,9 @@ journalctl -u eneru.service -f
 
 When contributing new features or bug fixes:
 
-1. **Add unit tests** for new functionality in the `tests/` directory
-2. **Update example configs** if new configuration options are added
-3. **Test locally** before submitting a pull request:
+1. Add unit tests for new functionality in the `tests/` directory
+2. Update example configs if new configuration options are added
+3. Test locally before submitting a pull request:
 
 ```bash
 # Run the full test suite

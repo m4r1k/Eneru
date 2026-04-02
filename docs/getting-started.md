@@ -51,7 +51,7 @@ Add the repository to get automatic updates:
 
 ### Option 2: PyPI (pip)
 
-Install from PyPI for a quick setup:
+Install from PyPI:
 
 ```bash
 pip install eneru

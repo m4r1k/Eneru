@@ -1,6 +1,6 @@
 # Notifications
 
-Eneru uses [Apprise](https://github.com/caronc/apprise) to send notifications to 100+ services including Discord, Slack, Telegram, ntfy, Pushover, Email, and many more.
+Eneru uses [Apprise](https://github.com/caronc/apprise) to send notifications to 100+ services: Discord, Slack, Telegram, ntfy, Pushover, Email, and others.
 
 ---
 
@@ -103,7 +103,7 @@ Apprise supports 100+ notification services. See the [Apprise Wiki](https://gith
 
 ## Testing notifications
 
-Before relying on notifications during a power event, test them:
+Test notifications before relying on them during a power event:
 
 ```bash
 # Send a test notification
@@ -117,13 +117,9 @@ sudo python3 /opt/ups-monitor/eneru.py --validate-config --test-notifications
 
 ## Persistent retry architecture
 
-During power outages, network connectivity is often temporarily down. Eneru uses a non-blocking persistent retry system:
+Network connectivity is often temporarily down during power outages. Eneru uses a non-blocking persistent retry system: the main thread queues notifications instantly and continues with shutdown operations, while a worker thread retries failed sends until they succeed. A FIFO queue preserves message order.
 
-1. **Never blocks shutdown** - the main thread queues instantly and continues
-2. **Retries until success** - a worker thread retries failed notifications
-3. **Preserves order** - FIFO queue keeps messages in sequence
-
-You get all notifications about power events as long as the network recovers before the system shuts down.
+All notifications are delivered as long as the network recovers before the system shuts down.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -190,7 +186,7 @@ notifications:
   retry_interval: 5
 ```
 
-### Why persistent retry matters
+### Comparison with fire-and-forget
 
 | Scenario | Fire-and-Forget (v4.6) | Persistent Retry (v4.7+) |
 |----------|------------------------|--------------------------|
@@ -202,7 +198,7 @@ notifications:
 
 ### The 5-second grace period
 
-After all critical shutdown operations complete, Eneru waits 5 seconds before issuing the final `shutdown -h now` command. This grace period allows queued notifications to be sent if the network is available, without risking data loss if it's not.
+After all shutdown operations complete, Eneru waits 5 seconds before issuing `shutdown -h now`. This gives queued notifications a window to send if the network is available.
 
 ```
 Timeline (worst case - network down):
@@ -221,9 +217,9 @@ Timeline (worst case - network down):
 
 ### 30-second power blip
 
-During a brief power blip, power may be restored within seconds or minutes, well before any shutdown triggers fire. But public Internet often stays unreachable for several more minutes while local network equipment boots up (router, modem, switches, WiFi APs, etc).
+During a brief power blip, power may return within seconds, well before any shutdown triggers fire. But the public Internet often stays unreachable for several minutes while local network equipment reboots (router, modem, switches, WiFi APs).
 
-Notifications queue instantly and the worker keeps retrying every `retry_interval` seconds. Once the network is back, all messages are delivered in order.
+Notifications queue instantly and the worker retries every `retry_interval` seconds. Once the network is back, all messages are delivered in order.
 
 ```
 Timeline (brief power blip, network slow to recover):
@@ -249,7 +245,7 @@ Timeline (brief power blip, network slow to recover):
 
 ## Notification events
 
-Eneru sends notifications for:
+Eneru sends notifications for these events:
 
 | Event | Description |
 |-------|-------------|
@@ -267,25 +263,27 @@ Eneru sends notifications for:
 
 ### Notifications not arriving
 
-1. **Test Apprise directly:**
-   ```bash
-   python3 -c "
-   import apprise
-   ap = apprise.Apprise()
-   ap.add('discord://webhook_id/webhook_token')
-   result = ap.notify(body='Test from Apprise', title='Test')
-   print('Success' if result else 'Failed')
-   "
-   ```
+Test Apprise directly:
 
-2. **Check URL format:** Each service has a specific URL format. Refer to the [Apprise Wiki](https://github.com/caronc/apprise/wiki).
+```bash
+python3 -c "
+import apprise
+ap = apprise.Apprise()
+ap.add('discord://webhook_id/webhook_token')
+result = ap.notify(body='Test from Apprise', title='Test')
+print('Success' if result else 'Failed')
+"
+```
 
-3. **Verify network access:** Can the server reach the notification service?
-   ```bash
-   curl -I https://discord.com
-   ```
+Check that the URL format matches the service. Each service has its own format documented in the [Apprise Wiki](https://github.com/caronc/apprise/wiki).
 
-4. **Check logs:** Notification errors are logged to `/var/log/ups-monitor.log`.
+Verify the server can reach the notification service:
+
+```bash
+curl -I https://discord.com
+```
+
+Notification errors are logged to `/var/log/ups-monitor.log`.
 
 ### Rate limiting
 

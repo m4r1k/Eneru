@@ -1,6 +1,6 @@
 # Configuration
 
-All configuration is stored in `/etc/ups-monitor/config.yaml`. Features are disabled by removing their section or setting `enabled: false`.
+Configuration is stored in `/etc/ups-monitor/config.yaml`. Features are disabled by removing their section or setting `enabled: false`.
 
 ---
 
@@ -177,13 +177,13 @@ local_shutdown:
 
 When a NUT server becomes unreachable while the UPS is on line power, Eneru waits
 for the configured duration before sending a `CONNECTION_LOST` notification. If the
-connection recovers within this window, no notification is sent. This prevents
-notification storms from flaky NUT server connections (common with integrated NUT
-servers on some UPS devices).
+connection recovers within this window, no notification is sent. This avoids
+notification storms from flaky NUT server connections, which are common with
+integrated NUT servers on some UPS devices.
 
 If the connection repeatedly flaps (recovers within the grace period), Eneru sends a
 single `WARNING` notification after the configured number of flaps (`flap_threshold`)
-within a 24-hour window, alerting you that the NUT server is unstable.
+within a 24-hour window to indicate the NUT server is unstable.
 
 **Important:** The grace period never affects the failsafe mechanism. If the UPS is
 on battery power when the connection is lost, Eneru triggers an immediate emergency
@@ -389,7 +389,7 @@ eneru --exit-after-shutdown
 
 ## Validating configuration
 
-Always validate your configuration before starting the service:
+Validate your configuration before starting the service:
 
 ```bash
 sudo python3 /opt/ups-monitor/eneru.py --validate-config
