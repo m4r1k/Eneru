@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [4.11.0] - Unreleased
+## [4.11.0] - 2026-04-02
 
 ### Added
 - **Connection Loss Grace Period:** Delays `CONNECTION_LOST` notifications for flaky NUT servers
@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Apprise Dependency:** Bumped minimum version from 1.9.6 to 1.9.7
+- **CI Integration Matrix:** Added Debian 11 (Bullseye) and Ubuntu 22.04 (Jammy) to integration tests
+    - Both pass `.deb` package installation with system Python
+    - Debian 11 also tested with pip-in-container (system pip 20.3.4 works)
+    - Ubuntu 22.04 excluded from pip-in-container: system pip 22.0.2 has a regression with `pyproject.toml` dynamic version metadata (workaround: upgrade pip)
+    - Integration tests now cover 9 Linux distributions (was 7)
 - **CI Python 3.15:** Added Python 3.15-dev to test matrix as non-blocking (`continue-on-error`)
 - **Documentation:** Replaced PNG architecture diagram with SVG, fixed documentation formatting
 
@@ -470,6 +475,7 @@ During power outages, network connectivity is often unreliable. The previous blo
 | Failsafe (FSB) | Immediate shutdown on battery | Unchanged (grace period bypassed) |
 | Apprise Minimum | 1.9.6 | 1.9.7 |
 | CI Python Versions | 3.9-3.14 | 3.9-3.15-dev |
+| CI Integration Distros | 7 (Debian 12-13, Ubuntu 24.04-26.04, RHEL 8-10) | 9 (+ Debian 11, Ubuntu 22.04) |
 | Test Count | 190 tests | 216 tests |
 
 ### v4.10 vs v4.9

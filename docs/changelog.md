@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [4.11.0] - Unreleased
+## [4.11.0] - 2026-04-02
 
 ### Added
 - **Connection Loss Grace Period:** Delays `CONNECTION_LOST` notifications for flaky NUT servers
@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Apprise Dependency:** Bumped minimum version from 1.9.6 to 1.9.7
+- **CI Integration Matrix:** Added Debian 11 and Ubuntu 22.04 to integration tests (9 distros total)
 - **CI Python 3.15:** Added Python 3.15-dev to test matrix as non-blocking
 - **Documentation:** Replaced PNG diagram with SVG, fixed documentation formatting
 
