@@ -58,6 +58,11 @@ contents:
       owner: root
       group: root
 
+  # Symlink for PATH access
+  - dst: /usr/local/bin/eneru
+    type: symlink
+    src: /opt/ups-monitor/eneru.py
+
   # Eneru package modules
   - src: src/eneru/__init__.py
     dst: /opt/ups-monitor/eneru/__init__.py
