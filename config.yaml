@@ -12,6 +12,17 @@ ups:
   # Number of stale data attempts before declaring connection lost
   max_stale_data_tolerance: 3
 
+  # Connection loss grace period
+  # Suppresses notifications during brief NUT server outages (flaky connections)
+  # Does NOT affect failsafe: if on battery when connection is lost, shutdown is immediate
+  connection_loss_grace_period:
+    # Enable/disable grace period (default: true)
+    enabled: true
+    # Duration in seconds before sending CONNECTION_LOST notification (default: 60)
+    duration: 60
+    # Send a warning after this many grace-period recoveries (flaps) within 24h (default: 5)
+    flap_threshold: 5
+
 # ==============================================================================
 # SHUTDOWN TRIGGERS
 # ==============================================================================

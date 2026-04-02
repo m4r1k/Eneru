@@ -5,6 +5,10 @@ ups:
   name: "UPS@ups-server.local"
   check_interval: 1
   max_stale_data_tolerance: 5
+  # Enterprise NUT servers are typically stable - shorter grace period
+  connection_loss_grace_period:
+    enabled: true
+    duration: 30
 
 triggers:
   low_battery_threshold: 30

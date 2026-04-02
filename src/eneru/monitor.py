@@ -173,6 +173,10 @@ class UPSMonitor:
         if self.config.local_shutdown.enabled:
             features.append("Local Shutdown")
 
+        grace_cfg = self.config.ups.connection_loss_grace_period
+        if grace_cfg.enabled:
+            features.append(f"Connection Grace ({grace_cfg.duration}s)")
+
         self._log_message(f"📋 Enabled features: {', '.join(features) if features else 'None'}")
 
     def _log_message(self, message: str):
@@ -1396,6 +1400,75 @@ class UPSMonitor:
             self.state.extended_time_logged = False
             self.state.battery_history.clear()
 
+    def _handle_connection_failure(self, error_msg: str):
+        """Handle connection failure with optional grace period.
+
+        Called only when NOT on battery (failsafe is handled separately).
+        Implements the connection loss grace period to suppress notification
+        storms from flaky NUT servers.
+        """
+        grace_cfg = self.config.ups.connection_loss_grace_period
+
+        if not grace_cfg.enabled:
+            # Grace period disabled: immediate notification (original behavior)
+            if self.state.connection_state != "FAILED":
+                if "Data stale" in error_msg:
+                    self._log_power_event(
+                        "CONNECTION_LOST",
+                        f"Data from UPS {self.config.ups.name} is persistently stale "
+                        f"(>= {self.config.ups.max_stale_data_tolerance} attempts). "
+                        f"Monitoring is inactive."
+                    )
+                else:
+                    self._log_power_event(
+                        "CONNECTION_LOST",
+                        f"Cannot connect to UPS {self.config.ups.name} "
+                        "(Network, Server, or Config error). Monitoring is inactive."
+                    )
+                self.state.connection_state = "FAILED"
+            return
+
+        # Grace period enabled
+        if self.state.connection_state == "OK":
+            # First failure: enter grace period
+            self.state.connection_state = "GRACE_PERIOD"
+            self.state.connection_lost_time = time.time()
+            if "Data stale" in error_msg:
+                self._log_message(
+                    f"⚠️ Connection to UPS {self.config.ups.name} lost "
+                    f"(data stale). Grace period started "
+                    f"({grace_cfg.duration}s)."
+                )
+            else:
+                self._log_message(
+                    f"⚠️ Connection to UPS {self.config.ups.name} lost. "
+                    f"Grace period started ({grace_cfg.duration}s)."
+                )
+
+        elif self.state.connection_state == "GRACE_PERIOD":
+            elapsed = time.time() - self.state.connection_lost_time
+            if elapsed >= grace_cfg.duration:
+                # Grace period expired: fire full notification
+                if "Data stale" in error_msg:
+                    self._log_power_event(
+                        "CONNECTION_LOST",
+                        f"Data from UPS {self.config.ups.name} is persistently stale "
+                        f"(>= {self.config.ups.max_stale_data_tolerance} attempts). "
+                        f"Monitoring is inactive. "
+                        f"(Grace period {grace_cfg.duration}s expired)"
+                    )
+                else:
+                    self._log_power_event(
+                        "CONNECTION_LOST",
+                        f"Cannot connect to UPS {self.config.ups.name} "
+                        "(Network, Server, or Config error). Monitoring is inactive. "
+                        f"(Grace period {grace_cfg.duration}s expired)"
+                    )
+                self.state.connection_state = "FAILED"
+                self.state.connection_lost_time = 0.0
+
+        # If connection_state == "FAILED": already notified, nothing to do
+
     def _main_loop(self):
         """Main monitoring loop."""
         while True:
@@ -1410,39 +1483,27 @@ class UPSMonitor:
 
                 if "Data stale" in error_msg:
                     self.state.stale_data_count += 1
-                    if self.state.connection_state != "FAILED":
+                    if self.state.connection_state not in ("FAILED", "GRACE_PERIOD"):
                         self._log_message(
                             f"⚠️ WARNING: Data stale from UPS {self.config.ups.name} "
                             f"(Attempt {self.state.stale_data_count}/{self.config.ups.max_stale_data_tolerance})."
                         )
 
                     if self.state.stale_data_count >= self.config.ups.max_stale_data_tolerance:
-                        if self.state.connection_state != "FAILED":
-                            self._log_power_event(
-                                "CONNECTION_LOST",
-                                f"Data from UPS {self.config.ups.name} is persistently stale "
-                                f"(>= {self.config.ups.max_stale_data_tolerance} attempts). Monitoring is inactive."
-                            )
-                            self.state.connection_state = "FAILED"
                         is_failsafe_trigger = True
                 else:
-                    if self.state.connection_state != "FAILED":
+                    if self.state.connection_state not in ("FAILED", "GRACE_PERIOD"):
                         self._log_message(
                             f"❌ ERROR: Cannot connect to UPS {self.config.ups.name}. Output: {error_msg}"
                         )
                     self.state.stale_data_count = 0
-
-                    if self.state.connection_state != "FAILED":
-                        self._log_power_event(
-                            "CONNECTION_LOST",
-                            f"Cannot connect to UPS {self.config.ups.name} "
-                            "(Network, Server, or Config error). Monitoring is inactive."
-                        )
-                        self.state.connection_state = "FAILED"
                     is_failsafe_trigger = True
 
                 # FAILSAFE: If connection lost while on battery, shutdown immediately
+                # This is NEVER affected by the grace period
                 if is_failsafe_trigger and "OB" in self.state.previous_status:
+                    self.state.connection_state = "FAILED"
+                    self.state.connection_lost_time = 0.0
                     self._shutdown_flag_path.touch()
                     self._log_message(
                         "🚨 FAILSAFE TRIGGERED (FSB): Connection lost or data persistently stale "
@@ -1457,6 +1518,10 @@ class UPSMonitor:
                     )
                     self._execute_shutdown_sequence()
 
+                # Grace period logic (only when NOT on battery)
+                elif is_failsafe_trigger:
+                    self._handle_connection_failure(error_msg)
+
                 time.sleep(5)
                 continue
 
@@ -1466,12 +1531,51 @@ class UPSMonitor:
 
             self.state.stale_data_count = 0
 
-            if self.state.connection_state == "FAILED":
+            if self.state.connection_state == "GRACE_PERIOD":
+                # Recovered during grace period: quiet recovery, no notification
+                elapsed = time.time() - self.state.connection_lost_time
+                self._log_message(
+                    f"✅ Connection to UPS {self.config.ups.name} recovered during "
+                    f"grace period ({elapsed:.0f}s elapsed). No notification sent."
+                )
+                self.state.connection_state = "OK"
+                self.state.connection_lost_time = 0.0
+
+                # Flap detection with 24h TTL
+                now = time.time()
+                if (self.state.connection_flap_count > 0
+                        and (now - self.state.connection_first_flap_time) > 86400):
+                    self.state.connection_flap_count = 0
+                if self.state.connection_flap_count == 0:
+                    self.state.connection_first_flap_time = now
+                self.state.connection_flap_count += 1
+
+                grace_cfg = self.config.ups.connection_loss_grace_period
+                if self.state.connection_flap_count >= grace_cfg.flap_threshold:
+                    self._log_message(
+                        f"⚠️ NUT server is unstable: connection to UPS {self.config.ups.name} "
+                        f"has flapped {self.state.connection_flap_count} times."
+                    )
+                    self._send_notification(
+                        f"⚠️ **NUT Server Unstable**\n"
+                        f"Connection to UPS {self.config.ups.name} has flapped "
+                        f"{self.state.connection_flap_count} times "
+                        f"(recovered within grace period each time). "
+                        f"Check your UPS network connection or NUT server configuration.",
+                        self.config.NOTIFY_WARNING
+                    )
+                    self.state.connection_flap_count = 0
+                    self.state.connection_first_flap_time = 0.0
+
+            elif self.state.connection_state == "FAILED":
                 self._log_power_event(
                     "CONNECTION_RESTORED",
                     f"Connection to UPS {self.config.ups.name} restored. Monitoring is active."
                 )
                 self.state.connection_state = "OK"
+                self.state.connection_lost_time = 0.0
+                self.state.connection_flap_count = 0
+                self.state.connection_first_flap_time = 0.0
 
             ups_status = ups_data.get('ups.status', '')
 

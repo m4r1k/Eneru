@@ -43,11 +43,22 @@ class TriggersConfig:
 
 
 @dataclass
+class ConnectionLossGracePeriodConfig:
+    """Connection loss grace period configuration."""
+    enabled: bool = True
+    duration: int = 60
+    flap_threshold: int = 5
+
+
+@dataclass
 class UPSConfig:
     """UPS connection configuration."""
     name: str = "UPS@localhost"
     check_interval: int = 1
     max_stale_data_tolerance: int = 3
+    connection_loss_grace_period: ConnectionLossGracePeriodConfig = field(
+        default_factory=ConnectionLossGracePeriodConfig
+    )
 
 
 @dataclass
@@ -271,11 +282,20 @@ class ConfigLoader:
         # UPS Configuration
         if 'ups' in data:
             ups_data = data['ups']
+            grace_data = ups_data.get('connection_loss_grace_period', {})
             config.ups = UPSConfig(
                 name=ups_data.get('name', config.ups.name),
                 check_interval=ups_data.get('check_interval', config.ups.check_interval),
                 max_stale_data_tolerance=ups_data.get('max_stale_data_tolerance',
                                                       config.ups.max_stale_data_tolerance),
+                connection_loss_grace_period=ConnectionLossGracePeriodConfig(
+                    enabled=grace_data.get('enabled',
+                                           config.ups.connection_loss_grace_period.enabled),
+                    duration=grace_data.get('duration',
+                                            config.ups.connection_loss_grace_period.duration),
+                    flap_threshold=grace_data.get('flap_threshold',
+                                                   config.ups.connection_loss_grace_period.flap_threshold),
+                ),
             )
 
         # Triggers Configuration

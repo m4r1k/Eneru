@@ -17,6 +17,10 @@ ups:
   name: "UPS@192.168.178.11"
   check_interval: 1
   max_stale_data_tolerance: 3
+  connection_loss_grace_period:
+    enabled: true
+    duration: 60
+    flap_threshold: 5
 
 # ==============================================================================
 # SHUTDOWN TRIGGERS
@@ -165,6 +169,25 @@ local_shutdown:
 | `name` | `UPS@localhost` | UPS identifier in `NAME@HOST` format |
 | `check_interval` | `1` | Seconds between status checks |
 | `max_stale_data_tolerance` | `3` | Stale data attempts before connection is marked lost |
+| `connection_loss_grace_period.enabled` | `true` | Enable grace period for connection loss notifications |
+| `connection_loss_grace_period.duration` | `60` | Seconds to suppress notifications after connection loss |
+| `connection_loss_grace_period.flap_threshold` | `5` | Send warning after this many grace-period recoveries within 24h |
+
+#### Connection loss grace period
+
+When a NUT server becomes unreachable while the UPS is on line power, Eneru waits
+for the configured duration before sending a `CONNECTION_LOST` notification. If the
+connection recovers within this window, no notification is sent. This prevents
+notification storms from flaky NUT server connections (common with integrated NUT
+servers on some UPS devices).
+
+If the connection repeatedly flaps (recovers within the grace period), Eneru sends a
+single `WARNING` notification after the configured number of flaps (`flap_threshold`)
+within a 24-hour window, alerting you that the NUT server is unstable.
+
+**Important:** The grace period never affects the failsafe mechanism. If the UPS is
+on battery power when the connection is lost, Eneru triggers an immediate emergency
+shutdown regardless of the grace period setting.
 
 ### Triggers section
 

@@ -2,6 +2,10 @@
 ups:
   name: "UPS@192.168.1.100"
   check_interval: 1
+  # Suppress notification storms from flaky NUT servers
+  connection_loss_grace_period:
+    enabled: true
+    duration: 60
 
 triggers:
   low_battery_threshold: 25

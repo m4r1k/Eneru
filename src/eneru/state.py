@@ -15,6 +15,9 @@ class MonitorState:
     bypass_state: str = "INACTIVE"
     overload_state: str = "INACTIVE"
     connection_state: str = "OK"
+    connection_lost_time: float = 0.0
+    connection_flap_count: int = 0
+    connection_first_flap_time: float = 0.0
     stale_data_count: int = 0
     voltage_warning_low: float = 0.0
     voltage_warning_high: float = 0.0
