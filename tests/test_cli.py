@@ -6,7 +6,11 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from eneru import main, ConfigLoader, __version__
+from eneru import (
+    main, ConfigLoader, __version__, Config, UPSConfig, UPSGroupConfig, MonitorState,
+    BehaviorConfig, LoggingConfig, LocalShutdownConfig, VMConfig, ContainersConfig,
+    FilesystemsConfig, UnmountConfig,
+)
 from test_constants import (
     TEST_DISCORD_APPRISE_URL,
     TEST_SLACK_APPRISE_URL,
@@ -15,29 +19,33 @@ from test_constants import (
 
 
 class TestCLIVersion:
-    """Test CLI version flag."""
+    """Test CLI version subcommand."""
 
     @pytest.mark.unit
-    def test_version_flag(self):
-        """Test --version shows version and exits."""
-        with patch.object(sys, "argv", ["eneru", "--version"]):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
+    def test_version_subcommand(self, capsys):
+        """Test 'eneru version' shows version and exits."""
+        with patch.object(sys, "argv", ["eneru", "version"]):
+            main()
 
-            assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert __version__ in captured.out
 
     @pytest.mark.unit
-    def test_short_version_flag(self):
-        """Test -v shows version and exits."""
-        with patch.object(sys, "argv", ["eneru", "-v"]):
+    def test_bare_eneru_shows_help(self, capsys):
+        """Test bare 'eneru' shows help and exits 0."""
+        with patch.object(sys, "argv", ["eneru"]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
-
             assert exc_info.value.code == 0
+
+        captured = capsys.readouterr()
+        assert "run" in captured.out
+        assert "validate" in captured.out
+        assert "monitor" in captured.out
 
 
 class TestCLIValidateConfig:
-    """Test --validate-config CLI flag."""
+    """Test 'eneru validate' subcommand."""
 
     @pytest.mark.unit
     def test_validate_config_with_valid_file(self, tmp_path, capsys):
@@ -53,7 +61,7 @@ behavior:
 """)
 
         with patch.object(sys, "argv", [
-            "eneru", "--validate-config", "-c", str(config_file)
+            "eneru", "validate", "-c", str(config_file)
         ]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -67,7 +75,7 @@ behavior:
 
     @pytest.mark.unit
     def test_validate_config_shows_features(self, tmp_path, capsys):
-        """Test that validate-config shows enabled features."""
+        """Test that validate shows enabled features."""
         config_file = tmp_path / "config.yaml"
         config_file.write_text("""
 ups:
@@ -92,7 +100,7 @@ remote_servers:
 """)
 
         with patch.object(sys, "argv", [
-            "eneru", "--validate-config", "-c", str(config_file)
+            "eneru", "validate", "-c", str(config_file)
         ]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -108,7 +116,7 @@ remote_servers:
 
     @pytest.mark.unit
     def test_validate_config_shows_notifications(self, tmp_path, capsys):
-        """Test that validate-config shows notification configuration."""
+        """Test that validate shows notification configuration."""
         config_file = tmp_path / "config.yaml"
         config_file.write_text(f"""
 ups:
@@ -122,7 +130,7 @@ notifications:
 """)
 
         with patch.object(sys, "argv", [
-            "eneru", "--validate-config", "-c", str(config_file)
+            "eneru", "validate", "-c", str(config_file)
         ]):
             with patch("eneru.cli.APPRISE_AVAILABLE", True):
                 with pytest.raises(SystemExit) as exc_info:
@@ -141,12 +149,11 @@ notifications:
     def test_validate_config_nonexistent_file(self, capsys):
         """Test validating a non-existent configuration file."""
         with patch.object(sys, "argv", [
-            "eneru", "--validate-config", "-c", "/nonexistent/path/config.yaml"
+            "eneru", "validate", "-c", "/nonexistent/path/config.yaml"
         ]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
-            # Should still exit 0 (uses defaults)
             assert exc_info.value.code == 0
 
         captured = capsys.readouterr()
@@ -154,7 +161,7 @@ notifications:
 
     @pytest.mark.unit
     def test_validate_config_without_apprise(self, tmp_path, capsys):
-        """Test validate-config warns when apprise not installed but notifications configured."""
+        """Test validate warns when apprise not installed but notifications configured."""
         config_file = tmp_path / "config.yaml"
         config_file.write_text(f"""
 ups:
@@ -166,7 +173,7 @@ notifications:
 """)
 
         with patch.object(sys, "argv", [
-            "eneru", "--validate-config", "-c", str(config_file)
+            "eneru", "validate", "-c", str(config_file)
         ]):
             with patch("eneru.cli.APPRISE_AVAILABLE", False):
                 with pytest.raises(SystemExit) as exc_info:
@@ -179,7 +186,7 @@ notifications:
 
     @pytest.mark.unit
     def test_validate_config_filesystems(self, tmp_path, capsys):
-        """Test validate-config shows filesystem configuration."""
+        """Test validate shows filesystem configuration."""
         config_file = tmp_path / "config.yaml"
         config_file.write_text("""
 ups:
@@ -196,7 +203,7 @@ filesystems:
 """)
 
         with patch.object(sys, "argv", [
-            "eneru", "--validate-config", "-c", str(config_file)
+            "eneru", "validate", "-c", str(config_file)
         ]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -207,13 +214,52 @@ filesystems:
         assert "sync: True" in captured.out or "Filesystems sync: True" in captured.out
         assert "3 mount(s)" in captured.out
 
+    @pytest.mark.unit
+    def test_validate_multi_ups_config(self, tmp_path, capsys):
+        """Test validate shows multi-UPS overview."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  - name: "UPS1@192.168.1.10"
+    display_name: "Main UPS"
+    is_local: true
+    remote_servers:
+      - name: "ServerA"
+        enabled: true
+        host: "192.168.1.20"
+        user: "admin"
+
+  - name: "UPS2@192.168.1.11"
+    display_name: "Backup UPS"
+    remote_servers:
+      - name: "ServerB"
+        enabled: true
+        host: "192.168.1.30"
+        user: "admin"
+""")
+
+        with patch.object(sys, "argv", [
+            "eneru", "validate", "-c", str(config_file)
+        ]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+            assert exc_info.value.code == 0
+
+        captured = capsys.readouterr()
+        assert "multi-UPS" in captured.out
+        assert "2 groups" in captured.out
+        assert "Main UPS" in captured.out
+        assert "Backup UPS" in captured.out
+        assert "is_local" in captured.out
+
 
 class TestCLITestNotifications:
-    """Test --test-notifications CLI flag."""
+    """Test 'eneru test-notifications' subcommand."""
 
     @pytest.mark.unit
     def test_test_notifications_no_urls(self, tmp_path, capsys):
-        """Test that --test-notifications fails gracefully when no URLs configured."""
+        """Test that test-notifications fails gracefully when no URLs configured."""
         config_file = tmp_path / "config.yaml"
         config_file.write_text("""
 ups:
@@ -224,7 +270,7 @@ notifications:
 """)
 
         with patch.object(sys, "argv", [
-            "eneru", "--test-notifications", "-c", str(config_file)
+            "eneru", "test-notifications", "-c", str(config_file)
         ]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -236,7 +282,7 @@ notifications:
 
     @pytest.mark.unit
     def test_test_notifications_no_apprise(self, tmp_path, capsys):
-        """Test that --test-notifications fails when apprise not installed."""
+        """Test that test-notifications fails when apprise not installed."""
         config_file = tmp_path / "config.yaml"
         config_file.write_text(f"""
 ups:
@@ -248,7 +294,7 @@ notifications:
 """)
 
         with patch.object(sys, "argv", [
-            "eneru", "--test-notifications", "-c", str(config_file)
+            "eneru", "test-notifications", "-c", str(config_file)
         ]):
             with patch("eneru.cli.APPRISE_AVAILABLE", False):
                 with pytest.raises(SystemExit) as exc_info:
@@ -281,7 +327,7 @@ notifications:
         mock_apprise.NotifyType.INFO = "info"
 
         with patch.object(sys, "argv", [
-            "eneru", "--test-notifications", "-c", str(config_file)
+            "eneru", "test-notifications", "-c", str(config_file)
         ]):
             with patch("eneru.cli.APPRISE_AVAILABLE", True):
                 with patch.dict(sys.modules, {"apprise": mock_apprise}):
@@ -311,11 +357,11 @@ notifications:
         mock_apprise_instance = MagicMock()
         mock_apprise.Apprise.return_value = mock_apprise_instance
         mock_apprise_instance.add.return_value = True
-        mock_apprise_instance.notify.return_value = False  # Notification failed
+        mock_apprise_instance.notify.return_value = False
         mock_apprise.NotifyType.INFO = "info"
 
         with patch.object(sys, "argv", [
-            "eneru", "--test-notifications", "-c", str(config_file)
+            "eneru", "test-notifications", "-c", str(config_file)
         ]):
             with patch("eneru.cli.APPRISE_AVAILABLE", True):
                 with patch.dict(sys.modules, {"apprise": mock_apprise}):
@@ -330,7 +376,7 @@ notifications:
 
     @pytest.mark.unit
     def test_test_notifications_invalid_url(self, tmp_path, capsys):
-        """Test --test-notifications with invalid URL."""
+        """Test test-notifications with invalid URL."""
         config_file = tmp_path / "config.yaml"
         config_file.write_text("""
 ups:
@@ -344,11 +390,11 @@ notifications:
         mock_apprise = MagicMock()
         mock_apprise_instance = MagicMock()
         mock_apprise.Apprise.return_value = mock_apprise_instance
-        mock_apprise_instance.add.return_value = False  # Invalid URL
+        mock_apprise_instance.add.return_value = False
         mock_apprise.NotifyType.INFO = "info"
 
         with patch.object(sys, "argv", [
-            "eneru", "--test-notifications", "-c", str(config_file)
+            "eneru", "test-notifications", "-c", str(config_file)
         ]):
             with patch("eneru.cli.APPRISE_AVAILABLE", True):
                 with patch.dict(sys.modules, {"apprise": mock_apprise}):
@@ -362,53 +408,8 @@ notifications:
         assert "Invalid URL" in captured.out or "No valid notification URLs" in captured.out
 
 
-class TestCLICombinedFlags:
-    """Test combining multiple CLI flags."""
-
-    @pytest.mark.unit
-    def test_validate_and_test_notifications(self, tmp_path, capsys):
-        """Test using both --validate-config and --test-notifications together."""
-        config_file = tmp_path / "config.yaml"
-        config_file.write_text(f"""
-ups:
-  name: "TestUPS@localhost"
-
-notifications:
-  urls:
-    - "{TEST_JSON_WEBHOOK_URL}"
-""")
-
-        mock_apprise = MagicMock()
-        mock_apprise_instance = MagicMock()
-        mock_apprise.Apprise.return_value = mock_apprise_instance
-        mock_apprise_instance.add.return_value = True
-        mock_apprise_instance.notify.return_value = True
-        mock_apprise.NotifyType.INFO = "info"
-
-        with patch.object(sys, "argv", [
-            "eneru",
-            "--validate-config",
-            "--test-notifications",
-            "-c", str(config_file)
-        ]):
-            with patch("eneru.cli.APPRISE_AVAILABLE", True):
-                with patch.dict(sys.modules, {"apprise": mock_apprise}):
-                    with patch("eneru.cli.apprise", mock_apprise):
-                        with pytest.raises(SystemExit) as exc_info:
-                            main()
-
-                        assert exc_info.value.code == 0
-
-        captured = capsys.readouterr()
-        # Both outputs should be present
-        assert "Configuration is valid" in captured.out
-        assert "Testing notifications" in captured.out
-        # Separator should be present
-        assert "---" in captured.out
-
-
 class TestCLIDryRun:
-    """Test --dry-run CLI flag."""
+    """Test --dry-run CLI flag on run subcommand."""
 
     @pytest.mark.unit
     def test_dry_run_overrides_config(self, tmp_path):
@@ -422,91 +423,94 @@ behavior:
   dry_run: false
 """)
 
-        # Load config normally - should be false
         config = ConfigLoader.load(str(config_file))
         assert config.behavior.dry_run is False
 
-        # Now test that --dry-run flag would override it
-        # We can't easily test the full main() here, so test the logic directly
-        config.behavior.dry_run = True  # Simulating --dry-run flag effect
+        config.behavior.dry_run = True
         assert config.behavior.dry_run is True
 
 
 class TestCLIExitAfterShutdown:
-    """Test --exit-after-shutdown CLI flag."""
+    """Test --exit-after-shutdown CLI flag on run subcommand."""
 
     @pytest.mark.unit
     def test_exit_after_shutdown_flag_sets_monitor_attribute(self, tmp_path):
         """Test that --exit-after-shutdown flag is passed to UPSMonitor."""
-        from eneru import UPSMonitor, Config
+        from eneru import UPSMonitor
 
-        config = Config()
-        config.ups.name = "TestUPS@localhost"
+        config = Config(ups_groups=[UPSGroupConfig(
+            ups=UPSConfig(name="TestUPS@localhost"),
+            is_local=True,
+        )])
 
-        # Without the flag (default)
         monitor = UPSMonitor(config)
         assert monitor._exit_after_shutdown is False
 
-        # With the flag
         monitor_with_flag = UPSMonitor(config, exit_after_shutdown=True)
         assert monitor_with_flag._exit_after_shutdown is True
 
     @pytest.mark.unit
     def test_exit_after_shutdown_triggers_exit(self, tmp_path):
         """Test that shutdown sequence exits when flag is set."""
-        from eneru import UPSMonitor, Config, MonitorState
+        from eneru import UPSMonitor
 
-        config = Config()
-        config.ups.name = "TestUPS@localhost"
-        config.behavior.dry_run = True
-        config.local_shutdown.enabled = False
-        config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
-        config.logging.state_file = str(tmp_path / "state")
-        config.logging.battery_history_file = str(tmp_path / "history")
-        config.virtual_machines.enabled = False
-        config.containers.enabled = False
-        config.filesystems.sync_enabled = False
-        config.filesystems.unmount.enabled = False
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="TestUPS@localhost"),
+                virtual_machines=VMConfig(enabled=False),
+                containers=ContainersConfig(enabled=False),
+                filesystems=FilesystemsConfig(sync_enabled=False,
+                    unmount=UnmountConfig(enabled=False)),
+                is_local=True,
+            )],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                shutdown_flag_file=str(tmp_path / "shutdown-flag"),
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+            ),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+        )
 
         monitor = UPSMonitor(config, exit_after_shutdown=True)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         monitor._notification_worker = MagicMock()
 
-        # Mock _cleanup_and_exit to verify it gets called
         with patch.object(monitor, "_cleanup_and_exit") as mock_exit:
             monitor._execute_shutdown_sequence()
-
-            # Should have called _cleanup_and_exit due to --exit-after-shutdown
             mock_exit.assert_called_once()
 
     @pytest.mark.unit
     def test_no_exit_without_flag(self, tmp_path):
         """Test that shutdown sequence does NOT exit when flag is not set."""
-        from eneru import UPSMonitor, Config, MonitorState
+        from eneru import UPSMonitor
 
-        config = Config()
-        config.ups.name = "TestUPS@localhost"
-        config.behavior.dry_run = True
-        config.local_shutdown.enabled = False
-        config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
-        config.logging.state_file = str(tmp_path / "state")
-        config.logging.battery_history_file = str(tmp_path / "history")
-        config.virtual_machines.enabled = False
-        config.containers.enabled = False
-        config.filesystems.sync_enabled = False
-        config.filesystems.unmount.enabled = False
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="TestUPS@localhost"),
+                virtual_machines=VMConfig(enabled=False),
+                containers=ContainersConfig(enabled=False),
+                filesystems=FilesystemsConfig(sync_enabled=False,
+                    unmount=UnmountConfig(enabled=False)),
+                is_local=True,
+            )],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                shutdown_flag_file=str(tmp_path / "shutdown-flag"),
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+            ),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+        )
 
-        monitor = UPSMonitor(config, exit_after_shutdown=False)  # Default
+        monitor = UPSMonitor(config, exit_after_shutdown=False)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         monitor._notification_worker = MagicMock()
 
-        # Mock _cleanup_and_exit to verify it does NOT get called
         with patch.object(monitor, "_cleanup_and_exit") as mock_exit:
             monitor._execute_shutdown_sequence()
-
-            # Should NOT have called _cleanup_and_exit
             mock_exit.assert_not_called()
 
 
@@ -523,7 +527,7 @@ ups:
 """)
 
         with patch.object(sys, "argv", [
-            "eneru", "--validate-config", "-c", str(config_file)
+            "eneru", "validate", "-c", str(config_file)
         ]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -543,7 +547,7 @@ ups:
 """)
 
         with patch.object(sys, "argv", [
-            "eneru", "--validate-config", "--config", str(config_file)
+            "eneru", "validate", "--config", str(config_file)
         ]):
             with pytest.raises(SystemExit) as exc_info:
                 main()

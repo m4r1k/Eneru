@@ -19,6 +19,7 @@ from test_constants import TEST_DISCORD_APPRISE_URL
 from eneru import (
     Config,
     UPSConfig,
+    UPSGroupConfig,
     TriggersConfig,
     DepletionConfig,
     ExtendedTimeConfig,
@@ -39,84 +40,90 @@ from eneru import (
 @pytest.fixture
 def default_config() -> Config:
     """Create a default configuration for testing."""
-    return Config()
+    return Config(ups_groups=[UPSGroupConfig()])
 
 
 @pytest.fixture
 def minimal_config() -> Config:
     """Create a minimal configuration."""
-    config = Config()
-    config.ups.name = "TestUPS@localhost"
-    config.behavior.dry_run = True
-    config.notifications.enabled = False
-    config.virtual_machines.enabled = False
-    config.containers.enabled = False
-    config.filesystems.unmount.enabled = False
-    config.local_shutdown.enabled = False
-    return config
+    return Config(
+        ups_groups=[UPSGroupConfig(
+            ups=UPSConfig(name="TestUPS@localhost"),
+            virtual_machines=VMConfig(enabled=False),
+            containers=ContainersConfig(enabled=False),
+            filesystems=FilesystemsConfig(unmount=UnmountConfig(enabled=False)),
+            is_local=True,
+        )],
+        behavior=BehaviorConfig(dry_run=True),
+        notifications=NotificationsConfig(enabled=False),
+        local_shutdown=LocalShutdownConfig(enabled=False),
+    )
 
 
 @pytest.fixture
 def full_config() -> Config:
     """Create a fully-configured configuration for testing."""
-    config = Config()
-    config.ups = UPSConfig(
-        name="UPS@192.168.1.100",
-        check_interval=1,
-        max_stale_data_tolerance=3,
-    )
-    config.triggers = TriggersConfig(
-        low_battery_threshold=20,
-        critical_runtime_threshold=600,
-        depletion=DepletionConfig(
-            window=300,
-            critical_rate=15.0,
-            grace_period=90,
-        ),
-        extended_time=ExtendedTimeConfig(
-            enabled=True,
-            threshold=900,
-        ),
-    )
-    config.behavior = BehaviorConfig(dry_run=True)
-    config.notifications = NotificationsConfig(
-        enabled=True,
-        urls=[TEST_DISCORD_APPRISE_URL],
-        title="Test UPS",
-        timeout=10,
-    )
-    config.virtual_machines = VMConfig(enabled=True, max_wait=30)
-    config.containers = ContainersConfig(
-        enabled=True,
-        runtime="auto",
-        stop_timeout=60,
-    )
-    config.filesystems = FilesystemsConfig(
-        sync_enabled=True,
-        unmount=UnmountConfig(
-            enabled=True,
-            timeout=15,
-            mounts=[
-                {"path": "/mnt/test1", "options": ""},
-                {"path": "/mnt/test2", "options": "-l"},
+    return Config(
+        ups_groups=[UPSGroupConfig(
+            ups=UPSConfig(
+                name="UPS@192.168.1.100",
+                check_interval=1,
+                max_stale_data_tolerance=3,
+            ),
+            triggers=TriggersConfig(
+                low_battery_threshold=20,
+                critical_runtime_threshold=600,
+                depletion=DepletionConfig(
+                    window=300,
+                    critical_rate=15.0,
+                    grace_period=90,
+                ),
+                extended_time=ExtendedTimeConfig(
+                    enabled=True,
+                    threshold=900,
+                ),
+            ),
+            virtual_machines=VMConfig(enabled=True, max_wait=30),
+            containers=ContainersConfig(
+                enabled=True,
+                runtime="auto",
+                stop_timeout=60,
+            ),
+            filesystems=FilesystemsConfig(
+                sync_enabled=True,
+                unmount=UnmountConfig(
+                    enabled=True,
+                    timeout=15,
+                    mounts=[
+                        {"path": "/mnt/test1", "options": ""},
+                        {"path": "/mnt/test2", "options": "-l"},
+                    ],
+                ),
+            ),
+            remote_servers=[
+                RemoteServerConfig(
+                    name="Test Server",
+                    enabled=True,
+                    host="192.168.1.50",
+                    user="admin",
+                    shutdown_command="sudo shutdown -h now",
+                ),
             ],
-        ),
-    )
-    config.remote_servers = [
-        RemoteServerConfig(
-            name="Test Server",
+            is_local=True,
+        )],
+        behavior=BehaviorConfig(dry_run=True),
+        notifications=NotificationsConfig(
             enabled=True,
-            host="192.168.1.50",
-            user="admin",
-            shutdown_command="sudo shutdown -h now",
+            urls=[TEST_DISCORD_APPRISE_URL],
+            title="Test UPS",
+            timeout=10,
         ),
-    ]
-    config.local_shutdown = LocalShutdownConfig(
-        enabled=True,
-        command="shutdown -h now",
-        message="Test shutdown",
+        local_shutdown=LocalShutdownConfig(
+            enabled=True,
+            command="shutdown -h now",
+            message="Test shutdown",
+        ),
     )
-    return config
 
 
 @pytest.fixture
