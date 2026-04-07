@@ -22,7 +22,7 @@ Every commit runs unit tests, integration tests across 9 Linux distributions, en
               ╱    7 Linux Distros    ╲
              ╱─────────────────────────╲
             ╱         Unit Tests        ╲
-           ╱   pytest + Coverage (190)   ╲
+           ╱   pytest + Coverage (292)   ╲
           ╱      7 Python Versions        ╲
          ╱─────────────────────────────────╲
         ╱          Static Analysis          ╲
@@ -37,7 +37,7 @@ Every commit runs unit tests, integration tests across 9 Linux distributions, en
 |-------|-----------|---------------|
 | **AI-Assisted Dev** | Continuous | Code review, implementation guidance |
 | **Static Analysis** | Every commit | Python syntax, config validation |
-| **Unit Tests** | Every commit | Logic, state machine, edge cases (190 tests) |
+| **Unit Tests** | Every commit | Logic, state machine, edge cases (292 tests) |
 | **Integration** | Every commit | Package install on 7 Linux distros |
 | **E2E Tests** | Every commit | Full workflow with real NUT, SSH, Docker |
 | **Real UPS** | Pre-release | Actual hardware, power events |
@@ -109,14 +109,18 @@ Tests `pip install .` to ensure `pyproject.toml` is valid:
 
 ## Test coverage
 
-The test suite covers:
+292 tests across 14 files:
 
-- Configuration parsing and validation: all YAML options, defaults, and error handling
-- Trigger logic: battery level, runtime, depletion rate, time on battery, FSD
-- State machine transitions between monitoring states
-- Notification formatting, message templates, and Apprise integration
-- Shutdown sequence: command execution order and error handling
-- Edge cases: missing UPS data, connection failures, malformed input
+- Configuration parsing (62 tests) -- YAML options, defaults, multi-UPS detection, trigger inheritance, ownership validation
+- Remote commands (29 tests) -- SSH execution, pre-shutdown actions, parallel and sequential modes
+- Multi-UPS coordination (27 tests) -- coordinator routing, is_local/drain/trigger_on, defense-in-depth lock, battery anomaly, notification prefixing, runtime is_local enforcement, exit_after_shutdown in coordinator
+- Core monitor logic (26 tests) -- OL/OB/FSD state machine, all four shutdown triggers, failsafe, shutdown sequence ordering
+- Connection grace period (26 tests) -- OK/GRACE_PERIOD/FAILED transitions, flap detection, stale data
+- TUI dashboard (23 tests) -- state file parsing, log filtering, human-readable status, --once output
+- CLI (20 tests) -- subcommands, bare invocation, multi-UPS validate
+- Calculations (17 tests) -- depletion rate, battery history
+- Notifications (16 tests) -- formatting, retry, Apprise
+- State, triggers, command execution (39 tests combined)
 
 To run tests locally:
 
@@ -183,7 +187,7 @@ The E2E tests use scenario files to simulate different UPS states:
 
 ### E2E test cases
 
-The E2E workflow (`.github/workflows/e2e.yml`) runs 7 tests on every push and PR:
+The E2E workflow (`.github/workflows/e2e.yml`) runs 13 tests on every push and PR:
 
 | Test | Description |
 |------|-------------|
@@ -194,6 +198,12 @@ The E2E workflow (`.github/workflows/e2e.yml`) runs 7 tests on every push and PR
 | **Test 5** | FSD (Forced Shutdown) flag triggers immediate shutdown |
 | **Test 6** | Voltage event detection (brownout, AVR) |
 | **Test 7** | Notification delivery (if `E2E_NOTIFICATION_URL` secret configured) |
+| **Test 8** | Multi-UPS config validation against real NUT (both UPS1 and UPS2) |
+| **Test 9** | Multi-UPS isolation: UPS1 fails, UPS2 unaffected |
+| **Test 10** | Multi-UPS both online: no false shutdown triggers |
+| **Test 11** | Ownership validation: non-local group with containers rejected |
+| **Test 12** | CLI safety: bare `eneru` shows help, does not start daemon |
+| **Test 13** | TUI `--once` snapshot outputs UPS status |
 
 ### Running E2E tests locally
 
@@ -213,15 +223,21 @@ docker compose up -d --build
 # Wait for services to be ready
 sleep 10
 
-# Verify NUT is working
+# Verify NUT is working (single-UPS and multi-UPS)
 upsc TestUPS@localhost:3493
+upsc UPS1@localhost:3493
+upsc UPS2@localhost:3493
 
 # Run Eneru in dry-run mode
-eneru --validate-config --config config-e2e-dry-run.yaml
+eneru validate --config config-e2e-dry-run.yaml
 
-# Simulate a power failure
+# Simulate a power failure (single-UPS)
 cp scenarios/low-battery.dev scenarios/apply.dev
-eneru --config config-e2e-dry-run.yaml --exit-after-shutdown
+eneru run --config config-e2e-dry-run.yaml --exit-after-shutdown
+
+# Multi-UPS: simulate UPS1 failure while UPS2 stays online
+cp scenarios/low-battery.dev scenarios/apply-UPS1.dev
+eneru run --config config-e2e-multi-ups.yaml --exit-after-shutdown
 
 # Cleanup
 docker compose down -v
@@ -313,9 +329,7 @@ When contributing new features or bug fixes:
 pytest -v
 
 # Validate your config changes
-python -m eneru --validate-config --config config.yaml
-# Or using the entry point:
-eneru --validate-config --config config.yaml
+eneru validate --config config.yaml
 ```
 
 See the [GitHub repository](https://github.com/m4r1k/Eneru) for contribution guidelines.

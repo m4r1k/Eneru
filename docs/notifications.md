@@ -107,10 +107,10 @@ Test notifications before relying on them during a power event:
 
 ```bash
 # Send a test notification
-sudo python3 /opt/ups-monitor/eneru.py --test-notifications
+eneru test-notifications --config /etc/ups-monitor/config.yaml
 
-# Combine with config validation
-sudo python3 /opt/ups-monitor/eneru.py --validate-config --test-notifications
+# Validate configuration
+eneru validate --config /etc/ups-monitor/config.yaml
 ```
 
 ---

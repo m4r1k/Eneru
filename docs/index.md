@@ -6,24 +6,30 @@
 
 **UPS monitoring and shutdown orchestration for NUT**
 
-A Python-based UPS monitoring daemon that watches UPS status via [Network UPS Tools (NUT)](https://networkupstools.org/) and runs configurable shutdown sequences to protect your infrastructure during power events.
+A Python-based UPS monitoring daemon for [Network UPS Tools (NUT)](https://networkupstools.org/). Monitors one or more UPSes, orchestrates shutdown of VMs, containers, and remote servers during power events.
+
+<p align="center">
+  <img src="images/eneru-mon.gif" alt="Eneru Monitor Dashboard" width="700">
+</p>
 
 ---
 
 ## Why Eneru?
 
-Most UPS shutdown solutions handle a single system. Eneru handles multi-system environments:
+Most UPS shutdown tools handle one machine. If you have more than one, things get complicated fast:
 
 | Challenge | Eneru Solution |
 |-----------|----------------|
+| Multiple UPSes powering different servers | ✅ Multi-UPS monitoring from a single instance |
 | Multiple servers need coordinated shutdown | ✅ Orchestrated multi-server shutdown via SSH |
 | VMs and containers need graceful stop | ✅ Libvirt VM and Docker/Podman container handling |
 | Network mounts hang during power loss | ✅ Timeout-protected unmounting |
-| No visibility during power events | ✅ Real-time notifications via 100+ services |
+| No visibility during power events | ✅ Real-time TUI dashboard + notifications via 100+ services |
 | Different systems need different commands | ✅ Per-server custom shutdown commands |
 | Hypervisors need graceful VM shutdown | ✅ Pre-shutdown actions (Proxmox, ESXi, XCP-ng, libvirt) |
 | Battery estimates are unreliable | ✅ Multi-vector shutdown triggers |
 | Network down during outage might block/slow down shutdown | ✅ Non-blocking notifications with persistent retry |
+| Firmware recalibrates battery silently | ✅ Battery anomaly detection and alerts |
 
 ---
 
@@ -33,7 +39,7 @@ Most UPS shutdown solutions handle a single system. Eneru handles multi-system e
 - **Virtualization hosts** - Graceful VM shutdown before power loss
 - **Container hosts** - Stop Docker/Podman containers safely
 - **NAS systems** - Coordinate shutdown of Synology, QNAP, TrueNAS
-- **Small business** - Multi-server environments with single UPS
+- **Small business** - Multi-UPS environments with multiple server groups
 - **Hybrid setups** - Mix of physical and virtual infrastructure
 
 ---
@@ -42,7 +48,9 @@ Most UPS shutdown solutions handle a single system. Eneru handles multi-system e
 
 ### Monitoring
 
-- **Single-call polling:** Fetches all UPS metrics in one network call with configurable intervals
+- **Multi-UPS support:** Monitor one or more UPSes from a single instance, each with its own shutdown group
+- **TUI dashboard:** `eneru monitor` shows live UPS status with color-coded badges
+- **Single-call polling:** One `upsc` call per cycle, all processing in memory
 - **Input validation:** Prevents failures from corrupted or transient data
 - **Atomic state updates:** Uses atomic file operations for data integrity
 - **Connection recovery:** Automatic reconnection with stale data detection and [grace period](configuration.md#connection-loss-grace-period) to suppress notification storms from flaky NUT servers

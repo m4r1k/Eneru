@@ -67,7 +67,7 @@ After pip install, you'll need to:
 
 1. Create the config directory: `sudo mkdir -p /etc/ups-monitor`
 2. Create a config file: `sudo nano /etc/ups-monitor/config.yaml`
-3. Run manually or set up your own service: `eneru --config /etc/ups-monitor/config.yaml`
+3. Run manually or set up your own service: `eneru run --config /etc/ups-monitor/config.yaml`
 
 ### Option 3: Direct download from GitHub releases
 
@@ -100,7 +100,7 @@ The package installs but does **not** auto-enable or auto-start the service. You
 sudo nano /etc/ups-monitor/config.yaml
 
 # 2. Validate configuration
-sudo python3 /opt/ups-monitor/eneru.py --validate-config
+eneru validate --config /etc/ups-monitor/config.yaml
 
 # 3. Enable and start the service
 sudo systemctl enable eneru.service
