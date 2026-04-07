@@ -42,7 +42,7 @@ jobs:
         run: pytest -v
 
       - name: Validate configuration
-        run: python -m eneru --validate-config --config config.yaml
+        run: python -m eneru validate --config config.yaml
 
       - name: Extract version
         id: version

@@ -91,7 +91,7 @@ jobs:
       - name: "Test 1: Validate E2E config"
         run: |
           echo "=== Test 1: Config Validation ==="
-          eneru --validate-config --config ${{ env.E2E_DIR }}/config-e2e.yaml
+          eneru validate --config ${{ env.E2E_DIR }}/config-e2e.yaml
 
       # ========================================
       # TEST 2: Monitor normal (online) state
@@ -105,7 +105,7 @@ jobs:
           sleep 3
 
           # Run Eneru for 5 seconds - should NOT trigger shutdown
-          timeout 5 eneru --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test2.log || true
+          timeout 5 eneru run --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test2.log || true
 
           # Verify no shutdown was triggered
           if grep -q "SHUTDOWN SEQUENCE" /tmp/test2.log; then
@@ -130,7 +130,7 @@ jobs:
           sleep 3
 
           # Run Eneru in dry-run mode
-          eneru --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test3.log || true
+          eneru run --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test3.log || true
 
           # Verify shutdown was triggered (in dry-run)
           if ! grep -q "SHUTDOWN SEQUENCE" /tmp/test3.log; then
@@ -169,7 +169,7 @@ jobs:
           sleep 3
 
           # Run Eneru briefly - will trigger shutdown and send SSH command
-          eneru --config config-e2e.yaml --exit-after-shutdown 2>&1 | tee /tmp/test4.log || true
+          eneru run --config config-e2e.yaml --exit-after-shutdown 2>&1 | tee /tmp/test4.log || true
 
           echo ""
           echo "=== Verifying SSH shutdown ==="
@@ -205,7 +205,7 @@ jobs:
           sleep 3
 
           # Run Eneru in dry-run mode
-          eneru --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test5.log || true
+          eneru run --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test5.log || true
 
           # Verify FSD triggered shutdown
           if ! grep -q "FSD" /tmp/test5.log; then
@@ -235,7 +235,7 @@ jobs:
           sleep 2
 
           # Run briefly to detect brownout
-          timeout 8 eneru --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test6.log || true
+          timeout 8 eneru run --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test6.log || true
 
           # Verify brownout was detected (should log a voltage warning)
           if grep -q -i "voltage\|brownout" /tmp/test6.log; then
@@ -263,7 +263,7 @@ jobs:
             ${{ env.E2E_DIR }}/config-e2e-notifications.yaml > /tmp/config-notif.yaml
 
           # Test notification delivery
-          eneru --test-notifications --config /tmp/config-notif.yaml
+          eneru test-notifications --config /tmp/config-notif.yaml
 
           echo "PASS: Notification sent successfully"
 

@@ -45,11 +45,11 @@ jobs:
         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
     - name: Validate default config
-      run: python -m eneru --validate-config --config config.yaml
+      run: python -m eneru validate --config config.yaml
 
     - name: Validate example configs
       run: |
         for config in examples/*.yaml; do
           echo "Validating $config..."
-          python -m eneru --validate-config --config "$config"
+          python -m eneru validate --config "$config"
         done

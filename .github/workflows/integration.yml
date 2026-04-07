@@ -74,14 +74,14 @@ jobs:
 
       - name: Verify installation
         run: |
-          eneru --version
-          eneru --validate-config --config config.yaml
+          eneru version
+          eneru validate --config config.yaml
 
       - name: Validate example configs
         run: |
           for config in examples/*.yaml; do
             echo "Validating $config..."
-            eneru --validate-config --config "$config"
+            eneru validate --config "$config"
           done
 
   # Test .deb package installation on Debian/Ubuntu
@@ -137,14 +137,14 @@ jobs:
           test -f /opt/ups-monitor/eneru.py
           test -f /etc/ups-monitor/config.yaml
           # Run validation
-          python3 /opt/ups-monitor/eneru.py --version
-          python3 /opt/ups-monitor/eneru.py --validate-config --config /etc/ups-monitor/config.yaml
+          python3 /opt/ups-monitor/eneru.py version
+          python3 /opt/ups-monitor/eneru.py validate --config /etc/ups-monitor/config.yaml
 
       - name: Validate example configs
         run: |
           for config in examples/*.yaml; do
             echo "Validating $config..."
-            python3 /opt/ups-monitor/eneru.py --validate-config --config "$config"
+            python3 /opt/ups-monitor/eneru.py validate --config "$config"
           done
 
   # Test .rpm package installation on RHEL UBI
@@ -190,14 +190,14 @@ jobs:
           test -f /opt/ups-monitor/eneru.py
           test -f /etc/ups-monitor/config.yaml
           # Run validation
-          python3 /opt/ups-monitor/eneru.py --version
-          python3 /opt/ups-monitor/eneru.py --validate-config --config /etc/ups-monitor/config.yaml
+          python3 /opt/ups-monitor/eneru.py version
+          python3 /opt/ups-monitor/eneru.py validate --config /etc/ups-monitor/config.yaml
 
       - name: Validate example configs
         run: |
           for config in examples/*.yaml; do
             echo "Validating $config..."
-            python3 /opt/ups-monitor/eneru.py --validate-config --config "$config"
+            python3 /opt/ups-monitor/eneru.py validate --config "$config"
           done
 
   # Test pip installation inside containers (ensures pyproject.toml works on real distros)
@@ -248,12 +248,12 @@ jobs:
 
       - name: Verify installation
         run: |
-          eneru --version
-          eneru --validate-config --config config.yaml
+          eneru version
+          eneru validate --config config.yaml
 
       - name: Validate example configs
         run: |
           for config in examples/*.yaml; do
             echo "Validating $config..."
-            eneru --validate-config --config "$config"
+            eneru validate --config "$config"
           done
