@@ -100,10 +100,10 @@ This does not affect `.deb` package installation, which works on Ubuntu 22.04 wi
 ### Validate configuration
 
 ```bash
-sudo python3 /opt/ups-monitor/eneru.py --validate-config
+eneru validate --config /etc/ups-monitor/config.yaml
 ```
 
-This checks for YAML syntax errors and invalid configuration values.
+This checks for YAML syntax errors, invalid configuration values, and multi-UPS ownership rules.
 
 ---
 

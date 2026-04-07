@@ -54,11 +54,17 @@ class ConnectionLossGracePeriodConfig:
 class UPSConfig:
     """UPS connection configuration."""
     name: str = "UPS@localhost"
+    display_name: Optional[str] = None  # Human-readable name for logs/notifications
     check_interval: int = 1
     max_stale_data_tolerance: int = 3
     connection_loss_grace_period: ConnectionLossGracePeriodConfig = field(
         default_factory=ConnectionLossGracePeriodConfig
     )
+
+    @property
+    def label(self) -> str:
+        """Return display_name if set, otherwise name."""
+        return self.display_name or self.name
 
 
 @dataclass
@@ -151,6 +157,8 @@ class LocalShutdownConfig:
     enabled: bool = True
     command: str = "shutdown -h now"
     message: str = "UPS battery critical - emergency shutdown"
+    drain_on_local_shutdown: bool = False  # Drain all groups before local shutdown
+    trigger_on: str = "any"  # "any" or "none" — when to trigger local shutdown in multi-UPS
 
 
 @dataclass
@@ -160,17 +168,32 @@ class BehaviorConfig:
 
 
 @dataclass
-class Config:
-    """Main configuration container."""
+class UPSGroupConfig:
+    """A UPS and the resources it protects."""
     ups: UPSConfig = field(default_factory=UPSConfig)
     triggers: TriggersConfig = field(default_factory=TriggersConfig)
-    behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
-    logging: LoggingConfig = field(default_factory=LoggingConfig)
-    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
+    remote_servers: List[RemoteServerConfig] = field(default_factory=list)
     virtual_machines: VMConfig = field(default_factory=VMConfig)
     containers: ContainersConfig = field(default_factory=ContainersConfig)
     filesystems: FilesystemsConfig = field(default_factory=FilesystemsConfig)
-    remote_servers: List[RemoteServerConfig] = field(default_factory=list)
+    is_local: bool = False  # Does this UPS power the Eneru host?
+
+    @property
+    def is_multi_ups(self) -> bool:
+        """True if this group was created from a multi-UPS config."""
+        return self._multi_ups
+
+    def __post_init__(self):
+        self._multi_ups = False
+
+
+@dataclass
+class Config:
+    """Main configuration container."""
+    ups_groups: List[UPSGroupConfig] = field(default_factory=list)
+    behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
+    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     local_shutdown: LocalShutdownConfig = field(default_factory=LocalShutdownConfig)
 
     # Notification types mapped to colors/severity
@@ -178,6 +201,54 @@ class Config:
     NOTIFY_WARNING: str = "warning"
     NOTIFY_SUCCESS: str = "success"
     NOTIFY_INFO: str = "info"
+
+    @property
+    def multi_ups(self) -> bool:
+        """True if multiple UPS groups are configured."""
+        return len(self.ups_groups) > 1
+
+    # --- Backward-compatible accessors for single-UPS code paths ---
+    @property
+    def ups(self) -> UPSConfig:
+        """Legacy accessor: returns the first (or only) UPS config."""
+        if self.ups_groups:
+            return self.ups_groups[0].ups
+        return UPSConfig()
+
+    @property
+    def triggers(self) -> TriggersConfig:
+        """Legacy accessor: returns triggers from the first group."""
+        if self.ups_groups:
+            return self.ups_groups[0].triggers
+        return TriggersConfig()
+
+    @property
+    def remote_servers(self) -> List[RemoteServerConfig]:
+        """Legacy accessor: returns remote servers from the first group."""
+        if self.ups_groups:
+            return self.ups_groups[0].remote_servers
+        return []
+
+    @property
+    def virtual_machines(self) -> VMConfig:
+        """Legacy accessor: returns VM config from the first group."""
+        if self.ups_groups:
+            return self.ups_groups[0].virtual_machines
+        return VMConfig()
+
+    @property
+    def containers(self) -> ContainersConfig:
+        """Legacy accessor: returns container config from the first group."""
+        if self.ups_groups:
+            return self.ups_groups[0].containers
+        return ContainersConfig()
+
+    @property
+    def filesystems(self) -> FilesystemsConfig:
+        """Legacy accessor: returns filesystem config from the first group."""
+        if self.ups_groups:
+            return self.ups_groups[0].filesystems
+        return FilesystemsConfig()
 
 
 # ==============================================================================
@@ -275,61 +346,204 @@ class ConfigLoader:
         return url
 
     @classmethod
+    def _parse_ups_config(cls, ups_data: Dict[str, Any]) -> UPSConfig:
+        """Parse a single UPS connection configuration."""
+        defaults = UPSConfig()
+        grace_data = ups_data.get('connection_loss_grace_period', {})
+        return UPSConfig(
+            name=ups_data.get('name', defaults.name),
+            display_name=ups_data.get('display_name'),
+            check_interval=ups_data.get('check_interval', defaults.check_interval),
+            max_stale_data_tolerance=ups_data.get('max_stale_data_tolerance',
+                                                  defaults.max_stale_data_tolerance),
+            connection_loss_grace_period=ConnectionLossGracePeriodConfig(
+                enabled=grace_data.get('enabled',
+                                       defaults.connection_loss_grace_period.enabled),
+                duration=grace_data.get('duration',
+                                        defaults.connection_loss_grace_period.duration),
+                flap_threshold=grace_data.get('flap_threshold',
+                                               defaults.connection_loss_grace_period.flap_threshold),
+            ),
+        )
+
+    @classmethod
+    def _parse_triggers_config(cls, triggers_data: Dict[str, Any],
+                                defaults: Optional[TriggersConfig] = None) -> TriggersConfig:
+        """Parse triggers configuration, optionally inheriting from defaults."""
+        if defaults is None:
+            defaults = TriggersConfig()
+        depletion_data = triggers_data.get('depletion', {})
+        extended_data = triggers_data.get('extended_time', {})
+        return TriggersConfig(
+            low_battery_threshold=triggers_data.get('low_battery_threshold',
+                                                    defaults.low_battery_threshold),
+            critical_runtime_threshold=triggers_data.get('critical_runtime_threshold',
+                                                         defaults.critical_runtime_threshold),
+            depletion=DepletionConfig(
+                window=depletion_data.get('window', defaults.depletion.window),
+                critical_rate=depletion_data.get('critical_rate',
+                                                 defaults.depletion.critical_rate),
+                grace_period=depletion_data.get('grace_period',
+                                                defaults.depletion.grace_period),
+            ),
+            extended_time=ExtendedTimeConfig(
+                enabled=extended_data.get('enabled', defaults.extended_time.enabled),
+                threshold=extended_data.get('threshold', defaults.extended_time.threshold),
+            ),
+        )
+
+    @classmethod
+    def _parse_remote_servers(cls, servers_data: list) -> List[RemoteServerConfig]:
+        """Parse a list of remote server configurations."""
+        servers = []
+        for server_data in servers_data:
+            pre_cmds_raw = server_data.get('pre_shutdown_commands') or []
+            pre_cmds = []
+            for cmd_data in pre_cmds_raw:
+                if isinstance(cmd_data, dict):
+                    pre_cmds.append(RemoteCommandConfig(
+                        action=cmd_data.get('action'),
+                        command=cmd_data.get('command'),
+                        timeout=cmd_data.get('timeout'),
+                        path=cmd_data.get('path'),
+                    ))
+            servers.append(RemoteServerConfig(
+                name=server_data.get('name', ''),
+                enabled=server_data.get('enabled', False),
+                host=server_data.get('host', ''),
+                user=server_data.get('user', ''),
+                connect_timeout=server_data.get('connect_timeout', 10),
+                command_timeout=server_data.get('command_timeout', 30),
+                shutdown_command=server_data.get('shutdown_command', 'sudo shutdown -h now'),
+                ssh_options=server_data.get('ssh_options', []),
+                pre_shutdown_commands=pre_cmds,
+                parallel=server_data.get('parallel', True),
+            ))
+        return servers
+
+    @classmethod
+    def _parse_containers_config(cls, containers_data: Dict[str, Any],
+                                  is_legacy_docker: bool = False) -> ContainersConfig:
+        """Parse container runtime configuration."""
+        compose_files_raw = containers_data.get('compose_files') or []
+        compose_files = []
+        for cf in compose_files_raw:
+            if isinstance(cf, str):
+                compose_files.append(ComposeFileConfig(path=cf))
+            elif isinstance(cf, dict):
+                compose_files.append(ComposeFileConfig(
+                    path=cf.get('path', ''),
+                    stop_timeout=cf.get('stop_timeout'),
+                ))
+
+        if is_legacy_docker:
+            return ContainersConfig(
+                enabled=containers_data.get('enabled', False),
+                runtime="docker",
+                stop_timeout=containers_data.get('stop_timeout', 60),
+                compose_files=compose_files,
+                shutdown_all_remaining_containers=containers_data.get(
+                    'shutdown_all_remaining_containers', True),
+                include_user_containers=False,
+            )
+        return ContainersConfig(
+            enabled=containers_data.get('enabled', False),
+            runtime=containers_data.get('runtime', 'auto'),
+            stop_timeout=containers_data.get('stop_timeout', 60),
+            compose_files=compose_files,
+            shutdown_all_remaining_containers=containers_data.get(
+                'shutdown_all_remaining_containers', True),
+            include_user_containers=containers_data.get('include_user_containers', False),
+        )
+
+    @classmethod
+    def _parse_filesystems_config(cls, fs_data: Dict[str, Any]) -> FilesystemsConfig:
+        """Parse filesystem operations configuration."""
+        unmount_data = fs_data.get('unmount', {})
+        mounts_raw = unmount_data.get('mounts', [])
+        mounts = []
+        for mount in mounts_raw:
+            if isinstance(mount, str):
+                mounts.append({'path': mount, 'options': ''})
+            elif isinstance(mount, dict):
+                mounts.append({
+                    'path': mount.get('path', ''),
+                    'options': mount.get('options', ''),
+                })
+        return FilesystemsConfig(
+            sync_enabled=fs_data.get('sync_enabled', True),
+            unmount=UnmountConfig(
+                enabled=unmount_data.get('enabled', False),
+                timeout=unmount_data.get('timeout', 15),
+                mounts=mounts,
+            ),
+        )
+
+    @classmethod
+    def _parse_notifications(cls, data: Dict[str, Any]) -> NotificationsConfig:
+        """Parse notifications configuration, supporting legacy Discord format."""
+        notif_urls = []
+        notif_title = None
+        avatar_url = None
+        notif_timeout = 10
+        notif_retry_interval = 5
+
+        if 'notifications' in data:
+            notif_data = data['notifications']
+            notif_title = notif_data.get('title')
+            avatar_url = notif_data.get('avatar_url')
+            notif_timeout = notif_data.get('timeout', 10)
+            notif_retry_interval = notif_data.get('retry_interval', 5)
+
+            if 'urls' in notif_data:
+                for url in notif_data.get('urls', []):
+                    notif_urls.append(cls._append_avatar_to_url(url, avatar_url))
+
+            if 'discord' in notif_data:
+                discord_data = notif_data['discord']
+                webhook_url = discord_data.get('webhook_url', '')
+                if webhook_url:
+                    apprise_url = cls._convert_discord_webhook_to_apprise(webhook_url)
+                    apprise_url = cls._append_avatar_to_url(apprise_url, avatar_url)
+                    if apprise_url not in notif_urls:
+                        notif_urls.insert(0, apprise_url)
+                notif_timeout = discord_data.get('timeout', notif_timeout)
+
+        if 'discord' in data and 'notifications' not in data:
+            discord_data = data['discord']
+            webhook_url = discord_data.get('webhook_url', '')
+            if webhook_url:
+                apprise_url = cls._convert_discord_webhook_to_apprise(webhook_url)
+                apprise_url = cls._append_avatar_to_url(apprise_url, avatar_url)
+                if apprise_url not in notif_urls:
+                    notif_urls.insert(0, apprise_url)
+                notif_timeout = discord_data.get('timeout', notif_timeout)
+
+        return NotificationsConfig(
+            enabled=len(notif_urls) > 0,
+            urls=notif_urls,
+            title=notif_title,
+            avatar_url=avatar_url,
+            timeout=notif_timeout,
+            retry_interval=notif_retry_interval,
+        )
+
+    @classmethod
     def _parse_config(cls, data: Dict[str, Any]) -> Config:
-        """Parse configuration dictionary into Config object."""
+        """Parse configuration dictionary into Config object.
+
+        Supports two formats:
+        - Legacy: ups is a dict with 'name' key, resources at top level
+        - Multi-UPS: ups is a list, resources nested under each UPS entry
+        """
         config = Config()
 
-        # UPS Configuration
-        if 'ups' in data:
-            ups_data = data['ups']
-            grace_data = ups_data.get('connection_loss_grace_period', {})
-            config.ups = UPSConfig(
-                name=ups_data.get('name', config.ups.name),
-                check_interval=ups_data.get('check_interval', config.ups.check_interval),
-                max_stale_data_tolerance=ups_data.get('max_stale_data_tolerance',
-                                                      config.ups.max_stale_data_tolerance),
-                connection_loss_grace_period=ConnectionLossGracePeriodConfig(
-                    enabled=grace_data.get('enabled',
-                                           config.ups.connection_loss_grace_period.enabled),
-                    duration=grace_data.get('duration',
-                                            config.ups.connection_loss_grace_period.duration),
-                    flap_threshold=grace_data.get('flap_threshold',
-                                                   config.ups.connection_loss_grace_period.flap_threshold),
-                ),
-            )
-
-        # Triggers Configuration
-        if 'triggers' in data:
-            triggers_data = data['triggers']
-            depletion_data = triggers_data.get('depletion', {})
-            extended_data = triggers_data.get('extended_time', {})
-
-            config.triggers = TriggersConfig(
-                low_battery_threshold=triggers_data.get('low_battery_threshold',
-                                                        config.triggers.low_battery_threshold),
-                critical_runtime_threshold=triggers_data.get('critical_runtime_threshold',
-                                                             config.triggers.critical_runtime_threshold),
-                depletion=DepletionConfig(
-                    window=depletion_data.get('window', config.triggers.depletion.window),
-                    critical_rate=depletion_data.get('critical_rate',
-                                                     config.triggers.depletion.critical_rate),
-                    grace_period=depletion_data.get('grace_period',
-                                                    config.triggers.depletion.grace_period),
-                ),
-                extended_time=ExtendedTimeConfig(
-                    enabled=extended_data.get('enabled', config.triggers.extended_time.enabled),
-                    threshold=extended_data.get('threshold', config.triggers.extended_time.threshold),
-                ),
-            )
-
-        # Behavior Configuration
+        # Parse global settings (shared across all UPS groups)
         if 'behavior' in data:
-            behavior_data = data['behavior']
             config.behavior = BehaviorConfig(
-                dry_run=behavior_data.get('dry_run', config.behavior.dry_run),
+                dry_run=data['behavior'].get('dry_run', False),
             )
 
-        # Logging Configuration
         if 'logging' in data:
             logging_data = data['logging']
             config.logging = LoggingConfig(
@@ -341,177 +555,129 @@ class ConfigLoader:
                                                     config.logging.shutdown_flag_file),
             )
 
-        # Notifications Configuration
-        # Support both new 'notifications' format and legacy 'discord' format
-        notif_urls = []
-        notif_title = None
-        avatar_url = None
-        notif_timeout = 10
-        notif_retry_interval = 5
+        config.notifications = cls._parse_notifications(data)
 
-        if 'notifications' in data:
-            notif_data = data['notifications']
-
-            # Get configuration options
-            notif_title = notif_data.get('title')
-            avatar_url = notif_data.get('avatar_url')
-            notif_timeout = notif_data.get('timeout', 10)
-            notif_retry_interval = notif_data.get('retry_interval', 5)
-
-            # New Apprise-style configuration
-            if 'urls' in notif_data:
-                for url in notif_data.get('urls', []):
-                    notif_urls.append(cls._append_avatar_to_url(url, avatar_url))
-
-            # Legacy Discord configuration within notifications
-            if 'discord' in notif_data:
-                discord_data = notif_data['discord']
-                webhook_url = discord_data.get('webhook_url', '')
-                if webhook_url:
-                    apprise_url = cls._convert_discord_webhook_to_apprise(webhook_url)
-                    apprise_url = cls._append_avatar_to_url(apprise_url, avatar_url)
-                    if apprise_url not in notif_urls:
-                        notif_urls.insert(0, apprise_url)
-                notif_timeout = discord_data.get('timeout', notif_timeout)
-
-        # Top-level legacy Discord configuration (backwards compatibility)
-        if 'discord' in data and 'notifications' not in data:
-            discord_data = data['discord']
-            webhook_url = discord_data.get('webhook_url', '')
-            if webhook_url:
-                apprise_url = cls._convert_discord_webhook_to_apprise(webhook_url)
-                apprise_url = cls._append_avatar_to_url(apprise_url, avatar_url)
-                if apprise_url not in notif_urls:
-                    notif_urls.insert(0, apprise_url)
-                notif_timeout = discord_data.get('timeout', notif_timeout)
-
-        config.notifications = NotificationsConfig(
-            enabled=len(notif_urls) > 0,
-            urls=notif_urls,
-            title=notif_title,
-            avatar_url=avatar_url,
-            timeout=notif_timeout,
-            retry_interval=notif_retry_interval,
-        )
-
-        # Virtual Machines Configuration
-        if 'virtual_machines' in data:
-            vm_data = data['virtual_machines']
-            config.virtual_machines = VMConfig(
-                enabled=vm_data.get('enabled', False),
-                max_wait=vm_data.get('max_wait', 30),
-            )
-
-        # Containers Configuration (supports both 'containers' and legacy 'docker')
-        containers_data = data.get('containers', data.get('docker', {}))
-        if containers_data:
-            # Parse compose_files - normalize both string and dict formats
-            compose_files_raw = containers_data.get('compose_files') or []
-            compose_files = []
-            for cf in compose_files_raw:
-                if isinstance(cf, str):
-                    compose_files.append(ComposeFileConfig(path=cf))
-                elif isinstance(cf, dict):
-                    compose_files.append(ComposeFileConfig(
-                        path=cf.get('path', ''),
-                        stop_timeout=cf.get('stop_timeout'),
-                    ))
-
-            # Handle legacy 'docker' section format
-            if 'docker' in data and 'containers' not in data:
-                # Legacy format: docker.enabled, docker.stop_timeout
-                config.containers = ContainersConfig(
-                    enabled=containers_data.get('enabled', False),
-                    runtime="docker",  # Legacy config assumes docker
-                    stop_timeout=containers_data.get('stop_timeout', 60),
-                    compose_files=compose_files,
-                    shutdown_all_remaining_containers=containers_data.get(
-                        'shutdown_all_remaining_containers', True),
-                    include_user_containers=False,
-                )
-            else:
-                # New format: containers section
-                config.containers = ContainersConfig(
-                    enabled=containers_data.get('enabled', False),
-                    runtime=containers_data.get('runtime', 'auto'),
-                    stop_timeout=containers_data.get('stop_timeout', 60),
-                    compose_files=compose_files,
-                    shutdown_all_remaining_containers=containers_data.get(
-                        'shutdown_all_remaining_containers', True),
-                    include_user_containers=containers_data.get('include_user_containers', False),
-                )
-
-        # Filesystems Configuration
-        if 'filesystems' in data:
-            fs_data = data['filesystems']
-            unmount_data = fs_data.get('unmount', {})
-            mounts_raw = unmount_data.get('mounts', [])
-
-            # Normalize mounts to list of dicts
-            mounts = []
-            for mount in mounts_raw:
-                if isinstance(mount, str):
-                    mounts.append({'path': mount, 'options': ''})
-                elif isinstance(mount, dict):
-                    mounts.append({
-                        'path': mount.get('path', ''),
-                        'options': mount.get('options', ''),
-                    })
-
-            config.filesystems = FilesystemsConfig(
-                sync_enabled=fs_data.get('sync_enabled', True),
-                unmount=UnmountConfig(
-                    enabled=unmount_data.get('enabled', False),
-                    timeout=unmount_data.get('timeout', 15),
-                    mounts=mounts,
-                ),
-            )
-
-        # Remote Servers Configuration
-        if 'remote_servers' in data:
-            servers = []
-            for server_data in data['remote_servers']:
-                # Parse pre_shutdown_commands
-                pre_cmds_raw = server_data.get('pre_shutdown_commands') or []
-                pre_cmds = []
-                for cmd_data in pre_cmds_raw:
-                    if isinstance(cmd_data, dict):
-                        pre_cmds.append(RemoteCommandConfig(
-                            action=cmd_data.get('action'),
-                            command=cmd_data.get('command'),
-                            timeout=cmd_data.get('timeout'),
-                            path=cmd_data.get('path'),
-                        ))
-
-                servers.append(RemoteServerConfig(
-                    name=server_data.get('name', ''),
-                    enabled=server_data.get('enabled', False),
-                    host=server_data.get('host', ''),
-                    user=server_data.get('user', ''),
-                    connect_timeout=server_data.get('connect_timeout', 10),
-                    command_timeout=server_data.get('command_timeout', 30),
-                    shutdown_command=server_data.get('shutdown_command', 'sudo shutdown -h now'),
-                    ssh_options=server_data.get('ssh_options', []),
-                    pre_shutdown_commands=pre_cmds,
-                    parallel=server_data.get('parallel', True),
-                ))
-            config.remote_servers = servers
-
-        # Local Shutdown Configuration
         if 'local_shutdown' in data:
             local_data = data['local_shutdown']
             config.local_shutdown = LocalShutdownConfig(
                 enabled=local_data.get('enabled', True),
                 command=local_data.get('command', 'shutdown -h now'),
                 message=local_data.get('message', 'UPS battery critical - emergency shutdown'),
+                drain_on_local_shutdown=local_data.get('drain_on_local_shutdown', False),
+                trigger_on=local_data.get('trigger_on', 'any'),
             )
+
+        # Parse global triggers (used as defaults for per-UPS triggers)
+        global_triggers = TriggersConfig()
+        if 'triggers' in data:
+            global_triggers = cls._parse_triggers_config(data['triggers'])
+
+        # Detect legacy vs multi-UPS format
+        ups_raw = data.get('ups', {})
+
+        if isinstance(ups_raw, list):
+            # --- Multi-UPS mode ---
+            config.ups_groups = cls._parse_multi_ups(ups_raw, global_triggers)
+        else:
+            # --- Legacy single-UPS mode ---
+            config.ups_groups = [cls._parse_legacy_ups(data, ups_raw, global_triggers)]
 
         return config
 
     @classmethod
+    def _parse_legacy_ups(cls, data: Dict[str, Any], ups_data: Dict[str, Any],
+                           global_triggers: TriggersConfig) -> UPSGroupConfig:
+        """Parse legacy single-UPS format into a UPSGroupConfig."""
+        ups_config = cls._parse_ups_config(ups_data) if ups_data else UPSConfig()
+
+        # Parse top-level resources
+        remote_servers = []
+        if 'remote_servers' in data:
+            remote_servers = cls._parse_remote_servers(data['remote_servers'])
+
+        vm_config = VMConfig()
+        if 'virtual_machines' in data:
+            vm_data = data['virtual_machines']
+            vm_config = VMConfig(
+                enabled=vm_data.get('enabled', False),
+                max_wait=vm_data.get('max_wait', 30),
+            )
+
+        containers_config = ContainersConfig()
+        containers_data = data.get('containers', data.get('docker', {}))
+        if containers_data:
+            is_legacy_docker = 'docker' in data and 'containers' not in data
+            containers_config = cls._parse_containers_config(containers_data, is_legacy_docker)
+
+        fs_config = FilesystemsConfig()
+        if 'filesystems' in data:
+            fs_config = cls._parse_filesystems_config(data['filesystems'])
+
+        group = UPSGroupConfig(
+            ups=ups_config,
+            triggers=global_triggers,
+            remote_servers=remote_servers,
+            virtual_machines=vm_config,
+            containers=containers_config,
+            filesystems=fs_config,
+            is_local=True,  # Legacy single-UPS is always local
+        )
+        return group
+
+    @classmethod
+    def _parse_multi_ups(cls, ups_list: list,
+                          global_triggers: TriggersConfig) -> List[UPSGroupConfig]:
+        """Parse multi-UPS list format into UPSGroupConfig list."""
+        groups = []
+        for entry in ups_list:
+            ups_config = cls._parse_ups_config(entry)
+
+            # Per-UPS triggers inherit from global, override if specified
+            if 'triggers' in entry:
+                triggers = cls._parse_triggers_config(entry['triggers'], global_triggers)
+            else:
+                triggers = global_triggers
+
+            is_local = entry.get('is_local', False)
+
+            # Remote servers (allowed for all groups)
+            remote_servers = []
+            if 'remote_servers' in entry:
+                remote_servers = cls._parse_remote_servers(entry['remote_servers'])
+
+            # Local resources (only allowed if is_local)
+            vm_config = VMConfig()
+            if 'virtual_machines' in entry:
+                vm_config = VMConfig(
+                    enabled=entry['virtual_machines'].get('enabled', False),
+                    max_wait=entry['virtual_machines'].get('max_wait', 30),
+                )
+
+            containers_config = ContainersConfig()
+            if 'containers' in entry:
+                containers_config = cls._parse_containers_config(entry['containers'])
+
+            fs_config = FilesystemsConfig()
+            if 'filesystems' in entry:
+                fs_config = cls._parse_filesystems_config(entry['filesystems'])
+
+            group = UPSGroupConfig(
+                ups=ups_config,
+                triggers=triggers,
+                remote_servers=remote_servers,
+                virtual_machines=vm_config,
+                containers=containers_config,
+                filesystems=fs_config,
+                is_local=is_local,
+            )
+            group._multi_ups = True
+            groups.append(group)
+
+        return groups
+
+    @classmethod
     def validate_config(cls, config: Config, raw_data: Optional[Dict[str, Any]] = None) -> List[str]:
         """Validate configuration and return list of warnings/info messages."""
-        # Import here to avoid circular imports
         from eneru.notifications import APPRISE_AVAILABLE
 
         messages = []
@@ -523,15 +689,13 @@ class ConfigLoader:
                 "Notifications will be disabled. Install with: pip install apprise"
             )
 
-        # Check for legacy Discord configuration (webhook_url in discord section)
+        # Check for legacy Discord configuration
         has_legacy_discord = False
         if raw_data:
-            # Check for legacy discord.webhook_url in notifications section
             if 'notifications' in raw_data:
                 notif_data = raw_data['notifications']
                 if 'discord' in notif_data and notif_data['discord'].get('webhook_url'):
                     has_legacy_discord = True
-            # Check for top-level legacy discord section
             if 'discord' in raw_data and 'notifications' not in raw_data:
                 if raw_data['discord'].get('webhook_url'):
                     has_legacy_discord = True
@@ -541,5 +705,46 @@ class ConfigLoader:
                 "INFO: Legacy Discord webhook_url detected. Using Apprise for notifications. "
                 "Consider migrating to the 'notifications.urls' format."
             )
+
+        # Multi-UPS validation
+        if config.multi_ups:
+            # Check that at most one group is marked is_local
+            local_groups = [g for g in config.ups_groups if g.is_local]
+            if len(local_groups) > 1:
+                local_names = [g.ups.label for g in local_groups]
+                messages.append(
+                    f"ERROR: Multiple UPS groups marked as is_local: {', '.join(local_names)}. "
+                    "At most one UPS group can power the Eneru host."
+                )
+
+            # Check ownership: non-local groups must not have local resources
+            for group in config.ups_groups:
+                if group.is_local:
+                    continue
+                label = group.ups.label
+                if group.virtual_machines.enabled:
+                    messages.append(
+                        f"ERROR: UPS group '{label}' has virtual_machines enabled but is not "
+                        "marked is_local. Only the local UPS group can manage VMs."
+                    )
+                if group.containers.enabled:
+                    messages.append(
+                        f"ERROR: UPS group '{label}' has containers enabled but is not "
+                        "marked is_local. Only the local UPS group can manage containers."
+                    )
+                if group.filesystems.unmount.enabled:
+                    messages.append(
+                        f"ERROR: UPS group '{label}' has filesystem unmount enabled but is not "
+                        "marked is_local. Only the local UPS group can manage filesystems."
+                    )
+
+            # Warn about top-level resources in multi-UPS mode
+            if raw_data:
+                for key in ('remote_servers', 'virtual_machines', 'containers', 'filesystems'):
+                    if key in raw_data:
+                        messages.append(
+                            f"WARNING: Top-level '{key}' section ignored in multi-UPS mode. "
+                            f"Move resources under the appropriate UPS entry."
+                        )
 
         return messages

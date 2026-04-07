@@ -7,6 +7,8 @@
 ups:
   # UPS identifier in format NAME@HOST or just NAME for local
   name: "UPS@192.168.178.11"
+  # Optional human-readable name for logs and notifications
+  # display_name: "Homelab UPS"
   # Seconds between status checks
   check_interval: 1
   # Number of stale data attempts before declaring connection lost

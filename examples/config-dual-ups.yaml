@@ -1,0 +1,125 @@
+# Eneru - Dual UPS Configuration Example
+#
+# This example shows how to monitor two independent UPSes from a single
+# Eneru instance. Each UPS protects a different set of servers.
+#
+# Use case: A dedicated machine (e.g. a Raspberry Pi) running Eneru
+# monitors two UPSes via NUT. When one UPS goes critical, only the
+# servers powered by that UPS are shut down. The other group continues
+# normally.
+#
+# See also: config-minimal.yaml, config-homelab.yaml, config-enterprise.yaml
+
+ups:
+  # --- UPS Group 1: Main rack ---
+  # This UPS powers the Eneru host and some servers
+  - name: "UPS1@192.168.1.10"
+    display_name: "Main Rack UPS"
+    check_interval: 1
+    is_local: true               # This UPS powers the machine running Eneru
+    max_stale_data_tolerance: 3
+    connection_loss_grace_period:
+      enabled: true
+      duration: 60
+      flap_threshold: 5
+
+    # Per-UPS trigger thresholds (override global defaults below)
+    triggers:
+      low_battery_threshold: 20
+      critical_runtime_threshold: 600
+
+    # Local resources (only allowed because is_local: true)
+    virtual_machines:
+      enabled: true
+      max_wait: 30
+
+    containers:
+      enabled: true
+      runtime: auto
+      stop_timeout: 60
+      compose_files:
+        - "/opt/critical-stack/docker-compose.yml"
+
+    filesystems:
+      sync_enabled: true
+      unmount:
+        enabled: true
+        timeout: 15
+        mounts:
+          - path: "/mnt/nas-share"
+            options: "-l"
+
+    # Remote servers powered by this UPS
+    remote_servers:
+      - name: "Proxmox Node 1"
+        enabled: true
+        host: "192.168.1.20"
+        user: "root"
+        connect_timeout: 10
+        command_timeout: 30
+        shutdown_command: "shutdown -h now"
+        ssh_options:
+          - "-o StrictHostKeyChecking=no"
+        pre_shutdown_commands:
+          - action: "stop_proxmox_vms"
+            timeout: 120
+          - action: "sync"
+
+  # --- UPS Group 2: Backup rack ---
+  # This UPS powers a separate set of servers
+  - name: "UPS2@192.168.1.11"
+    display_name: "Backup Rack UPS"
+    check_interval: 1
+
+    # Uses the global trigger defaults (no override)
+
+    # Remote resources only (not is_local)
+    remote_servers:
+      - name: "Synology NAS"
+        enabled: true
+        host: "192.168.1.30"
+        user: "nas-admin"
+        connect_timeout: 10
+        command_timeout: 30
+        shutdown_command: "sudo -i synoshutdown -s"
+        ssh_options:
+          - "-o StrictHostKeyChecking=no"
+        pre_shutdown_commands:
+          - action: "sync"
+
+      - name: "Backup Server"
+        enabled: true
+        host: "192.168.1.31"
+        user: "root"
+        shutdown_command: "shutdown -h now"
+
+# --- Global settings (shared across all UPS groups) ---
+
+# Global trigger defaults (used by groups that don't override)
+triggers:
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+  depletion:
+    window: 300
+    critical_rate: 15.0
+    grace_period: 90
+  extended_time:
+    enabled: true
+    threshold: 900
+
+behavior:
+  dry_run: false
+
+logging:
+  file: "/var/log/ups-monitor.log"
+
+notifications:
+  title: "Eneru Multi-UPS"
+  urls:
+    - "discord://webhook_id/webhook_token"
+
+local_shutdown:
+  enabled: true
+  command: "shutdown -h now"
+  message: "UPS battery critical - emergency shutdown"
+  drain_on_local_shutdown: false   # Don't drain other groups on local shutdown

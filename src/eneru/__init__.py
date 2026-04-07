@@ -4,6 +4,7 @@ from eneru.version import __version__
 from eneru.config import (
     Config,
     UPSConfig,
+    UPSGroupConfig,
     TriggersConfig,
     DepletionConfig,
     ExtendedTimeConfig,
@@ -27,7 +28,7 @@ from eneru.logger import UPSLogger, TimezoneFormatter
 from eneru.notifications import NotificationWorker, APPRISE_AVAILABLE
 from eneru.utils import run_command, command_exists, is_numeric, format_seconds
 from eneru.actions import REMOTE_ACTIONS
-from eneru.monitor import UPSMonitor
+from eneru.monitor import UPSMonitor, MultiUPSCoordinator
 from eneru.cli import main
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     # Configuration classes
     "Config",
     "UPSConfig",
+    "UPSGroupConfig",
     "TriggersConfig",
     "DepletionConfig",
     "ExtendedTimeConfig",
@@ -55,6 +57,7 @@ __all__ = [
     "ConfigLoader",
     # Core classes
     "UPSMonitor",
+    "MultiUPSCoordinator",
     "NotificationWorker",
     # Logger classes
     "UPSLogger",

@@ -356,33 +356,41 @@ See [Remote Servers](remote-servers.md) for SSH setup instructions.
 
 ## Command-line options
 
-| Option | Description |
-|--------|-------------|
-| `-h`, `--help` | Show help message and exit |
-| `-c CONFIG`, `--config CONFIG` | Path to configuration file (default: `/etc/ups-monitor/config.yaml`) |
-| `--dry-run` | Run in dry-run mode (overrides config file setting) |
-| `--validate-config` | Validate configuration file and exit |
-| `--test-notifications` | Send a test notification and exit |
-| `-v`, `--version` | Show version number and exit |
-| `--exit-after-shutdown` | Exit after completing shutdown sequence (useful for testing/scripting) |
+| Subcommand | Description |
+|------------|-------------|
+| `eneru run` | Start the monitoring daemon |
+| `eneru validate` | Validate configuration and show overview |
+| `eneru monitor` | Launch real-time TUI dashboard |
+| `eneru test-notifications` | Send a test notification and exit |
+| `eneru version` | Show version information |
+
+Running bare `eneru` without a subcommand shows help.
+
+**Flags for `eneru run`:**
+
+| Flag | Description |
+|------|-------------|
+| `-c`, `--config` | Path to configuration file |
+| `--dry-run` | Run in dry-run mode (overrides config) |
+| `--exit-after-shutdown` | Exit after shutdown sequence (for testing) |
 
 ### Examples
 
 ```bash
 # Validate configuration
-eneru --validate-config
+eneru validate --config /etc/ups-monitor/config.yaml
 
-# Run with custom config file
-eneru --config /path/to/config.yaml
+# Start monitoring
+eneru run --config /etc/ups-monitor/config.yaml
 
 # Test in dry-run mode
-eneru --dry-run
+eneru run --dry-run --config /etc/ups-monitor/config.yaml
+
+# Real-time dashboard
+eneru monitor --config /etc/ups-monitor/config.yaml
 
 # Send a test notification
-eneru --test-notifications
-
-# Run once and exit after shutdown (for scripting/testing)
-eneru --exit-after-shutdown
+eneru test-notifications --config /etc/ups-monitor/config.yaml
 ```
 
 ---
@@ -392,12 +400,13 @@ eneru --exit-after-shutdown
 Validate your configuration before starting the service:
 
 ```bash
-sudo python3 /opt/ups-monitor/eneru.py --validate-config
+eneru validate --config /etc/ups-monitor/config.yaml
 ```
 
 This checks for:
 
 - YAML syntax errors
-- Required fields
-- Valid value ranges
+- Required fields and valid value ranges
+- Multi-UPS ownership rules (only `is_local` group can manage VMs/containers)
+- Notification service availability
 - Reachable UPS (optional connectivity test)

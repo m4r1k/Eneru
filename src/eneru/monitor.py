@@ -53,16 +53,31 @@ except ImportError:
 class UPSMonitor:
     """Main UPS Monitor class."""
 
-    def __init__(self, config: Config, exit_after_shutdown: bool = False):
+    def __init__(self, config: Config, exit_after_shutdown: bool = False,
+                 coordinator_mode: bool = False,
+                 shutdown_callback=None,
+                 stop_event: Optional[threading.Event] = None,
+                 log_prefix: str = "",
+                 notification_worker: Optional[NotificationWorker] = None,
+                 logger: Optional[UPSLogger] = None,
+                 state_file_suffix: str = ""):
         self.config = config
         self.state = MonitorState()
-        self.logger: Optional[UPSLogger] = None
-        self._shutdown_flag_path = Path(config.logging.shutdown_flag_file)
-        self._battery_history_path = Path(config.logging.battery_history_file)
-        self._state_file_path = Path(config.logging.state_file)
+        self.logger: Optional[UPSLogger] = logger
+        self._coordinator_mode = coordinator_mode
+        self._shutdown_callback = shutdown_callback
+        self._stop_event = stop_event or threading.Event()
+        self._log_prefix = log_prefix
+
+        # Per-group state file paths (suffix for multi-UPS)
+        sfx = f".{state_file_suffix}" if state_file_suffix else ""
+        self._shutdown_flag_path = Path(config.logging.shutdown_flag_file + sfx)
+        self._battery_history_path = Path(config.logging.battery_history_file + sfx)
+        self._state_file_path = Path(config.logging.state_file + sfx)
+
         self._container_runtime: Optional[str] = None
         self._compose_available: bool = False
-        self._notification_worker: Optional[NotificationWorker] = None
+        self._notification_worker: Optional[NotificationWorker] = notification_worker
         self._exit_after_shutdown = exit_after_shutdown
 
     def run(self):
@@ -82,10 +97,12 @@ class UPSMonitor:
 
     def _initialize(self):
         """Initialize the UPS monitor."""
-        signal.signal(signal.SIGTERM, self._cleanup_and_exit)
-        signal.signal(signal.SIGINT, self._cleanup_and_exit)
+        if not self._coordinator_mode:
+            signal.signal(signal.SIGTERM, self._cleanup_and_exit)
+            signal.signal(signal.SIGINT, self._cleanup_and_exit)
 
-        self.logger = UPSLogger(self.config.logging.file, self.config)
+        if self.logger is None:
+            self.logger = UPSLogger(self.config.logging.file, self.config)
 
         if self.config.logging.file:
             try:
@@ -120,6 +137,10 @@ class UPSMonitor:
 
     def _initialize_notifications(self):
         """Initialize the notification worker."""
+        # In coordinator mode, the notification worker is shared and pre-initialized
+        if self._notification_worker is not None:
+            return
+
         if not self.config.notifications.enabled:
             self._log_message("📢 Notifications: disabled")
             return
@@ -180,13 +201,14 @@ class UPSMonitor:
         self._log_message(f"📋 Enabled features: {', '.join(features) if features else 'None'}")
 
     def _log_message(self, message: str):
-        """Log a message using the logger."""
+        """Log a message using the logger, with optional prefix for multi-UPS."""
+        prefixed = f"{self._log_prefix}{message}" if self._log_prefix else message
         if self.logger:
-            self.logger.log(message)
+            self.logger.log(prefixed)
         else:
             tz_name = time.strftime('%Z')
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            print(f"{timestamp} {tz_name} - {message}")
+            print(f"{timestamp} {tz_name} - {prefixed}")
 
         # During shutdown, also send log messages as notifications (non-blocking)
         if self._shutdown_flag_path.exists():
@@ -214,8 +236,11 @@ class UPSMonitor:
         if not self._notification_worker:
             return
 
+        # Prefix notification body with UPS name in multi-UPS mode
+        prefixed_body = f"{self._log_prefix}{body}" if self._log_prefix else body
+
         # Escape @ symbols to prevent Discord mentions (e.g., UPS@192.168.1.1)
-        escaped_body = body.replace("@", "@\u200B")  # Zero-width space after @
+        escaped_body = prefixed_body.replace("@", "@\u200B")  # Zero-width space after @
 
         # CRITICAL: During shutdown, NEVER block on notifications
         # Network is likely unreliable during power outages
@@ -1113,19 +1138,34 @@ class UPSMonitor:
                 "🚨 CRITICAL: Executing emergency UPS shutdown sequence NOW!"
             ])
 
-        self._shutdown_vms()
-        self._shutdown_containers()
-        self._sync_filesystems()
-        self._unmount_filesystems()
+        # Runtime is_local enforcement: only the local UPS group can
+        # manage VMs, containers, and filesystems. Non-local groups skip
+        # these even if config validation was somehow bypassed.
+        group = self.config.ups_groups[0] if self.config.ups_groups else None
+        is_local = group.is_local if group else True  # legacy single-UPS = local
+
+        if is_local:
+            self._shutdown_vms()
+            self._shutdown_containers()
+            self._sync_filesystems()
+            self._unmount_filesystems()
         self._shutdown_remote_servers()
 
-        if self.config.filesystems.sync_enabled:
+        if is_local and self.config.filesystems.sync_enabled:
             self._log_message("💾 Final filesystem sync...")
             if self.config.behavior.dry_run:
                 self._log_message("  🧪 [DRY-RUN] Would perform final sync")
             else:
                 os.sync()
                 self._log_message("  ✅ Final sync complete")
+
+        # In coordinator mode, notify the coordinator instead of doing local shutdown
+        if self._coordinator_mode:
+            self._log_message("✅ ========== GROUP SHUTDOWN SEQUENCE COMPLETE ==========")
+            if self._shutdown_callback:
+                group = self.config.ups_groups[0] if self.config.ups_groups else None
+                self._shutdown_callback(group)
+            return
 
         if self.config.local_shutdown.enabled:
             self._log_message("🔌 Shutting down local server NOW")
@@ -1207,6 +1247,59 @@ class UPSMonitor:
     # ==========================================================================
     # STATUS CHECKS
     # ==========================================================================
+
+    def _check_battery_anomaly(self, ups_data: Dict[str, str]):
+        """Detect abnormal battery charge changes while on line power.
+
+        Catches firmware recalibrations, battery aging events, or hardware
+        issues that cause sudden charge drops (e.g., 100% -> 60% in seconds)
+        while the UPS is on line power and not discharging.
+        """
+        ups_status = ups_data.get('ups.status', '')
+        battery_charge_str = ups_data.get('battery.charge', '')
+
+        if not is_numeric(battery_charge_str):
+            return
+
+        current_charge = float(battery_charge_str)
+        current_time = time.time()
+
+        # Only track anomalies while on line power (OL/CHRG)
+        if "OB" in ups_status:
+            # On battery -- reset tracking, drops are expected
+            self.state.last_battery_charge = current_charge
+            self.state.last_battery_charge_time = current_time
+            return
+
+        prev_charge = self.state.last_battery_charge
+        prev_time = self.state.last_battery_charge_time
+
+        # Update tracking
+        self.state.last_battery_charge = current_charge
+        self.state.last_battery_charge_time = current_time
+
+        # Skip if not yet initialized
+        if prev_charge < 0:
+            return
+
+        # Check for significant drop while online
+        drop = prev_charge - current_charge
+        elapsed = current_time - prev_time if prev_time > 0 else 0
+
+        # Threshold: >20% drop within 120 seconds while on line power
+        if drop > 20 and elapsed < 120:
+            self._log_message(
+                f"⚠️ WARNING: Battery charge dropped from {prev_charge:.0f}% to "
+                f"{current_charge:.0f}% ({drop:.0f}% drop) while on line power. "
+                f"Possible firmware recalibration, battery aging, or hardware issue."
+            )
+            self._send_notification(
+                f"⚠️ **Battery Anomaly Detected**\n"
+                f"Charge dropped from {prev_charge:.0f}% to {current_charge:.0f}% "
+                f"({drop:.0f}% drop in {elapsed:.0f}s) while on line power.\n"
+                f"Possible causes: firmware recalibration, battery aging, or hardware issue.",
+                self.config.NOTIFY_WARNING
+            )
 
     def _check_voltage_issues(self, ups_status: str, input_voltage: str):
         """Check for voltage quality issues."""
@@ -1471,7 +1564,7 @@ class UPSMonitor:
 
     def _main_loop(self):
         """Main monitoring loop."""
-        while True:
+        while not self._stop_event.is_set():
             success, ups_data, error_msg = self._get_all_ups_data()
 
             # ==================================================================
@@ -1522,7 +1615,7 @@ class UPSMonitor:
                 elif is_failsafe_trigger:
                     self._handle_connection_failure(error_msg)
 
-                time.sleep(5)
+                self._stop_event.wait(5)
                 continue
 
             # ==================================================================
@@ -1584,7 +1677,7 @@ class UPSMonitor:
                     "❌ ERROR: Received data from UPS but 'ups.status' is missing. "
                     "Check NUT configuration."
                 )
-                time.sleep(5)
+                self._stop_event.wait(5)
                 continue
 
             self._save_state(ups_data)
@@ -1613,6 +1706,9 @@ class UPSMonitor:
             elif "OL" in ups_status or "CHRG" in ups_status:
                 self._handle_on_line(ups_data)
 
+            # Battery anomaly detection (runs on every cycle with valid data)
+            self._check_battery_anomaly(ups_data)
+
             # ==================================================================
             # ENVIRONMENT MONITORING
             # ==================================================================
@@ -1627,4 +1723,267 @@ class UPSMonitor:
 
             self.state.previous_status = ups_status
 
-            time.sleep(self.config.ups.check_interval)
+            self._stop_event.wait(self.config.ups.check_interval)
+
+
+# ==============================================================================
+# MULTI-UPS COORDINATOR
+# ==============================================================================
+
+class MultiUPSCoordinator:
+    """Coordinates multiple UPSGroupMonitor threads for multi-UPS setups.
+
+    Each UPS group runs its own UPSMonitor in a dedicated thread. The
+    coordinator owns shared resources (notifications, logger) and handles
+    local shutdown coordination with defense-in-depth (threading.Lock +
+    filesystem flag).
+    """
+
+    def __init__(self, config: Config, exit_after_shutdown: bool = False):
+        self.config = config
+        self._exit_after_shutdown = exit_after_shutdown
+        self._monitors: List[UPSMonitor] = []
+        self._threads: List[threading.Thread] = []
+        self._stop_event = threading.Event()
+        self._local_shutdown_lock = threading.Lock()
+        self._local_shutdown_initiated = False
+        self._global_shutdown_flag = Path(config.logging.shutdown_flag_file)
+
+        # Shared resources
+        self._logger: Optional[UPSLogger] = None
+        self._notification_worker: Optional[NotificationWorker] = None
+
+    def run(self):
+        """Start all UPS group monitors and wait for shutdown or signal."""
+        try:
+            self._initialize()
+            self._start_monitors()
+            self._wait_for_completion()
+        except KeyboardInterrupt:
+            self._handle_signal(signal.SIGINT, None)
+
+    def _initialize(self):
+        """Initialize shared resources."""
+        signal.signal(signal.SIGTERM, self._handle_signal)
+        signal.signal(signal.SIGINT, self._handle_signal)
+
+        self._logger = UPSLogger(self.config.logging.file, self.config)
+
+        if self.config.logging.file:
+            try:
+                Path(self.config.logging.file).touch(exist_ok=True)
+            except PermissionError:
+                pass
+
+        self._global_shutdown_flag.unlink(missing_ok=True)
+
+        # Initialize shared notification worker
+        if self.config.notifications.enabled and APPRISE_AVAILABLE:
+            self._notification_worker = NotificationWorker(self.config)
+            if self._notification_worker.start():
+                count = self._notification_worker.get_service_count()
+                self._log(f"📢 Notifications: enabled ({count} service(s))")
+            else:
+                self._log("⚠️ WARNING: Failed to initialize notifications")
+                self._notification_worker = None
+
+        group_count = len(self.config.ups_groups)
+        self._log(f"🚀 Eneru v{__version__} starting - multi-UPS mode ({group_count} groups)")
+
+        if self.config.behavior.dry_run:
+            self._log("🧪 *** RUNNING IN DRY-RUN MODE - NO ACTUAL SHUTDOWN WILL OCCUR ***")
+
+    def _start_monitors(self):
+        """Create and start one UPSMonitor thread per group."""
+        for group in self.config.ups_groups:
+            # Build a single-group Config for this monitor
+            group_config = Config(
+                ups_groups=[group],
+                behavior=self.config.behavior,
+                logging=self.config.logging,
+                notifications=self.config.notifications,
+                local_shutdown=self.config.local_shutdown,
+            )
+
+            # Sanitize UPS name for file paths
+            sanitized = group.ups.name.replace("@", "-").replace(":", "-").replace("/", "-")
+            prefix = f"[{group.ups.label}] "
+
+            monitor = UPSMonitor(
+                config=group_config,
+                exit_after_shutdown=self._exit_after_shutdown,
+                coordinator_mode=True,
+                shutdown_callback=self._on_group_shutdown,
+                stop_event=self._stop_event,
+                log_prefix=prefix,
+                notification_worker=self._notification_worker,
+                logger=self._logger,
+                state_file_suffix=sanitized,
+            )
+            self._monitors.append(monitor)
+
+            thread = threading.Thread(
+                target=self._run_monitor,
+                args=(monitor, group),
+                name=f"ups-{sanitized}",
+                daemon=True,
+            )
+            self._threads.append(thread)
+            thread.start()
+            self._log(f"  Started monitor thread for {group.ups.label}"
+                      f"{' [is_local]' if group.is_local else ''}")
+
+    def _run_monitor(self, monitor: UPSMonitor, group):
+        """Thread target: run a single UPS monitor."""
+        try:
+            monitor.run()
+        except Exception as e:
+            label = group.ups.label
+            self._log(f"❌ Monitor thread for {label} crashed: {e}")
+            if self._notification_worker:
+                self._notification_worker.send(
+                    f"❌ **Monitor Crashed:** {label}\nError: {e}",
+                    "failure",
+                )
+
+    def _on_group_shutdown(self, group):
+        """Called by a UPS monitor when its group triggers shutdown."""
+        if group is None:
+            return
+
+        label = group.ups.label
+        is_local = group.is_local
+        should_local_shutdown = False
+
+        if is_local:
+            should_local_shutdown = True
+        elif self.config.local_shutdown.trigger_on == "any":
+            has_any_local = any(g.is_local for g in self.config.ups_groups)
+            if not has_any_local:
+                should_local_shutdown = True
+
+        if should_local_shutdown:
+            self._handle_local_shutdown(label)
+        elif self._exit_after_shutdown:
+            # Non-local group shutdown completed, exit if requested
+            self._log(f"🛑 Group {label} shutdown complete. Exiting (--exit-after-shutdown).")
+            self._stop_event.set()
+
+    def _handle_local_shutdown(self, triggered_by: str):
+        """Execute local shutdown with defense-in-depth protection."""
+        # Defense layer 1: in-memory lock
+        proceed = False
+        with self._local_shutdown_lock:
+            if not self._local_shutdown_initiated:
+                self._local_shutdown_initiated = True
+                proceed = True
+
+        if not proceed:
+            return
+
+        # Defense layer 2: filesystem flag
+        self._global_shutdown_flag.touch()
+
+        self._log(f"🚨 Local shutdown triggered by {triggered_by}")
+
+        # Drain other groups if configured
+        if self.config.local_shutdown.drain_on_local_shutdown:
+            self._log("⏳ Draining all UPS groups before local shutdown...")
+            self._drain_all_groups(timeout=120)
+
+        # Execute local shutdown
+        if self.config.local_shutdown.enabled:
+            self._log("🔌 Shutting down local server NOW")
+            if self.config.behavior.dry_run:
+                self._log(f"🧪 [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
+                self._global_shutdown_flag.unlink(missing_ok=True)
+            else:
+                if self._notification_worker:
+                    self._notification_worker.send(
+                        "🛑 **Shutdown Sequence Complete**\nShutting down local server NOW.",
+                        "failure",
+                    )
+                time.sleep(5)
+                cmd_parts = self.config.local_shutdown.command.split()
+                if self.config.local_shutdown.message:
+                    cmd_parts.append(self.config.local_shutdown.message)
+                run_command(cmd_parts)
+        else:
+            self._log("✅ Local shutdown disabled. Group shutdown complete.")
+            self._global_shutdown_flag.unlink(missing_ok=True)
+
+        # Exit if --exit-after-shutdown was specified
+        if self._exit_after_shutdown:
+            self._log("🛑 Exiting after shutdown sequence (--exit-after-shutdown)")
+            self._stop_event.set()
+
+    def _drain_all_groups(self, timeout: int = 120):
+        """Shut down all groups' resources, then stop monitor threads.
+
+        This triggers each monitor's shutdown sequence (VMs, containers,
+        remote servers) before stopping the monitoring loops. Resources
+        are actively shut down, not just abandoned.
+        """
+        self._log("⏳ Draining all UPS groups -- shutting down their resources...")
+
+        # First, trigger shutdown on each monitor that hasn't already shut down
+        for monitor in self._monitors:
+            if not monitor._shutdown_flag_path.exists():
+                self._log(f"  ➡️ Triggering shutdown for {monitor._log_prefix.strip()}")
+                try:
+                    monitor._execute_shutdown_sequence()
+                except Exception as e:
+                    self._log(f"  ⚠️ Error during drain shutdown: {e}")
+
+        # Then stop the monitoring loops
+        self._stop_event.set()
+        deadline = time.time() + timeout
+        for thread in self._threads:
+            remaining = max(0, deadline - time.time())
+            thread.join(timeout=remaining)
+        still_running = [t for t in self._threads if t.is_alive()]
+        if still_running:
+            self._log(f"⚠️ {len(still_running)} monitor(s) still running after drain timeout")
+
+    def _wait_for_completion(self):
+        """Block until all monitors finish or a signal is received."""
+        try:
+            while not self._stop_event.is_set():
+                # Check if any thread is still alive
+                alive = [t for t in self._threads if t.is_alive()]
+                if not alive:
+                    break
+                self._stop_event.wait(1)
+        except KeyboardInterrupt:
+            self._handle_signal(signal.SIGINT, None)
+
+    def _handle_signal(self, signum: int, frame):
+        """Handle SIGTERM/SIGINT for clean shutdown."""
+        self._log("🛑 Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
+
+        if self._notification_worker:
+            self._notification_worker.send(
+                "🛑 **Eneru Service Stopped**\nMonitoring is now inactive.",
+                "warning",
+            )
+
+        self._stop_event.set()
+
+        # Wait briefly for threads to finish
+        for thread in self._threads:
+            thread.join(timeout=5)
+
+        if self._notification_worker:
+            self._notification_worker.stop()
+
+        self._global_shutdown_flag.unlink(missing_ok=True)
+        sys.exit(0)
+
+    def _log(self, message: str):
+        """Log a message using the shared logger."""
+        if self._logger:
+            self._logger.log(message)
+        else:
+            tz_name = time.strftime('%Z')
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"{timestamp} {tz_name} - {message}")
