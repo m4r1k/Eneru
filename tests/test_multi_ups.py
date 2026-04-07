@@ -485,3 +485,254 @@ class TestBatteryAnomalyDetection:
         monitor._check_battery_anomaly(ups_data)
 
         monitor._notification_worker.send.assert_not_called()
+
+
+# ==============================================================================
+# DRAIN ON LOCAL SHUTDOWN
+# ==============================================================================
+
+class TestDrainOnLocalShutdown:
+    """Verify drain_on_local_shutdown triggers resource shutdown on other groups."""
+
+    @pytest.mark.unit
+    def test_drain_calls_shutdown_on_other_monitors(self, tmp_path):
+        """drain_on_local_shutdown=true must call _execute_shutdown_sequence on each monitor."""
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True),
+                UPSGroupConfig(ups=UPSConfig(name="UPS2"), is_local=False),
+            ],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                shutdown_flag_file=str(tmp_path / "flag"),
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+            ),
+            local_shutdown=LocalShutdownConfig(
+                enabled=False,
+                drain_on_local_shutdown=True,
+            ),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+
+        mock_monitor = MagicMock()
+        mock_monitor._shutdown_flag_path = tmp_path / "flag-ups2"
+        mock_monitor._shutdown_flag_path.unlink(missing_ok=True)
+        mock_monitor._log_prefix = "[UPS2] "
+        coord._monitors = [mock_monitor]
+        coord._threads = []
+
+        coord._drain_all_groups(timeout=5)
+
+        mock_monitor._execute_shutdown_sequence.assert_called_once()
+
+    @pytest.mark.unit
+    def test_drain_not_called_when_disabled(self, tmp_path):
+        """drain_on_local_shutdown=false must NOT drain other groups."""
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True),
+            ],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                shutdown_flag_file=str(tmp_path / "flag"),
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+            ),
+            local_shutdown=LocalShutdownConfig(
+                enabled=False,
+                drain_on_local_shutdown=False,
+            ),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        coord._notification_worker = None
+
+        drain_called = []
+        coord._drain_all_groups = lambda timeout=120: drain_called.append(True)
+
+        coord._handle_local_shutdown("UPS1")
+
+        assert len(drain_called) == 0
+
+
+# ==============================================================================
+# RUNTIME is_local ENFORCEMENT
+# ==============================================================================
+
+class TestRuntimeIsLocalEnforcement:
+    """Verify non-local groups skip VMs/containers/filesystems at runtime."""
+
+    @pytest.mark.unit
+    def test_nonlocal_group_skips_local_resources(self, tmp_path):
+        """Non-local group's shutdown sequence must skip VMs, containers, filesystems."""
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS2@remote"),
+                is_local=False,
+            )],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                shutdown_flag_file=str(tmp_path / "flag"),
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+            ),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+        )
+
+        monitor = UPSMonitor(config)
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+        monitor._notification_worker = MagicMock()
+
+        call_order = []
+        monitor._shutdown_vms = lambda: call_order.append("vms")
+        monitor._shutdown_containers = lambda: call_order.append("containers")
+        monitor._sync_filesystems = lambda: call_order.append("sync")
+        monitor._unmount_filesystems = lambda: call_order.append("unmount")
+        monitor._shutdown_remote_servers = lambda: call_order.append("remote")
+
+        monitor._execute_shutdown_sequence()
+
+        assert "remote" in call_order
+        assert "vms" not in call_order
+        assert "containers" not in call_order
+        assert "sync" not in call_order
+        assert "unmount" not in call_order
+
+    @pytest.mark.unit
+    def test_local_group_runs_all_resources(self, tmp_path):
+        """Local group's shutdown sequence must run all resources."""
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS1@local"),
+                is_local=True,
+            )],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                shutdown_flag_file=str(tmp_path / "flag"),
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+            ),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+        )
+
+        monitor = UPSMonitor(config)
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+        monitor._notification_worker = MagicMock()
+
+        call_order = []
+        monitor._shutdown_vms = lambda: call_order.append("vms")
+        monitor._shutdown_containers = lambda: call_order.append("containers")
+        monitor._sync_filesystems = lambda: call_order.append("sync")
+        monitor._unmount_filesystems = lambda: call_order.append("unmount")
+        monitor._shutdown_remote_servers = lambda: call_order.append("remote")
+
+        monitor._execute_shutdown_sequence()
+
+        assert call_order == ["vms", "containers", "sync", "unmount", "remote"]
+
+
+# ==============================================================================
+# NOTIFICATION PREFIXING
+# ==============================================================================
+
+class TestNotificationPrefixing:
+    """Verify notifications include UPS name in multi-UPS mode."""
+
+    @pytest.mark.unit
+    def test_notification_prefixed_in_coordinator_mode(self, tmp_path):
+        """Notifications in coordinator mode include [display_name] prefix."""
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS1@test", display_name="Main UPS"),
+                is_local=True,
+            )],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                shutdown_flag_file=str(tmp_path / "flag"),
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+            ),
+        )
+
+        mock_worker = MagicMock()
+        monitor = UPSMonitor(
+            config=config,
+            coordinator_mode=True,
+            log_prefix="[Main UPS] ",
+            notification_worker=mock_worker,
+        )
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+
+        monitor._send_notification("Battery at 15%", "warning")
+
+        mock_worker.send.assert_called_once()
+        call_kwargs = mock_worker.send.call_args
+        body = call_kwargs.kwargs.get("body", "")
+        assert "[Main UPS]" in body
+        assert "15%" in body
+
+    @pytest.mark.unit
+    def test_notification_not_prefixed_in_single_ups(self, tmp_path):
+        """Notifications in single-UPS mode have no prefix."""
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@test"),
+                is_local=True,
+            )],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                shutdown_flag_file=str(tmp_path / "flag"),
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+            ),
+        )
+
+        mock_worker = MagicMock()
+        monitor = UPSMonitor(config=config, notification_worker=mock_worker)
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+
+        monitor._send_notification("Battery at 15%", "warning")
+
+        mock_worker.send.assert_called_once()
+        call_kwargs = mock_worker.send.call_args
+        body = call_kwargs.kwargs.get("body", "")
+        assert not body.startswith("[")
+        assert "15%" in body
+
+
+# ==============================================================================
+# EXIT AFTER SHUTDOWN IN COORDINATOR MODE
+# ==============================================================================
+
+class TestCoordinatorExitAfterShutdown:
+    """Verify --exit-after-shutdown works in multi-UPS coordinator mode."""
+
+    @pytest.mark.unit
+    def test_exit_after_shutdown_sets_stop_event(self, tmp_path):
+        """Coordinator sets stop_event after group shutdown when exit_after_shutdown=True."""
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True),
+            ],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                shutdown_flag_file=str(tmp_path / "flag"),
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+            ),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+        )
+
+        coord = MultiUPSCoordinator(config, exit_after_shutdown=True)
+        coord._log = lambda msg: None
+        coord._notification_worker = None
+
+        coord._on_group_shutdown(config.ups_groups[0])
+
+        assert coord._stop_event.is_set()

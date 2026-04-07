@@ -1138,13 +1138,20 @@ class UPSMonitor:
                 "🚨 CRITICAL: Executing emergency UPS shutdown sequence NOW!"
             ])
 
-        self._shutdown_vms()
-        self._shutdown_containers()
-        self._sync_filesystems()
-        self._unmount_filesystems()
+        # Runtime is_local enforcement: only the local UPS group can
+        # manage VMs, containers, and filesystems. Non-local groups skip
+        # these even if config validation was somehow bypassed.
+        group = self.config.ups_groups[0] if self.config.ups_groups else None
+        is_local = group.is_local if group else True  # legacy single-UPS = local
+
+        if is_local:
+            self._shutdown_vms()
+            self._shutdown_containers()
+            self._sync_filesystems()
+            self._unmount_filesystems()
         self._shutdown_remote_servers()
 
-        if self.config.filesystems.sync_enabled:
+        if is_local and self.config.filesystems.sync_enabled:
             self._log_message("💾 Final filesystem sync...")
             if self.config.behavior.dry_run:
                 self._log_message("  🧪 [DRY-RUN] Would perform final sync")
@@ -1846,14 +1853,21 @@ class MultiUPSCoordinator:
 
         label = group.ups.label
         is_local = group.is_local
+        should_local_shutdown = False
 
         if is_local:
-            self._handle_local_shutdown(label)
+            should_local_shutdown = True
         elif self.config.local_shutdown.trigger_on == "any":
-            # No is_local set on any UPS, but trigger_on=any means any group triggers local
             has_any_local = any(g.is_local for g in self.config.ups_groups)
             if not has_any_local:
-                self._handle_local_shutdown(label)
+                should_local_shutdown = True
+
+        if should_local_shutdown:
+            self._handle_local_shutdown(label)
+        elif self._exit_after_shutdown:
+            # Non-local group shutdown completed, exit if requested
+            self._log(f"🛑 Group {label} shutdown complete. Exiting (--exit-after-shutdown).")
+            self._stop_event.set()
 
     def _handle_local_shutdown(self, triggered_by: str):
         """Execute local shutdown with defense-in-depth protection."""
@@ -1894,6 +1908,14 @@ class MultiUPSCoordinator:
                 if self.config.local_shutdown.message:
                     cmd_parts.append(self.config.local_shutdown.message)
                 run_command(cmd_parts)
+        else:
+            self._log("✅ Local shutdown disabled. Group shutdown complete.")
+            self._global_shutdown_flag.unlink(missing_ok=True)
+
+        # Exit if --exit-after-shutdown was specified
+        if self._exit_after_shutdown:
+            self._log("🛑 Exiting after shutdown sequence (--exit-after-shutdown)")
+            self._stop_event.set()
 
     def _drain_all_groups(self, timeout: int = 120):
         """Shut down all groups' resources, then stop monitor threads.

@@ -371,6 +371,68 @@ jobs:
 
           echo "PASS: No false shutdown triggers with both UPSes online"
 
+      # ========================================
+      # TEST 11: Ownership validation (non-local with containers)
+      # ========================================
+      - name: "Test 11: Ownership validation rejects non-local containers"
+        run: |
+          echo "=== Test 11: Ownership Validation ==="
+
+          cat > /tmp/config-bad-ownership.yaml <<YAML
+          ups:
+            - name: "UPS1@localhost:3493"
+              is_local: true
+            - name: "UPS2@localhost:3493"
+              containers:
+                enabled: true
+          YAML
+
+          # validate should report ERROR for non-local group with containers
+          OUTPUT=$(eneru validate --config /tmp/config-bad-ownership.yaml 2>&1) || true
+
+          if echo "$OUTPUT" | grep -q "ERROR.*containers"; then
+            echo "PASS: Ownership violation correctly detected"
+          else
+            echo "FAIL: Ownership violation not detected"
+            echo "$OUTPUT"
+            exit 1
+          fi
+
+      # ========================================
+      # TEST 12: CLI safety (bare eneru shows help)
+      # ========================================
+      - name: "Test 12: CLI safety - bare eneru shows help"
+        run: |
+          echo "=== Test 12: CLI Safety ==="
+
+          OUTPUT=$(eneru 2>&1) || true
+          EXIT_CODE=$?
+
+          if echo "$OUTPUT" | grep -q "run\|validate\|monitor"; then
+            echo "PASS: Bare 'eneru' shows help with subcommands"
+          else
+            echo "FAIL: Bare 'eneru' did not show help"
+            echo "$OUTPUT"
+            exit 1
+          fi
+
+      # ========================================
+      # TEST 13: TUI --once snapshot
+      # ========================================
+      - name: "Test 13: TUI --once snapshot"
+        run: |
+          echo "=== Test 13: TUI --once ==="
+
+          OUTPUT=$(eneru monitor --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml --once 2>&1)
+
+          if echo "$OUTPUT" | grep -q "TestUPS@localhost\|Eneru v"; then
+            echo "PASS: TUI --once outputs UPS status"
+          else
+            echo "FAIL: TUI --once did not produce expected output"
+            echo "$OUTPUT"
+            exit 1
+          fi
+
       - name: Collect logs on failure
         if: failure()
         run: |
