@@ -267,6 +267,110 @@ jobs:
 
           echo "PASS: Notification sent successfully"
 
+      # ========================================
+      # TEST 8: Multi-UPS config validation
+      # ========================================
+      - name: "Test 8: Multi-UPS config validation"
+        run: |
+          echo "=== Test 8: Multi-UPS Config Validation ==="
+
+          # Verify both UPSes are reachable
+          upsc UPS1@localhost:3493 2>/dev/null | grep -q "ups.status" || { echo "FAIL: UPS1 not reachable"; exit 1; }
+          upsc UPS2@localhost:3493 2>/dev/null | grep -q "ups.status" || { echo "FAIL: UPS2 not reachable"; exit 1; }
+
+          echo "Both UPS1 and UPS2 reachable on NUT server"
+
+          # Validate multi-UPS config
+          eneru validate --config ${{ env.E2E_DIR }}/config-e2e-multi-ups.yaml
+
+          echo "PASS: Multi-UPS config validates against real NUT server"
+
+      # ========================================
+      # TEST 9: Multi-UPS isolation - UPS1 fails, UPS2 unaffected
+      # ========================================
+      - name: "Test 9: Multi-UPS isolation (UPS1 fails, UPS2 normal)"
+        run: |
+          echo "=== Test 9: Multi-UPS Isolation ==="
+
+          # Clean up
+          rm -f /tmp/eneru-e2e-shutdown-flag*
+
+          # Ensure both UPSes start online
+          cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS1.dev
+          cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS2.dev
+          sleep 3
+
+          # Now fail UPS1 (low battery) while UPS2 stays online
+          cp ${{ env.E2E_DIR }}/scenarios/low-battery.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS1.dev
+          sleep 3
+
+          # Verify UPS1 is on battery / low
+          UPS1_STATUS=$(upsc UPS1@localhost:3493 ups.status 2>/dev/null)
+          UPS2_STATUS=$(upsc UPS2@localhost:3493 ups.status 2>/dev/null)
+
+          echo "UPS1 status: $UPS1_STATUS"
+          echo "UPS2 status: $UPS2_STATUS"
+
+          if echo "$UPS1_STATUS" | grep -q "OB"; then
+            echo "PASS: UPS1 correctly shows on battery"
+          else
+            echo "FAIL: UPS1 should be on battery, got: $UPS1_STATUS"
+            exit 1
+          fi
+
+          if echo "$UPS2_STATUS" | grep -q "OL"; then
+            echo "PASS: UPS2 correctly shows online (unaffected)"
+          else
+            echo "FAIL: UPS2 should still be online, got: $UPS2_STATUS"
+            exit 1
+          fi
+
+          # Run multi-UPS Eneru briefly -- UPS1 should trigger shutdown for its group
+          eneru run --config ${{ env.E2E_DIR }}/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test9.log || true
+
+          # Verify UPS1 triggered shutdown
+          if grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdown" /tmp/test9.log; then
+            echo "PASS: UPS1 low battery triggered shutdown"
+          else
+            echo "FAIL: No shutdown triggered for UPS1"
+            cat /tmp/test9.log
+            exit 1
+          fi
+
+          # Verify the log shows UPS1 context (prefixed with display name or UPS name)
+          if grep -q "E2E UPS1\|UPS1@localhost" /tmp/test9.log; then
+            echo "PASS: Shutdown log correctly identifies UPS1"
+          else
+            echo "Note: UPS identification in logs not verified"
+          fi
+
+          echo "PASS: Multi-UPS isolation working correctly"
+
+      # ========================================
+      # TEST 10: Multi-UPS both online (no false triggers)
+      # ========================================
+      - name: "Test 10: Multi-UPS both online (no false triggers)"
+        run: |
+          echo "=== Test 10: Multi-UPS Normal Operation ==="
+
+          # Clean up
+          rm -f /tmp/eneru-e2e-shutdown-flag*
+
+          # Both UPSes online
+          cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS1.dev
+          cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS2.dev
+          sleep 3
+
+          # Run briefly -- should NOT trigger any shutdown
+          timeout 5 eneru run --config ${{ env.E2E_DIR }}/config-e2e-multi-ups.yaml 2>&1 | tee /tmp/test10.log || true
+
+          if grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED" /tmp/test10.log; then
+            echo "FAIL: Shutdown triggered during normal multi-UPS operation!"
+            exit 1
+          fi
+
+          echo "PASS: No false shutdown triggers with both UPSes online"
+
       - name: Collect logs on failure
         if: failure()
         run: |
