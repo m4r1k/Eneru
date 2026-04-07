@@ -1,0 +1,21 @@
+# Default state for UPS2 (multi-UPS mode): Online, fully charged
+ups.status: OL CHRG
+ups.load: 30
+battery.charge: 100
+battery.runtime: 2400
+battery.voltage: 27.0
+battery.voltage.nominal: 24
+input.voltage: 231.0
+input.voltage.nominal: 230
+input.frequency: 50.0
+input.transfer.low: 170
+input.transfer.high: 280
+output.voltage: 231.0
+output.frequency: 50.0
+device.mfr: Eneru
+device.model: E2E UPS2
+device.serial: E2E-UPS2-001
+device.type: ups
+ups.mfr: Eneru
+ups.model: E2E UPS2
+ups.serial: E2E-UPS2-001
