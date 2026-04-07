@@ -214,11 +214,14 @@ def _cmd_version(args):
 
 def _cmd_monitor(args):
     """Launch the TUI dashboard."""
-    # TUI will be implemented in a later task
-    print(f"Eneru v{__version__} - Monitor Dashboard")
-    print("TUI dashboard is not yet implemented.")
-    print("Use 'eneru run --config <file>' to start the monitoring daemon.")
-    sys.exit(1)
+    config = _load_config(args)
+
+    from eneru.tui import run_tui, run_once
+
+    if args.once:
+        run_once(config)
+    else:
+        run_tui(config, interval=args.interval)
 
 
 def main():

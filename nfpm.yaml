@@ -141,6 +141,13 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/tui.py
+    dst: /opt/ups-monitor/eneru/tui.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   # Systemd service file (use /lib for packages, not /etc)
   - src: eneru.service
     dst: /lib/systemd/system/eneru.service
