@@ -1238,6 +1238,59 @@ class UPSMonitor:
     # STATUS CHECKS
     # ==========================================================================
 
+    def _check_battery_anomaly(self, ups_data: Dict[str, str]):
+        """Detect abnormal battery charge changes while on line power.
+
+        Catches firmware recalibrations, battery aging events, or hardware
+        issues that cause sudden charge drops (e.g., 100% -> 60% in seconds)
+        while the UPS is on line power and not discharging.
+        """
+        ups_status = ups_data.get('ups.status', '')
+        battery_charge_str = ups_data.get('battery.charge', '')
+
+        if not is_numeric(battery_charge_str):
+            return
+
+        current_charge = float(battery_charge_str)
+        current_time = time.time()
+
+        # Only track anomalies while on line power (OL/CHRG)
+        if "OB" in ups_status:
+            # On battery -- reset tracking, drops are expected
+            self.state.last_battery_charge = current_charge
+            self.state.last_battery_charge_time = current_time
+            return
+
+        prev_charge = self.state.last_battery_charge
+        prev_time = self.state.last_battery_charge_time
+
+        # Update tracking
+        self.state.last_battery_charge = current_charge
+        self.state.last_battery_charge_time = current_time
+
+        # Skip if not yet initialized
+        if prev_charge < 0:
+            return
+
+        # Check for significant drop while online
+        drop = prev_charge - current_charge
+        elapsed = current_time - prev_time if prev_time > 0 else 0
+
+        # Threshold: >20% drop within 120 seconds while on line power
+        if drop > 20 and elapsed < 120:
+            self._log_message(
+                f"⚠️ WARNING: Battery charge dropped from {prev_charge:.0f}% to "
+                f"{current_charge:.0f}% ({drop:.0f}% drop) while on line power. "
+                f"Possible firmware recalibration, battery aging, or hardware issue."
+            )
+            self._send_notification(
+                f"⚠️ **Battery Anomaly Detected**\n"
+                f"Charge dropped from {prev_charge:.0f}% to {current_charge:.0f}% "
+                f"({drop:.0f}% drop in {elapsed:.0f}s) while on line power.\n"
+                f"Possible causes: firmware recalibration, battery aging, or hardware issue.",
+                self.config.NOTIFY_WARNING
+            )
+
     def _check_voltage_issues(self, ups_status: str, input_voltage: str):
         """Check for voltage quality issues."""
         if "OL" not in ups_status:
@@ -1642,6 +1695,9 @@ class UPSMonitor:
 
             elif "OL" in ups_status or "CHRG" in ups_status:
                 self._handle_on_line(ups_data)
+
+            # Battery anomaly detection (runs on every cycle with valid data)
+            self._check_battery_anomaly(ups_data)
 
             # ==================================================================
             # ENVIRONMENT MONITORING

@@ -23,3 +23,6 @@ class MonitorState:
     voltage_warning_high: float = 0.0
     nominal_voltage: float = 230.0
     battery_history: deque = field(default_factory=lambda: deque(maxlen=1000))
+    # Battery anomaly detection (recalibration, sudden drops while online)
+    last_battery_charge: float = -1.0  # -1 = not yet initialized
+    last_battery_charge_time: float = 0.0
