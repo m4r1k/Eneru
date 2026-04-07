@@ -236,8 +236,11 @@ class UPSMonitor:
         if not self._notification_worker:
             return
 
+        # Prefix notification body with UPS name in multi-UPS mode
+        prefixed_body = f"{self._log_prefix}{body}" if self._log_prefix else body
+
         # Escape @ symbols to prevent Discord mentions (e.g., UPS@192.168.1.1)
-        escaped_body = body.replace("@", "@\u200B")  # Zero-width space after @
+        escaped_body = prefixed_body.replace("@", "@\u200B")  # Zero-width space after @
 
         # CRITICAL: During shutdown, NEVER block on notifications
         # Network is likely unreliable during power outages
@@ -1893,7 +1896,24 @@ class MultiUPSCoordinator:
                 run_command(cmd_parts)
 
     def _drain_all_groups(self, timeout: int = 120):
-        """Signal all monitors to stop and shut down their resources."""
+        """Shut down all groups' resources, then stop monitor threads.
+
+        This triggers each monitor's shutdown sequence (VMs, containers,
+        remote servers) before stopping the monitoring loops. Resources
+        are actively shut down, not just abandoned.
+        """
+        self._log("⏳ Draining all UPS groups -- shutting down their resources...")
+
+        # First, trigger shutdown on each monitor that hasn't already shut down
+        for monitor in self._monitors:
+            if not monitor._shutdown_flag_path.exists():
+                self._log(f"  ➡️ Triggering shutdown for {monitor._log_prefix.strip()}")
+                try:
+                    monitor._execute_shutdown_sequence()
+                except Exception as e:
+                    self._log(f"  ⚠️ Error during drain shutdown: {e}")
+
+        # Then stop the monitoring loops
         self._stop_event.set()
         deadline = time.time() + timeout
         for thread in self._threads:

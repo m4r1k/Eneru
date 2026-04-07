@@ -16,13 +16,15 @@ COPY ups.conf /etc/nut/ups.conf
 COPY upsd.conf /etc/nut/upsd.conf
 COPY upsd.users /etc/nut/upsd.users
 
-# Copy default UPS state (online, fully charged)
+# Copy default UPS state files (online, fully charged)
 COPY default.dev /etc/nut/TestUPS.dev
+COPY UPS1.dev /etc/nut/UPS1.dev
+COPY UPS2.dev /etc/nut/UPS2.dev
 
 # Set permissions
 RUN chown -R nut:nut /etc/nut /var/run/nut && \
     chmod 640 /etc/nut/*.conf /etc/nut/upsd.users && \
-    chmod 644 /etc/nut/TestUPS.dev
+    chmod 644 /etc/nut/*.dev
 
 # Copy entrypoint script
 COPY entrypoint.sh /entrypoint.sh
