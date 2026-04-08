@@ -1,5 +1,7 @@
-# UPS Monitor Configuration File
-# All sections are optional - features are disabled if not configured
+# Eneru Configuration Reference
+# Comprehensive example with every feature flag documented.
+# All sections are optional - features are disabled if not configured.
+# When adding new features to Eneru, update this file to include them.
 
 # ==============================================================================
 # UPS CONNECTION

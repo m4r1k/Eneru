@@ -329,7 +329,7 @@ When contributing new features or bug fixes:
 pytest -v
 
 # Validate your config changes
-eneru validate --config config.yaml
+eneru validate --config /etc/ups-monitor/config.yaml
 ```
 
 See the [GitHub repository](https://github.com/m4r1k/Eneru) for contribution guidelines.

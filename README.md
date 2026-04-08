@@ -20,7 +20,7 @@ A Python-based UPS monitoring daemon for [Network UPS Tools (NUT)](https://netwo
 [Documentation](https://eneru.readthedocs.io/) •
 [Getting Started](https://eneru.readthedocs.io/latest/getting-started/) •
 [Configuration](https://eneru.readthedocs.io/latest/configuration/) •
-[Changelog](CHANGELOG.md)
+[Changelog](https://eneru.readthedocs.io/latest/changelog/)
 
 </div>
 

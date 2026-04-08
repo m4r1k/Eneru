@@ -25,8 +25,8 @@ pytest -m integration               # Integration tests only
 pytest --cov=src/eneru              # With coverage
 
 # Development
-python -m eneru --validate-config --config config.yaml
-python -m eneru --dry-run --config config.yaml
+python -m eneru validate --config examples/config-reference.yaml
+python -m eneru run --dry-run --config examples/config-reference.yaml
 
 # Documentation
 mkdocs serve                        # Local docs preview
@@ -66,7 +66,7 @@ docs/                           # MkDocs documentation (ReadTheDocs)
   remote-servers.md             # SSH configuration
   testing.md                    # CI/CD strategy
   troubleshooting.md            # Debug guide
-  changelog.md                  # Lean changelog (RTD)
+  changelog.md                  # Changelog (comprehensive, single source of truth)
 
 .github/
   workflows/
@@ -78,11 +78,17 @@ docs/                           # MkDocs documentation (ReadTheDocs)
   ISSUE_TEMPLATE/               # Bug/feature templates
   PULL_REQUEST_TEMPLATE.md      # PR template
 
-config.yaml                     # Example configuration
-examples/                       # Additional example configs
-  config-minimal.yaml
-  config-homelab.yaml
-  config-enterprise.yaml
+examples/                       # Example configs
+  config-reference.yaml         # Comprehensive reference (every feature flag)
+  config-minimal.yaml           # Minimal single-UPS setup
+  config-homelab.yaml           # Homelab: VMs, containers, NAS
+  config-enterprise.yaml        # Multi-server enterprise setup
+  config-dual-ups.yaml          # Multi-UPS setup
+
+packaging/
+  eneru-wrapper.py              # Package entry point wrapper
+  eneru.service                 # Systemd service file
+  scripts/                      # Package lifecycle scripts
 
 pyproject.toml                  # PEP 517/518 packaging
 pytest.ini                      # pytest configuration
@@ -91,7 +97,6 @@ nfpm.yaml                       # .deb/.rpm package config
 .readthedocs.yaml               # RTD build config
 requirements.txt                # Runtime dependencies
 requirements-dev.txt            # Dev dependencies
-CHANGELOG.md                    # Full changelog with version comparisons
 CONTRIBUTING.md                 # Contribution guidelines
 README.md                       # Project overview
 ```
@@ -152,20 +157,46 @@ README.md                       # Project overview
 - Notifications via Apprise (100+ services supported)
 - Config validation before any changes to config handling
 - Always test with `--dry-run` before real shutdown logic changes
+- When adding new config feature flags, add them to `examples/config-reference.yaml`
 
-## Changelog Format
+## Git Workflow
 
-Two changelog files are maintained:
+`main` is protected. All changes go through feature branches and pull requests.
 
-1. **`docs/changelog.md`** - Lean version for ReadTheDocs
-   - Brief summaries per version
-   - Links to full changelog on GitHub
+**Branch protection on `main`:**
+- Required CI checks before merge: `validate` (Python 3.9-3.14) + `e2e-test` (7 checks total)
+- Strict mode: branch must be up-to-date with main before merge
+- Enforce admins: maintainers follow the same rules
+- No force pushes, no branch deletion
+- 0 required reviewers (CI-gated, not review-gated)
+- Feature branches auto-delete after merge
 
-2. **`CHANGELOG.md`** - Comprehensive version
-   - Detailed changes with migration notes
-   - Version comparison tables (e.g., "v4.9 vs v4.8") showing feature differences
+**Workflow:**
+```
+1. Create feature branch from main
+2. Develop, commit, push
+3. Open PR against main
+4. CI checks must pass (all 7)
+5. Merge via GitHub (branch auto-deletes)
+```
 
-When releasing a new version, update both files. The comparison table format:
+**Releasing a new version:**
+```
+1. Merge all feature work into main via PRs
+2. Update docs/changelog.md and version.py on main
+3. Tag the latest commit on main: git tag v5.0.0
+4. Push the tag: git push origin v5.0.0
+5. Create GitHub Release from the tag
+   (triggers release.yml for .deb/.rpm and pypi.yml for PyPI)
+```
+
+Tags are the immutable release snapshots. No release branches -- tags are sufficient for a single active version. GitHub Releases, .deb/.rpm packages, and PyPI artifacts are all built from tags via CI.
+
+## Changelog
+
+A single changelog is maintained at `docs/changelog.md`. This is the comprehensive version with detailed changes, migration notes, and version comparison tables. It is rendered on [ReadTheDocs](https://eneru.readthedocs.io/latest/changelog/).
+
+When releasing a new version, update `docs/changelog.md` with the comparison table format:
 ```markdown
 ### vX.Y vs vX.Z
 
@@ -208,7 +239,7 @@ When writing documentation, use the correct invocation style for the context:
 | Context | Command Style | Example |
 |---------|---------------|---------|
 | Package users (README, troubleshooting) | `/opt/ups-monitor/eneru.py` | `sudo python3 /opt/ups-monitor/eneru.py --validate-config` |
-| Developers (CONTRIBUTING, testing) | `python -m eneru` or `eneru` | `python -m eneru --dry-run --config config.yaml` |
+| Developers (CONTRIBUTING, testing) | `python -m eneru` or `eneru` | `python -m eneru run --dry-run --config examples/config-reference.yaml` |
 | PyPI users | `eneru` | `eneru --validate-config` |
 
 ## Key Dependencies

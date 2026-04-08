@@ -73,9 +73,7 @@ jobs:
         run: pip install ".[notifications]"
 
       - name: Verify installation
-        run: |
-          eneru version
-          eneru validate --config config.yaml
+        run: eneru version
 
       - name: Validate example configs
         run: |
@@ -247,9 +245,7 @@ jobs:
           python3 -m pip install ".[notifications]"
 
       - name: Verify installation
-        run: |
-          eneru version
-          eneru validate --config config.yaml
+        run: eneru version
 
       - name: Validate example configs
         run: |

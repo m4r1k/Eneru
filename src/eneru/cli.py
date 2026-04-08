@@ -238,8 +238,8 @@ def main():
             "  version              Show version information\n"
             "\nExamples:\n"
             "  eneru run --config /etc/ups-monitor/config.yaml\n"
-            "  eneru validate --config config.yaml\n"
-            "  eneru monitor --config config.yaml\n"
+            "  eneru validate --config /etc/ups-monitor/config.yaml\n"
+            "  eneru monitor --config /etc/ups-monitor/config.yaml\n"
         ),
     )
 

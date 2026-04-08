@@ -2,6 +2,8 @@
 
 Configuration is stored in `/etc/ups-monitor/config.yaml`. Features are disabled by removing their section or setting `enabled: false`.
 
+For a comprehensive reference config with every feature flag documented, see [`examples/config-reference.yaml`](https://github.com/m4r1k/Eneru/blob/main/examples/config-reference.yaml).
+
 ---
 
 ## Full configuration example
