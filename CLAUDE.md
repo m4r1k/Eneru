@@ -4,7 +4,7 @@ Intelligent UPS monitoring daemon for NUT (Network UPS Tools). Orchestrates grac
 
 ## Development Setup
 
-Use `uv` for fast virtual environment management. Always work in a virtualenv.
+**IMPORTANT: NEVER run Python, pytest, pip, or any dev commands directly on the system. ALL commands MUST be executed inside a `uv` virtualenv.** Create and activate the venv before doing anything else.
 
 ```bash
 # Create and activate virtualenv (disposable tmp folder)

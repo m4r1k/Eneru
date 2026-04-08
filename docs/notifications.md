@@ -255,6 +255,7 @@ Eneru sends notifications for these events:
 | Power Restored | UPS back on line power |
 | Shutdown Triggered | Emergency shutdown initiated |
 | Voltage Events | Brownout, over-voltage, AVR activation |
+| Battery Anomaly | Charge dropped >20% while on line power (recalibration, aging, hardware fault). Must persist across 3 polls to filter jitter from APC, CyberPower, and Ubiquiti UniFi UPS units |
 | Overload | UPS load threshold exceeded |
 
 ---

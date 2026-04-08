@@ -347,6 +347,21 @@ Eneru works with any UPS supported by NUT. However, some UPS models may:
 
 The multi-trigger system compensates for these issues.
 
+### Battery anomaly detection and firmware jitter
+
+Eneru watches for unexpected battery charge drops (>20% within 120 seconds) while the UPS is on line power. If the charge suddenly falls without the UPS ever going on battery, something is wrong: a firmware recalibration, battery aging, or a hardware problem.
+
+However, some UPS models (APC, CyberPower, and Ubiquiti UniFi UPS are known offenders) briefly report a bogus charge value right after switching from battery (OB) back to line power (OL). A UPS sitting at 100% charge might report 50% for a second or two after power is restored, then go right back to the correct value.
+
+To avoid false alarms, Eneru requires the anomalous reading to persist across 3 consecutive polls before firing a warning. If the charge bounces back before that, the reading is discarded as jitter.
+
+In practice:
+
+- If the charge stays low across multiple polls, it is a real anomaly and Eneru fires the warning
+- If the charge recovers within 1-2 polls, Eneru treats it as transient jitter and ignores it
+
+If you see repeated false `Battery Anomaly Detected` warnings, check your UPS firmware version. Some firmware updates improve charge reporting accuracy during power transitions.
+
 ---
 
 ## Getting help

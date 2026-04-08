@@ -138,12 +138,12 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 - Monitor one or more UPSes from a single instance, each with its own shutdown group
 - Real-time TUI dashboard (`eneru monitor`) with color-coded status
 - Shutdown triggers: battery %, runtime, depletion rate, time on battery, FSD flag
-- Battery anomaly alerts when charge drops unexpectedly (firmware recalibration, aging)
+- Battery anomaly alerts for unexpected charge drops while on line power, with jitter filtering for APC, CyberPower, and Ubiquiti UniFi UPS units
 - Shuts down VMs, containers, remote servers, filesystems, and the local system in order
 - Notifications to 100+ services (Discord, Slack, Telegram, ntfy, email) via [Apprise](https://github.com/caronc/apprise/wiki)
 - Power quality monitoring: voltage, AVR, bypass, overload
 - Dry-run mode for safe testing
-- 292 tests, 9 Linux distros, E2E tests with real NUT/SSH/Docker on every commit
+- 296 tests, 9 Linux distros, E2E tests with real NUT/SSH/Docker on every commit
 
 ---
 

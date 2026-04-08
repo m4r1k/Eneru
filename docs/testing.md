@@ -109,11 +109,11 @@ Tests `pip install .` to ensure `pyproject.toml` is valid:
 
 ## Test coverage
 
-292 tests across 14 files:
+296 tests across 14 files:
 
 - Configuration parsing (62 tests) -- YAML options, defaults, multi-UPS detection, trigger inheritance, ownership validation
 - Remote commands (29 tests) -- SSH execution, pre-shutdown actions, parallel and sequential modes
-- Multi-UPS coordination (27 tests) -- coordinator routing, is_local/drain/trigger_on, defense-in-depth lock, battery anomaly, notification prefixing, runtime is_local enforcement, exit_after_shutdown in coordinator
+- Multi-UPS coordination (31 tests) -- coordinator routing, is_local/drain/trigger_on, defense-in-depth lock, battery anomaly with jitter filtering, notification prefixing, runtime is_local enforcement, exit_after_shutdown in coordinator
 - Core monitor logic (26 tests) -- OL/OB/FSD state machine, all four shutdown triggers, failsafe, shutdown sequence ordering
 - Connection grace period (26 tests) -- OK/GRACE_PERIOD/FAILED transitions, flap detection, stale data
 - TUI dashboard (23 tests) -- state file parsing, log filtering, human-readable status, --once output
