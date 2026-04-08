@@ -157,7 +157,7 @@ contents:
       group: root
 
   # Default configuration file (marked as config file - won't be overwritten)
-  - src: config.yaml
+  - src: examples/config-reference.yaml
     dst: /etc/ups-monitor/config.yaml
     type: config|noreplace
     file_info:

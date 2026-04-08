@@ -68,9 +68,9 @@ source /tmp/eneru-venv/bin/activate
 uv pip install -e ".[dev,notifications,docs]"
 
 # Run in dry-run mode for testing
-python -m eneru --dry-run --config config.yaml
+python -m eneru run --dry-run --config examples/config-reference.yaml
 # Or use the entry point:
-eneru --dry-run --config config.yaml
+eneru run --dry-run --config examples/config-reference.yaml
 ```
 
 ### Project structure (v4.10+)

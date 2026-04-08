@@ -44,9 +44,6 @@ jobs:
       env:
         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-    - name: Validate default config
-      run: python -m eneru validate --config config.yaml
-
     - name: Validate example configs
       run: |
         for config in examples/*.yaml; do

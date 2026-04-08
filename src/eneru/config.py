@@ -261,8 +261,6 @@ class ConfigLoader:
     DEFAULT_CONFIG_PATHS = [
         Path("/etc/ups-monitor/config.yaml"),
         Path("/etc/ups-monitor/config.yml"),
-        Path("./config.yaml"),
-        Path("./config.yml"),
     ]
 
     @classmethod
