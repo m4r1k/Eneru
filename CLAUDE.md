@@ -169,6 +169,7 @@ README.md                       # Project overview
 - Enforce admins: maintainers follow the same rules
 - No force pushes, no branch deletion
 - 0 required reviewers (CI-gated, not review-gated)
+- Feature branches auto-delete after merge
 
 **Workflow:**
 ```
@@ -176,7 +177,7 @@ README.md                       # Project overview
 2. Develop, commit, push
 3. Open PR against main
 4. CI checks must pass (all 7)
-5. Merge via GitHub
+5. Merge via GitHub (branch auto-deletes)
 ```
 
 ## Changelog
