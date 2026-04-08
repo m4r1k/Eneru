@@ -26,3 +26,10 @@ class MonitorState:
     # Battery anomaly detection (recalibration, sudden drops while online)
     last_battery_charge: float = -1.0  # -1 = not yet initialized
     last_battery_charge_time: float = 0.0
+    # Sustained-reading confirmation: anomaly must persist across 3 consecutive
+    # polls to filter out transient firmware jitter after OB→OL transitions
+    # (known behavior on APC, CyberPower, and Ubiquiti UniFi UPS units).
+    pending_anomaly_charge: float = -1.0  # -1 = no pending anomaly
+    pending_anomaly_prev_charge: float = 0.0
+    pending_anomaly_time: float = 0.0
+    pending_anomaly_count: int = 0  # consecutive polls confirming the anomaly

@@ -1254,6 +1254,13 @@ class UPSMonitor:
         Catches firmware recalibrations, battery aging events, or hardware
         issues that cause sudden charge drops (e.g., 100% -> 60% in seconds)
         while the UPS is on line power and not discharging.
+
+        Uses sustained-reading confirmation: an anomalous drop must persist
+        across 3 consecutive polls before firing.  This filters out transient
+        firmware jitter that some UPS units (notably APC, CyberPower, and
+        Ubiquiti UniFi UPS) exhibit after an OB -> OL transition, where the first
+        few readings may report a wildly incorrect charge that self-corrects
+        within a couple of seconds.
         """
         ups_status = ups_data.get('ups.status', '')
         battery_charge_str = ups_data.get('battery.charge', '')
@@ -1269,6 +1276,8 @@ class UPSMonitor:
             # On battery -- reset tracking, drops are expected
             self.state.last_battery_charge = current_charge
             self.state.last_battery_charge_time = current_time
+            self.state.pending_anomaly_charge = -1.0
+            self.state.pending_anomaly_count = 0
             return
 
         prev_charge = self.state.last_battery_charge
@@ -1288,15 +1297,44 @@ class UPSMonitor:
 
         # Threshold: >20% drop within 120 seconds while on line power
         if drop > 20 and elapsed < 120:
+            # First detection -- record as pending, wait for confirmation
+            self.state.pending_anomaly_charge = current_charge
+            self.state.pending_anomaly_prev_charge = prev_charge
+            self.state.pending_anomaly_time = current_time
+            self.state.pending_anomaly_count = 1
+            return
+
+        # Check if a pending anomaly is being confirmed across polls
+        if self.state.pending_anomaly_charge >= 0:
+            # Charge recovered -- transient jitter, discard the anomaly
+            if current_charge > self.state.pending_anomaly_charge + 10:
+                self.state.pending_anomaly_charge = -1.0
+                self.state.pending_anomaly_count = 0
+                return
+
+            # Still low -- increment confirmation counter
+            self.state.pending_anomaly_count += 1
+
+            # Need 3 consecutive polls to confirm (filters firmware jitter)
+            if self.state.pending_anomaly_count < 3:
+                return
+
+            # Confirmed anomaly (sustained across 3 polls)
+            anomaly_prev = self.state.pending_anomaly_prev_charge
+            anomaly_drop = anomaly_prev - current_charge
+            anomaly_elapsed = current_time - self.state.pending_anomaly_time
+            self.state.pending_anomaly_charge = -1.0
+            self.state.pending_anomaly_count = 0
+
             self._log_message(
-                f"⚠️ WARNING: Battery charge dropped from {prev_charge:.0f}% to "
-                f"{current_charge:.0f}% ({drop:.0f}% drop) while on line power. "
+                f"⚠️ WARNING: Battery charge dropped from {anomaly_prev:.0f}% to "
+                f"{current_charge:.0f}% ({anomaly_drop:.0f}% drop) while on line power. "
                 f"Possible firmware recalibration, battery aging, or hardware issue."
             )
             self._send_notification(
                 f"⚠️ **Battery Anomaly Detected**\n"
-                f"Charge dropped from {prev_charge:.0f}% to {current_charge:.0f}% "
-                f"({drop:.0f}% drop in {elapsed:.0f}s) while on line power.\n"
+                f"Charge dropped from {anomaly_prev:.0f}% to {current_charge:.0f}% "
+                f"({anomaly_drop:.0f}% drop in {anomaly_elapsed:.0f}s) while on line power.\n"
                 f"Possible causes: firmware recalibration, battery aging, or hardware issue.",
                 self.config.NOTIFY_WARNING
             )

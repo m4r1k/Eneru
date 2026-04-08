@@ -383,11 +383,16 @@ class TestUPSMonitorCoordinatorMode:
 # ==============================================================================
 
 class TestBatteryAnomalyDetection:
-    """Battery recalibration / anomaly notification."""
+    """Battery recalibration / anomaly notification.
 
-    @pytest.mark.unit
-    def test_large_drop_while_online_triggers_warning(self, tmp_path):
-        """A >20% battery drop while on OL within 120s triggers notification."""
+    Uses sustained-reading confirmation: an anomalous drop must persist
+    across 3 consecutive polls before firing.  This filters out transient
+    firmware jitter that APC and CyberPower units exhibit after OB→OL
+    transitions.
+    """
+
+    def _make_monitor(self, tmp_path):
+        """Helper: create a UPSMonitor wired for anomaly-detection tests."""
         import time as _time
 
         config = Config(
@@ -409,49 +414,81 @@ class TestBatteryAnomalyDetection:
         monitor.logger = MagicMock()
         monitor._notification_worker = MagicMock()
 
-        # First reading: 100%
+        # Baseline: 100% charge recorded 10s ago
         monitor.state.last_battery_charge = 100.0
-        monitor.state.last_battery_charge_time = _time.time() - 10  # 10s ago
+        monitor.state.last_battery_charge_time = _time.time() - 10
+        return monitor
 
-        # Second reading: 60% (40% drop in 10s while OL)
+    @pytest.mark.unit
+    def test_large_drop_while_online_triggers_warning(self, tmp_path):
+        """A >20% sustained battery drop while on OL triggers notification after 3 polls."""
+        monitor = self._make_monitor(tmp_path)
         ups_data = {"ups.status": "OL CHRG", "battery.charge": "60"}
+
+        # Poll 1: 60% (40% drop in 10s while OL) -- pending, no alert yet
+        monitor._check_battery_anomaly(ups_data)
+        monitor._notification_worker.send.assert_not_called()
+
+        # Poll 2: still 60% -- not yet confirmed (need 3 polls)
+        monitor._check_battery_anomaly(ups_data)
+        monitor._notification_worker.send.assert_not_called()
+
+        # Poll 3: still 60% -- confirmed anomaly, alert fires
         monitor._check_battery_anomaly(ups_data)
 
         # Should have logged a warning
         monitor.logger.log.assert_called()
         log_msg = monitor.logger.log.call_args[0][0]
-        assert "Battery Anomaly" in log_msg or "dropped" in log_msg
+        assert "dropped" in log_msg
 
         # Should have sent notification
         monitor._notification_worker.send.assert_called_once()
         call_kwargs = monitor._notification_worker.send.call_args
-        # send() is called with keyword args: body=..., notify_type=...
         notif_body = call_kwargs.kwargs.get("body", call_kwargs.args[0] if call_kwargs.args else "")
         assert "100%" in notif_body
         assert "60%" in notif_body
 
     @pytest.mark.unit
+    def test_transient_jitter_recovers_poll2_no_warning(self, tmp_path):
+        """A drop that recovers on poll 2 is transient jitter, not an anomaly.
+
+        Reproduces the real-world scenario observed on 2026-04-07 where a
+        CyberPower UPS reported 50% immediately after an OB→OL transition,
+        then self-corrected.
+        """
+        monitor = self._make_monitor(tmp_path)
+
+        # Poll 1: 50% drop detected while OL -- pending
+        ups_data_drop = {"ups.status": "OL CHRG", "battery.charge": "50"}
+        monitor._check_battery_anomaly(ups_data_drop)
+        monitor._notification_worker.send.assert_not_called()
+
+        # Poll 2: charge bounces back to 99% -- jitter, discard anomaly
+        ups_data_recovery = {"ups.status": "OL CHRG", "battery.charge": "99"}
+        monitor._check_battery_anomaly(ups_data_recovery)
+        monitor._notification_worker.send.assert_not_called()
+
+    @pytest.mark.unit
+    def test_transient_jitter_recovers_poll3_no_warning(self, tmp_path):
+        """A drop that persists for 2 polls but recovers on poll 3 is still jitter."""
+        monitor = self._make_monitor(tmp_path)
+
+        ups_data_drop = {"ups.status": "OL CHRG", "battery.charge": "50"}
+        ups_data_recovery = {"ups.status": "OL CHRG", "battery.charge": "99"}
+
+        # Poll 1: drop detected -- pending (count=1)
+        monitor._check_battery_anomaly(ups_data_drop)
+        # Poll 2: still low -- count=2, not yet confirmed
+        monitor._check_battery_anomaly(ups_data_drop)
+        # Poll 3: recovers before reaching threshold of 3
+        monitor._check_battery_anomaly(ups_data_recovery)
+
+        monitor._notification_worker.send.assert_not_called()
+
+    @pytest.mark.unit
     def test_small_drop_no_warning(self, tmp_path):
         """A small battery drop (<20%) does not trigger notification."""
-        import time as _time
-
-        config = Config(
-            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@test"), is_local=True)],
-            behavior=BehaviorConfig(dry_run=True),
-            logging=LoggingConfig(
-                shutdown_flag_file=str(tmp_path / "flag"),
-                state_file=str(tmp_path / "state"),
-                battery_history_file=str(tmp_path / "history"),
-            ),
-        )
-
-        monitor = UPSMonitor(config)
-        monitor.state = MonitorState()
-        monitor.logger = MagicMock()
-        monitor._notification_worker = MagicMock()
-
-        monitor.state.last_battery_charge = 100.0
-        monitor.state.last_battery_charge_time = _time.time() - 10
+        monitor = self._make_monitor(tmp_path)
 
         ups_data = {"ups.status": "OL CHRG", "battery.charge": "95"}
         monitor._check_battery_anomaly(ups_data)
@@ -461,30 +498,54 @@ class TestBatteryAnomalyDetection:
     @pytest.mark.unit
     def test_drop_while_on_battery_no_warning(self, tmp_path):
         """Battery drops while OB are expected and do not trigger anomaly."""
-        import time as _time
-
-        config = Config(
-            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@test"), is_local=True)],
-            behavior=BehaviorConfig(dry_run=True),
-            logging=LoggingConfig(
-                shutdown_flag_file=str(tmp_path / "flag"),
-                state_file=str(tmp_path / "state"),
-                battery_history_file=str(tmp_path / "history"),
-            ),
-        )
-
-        monitor = UPSMonitor(config)
-        monitor.state = MonitorState()
-        monitor.logger = MagicMock()
-        monitor._notification_worker = MagicMock()
-
-        monitor.state.last_battery_charge = 100.0
-        monitor.state.last_battery_charge_time = _time.time() - 10
+        monitor = self._make_monitor(tmp_path)
 
         ups_data = {"ups.status": "OB DISCHRG", "battery.charge": "50"}
         monitor._check_battery_anomaly(ups_data)
 
         monitor._notification_worker.send.assert_not_called()
+
+    @pytest.mark.unit
+    def test_ob_transition_clears_pending_anomaly(self, tmp_path):
+        """Going on battery resets any pending anomaly detection state."""
+        monitor = self._make_monitor(tmp_path)
+
+        # Poll 1: anomalous drop detected -- pending
+        ups_data_drop = {"ups.status": "OL CHRG", "battery.charge": "50"}
+        monitor._check_battery_anomaly(ups_data_drop)
+        assert monitor.state.pending_anomaly_charge >= 0
+        assert monitor.state.pending_anomaly_count == 1
+
+        # UPS goes on battery -- pending anomaly and counter must be cleared
+        ups_data_ob = {"ups.status": "OB DISCHRG", "battery.charge": "48"}
+        monitor._check_battery_anomaly(ups_data_ob)
+        assert monitor.state.pending_anomaly_charge < 0
+        assert monitor.state.pending_anomaly_count == 0
+
+        monitor._notification_worker.send.assert_not_called()
+
+    @pytest.mark.unit
+    def test_firmware_recalibration_while_online_fires(self, tmp_path):
+        """Pure OL recalibration (no OB transition) fires after 3-poll confirmation.
+
+        Reproduces the real-world scenario observed on 2026-04-03 where a
+        firmware upgrade caused the charge to drop from 100% to 60% while
+        the UPS never left line power (OL CHRG → OL → OL CHRG).
+        """
+        monitor = self._make_monitor(tmp_path)
+        ups_data_drop = {"ups.status": "OL CHRG", "battery.charge": "60"}
+
+        # Poll 1: charge drops to 60% while staying on OL -- pending
+        monitor._check_battery_anomaly(ups_data_drop)
+        monitor._notification_worker.send.assert_not_called()
+
+        # Poll 2: still 60% -- not yet confirmed
+        monitor._check_battery_anomaly(ups_data_drop)
+        monitor._notification_worker.send.assert_not_called()
+
+        # Poll 3: still 60% -- sustained, confirmed anomaly
+        monitor._check_battery_anomaly(ups_data_drop)
+        monitor._notification_worker.send.assert_called_once()
 
 
 # ==============================================================================
