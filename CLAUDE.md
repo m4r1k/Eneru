@@ -180,6 +180,18 @@ README.md                       # Project overview
 5. Merge via GitHub (branch auto-deletes)
 ```
 
+**Releasing a new version:**
+```
+1. Merge all feature work into main via PRs
+2. Update docs/changelog.md and version.py on main
+3. Tag the latest commit on main: git tag v5.0.0
+4. Push the tag: git push origin v5.0.0
+5. Create GitHub Release from the tag
+   (triggers release.yml for .deb/.rpm and pypi.yml for PyPI)
+```
+
+Tags are the immutable release snapshots. No release branches -- tags are sufficient for a single active version. GitHub Releases, .deb/.rpm packages, and PyPI artifacts are all built from tags via CI.
+
 ## Changelog
 
 A single changelog is maintained at `docs/changelog.md`. This is the comprehensive version with detailed changes, migration notes, and version comparison tables. It is rendered on [ReadTheDocs](https://eneru.readthedocs.io/latest/changelog/).
