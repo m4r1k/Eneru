@@ -1,0 +1,62 @@
+# Eneru E2E Test Configuration - Multi-UPS Mode with Drain (Dry Run)
+# Tests drain_on_local_shutdown: when the local UPS fails, all groups drain
+
+ups:
+  - name: "UPS1@localhost:3493"
+    display_name: "E2E UPS1"
+    check_interval: 1
+    is_local: true
+    triggers:
+      low_battery_threshold: 20
+      critical_runtime_threshold: 600
+    containers:
+      enabled: true
+      runtime: docker
+      stop_timeout: 10
+      compose_files: []
+      shutdown_all_remaining_containers: true
+    remote_servers:
+      - name: "E2E SSH Target (UPS1)"
+        enabled: true
+        host: "localhost"
+        user: "testuser"
+        connect_timeout: 5
+        command_timeout: 10
+        shutdown_command: "sudo shutdown -h now"
+        ssh_options:
+          - "-o Port=2222"
+          - "-o StrictHostKeyChecking=no"
+          - "-o UserKnownHostsFile=/dev/null"
+          - "-o IdentityFile=/tmp/e2e-ssh-key"
+
+  - name: "UPS2@localhost:3493"
+    display_name: "E2E UPS2"
+    check_interval: 1
+    triggers:
+      low_battery_threshold: 15
+
+triggers:
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+  depletion:
+    window: 300
+    critical_rate: 15.0
+    grace_period: 30
+  extended_time:
+    enabled: false
+
+behavior:
+  dry_run: true
+
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-state"
+  battery_history_file: "/tmp/eneru-e2e-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-shutdown-flag"
+
+notifications:
+  enabled: false
+
+local_shutdown:
+  enabled: false
+  drain_on_local_shutdown: true

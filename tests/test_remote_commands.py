@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import patch, MagicMock, call
 
 from eneru import (
-    UPSMonitor,
+    UPSGroupMonitor,
     Config,
     RemoteServerConfig,
     RemoteCommandConfig,
@@ -128,7 +128,7 @@ class TestRemotePreShutdownExecution:
         minimal_config.logging.file = None
         minimal_config.behavior.dry_run = False
 
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         monitor._notification_worker = MagicMock()
@@ -435,7 +435,7 @@ class TestRunRemoteCommand:
         minimal_config.logging.shutdown_flag_file = str(tmp_path / "flag")
         minimal_config.logging.file = None
 
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
 

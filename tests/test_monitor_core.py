@@ -18,11 +18,11 @@ from eneru import (
     VMConfig, ContainersConfig, FilesystemsConfig, UnmountConfig,
     RemoteServerConfig, LocalShutdownConfig, MonitorState,
 )
-from eneru.monitor import UPSMonitor
+from eneru.monitor import UPSGroupMonitor
 
 
 def make_monitor(tmp_path, **overrides):
-    """Helper to create a UPSMonitor with test defaults."""
+    """Helper to create a UPSGroupMonitor with test defaults."""
     triggers = overrides.pop("triggers", TriggersConfig(
         low_battery_threshold=20,
         critical_runtime_threshold=600,
@@ -50,7 +50,7 @@ def make_monitor(tmp_path, **overrides):
         local_shutdown=LocalShutdownConfig(enabled=False),
         **overrides,
     )
-    monitor = UPSMonitor(config)
+    monitor = UPSGroupMonitor(config)
     monitor.state = MonitorState()
     monitor.logger = MagicMock()
     monitor._notification_worker = MagicMock()
@@ -555,7 +555,7 @@ class TestConnectionGracePeriod:
                 battery_history_file=str(tmp_path / "history"),
             ),
         )
-        monitor = UPSMonitor(config)
+        monitor = UPSGroupMonitor(config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         monitor._notification_worker = MagicMock()

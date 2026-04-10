@@ -2,6 +2,9 @@
 
 Eneru uses multiple independent triggers to decide when to shut down. This way, if one metric is unreliable (e.g., aged batteries with bad runtime estimates), other triggers can still catch the problem.
 
+!!! info "Beyond NUT's built-in triggers"
+    NUT's `upsmon` supports two shutdown conditions: `LOWBATT` (UPS hardware signals low battery) and `FSD` (forced shutdown flag). These depend on the UPS firmware's own assessment, which can be unreliable with aged batteries or certain hardware. Eneru adds four more triggers computed from observed data to cover scenarios that firmware-based triggers miss.
+
 ---
 
 ## Trigger priority

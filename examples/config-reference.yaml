@@ -259,3 +259,10 @@ local_shutdown:
   command: "shutdown -h now"
   # Additional message for shutdown command
   message: "UPS battery critical - emergency shutdown"
+  # Multi-UPS: drain all other groups before local shutdown (default: false)
+  # When true, all groups' resources are shut down before the Eneru host shuts down
+  drain_on_local_shutdown: false
+  # Multi-UPS: when to trigger local shutdown if no UPS is marked is_local
+  # "any" = any group's shutdown triggers local shutdown (default)
+  # "none" = Eneru host never shuts itself down (recommended for multi-UPS)
+  trigger_on: "any"

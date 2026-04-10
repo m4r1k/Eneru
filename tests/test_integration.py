@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from eneru import (
-    UPSMonitor,
+    UPSGroupMonitor,
     ConfigLoader,
     Config,
     MonitorState,
@@ -61,7 +61,7 @@ local_shutdown:
         assert config.behavior.dry_run is True
 
         # Create monitor with the config
-        monitor = UPSMonitor(config)
+        monitor = UPSGroupMonitor(config)
         assert monitor.config.ups.name == "TestUPS@localhost"
 
     @pytest.mark.integration
@@ -85,7 +85,7 @@ input.transfer.high: 270
 """, "")
 
             with patch("eneru.monitor.command_exists", return_value=True):
-                monitor = UPSMonitor(minimal_config)
+                monitor = UPSGroupMonitor(minimal_config)
 
                 # Initialize without running the main loop
                 with patch.object(monitor, "_main_loop"):
@@ -119,7 +119,7 @@ class TestShutdownSequence:
         ]
         minimal_config.local_shutdown.enabled = True
 
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         monitor._notification_worker = MagicMock()

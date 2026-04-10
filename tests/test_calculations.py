@@ -7,7 +7,7 @@ from collections import deque
 from eneru import (
     is_numeric,
     format_seconds,
-    UPSMonitor,
+    UPSGroupMonitor,
     Config,
     MonitorState,
 )
@@ -114,7 +114,7 @@ class TestDepletionRateCalculation:
     def monitor_with_history(self, minimal_config, tmp_path):
         """Create a monitor with battery history."""
         minimal_config.logging.battery_history_file = str(tmp_path / "battery-history")
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         return monitor
 

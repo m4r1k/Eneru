@@ -88,7 +88,7 @@ src/eneru/
   notifications.py    # NotificationWorker (Apprise integration)
   utils.py            # Helper functions (run_command, etc.)
   actions.py          # REMOTE_ACTIONS templates
-  monitor.py          # UPSMonitor class (core daemon)
+  monitor.py          # UPSGroupMonitor class (core daemon)
   cli.py              # CLI argument parsing + main()
 ```
 
@@ -97,7 +97,7 @@ src/eneru/
 Before submitting a PR, ensure:
 
 - [ ] All tests pass (`pytest`)
-- [ ] `--validate-config` passes (`python -m eneru --validate-config`)
+- [ ] `validate` passes (`python -m eneru validate`)
 - [ ] `--dry-run` mode works correctly
 - [ ] No Python syntax errors (`python -m py_compile src/eneru/*.py`)
 - [ ] Existing features still work

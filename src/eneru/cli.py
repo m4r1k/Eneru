@@ -6,7 +6,7 @@ from datetime import datetime
 
 from eneru.version import __version__
 from eneru.config import ConfigLoader
-from eneru.monitor import UPSMonitor, MultiUPSCoordinator
+from eneru.monitor import UPSGroupMonitor, MultiUPSCoordinator
 from eneru.notifications import APPRISE_AVAILABLE
 
 # Optional import for Apprise (needed for test notifications)
@@ -32,7 +32,7 @@ def _cmd_run(args):
         coordinator = MultiUPSCoordinator(config, exit_after_shutdown=args.exit_after_shutdown)
         coordinator.run()
     else:
-        monitor = UPSMonitor(config, exit_after_shutdown=args.exit_after_shutdown)
+        monitor = UPSGroupMonitor(config, exit_after_shutdown=args.exit_after_shutdown)
         monitor.run()
 
 
@@ -122,8 +122,16 @@ def _cmd_validate(args):
     else:
         print(f"    Disabled")
 
-    # Run validation checks
-    messages = ConfigLoader.validate_config(config)
+    # Run validation checks (pass raw YAML data for top-level resource warnings)
+    raw_data = None
+    if config.multi_ups and args.config:
+        try:
+            import yaml
+            with open(args.config, 'r') as f:
+                raw_data = yaml.safe_load(f) or {}
+        except Exception:
+            pass
+    messages = ConfigLoader.validate_config(config, raw_data=raw_data)
     if messages:
         print()
         for msg in messages:

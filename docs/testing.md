@@ -22,7 +22,7 @@ Every commit runs unit tests, integration tests across 9 Linux distributions, en
               ╱    7 Linux Distros    ╲
              ╱─────────────────────────╲
             ╱         Unit Tests        ╲
-           ╱   pytest + Coverage (292)   ╲
+           ╱   pytest + Coverage (300)   ╲
           ╱      7 Python Versions        ╲
          ╱─────────────────────────────────╲
         ╱          Static Analysis          ╲
@@ -37,7 +37,7 @@ Every commit runs unit tests, integration tests across 9 Linux distributions, en
 |-------|-----------|---------------|
 | **AI-Assisted Dev** | Continuous | Code review, implementation guidance |
 | **Static Analysis** | Every commit | Python syntax, config validation |
-| **Unit Tests** | Every commit | Logic, state machine, edge cases (292 tests) |
+| **Unit Tests** | Every commit | Logic, state machine, edge cases (300 tests) |
 | **Integration** | Every commit | Package install on 7 Linux distros |
 | **E2E Tests** | Every commit | Full workflow with real NUT, SSH, Docker |
 | **Real UPS** | Pre-release | Actual hardware, power events |
@@ -109,18 +109,18 @@ Tests `pip install .` to ensure `pyproject.toml` is valid:
 
 ## Test coverage
 
-296 tests across 14 files:
+300 tests across 13 files:
 
-- Configuration parsing (62 tests) -- YAML options, defaults, multi-UPS detection, trigger inheritance, ownership validation
+- Configuration parsing (64 tests) -- YAML options, defaults, multi-UPS detection, trigger inheritance, ownership validation, trigger_on enum validation
+- Multi-UPS coordination (33 tests) -- coordinator routing, is_local/drain/trigger_on, defense-in-depth lock, battery anomaly with jitter filtering, notification prefixing, runtime is_local enforcement, exit_after_shutdown in coordinator, ownership rejection (VMs/containers/filesystems)
 - Remote commands (29 tests) -- SSH execution, pre-shutdown actions, parallel and sequential modes
-- Multi-UPS coordination (31 tests) -- coordinator routing, is_local/drain/trigger_on, defense-in-depth lock, battery anomaly with jitter filtering, notification prefixing, runtime is_local enforcement, exit_after_shutdown in coordinator
 - Core monitor logic (26 tests) -- OL/OB/FSD state machine, all four shutdown triggers, failsafe, shutdown sequence ordering
 - Connection grace period (26 tests) -- OK/GRACE_PERIOD/FAILED transitions, flap detection, stale data
 - TUI dashboard (23 tests) -- state file parsing, log filtering, human-readable status, --once output
 - CLI (20 tests) -- subcommands, bare invocation, multi-UPS validate
 - Calculations (17 tests) -- depletion rate, battery history
 - Notifications (16 tests) -- formatting, retry, Apprise
-- State, triggers, command execution (39 tests combined)
+- State, triggers, integration, command execution (46 tests combined)
 
 To run tests locally:
 
@@ -187,7 +187,7 @@ The E2E tests use scenario files to simulate different UPS states:
 
 ### E2E test cases
 
-The E2E workflow (`.github/workflows/e2e.yml`) runs 13 tests on every push and PR:
+The E2E workflow (`.github/workflows/e2e.yml`) runs 18 tests on every push and PR:
 
 | Test | Description |
 |------|-------------|
@@ -204,6 +204,11 @@ The E2E workflow (`.github/workflows/e2e.yml`) runs 13 tests on every push and P
 | **Test 11** | Ownership validation: non-local group with containers rejected |
 | **Test 12** | CLI safety: bare `eneru` shows help, does not start daemon |
 | **Test 13** | TUI `--once` snapshot outputs UPS status |
+| **Test 14** | Multi-UPS concurrent failure: both UPSes fail, both groups shut down |
+| **Test 15** | Non-local failure: UPS2 fails, UPS1 and local resources unaffected |
+| **Test 16** | Local drain (`drain_on_local_shutdown=true`): all groups drain before local shutdown |
+| **Test 17** | Local no-drain (`drain_on_local_shutdown=false`): only local group shuts down |
+| **Test 18** | Power recovery: OB then power restored, no shutdown triggered |
 
 ### Running E2E tests locally
 

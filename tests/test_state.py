@@ -5,7 +5,7 @@ import time
 from unittest.mock import patch, MagicMock
 
 from eneru import (
-    UPSMonitor,
+    UPSGroupMonitor,
     MonitorState,
 )
 
@@ -19,7 +19,7 @@ class TestStateTransitions:
         minimal_config.logging.battery_history_file = str(tmp_path / "battery-history")
         minimal_config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
         minimal_config.logging.state_file = str(tmp_path / "state")
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         monitor._notification_worker = MagicMock()
@@ -118,7 +118,7 @@ class TestVoltageStateTracking:
     def monitor(self, minimal_config, tmp_path):
         """Create a monitor for testing."""
         minimal_config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.state.voltage_warning_low = 200.0
         monitor.state.voltage_warning_high = 250.0
@@ -181,7 +181,7 @@ class TestAVRStateTracking:
     def monitor(self, minimal_config, tmp_path):
         """Create a monitor for testing."""
         minimal_config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         monitor._notification_worker = MagicMock()
@@ -231,7 +231,7 @@ class TestBypassStateTracking:
     def monitor(self, minimal_config, tmp_path):
         """Create a monitor for testing."""
         minimal_config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         monitor._notification_worker = MagicMock()
@@ -269,7 +269,7 @@ class TestOverloadStateTracking:
     def monitor(self, minimal_config, tmp_path):
         """Create a monitor for testing."""
         minimal_config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         monitor._notification_worker = MagicMock()

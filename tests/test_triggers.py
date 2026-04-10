@@ -5,7 +5,7 @@ import time
 from unittest.mock import patch, MagicMock
 
 from eneru import (
-    UPSMonitor,
+    UPSGroupMonitor,
     Config,
     MonitorState,
 )
@@ -20,7 +20,7 @@ class TestTriggerEvaluation:
         minimal_config.logging.battery_history_file = str(tmp_path / "battery-history")
         minimal_config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
         minimal_config.logging.state_file = str(tmp_path / "state")
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         return monitor
@@ -187,7 +187,7 @@ class TestFSDTrigger:
     def monitor(self, minimal_config, tmp_path):
         """Create a monitor for testing."""
         minimal_config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         return monitor
@@ -215,7 +215,7 @@ class TestTriggerPriority:
         minimal_config.logging.battery_history_file = str(tmp_path / "battery-history")
         minimal_config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
         minimal_config.logging.state_file = str(tmp_path / "state")
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         return monitor

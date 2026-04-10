@@ -45,7 +45,7 @@ src/eneru/                      # Main package
   notifications.py              # NotificationWorker (Apprise integration)
   utils.py                      # Helper functions (run_command, etc.)
   actions.py                    # REMOTE_ACTIONS templates
-  monitor.py                    # UPSMonitor class (core daemon)
+  monitor.py                    # UPSGroupMonitor class (core daemon)
   cli.py                        # CLI argument parsing + main()
 
 tests/                          # pytest tests
@@ -158,6 +158,7 @@ README.md                       # Project overview
 - Config validation before any changes to config handling
 - Always test with `--dry-run` before real shutdown logic changes
 - When adding new config feature flags, add them to `examples/config-reference.yaml`
+- When adding or removing tests, update `docs/testing.md` (test counts in pyramid/table, per-file breakdown, E2E test case table)
 
 ## Git Workflow
 

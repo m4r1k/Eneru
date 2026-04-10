@@ -745,4 +745,11 @@ class ConfigLoader:
                             f"Move resources under the appropriate UPS entry."
                         )
 
+        # Validate trigger_on value
+        if config.local_shutdown.trigger_on not in ("any", "none"):
+            messages.append(
+                f"ERROR: local_shutdown.trigger_on must be 'any' or 'none', "
+                f"got '{config.local_shutdown.trigger_on}'"
+            )
+
         return messages
