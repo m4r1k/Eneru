@@ -25,7 +25,7 @@ A Python-based UPS monitoring daemon for [Network UPS Tools (NUT)](https://netwo
 </div>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-mon.gif" alt="Eneru Monitor Dashboard" width="700">
+  <img src="https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-mon.gif" alt="Eneru Monitor Dashboard" width="400">
 </p>
 
 ---
@@ -46,6 +46,21 @@ Most UPS shutdown tools handle one machine. If you have more than one, things ge
 | Battery estimates are unreliable | ✅ Multi-vector shutdown triggers |
 | Network down during outage | ✅ Non-blocking notifications with persistent retry |
 | Firmware recalibrates battery silently | ✅ Battery anomaly detection and alerts |
+
+---
+
+## How Eneru is different
+
+NUT's `upsmon` shuts down one machine with two triggers (low battery, forced shutdown). apcupsd does the same for APC hardware. PeaNUT and NUTCase provide dashboards but no shutdown logic. Enterprise tools (Eaton IPM, PowerChute) add virtualization support but are vendor-locked and proprietary.
+
+Eneru sits on top of NUT and adds what these tools lack:
+
+- **Orchestrated multi-resource shutdown**, VMs, compose stacks, containers, remote servers, filesystems, and local system in a coordinated sequence
+- **6 independent shutdown triggers**, including depletion rate (computed from observed battery data, not UPS estimates) and extended time on battery. NUT's 2 triggers miss these failure modes
+- **Multi-UPS coordination**, monitor multiple UPSes with per-group triggers and shutdown policies, each with independent failure handling
+- **Battery anomaly detection**, catches firmware recalibrations and battery degradation with vendor-specific jitter filtering (APC, CyberPower, Ubiquiti)
+
+See the [full comparison](https://eneru.readthedocs.io/latest/#how-eneru-compares) in the documentation.
 
 ---
 

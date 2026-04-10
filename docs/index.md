@@ -44,6 +44,27 @@ Most UPS shutdown tools handle one machine. If you have more than one, things ge
 
 ---
 
+## How Eneru compares
+
+Eneru builds on NUT's protocol layer and adds shutdown orchestration on top:
+
+| Capability | NUT upsmon | apcupsd | PeaNUT | Eneru |
+|------------|-----------|---------|--------|-------|
+| **Shutdown triggers** | 2 (LOWBATT, FSD) | Timer + event scripts | None (dashboard only) | 6 independent triggers including depletion rate and extended time |
+| **Shutdown orchestration** | Runs a single script | Runs event scripts | None | Ordered sequence: VMs → compose → containers → remote servers → filesystems → local |
+| **Multi-UPS** | Monitor multiple, shut down one host | One UPS per instance | Display multiple | Coordinated groups with per-UPS triggers, `is_local` ownership, and `trigger_on` policies |
+| **Battery intelligence** | None | None | None | Depletion rate from observed data, anomaly detection with firmware jitter filtering |
+| **Remote server shutdown** | Via custom script | Via custom script | None | SSH-based with pre-shutdown commands (Proxmox, ESXi, XCP-ng), parallel/sequential modes |
+| **Container handling** | None | None | None | Docker/Podman with compose ordering, rootless Podman, auto-detection |
+| **Notifications** | Email/pager via script | Event scripts | None | 100+ services via Apprise, non-blocking with persistent retry |
+| **Dashboard** | CGI (1990s era) | CGI multimon | Modern web (React) | Real-time TUI with color-coded status |
+| **Connection resilience** | Retry + failsafe | Retry | N/A | Grace period with flap detection, failsafe on battery |
+
+!!! note "Eneru complements NUT, it doesn't replace it"
+    NUT handles the hard problem of talking to 170+ manufacturers' hardware via 250+ drivers. Eneru handles what happens *after* NUT delivers the data: when to shut down, what to shut down, and in what order.
+
+---
+
 ## Features
 
 ### Monitoring
