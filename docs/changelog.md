@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [5.0.0]
+## [5.0.0] - 2026-04-11
 
 ### Added
 - **Multi-UPS Monitoring:** Monitor multiple UPS systems from a single Eneru instance (#4)
