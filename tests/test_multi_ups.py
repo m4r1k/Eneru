@@ -13,7 +13,7 @@ from eneru import (
     VMConfig, ContainersConfig, FilesystemsConfig, UnmountConfig,
     RemoteServerConfig, LocalShutdownConfig, MonitorState, ConfigLoader,
 )
-from eneru.monitor import UPSMonitor, MultiUPSCoordinator
+from eneru.monitor import UPSGroupMonitor, MultiUPSCoordinator
 
 
 # ==============================================================================
@@ -188,6 +188,43 @@ ups:
         assert any("containers enabled" in m and "UPS2" in m for m in errors)
 
     @pytest.mark.unit
+    def test_nonlocal_vms_rejected(self, tmp_path):
+        """Non-local group with virtual_machines enabled produces ERROR."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  - name: "UPS1@10.0.0.1"
+    is_local: true
+  - name: "UPS2@10.0.0.2"
+    virtual_machines:
+      enabled: true
+""")
+        config = ConfigLoader.load(str(config_file))
+        msgs = ConfigLoader.validate_config(config)
+        errors = [m for m in msgs if m.startswith("ERROR")]
+        assert any("virtual_machines enabled" in m and "UPS2" in m for m in errors)
+
+    @pytest.mark.unit
+    def test_nonlocal_filesystems_rejected(self, tmp_path):
+        """Non-local group with filesystem unmount enabled produces ERROR."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  - name: "UPS1@10.0.0.1"
+    is_local: true
+  - name: "UPS2@10.0.0.2"
+    filesystems:
+      unmount:
+        enabled: true
+        mounts:
+          - "/mnt/data"
+""")
+        config = ConfigLoader.load(str(config_file))
+        msgs = ConfigLoader.validate_config(config)
+        errors = [m for m in msgs if m.startswith("ERROR")]
+        assert any("filesystem unmount enabled" in m and "UPS2" in m for m in errors)
+
+    @pytest.mark.unit
     def test_multiple_is_local_rejected(self, tmp_path):
         """Multiple is_local groups produce ERROR."""
         config_file = tmp_path / "config.yaml"
@@ -343,8 +380,8 @@ class TestMultiUPSCoordinator:
 # UPS MONITOR COORDINATOR MODE
 # ==============================================================================
 
-class TestUPSMonitorCoordinatorMode:
-    """UPSMonitor hooks for coordinator mode."""
+class TestUPSGroupMonitorCoordinatorMode:
+    """UPSGroupMonitor hooks for coordinator mode."""
 
     @pytest.mark.unit
     def test_coordinator_mode_params(self):
@@ -356,7 +393,7 @@ class TestUPSMonitorCoordinatorMode:
         )
         stop_event = threading.Event()
 
-        monitor = UPSMonitor(
+        monitor = UPSGroupMonitor(
             config=config,
             coordinator_mode=True,
             stop_event=stop_event,
@@ -392,7 +429,7 @@ class TestBatteryAnomalyDetection:
     """
 
     def _make_monitor(self, tmp_path):
-        """Helper: create a UPSMonitor wired for anomaly-detection tests."""
+        """Helper: create a UPSGroupMonitor wired for anomaly-detection tests."""
         import time as _time
 
         config = Config(
@@ -409,7 +446,7 @@ class TestBatteryAnomalyDetection:
             local_shutdown=LocalShutdownConfig(enabled=False),
         )
 
-        monitor = UPSMonitor(config)
+        monitor = UPSGroupMonitor(config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         monitor._notification_worker = MagicMock()
@@ -642,7 +679,7 @@ class TestRuntimeIsLocalEnforcement:
             local_shutdown=LocalShutdownConfig(enabled=False),
         )
 
-        monitor = UPSMonitor(config)
+        monitor = UPSGroupMonitor(config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         monitor._notification_worker = MagicMock()
@@ -679,7 +716,7 @@ class TestRuntimeIsLocalEnforcement:
             local_shutdown=LocalShutdownConfig(enabled=False),
         )
 
-        monitor = UPSMonitor(config)
+        monitor = UPSGroupMonitor(config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         monitor._notification_worker = MagicMock()
@@ -720,7 +757,7 @@ class TestNotificationPrefixing:
         )
 
         mock_worker = MagicMock()
-        monitor = UPSMonitor(
+        monitor = UPSGroupMonitor(
             config=config,
             coordinator_mode=True,
             log_prefix="[Main UPS] ",
@@ -754,7 +791,7 @@ class TestNotificationPrefixing:
         )
 
         mock_worker = MagicMock()
-        monitor = UPSMonitor(config=config, notification_worker=mock_worker)
+        monitor = UPSGroupMonitor(config=config, notification_worker=mock_worker)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
 

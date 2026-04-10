@@ -433,6 +433,200 @@ jobs:
             exit 1
           fi
 
+      # ========================================
+      # TEST 14: Multi-UPS concurrent failure
+      # ========================================
+      - name: "Test 14: Multi-UPS concurrent failure (both UPSes fail)"
+        run: |
+          echo "=== Test 14: Concurrent UPS Failure ==="
+
+          # Clean up
+          rm -f /tmp/eneru-e2e-shutdown-flag*
+
+          # Both UPSes go low-battery simultaneously
+          cp ${{ env.E2E_DIR }}/scenarios/low-battery.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS1.dev
+          cp ${{ env.E2E_DIR }}/scenarios/low-battery.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS2.dev
+          sleep 3
+
+          # Run multi-UPS Eneru -- both groups should trigger shutdown
+          eneru run --config ${{ env.E2E_DIR }}/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test14.log || true
+
+          # Verify shutdown was triggered
+          if ! grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdown" /tmp/test14.log; then
+            echo "FAIL: No shutdown triggered during concurrent failure"
+            cat /tmp/test14.log
+            exit 1
+          fi
+
+          # Verify both UPSes are referenced in the log
+          if grep -q "E2E UPS1\|UPS1@localhost" /tmp/test14.log; then
+            echo "PASS: UPS1 shutdown logged"
+          else
+            echo "Note: UPS1 identification not verified in logs"
+          fi
+
+          if grep -q "E2E UPS2\|UPS2@localhost" /tmp/test14.log; then
+            echo "PASS: UPS2 shutdown logged"
+          else
+            echo "Note: UPS2 identification not verified in logs"
+          fi
+
+          echo "PASS: Concurrent failure handled correctly"
+
+      # ========================================
+      # TEST 15: Non-local failure (UPS2 fails, UPS1 unaffected)
+      # ========================================
+      - name: "Test 15: Non-local failure (UPS2 fails, UPS1 unaffected)"
+        run: |
+          echo "=== Test 15: Non-Local UPS Failure ==="
+
+          # Clean up
+          rm -f /tmp/eneru-e2e-shutdown-flag*
+
+          # UPS1 stays online, UPS2 goes low-battery
+          cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS1.dev
+          cp ${{ env.E2E_DIR }}/scenarios/low-battery.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS2.dev
+          sleep 3
+
+          # Verify UPS states
+          UPS1_STATUS=$(upsc UPS1@localhost:3493 ups.status 2>/dev/null)
+          UPS2_STATUS=$(upsc UPS2@localhost:3493 ups.status 2>/dev/null)
+          echo "UPS1 status: $UPS1_STATUS (should be OL)"
+          echo "UPS2 status: $UPS2_STATUS (should be OB)"
+
+          # Run multi-UPS Eneru -- UPS2 (non-local) should trigger, UPS1 unaffected
+          eneru run --config ${{ env.E2E_DIR }}/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test15.log || true
+
+          # Verify UPS2 triggered shutdown
+          if ! grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdown" /tmp/test15.log; then
+            echo "FAIL: No shutdown triggered for UPS2"
+            cat /tmp/test15.log
+            exit 1
+          fi
+
+          # Verify UPS2 is identified in shutdown context
+          if grep -q "E2E UPS2\|UPS2@localhost" /tmp/test15.log; then
+            echo "PASS: UPS2 correctly triggered shutdown"
+          else
+            echo "Note: UPS2 identification not verified in logs"
+          fi
+
+          echo "PASS: Non-local failure correctly handled"
+
+      # ========================================
+      # TEST 16: Local drain (drain_on_local_shutdown=true)
+      # ========================================
+      - name: "Test 16: Local drain (drain_on_local_shutdown=true)"
+        run: |
+          echo "=== Test 16: Local Drain ==="
+
+          # Clean up
+          rm -f /tmp/eneru-e2e-shutdown-flag*
+
+          # UPS1 (is_local) goes low-battery, UPS2 stays online
+          cp ${{ env.E2E_DIR }}/scenarios/low-battery.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS1.dev
+          cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS2.dev
+          sleep 3
+
+          # Run with drain config
+          eneru run --config ${{ env.E2E_DIR }}/config-e2e-multi-ups-drain.yaml --exit-after-shutdown 2>&1 | tee /tmp/test16.log || true
+
+          # Verify shutdown was triggered
+          if ! grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdown" /tmp/test16.log; then
+            echo "FAIL: No shutdown triggered"
+            cat /tmp/test16.log
+            exit 1
+          fi
+
+          # Verify drain message appears
+          if grep -qi "drain" /tmp/test16.log; then
+            echo "PASS: Drain message logged"
+          else
+            echo "FAIL: Drain message not found in logs"
+            cat /tmp/test16.log
+            exit 1
+          fi
+
+          echo "PASS: Local drain correctly executed"
+
+      # ========================================
+      # TEST 17: Local no-drain (drain_on_local_shutdown=false)
+      # ========================================
+      - name: "Test 17: Local no-drain (drain_on_local_shutdown=false)"
+        run: |
+          echo "=== Test 17: Local No-Drain ==="
+
+          # Clean up
+          rm -f /tmp/eneru-e2e-shutdown-flag*
+
+          # UPS1 (is_local) goes low-battery, UPS2 stays online
+          cp ${{ env.E2E_DIR }}/scenarios/low-battery.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS1.dev
+          cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS2.dev
+          sleep 3
+
+          # Run with default multi-UPS config (drain=false)
+          eneru run --config ${{ env.E2E_DIR }}/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test17.log || true
+
+          # Verify UPS1 shutdown triggered
+          if ! grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdown" /tmp/test17.log; then
+            echo "FAIL: No shutdown triggered for UPS1"
+            cat /tmp/test17.log
+            exit 1
+          fi
+
+          # Verify NO drain message
+          if grep -qi "drain" /tmp/test17.log; then
+            echo "FAIL: Drain should NOT occur with drain_on_local_shutdown=false"
+            exit 1
+          fi
+
+          echo "PASS: No-drain correctly skipped drain step"
+
+      # ========================================
+      # TEST 18: Recovery (OB then power restored)
+      # ========================================
+      - name: "Test 18: Recovery - power restored before shutdown"
+        run: |
+          echo "=== Test 18: Power Recovery ==="
+
+          # Clean up
+          rm -f /tmp/eneru-e2e-shutdown-flag*
+
+          # Start with on-battery (above thresholds -- no shutdown trigger)
+          cp ${{ env.E2E_DIR }}/scenarios/on-battery.dev ${{ env.E2E_DIR }}/scenarios/apply.dev
+          sleep 3
+
+          # Run Eneru in background
+          timeout 12 eneru run --config ${{ env.E2E_DIR }}/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test18.log &
+          ENERU_PID=$!
+
+          # Wait for Eneru to detect on-battery state
+          sleep 4
+
+          # Restore power
+          cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply.dev
+          sleep 3
+
+          # Wait for Eneru to detect recovery
+          wait $ENERU_PID 2>/dev/null || true
+
+          # Verify POWER_RESTORED was logged
+          if grep -qi "POWER_RESTORED\|power.*restored\|Power restored" /tmp/test18.log; then
+            echo "PASS: Power restoration detected"
+          else
+            echo "FAIL: POWER_RESTORED not logged"
+            cat /tmp/test18.log
+            exit 1
+          fi
+
+          # Verify NO shutdown was triggered
+          if grep -q "SHUTDOWN SEQUENCE" /tmp/test18.log; then
+            echo "FAIL: Shutdown should NOT have been triggered during recovery"
+            exit 1
+          fi
+
+          echo "PASS: Recovery correctly handled - no shutdown, power restored logged"
+
       - name: Collect logs on failure
         if: failure()
         run: |

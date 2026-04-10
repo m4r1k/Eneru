@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.0.0]
+
+### Added
+- **Multi-UPS Monitoring:** Monitor multiple UPS systems from a single Eneru instance (#4)
+    - New `UPSGroupConfig` with `is_local` flag to define which UPS powers the Eneru host
+    - Per-UPS `display_name` for human-readable labels in logs and notifications
+    - Per-UPS trigger overrides with global defaults inheritance
+    - `MultiUPSCoordinator` with thread-per-group architecture and shared notification worker
+    - Defense-in-depth local shutdown coordination (`threading.Lock` + filesystem flag file) prevents duplicate shutdown
+    - Backward-compatible config detection: dict format = single-UPS (legacy), list format = multi-UPS
+    - Ownership validation: only the `is_local` group can manage local resources (VMs, containers, filesystems)
+    - New example configuration: `examples/config-dual-ups.yaml`
+- **TUI Dashboard (`eneru monitor`):** Real-time curses-based monitoring interface
+    - Two-panel layout: gray config/status panel + gold events panel
+    - Reads daemon state files directly (no NUT polling, no contention with main daemon)
+    - Color-coded status badges: green (online), red + blink (on battery/critical), magenta (unknown)
+    - 256-color palette for consistent rendering across SSH sessions
+    - Interactive controls: `<Q>` quit, `<R>` refresh, `<M>` toggle more logs
+    - `--once` mode for scripts and cron health checks (single snapshot, no curses)
+    - Auto-refresh every 5 seconds, configurable with `--interval`
+    - Multi-UPS display: shows all UPS groups in a single dashboard
+- **Battery Anomaly Detection:** Identifies unexpected charge drops while on line power
+    - Detects >20% charge drops within 120 seconds while UPS reports OL/CHRG status
+    - Sustained-reading confirmation: requires 3 consecutive polls before firing alert
+    - Firmware jitter filtering for APC, CyberPower, and Ubiquiti UniFi UPS units after OB→OL transitions
+    - Catches firmware recalibrations, battery aging, and hardware issues
+    - Sends notification + log warning with charge delta and timing details
+- **CLI Subcommand Architecture:** Modern command-line interface with dedicated subcommands
+    - `eneru run` — start the UPS monitoring daemon
+    - `eneru validate` — validate configuration file and show overview
+    - `eneru monitor` — launch the TUI dashboard
+    - `eneru test-notifications` — test notification channels
+    - `eneru version` — display version information
+    - Bare `eneru` now shows help instead of starting the daemon (prevents accidental start)
+
+### Changed
+- **Config Reference Relocated:** `config.yaml` → `examples/config-reference.yaml` (installed path `/etc/ups-monitor/` unchanged)
+- **Systemd Service Relocated:** `eneru.service` → `packaging/eneru.service` (installed path `/lib/systemd/system/` unchanged)
+- **Systemd Service Updated:** ExecStart uses `eneru run` subcommand
+- **Changelog Consolidated:** Root `CHANGELOG.md` merged into `docs/changelog.md` with complete version history (v1.0 through v4.11)
+- **Test Suite Expanded:** 216 → 300 tests (+84 tests, 39% increase)
+    - 20+ multi-UPS tests: config parsing, trigger inheritance, ownership validation, coordinator routing, lock synchronization
+    - 26 monitor core tests: status state machine, shutdown triggers, FSD handling, failsafe, shutdown sequencing
+    - 23 TUI tests: state file parsing, log filtering, status mapping, color rendering, `--once` output
+- **E2E Tests Expanded:** 7 → 18 tests with multi-UPS scenarios
+    - NUT dummy server extended with UPS1 and UPS2 driver entries and per-UPS state files
+    - New tests: multi-UPS config validation, UPS isolation (one fails, other unaffected), ownership validation, TUI `--once`
+
+### Technical Details
+- Thread-per-group model: each UPS group runs in a dedicated thread with its own `UPSGroupMonitor` instance
+- Per-group state files suffixed with sanitized UPS name (e.g., `/var/run/ups-monitor.state.UPS1-192-168-1-10`)
+- Single-UPS mode completely unchanged -- full backward compatibility
+- Legacy config format (dict) auto-detected and supported alongside new list format
+- At most one UPS group can be marked `is_local: true`
+- Remote servers allowed on any group; local resources restricted to the `is_local` group
+
+### Migration Notes
+
+CLI invocation changed from bare command to subcommands:
+```bash
+# Before (v4.x)
+eneru --config /etc/ups-monitor/config.yaml
+eneru --validate-config --config /etc/ups-monitor/config.yaml
+eneru --test-notifications --config /etc/ups-monitor/config.yaml
+
+# After (v5.0)
+eneru run --config /etc/ups-monitor/config.yaml
+eneru validate --config /etc/ups-monitor/config.yaml
+eneru test-notifications --config /etc/ups-monitor/config.yaml
+```
+
+- **Package users (deb/rpm):** Systemd service is updated automatically — no action needed
+- **Config format:** Existing single-UPS configurations work without any modification
+- **No breaking changes** for single-UPS deployments
+
+---
+
 ## [4.11.0] - 2026-04-02
 
 ### Added
@@ -48,7 +125,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `notifications.py` - NotificationWorker (Apprise integration)
     - `utils.py` - Helper functions (run_command, command_exists, is_numeric, format_seconds)
     - `actions.py` - REMOTE_ACTIONS templates for remote pre-shutdown commands
-    - `monitor.py` - UPSMonitor class (core daemon logic)
+    - `monitor.py` - UPSGroupMonitor class (core daemon logic)
     - `cli.py` - CLI argument parsing + main()
 - **Developer Documentation:** Add `CLAUDE.md` for Claude Code
 
@@ -463,6 +540,24 @@ During power outages, network connectivity is often unreliable. The previous blo
 ---
 
 ## Version Comparison
+
+### v5.0 vs v4.11
+
+| Feature | v4.11 | v5.0 |
+|---------|-------|------|
+| UPS Support | Single UPS only | Multiple UPS with per-group resources |
+| UPS Ownership | N/A | `is_local` flag defines host UPS |
+| Per-UPS Triggers | N/A | Override global defaults per UPS group |
+| TUI Dashboard | Not available | `eneru monitor` with real-time status |
+| Battery Anomaly Detection | Not available | Charge drop detection with jitter filtering |
+| CLI Interface | Flat flags (`--validate-config`) | Subcommands (`eneru run`, `validate`, `monitor`) |
+| Bare `eneru` | Starts daemon | Shows help (safe default) |
+| Config Reference Location | `config.yaml` (root) | `examples/config-reference.yaml` |
+| Service File Location | Root directory | `packaging/eneru.service` |
+| Thread Model | 2 threads (monitor + notifications) | N+2 threads (N UPS monitors + notifications + main) |
+| Shutdown Coordination | N/A | Lock + flag file (defense-in-depth) |
+| E2E Test Scenarios | 7 (single-UPS) | 18 (single + multi-UPS) |
+| Test Count | 216 tests | 300 tests |
 
 ### v4.11 vs v4.10
 

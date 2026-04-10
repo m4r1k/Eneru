@@ -8,7 +8,7 @@ from eneru import (
     Config,
     UPSConfig,
     ConnectionLossGracePeriodConfig,
-    UPSMonitor,
+    UPSGroupMonitor,
     MonitorState,
     ConfigLoader,
 )
@@ -112,7 +112,7 @@ class TestGracePeriodBehavior:
         minimal_config.ups.connection_loss_grace_period = ConnectionLossGracePeriodConfig(
             enabled=True, duration=60, flap_threshold=5
         )
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         return monitor
@@ -208,7 +208,7 @@ class TestGracePeriodRecovery:
         minimal_config.ups.connection_loss_grace_period = ConnectionLossGracePeriodConfig(
             enabled=True, duration=60, flap_threshold=5
         )
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         return monitor
@@ -269,7 +269,7 @@ class TestGracePeriodDisabled:
         minimal_config.ups.connection_loss_grace_period = ConnectionLossGracePeriodConfig(
             enabled=False
         )
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         return monitor
@@ -322,7 +322,7 @@ class TestGracePeriodFailsafe:
         minimal_config.ups.connection_loss_grace_period = ConnectionLossGracePeriodConfig(
             enabled=True, duration=60, flap_threshold=5
         )
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         return monitor
@@ -393,7 +393,7 @@ class TestFlapDetection:
         minimal_config.ups.connection_loss_grace_period = ConnectionLossGracePeriodConfig(
             enabled=True, duration=60, flap_threshold=3
         )
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         return monitor
@@ -529,7 +529,7 @@ class TestStaleDataInteraction:
         minimal_config.ups.connection_loss_grace_period = ConnectionLossGracePeriodConfig(
             enabled=True, duration=60, flap_threshold=5
         )
-        monitor = UPSMonitor(minimal_config)
+        monitor = UPSGroupMonitor(minimal_config)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         return monitor

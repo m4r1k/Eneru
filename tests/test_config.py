@@ -768,6 +768,22 @@ class TestConfigValidation:
         # Should not have warnings about missing Apprise
         assert not any("WARNING" in msg for msg in messages)
 
+    @pytest.mark.unit
+    def test_validate_invalid_trigger_on(self, minimal_config):
+        """Invalid trigger_on value produces ERROR."""
+        minimal_config.local_shutdown.trigger_on = "all"
+        messages = ConfigLoader.validate_config(minimal_config)
+        errors = [m for m in messages if m.startswith("ERROR")]
+        assert any("trigger_on" in m and "'all'" in m for m in errors)
+
+    @pytest.mark.unit
+    def test_validate_valid_trigger_on_values(self, minimal_config):
+        """Valid trigger_on values ('any', 'none') produce no error."""
+        for value in ("any", "none"):
+            minimal_config.local_shutdown.trigger_on = value
+            messages = ConfigLoader.validate_config(minimal_config)
+            assert not any("trigger_on" in m for m in messages)
+
 
 class TestConfigParsingEdgeCases:
     """Test edge cases in configuration parsing."""

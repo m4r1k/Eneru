@@ -50,7 +50,7 @@ except ImportError:
     apprise = None
 
 
-class UPSMonitor:
+class UPSGroupMonitor:
     """Main UPS Monitor class."""
 
     def __init__(self, config: Config, exit_after_shutdown: bool = False,
@@ -1771,7 +1771,7 @@ class UPSMonitor:
 class MultiUPSCoordinator:
     """Coordinates multiple UPSGroupMonitor threads for multi-UPS setups.
 
-    Each UPS group runs its own UPSMonitor in a dedicated thread. The
+    Each UPS group runs its own UPSGroupMonitor in a dedicated thread. The
     coordinator owns shared resources (notifications, logger) and handles
     local shutdown coordination with defense-in-depth (threading.Lock +
     filesystem flag).
@@ -1780,7 +1780,7 @@ class MultiUPSCoordinator:
     def __init__(self, config: Config, exit_after_shutdown: bool = False):
         self.config = config
         self._exit_after_shutdown = exit_after_shutdown
-        self._monitors: List[UPSMonitor] = []
+        self._monitors: List[UPSGroupMonitor] = []
         self._threads: List[threading.Thread] = []
         self._stop_event = threading.Event()
         self._local_shutdown_lock = threading.Lock()
@@ -1832,7 +1832,7 @@ class MultiUPSCoordinator:
             self._log("🧪 *** RUNNING IN DRY-RUN MODE - NO ACTUAL SHUTDOWN WILL OCCUR ***")
 
     def _start_monitors(self):
-        """Create and start one UPSMonitor thread per group."""
+        """Create and start one UPSGroupMonitor thread per group."""
         for group in self.config.ups_groups:
             # Build a single-group Config for this monitor
             group_config = Config(
@@ -1847,7 +1847,7 @@ class MultiUPSCoordinator:
             sanitized = group.ups.name.replace("@", "-").replace(":", "-").replace("/", "-")
             prefix = f"[{group.ups.label}] "
 
-            monitor = UPSMonitor(
+            monitor = UPSGroupMonitor(
                 config=group_config,
                 exit_after_shutdown=self._exit_after_shutdown,
                 coordinator_mode=True,
@@ -1871,7 +1871,7 @@ class MultiUPSCoordinator:
             self._log(f"  Started monitor thread for {group.ups.label}"
                       f"{' [is_local]' if group.is_local else ''}")
 
-    def _run_monitor(self, monitor: UPSMonitor, group):
+    def _run_monitor(self, monitor: UPSGroupMonitor, group):
         """Thread target: run a single UPS monitor."""
         try:
             monitor.run()

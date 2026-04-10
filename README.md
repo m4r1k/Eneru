@@ -143,7 +143,7 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 - Notifications to 100+ services (Discord, Slack, Telegram, ntfy, email) via [Apprise](https://github.com/caronc/apprise/wiki)
 - Power quality monitoring: voltage, AVR, bypass, overload
 - Dry-run mode for safe testing
-- 296 tests, 9 Linux distros, E2E tests with real NUT/SSH/Docker on every commit
+- 300 tests, 9 Linux distros, E2E tests with real NUT/SSH/Docker on every commit
 
 ---
 

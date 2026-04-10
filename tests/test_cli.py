@@ -435,24 +435,24 @@ class TestCLIExitAfterShutdown:
 
     @pytest.mark.unit
     def test_exit_after_shutdown_flag_sets_monitor_attribute(self, tmp_path):
-        """Test that --exit-after-shutdown flag is passed to UPSMonitor."""
-        from eneru import UPSMonitor
+        """Test that --exit-after-shutdown flag is passed to UPSGroupMonitor."""
+        from eneru import UPSGroupMonitor
 
         config = Config(ups_groups=[UPSGroupConfig(
             ups=UPSConfig(name="TestUPS@localhost"),
             is_local=True,
         )])
 
-        monitor = UPSMonitor(config)
+        monitor = UPSGroupMonitor(config)
         assert monitor._exit_after_shutdown is False
 
-        monitor_with_flag = UPSMonitor(config, exit_after_shutdown=True)
+        monitor_with_flag = UPSGroupMonitor(config, exit_after_shutdown=True)
         assert monitor_with_flag._exit_after_shutdown is True
 
     @pytest.mark.unit
     def test_exit_after_shutdown_triggers_exit(self, tmp_path):
         """Test that shutdown sequence exits when flag is set."""
-        from eneru import UPSMonitor
+        from eneru import UPSGroupMonitor
 
         config = Config(
             ups_groups=[UPSGroupConfig(
@@ -472,7 +472,7 @@ class TestCLIExitAfterShutdown:
             local_shutdown=LocalShutdownConfig(enabled=False),
         )
 
-        monitor = UPSMonitor(config, exit_after_shutdown=True)
+        monitor = UPSGroupMonitor(config, exit_after_shutdown=True)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         monitor._notification_worker = MagicMock()
@@ -484,7 +484,7 @@ class TestCLIExitAfterShutdown:
     @pytest.mark.unit
     def test_no_exit_without_flag(self, tmp_path):
         """Test that shutdown sequence does NOT exit when flag is not set."""
-        from eneru import UPSMonitor
+        from eneru import UPSGroupMonitor
 
         config = Config(
             ups_groups=[UPSGroupConfig(
@@ -504,7 +504,7 @@ class TestCLIExitAfterShutdown:
             local_shutdown=LocalShutdownConfig(enabled=False),
         )
 
-        monitor = UPSMonitor(config, exit_after_shutdown=False)
+        monitor = UPSGroupMonitor(config, exit_after_shutdown=False)
         monitor.state = MonitorState()
         monitor.logger = MagicMock()
         monitor._notification_worker = MagicMock()
