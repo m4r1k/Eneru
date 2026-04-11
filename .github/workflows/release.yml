@@ -64,6 +64,18 @@ jobs:
           echo "Building packages version: $VERSION"
           echo "Code version: $VERSION_FULL"
 
+      - name: Determine channel
+        id: channel
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          if echo "$VERSION" | grep -qE '-(rc|beta|alpha)'; then
+            CHANNEL="testing"
+          else
+            CHANNEL="stable"
+          fi
+          echo "CHANNEL=$CHANNEL" >> $GITHUB_OUTPUT
+          echo "Channel: $CHANNEL for version: $VERSION"
+
       - name: Update version in script
         run: |
           # Update __version__ with full version including git hash
@@ -126,21 +138,61 @@ jobs:
             git checkout -b gh-pages
           fi
 
-      - name: Prepare repository structure
+      - name: Migrate pre-release packages to testing channel
         run: |
           cd gh-pages
 
-          # Create directory structure (preserve existing packages)
-          # APT: pool for packages, dists for metadata
-          mkdir -p deb/pool/main deb/dists/stable/main/binary-all
-          mkdir -p rpm
+          # One-time migration: move pre-release packages out of stable directories
+          # nFPM converts -rc/-beta/-alpha to ~ in package filenames
+          # This step is idempotent — becomes a no-op once migration is complete
+
+          # --- APT migration ---
+          if [ -d "deb/pool/main" ] && ls deb/pool/main/*.deb 1>/dev/null 2>&1; then
+            mkdir -p deb/pool/testing
+            for deb in deb/pool/main/*.deb; do
+              filename=$(basename "$deb")
+              if echo "$filename" | grep -qE '~(rc|beta|alpha)'; then
+                echo "Migrating to testing: $filename"
+                mv "$deb" deb/pool/testing/
+              fi
+            done
+          fi
+
+          # --- RPM migration ---
+          if ls rpm/*.rpm 1>/dev/null 2>&1; then
+            mkdir -p rpm/testing
+            for rpm_file in rpm/*.rpm; do
+              # Skip if it's a directory (rpm/testing/)
+              [ -f "$rpm_file" ] || continue
+              filename=$(basename "$rpm_file")
+              if echo "$filename" | grep -qE '~(rc|beta|alpha)'; then
+                echo "Migrating to testing: $filename"
+                mv "$rpm_file" rpm/testing/
+              fi
+            done
+          fi
+
+      - name: Prepare repository structure
+        run: |
+          CHANNEL="${{ steps.channel.outputs.CHANNEL }}"
+          cd gh-pages
+
+          # Create directory structure for both channels
+          mkdir -p deb/pool/main deb/pool/testing
+          mkdir -p deb/dists/stable/main/binary-all deb/dists/testing/main/binary-all
+          mkdir -p rpm rpm/testing
 
           # Export public GPG key
           gpg --armor --export > KEY.gpg
 
-          # Copy new packages (keep existing ones in pool)
-          cp ../*.deb deb/pool/main/
-          cp ../*.rpm rpm/
+          # Copy new packages to the correct channel
+          if [ "$CHANNEL" = "stable" ]; then
+            cp ../*.deb deb/pool/main/
+            cp ../*.rpm rpm/
+          else
+            cp ../*.deb deb/pool/testing/
+            cp ../*.rpm rpm/testing/
+          fi
 
       - name: Build APT repository
         run: |
@@ -150,52 +202,72 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y dpkg-dev
 
-          # Generate Packages file in the correct location
-          # Path is relative to deb/ directory
-          dpkg-scanpackages --arch all pool/main /dev/null > dists/stable/main/binary-all/Packages
-          gzip -k -f dists/stable/main/binary-all/Packages
+          # Build metadata for each channel from its own pool
+          # stable: pool/main -> dists/stable
+          # testing: pool/testing -> dists/testing
+          for CHANNEL_INFO in "stable:pool/main:dists/stable" "testing:pool/testing:dists/testing"; do
+            CHANNEL_NAME="${CHANNEL_INFO%%:*}"
+            REMAINDER="${CHANNEL_INFO#*:}"
+            POOL_DIR="${REMAINDER%%:*}"
+            DIST_DIR="${REMAINDER#*:}"
 
-          # Generate Release file for the suite
-          cd dists/stable
-          cat > Release <<EOF
+            # Skip if pool directory has no packages
+            if ! ls "${POOL_DIR}"/*.deb 1>/dev/null 2>&1; then
+              echo "No packages in ${POOL_DIR}, skipping ${CHANNEL_NAME} metadata"
+              continue
+            fi
+
+            echo "Building APT metadata for ${CHANNEL_NAME} from ${POOL_DIR}..."
+
+            # Generate Packages file (paths relative to deb/ directory)
+            dpkg-scanpackages --arch all "${POOL_DIR}" /dev/null > "${DIST_DIR}/main/binary-all/Packages"
+            gzip -k -f "${DIST_DIR}/main/binary-all/Packages"
+
+            # Generate Release file
+            cat > "${DIST_DIR}/Release" <<EOF
           Origin: Eneru
           Label: Eneru
-          Suite: stable
-          Codename: stable
+          Suite: ${CHANNEL_NAME}
+          Codename: ${CHANNEL_NAME}
           Architectures: all
           Components: main
-          Description: Eneru UPS Monitor packages
+          Description: Eneru UPS Monitor packages (${CHANNEL_NAME})
           Date: $(date -Ru)
           EOF
 
-          # Add checksums to Release (paths relative to dists/stable/)
-          {
-            echo "MD5Sum:"
-            find main -type f \( -name "Packages" -o -name "Packages.gz" \) -exec sh -c 'echo " $(md5sum "$1" | cut -d" " -f1) $(stat -c%s "$1") $1"' _ {} \;
-            echo "SHA1:"
-            find main -type f \( -name "Packages" -o -name "Packages.gz" \) -exec sh -c 'echo " $(sha1sum "$1" | cut -d" " -f1) $(stat -c%s "$1") $1"' _ {} \;
-            echo "SHA256:"
-            find main -type f \( -name "Packages" -o -name "Packages.gz" \) -exec sh -c 'echo " $(sha256sum "$1" | cut -d" " -f1) $(stat -c%s "$1") $1"' _ {} \;
-          } >> Release
+            # Add checksums (paths relative to dists/<channel>/)
+            cd "${DIST_DIR}"
+            {
+              echo "MD5Sum:"
+              find main -type f \( -name "Packages" -o -name "Packages.gz" \) -exec sh -c 'echo " $(md5sum "$1" | cut -d" " -f1) $(stat -c%s "$1") $1"' _ {} \;
+              echo "SHA1:"
+              find main -type f \( -name "Packages" -o -name "Packages.gz" \) -exec sh -c 'echo " $(sha1sum "$1" | cut -d" " -f1) $(stat -c%s "$1") $1"' _ {} \;
+              echo "SHA256:"
+              find main -type f \( -name "Packages" -o -name "Packages.gz" \) -exec sh -c 'echo " $(sha256sum "$1" | cut -d" " -f1) $(stat -c%s "$1") $1"' _ {} \;
+            } >> Release
 
-          # Sign the Release file
-          gpg --batch --yes --armor --detach-sign -o Release.gpg Release
-          gpg --batch --yes --clearsign -o InRelease Release
+            # Sign the Release file
+            gpg --batch --yes --armor --detach-sign -o Release.gpg Release
+            gpg --batch --yes --clearsign -o InRelease Release
+
+            # Return to deb/ directory for next iteration
+            cd "$GITHUB_WORKSPACE/gh-pages/deb"
+          done
 
       - name: Build RPM repository
         run: |
-          cd gh-pages/rpm
-
           # Install createrepo
           sudo apt-get install -y createrepo-c
 
-          # Create repository metadata from ALL packages
-          createrepo_c .
+          # --- Stable RPM repository (rpm/ root — unchanged for backward compat) ---
+          cd gh-pages/rpm
+          if ls *.rpm 1>/dev/null 2>&1; then
+            echo "Building stable RPM metadata..."
+            createrepo_c --excludes='testing/*' .
+            gpg --batch --yes --armor --detach-sign -o repodata/repomd.xml.asc repodata/repomd.xml
+          fi
 
-          # Sign the repomd.xml
-          gpg --batch --yes --armor --detach-sign -o repodata/repomd.xml.asc repodata/repomd.xml
-
-          # Create repo file for easy installation
+          # Stable repo file (unchanged baseurl for existing users)
           # Note: gpgcheck=0 because individual RPMs are not signed,
           # but repo metadata (repomd.xml) is signed and served over HTTPS
           cat > eneru.repo << 'REPOFILE'
@@ -207,13 +279,32 @@ jobs:
           repo_gpgcheck=1
           gpgkey=https://m4r1k.github.io/Eneru/KEY.gpg
           REPOFILE
-          # Remove leading spaces from the repo file
           sed -i 's/^          //' eneru.repo
+
+          # --- Testing RPM repository (rpm/testing/) ---
+          cd "$GITHUB_WORKSPACE/gh-pages/rpm/testing"
+          if ls *.rpm 1>/dev/null 2>&1; then
+            echo "Building testing RPM metadata..."
+            createrepo_c .
+            gpg --batch --yes --armor --detach-sign -o repodata/repomd.xml.asc repodata/repomd.xml
+          fi
+
+          # Testing repo file
+          cat > eneru-testing.repo << 'REPOFILE'
+          [eneru-testing]
+          name=Eneru UPS Monitor (Testing)
+          baseurl=https://m4r1k.github.io/Eneru/rpm/testing
+          enabled=1
+          gpgcheck=0
+          repo_gpgcheck=1
+          gpgkey=https://m4r1k.github.io/Eneru/KEY.gpg
+          REPOFILE
+          sed -i 's/^          //' eneru-testing.repo
 
       - name: Create index.html
         run: |
           cd gh-pages
-          cat > index.html <<'EOF'
+          cat > index.html <<'HTMLEOF'
           <!DOCTYPE html>
           <html>
           <head>
@@ -221,17 +312,22 @@ jobs:
             <style>
               body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
               h1 { color: #333; }
+              h2 { color: #555; margin-top: 2em; }
+              h3 { color: #666; }
               pre { background: #f4f4f4; padding: 15px; border-radius: 5px; overflow-x: auto; }
               code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
               .section { margin: 30px 0; }
+              .note { background: #fff3cd; border: 1px solid #ffc107; border-radius: 5px; padding: 12px; margin: 15px 0; }
             </style>
           </head>
           <body>
-            <h1>⚡ Eneru Package Repository</h1>
-            <p>Official package repository for <a href="https://github.com/m4r1k/Eneru">Eneru</a> - Intelligent UPS Monitoring & Shutdown Orchestration for NUT.</p>
+            <h1>Eneru Package Repository</h1>
+            <p>Official package repository for <a href="https://github.com/m4r1k/Eneru">Eneru</a> - Intelligent UPS Monitoring &amp; Shutdown Orchestration for NUT.</p>
 
             <div class="section">
-              <h2>Debian / Ubuntu</h2>
+              <h2>Stable Releases</h2>
+
+              <h3>Debian / Ubuntu</h3>
               <pre>
           # Import GPG key
           curl -fsSL https://m4r1k.github.io/Eneru/KEY.gpg | sudo gpg --dearmor -o /usr/share/keyrings/eneru.gpg
@@ -242,10 +338,8 @@ jobs:
           # Install
           sudo apt update
           sudo apt install eneru</pre>
-            </div>
 
-            <div class="section">
-              <h2>RHEL / Fedora</h2>
+              <h3>RHEL / Fedora</h3>
               <pre>
           # RHEL 8/9: Enable EPEL first (required for apprise dependency)
           sudo dnf install -y epel-release
@@ -258,21 +352,114 @@ jobs:
             </div>
 
             <div class="section">
+              <h2>Testing / Pre-release</h2>
+              <div class="note">
+                <strong>Note:</strong> The testing channel contains release candidates (rc), beta, and alpha versions.
+                These may be unstable. Use in production at your own risk.
+              </div>
+
+              <h3>Debian / Ubuntu</h3>
+              <pre>
+          # Import GPG key (if not already done)
+          curl -fsSL https://m4r1k.github.io/Eneru/KEY.gpg | sudo gpg --dearmor -o /usr/share/keyrings/eneru.gpg
+
+          # Add testing repository
+          echo "deb [arch=all signed-by=/usr/share/keyrings/eneru.gpg] https://m4r1k.github.io/Eneru/deb testing main" | sudo tee /etc/apt/sources.list.d/eneru-testing.list
+
+          # Install pre-release version
+          sudo apt update
+          sudo apt install eneru</pre>
+
+              <h3>RHEL / Fedora</h3>
+              <pre>
+          # Add testing repository
+          sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/eneru-testing.repo
+
+          # Install pre-release version
+          sudo dnf install eneru</pre>
+            </div>
+
+            <div class="section">
               <h2>Direct Downloads</h2>
               <p>Download packages directly from <a href="https://github.com/m4r1k/Eneru/releases">GitHub Releases</a>.</p>
             </div>
 
             <div class="section">
-              <h2>Repository Contents</h2>
-              <ul>
-                <li><a href="KEY.gpg">KEY.gpg</a> - GPG public key</li>
-                <li><a href="deb/">deb/</a> - Debian/Ubuntu packages</li>
-                <li><a href="rpm/">rpm/</a> - RHEL/Fedora packages</li>
-              </ul>
+              <h2>GPG Verification</h2>
+              <p>All repository metadata is signed with our <a href="KEY.gpg">GPG key</a>.</p>
             </div>
           </body>
           </html>
-          EOF
+          HTMLEOF
+
+      - name: Create README.md
+        run: |
+          cd gh-pages
+          cat > README.md <<'READMEEOF'
+          # Eneru Package Repository
+
+          Official APT and YUM/DNF package repository for [Eneru](https://github.com/m4r1k/Eneru).
+
+          ## Stable Releases
+
+          ### Debian / Ubuntu
+
+          ```bash
+          # Import GPG key
+          curl -fsSL https://m4r1k.github.io/Eneru/KEY.gpg | sudo gpg --dearmor -o /usr/share/keyrings/eneru.gpg
+
+          # Add repository
+          echo "deb [arch=all signed-by=/usr/share/keyrings/eneru.gpg] https://m4r1k.github.io/Eneru/deb stable main" | sudo tee /etc/apt/sources.list.d/eneru.list
+
+          # Install
+          sudo apt update
+          sudo apt install eneru
+          ```
+
+          ### RHEL / Fedora
+
+          ```bash
+          # RHEL 8/9: Enable EPEL first (required for apprise dependency)
+          sudo dnf install -y epel-release
+
+          # Add repository
+          sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
+
+          # Install
+          sudo dnf install eneru
+          ```
+
+          ## Testing / Pre-release
+
+          > **Note:** The testing channel contains release candidates (rc), beta, and alpha versions.
+          > These may be unstable. Use in production at your own risk.
+
+          ### Debian / Ubuntu
+
+          ```bash
+          # Add testing repository (GPG key must already be imported)
+          echo "deb [arch=all signed-by=/usr/share/keyrings/eneru.gpg] https://m4r1k.github.io/Eneru/deb testing main" | sudo tee /etc/apt/sources.list.d/eneru-testing.list
+
+          sudo apt update
+          sudo apt install eneru
+          ```
+
+          ### RHEL / Fedora
+
+          ```bash
+          sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/eneru-testing.repo
+
+          sudo dnf install eneru
+          ```
+
+          ## Direct Downloads
+
+          Download packages directly from [GitHub Releases](https://github.com/m4r1k/Eneru/releases).
+
+          ## GPG Verification
+
+          All repository metadata is signed. Import the [GPG key](https://m4r1k.github.io/Eneru/KEY.gpg) to verify packages.
+          READMEEOF
 
       - name: Deploy to gh-pages
         run: |
@@ -289,6 +476,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Package Version:** ${{ steps.version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
           echo "**Code Version:** ${{ steps.version.outputs.VERSION_FULL }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Channel:** ${{ steps.channel.outputs.CHANNEL }}" >> $GITHUB_STEP_SUMMARY
           echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Packages Built" >> $GITHUB_STEP_SUMMARY
@@ -296,10 +484,16 @@ jobs:
           ls -la *.deb *.rpm >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### All Packages in Repository" >> $GITHUB_STEP_SUMMARY
+          echo "### Stable Packages" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          ls -la gh-pages/deb/pool/main/*.deb >> $GITHUB_STEP_SUMMARY || echo "No deb packages yet"
-          ls -la gh-pages/rpm/*.rpm >> $GITHUB_STEP_SUMMARY || echo "No rpm packages yet"
+          ls -la gh-pages/deb/pool/main/*.deb >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "No stable deb packages"
+          ls -la gh-pages/rpm/*.rpm >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "No stable rpm packages"
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Testing Packages" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ls -la gh-pages/deb/pool/testing/*.deb >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "No testing deb packages"
+          ls -la gh-pages/rpm/testing/*.rpm >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "No testing rpm packages"
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Package Repository" >> $GITHUB_STEP_SUMMARY

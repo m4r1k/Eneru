@@ -38,6 +38,7 @@ nav:
   - Remote Servers: remote-servers.md
   - Testing: testing.md
   - Troubleshooting: troubleshooting.md
+  - Roadmap: roadmap.md
   - Changelog: changelog.md
 
 markdown_extensions:
