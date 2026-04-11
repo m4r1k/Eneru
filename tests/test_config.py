@@ -227,8 +227,7 @@ class TestAvatarUrlAppending:
         avatar = "https://example.com/avatar.png"
         result = ConfigLoader._append_avatar_to_url(TEST_DISCORD_APPRISE_URL, avatar)
 
-        assert "avatar_url=" in result
-        assert "example.com" in result
+        assert "avatar_url=https%3A%2F%2Fexample.com%2Favatar.png" in result
 
     @pytest.mark.unit
     def test_append_avatar_to_slack(self):
