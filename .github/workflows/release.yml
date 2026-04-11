@@ -68,7 +68,7 @@ jobs:
         id: channel
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
-          if echo "$VERSION" | grep -qE '-(rc|beta|alpha)'; then
+          if [[ "$VERSION" =~ -(rc|beta|alpha) ]]; then
             CHANNEL="testing"
           else
             CHANNEL="stable"
