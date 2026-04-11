@@ -43,7 +43,7 @@ jobs:
         run: VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager rpm --target .
 
       - name: Upload packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: packages
           path: |
