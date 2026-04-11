@@ -1,0 +1,36 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: Eneru
+Label: Eneru
+Suite: testing
+Codename: testing
+Architectures: all
+Components: main
+Description: Eneru UPS Monitor packages (testing)
+Date: Sat, 11 Apr 2026 12:41:43 +0000
+MD5Sum:
+ d770b2b071d50d708fd950bab116e31a 530 main/binary-all/Packages.gz
+ 4a2eca43e7b76658e2ebef8b33e6bfd3 744 main/binary-all/Packages
+SHA1:
+ 6e58bb8e3d4591a9d0d91d72b7e8cb685612afe2 530 main/binary-all/Packages.gz
+ d25f0425c7c2e4eed4fe91f91f303d4f90427073 744 main/binary-all/Packages
+SHA256:
+ c71b530aa844affaf35e19682f1c8f9f9874899e1e8bc2e90aea68dcef1ea749 530 main/binary-all/Packages.gz
+ 564adf4389c908c1648be7ae1a3de01a3781ab07b8e13e0adee01acf9533b928 744 main/binary-all/Packages
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEWVbOf3R4twP7zVv0hAK87i1Wf24FAmnaQYcACgkQhAK87i1W
+f26JuA/+Mi3biifjxUpJjE1w4UKr6WwdmlxRNm8aMHCoaEzCIf+OkQ/7GUpUn+CW
+nIWaZ04YPhCZ4decF7DFvKuV2tSqMqR0YQi3FpySDHyx71lqI1LZE7P4gPAo0xY7
+wml1ifwOwMpy2oYLr+e36IHgho0FsOMUwTOpeBHUxH0i/rQoQCLFjgP0ukXrkzZ/
+d5pEOzNqMh8CwdQ+oi1nksz2En3sdzeRB1X9NiC9RZVXs06ePD8UJzjBi7htDDFC
+wsXbW04nPgUFVQzgDJExw3WQ8v7IHhHrUEa0hFZD9m0SC+1YqdjyKRB0KN0H9Ll8
++bm7LbQKAxVRcgMg6XLdUQxFGep3X2vI70ztV4fh4lvP21NtxvL30ogsNLc1qUcK
+TFUQ4Qhc4dKnpz5ZSdizDS9uP+FKYe21gCF148OxPvhaXkcNaWMi+XNnm+jNr+3N
+LqUptYvLkhcYylTqgUcbYAhx7bMAwXMbZx9UbaIkedwz3KexbJYNtjRONUmHnF8Y
+mCjo1A4skg3bm3TQ7LUx6zZpLDO7dAyKK1Fc1uBExDx+SVD0UL2TaoI4foCOeY8r
+iBAYnFWzX/gsKrFk+dWeLrWo5rsmwk1O/5XiJN6uYhW/J/itMXcZ7yybVM1shQN2
+fhRhfCHikEfizNZRs3UTjZ4gTKv86VC136Ncn2jUzt42TYJhdR8=
+=Xk5w
+-----END PGP SIGNATURE-----
