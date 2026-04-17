@@ -29,6 +29,33 @@ services:
     networks:
       - eneru-e2e
 
+  # Additional SSH targets for multi-phase shutdown ordering tests.
+  # Identical image to ssh-target, exposed on different host ports so
+  # Eneru can address each one independently via SSH.
+  ssh-target-2:
+    build:
+      context: ./ssh-target
+      dockerfile: Dockerfile
+    container_name: eneru-e2e-ssh-2
+    ports:
+      - "2223:22"
+    volumes:
+      - ./ssh-target/authorized_keys:/tmp/host-authorized-keys:ro
+    networks:
+      - eneru-e2e
+
+  ssh-target-3:
+    build:
+      context: ./ssh-target
+      dockerfile: Dockerfile
+    container_name: eneru-e2e-ssh-3
+    ports:
+      - "2224:22"
+    volumes:
+      - ./ssh-target/authorized_keys:/tmp/host-authorized-keys:ro
+    networks:
+      - eneru-e2e
+
   # Target containers that Eneru will stop during shutdown sequence
   target-nginx:
     image: nginx:alpine

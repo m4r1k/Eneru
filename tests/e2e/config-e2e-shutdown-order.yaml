@@ -1,0 +1,98 @@
+# E2E config exercising multi-phase shutdown ordering.
+#
+# Three SSH targets across two phases:
+#   Phase 1 (shutdown_order: 1, parallel within): Target1, Target2
+#   Phase 2 (shutdown_order: 2, alone):           Target3
+#
+# After triggering shutdown, the per-target /var/log/shutdown.log timestamps
+# must satisfy: max(phase-1 timestamps) <= phase-2 timestamp.
+# Eneru's stdout must show "Phase 1/2 (order=1)" and "Phase 2/2 (order=2)".
+
+ups:
+  name: "TestUPS@localhost:3493"
+  check_interval: 1
+  max_stale_data_tolerance: 3
+
+triggers:
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+  depletion:
+    window: 300
+    critical_rate: 15.0
+    grace_period: 30
+  extended_time:
+    enabled: false
+
+behavior:
+  dry_run: false  # Real execution against the SSH targets
+
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-shutdown-order-state"
+  battery_history_file: "/tmp/eneru-e2e-shutdown-order-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-shutdown-order-flag"
+
+notifications:
+  enabled: false
+  urls: []
+
+virtual_machines:
+  enabled: false
+
+containers:
+  enabled: false  # Avoid stopping the NUT/SSH containers in this test
+
+filesystems:
+  sync_enabled: false  # Skip sync for test speed; covered by other E2E tests
+  unmount:
+    enabled: false
+
+remote_servers:
+  - name: "Phase1-Target1"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    connect_timeout: 5
+    command_timeout: 10
+    shutdown_safety_margin: 5  # Tight budget so test finishes quickly
+    shutdown_order: 1
+    shutdown_command: "sudo shutdown -h now"
+    ssh_options:
+      - "-o Port=2222"
+      - "-o StrictHostKeyChecking=no"
+      - "-o UserKnownHostsFile=/dev/null"
+      - "-o IdentityFile=/tmp/e2e-ssh-key"
+
+  - name: "Phase1-Target2"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    connect_timeout: 5
+    command_timeout: 10
+    shutdown_safety_margin: 5
+    shutdown_order: 1
+    shutdown_command: "sudo shutdown -h now"
+    ssh_options:
+      - "-o Port=2223"
+      - "-o StrictHostKeyChecking=no"
+      - "-o UserKnownHostsFile=/dev/null"
+      - "-o IdentityFile=/tmp/e2e-ssh-key"
+
+  - name: "Phase2-Target3"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    connect_timeout: 5
+    command_timeout: 10
+    shutdown_safety_margin: 5
+    shutdown_order: 2
+    shutdown_command: "sudo shutdown -h now"
+    ssh_options:
+      - "-o Port=2224"
+      - "-o StrictHostKeyChecking=no"
+      - "-o UserKnownHostsFile=/dev/null"
+      - "-o IdentityFile=/tmp/e2e-ssh-key"
+
+local_shutdown:
+  enabled: false  # CRITICAL: Never enable in CI - would kill the runner
+  command: "echo 'Local shutdown would execute here'"

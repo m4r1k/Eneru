@@ -187,7 +187,7 @@ The E2E tests use scenario files to simulate different UPS states:
 
 ### E2E test cases
 
-The E2E workflow (`.github/workflows/e2e.yml`) runs 18 tests on every push and PR:
+The E2E workflow (`.github/workflows/e2e.yml`) runs 19 tests on every push and PR:
 
 | Test | Description |
 |------|-------------|
@@ -209,6 +209,7 @@ The E2E workflow (`.github/workflows/e2e.yml`) runs 18 tests on every push and P
 | **Test 16** | Local drain (`drain_on_local_shutdown=true`): all groups drain before local shutdown |
 | **Test 17** | Local no-drain (`drain_on_local_shutdown=false`): only local group shuts down |
 | **Test 18** | Power recovery: OB then power restored, no shutdown triggered |
+| **Test 19** | Multi-phase shutdown ordering: 3 SSH targets across 2 phases (`shutdown_order: 1, 1, 2`) — verifies all received shutdown, "Phase N/M (order=X)" log lines, and timestamp ordering across phases |
 
 ### Running E2E tests locally
 

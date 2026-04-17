@@ -58,14 +58,16 @@ jobs:
           done
 
           echo ""
-          echo "Waiting for SSH server..."
-          for i in {1..30}; do
-            if nc -z localhost 2222 2>/dev/null; then
-              echo "SSH server ready!"
-              break
-            fi
-            echo "  Attempt $i/30..."
-            sleep 2
+          echo "Waiting for SSH servers (ports 2222, 2223, 2224)..."
+          for port in 2222 2223 2224; do
+            for i in {1..30}; do
+              if nc -z localhost "$port" 2>/dev/null; then
+                echo "  SSH server on $port ready!"
+                break
+              fi
+              echo "  Attempt $i/30 for $port..."
+              sleep 2
+            done
           done
 
           echo ""
@@ -626,6 +628,94 @@ jobs:
           fi
 
           echo "PASS: Recovery correctly handled - no shutdown, power restored logged"
+
+      # ========================================
+      # TEST 19: Multi-phase shutdown ordering
+      # ========================================
+      - name: "Test 19: Multi-phase shutdown ordering (shutdown_order)"
+        run: |
+          echo "=== Test 19: Multi-Phase Shutdown Ordering ==="
+
+          cd ${{ env.E2E_DIR }}
+
+          # Reset shutdown state on all three SSH targets so we get fresh
+          # timestamps from this run only.
+          for svc in ssh-target ssh-target-2 ssh-target-3; do
+            docker compose exec -T "$svc" sh -c \
+              ": > /var/log/shutdown.log && rm -f /var/run/shutdown-triggered && touch /var/run/server-alive"
+          done
+
+          rm -f /tmp/eneru-e2e-shutdown-order-flag
+
+          # Trigger shutdown via low battery
+          cp scenarios/low-battery.dev scenarios/apply.dev
+          sleep 3
+
+          eneru run --config config-e2e-shutdown-order.yaml --exit-after-shutdown 2>&1 \
+            | tee /tmp/test19.log || true
+
+          echo ""
+          echo "=== Verifying all three targets received shutdown ==="
+          for svc in ssh-target ssh-target-2 ssh-target-3; do
+            if docker compose exec -T "$svc" test -f /var/run/shutdown-triggered; then
+              echo "  PASS: $svc received shutdown"
+            else
+              echo "  FAIL: $svc did NOT receive shutdown"
+              docker compose logs "$svc"
+              exit 1
+            fi
+          done
+
+          echo ""
+          echo "=== Verifying phase log lines in Eneru output ==="
+          if grep -q "Phase 1/2 (order=1)" /tmp/test19.log; then
+            echo "PASS: Phase 1/2 (order=1) logged"
+          else
+            echo "FAIL: Phase 1/2 (order=1) not found in Eneru output"
+            cat /tmp/test19.log
+            exit 1
+          fi
+
+          if grep -q "Phase 2/2 (order=2)" /tmp/test19.log; then
+            echo "PASS: Phase 2/2 (order=2) logged"
+          else
+            echo "FAIL: Phase 2/2 (order=2) not found in Eneru output"
+            cat /tmp/test19.log
+            exit 1
+          fi
+
+          echo ""
+          echo "=== Verifying timestamp ordering across phases ==="
+          # Each /var/log/shutdown.log has a single line:
+          #   Tue Apr 17 19:43:00 UTC 2026: Shutdown command received: -h now
+          # We extract the date prefix, parse to epoch, and assert
+          # phase-2 timestamp >= max(phase-1 timestamps).
+          parse_epoch() {
+            local svc="$1"
+            local line
+            line=$(docker compose exec -T "$svc" cat /var/log/shutdown.log)
+            local ts="${line%%: Shutdown*}"
+            date -d "$ts" +%s
+          }
+
+          T1=$(parse_epoch ssh-target)
+          T2=$(parse_epoch ssh-target-2)
+          T3=$(parse_epoch ssh-target-3)
+          PHASE1_MAX=$T1
+          [ "$T2" -gt "$PHASE1_MAX" ] && PHASE1_MAX=$T2
+
+          echo "  Phase 1 timestamps: ssh-target=$T1, ssh-target-2=$T2 (max=$PHASE1_MAX)"
+          echo "  Phase 2 timestamp:  ssh-target-3=$T3"
+
+          if [ "$T3" -ge "$PHASE1_MAX" ]; then
+            echo "PASS: phase-2 (T=$T3) ran at or after phase-1 max (T=$PHASE1_MAX)"
+          else
+            echo "FAIL: phase-2 (T=$T3) ran BEFORE phase-1 max (T=$PHASE1_MAX) — ordering broken"
+            exit 1
+          fi
+
+          echo ""
+          echo "=== Test 19 PASSED: multi-phase shutdown ordering verified ==="
 
       - name: Collect logs on failure
         if: failure()
