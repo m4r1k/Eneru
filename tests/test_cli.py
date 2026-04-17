@@ -108,11 +108,11 @@ remote_servers:
             assert exc_info.value.code == 0
 
         captured = capsys.readouterr()
-        assert "VMs enabled: True" in captured.out
-        assert "Containers enabled: True" in captured.out
+        assert "Virtual machines" in captured.out
+        assert "Containers" in captured.out
         assert "podman" in captured.out
         assert "2 compose file(s)" in captured.out
-        assert "Remote servers: 1" in captured.out
+        assert "Remote server: Server 1" in captured.out
 
     @pytest.mark.unit
     def test_validate_config_shows_notifications(self, tmp_path, capsys):
@@ -211,8 +211,7 @@ filesystems:
             assert exc_info.value.code == 0
 
         captured = capsys.readouterr()
-        assert "sync: True" in captured.out or "Filesystems sync: True" in captured.out
-        assert "3 mount(s)" in captured.out
+        assert "Filesystem sync + unmount 3 mount(s)" in captured.out
 
     @pytest.mark.unit
     def test_validate_multi_ups_config(self, tmp_path, capsys):

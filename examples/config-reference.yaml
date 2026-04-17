@@ -189,10 +189,22 @@ filesystems:
 # Remote Server Shutdown
 # Define multiple remote servers to shutdown via SSH
 # Each server can have pre_shutdown_commands to gracefully stop services before shutdown
-# Servers are processed in two phases:
-#   1. Sequential: Servers with parallel: false are shutdown one by one (in config order)
-#   2. Parallel: Remaining servers (parallel: true, the default) are shutdown concurrently
-# Use parallel: false for servers with dependencies (e.g., NAS that other servers mount)
+#
+# Shutdown ordering:
+#   Use shutdown_order to define phases. Servers with the same shutdown_order
+#   run in parallel; different orders run sequentially (ascending).
+#   A server alone in its order effectively runs sequentially.
+#
+#   Example: shutdown_order: 1 (compute), 2 (storage), 3 (network)
+#
+# Legacy mode (no shutdown_order):
+#   Servers with parallel: false shutdown sequentially before all parallel: true servers.
+#   This is equivalent to shutdown_order for simple two-group setups.
+#
+# IMPORTANT: shutdown_order and parallel are mutually exclusive.
+#   Setting both on the same server is a hard validation error — pick one
+#   model per server. Use shutdown_order for multi-phase ordering, or
+#   parallel for the legacy two-group behavior.
 remote_servers:
   - name: "Synology NAS"
     enabled: true
@@ -207,9 +219,24 @@ remote_servers:
     # SSH options (optional)
     ssh_options:
       - "-o StrictHostKeyChecking=no"
-    # Parallel shutdown (default: true)
-    # Set to false to shutdown this server sequentially before the parallel batch
+    # Shutdown order (optional, positive integer >= 1)
+    # Servers with the same shutdown_order run in parallel.
+    # Lower orders run first. A server alone in its order runs sequentially.
+    # shutdown_order: 1
+    #
+    # Legacy alternative: parallel: false
+    # Shuts down this server sequentially before the parallel batch.
+    # Mutually exclusive with shutdown_order — setting both is a hard error.
     # parallel: false
+    #
+    # Safety margin (seconds) added on top of (pre_shutdown_commands +
+    # command_timeout + connect_timeout) when waiting for this server's
+    # parallel-shutdown thread. Covers SSH session setup, OS jitter, and
+    # the brief window between the remote shutdown command starting and
+    # SSH closing the channel. Default: 60. Tune higher for servers with
+    # battery-backed RAID or large flush windows; tune lower for fast VMs.
+    # Set to 0 to opt out of the safety buffer entirely.
+    # shutdown_safety_margin: 60
 
   # Example: Proxmox server with VMs and containers
   # - name: "Proxmox Host"
@@ -244,12 +271,47 @@ remote_servers:
   #     - action: "sync"
   #   shutdown_command: "shutdown -h now"
 
-  # Example: Server with dependency - must shutdown LAST
+  # Example: Server with dependency - must shutdown AFTER compute servers
   # - name: "Storage Server"
   #   enabled: true
   #   host: "192.168.178.200"
   #   user: "root"
-  #   parallel: false  # Shutdown sequentially (after all parallel servers)
+  #   shutdown_order: 2  # Phase 2: after compute (order 1), before network (order 3)
+  #   shutdown_command: "shutdown -h now"
+
+  # Example: Multi-phase shutdown ordering
+  # Phase 1: Compute servers shutdown in parallel
+  # - name: "App Server 1"
+  #   enabled: true
+  #   host: "192.168.178.100"
+  #   user: "root"
+  #   shutdown_order: 1
+  #   shutdown_command: "shutdown -h now"
+  # - name: "App Server 2"
+  #   enabled: true
+  #   host: "192.168.178.101"
+  #   user: "root"
+  #   shutdown_order: 1
+  #   shutdown_command: "shutdown -h now"
+  # Phase 2: Storage shuts down alone (after compute releases mounts)
+  # - name: "Storage Server"
+  #   enabled: true
+  #   host: "192.168.178.200"
+  #   user: "root"
+  #   shutdown_order: 2
+  #   shutdown_command: "shutdown -h now"
+  # Phase 3: Network infrastructure shuts down last
+  # - name: "Router"
+  #   enabled: true
+  #   host: "192.168.178.254"
+  #   user: "admin"
+  #   shutdown_order: 3
+  #   shutdown_command: "shutdown -h now"
+  # - name: "Switch"
+  #   enabled: true
+  #   host: "192.168.178.253"
+  #   user: "admin"
+  #   shutdown_order: 3
   #   shutdown_command: "shutdown -h now"
 
 # Local Server Shutdown

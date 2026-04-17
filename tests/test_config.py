@@ -656,8 +656,13 @@ remote_servers:
         assert server.pre_shutdown_commands == []
 
     @pytest.mark.unit
-    def test_parallel_option_default_true(self, temp_config_file):
-        """Test that parallel defaults to True when not specified."""
+    def test_parallel_option_default_none(self, temp_config_file):
+        """Test that parallel defaults to None (unset) when not specified.
+
+        Absent ``parallel`` is treated as the default parallel batch by
+        ``compute_effective_order``; the None state is preserved so the
+        validator can detect mutual-exclusion conflicts with shutdown_order.
+        """
         config_data = """
 remote_servers:
   - name: "Server Without Parallel"
@@ -670,7 +675,7 @@ remote_servers:
         config = ConfigLoader.load(str(temp_config_file))
 
         server = config.remote_servers[0]
-        assert server.parallel is True
+        assert server.parallel is None
 
     @pytest.mark.unit
     def test_parallel_option_explicit_false(self, temp_config_file):
@@ -717,7 +722,7 @@ remote_servers:
         config = ConfigLoader.load(str(temp_config_file))
 
         assert len(config.remote_servers) == 3
-        assert config.remote_servers[0].parallel is True
+        assert config.remote_servers[0].parallel is None  # field omitted
         assert config.remote_servers[1].parallel is False
         assert config.remote_servers[2].parallel is True
 
@@ -967,7 +972,8 @@ remote_servers:
         assert server.shutdown_command == "sudo shutdown -h now"  # default
         assert server.ssh_options == []  # default
         assert server.pre_shutdown_commands == []  # default
-        assert server.parallel is True  # default
+        assert server.parallel is None  # default (unset; behaves as parallel batch)
+        assert server.shutdown_safety_margin == 60  # default
 
     @pytest.mark.unit
     def test_filesystems_sync_disabled(self, temp_config_file):
@@ -1084,3 +1090,430 @@ notifications:
         # Should only have one URL (deduplication logic)
         assert len(config.notifications.urls) == 1
         assert "discord://" in config.notifications.urls[0]
+
+
+class TestShutdownOrderConfig:
+    """Test shutdown_order configuration parsing and validation."""
+
+    @pytest.mark.unit
+    def test_shutdown_order_default_none(self, temp_config_file):
+        """Test that shutdown_order defaults to None when not specified."""
+        config_data = """
+remote_servers:
+  - name: "Server"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        assert config.remote_servers[0].shutdown_order is None
+
+    @pytest.mark.unit
+    def test_shutdown_order_positive_integer(self, temp_config_file):
+        """Test parsing a positive shutdown_order value."""
+        config_data = """
+remote_servers:
+  - name: "Server"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_order: 2
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        assert config.remote_servers[0].shutdown_order == 2
+
+    @pytest.mark.unit
+    def test_shutdown_order_multiple_servers(self, temp_config_file):
+        """Test multiple servers with different shutdown_order values."""
+        config_data = """
+remote_servers:
+  - name: "App Server 1"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_order: 1
+    shutdown_command: "shutdown -h now"
+  - name: "Storage Server"
+    enabled: true
+    host: "192.168.1.11"
+    user: "root"
+    shutdown_order: 2
+    shutdown_command: "shutdown -h now"
+  - name: "App Server 2"
+    enabled: true
+    host: "192.168.1.12"
+    user: "root"
+    shutdown_order: 1
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        assert config.remote_servers[0].shutdown_order == 1
+        assert config.remote_servers[1].shutdown_order == 2
+        assert config.remote_servers[2].shutdown_order == 1
+
+    @pytest.mark.unit
+    def test_shutdown_order_mixed_with_parallel_flag(self, temp_config_file):
+        """Test that shutdown_order and parallel are parsed independently."""
+        config_data = """
+remote_servers:
+  - name: "With Order"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_order: 3
+    shutdown_command: "shutdown -h now"
+  - name: "Legacy Sequential"
+    enabled: true
+    host: "192.168.1.11"
+    user: "root"
+    parallel: false
+    shutdown_command: "shutdown -h now"
+  - name: "Legacy Parallel"
+    enabled: true
+    host: "192.168.1.12"
+    user: "root"
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        assert config.remote_servers[0].shutdown_order == 3
+        assert config.remote_servers[0].parallel is None  # parallel not in YAML
+        assert config.remote_servers[1].shutdown_order is None
+        assert config.remote_servers[1].parallel is False
+        assert config.remote_servers[2].shutdown_order is None
+        assert config.remote_servers[2].parallel is None  # parallel not in YAML
+
+    @pytest.mark.unit
+    def test_shutdown_order_with_gaps(self, temp_config_file):
+        """Test that gaps in shutdown_order values are accepted."""
+        config_data = """
+remote_servers:
+  - name: "Server A"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_order: 10
+    shutdown_command: "shutdown -h now"
+  - name: "Server B"
+    enabled: true
+    host: "192.168.1.11"
+    user: "root"
+    shutdown_order: 30
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        assert config.remote_servers[0].shutdown_order == 10
+        assert config.remote_servers[1].shutdown_order == 30
+
+    @pytest.mark.unit
+    def test_validation_error_shutdown_order_with_parallel_false(self, temp_config_file):
+        """Test that validation errors when shutdown_order and parallel: false are both set."""
+        config_data = """
+remote_servers:
+  - name: "Conflicting Server"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_order: 2
+    parallel: false
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config)
+        error_msgs = [
+            m for m in messages
+            if "ERROR" in m and "cannot set both" in m
+        ]
+        assert len(error_msgs) == 1
+        assert "Conflicting Server" in error_msgs[0]
+        assert "shutdown_order" in error_msgs[0]
+        assert "parallel" in error_msgs[0]
+
+    @pytest.mark.unit
+    def test_validation_error_shutdown_order_with_parallel_true(self, temp_config_file):
+        """Test that validation errors when shutdown_order and parallel: true are both set."""
+        config_data = """
+remote_servers:
+  - name: "Conflicting Server"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_order: 2
+    parallel: true
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config)
+        error_msgs = [
+            m for m in messages
+            if "ERROR" in m and "cannot set both" in m
+        ]
+        assert len(error_msgs) == 1
+        assert "Conflicting Server" in error_msgs[0]
+
+    @pytest.mark.unit
+    def test_validation_error_shutdown_order_zero(self, temp_config_file):
+        """Test that validation rejects shutdown_order: 0."""
+        config_data = """
+remote_servers:
+  - name: "Bad Server"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_order: 0
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config)
+        error_msgs = [m for m in messages if "ERROR" in m and "shutdown_order" in m]
+        assert len(error_msgs) == 1
+        assert ">= 1" in error_msgs[0]
+
+    @pytest.mark.unit
+    def test_validation_error_shutdown_order_negative(self, temp_config_file):
+        """Test that validation rejects negative shutdown_order."""
+        config_data = """
+remote_servers:
+  - name: "Bad Server"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_order: -1
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config)
+        error_msgs = [m for m in messages if "ERROR" in m and "shutdown_order" in m]
+        assert len(error_msgs) == 1
+        assert ">= 1" in error_msgs[0]
+
+    @pytest.mark.unit
+    def test_validation_no_message_shutdown_order_alone(self, temp_config_file):
+        """Test no validation message when shutdown_order is set without parallel."""
+        config_data = """
+remote_servers:
+  - name: "Good Server"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_order: 1
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config)
+        assert not any("shutdown_order" in m for m in messages)
+        assert not any("cannot set both" in m for m in messages)
+
+    @pytest.mark.unit
+    def test_validation_error_shutdown_order_boolean(self, temp_config_file):
+        """Test that validation rejects shutdown_order: true (YAML bool is int subclass)."""
+        config_data = """
+remote_servers:
+  - name: "Bad Server"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_order: true
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config)
+        error_msgs = [m for m in messages if "ERROR" in m and "shutdown_order" in m]
+        assert len(error_msgs) == 1
+        assert "positive integer" in error_msgs[0]
+
+    @pytest.mark.unit
+    def test_validation_error_shutdown_order_float(self, temp_config_file):
+        """Test that validation rejects shutdown_order: 2.5 (YAML float)."""
+        config_data = """
+remote_servers:
+  - name: "Bad Server"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_order: 2.5
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config)
+        error_msgs = [m for m in messages if "ERROR" in m and "shutdown_order" in m]
+        assert len(error_msgs) == 1
+        assert "positive integer" in error_msgs[0]
+
+    @pytest.mark.unit
+    def test_validation_no_conflict_error_when_shutdown_order_invalid(self, temp_config_file):
+        """Test no 'cannot set both' error when shutdown_order itself is invalid.
+
+        When shutdown_order fails its own validation, we should not also
+        complain about the mutual-exclusion conflict — the user needs to
+        fix shutdown_order first; chaining errors would be noisy.
+        """
+        config_data = """
+remote_servers:
+  - name: "Bad Server"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_order: -1
+    parallel: false
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config)
+        order_error_msgs = [
+            m for m in messages
+            if "ERROR" in m and "shutdown_order" in m and ">= 1" in m
+        ]
+        conflict_msgs = [m for m in messages if "cannot set both" in m]
+        assert len(order_error_msgs) == 1
+        assert len(conflict_msgs) == 0
+
+
+class TestShutdownSafetyMargin:
+    """Test shutdown_safety_margin configuration parsing and validation."""
+
+    @pytest.mark.unit
+    def test_safety_margin_default_60(self, temp_config_file):
+        """Test that shutdown_safety_margin defaults to 60 when not specified."""
+        config_data = """
+remote_servers:
+  - name: "Default Server"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+        assert config.remote_servers[0].shutdown_safety_margin == 60
+
+    @pytest.mark.unit
+    def test_safety_margin_custom_value(self, temp_config_file):
+        """Test parsing a custom shutdown_safety_margin value."""
+        config_data = """
+remote_servers:
+  - name: "Slow NAS"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_safety_margin: 180
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+        assert config.remote_servers[0].shutdown_safety_margin == 180
+
+    @pytest.mark.unit
+    def test_safety_margin_zero_accepted(self, temp_config_file):
+        """Test that shutdown_safety_margin: 0 is accepted (opt-out of buffer)."""
+        config_data = """
+remote_servers:
+  - name: "No Margin"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_safety_margin: 0
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+        assert config.remote_servers[0].shutdown_safety_margin == 0
+
+        messages = ConfigLoader.validate_config(config)
+        assert not any("shutdown_safety_margin" in m for m in messages)
+
+    @pytest.mark.unit
+    def test_safety_margin_negative_rejected(self, temp_config_file):
+        """Test that negative shutdown_safety_margin is rejected."""
+        config_data = """
+remote_servers:
+  - name: "Bad Margin"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_safety_margin: -5
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config)
+        error_msgs = [
+            m for m in messages
+            if "ERROR" in m and "shutdown_safety_margin" in m
+        ]
+        assert len(error_msgs) == 1
+        assert ">= 0" in error_msgs[0]
+
+    @pytest.mark.unit
+    def test_safety_margin_boolean_rejected(self, temp_config_file):
+        """Test that boolean shutdown_safety_margin is rejected."""
+        config_data = """
+remote_servers:
+  - name: "Bad Margin"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_safety_margin: true
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config)
+        error_msgs = [
+            m for m in messages
+            if "ERROR" in m and "shutdown_safety_margin" in m
+        ]
+        assert len(error_msgs) == 1
+        assert "non-negative integer" in error_msgs[0]
+
+    @pytest.mark.unit
+    def test_safety_margin_float_rejected(self, temp_config_file):
+        """Test that float shutdown_safety_margin is rejected."""
+        config_data = """
+remote_servers:
+  - name: "Bad Margin"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_safety_margin: 30.5
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config)
+        error_msgs = [
+            m for m in messages
+            if "ERROR" in m and "shutdown_safety_margin" in m
+        ]
+        assert len(error_msgs) == 1
+        assert "non-negative integer" in error_msgs[0]

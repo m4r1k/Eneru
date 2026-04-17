@@ -18,7 +18,7 @@ from eneru import (
     VMConfig, ContainersConfig, FilesystemsConfig, UnmountConfig,
     RemoteServerConfig, LocalShutdownConfig, MonitorState,
 )
-from eneru.monitor import UPSGroupMonitor
+from eneru.monitor import UPSGroupMonitor, compute_effective_order
 
 
 def make_monitor(tmp_path, **overrides):
@@ -29,6 +29,7 @@ def make_monitor(tmp_path, **overrides):
         depletion=DepletionConfig(window=300, critical_rate=15.0, grace_period=90),
         extended_time=ExtendedTimeConfig(enabled=True, threshold=900),
     ))
+    remote_servers = overrides.pop("remote_servers", [])
     config = Config(
         ups_groups=[UPSGroupConfig(
             ups=UPSConfig(name="TestUPS@localhost"),
@@ -39,6 +40,7 @@ def make_monitor(tmp_path, **overrides):
                 sync_enabled=False,
                 unmount=UnmountConfig(enabled=False),
             ),
+            remote_servers=remote_servers,
             is_local=True,
         )],
         behavior=BehaviorConfig(dry_run=True),
@@ -563,3 +565,368 @@ class TestConnectionGracePeriod:
         monitor._handle_connection_failure("Connection refused")
 
         assert monitor.state.connection_state == "FAILED"
+
+
+# ==============================================================================
+# MULTI-PHASE SHUTDOWN ORDER
+# ==============================================================================
+
+class TestComputeEffectiveOrder:
+    """Test the compute_effective_order() function."""
+
+    @pytest.mark.unit
+    def test_all_defaults_get_order_zero(self):
+        """Servers with no shutdown_order and unset parallel get order 0."""
+        servers = [
+            RemoteServerConfig(name="A"),
+            RemoteServerConfig(name="B"),
+            RemoteServerConfig(name="C"),
+        ]
+        result = compute_effective_order(servers)
+        assert all(order == 0 for order, _ in result)
+
+    @pytest.mark.unit
+    def test_legacy_sequential_gets_negative_orders(self):
+        """parallel=False servers without shutdown_order get unique negative orders."""
+        servers = [
+            RemoteServerConfig(name="A", parallel=False),
+            RemoteServerConfig(name="B", parallel=False),
+            RemoteServerConfig(name="C", parallel=True),
+        ]
+        result = compute_effective_order(servers)
+        assert result[0] == (-2, servers[0])
+        assert result[1] == (-1, servers[1])
+        assert result[2] == (0, servers[2])
+
+    @pytest.mark.unit
+    def test_explicit_shutdown_order_used_as_is(self):
+        """Explicit shutdown_order values are used directly."""
+        servers = [
+            RemoteServerConfig(name="A", shutdown_order=3),
+            RemoteServerConfig(name="B", shutdown_order=1),
+            RemoteServerConfig(name="C", shutdown_order=2),
+        ]
+        result = compute_effective_order(servers)
+        assert result[0] == (3, servers[0])
+        assert result[1] == (1, servers[1])
+        assert result[2] == (2, servers[2])
+
+    @pytest.mark.unit
+    def test_mixed_explicit_and_legacy(self):
+        """Mix of shutdown_order and legacy parallel flag."""
+        servers = [
+            RemoteServerConfig(name="Explicit", shutdown_order=5),
+            RemoteServerConfig(name="LegacyPar"),
+            RemoteServerConfig(name="LegacySeq", parallel=False),
+        ]
+        result = compute_effective_order(servers)
+        assert result[0] == (5, servers[0])   # explicit
+        assert result[1] == (0, servers[1])   # legacy parallel -> 0
+        assert result[2] == (-1, servers[2])  # legacy sequential -> -1
+
+    @pytest.mark.unit
+    def test_shutdown_order_overrides_parallel_flag(self):
+        """compute_effective_order trusts shutdown_order even if parallel is also set.
+
+        Such a config is rejected by the validator (mutual-exclusion ERROR),
+        but the function itself should be defensive: if both are present, the
+        explicit shutdown_order value wins.
+        """
+        servers = [
+            RemoteServerConfig(name="A", shutdown_order=2, parallel=False),
+            RemoteServerConfig(name="B", shutdown_order=2, parallel=True),
+        ]
+        result = compute_effective_order(servers)
+        assert result[0][0] == 2
+        assert result[1][0] == 2
+
+    @pytest.mark.unit
+    def test_legacy_backward_compat_exact(self):
+        """Legacy config A(seq), B(seq), C(par), D(par) -> A then B then C+D."""
+        servers = [
+            RemoteServerConfig(name="A", parallel=False),
+            RemoteServerConfig(name="B", parallel=False),
+            RemoteServerConfig(name="C", parallel=True),
+            RemoteServerConfig(name="D", parallel=True),
+        ]
+        result = compute_effective_order(servers)
+
+        groups = {}
+        for order, s in result:
+            groups.setdefault(order, []).append(s.name)
+        sorted_keys = sorted(groups.keys())
+
+        assert sorted_keys == [-2, -1, 0]
+        assert groups[-2] == ["A"]
+        assert groups[-1] == ["B"]
+        assert sorted(groups[0]) == ["C", "D"]
+
+    @pytest.mark.unit
+    def test_empty_server_list(self):
+        """Empty server list returns empty result."""
+        assert compute_effective_order([]) == []
+
+    @pytest.mark.unit
+    def test_single_legacy_sequential(self):
+        """Single parallel=False server gets order -1."""
+        servers = [RemoteServerConfig(name="Solo", parallel=False)]
+        result = compute_effective_order(servers)
+        assert result[0] == (-1, servers[0])
+
+
+class TestMultiPhaseShutdown:
+    """Test multi-phase shutdown execution in UPSGroupMonitor."""
+
+    @pytest.mark.unit
+    def test_three_phase_execution_order(self, tmp_path):
+        """Three-phase shutdown executes groups in ascending order."""
+        monitor = make_monitor(tmp_path, remote_servers=[
+            RemoteServerConfig(name="Compute1", enabled=True, host="10.0.0.1",
+                               user="root", shutdown_order=1),
+            RemoteServerConfig(name="Compute2", enabled=True, host="10.0.0.2",
+                               user="root", shutdown_order=1),
+            RemoteServerConfig(name="Storage", enabled=True, host="10.0.0.3",
+                               user="root", shutdown_order=2),
+            RemoteServerConfig(name="Router", enabled=True, host="10.0.0.4",
+                               user="root", shutdown_order=3),
+            RemoteServerConfig(name="Switch", enabled=True, host="10.0.0.5",
+                               user="root", shutdown_order=3),
+        ])
+
+        call_order = []
+
+        def mock_shutdown(server):
+            call_order.append(server.name)
+
+        monitor._shutdown_remote_server = mock_shutdown
+        monitor._shutdown_remote_servers()
+
+        storage_idx = call_order.index("Storage")
+        assert call_order.index("Compute1") < storage_idx
+        assert call_order.index("Compute2") < storage_idx
+        assert call_order.index("Router") > storage_idx
+        assert call_order.index("Switch") > storage_idx
+
+    @pytest.mark.unit
+    def test_legacy_two_phase_backward_compat(self, tmp_path):
+        """Legacy config with parallel flag produces same ordering as old code."""
+        monitor = make_monitor(tmp_path, remote_servers=[
+            RemoteServerConfig(name="SeqA", enabled=True, host="10.0.0.1",
+                               user="root", parallel=False),
+            RemoteServerConfig(name="SeqB", enabled=True, host="10.0.0.2",
+                               user="root", parallel=False),
+            RemoteServerConfig(name="ParC", enabled=True, host="10.0.0.3",
+                               user="root", parallel=True),
+            RemoteServerConfig(name="ParD", enabled=True, host="10.0.0.4",
+                               user="root", parallel=True),
+        ])
+
+        call_order = []
+
+        def mock_shutdown(server):
+            call_order.append(server.name)
+
+        monitor._shutdown_remote_server = mock_shutdown
+        monitor._shutdown_remote_servers()
+
+        assert call_order.index("SeqA") < call_order.index("SeqB")
+        assert call_order.index("SeqB") < call_order.index("ParC")
+        assert call_order.index("SeqB") < call_order.index("ParD")
+
+    @pytest.mark.unit
+    def test_single_server_no_threading(self, tmp_path):
+        """A group with one server calls _shutdown_remote_server directly."""
+        monitor = make_monitor(tmp_path, remote_servers=[
+            RemoteServerConfig(name="Solo", enabled=True, host="10.0.0.1",
+                               user="root", shutdown_order=1),
+        ])
+
+        shutdown_called = []
+        monitor._shutdown_remote_server = lambda s: shutdown_called.append(s.name)
+        monitor._shutdown_remote_servers()
+
+        assert shutdown_called == ["Solo"]
+
+    @pytest.mark.unit
+    def test_disabled_servers_excluded(self, tmp_path):
+        """Disabled servers are not included in shutdown ordering."""
+        monitor = make_monitor(tmp_path, remote_servers=[
+            RemoteServerConfig(name="Enabled", enabled=True, host="10.0.0.1",
+                               user="root", shutdown_order=1),
+            RemoteServerConfig(name="Disabled", enabled=False, host="10.0.0.2",
+                               user="root", shutdown_order=1),
+        ])
+
+        shutdown_called = []
+        monitor._shutdown_remote_server = lambda s: shutdown_called.append(s.name)
+        monitor._shutdown_remote_servers()
+
+        assert shutdown_called == ["Enabled"]
+
+    @pytest.mark.unit
+    def test_no_enabled_servers_returns_early(self, tmp_path):
+        """No enabled servers means _shutdown_remote_servers returns immediately."""
+        monitor = make_monitor(tmp_path, remote_servers=[
+            RemoteServerConfig(name="Off", enabled=False, host="10.0.0.1", user="root"),
+        ])
+
+        log_messages = []
+        monitor._log_message = lambda msg, *a, **kw: log_messages.append(msg)
+        monitor._shutdown_remote_servers()
+
+        assert not any("🌐" in m for m in log_messages)
+
+    @pytest.mark.unit
+    def test_failure_in_one_phase_continues_to_next(self, tmp_path):
+        """A failure in one phase does not prevent subsequent phases from running."""
+        monitor = make_monitor(tmp_path, remote_servers=[
+            RemoteServerConfig(name="FailServer", enabled=True, host="10.0.0.1",
+                               user="root", shutdown_order=1),
+            RemoteServerConfig(name="GoodServer", enabled=True, host="10.0.0.2",
+                               user="root", shutdown_order=2),
+        ])
+
+        call_order = []
+
+        def mock_shutdown(server):
+            call_order.append(server.name)
+            if server.name == "FailServer":
+                raise RuntimeError("SSH failed")
+
+        monitor._shutdown_remote_server = mock_shutdown
+        monitor._shutdown_remote_servers()
+
+        assert call_order == ["FailServer", "GoodServer"]
+
+    @pytest.mark.unit
+    def test_phase_logging_multi_phase(self, tmp_path):
+        """Multi-phase shutdown logs phase headers."""
+        monitor = make_monitor(tmp_path, remote_servers=[
+            RemoteServerConfig(name="A", enabled=True, host="10.0.0.1",
+                               user="root", shutdown_order=1),
+            RemoteServerConfig(name="B", enabled=True, host="10.0.0.2",
+                               user="root", shutdown_order=2),
+        ])
+
+        log_messages = []
+        monitor._log_message = lambda msg, *a, **kw: log_messages.append(msg)
+        monitor._shutdown_remote_server = lambda s: None
+        monitor._shutdown_remote_servers()
+
+        phase_logs = [m for m in log_messages if "Phase" in m]
+        assert len(phase_logs) == 2
+        assert "Phase 1/2 (order=1)" in phase_logs[0]
+        assert "Phase 2/2 (order=2)" in phase_logs[1]
+
+    @pytest.mark.unit
+    def test_no_phase_logging_single_phase(self, tmp_path):
+        """Single-phase shutdown does not log phase headers."""
+        monitor = make_monitor(tmp_path, remote_servers=[
+            RemoteServerConfig(name="A", enabled=True, host="10.0.0.1",
+                               user="root", shutdown_order=1),
+            RemoteServerConfig(name="B", enabled=True, host="10.0.0.2",
+                               user="root", shutdown_order=1),
+        ])
+
+        log_messages = []
+        monitor._log_message = lambda msg, *a, **kw: log_messages.append(msg)
+        monitor._shutdown_remote_server = lambda s: None
+        monitor._shutdown_remote_servers()
+
+        assert not any("Phase" in m for m in log_messages)
+
+    @pytest.mark.unit
+    def test_parallel_group_uses_threads(self, tmp_path):
+        """Same-group servers run in parallel via threads."""
+        monitor = make_monitor(tmp_path, remote_servers=[
+            RemoteServerConfig(name="A", enabled=True, host="10.0.0.1",
+                               user="root", shutdown_order=1),
+            RemoteServerConfig(name="B", enabled=True, host="10.0.0.2",
+                               user="root", shutdown_order=1),
+        ])
+
+        thread_names = []
+
+        def mock_shutdown(server):
+            thread_names.append(threading.current_thread().name)
+
+        monitor._shutdown_remote_server = mock_shutdown
+        monitor._shutdown_remote_servers()
+
+        # Both servers should run in non-main threads (spawned by _shutdown_servers_parallel)
+        assert len(thread_names) == 2
+        assert all(name != "MainThread" for name in thread_names)
+        assert all(name.startswith("remote-shutdown-") for name in thread_names)
+
+    @pytest.mark.unit
+    def test_parallel_phase_join_does_not_stack(self, tmp_path):
+        """Phase total wait is bounded by the per-phase deadline, not N × budget.
+
+        Two stuck workers in the same phase must not cause the phase to wait
+        for 2 × max_timeout. Regression guard for the deadline-based join in
+        ``_shutdown_servers_parallel``.
+        """
+        # Tiny budgets so the test is fast: pre_cmd=0, command_timeout=0,
+        # connect_timeout=0, safety_margin=1 -> max_timeout = 1 second.
+        servers = [
+            RemoteServerConfig(name="StuckA", enabled=True, host="10.0.0.1", user="root",
+                               shutdown_order=1, command_timeout=0, connect_timeout=0,
+                               shutdown_safety_margin=1),
+            RemoteServerConfig(name="StuckB", enabled=True, host="10.0.0.2", user="root",
+                               shutdown_order=1, command_timeout=0, connect_timeout=0,
+                               shutdown_safety_margin=1),
+        ]
+        monitor = make_monitor(tmp_path, remote_servers=servers)
+
+        def hang_forever(server):
+            time.sleep(10)  # well beyond the 1s budget
+
+        monitor._shutdown_remote_server = hang_forever
+
+        start = time.monotonic()
+        monitor._shutdown_remote_servers()
+        elapsed = time.monotonic() - start
+
+        # Stacked behavior would be ~2 s; deadline-based should be ~1 s.
+        # Allow a generous 1.8 s ceiling for CI scheduler jitter; still well
+        # below the 2 s stacked floor and the 10 s actual hang time.
+        assert elapsed < 1.8, (
+            f"Phase took {elapsed:.2f}s — expected ~1s (deadline-based join), "
+            "looks like per-thread timeouts are stacking."
+        )
+
+
+class TestRemoteShutdownSafetyMargin:
+    """Verify shutdown_safety_margin flows through calc_server_timeout."""
+
+    @pytest.mark.unit
+    def test_calc_server_timeout_uses_per_server_margin(self, tmp_path):
+        """Each server's own margin contributes to its own budget,
+        and the phase-wide max wins for the join window."""
+        servers = [
+            RemoteServerConfig(name="Fast", enabled=True, host="10.0.0.1", user="root",
+                               shutdown_order=1, command_timeout=5, connect_timeout=2,
+                               shutdown_safety_margin=10),
+            RemoteServerConfig(name="Slow", enabled=True, host="10.0.0.2", user="root",
+                               shutdown_order=1, command_timeout=5, connect_timeout=2,
+                               shutdown_safety_margin=120),
+        ]
+        monitor = make_monitor(tmp_path, remote_servers=servers)
+
+        captured = {}
+        original_join = threading.Thread.join
+
+        def capture_join(self, timeout=None):
+            captured.setdefault("first_timeout", timeout)
+            # Don't actually wait — workers are no-ops anyway.
+            return original_join(self, timeout=0)
+
+        monitor._shutdown_remote_server = lambda s: None
+        with patch.object(threading.Thread, "join", capture_join):
+            monitor._shutdown_remote_servers()
+
+        # max_timeout = max(0+5+2+10, 0+5+2+120) = 127.
+        # Deadline-based join subtracts the tiny elapsed time between
+        # computing `deadline` and the first join, so the captured value
+        # will be just under 127.
+        assert captured["first_timeout"] == pytest.approx(127, abs=0.5)

@@ -113,47 +113,105 @@ Pre-shutdown commands are **best-effort**:
 
 ---
 
-## Parallel vs sequential shutdown
+## Shutdown ordering
 
 By default, all enabled remote servers shut down concurrently using threads, so one slow or unreachable server does not block others.
 
-### Dependency ordering
+### Multi-phase shutdown with `shutdown_order`
 
-If multiple servers mount NFS shares from a NAS, the NAS must shut down **last**.
-
-Use `parallel: false` to mark servers that should shutdown sequentially:
+Use `shutdown_order` to define phases when servers have dependencies. Servers with the same `shutdown_order` run in parallel; different orders run sequentially (ascending). A server alone in its order effectively runs sequentially.
 
 ```yaml
 remote_servers:
-  # These shutdown in parallel (default)
+  # Phase 1: Compute servers shutdown in parallel
   - name: "App Server 1"
     enabled: true
     host: "192.168.1.10"
     user: "root"
+    shutdown_order: 1
     shutdown_command: "shutdown -h now"
 
   - name: "App Server 2"
     enabled: true
     host: "192.168.1.11"
     user: "root"
+    shutdown_order: 1
     shutdown_command: "shutdown -h now"
 
-  # This shuts down AFTER all parallel servers complete
+  # Phase 2: Storage shuts down alone (after compute releases NFS mounts)
   - name: "NAS"
     enabled: true
     host: "192.168.1.50"
     user: "admin"
-    parallel: false  # Sequential - waits for parallel batch
+    shutdown_order: 2
+    shutdown_command: "sudo -i synoshutdown -s"
+
+  # Phase 3: Network infrastructure shuts down last
+  - name: "Router"
+    enabled: true
+    host: "192.168.1.254"
+    user: "admin"
+    shutdown_order: 3
+    shutdown_command: "shutdown -h now"
+
+  - name: "Switch"
+    enabled: true
+    host: "192.168.1.253"
+    user: "admin"
+    shutdown_order: 3
+    shutdown_command: "shutdown -h now"
+```
+
+`shutdown_order` must be a positive integer (>= 1). Gaps are allowed (e.g., 1, 5, 10) — only relative order matters.
+
+### Legacy `parallel` flag
+
+For simple two-group setups, the `parallel` flag still works:
+
+```yaml
+remote_servers:
+  - name: "App Server"
+    enabled: true
+    host: "192.168.1.10"
+    user: "root"
+    shutdown_command: "shutdown -h now"
+    # parallel: true is the default
+
+  - name: "NAS"
+    enabled: true
+    host: "192.168.1.50"
+    user: "admin"
+    parallel: false  # Shuts down before the parallel batch
     shutdown_command: "sudo -i synoshutdown -s"
 ```
 
-### Execution order
+### Behavior summary
 
-1. Servers with `parallel: false` shut down one-by-one in config order
-2. Remaining servers (default `parallel: true`) shut down concurrently
+| Config | Behavior |
+|--------|----------|
+| No `shutdown_order`, no `parallel` | Default: runs in the parallel batch |
+| No `shutdown_order`, `parallel: true` | Runs in the parallel batch |
+| No `shutdown_order`, `parallel: false` | Runs sequentially before the parallel batch |
+| `shutdown_order: N` (no `parallel`) | Grouped with other order-N servers, all in parallel |
+| `shutdown_order` + `parallel: true` or `false` | **Hard validation error** — pick one model |
 
-!!! tip "Dependency tip"
-    Put servers with dependencies (like NAS/storage) at the end of your config with `parallel: false`.
+!!! warning "shutdown_order and parallel are mutually exclusive"
+    Setting both `shutdown_order` and `parallel` on the same server is rejected at config load time. Use `shutdown_order` for multi-phase ordering, or `parallel` for the legacy two-group behavior — never both.
+
+!!! tip "Use `eneru validate` to preview"
+    Run `eneru validate --config your-config.yaml` to see the shutdown sequence tree, including remote server phases.
+
+### Tuning `shutdown_safety_margin`
+
+Each remote server has a `shutdown_safety_margin` (seconds, default `60`) added on top of `pre_shutdown_commands + command_timeout + connect_timeout` when waiting for its parallel-shutdown thread to finish. The margin covers SSH session setup, OS scheduling jitter, and the brief window between the remote shutdown command starting and SSH closing the channel.
+
+| When to tune | Suggested value |
+|--------------|-----------------|
+| Servers with battery-backed RAID, large write-back caches, or known slow shutdown paths | Raise (e.g. `120`–`300`) |
+| Fast VMs or stateless containers where shutdown completes immediately | Lower (e.g. `10`–`30`) |
+| Opt out of the buffer entirely (use only the explicit timeouts) | `0` |
+
+The phase-wide join window uses the **maximum** `shutdown_safety_margin` across the servers in that phase, so tuning one slow server up does not penalise the others' actual execution time — it only extends the worst-case wait before Eneru moves to the next phase.
 
 ---
 
