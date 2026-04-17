@@ -4,7 +4,17 @@ Intelligent UPS monitoring daemon for NUT (Network UPS Tools). Orchestrates grac
 
 ## Development Setup
 
-**IMPORTANT: NEVER run Python, pytest, pip, or any dev commands directly on the system. ALL commands MUST be executed inside a `uv` virtualenv.** Create and activate the venv before doing anything else.
+**CRITICAL: NEVER run `pip`, `pip3`, `python -m pip`, `python`, `pytest`, or any other dev/Python tooling directly against the system Python. ALL Python work — install, uninstall, run, test, version-check — MUST happen inside a `uv` virtualenv. No exceptions.**
+
+This rule applies to *every* operation, including:
+
+- Installing packages (`pip install ...`)
+- **Uninstalling packages (`pip uninstall ...`) — even to "clean up" or fix broken state.** A system-wide `pip uninstall eneru` will rip out files claimed by both pip and the deb/rpm package (e.g. `/usr/local/bin/eneru`), breaking the package install. If the system has stale pip-installed Python packages owned by Eneru, the only correct cleanup is to reinstall the deb/rpm to restore the package's files, then leave the pip remnants alone, *or* delete only the pip-owned site-packages directory by hand after confirming nothing else needs it. Never invoke pip itself.
+- Running the test suite (`pytest`)
+- Running ad-hoc scripts (`python -c '...'`)
+- Editable dev installs (`pip install -e .` — use `uv pip install -e .` inside the venv only)
+
+If you need to verify the installed deb/rpm package, invoke the package's own entry point (e.g. `/usr/local/bin/eneru version`, `python3 /opt/ups-monitor/eneru.py version`) — these read from `/opt/ups-monitor/`, not from system Python paths, so no venv is required.
 
 ```bash
 # Create and activate virtualenv (disposable tmp folder)
