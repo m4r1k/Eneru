@@ -125,9 +125,8 @@ filesystems:
       - "/mnt/backup"
 
 # Remote Server Shutdown
-# Servers are shutdown in two phases:
-#   1. Sequential: Servers with parallel: false (in config order)
-#   2. Parallel: Remaining servers (parallel: true, the default)
+# Use shutdown_order to define phases. Same order = parallel, ascending = sequential.
+# Legacy parallel: false still works for simple two-group setups.
 remote_servers:
   # Proxmox host with pre-shutdown commands
   - name: "Proxmox Host"
@@ -290,7 +289,9 @@ mounts:
 | `shutdown_command` | `sudo shutdown -h now` | Final shutdown command |
 | `ssh_options` | `[]` | Additional SSH options |
 | `pre_shutdown_commands` | `[]` | Commands to run before shutdown (see below) |
-| `parallel` | `true` | Shutdown concurrently with other parallel servers |
+| `parallel` | (unset) | Legacy two-group flag; `true` = parallel batch, `false` = sequential before parallel batch. Mutually exclusive with `shutdown_order` |
+| `shutdown_order` | (none) | Phase number (>= 1). Same order = parallel, ascending = sequential. Mutually exclusive with `parallel` |
+| `shutdown_safety_margin` | `60` | Seconds added to the per-server timeout budget when waiting for the parallel-shutdown thread. Set `0` to opt out |
 
 #### Pre-shutdown commands
 
@@ -321,16 +322,11 @@ pre_shutdown_commands:
 | `stop_compose` | Stop a compose stack (requires `path` parameter) |
 | `sync` | Sync filesystems |
 
-#### Parallel vs sequential shutdown
+#### Shutdown ordering
 
-Servers are shutdown in two phases:
+Use `shutdown_order` to define multi-phase shutdown. Servers with the same order run in parallel; different orders run sequentially (ascending). For simple setups, `parallel: false` still works. The two flags are **mutually exclusive** — setting both on the same server is rejected at config load time.
 
-1. **Sequential**: Servers with `parallel: false` shutdown one-by-one in config order
-2. **Parallel**: Remaining servers (default `parallel: true`) shutdown concurrently
-
-Use `parallel: false` for servers with dependencies (e.g., NAS that other servers mount).
-
-See [Remote Servers](remote-servers.md) for SSH setup instructions.
+See [Remote Servers](remote-servers.md) for detailed examples, SSH setup instructions, and `shutdown_safety_margin` tuning guidance.
 
 ### Local shutdown section
 

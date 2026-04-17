@@ -22,7 +22,7 @@ Every commit runs unit tests, integration tests across 9 Linux distributions, en
               ╱    7 Linux Distros    ╲
              ╱─────────────────────────╲
             ╱         Unit Tests        ╲
-           ╱   pytest + Coverage (300)   ╲
+           ╱   pytest + Coverage (338)   ╲
           ╱      7 Python Versions        ╲
          ╱─────────────────────────────────╲
         ╱          Static Analysis          ╲
@@ -37,7 +37,7 @@ Every commit runs unit tests, integration tests across 9 Linux distributions, en
 |-------|-----------|---------------|
 | **AI-Assisted Dev** | Continuous | Code review, implementation guidance |
 | **Static Analysis** | Every commit | Python syntax, config validation |
-| **Unit Tests** | Every commit | Logic, state machine, edge cases (300 tests) |
+| **Unit Tests** | Every commit | Logic, state machine, edge cases (338 tests) |
 | **Integration** | Every commit | Package install on 7 Linux distros |
 | **E2E Tests** | Every commit | Full workflow with real NUT, SSH, Docker |
 | **Real UPS** | Pre-release | Actual hardware, power events |
@@ -109,12 +109,12 @@ Tests `pip install .` to ensure `pyproject.toml` is valid:
 
 ## Test coverage
 
-300 tests across 13 files:
+338 tests across 13 files:
 
-- Configuration parsing (64 tests) -- YAML options, defaults, multi-UPS detection, trigger inheritance, ownership validation, trigger_on enum validation
+- Configuration parsing (83 tests) -- YAML options, defaults, multi-UPS detection, trigger inheritance, ownership validation, trigger_on enum validation, shutdown_order parsing and validation (incl. YAML type coercion edge cases, mutual-exclusion error with `parallel`), shutdown_safety_margin parsing and validation
+- Core monitor logic (45 tests) -- OL/OB/FSD state machine, all four shutdown triggers, failsafe, shutdown sequence ordering, multi-phase shutdown (compute_effective_order, phased execution, thread verification, backward compat, deadline-based join, per-server safety margin)
 - Multi-UPS coordination (33 tests) -- coordinator routing, is_local/drain/trigger_on, defense-in-depth lock, battery anomaly with jitter filtering, notification prefixing, runtime is_local enforcement, exit_after_shutdown in coordinator, ownership rejection (VMs/containers/filesystems)
 - Remote commands (29 tests) -- SSH execution, pre-shutdown actions, parallel and sequential modes
-- Core monitor logic (26 tests) -- OL/OB/FSD state machine, all four shutdown triggers, failsafe, shutdown sequence ordering
 - Connection grace period (26 tests) -- OK/GRACE_PERIOD/FAILED transitions, flap detection, stale data
 - TUI dashboard (23 tests) -- state file parsing, log filtering, human-readable status, --once output
 - CLI (20 tests) -- subcommands, bare invocation, multi-UPS validate
@@ -187,7 +187,7 @@ The E2E tests use scenario files to simulate different UPS states:
 
 ### E2E test cases
 
-The E2E workflow (`.github/workflows/e2e.yml`) runs 18 tests on every push and PR:
+The E2E workflow (`.github/workflows/e2e.yml`) runs 19 tests on every push and PR:
 
 | Test | Description |
 |------|-------------|
@@ -209,6 +209,7 @@ The E2E workflow (`.github/workflows/e2e.yml`) runs 18 tests on every push and P
 | **Test 16** | Local drain (`drain_on_local_shutdown=true`): all groups drain before local shutdown |
 | **Test 17** | Local no-drain (`drain_on_local_shutdown=false`): only local group shuts down |
 | **Test 18** | Power recovery: OB then power restored, no shutdown triggered |
+| **Test 19** | Multi-phase shutdown ordering: 3 SSH targets across 2 phases (`shutdown_order: 1, 1, 2`) — verifies all received shutdown, "Phase N/M (order=X)" log lines, and timestamp ordering across phases |
 
 ### Running E2E tests locally
 

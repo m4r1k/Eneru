@@ -159,6 +159,7 @@ README.md                       # Project overview
 - Always test with `--dry-run` before real shutdown logic changes
 - When adding new config feature flags, add them to `examples/config-reference.yaml`
 - When adding or removing tests, update `docs/testing.md` (test counts in pyramid/table, per-file breakdown, E2E test case table)
+- **New features require both synthetic AND end-to-end tests.** Any new feature must ship with (a) unit/integration tests in `tests/` covering the logic with maximum reasonable coverage, **and** (b) a corresponding step in `.github/workflows/e2e.yml` that exercises the feature end-to-end against the Docker Compose environment in `tests/e2e/`. Synthetic tests catch logic bugs; the E2E step proves the feature actually works against real NUT/SSH/Docker. PRs that add a feature without matching E2E coverage should be sent back for it.
 
 ## Git Workflow
 
@@ -174,12 +175,15 @@ README.md                       # Project overview
 
 **Workflow:**
 ```
-1. Create feature branch from main
-2. Develop, commit, push
-3. Open PR against main
-4. CI checks must pass (all 7)
-5. Merge via GitHub (branch auto-deletes)
+1. Pull latest main:   git checkout main && git pull --ff-only origin main
+2. Create feature branch from the up-to-date main
+3. Develop, commit, push
+4. Open PR against main
+5. CI checks must pass (all 7)
+6. Merge via GitHub (branch auto-deletes)
 ```
+
+**Always pull `main` before creating a feature branch.** Branching from a stale local `main` forces a rebase later and risks landing PRs against an obsolete base.
 
 **Releasing a new version:**
 ```

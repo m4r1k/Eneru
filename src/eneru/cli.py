@@ -6,7 +6,7 @@ from datetime import datetime
 
 from eneru.version import __version__
 from eneru.config import ConfigLoader
-from eneru.monitor import UPSGroupMonitor, MultiUPSCoordinator
+from eneru.monitor import UPSGroupMonitor, MultiUPSCoordinator, compute_effective_order
 from eneru.notifications import APPRISE_AVAILABLE
 
 # Optional import for Apprise (needed for test notifications)
@@ -36,6 +36,73 @@ def _cmd_run(args):
         monitor.run()
 
 
+def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
+    """Print the shutdown sequence tree for a UPS group."""
+    print(f"{prefix}  Shutdown sequence:")
+    step = 1
+    indent = f"{prefix}    "
+
+    if has_local:
+        if group.virtual_machines.enabled:
+            print(f"{indent}{step}. Virtual machines")
+            step += 1
+        if group.containers.enabled:
+            containers = group.containers
+            compose_count = len(containers.compose_files)
+            detail = f" ({containers.runtime}"
+            if compose_count > 0:
+                detail += f", {compose_count} compose file(s)"
+            detail += ")"
+            print(f"{indent}{step}. Containers{detail}")
+            step += 1
+        if group.filesystems.sync_enabled or group.filesystems.unmount.enabled:
+            parts = []
+            if group.filesystems.sync_enabled:
+                parts.append("sync")
+            if group.filesystems.unmount.enabled:
+                mount_count = len(group.filesystems.unmount.mounts)
+                parts.append(f"unmount {mount_count} mount(s)")
+            print(f"{indent}{step}. Filesystem {' + '.join(parts)}")
+            step += 1
+
+    if enabled_servers:
+        ordered = compute_effective_order(enabled_servers)
+        phases = {}
+        for effective, server in ordered:
+            phases.setdefault(effective, []).append(server)
+        sorted_keys = sorted(phases.keys())
+        num_phases = len(sorted_keys)
+
+        # Detect legacy mode: no server has explicit shutdown_order
+        is_legacy = all(s.shutdown_order is None for s in enabled_servers)
+
+        if num_phases == 1:
+            names = ", ".join(s.name or s.host for s in enabled_servers)
+            if len(enabled_servers) == 1:
+                print(f"{indent}{step}. Remote server: {names}")
+            else:
+                print(f"{indent}{step}. Remote servers ({len(enabled_servers)}): {names}")
+        else:
+            print(f"{indent}{step}. Remote servers ({len(enabled_servers)}, {num_phases} phases):")
+            for phase_idx, key in enumerate(sorted_keys, 1):
+                phase_servers = phases[key]
+                names = ", ".join(s.name or s.host for s in phase_servers)
+                if is_legacy:
+                    # Legacy mode: label by execution style
+                    if key < 0:
+                        print(f"{indent}   Sequential: {names}")
+                    else:
+                        print(f"{indent}   Parallel: {names}")
+                else:
+                    print(f"{indent}   Phase {phase_idx} (order={key}): {names}")
+        step += 1
+    else:
+        print(f"{indent}(no remote servers)")
+
+    if has_local:
+        print(f"{indent}{step}. Local shutdown")
+
+
 def _print_group_summary(group, idx, multi_ups):
     """Print a single UPS group summary for validate output."""
     label = group.ups.label
@@ -48,28 +115,10 @@ def _print_group_summary(group, idx, multi_ups):
         print(" [is_local]", end="")
     print()
 
-    # Only show local resources if is_local (or single-UPS legacy)
-    if group.is_local or not multi_ups:
-        print(f"{prefix}  VMs enabled: {group.virtual_machines.enabled}")
-        containers = group.containers
-        print(f"{prefix}  Containers enabled: {containers.enabled}", end="")
-        if containers.enabled:
-            compose_count = len(containers.compose_files)
-            if compose_count > 0:
-                print(f" (runtime: {containers.runtime}, {compose_count} compose file(s))")
-            else:
-                print(f" (runtime: {containers.runtime})")
-        else:
-            print()
-        print(f"{prefix}  Filesystems sync: {group.filesystems.sync_enabled}", end="")
-        if group.filesystems.unmount.enabled:
-            mount_count = len(group.filesystems.unmount.mounts)
-            print(f", unmount: {mount_count} mount(s)")
-        else:
-            print()
-
+    # Shutdown sequence tree
     enabled_servers = [s for s in group.remote_servers if s.enabled]
-    print(f"{prefix}  Remote servers: {len(enabled_servers)}")
+    has_local = group.is_local or not multi_ups
+    _print_shutdown_sequence(group, enabled_servers, has_local, prefix)
 
 
 def _cmd_validate(args):
@@ -78,7 +127,6 @@ def _cmd_validate(args):
     exit_code = 0
 
     print(f"Eneru v{__version__}")
-    print("Configuration is valid.")
 
     multi_ups = config.multi_ups
     if multi_ups:
@@ -138,6 +186,12 @@ def _cmd_validate(args):
             print(f"  {msg}")
             if msg.startswith("ERROR"):
                 exit_code = 1
+
+    print()
+    if exit_code == 0:
+        print("Configuration is valid.")
+    else:
+        print("Configuration is INVALID — fix the ERROR(s) above and re-run.")
 
     sys.exit(exit_code)
 

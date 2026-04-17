@@ -50,6 +50,42 @@ except ImportError:
     apprise = None
 
 
+def compute_effective_order(
+    servers: List[RemoteServerConfig],
+) -> List[Tuple[int, RemoteServerConfig]]:
+    """Compute effective shutdown order for each server.
+
+    Rules:
+    - If shutdown_order is explicitly set: use that value.
+    - If shutdown_order is None and parallel is False: each gets a unique
+      negative value based on its position among parallel=False servers,
+      preserving the legacy "sequential-first" behavior.
+    - Otherwise (shutdown_order is None and parallel is None or True):
+      effective = 0 (parallel batch).
+
+    This ensures existing configs with only ``parallel`` produce identical
+    behavior to the old two-phase code.
+    """
+    result: List[Tuple[int, RemoteServerConfig]] = []
+    legacy_seq_count = sum(
+        1 for s in servers
+        if s.shutdown_order is None and s.parallel is False
+    )
+    legacy_seq_index = 0
+    for server in servers:
+        if server.shutdown_order is not None:
+            effective = server.shutdown_order
+        elif server.parallel is False:
+            # Legacy sequential: assign negative orders in config order
+            # so they all run before the parallel batch (order 0).
+            effective = -(legacy_seq_count - legacy_seq_index)
+            legacy_seq_index += 1
+        else:
+            effective = 0
+        result.append((effective, server))
+    return result
+
+
 class UPSGroupMonitor:
     """Main UPS Monitor class."""
 
@@ -845,103 +881,116 @@ class UPSGroupMonitor:
     def _shutdown_remote_servers(self):
         """Shutdown all enabled remote servers via SSH.
 
-        Servers are processed in two phases:
-        1. Sequential phase: Servers with parallel=False are shutdown one by one
-           in config order. Use this for servers with dependencies (e.g., a server
-           that hosts storage used by other servers should be shutdown last).
-        2. Parallel phase: Remaining servers (parallel=True, the default) are
-           shutdown concurrently using threads to avoid sequential timeouts.
+        Servers are grouped by their effective shutdown order and processed
+        in ascending order.  All servers within a group run in parallel.
+        A server alone in its group effectively runs sequentially.
 
-        This hybrid approach ensures dependency order while still benefiting from
-        parallel execution for independent servers.
+        When shutdown_order is not set, the legacy parallel flag determines
+        effective order:
+        - parallel: true  (default) -> effective order 0
+        - parallel: false -> unique negative orders (run before order 0)
+        This preserves exact backward compatibility with existing configs.
         """
         enabled_servers = [s for s in self.config.remote_servers if s.enabled]
 
         if not enabled_servers:
             return
 
-        # Separate servers into sequential and parallel groups
-        sequential_servers = [s for s in enabled_servers if not s.parallel]
-        parallel_servers = [s for s in enabled_servers if s.parallel]
+        # Group servers by effective shutdown order
+        ordered = compute_effective_order(enabled_servers)
+        phases: Dict[int, List[RemoteServerConfig]] = {}
+        for effective, server in ordered:
+            phases.setdefault(effective, []).append(server)
+        sorted_keys = sorted(phases.keys())
 
         server_count = len(enabled_servers)
-        seq_count = len(sequential_servers)
-        par_count = len(parallel_servers)
+        num_phases = len(sorted_keys)
 
-        if seq_count > 0 and par_count > 0:
+        if num_phases > 1:
             self._log_message(
-                f"🌐 Shutting down {server_count} remote server(s) "
-                f"({seq_count} sequential, {par_count} parallel)..."
+                f"🌐 Shutting down {server_count} remote server(s) in {num_phases} phases..."
             )
-        elif seq_count > 0:
-            self._log_message(f"🌐 Shutting down {server_count} remote server(s) sequentially...")
-        else:
+        elif server_count > 1:
             self._log_message(f"🌐 Shutting down {server_count} remote server(s) in parallel...")
+        else:
+            self._log_message(f"🌐 Shutting down 1 remote server...")
 
         completed = 0
 
-        # Phase 1: Sequential servers (in config order)
-        for server in sequential_servers:
-            display_name = server.name or server.host
-            try:
-                self._shutdown_remote_server(server)
-                completed += 1
-            except Exception as e:
-                self._log_message(f"  ❌ {display_name} shutdown failed: {e}")
+        for phase_idx, key in enumerate(sorted_keys, 1):
+            phase_servers = phases[key]
+            names = ", ".join(s.name or s.host for s in phase_servers)
 
-        # Phase 2: Parallel servers
-        if parallel_servers:
-            # Calculate max timeout for parallel servers (for the join timeout)
-            def calc_server_timeout(server: RemoteServerConfig) -> int:
-                pre_cmd_time = sum(
-                    (cmd.timeout or server.command_timeout) for cmd in server.pre_shutdown_commands
-                )
-                return pre_cmd_time + server.command_timeout + server.connect_timeout + 60
+            if num_phases > 1:
+                self._log_message(f"  📋 Phase {phase_idx}/{num_phases} (order={key}): {names}")
 
-            max_timeout = max(calc_server_timeout(s) for s in parallel_servers)
-
-            # Track results for logging
-            results: Dict[str, Tuple[bool, str]] = {}
-            results_lock = threading.Lock()
-
-            def shutdown_server_thread(server: RemoteServerConfig):
-                """Thread worker for shutting down a single server."""
+            if len(phase_servers) == 1:
+                server = phase_servers[0]
                 display_name = server.name or server.host
                 try:
                     self._shutdown_remote_server(server)
-                    with results_lock:
-                        results[display_name] = (True, "")
+                    completed += 1
                 except Exception as e:
-                    with results_lock:
-                        results[display_name] = (False, str(e))
-
-            # Start all threads
-            threads: List[threading.Thread] = []
-            for server in parallel_servers:
-                t = threading.Thread(
-                    target=shutdown_server_thread,
-                    args=(server,),
-                    name=f"remote-shutdown-{server.name or server.host}"
-                )
-                t.start()
-                threads.append(t)
-
-            # Wait for all threads to complete with global timeout
-            for t in threads:
-                t.join(timeout=max_timeout)
-
-            # Check for any threads that are still running (timed out)
-            still_running = [t for t in threads if t.is_alive()]
-            if still_running:
-                self._log_message(
-                    f"  ⚠️ {len(still_running)} remote shutdown(s) still in progress "
-                    "(continuing with local shutdown)"
-                )
-
-            completed += par_count - len(still_running)
+                    self._log_message(f"  ❌ {display_name} shutdown failed: {e}")
+            else:
+                completed += self._shutdown_servers_parallel(phase_servers)
 
         # Log summary
         self._log_message(f"  ✅ Remote shutdown complete ({completed}/{server_count} servers)")
+
+    def _shutdown_servers_parallel(self, servers: List[RemoteServerConfig]) -> int:
+        """Shutdown multiple remote servers in parallel using threads.
+
+        Returns the number of servers whose threads finished within the
+        timeout window (regardless of individual success/failure — per-server
+        errors are logged inside _shutdown_remote_server).
+        """
+        def calc_server_timeout(server: RemoteServerConfig) -> int:
+            pre_cmd_time = sum(
+                (cmd.timeout or server.command_timeout) for cmd in server.pre_shutdown_commands
+            )
+            return (
+                pre_cmd_time
+                + server.command_timeout
+                + server.connect_timeout
+                + server.shutdown_safety_margin
+            )
+
+        max_timeout = max(calc_server_timeout(s) for s in servers)
+
+        def shutdown_server_thread(server: RemoteServerConfig):
+            """Thread worker for shutting down a single server."""
+            try:
+                self._shutdown_remote_server(server)
+            except Exception:
+                pass  # Errors logged inside _shutdown_remote_server
+
+        threads: List[threading.Thread] = []
+        for server in servers:
+            t = threading.Thread(
+                target=shutdown_server_thread,
+                args=(server,),
+                name=f"remote-shutdown-{server.name or server.host}"
+            )
+            t.start()
+            threads.append(t)
+
+        # Deadline-based join: cap total wait at max_timeout regardless of
+        # how many threads are stuck. Per-thread join() with the same
+        # max_timeout would stack to N × max_timeout in the worst case.
+        deadline = time.monotonic() + max_timeout
+        for t in threads:
+            remaining = max(0.0, deadline - time.monotonic())
+            t.join(timeout=remaining)
+
+        still_running = [t for t in threads if t.is_alive()]
+        if still_running:
+            self._log_message(
+                f"  ⚠️ {len(still_running)} remote shutdown(s) still in progress "
+                "(continuing with next phase)"
+            )
+
+        return len(servers) - len(still_running)
 
     def _run_remote_command(
         self,

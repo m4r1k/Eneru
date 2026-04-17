@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Multi-phase shutdown ordering (`shutdown_order`):** Define shutdown phases for remote servers (#4)
+    - Servers with the same `shutdown_order` run in parallel; different orders run sequentially (ascending)
+    - Enables complex dependency chains: e.g., compute (phase 1) → storage (phase 2) → network (phase 3)
+    - Full backward compatibility: existing configs with `parallel: false` produce identical behavior
+    - `eneru validate` now shows a shutdown sequence tree with phase grouping
+    - Validation rejects invalid values (must be positive integer >= 1)
+- **Per-server `shutdown_safety_margin` (seconds, default `60`):** Tunable safety buffer added on top of (`pre_shutdown_commands` + `command_timeout` + `connect_timeout`) when waiting for a parallel-shutdown thread to finish. Replaces a previously hard-coded `60` constant. Raise for slow-flushing storage, lower for fast VMs, set `0` to opt out.
+
+### Changed
+- **`shutdown_order` and `parallel` are now mutually exclusive** — setting both on the same server is a hard validation error (previously a warning). Pick one model: `shutdown_order` for multi-phase ordering, or `parallel` for the legacy two-group behaviour.
+- **Parallel-phase join is now deadline-based.** Previously each thread was joined with the full per-phase timeout, so a phase with N stuck servers could wait up to `N × max_timeout` before continuing. The total wait is now bounded by a single deadline, restoring the "dead hosts don't block" guarantee from v4.6.
+
+---
+
 ## [5.0.0] - 2026-04-11
 
 ### Added

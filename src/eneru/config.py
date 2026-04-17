@@ -148,7 +148,17 @@ class RemoteServerConfig:
     shutdown_command: str = "sudo shutdown -h now"
     ssh_options: List[str] = field(default_factory=list)
     pre_shutdown_commands: List[RemoteCommandConfig] = field(default_factory=list)
-    parallel: bool = True  # If False, server is shutdown sequentially before parallel batch
+    # Legacy ordering flag: None = unset (default behaves like True); True = run with the
+    # parallel batch; False = run sequentially before the parallel batch. Mutually exclusive
+    # with shutdown_order — setting both is a hard validation error.
+    parallel: Optional[bool] = None
+    shutdown_order: Optional[int] = None  # None = derive from parallel flag; >= 1 for explicit phase
+    # Seconds added on top of (pre_shutdown_commands + command_timeout + connect_timeout)
+    # when waiting for this server's parallel-shutdown thread to finish. Covers SSH session
+    # setup, OS scheduling jitter, and the brief window between the remote shutdown command
+    # starting and SSH closing the channel. Tune higher for servers with battery-backed RAID
+    # or large flush windows; tune lower for fast-shutdown VMs. Zero opts out entirely.
+    shutdown_safety_margin: int = 60
 
 
 @dataclass
@@ -415,7 +425,9 @@ class ConfigLoader:
                 shutdown_command=server_data.get('shutdown_command', 'sudo shutdown -h now'),
                 ssh_options=server_data.get('ssh_options', []),
                 pre_shutdown_commands=pre_cmds,
-                parallel=server_data.get('parallel', True),
+                parallel=server_data.get('parallel'),
+                shutdown_order=server_data.get('shutdown_order'),
+                shutdown_safety_margin=server_data.get('shutdown_safety_margin', 60),
             ))
         return servers
 
@@ -744,6 +756,52 @@ class ConfigLoader:
                             f"WARNING: Top-level '{key}' section ignored in multi-UPS mode. "
                             f"Move resources under the appropriate UPS entry."
                         )
+
+        # Validate shutdown_order, shutdown_safety_margin, and the
+        # mutual-exclusion of shutdown_order vs parallel.
+        for group in config.ups_groups:
+            for server in group.remote_servers:
+                display = server.name or server.host
+
+                so = server.shutdown_order
+                so_valid = False
+                if so is not None:
+                    if not isinstance(so, int) or isinstance(so, bool):
+                        messages.append(
+                            f"ERROR: Remote server '{display}': shutdown_order "
+                            f"must be a positive integer, got {so!r}"
+                        )
+                    elif so < 1:
+                        messages.append(
+                            f"ERROR: Remote server '{display}': shutdown_order "
+                            f"must be >= 1, got {so}"
+                        )
+                    else:
+                        so_valid = True
+
+                # Mutual exclusion: shutdown_order AND parallel both explicitly set
+                # (either parallel: true or parallel: false) is a hard error.
+                if so_valid and server.parallel is not None:
+                    messages.append(
+                        f"ERROR: Remote server '{display}': cannot set both "
+                        f"'shutdown_order' ({so}) and 'parallel' ({str(server.parallel).lower()}). "
+                        f"Pick one model:\n"
+                        f"  - shutdown_order: <int>>=1   (recommended; supports multi-phase ordering)\n"
+                        f"  - parallel: true|false       (legacy two-phase behavior)\n"
+                        f"Remove the unused field from this server's config."
+                    )
+
+                margin = server.shutdown_safety_margin
+                if not isinstance(margin, int) or isinstance(margin, bool):
+                    messages.append(
+                        f"ERROR: Remote server '{display}': shutdown_safety_margin "
+                        f"must be a non-negative integer, got {margin!r}"
+                    )
+                elif margin < 0:
+                    messages.append(
+                        f"ERROR: Remote server '{display}': shutdown_safety_margin "
+                        f"must be >= 0, got {margin}"
+                    )
 
         # Validate trigger_on value
         if config.local_shutdown.trigger_on not in ("any", "none"):
