@@ -141,6 +141,64 @@ contents:
       owner: root
       group: root
 
+  # eneru.shutdown subpackage (mixin per shutdown phase)
+  - src: src/eneru/shutdown/__init__.py
+    dst: /opt/ups-monitor/eneru/shutdown/__init__.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/shutdown/vms.py
+    dst: /opt/ups-monitor/eneru/shutdown/vms.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/shutdown/containers.py
+    dst: /opt/ups-monitor/eneru/shutdown/containers.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/shutdown/filesystems.py
+    dst: /opt/ups-monitor/eneru/shutdown/filesystems.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/shutdown/remote.py
+    dst: /opt/ups-monitor/eneru/shutdown/remote.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  # eneru.health subpackage (mixin per health-monitoring concern)
+  - src: src/eneru/health/__init__.py
+    dst: /opt/ups-monitor/eneru/health/__init__.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/health/voltage.py
+    dst: /opt/ups-monitor/eneru/health/voltage.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/health/battery.py
+    dst: /opt/ups-monitor/eneru/health/battery.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   - src: src/eneru/cli.py
     dst: /opt/ups-monitor/eneru/cli.py
     file_info:
@@ -182,6 +240,22 @@ contents:
 
   # Create the /opt/ups-monitor/eneru package directory
   - dst: /opt/ups-monitor/eneru
+    type: dir
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Create the /opt/ups-monitor/eneru/shutdown subpackage directory
+  - dst: /opt/ups-monitor/eneru/shutdown
+    type: dir
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Create the /opt/ups-monitor/eneru/health subpackage directory
+  - dst: /opt/ups-monitor/eneru/health
     type: dir
     file_info:
       mode: 0755

@@ -203,7 +203,14 @@ class TestShutdownSequence:
                 flag_was_created = True
             return (0, "", "")
 
-        with patch("eneru.monitor.run_command", side_effect=check_flag_exists):
+        # _execute_shutdown_sequence calls run_command both directly (in
+        # monitor.py) and indirectly through every shutdown-phase mixin.
+        # Patch each binding so the side_effect observes all invocations.
+        with patch("eneru.monitor.run_command", side_effect=check_flag_exists), \
+             patch("eneru.shutdown.vms.run_command", side_effect=check_flag_exists), \
+             patch("eneru.shutdown.containers.run_command", side_effect=check_flag_exists), \
+             patch("eneru.shutdown.filesystems.run_command", side_effect=check_flag_exists), \
+             patch("eneru.shutdown.remote.run_command", side_effect=check_flag_exists):
             with patch("os.sync"):
                 shutdown_monitor._execute_shutdown_sequence()
 
