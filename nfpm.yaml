@@ -134,6 +134,13 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/multi_ups.py
+    dst: /opt/ups-monitor/eneru/multi_ups.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   - src: src/eneru/cli.py
     dst: /opt/ups-monitor/eneru/cli.py
     file_info:
