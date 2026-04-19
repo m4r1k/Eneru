@@ -46,6 +46,7 @@ mkdocs serve                        # Local docs preview
 
 ```
 src/eneru/                      # Main package
+  CLAUDE.md                     # Module map + mixin pattern (Claude session context)
   __init__.py                   # Public API exports
   __main__.py                   # CLI entry point (python -m eneru)
   version.py                    # Version string (single source of truth)
@@ -55,12 +56,28 @@ src/eneru/                      # Main package
   notifications.py              # NotificationWorker (Apprise integration)
   utils.py                      # Helper functions (run_command, etc.)
   actions.py                    # REMOTE_ACTIONS templates
-  monitor.py                    # UPSGroupMonitor class (core daemon)
+  monitor.py                    # UPSGroupMonitor core: init, polling, orchestration, main loop
+  multi_ups.py                  # MultiUPSCoordinator (thread-per-group)
   cli.py                        # CLI argument parsing + main()
+  shutdown/                     # Per-phase shutdown mixins
+    vms.py                      # VMShutdownMixin (libvirt)
+    containers.py               # ContainerShutdownMixin (docker/podman + compose)
+    filesystems.py              # FilesystemShutdownMixin (sync + unmount)
+    remote.py                   # RemoteShutdownMixin (SSH-based remote servers)
+  health/                       # Health-monitoring mixins
+    voltage.py                  # VoltageMonitorMixin (thresholds, AVR, bypass, overload)
+    battery.py                  # BatteryMonitorMixin (depletion rate, anomaly detection)
 
 tests/                          # pytest tests
   conftest.py                   # Shared fixtures
-  test_*.py                     # Unit/integration tests
+  test_constants.py             # Shared test constants (sample webhook URLs, etc.)
+  test_config_loading.py        # Config: defaults + YAML file parse
+  test_config_notifications.py  # Config: legacy Discord, avatar handling
+  test_config_filesystems.py    # Config: mount path parsing
+  test_config_vm_containers.py  # Config: compose files, container runtime
+  test_config_remote.py         # Config: remote servers, ordering, safety margin
+  test_config_validation.py     # Config: cross-field validation, edge cases
+  test_*.py                     # Unit/integration tests for non-config modules
   e2e/                          # End-to-end tests
     docker-compose.yml          # E2E test environment
     config-e2e*.yaml            # E2E test configs
@@ -170,6 +187,15 @@ README.md                       # Project overview
 - When adding new config feature flags, add them to `examples/config-reference.yaml`
 - When adding or removing tests, update `docs/testing.md` (test counts in pyramid/table, per-file breakdown, E2E test case table)
 - **New features require both synthetic AND end-to-end tests.** Any new feature must ship with (a) unit/integration tests in `tests/` covering the logic with maximum reasonable coverage, **and** (b) a corresponding step in `.github/workflows/e2e.yml` that exercises the feature end-to-end against the Docker Compose environment in `tests/e2e/`. Synthetic tests catch logic bugs; the E2E step proves the feature actually works against real NUT/SSH/Docker. PRs that add a feature without matching E2E coverage should be sent back for it.
+- **Adding a new file under `src/eneru/`?** Also add a matching `contents:` entry in `nfpm.yaml`. The deb/rpm builds enumerate every module file explicitly — they do NOT glob. The pip path uses pyproject.toml autodiscovery, so a missing entry passes pip CI silently and only fails at deb/rpm install time with `ModuleNotFoundError`. Triple-checking via the isolated-interpreter package-layout simulation (see `src/eneru/CLAUDE.md`) before push is the way to catch this.
+
+## Working efficiently in Claude Code
+
+This repo deliberately keeps individual files small (`monitor.py` is now ~830 lines after the v5.1 mixin decomposition; the largest test file is ~735 lines). To stay within the 200k context window during longer sessions:
+
+- **Use Explore subagents for any "where is X" / "how does Y work" question.** A subagent search returns ~800 tokens vs. ~15-20k tokens for a direct `Read` of a 1,500-line file. Across a multi-turn session this is the single biggest lever — easily tens of thousands of tokens saved per session. Direct `Read` is right when you already know the file and need its current contents; reach for a subagent the moment the question is "where" / "what calls" / "how does this piece work".
+- **Read `src/eneru/CLAUDE.md`** for the per-module map and the mixin pattern before reading the implementations themselves; the map is ~80 lines vs. ~830 for `monitor.py`.
+- **Don't add `.mcp.json` or context-injecting hooks.** They pre-load files into every session — exactly the wrong direction. On-demand loading is the whole point of the decomposition.
 
 ## Git Workflow
 
