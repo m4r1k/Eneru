@@ -22,7 +22,7 @@ Every commit runs unit tests, integration tests across 9 Linux distributions, en
               ╱    7 Linux Distros    ╲
              ╱─────────────────────────╲
             ╱         Unit Tests        ╲
-           ╱   pytest + Coverage (364)   ╲
+           ╱   pytest + Coverage (410)   ╲
           ╱      7 Python Versions        ╲
          ╱─────────────────────────────────╲
         ╱          Static Analysis          ╲
@@ -37,7 +37,7 @@ Every commit runs unit tests, integration tests across 9 Linux distributions, en
 |-------|-----------|---------------|
 | **AI-Assisted Dev** | Continuous | Code review, implementation guidance |
 | **Static Analysis** | Every commit | Python syntax, config validation |
-| **Unit Tests** | Every commit | Logic, state machine, edge cases (364 tests) |
+| **Unit Tests** | Every commit | Logic, state machine, edge cases (410 tests) |
 | **Integration** | Every commit | Package install on 7 Linux distros |
 | **E2E Tests** | Every commit | Full workflow with real NUT, SSH, Docker |
 | **Real UPS** | Pre-release | Actual hardware, power events |
@@ -109,11 +109,12 @@ Tests `pip install .` to ensure `pyproject.toml` is valid:
 
 ## Test coverage
 
-364 tests across 17 files:
+410 tests across 20 files:
 
 - Configuration parsing (83 tests across 6 files) -- YAML options, defaults, multi-UPS detection, trigger inheritance, ownership validation, trigger_on enum validation, shutdown_order parsing and validation (incl. YAML type coercion edge cases, mutual-exclusion error with `parallel`), shutdown_safety_margin parsing and validation. Files: `test_config_loading.py` (10), `test_config_notifications.py` (9), `test_config_filesystems.py` (3), `test_config_vm_containers.py` (7), `test_config_remote.py` (29), `test_config_validation.py` (25)
 - Multi-UPS coordination (59 tests) -- coordinator routing, is_local/drain/trigger_on, defense-in-depth lock, battery anomaly with jitter filtering, notification prefixing, runtime is_local enforcement, exit_after_shutdown in coordinator, ownership rejection (VMs/containers/filesystems), plus full coverage of MultiUPSCoordinator lifecycle (initialize, start_monitors, run_monitor crash path, handle_signal, wait_for_completion, real local-shutdown command path, drain edge cases, log fallback)
 - Core monitor logic (45 tests) -- OL/OB/FSD state machine, all four shutdown triggers, failsafe, shutdown sequence ordering, multi-phase shutdown (compute_effective_order, phased execution, thread verification, backward compat, deadline-based join, per-server safety margin)
+- Shutdown phase mixins (46 tests across 3 files) -- per-mixin coverage for the shutdown phase code: `test_shutdown_vms.py` (7) covers libvirt graceful shutdown, force-destroy on timeout, dry-run, missing virsh, no running VMs; `test_shutdown_containers.py` (26) covers runtime detection (docker/podman/auto), compose subcommand availability, compose-stack shutdown with per-file timeouts, container shutdown with dry-run + real-stop paths, ps failure handling; `test_shutdown_filesystems.py` (13) covers sync (real, dry-run, disabled), unmount with options, timeout (exit 124), busy-mount handling, already-unmounted detection, multi-mount independence
 - Remote commands (29 tests) -- SSH execution, pre-shutdown actions, parallel and sequential modes
 - Connection grace period (26 tests) -- OK/GRACE_PERIOD/FAILED transitions, flap detection, stale data
 - TUI dashboard (23 tests) -- state file parsing, log filtering, human-readable status, --once output
