@@ -275,26 +275,35 @@ echo "username ALL=(ALL) NOPASSWD: /sbin/poweroff" | sudo tee /etc/sudoers.d/ups
 sudo chmod 0440 /etc/sudoers.d/ups_shutdown
 ```
 
-### TrueNAS
+### TrueNAS SCALE
 
-TrueNAS does not use sudoers. Configure via the web UI:
-1. Go to **System → Advanced → Init/Shutdown Scripts**
-2. Or use the API to grant shutdown permissions
+TrueNAS rebuilds `/etc/sudoers` from the middleware database on boot, so do not edit `/etc/sudoers.d/` by hand. Instead:
+
+1. Go to **Credentials → Local Users**, edit the SSH user
+2. In **Allowed sudo commands**, add the full path: `/usr/bin/midclt`
+3. Tick **Allow all sudo commands with no password** *or* leave it unchecked and the user will use the explicit allowed-commands list above
+4. Use the SCALE shutdown form from the table below (`sudo /usr/bin/midclt call system.shutdown "ups_event"` for 25.04+)
+
+### TrueNAS CORE
+
+CORE is FreeBSD; the orchestrated `shutdown -p now` runs the rc.d teardown sequence cleanly. Configure sudo via **Accounts → Users → Edit → Permit Sudo** in the WebUI; do not hand-edit sudoers.
 
 ---
 
 ## Common shutdown commands
 
-| System | Command |
-|--------|---------|
-| Standard Linux | `sudo shutdown -h now` |
-| Synology DSM | `sudo -i synoshutdown -s` |
-| QNAP QTS | `sudo /sbin/poweroff` |
-| TrueNAS CORE | `sudo shutdown -p now` |
-| TrueNAS SCALE | `sudo shutdown -h now` |
-| ESXi | `sudo /bin/halt` |
-| Proxmox VE | `sudo shutdown -h now` |
-| pfSense/OPNsense | `sudo /sbin/shutdown -p now` |
+| System | Command | Notes |
+|--------|---------|-------|
+| Standard Linux (systemd) | `sudo systemctl poweroff` | Modern, unambiguous form |
+| Standard Linux (portable) | `sudo shutdown -h now` | Works on systemd and SysV; on systemd `-h` powers off |
+| Synology DSM | `sudo -i synoshutdown -s` | DSM 6/7. On DSM 7, `sudo poweroff` is also valid |
+| QNAP QTS | `sudo /sbin/poweroff` | |
+| TrueNAS CORE | `sudo shutdown -p now` | `-p` cuts power on FreeBSD; `-h` only halts |
+| TrueNAS SCALE (>= 25.04) | `sudo /usr/bin/midclt call system.shutdown "ups_event"` | Vendor-recommended; orchestrates app/VM teardown. `reason` arg required since Fangtooth |
+| TrueNAS SCALE (< 25.04) | `sudo /usr/bin/midclt call system.shutdown` | Same as above without the mandatory reason arg |
+| VMware ESXi 7.x/8.x | `esxcli system shutdown poweroff --reason="UPS power event"` | No `sudo` on ESXi (SSH login is root). Reason logged to vmkernel.log |
+| Proxmox VE | `sudo shutdown -h now` | Stop guests first via `stop_proxmox_vms` / `stop_proxmox_cts` pre-shutdown actions |
+| pfSense / OPNsense | `sudo /sbin/shutdown -p now` | FreeBSD `-p` for ACPI power-off |
 
 ---
 
