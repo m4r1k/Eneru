@@ -28,7 +28,8 @@ from eneru.logger import UPSLogger, TimezoneFormatter
 from eneru.notifications import NotificationWorker, APPRISE_AVAILABLE
 from eneru.utils import run_command, command_exists, is_numeric, format_seconds
 from eneru.actions import REMOTE_ACTIONS
-from eneru.monitor import UPSGroupMonitor, MultiUPSCoordinator
+from eneru.monitor import UPSGroupMonitor
+from eneru.multi_ups import MultiUPSCoordinator
 from eneru.cli import main
 
 __all__ = [

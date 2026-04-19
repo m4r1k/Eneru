@@ -13,7 +13,8 @@ from eneru import (
     VMConfig, ContainersConfig, FilesystemsConfig, UnmountConfig,
     RemoteServerConfig, LocalShutdownConfig, MonitorState, ConfigLoader,
 )
-from eneru.monitor import UPSGroupMonitor, MultiUPSCoordinator
+from eneru.monitor import UPSGroupMonitor
+from eneru.multi_ups import MultiUPSCoordinator
 
 
 # ==============================================================================
@@ -834,3 +835,559 @@ class TestCoordinatorExitAfterShutdown:
         coord._on_group_shutdown(config.ups_groups[0])
 
         assert coord._stop_event.is_set()
+
+
+# ==============================================================================
+# COORDINATOR INITIALIZATION
+# ==============================================================================
+
+def _coord_config(tmp_path, **kwargs):
+    """Helper to build a Config with sane defaults for coordinator tests."""
+    defaults = dict(
+        ups_groups=[
+            UPSGroupConfig(ups=UPSConfig(name="UPS1@10.0.0.1"), is_local=True),
+        ],
+        behavior=BehaviorConfig(dry_run=True),
+        logging=LoggingConfig(
+            shutdown_flag_file=str(tmp_path / "flag"),
+            state_file=str(tmp_path / "state"),
+            battery_history_file=str(tmp_path / "history"),
+            file=str(tmp_path / "eneru.log"),
+        ),
+        local_shutdown=LocalShutdownConfig(enabled=False),
+    )
+    defaults.update(kwargs)
+    return Config(**defaults)
+
+
+class TestCoordinatorInitialize:
+    """_initialize() wires signal handlers, logger, flag, and notifications."""
+
+    @pytest.mark.unit
+    def test_initialize_clears_stale_global_flag(self, tmp_path):
+        """A pre-existing shutdown flag is cleared at startup."""
+        config = _coord_config(tmp_path)
+        flag = Path(config.logging.shutdown_flag_file)
+        flag.touch()
+        assert flag.exists()
+
+        coord = MultiUPSCoordinator(config)
+        with patch("eneru.multi_ups.signal.signal"):
+            coord._initialize()
+
+        assert not flag.exists()
+
+    @pytest.mark.unit
+    def test_initialize_registers_signal_handlers(self, tmp_path):
+        """SIGTERM and SIGINT are routed to _handle_signal."""
+        import signal as _signal
+
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        with patch("eneru.multi_ups.signal.signal") as mock_signal:
+            coord._initialize()
+
+        registered = {call.args[0] for call in mock_signal.call_args_list}
+        assert _signal.SIGTERM in registered
+        assert _signal.SIGINT in registered
+
+    @pytest.mark.unit
+    def test_initialize_creates_log_file(self, tmp_path):
+        """_initialize touches the log file when a path is configured."""
+        config = _coord_config(tmp_path)
+        log_path = Path(config.logging.file)
+        assert not log_path.exists()
+
+        coord = MultiUPSCoordinator(config)
+        with patch("eneru.multi_ups.signal.signal"):
+            coord._initialize()
+
+        assert log_path.exists()
+
+    @pytest.mark.unit
+    def test_initialize_skips_notifications_when_disabled(self, tmp_path):
+        """No NotificationWorker is created when notifications are disabled."""
+        config = _coord_config(
+            tmp_path,
+            notifications=NotificationsConfig(enabled=False),
+        )
+        coord = MultiUPSCoordinator(config)
+        with patch("eneru.multi_ups.signal.signal"), \
+             patch("eneru.multi_ups.NotificationWorker") as mock_worker_cls:
+            coord._initialize()
+
+        assert coord._notification_worker is None
+        mock_worker_cls.assert_not_called()
+
+    @pytest.mark.unit
+    def test_initialize_starts_notification_worker(self, tmp_path):
+        """A successfully started NotificationWorker is retained."""
+        config = _coord_config(
+            tmp_path,
+            notifications=NotificationsConfig(
+                enabled=True,
+                urls=["json://localhost"],
+            ),
+        )
+        coord = MultiUPSCoordinator(config)
+
+        mock_worker = MagicMock()
+        mock_worker.start.return_value = True
+        mock_worker.get_service_count.return_value = 1
+
+        with patch("eneru.multi_ups.signal.signal"), \
+             patch("eneru.multi_ups.APPRISE_AVAILABLE", True), \
+             patch("eneru.multi_ups.NotificationWorker", return_value=mock_worker):
+            coord._initialize()
+
+        assert coord._notification_worker is mock_worker
+        mock_worker.start.assert_called_once()
+
+    @pytest.mark.unit
+    def test_initialize_drops_notification_worker_on_start_failure(self, tmp_path):
+        """If NotificationWorker.start() returns False, the worker is dropped."""
+        config = _coord_config(
+            tmp_path,
+            notifications=NotificationsConfig(
+                enabled=True,
+                urls=["json://localhost"],
+            ),
+        )
+        coord = MultiUPSCoordinator(config)
+
+        mock_worker = MagicMock()
+        mock_worker.start.return_value = False
+
+        with patch("eneru.multi_ups.signal.signal"), \
+             patch("eneru.multi_ups.APPRISE_AVAILABLE", True), \
+             patch("eneru.multi_ups.NotificationWorker", return_value=mock_worker):
+            coord._initialize()
+
+        assert coord._notification_worker is None
+
+
+# ==============================================================================
+# COORDINATOR THREAD START
+# ==============================================================================
+
+class TestCoordinatorStartMonitors:
+    """_start_monitors() builds per-group configs and spawns daemon threads."""
+
+    @pytest.mark.unit
+    def test_start_monitors_one_thread_per_group(self, tmp_path):
+        """One thread is created per UPS group."""
+        config = _coord_config(
+            tmp_path,
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS1@host"), is_local=True),
+                UPSGroupConfig(ups=UPSConfig(name="UPS2@host"), is_local=False),
+                UPSGroupConfig(ups=UPSConfig(name="UPS3@host"), is_local=False),
+            ],
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+
+        with patch("eneru.multi_ups.threading.Thread") as mock_thread, \
+             patch("eneru.multi_ups.UPSGroupMonitor") as mock_monitor_cls:
+            mock_monitor_cls.return_value = MagicMock()
+            coord._start_monitors()
+
+        assert len(coord._monitors) == 3
+        assert mock_thread.call_count == 3
+        # Every thread is a daemon and was started
+        for call in mock_thread.call_args_list:
+            assert call.kwargs.get("daemon") is True
+        # threading.Thread is patched to return the same MagicMock each call,
+        # so start() should have been invoked once per group.
+        assert mock_thread.return_value.start.call_count == 3
+
+    @pytest.mark.unit
+    def test_start_monitors_sanitizes_ups_name(self, tmp_path):
+        """@, :, / in UPS names become - in thread name and state suffix."""
+        config = _coord_config(
+            tmp_path,
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS1@10.0.0.1:3493/path"), is_local=True),
+            ],
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+
+        with patch("eneru.multi_ups.threading.Thread") as mock_thread, \
+             patch("eneru.multi_ups.UPSGroupMonitor") as mock_monitor_cls:
+            mock_monitor_cls.return_value = MagicMock()
+            coord._start_monitors()
+
+        sanitized = "UPS1-10.0.0.1-3493-path"
+        thread_kwargs = mock_thread.call_args_list[0].kwargs
+        assert thread_kwargs["name"] == f"ups-{sanitized}"
+
+        monitor_kwargs = mock_monitor_cls.call_args_list[0].kwargs
+        assert monitor_kwargs["state_file_suffix"] == sanitized
+        assert monitor_kwargs["coordinator_mode"] is True
+        assert monitor_kwargs["log_prefix"].startswith("[")
+
+    @pytest.mark.unit
+    def test_start_monitors_passes_per_group_config(self, tmp_path):
+        """Each monitor receives a Config containing only its own group."""
+        groups = [
+            UPSGroupConfig(ups=UPSConfig(name="UPS1@h"), is_local=True),
+            UPSGroupConfig(ups=UPSConfig(name="UPS2@h"), is_local=False),
+        ]
+        config = _coord_config(tmp_path, ups_groups=groups)
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+
+        with patch("eneru.multi_ups.threading.Thread"), \
+             patch("eneru.multi_ups.UPSGroupMonitor") as mock_monitor_cls:
+            mock_monitor_cls.return_value = MagicMock()
+            coord._start_monitors()
+
+        for idx, call in enumerate(mock_monitor_cls.call_args_list):
+            per_group = call.kwargs["config"]
+            assert len(per_group.ups_groups) == 1
+            assert per_group.ups_groups[0].ups.name == groups[idx].ups.name
+
+
+# ==============================================================================
+# COORDINATOR RUN-MONITOR THREAD TARGET
+# ==============================================================================
+
+class TestCoordinatorRunMonitor:
+    """_run_monitor() handles normal completion and crash notification."""
+
+    @pytest.mark.unit
+    def test_run_monitor_normal(self, tmp_path):
+        """A monitor that runs without raising does not notify failure."""
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        coord._notification_worker = MagicMock()
+
+        mock_monitor = MagicMock()
+        coord._run_monitor(mock_monitor, config.ups_groups[0])
+
+        mock_monitor.run.assert_called_once()
+        coord._notification_worker.send.assert_not_called()
+
+    @pytest.mark.unit
+    def test_run_monitor_crash_logs_and_notifies(self, tmp_path):
+        """A monitor that raises is logged and a failure notification is sent."""
+        config = _coord_config(
+            tmp_path,
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS1", display_name="MainUPS"),
+                is_local=True,
+            )],
+        )
+        coord = MultiUPSCoordinator(config)
+        logged = []
+        coord._log = logged.append
+        coord._notification_worker = MagicMock()
+
+        mock_monitor = MagicMock()
+        mock_monitor.run.side_effect = RuntimeError("boom")
+        coord._run_monitor(mock_monitor, config.ups_groups[0])
+
+        assert any("MainUPS" in m and "boom" in m for m in logged)
+        coord._notification_worker.send.assert_called_once()
+        body = coord._notification_worker.send.call_args.args[0]
+        assert "MainUPS" in body
+        assert "boom" in body
+
+    @pytest.mark.unit
+    def test_run_monitor_crash_without_notifier(self, tmp_path):
+        """Crash path is safe when no notification worker is configured."""
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        coord._notification_worker = None
+
+        mock_monitor = MagicMock()
+        mock_monitor.run.side_effect = RuntimeError("boom")
+        # Must not raise.
+        coord._run_monitor(mock_monitor, config.ups_groups[0])
+
+
+# ==============================================================================
+# COORDINATOR LOCAL SHUTDOWN (REAL PATH)
+# ==============================================================================
+
+class TestCoordinatorRealLocalShutdown:
+    """_handle_local_shutdown executes the real shutdown command outside dry-run."""
+
+    @pytest.mark.unit
+    def test_real_shutdown_invokes_command(self, tmp_path):
+        """Non-dry-run path runs the configured shutdown command."""
+        config = _coord_config(
+            tmp_path,
+            behavior=BehaviorConfig(dry_run=False),
+            local_shutdown=LocalShutdownConfig(
+                enabled=True,
+                command="/sbin/shutdown -h now",
+                message="UPS triggered shutdown",
+            ),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        coord._notification_worker = MagicMock()
+
+        with patch("eneru.multi_ups.time.sleep"), \
+             patch("eneru.multi_ups.run_command") as mock_run:
+            coord._handle_local_shutdown("UPS1")
+
+        mock_run.assert_called_once()
+        cmd_parts = mock_run.call_args.args[0]
+        assert cmd_parts[:3] == ["/sbin/shutdown", "-h", "now"]
+        assert cmd_parts[-1] == "UPS triggered shutdown"
+        coord._notification_worker.send.assert_called_once()
+
+    @pytest.mark.unit
+    def test_real_shutdown_without_message(self, tmp_path):
+        """Empty message means no extra arg appended to the command."""
+        config = _coord_config(
+            tmp_path,
+            behavior=BehaviorConfig(dry_run=False),
+            local_shutdown=LocalShutdownConfig(
+                enabled=True,
+                command="/sbin/poweroff",
+                message="",
+            ),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        coord._notification_worker = None
+
+        with patch("eneru.multi_ups.time.sleep"), \
+             patch("eneru.multi_ups.run_command") as mock_run:
+            coord._handle_local_shutdown("UPS1")
+
+        cmd_parts = mock_run.call_args.args[0]
+        assert cmd_parts == ["/sbin/poweroff"]
+
+    @pytest.mark.unit
+    def test_disabled_local_shutdown_clears_flag(self, tmp_path):
+        """When local_shutdown.enabled=False, the global flag is removed."""
+        config = _coord_config(
+            tmp_path,
+            local_shutdown=LocalShutdownConfig(enabled=False),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        coord._notification_worker = None
+
+        coord._handle_local_shutdown("UPS1")
+
+        assert not Path(config.logging.shutdown_flag_file).exists()
+
+    @pytest.mark.unit
+    def test_dry_run_clears_flag(self, tmp_path):
+        """Dry-run path also clears the flag rather than rebooting the host."""
+        config = _coord_config(
+            tmp_path,
+            behavior=BehaviorConfig(dry_run=True),
+            local_shutdown=LocalShutdownConfig(
+                enabled=True,
+                command="/sbin/shutdown -h now",
+            ),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        coord._notification_worker = None
+
+        with patch("eneru.multi_ups.run_command") as mock_run:
+            coord._handle_local_shutdown("UPS1")
+
+        mock_run.assert_not_called()
+        assert not Path(config.logging.shutdown_flag_file).exists()
+
+    @pytest.mark.unit
+    def test_real_shutdown_sets_stop_event_when_exit_requested(self, tmp_path):
+        """exit_after_shutdown=True sets stop_event after the local shutdown."""
+        config = _coord_config(
+            tmp_path,
+            local_shutdown=LocalShutdownConfig(enabled=False),
+        )
+        coord = MultiUPSCoordinator(config, exit_after_shutdown=True)
+        coord._log = lambda msg: None
+        coord._notification_worker = None
+
+        coord._handle_local_shutdown("UPS1")
+
+        assert coord._stop_event.is_set()
+
+
+# ==============================================================================
+# COORDINATOR DRAIN EDGE CASES
+# ==============================================================================
+
+class TestCoordinatorDrainEdgeCases:
+    """_drain_all_groups handles already-shut, exceptions, and timeouts."""
+
+    @pytest.mark.unit
+    def test_drain_skips_monitor_with_existing_flag(self, tmp_path):
+        """A monitor whose shutdown flag is already present is not re-triggered."""
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+
+        already_shut = MagicMock()
+        already_shut._shutdown_flag_path = tmp_path / "shut-flag"
+        already_shut._shutdown_flag_path.touch()
+        coord._monitors = [already_shut]
+        coord._threads = []
+
+        coord._drain_all_groups(timeout=1)
+
+        already_shut._execute_shutdown_sequence.assert_not_called()
+
+    @pytest.mark.unit
+    def test_drain_swallows_shutdown_exception(self, tmp_path):
+        """An exception in a monitor's shutdown sequence is logged, not raised."""
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        logs = []
+        coord._log = logs.append
+
+        bad_monitor = MagicMock()
+        bad_monitor._shutdown_flag_path = tmp_path / "bad-flag"
+        bad_monitor._shutdown_flag_path.unlink(missing_ok=True)
+        bad_monitor._log_prefix = "[bad] "
+        bad_monitor._execute_shutdown_sequence.side_effect = RuntimeError("fail")
+        coord._monitors = [bad_monitor]
+        coord._threads = []
+
+        # Must not raise.
+        coord._drain_all_groups(timeout=1)
+        assert any("Error during drain shutdown" in m for m in logs)
+
+    @pytest.mark.unit
+    def test_drain_warns_on_timeout(self, tmp_path):
+        """Threads still alive after the deadline produce a warning log."""
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        logs = []
+        coord._log = logs.append
+
+        coord._monitors = []
+        live_thread = MagicMock()
+        live_thread.is_alive.return_value = True
+        coord._threads = [live_thread]
+
+        coord._drain_all_groups(timeout=0)
+
+        live_thread.join.assert_called_once()
+        assert any("still running after drain timeout" in m for m in logs)
+
+
+# ==============================================================================
+# COORDINATOR WAIT-FOR-COMPLETION
+# ==============================================================================
+
+class TestCoordinatorWaitForCompletion:
+    """_wait_for_completion exits when all monitor threads die."""
+
+    @pytest.mark.unit
+    def test_wait_returns_when_no_threads_alive(self, tmp_path):
+        """If every thread is dead, the wait loop exits promptly."""
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+
+        dead_thread = MagicMock()
+        dead_thread.is_alive.return_value = False
+        coord._threads = [dead_thread]
+
+        # Should return without blocking on stop_event.
+        coord._wait_for_completion()
+        assert not coord._stop_event.is_set()
+
+    @pytest.mark.unit
+    def test_wait_returns_when_stop_event_set(self, tmp_path):
+        """A pre-set stop_event causes immediate exit."""
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._stop_event.set()
+
+        live_thread = MagicMock()
+        live_thread.is_alive.return_value = True
+        coord._threads = [live_thread]
+
+        coord._wait_for_completion()
+
+
+# ==============================================================================
+# COORDINATOR SIGNAL HANDLER
+# ==============================================================================
+
+class TestCoordinatorHandleSignal:
+    """_handle_signal stops worker, joins threads, clears flag, and exits."""
+
+    @pytest.mark.unit
+    def test_handle_signal_stops_notification_worker(self, tmp_path):
+        """A configured notification worker is told to stop."""
+        import signal as _signal
+
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        coord._notification_worker = MagicMock()
+        coord._threads = []
+
+        Path(config.logging.shutdown_flag_file).touch()
+
+        with patch("eneru.multi_ups.sys.exit") as mock_exit:
+            coord._handle_signal(_signal.SIGTERM, None)
+
+        coord._notification_worker.send.assert_called_once()
+        coord._notification_worker.stop.assert_called_once()
+        assert coord._stop_event.is_set()
+        assert not Path(config.logging.shutdown_flag_file).exists()
+        mock_exit.assert_called_once_with(0)
+
+    @pytest.mark.unit
+    def test_handle_signal_joins_threads(self, tmp_path):
+        """Each registered thread is joined before exit."""
+        import signal as _signal
+
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        coord._notification_worker = None
+
+        threads = [MagicMock(), MagicMock()]
+        coord._threads = threads
+
+        with patch("eneru.multi_ups.sys.exit"):
+            coord._handle_signal(_signal.SIGINT, None)
+
+        for thread in threads:
+            thread.join.assert_called_once_with(timeout=5)
+
+
+# ==============================================================================
+# COORDINATOR LOG FALLBACK
+# ==============================================================================
+
+class TestCoordinatorLogFallback:
+    """_log() falls back to print() when no shared logger is initialized."""
+
+    @pytest.mark.unit
+    def test_log_uses_logger_when_present(self, tmp_path):
+        """When a logger is set, _log delegates to logger.log()."""
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._logger = MagicMock()
+
+        coord._log("hello")
+        coord._logger.log.assert_called_once_with("hello")
+
+    @pytest.mark.unit
+    def test_log_prints_when_no_logger(self, tmp_path, capsys):
+        """Without a logger, _log writes a timestamped line to stdout."""
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._logger = None
+
+        coord._log("hello world")
+        captured = capsys.readouterr()
+        assert "hello world" in captured.out

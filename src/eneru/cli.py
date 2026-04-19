@@ -6,7 +6,8 @@ from datetime import datetime
 
 from eneru.version import __version__
 from eneru.config import ConfigLoader
-from eneru.monitor import UPSGroupMonitor, MultiUPSCoordinator, compute_effective_order
+from eneru.monitor import UPSGroupMonitor, compute_effective_order
+from eneru.multi_ups import MultiUPSCoordinator
 from eneru.notifications import APPRISE_AVAILABLE
 
 # Optional import for Apprise (needed for test notifications)
