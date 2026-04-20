@@ -109,7 +109,7 @@ Tests `pip install .` to ensure `pyproject.toml` is valid:
 
 ## Test coverage
 
-628 tests across 25 files:
+637 tests across 25 files:
 
 - Configuration parsing (116 tests across 6 files): YAML options, defaults, multi-UPS detection, trigger inheritance, ownership validation, `trigger_on` enum validation, `shutdown_order` parsing and validation (YAML type coercion edge cases, mutual-exclusion error with `parallel`), `shutdown_safety_margin` parsing and validation. Adds the redundancy-group dataclass (parsing, defaults, inheritance, multi-group, malformed-entry handling) and 24 validation rules (`min_healthy` bounds, unknown UPS references, duplicate sources, missing names, duplicate names, enum checks, local-resource ownership, cross-tier server conflicts, `is_local` uniqueness). Files: `test_config_loading.py` (19), `test_config_notifications.py` (9), `test_config_filesystems.py` (3), `test_config_vm_containers.py` (7), `test_config_remote.py` (29), `test_config_validation.py` (49).
 - Multi-UPS coordination (65 tests): coordinator routing, `is_local` / drain / `trigger_on`, defense-in-depth lock, battery anomaly with jitter filtering, notification prefixing, runtime `is_local` enforcement, `exit_after_shutdown` in coordinator, ownership rejection (VMs / containers / filesystems), and the full `MultiUPSCoordinator` lifecycle (`initialize`, `start_monitors`, `run_monitor` crash path, `handle_signal`, `wait_for_completion`, real local-shutdown command path, drain edge cases, log fallback). 6 new tests cover redundancy-group wiring inside the coordinator: `in_redundancy` set computation, `in_redundancy_group` flag passed to monitors, evaluator + executor instantiation, signal-handler join of evaluator threads.

@@ -20,9 +20,9 @@ Feature requests and feedback: [GitHub Issues](https://github.com/m4r1k/Eneru/is
 
 ---
 
-## v5.1 -- Redundancy groups and statistics (rc4)
+## v5.1 -- Redundancy groups and statistics (rc5)
 
-*Implementation complete; v5.1.0-rc4 available for hardware testing.*
+*Implementation complete; v5.1.0-rc5 available for hardware testing.*
 
 - ✅ Redundancy groups: bundle multiple UPSes protecting the same servers via redundant power, trigger shutdown only when redundancy is exhausted (`min_healthy` consensus)
 - ✅ UPS health model with four states (HEALTHY / DEGRADED / CRITICAL / UNKNOWN) and configurable policies for how degraded and unknown states count

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> Status: v5.1.0-rc4 is cut for hardware testing. Once that's done the
+> Status: v5.1.0-rc5 is cut for hardware testing. Once that's done the
 > entry below is promoted from `[Unreleased]` to `[5.1.0] - YYYY-MM-DD`
 > with no other changes.
 
@@ -55,13 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Proxmox `stop_proxmox_vms` / `stop_proxmox_cts` now work for non-root SSH users (#4).** Surfaced by real-world testing: `qm` and `pct` reject non-root callers regardless of PVE-level ACLs (`vm.audit` + `vm.powermgmt` are insufficient on their own), so the templates were silently broken for any SSH user that wasn't root. Both templates now invoke `qm` / `pct` via `sudo`. Root-SSH setups keep working unchanged because Proxmox VE ships sudo with `root NOPASSWD: ALL` by default. Non-root users add a one-line sudoers entry, see [Passwordless sudo → Proxmox VE](remote-servers.md#proxmox-ve) in the docs.
 
 ### Migration notes
-- **Stats are on by default.** On first start of v5.1.0-rc4 the daemon creates `/var/lib/eneru/<sanitized-ups-name>.db` and begins recording samples. No config change required. Override with `statistics.db_directory: <path>` to put stats elsewhere (e.g. an attached SSD on Pi-class hardware).
+- **Stats are on by default.** On first start of v5.1.0-rc5 the daemon creates `/var/lib/eneru/<sanitized-ups-name>.db` and begins recording samples. No config change required. Override with `statistics.db_directory: <path>` to put stats elsewhere (e.g. an attached SSD on Pi-class hardware).
 - **Existing single-UPS configs continue to work unchanged.** `redundancy_groups:` is optional. The advisory-trigger code path only activates when a UPS appears in `ups_sources`.
 - **Storage on small devices.** Per-UPS DB is ~14 MB steady-state with one `executemany` flush every 10 s, comparable to typical journald background writes. See `docs/statistics.md`, "Storage on small devices (Raspberry Pi / SD card)".
 
 ### Technical details
 - New modules under `src/eneru/`: `health_model.py`, `redundancy.py`, `stats.py`, `graph.py`. All four are wired into `nfpm.yaml`.
-- Test counts: 410 → 628 unit tests across 25 files; 19 → 31 E2E scenarios.
+- Test counts: 410 → 637 unit tests across 25 files; 19 → 31 E2E scenarios.
 - New structural-defense test (`tests/test_packaging.py`) asserts every `src/eneru/**/*.py` is referenced by `nfpm.yaml`. Catches the PR #23 class of bug where a missing entry passes pip CI silently and fails at deb/rpm install with `ModuleNotFoundError`.
 
 ---
