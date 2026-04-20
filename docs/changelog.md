@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> Status: v5.1.0-rc5 is cut for hardware testing. Once that's done the
+> Status: v5.1.0-rc6 is cut for hardware testing. Once that's done the
 > entry below is promoted from `[Unreleased]` to `[5.1.0] - YYYY-MM-DD`
 > with no other changes.
 
@@ -32,8 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `docs/redundancy-groups.md` covers the model. `eneru validate` summarises every redundancy group with its quorum policy.
 - **Per-UPS SQLite statistics store (Phase 2 spec 2.12):** every poll is buffered into an in-memory deque (no I/O on the hot path). A background `StatsWriter` thread flushes to disk every 10 s, then aggregates and purges every 5 min.
     - Per-UPS `.db` at `<statistics.db_directory>/<sanitized-ups-name>.db`. Default `db_directory: /var/lib/eneru` (created by deb/rpm; pip installs auto-create on first start).
-    - Schema: `samples` (10 metrics: status, battery_charge, battery_runtime, ups_load, input_voltage, output_voltage, depletion_rate, time_on_battery, connection_state, ts), `agg_5min` and `agg_hourly` (avg / min / max / count), `events` (power-event log), `meta`.
-    - Tier-aware retention: 24 h raw + 30 d 5-minute + 5 y hourly (configurable). Steady-state footprint per UPS ≈ 14 MB.
+    - Schema (v2 in rc6): `samples` carries 13 metrics (`status`, `battery_charge`, `battery_runtime`, `ups_load`, `input_voltage`, `output_voltage`, `battery_voltage`, `ups_temperature`, `input_frequency`, `output_frequency`, plus the Eneru-derived `depletion_rate`, `time_on_battery`, `connection_state`) keyed by `ts`. `agg_5min` and `agg_hourly` carry avg/min/max for the signal-shaped metrics. `events` is the power-event log; `meta` tracks `schema_version`.
+    - Tier-aware retention: 24 h raw + 30 d 5-minute + 5 y hourly (configurable). Steady-state footprint per UPS ≈ 17 MB at the v2 column count.
     - WAL + `synchronous=NORMAL`. `StatsStore.open_readonly` exposes a `?mode=ro` URI connection for the TUI.
     - Failure isolation: every public method catches `sqlite3.Error` / `OSError`, logs once with rate-limit, swallows. SQLite outages can never crash the daemon.
     - `docs/statistics.md` covers schema, SD-card storage profile, sqlite3 inspection recipes, backup, and failure modes.
@@ -43,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Headless rendering: `eneru monitor --once --graph charge --time 1h` prints the graph to stdout for scripts and CI.
     - `docs/tui-graphs.md` documents keybindings and the time-range tier-selection table.
 - **TUI events panel sourced from SQLite:** the gold "Recent Events" panel now reads each UPS's `events` table via `StatsStore.open_readonly` and merges across UPSes (sorted by timestamp; `[label]` prefix in multi-UPS mode). Falls back to the log-tail parser when no DB exists. New `eneru monitor --once --events-only` flag for scripted log retrieval.
+- **rc6 — stats schema completed (v1 → v2):** four raw NUT metrics from spec 2.12 (`battery_voltage`, `ups_temperature`, `input_frequency`, `output_frequency`) added to `samples` with matching aggregate columns (and the previously-missing `output_voltage_avg`). The migration runs automatically on first start of rc6 against any pre-existing v1 DB via idempotent `ALTER TABLE` statements; existing rows are preserved with NULLs for the new columns. `meta.schema_version` is now bumped to `2`. Pattern documented for future schema growth in `src/eneru/CLAUDE.md` ("Stats schema evolution").
+- **rc6 — TUI graphs blend SQLite + a per-UPS live deque (spec 2.13):** the writer flushes every 10 s, but the state file is rewritten every poll. The TUI now keeps a 60-entry per-UPS deque populated each refresh from the state file; `query_metric_series` extends the SQLite tail with any newer deque points (deduped by timestamp). Result: the graph's right edge stays current between flushes instead of lagging up to 10 s.
+- **rc6 — TUI footer interpolates current cycle state.** The bottom-row hints show `<G> Graph: charge`, `<T> Time: 1h`, `<U> UPS: 1/2` instead of static labels, so an operator can see at a glance what state the cycle keys will move from.
+- **rc6 — `PRAGMA busy_timeout = 500` on every stats SQLite connection** (writer + readonly TUI). Bounds reader-writer contention to half a second on slow storage (SD cards on Pi-class hardware).
 
 ### Changed
 - **`shutdown_order` and `parallel` are now mutually exclusive.** Setting both on the same server is a hard validation error (previously a warning). Pick one model: `shutdown_order` for multi-phase ordering, or `parallel` for the legacy two-group behaviour.
@@ -56,13 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Migration notes
 - **Stats are on by default.** On first start of v5.1.0-rc5 the daemon creates `/var/lib/eneru/<sanitized-ups-name>.db` and begins recording samples. No config change required. Override with `statistics.db_directory: <path>` to put stats elsewhere (e.g. an attached SSD on Pi-class hardware).
+- **rc6 — stats schema migration is automatic.** Daemons upgraded from rc5 (`SCHEMA_VERSION = 1`) will run additive `ALTER TABLE` statements on first start to add the four new metric columns and the agg `*_avg`/`*_min`/`*_max` columns. Existing samples are preserved (NULL for new columns); `meta.schema_version` is bumped to `2`. The migration is idempotent — repeated rc6 starts re-run no work.
+- **rc6 — CI exercises the production stats path.** Previously, every E2E test silently disabled stats because the GitHub runner couldn't write `/var/lib/eneru`. The workflow now provisions the directory upfront so Tests 1–27 actually persist samples + events, mirroring what users hit after `apt install eneru`. No user-facing change.
 - **Existing single-UPS configs continue to work unchanged.** `redundancy_groups:` is optional. The advisory-trigger code path only activates when a UPS appears in `ups_sources`.
-- **Storage on small devices.** Per-UPS DB is ~14 MB steady-state with one `executemany` flush every 10 s, comparable to typical journald background writes. See `docs/statistics.md`, "Storage on small devices (Raspberry Pi / SD card)".
+- **Storage on small devices.** Per-UPS DB is ~17 MB steady-state at the v2 column count with one `executemany` flush every 10 s, comparable to typical journald background writes. See `docs/statistics.md`, "Storage on small devices (Raspberry Pi / SD card)".
 
 ### Technical details
 - New modules under `src/eneru/`: `health_model.py`, `redundancy.py`, `stats.py`, `graph.py`. All four are wired into `nfpm.yaml`.
-- Test counts: 410 → 637 unit tests across 25 files; 19 → 31 E2E scenarios.
+- Test counts (rc6): ~650 unit tests across 26 files; 31 E2E scenarios.
 - New structural-defense test (`tests/test_packaging.py`) asserts every `src/eneru/**/*.py` is referenced by `nfpm.yaml`. Catches the PR #23 class of bug where a missing entry passes pip CI silently and fails at deb/rpm install with `ModuleNotFoundError`.
+- **rc6 — schema migration mechanic.** `StatsStore._migrate_schema` reads `meta.schema_version` and applies append-only `ALTER TABLE` migrations gated by `_safe_alter` (idempotent: duplicate-column errors are swallowed). Pattern documented in `src/eneru/CLAUDE.md` and the root `CLAUDE.md` "Conventions" section. `meta.schema_version` is bumped *after* migrations succeed, so a crash mid-migration is replayed safely on the next start.
 
 ---
 

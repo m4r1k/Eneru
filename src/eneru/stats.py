@@ -18,9 +18,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 
-# 10 metrics per spec 2.12. Samples table columns and aggregation derive
-# from this list; keeping it as a constant lets tests assert the schema
-# stays in sync.
+# Sample columns: 10 raw NUT metrics from spec 2.12 (battery.charge,
+# battery.runtime, ups.load, input.voltage, output.voltage, battery.voltage,
+# ups.temperature, input.frequency, output.frequency, ups.status) plus 3
+# Eneru-derived state fields (depletion_rate, time_on_battery,
+# connection_state) that are the foundation for the future API.
+# Order is locked: appending only keeps INSERT tuples stable for migrations.
 SAMPLE_FIELDS: Tuple[str, ...] = (
     "ts",                # epoch seconds
     "status",            # ups.status string
@@ -29,12 +32,19 @@ SAMPLE_FIELDS: Tuple[str, ...] = (
     "ups_load",          # %
     "input_voltage",     # V
     "output_voltage",    # V
-    "depletion_rate",    # %/min
-    "time_on_battery",   # seconds since on-battery start (0 when OL)
-    "connection_state",  # OK / GRACE_PERIOD / FAILED
+    "depletion_rate",    # %/min  (Eneru-derived)
+    "time_on_battery",   # seconds since on-battery start (Eneru-derived)
+    "connection_state",  # OK / GRACE_PERIOD / FAILED  (Eneru-derived)
+    "battery_voltage",   # V                 (added v2)
+    "ups_temperature",   # °C                (added v2)
+    "input_frequency",   # Hz                (added v2)
+    "output_frequency",  # Hz                (added v2)
 )
 
-SCHEMA_VERSION = 1
+# Bump and add a migration block in StatsStore._init_schema whenever the
+# samples / agg_5min / agg_hourly / events / meta schema gains a column
+# or table. See src/eneru/CLAUDE.md "Stats schema evolution".
+SCHEMA_VERSION = 2
 
 # Bucket sizes for aggregation tiers.
 BUCKET_5MIN = 5 * 60
@@ -64,7 +74,12 @@ def _sample_from_ups_data(
     connection_state: str = "OK",
     ts: Optional[int] = None,
 ) -> Tuple:
-    """Project a raw upsc dict + state context into a SAMPLE_FIELDS tuple."""
+    """Project a raw upsc dict + state context into a SAMPLE_FIELDS tuple.
+
+    Tuple positions are locked to the SAMPLE_FIELDS order so the same
+    ``executemany`` works against any schema version reached via
+    additive migrations.
+    """
     return (
         int(ts if ts is not None else time.time()),
         ups_data.get("ups.status", ""),
@@ -76,6 +91,10 @@ def _sample_from_ups_data(
         float(depletion_rate or 0.0),
         int(time_on_battery or 0),
         connection_state or "OK",
+        _to_float(ups_data.get("battery.voltage")),
+        _to_float(ups_data.get("ups.temperature")),
+        _to_float(ups_data.get("input.frequency")),
+        _to_float(ups_data.get("output.frequency")),
     )
 
 
@@ -134,6 +153,11 @@ class StatsStore:
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.execute("PRAGMA synchronous = NORMAL")
         self._conn.execute("PRAGMA temp_store = MEMORY")
+        # Bound the writer's wait if a slow reader (TUI) is mid-query
+        # on slow storage (SD card on a Raspberry Pi). 500 ms is well
+        # under the 10 s flush interval, so a stalled reader can never
+        # hold up the writer thread for longer than that bound.
+        self._conn.execute("PRAGMA busy_timeout = 500")
         self._init_schema()
 
     def close(self) -> None:
@@ -163,6 +187,11 @@ class StatsStore:
                 ("depletion_rate", "REAL"),
                 ("time_on_battery", "INTEGER"),
                 ("connection_state", "TEXT"),
+                # v2 additions:
+                ("battery_voltage", "REAL"),
+                ("ups_temperature", "REAL"),
+                ("input_frequency", "REAL"),
+                ("output_frequency", "REAL"),
             )
         )
         agg_cols = """
@@ -176,7 +205,15 @@ class StatsStore:
             input_voltage_avg REAL,
             input_voltage_min REAL,
             input_voltage_max REAL,
-            samples_count INTEGER
+            samples_count INTEGER,
+            -- v2 additions:
+            output_voltage_avg REAL,
+            battery_voltage_avg REAL,
+            ups_temperature_avg REAL,
+            ups_temperature_min REAL,
+            ups_temperature_max REAL,
+            input_frequency_avg REAL,
+            output_frequency_avg REAL
         """
         with self._conn:
             self._conn.executescript(f"""
@@ -205,10 +242,69 @@ class StatsStore:
                     value TEXT
                 );
             """)
+            self._migrate_schema()
             self._conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
                 ("schema_version", str(SCHEMA_VERSION)),
             )
+
+    def _migrate_schema(self) -> None:
+        """Apply additive schema migrations keyed off ``meta.schema_version``.
+
+        See ``src/eneru/CLAUDE.md`` ("Stats schema evolution") for the
+        full pattern. Rules:
+
+        1. Migrations are append-only — never modify a previous block.
+        2. Each ``ALTER TABLE`` is wrapped so duplicate columns are a
+           no-op (idempotent on retries / partially-migrated DBs).
+        3. ``meta.schema_version`` is bumped *after* the migrations
+           succeed so a crash mid-migration is replayed safely.
+        """
+        cur = self._conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()
+        # No row -> brand-new DB; CREATE TABLE above already includes
+        # every current column, so no ALTERs are needed.
+        if cur is None:
+            return
+        try:
+            current = int(cur[0])
+        except (TypeError, ValueError):
+            current = 1
+
+        if current < 2:
+            # v1 -> v2: 4 raw NUT metric columns on samples; matching
+            # *_avg (and *_min/*_max for temperature) on the agg tables;
+            # plus output_voltage_avg that closes the long-standing gap
+            # in _agg_column_for.
+            v2_samples = (
+                "battery_voltage REAL",
+                "ups_temperature REAL",
+                "input_frequency REAL",
+                "output_frequency REAL",
+            )
+            v2_agg = (
+                "output_voltage_avg REAL",
+                "battery_voltage_avg REAL",
+                "ups_temperature_avg REAL",
+                "ups_temperature_min REAL",
+                "ups_temperature_max REAL",
+                "input_frequency_avg REAL",
+                "output_frequency_avg REAL",
+            )
+            for col in v2_samples:
+                self._safe_alter("samples", col)
+            for table in ("agg_5min", "agg_hourly"):
+                for col in v2_agg:
+                    self._safe_alter(table, col)
+
+    def _safe_alter(self, table: str, column_def: str) -> None:
+        """Idempotent ``ALTER TABLE ... ADD COLUMN``; ignores duplicates."""
+        try:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")
+        except sqlite3.OperationalError:
+            # Column already exists -- benign on retries / partial migrations.
+            pass
 
     # ----- hot path: zero-I/O sample buffering -----
 
@@ -276,7 +372,10 @@ class StatsStore:
                         battery_runtime_avg,
                         ups_load_avg, ups_load_max,
                         input_voltage_avg, input_voltage_min, input_voltage_max,
-                        samples_count
+                        samples_count,
+                        output_voltage_avg, battery_voltage_avg,
+                        ups_temperature_avg, ups_temperature_min, ups_temperature_max,
+                        input_frequency_avg, output_frequency_avg
                     )
                     SELECT
                         (ts / {BUCKET_5MIN}) * {BUCKET_5MIN} AS bucket,
@@ -284,7 +383,10 @@ class StatsStore:
                         AVG(battery_runtime),
                         AVG(ups_load), MAX(ups_load),
                         AVG(input_voltage), MIN(input_voltage), MAX(input_voltage),
-                        COUNT(*)
+                        COUNT(*),
+                        AVG(output_voltage), AVG(battery_voltage),
+                        AVG(ups_temperature), MIN(ups_temperature), MAX(ups_temperature),
+                        AVG(input_frequency), AVG(output_frequency)
                     FROM samples
                     GROUP BY bucket
                 """).rowcount
@@ -295,7 +397,10 @@ class StatsStore:
                         battery_runtime_avg,
                         ups_load_avg, ups_load_max,
                         input_voltage_avg, input_voltage_min, input_voltage_max,
-                        samples_count
+                        samples_count,
+                        output_voltage_avg, battery_voltage_avg,
+                        ups_temperature_avg, ups_temperature_min, ups_temperature_max,
+                        input_frequency_avg, output_frequency_avg
                     )
                     SELECT
                         (ts / {BUCKET_HOURLY}) * {BUCKET_HOURLY} AS bucket,
@@ -305,7 +410,11 @@ class StatsStore:
                         AVG(ups_load_avg), MAX(ups_load_max),
                         AVG(input_voltage_avg),
                         MIN(input_voltage_min), MAX(input_voltage_max),
-                        SUM(samples_count)
+                        SUM(samples_count),
+                        AVG(output_voltage_avg), AVG(battery_voltage_avg),
+                        AVG(ups_temperature_avg),
+                        MIN(ups_temperature_min), MAX(ups_temperature_max),
+                        AVG(input_frequency_avg), AVG(output_frequency_avg)
                     FROM agg_5min
                     GROUP BY bucket
                 """).rowcount
@@ -435,16 +544,24 @@ class StatsStore:
 
     @staticmethod
     def _agg_column_for(metric: str) -> str:
-        # Aggregations only carry the documented columns; map a raw metric
-        # name to its corresponding *_avg column.
+        """Map a raw-metric name to its ``*_avg`` column on the agg tables.
+
+        ``depletion_rate``, ``time_on_battery`` and ``connection_state``
+        are not aggregated (state-shaped, not signal-shaped) and fall
+        through to a column that doesn't exist on agg tables -- callers
+        receive an empty result, which is the right behavior.
+        """
         avg_map = {
             "battery_charge": "battery_charge_avg",
             "battery_runtime": "battery_runtime_avg",
             "ups_load": "ups_load_avg",
             "input_voltage": "input_voltage_avg",
+            "output_voltage": "output_voltage_avg",
+            "battery_voltage": "battery_voltage_avg",
+            "ups_temperature": "ups_temperature_avg",
+            "input_frequency": "input_frequency_avg",
+            "output_frequency": "output_frequency_avg",
         }
-        # Output-voltage and depletion_rate aren't aggregated; fall back
-        # to the same column name (will be NULL in agg tables).
         return avg_map.get(metric, metric)
 
     # ----- read-only API for the TUI -----
@@ -461,7 +578,11 @@ class StatsStore:
         if not path.exists():
             return None  # type: ignore[return-value]
         uri = f"file:{path}?mode=ro"
-        return sqlite3.connect(uri, uri=True, check_same_thread=False)
+        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        # Same bound as the writer connection: a slow query against the
+        # writer's WAL can't stall the TUI refresh for more than 500 ms.
+        conn.execute("PRAGMA busy_timeout = 500")
+        return conn
 
     # ----- error rate-limiting -----
 

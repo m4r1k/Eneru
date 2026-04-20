@@ -28,6 +28,12 @@ log_event()      ──────────────── direct INSERT 
 
 ## Schema
 
+The `samples` table carries 13 metrics per row: 10 raw NUT vars (per
+spec 2.12) plus 3 Eneru-derived state fields. The 4 columns flagged
+"v2" were added in v5.1.0-rc6 and arrive automatically on existing
+databases via additive `ALTER TABLE` migration -- see
+[Schema versioning](#schema-versioning) below.
+
 ```sql
 samples (
     ts INTEGER NOT NULL,             -- epoch seconds
@@ -37,9 +43,13 @@ samples (
     ups_load REAL,                   -- %
     input_voltage REAL,              -- V
     output_voltage REAL,             -- V
-    depletion_rate REAL,             -- %/min
-    time_on_battery INTEGER,         -- seconds since on-battery start
-    connection_state TEXT            -- OK / GRACE_PERIOD / FAILED
+    depletion_rate REAL,             -- %/min       (Eneru-derived)
+    time_on_battery INTEGER,         -- seconds since OB start (Eneru-derived)
+    connection_state TEXT,           -- OK / GRACE_PERIOD / FAILED  (Eneru-derived)
+    battery_voltage REAL,            -- V           (v2)
+    ups_temperature REAL,            -- °C          (v2)
+    input_frequency REAL,            -- Hz          (v2)
+    output_frequency REAL            -- Hz          (v2)
 )
 
 agg_5min, agg_hourly (
@@ -53,7 +63,14 @@ agg_5min, agg_hourly (
     input_voltage_avg REAL,
     input_voltage_min REAL,
     input_voltage_max REAL,
-    samples_count INTEGER
+    samples_count INTEGER,
+    output_voltage_avg REAL,         -- (v2 -- closes the long-standing gap)
+    battery_voltage_avg REAL,        -- (v2)
+    ups_temperature_avg REAL,        -- (v2)
+    ups_temperature_min REAL,        -- (v2)
+    ups_temperature_max REAL,        -- (v2)
+    input_frequency_avg REAL,        -- (v2)
+    output_frequency_avg REAL        -- (v2)
 )
 
 events (
@@ -64,8 +81,33 @@ events (
 
 meta (
     key TEXT PRIMARY KEY,
-    value TEXT                       -- e.g. schema_version=1
+    value TEXT                       -- e.g. schema_version=2
 )
+```
+
+The 3 Eneru-derived columns (`depletion_rate`, `time_on_battery`,
+`connection_state`) intentionally have no `*_avg` companion in the agg
+tables: they're state-shaped, not signal-shaped, so an average over a
+5-minute bucket is meaningless. The TUI graph panel only offers the 9
+signal-shaped metrics in its `<G>` cycle.
+
+## Schema versioning
+
+`meta.schema_version` records the schema generation. New deployments
+land at the current version (currently `2`). Daemons upgraded from an
+older version run idempotent `ALTER TABLE ADD COLUMN` migrations on
+first start; existing rows are preserved with `NULL` for the new
+columns until the next sample. The migration is wrapped in try/except
+so a duplicate-column error is benign and `meta.schema_version` is
+bumped *after* the migrations succeed -- a crash mid-migration is
+replayed safely on next start.
+
+When a future feature adds new columns or tables, follow the pattern
+documented in `src/eneru/CLAUDE.md` ("Stats schema evolution"):
+
+```bash
+sqlite3 /var/lib/eneru/UPS-host-3493.db \
+  "SELECT key, value FROM meta WHERE key='schema_version';"
 ```
 
 ## Configuration
@@ -89,16 +131,17 @@ owner root). Pip installs create the directory on first start.
 
 ## Storage on small devices (Raspberry Pi / SD card)
 
-Per-UPS database, steady state at 1 Hz polling:
+Per-UPS database, steady state at 1 Hz polling (v2 schema, 13 metrics):
 
-- Raw samples: ~100 bytes × 86,400 polls/day ≈ 8.6 MB/day. Older
+- Raw samples: ~135 bytes × 86,400 polls/day ≈ 11.7 MB/day. Older
   samples are aggregated and deleted after 24 h.
-- 5-min aggregations: ~100 bytes × 288 buckets/day × 30 days ≈ 0.8 MB.
-- Hourly aggregations: ~100 bytes × 24 buckets/day × 5 years ≈ 4 MB.
+- 5-min aggregations: ~135 bytes × 288 buckets/day × 30 days ≈ 1.1 MB.
+- Hourly aggregations: ~135 bytes × 24 buckets/day × 5 years ≈ 5.5 MB.
 - Events table: a few hundred bytes per power event, normally negligible.
 
-Steady-state footprint per UPS ≈ 14 MB (24 h raw + 30 d 5-min + 5 y
-hourly). For a 4-UPS site that's ~56 MB.
+Steady-state footprint per UPS ≈ 17 MB (24 h raw + 30 d 5-min + 5 y
+hourly). For a 4-UPS site that's ~70 MB. Still trivial on the
+smallest SD cards.
 
 Disk I/O profile per UPS: one `executemany` transaction every 10s,
 batching 10 inserts. That is roughly equivalent to a busy systemd

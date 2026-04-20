@@ -73,10 +73,34 @@ the renderer falls back to standard block characters
   returns one string per terminal row.
 - The TUI opens the per-UPS DB read-only via
   `StatsStore.open_readonly(path)` (`?mode=ro` URI), so it never
-  contends with the daemon's writer thread. WAL mode keeps reads
-  non-blocking while the writer flushes.
+  contends with the daemon's writer thread. WAL + `PRAGMA
+  busy_timeout = 500` keep reads non-blocking with a half-second
+  upper bound on contention even on slow storage.
 - The DB is opened lazily on the first non-`off` graph mode and
   closed when the TUI exits.
+- **Live blending (rc6+).** The daemon's stats writer flushes every
+  10 s, but the state file is rewritten every poll cycle (~1 s).
+  Without blending, the graph's right edge would lag the live status
+  panel by up to 10 s. The TUI keeps a per-UPS deque (60 entries,
+  one per refresh) populated from the same state file
+  `collect_group_data` reads. `query_metric_series` extends the
+  SQLite tail with any deque samples newer than the most recent
+  flush, deduped by timestamp. The deque is bounded and bytes
+  cheap; no extra DB I/O.
+
+## Footer hints
+
+The bottom-row hints in `eneru monitor` interpolate the current
+cycle state -- so an operator can see at a glance what the next
+keypress will do:
+
+```
+ <Q>  Quit    <R>  Refresh    <M>  More logs   \
+ <G>  Graph: charge    <T>  Time: 1h    <U>  UPS: 1/2
+```
+
+`<U>` is rendered as `UPS` (without the index) when only one UPS is
+configured.
 
 ## Troubleshooting
 

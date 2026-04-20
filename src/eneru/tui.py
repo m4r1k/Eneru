@@ -53,40 +53,161 @@ def stats_db_path_for(group: UPSGroupConfig, config: Config) -> Path:
     return Path(config.statistics.db_directory) / f"{sanitized}.db"
 
 
+def state_file_path_for(group: UPSGroupConfig, config: Config) -> Path:
+    """Return the per-UPS state file path the daemon writes every poll.
+
+    Multi-UPS mode appends a sanitized suffix; single-UPS uses the bare
+    path. Used by both ``collect_group_data`` and ``update_live_buffer``.
+    """
+    name = group.ups.name
+    if config.multi_ups:
+        sanitized = name.replace("@", "-").replace(":", "-").replace("/", "-")
+        return Path(config.logging.state_file + f".{sanitized}")
+    return Path(config.logging.state_file)
+
+
+# ---- Live-sample blending (spec 2.13) ----
+#
+# The daemon's SQLite writer flushes every 10 s, but the state file is
+# rewritten every poll cycle (~1 s). Without blending, the TUI graph's
+# rightmost edge lags by up to 10 s while the live status panel stays
+# current. ``update_live_buffer`` is called once per TUI refresh per
+# group; it parses the same state file ``collect_group_data`` does and
+# pushes the snapshot into a per-UPS deque. ``query_metric_series``
+# then extends the SQLite result with any deque points newer than the
+# last SQLite sample, deduped by timestamp.
+_LIVE_BUFFER_MAXLEN = 60
+_live_buffers: Dict[str, "deque[Tuple[int, Dict[str, float]]]"] = {}
+
+# State-file keys (left) we promote into deque samples, mapped to the
+# stats schema's column names (right). Only the columns we render
+# graphs for need to be here -- adding a new graph metric means adding
+# its column to METRIC_INFO + the corresponding state-file key here.
+_STATE_FILE_TO_COLUMN: Dict[str, str] = {
+    "battery.charge": "battery_charge",
+    "battery.runtime": "battery_runtime",
+    "ups.load": "ups_load",
+    "input.voltage": "input_voltage",
+    "output.voltage": "output_voltage",
+    "battery.voltage": "battery_voltage",
+    "ups.temperature": "ups_temperature",
+    "input.frequency": "input_frequency",
+    "output.frequency": "output_frequency",
+}
+
+
+def _buffer_key(group: UPSGroupConfig, config: Config) -> str:
+    """Stable per-UPS key (matches the stats DB filename stem)."""
+    return stats_db_path_for(group, config).stem
+
+
+def _live_buffer_for(group: UPSGroupConfig, config: Config) -> deque:
+    key = _buffer_key(group, config)
+    buf = _live_buffers.get(key)
+    if buf is None:
+        buf = deque(maxlen=_LIVE_BUFFER_MAXLEN)
+        _live_buffers[key] = buf
+    return buf
+
+
+def _coerce_float(value) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def update_live_buffer(group: UPSGroupConfig, config: Config) -> None:
+    """Snapshot the state file into the per-UPS live deque.
+
+    Idempotent within the same wall-clock second: if called twice in
+    one second the latter call replaces the former (no duplicate
+    timestamps make it into the deque).
+    """
+    data = parse_state_file(state_file_path_for(group, config))
+    if not data:
+        return
+    sample: Dict[str, float] = {}
+    for state_key, column in _STATE_FILE_TO_COLUMN.items():
+        v = _coerce_float(data.get(state_key))
+        if v is not None:
+            sample[column] = v
+    if not sample:
+        return
+    ts = int(time.time())
+    buf = _live_buffer_for(group, config)
+    if buf and buf[-1][0] == ts:
+        buf[-1] = (ts, sample)
+    else:
+        buf.append((ts, sample))
+
+
+def clear_live_buffers() -> None:
+    """Drop all live buffers. Test helper -- the runtime never calls this."""
+    _live_buffers.clear()
+
+
 def query_metric_series(
     config: Config,
     group: UPSGroupConfig,
     metric: str,
     seconds: int,
 ) -> List[Tuple[int, float]]:
-    """Open the per-UPS stats DB read-only and return ``[(ts, value), ...]``.
+    """Return ``[(ts, value), ...]`` for a metric across a time window.
 
-    Returns an empty list if the DB doesn't exist or the metric is
-    unknown -- callers should render a "(no data)" placeholder.
+    Source order:
+    1. The per-UPS SQLite stats DB (historical, possibly up to 10 s stale).
+    2. The per-UPS live deque (real-time tail since the last SQLite flush).
+
+    Returns an empty list if neither source has data for the metric --
+    callers should render a "(no data)" placeholder.
     """
     info = METRIC_INFO.get(metric)
     if info is None:
         return []
     column = info[0]
+    end = int(time.time())
+    start = end - max(60, int(seconds))
+
+    sqlite_series: List[Tuple[int, float]] = []
     db_path = stats_db_path_for(group, config)
     conn = StatsStore.open_readonly(db_path)
-    if conn is None:
-        return []
-    try:
-        end = int(time.time())
-        start = end - max(60, int(seconds))
-        # Build a temporary store to reuse query_range tier-selection.
-        store = StatsStore(db_path)
-        store._conn = conn
+    if conn is not None:
         try:
-            return store.query_range(column, start, end)
+            store = StatsStore(db_path)
+            store._conn = conn
+            try:
+                sqlite_series = store.query_range(column, start, end)
+            finally:
+                store._conn = None
         finally:
-            store._conn = None
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    # Blend with the live deque: anything newer than the last SQLite
+    # sample (or any point in-window if SQLite is empty), deduped by ts.
+    buf = _live_buffers.get(_buffer_key(group, config))
+    if not buf:
+        return sqlite_series
+    sqlite_tail_ts = sqlite_series[-1][0] if sqlite_series else (start - 1)
+    extra: List[Tuple[int, float]] = []
+    seen_ts = {ts for ts, _ in sqlite_series}
+    for ts, sample in buf:
+        if ts <= sqlite_tail_ts or ts in seen_ts or ts < start or ts > end:
+            continue
+        v = sample.get(column)
+        if v is None:
+            continue
+        extra.append((ts, float(v)))
+        seen_ts.add(ts)
+    if not extra:
+        return sqlite_series
+    extra.sort(key=lambda t: t[0])
+    return sqlite_series + extra
 
 
 # ==============================================================================
@@ -310,12 +431,7 @@ def collect_group_data(group: UPSGroupConfig, config: Config) -> Dict:
     label = group.ups.label
     name = group.ups.name
 
-    if config.multi_ups:
-        sanitized = name.replace("@", "-").replace(":", "-").replace("/", "-")
-        state_path = Path(config.logging.state_file + f".{sanitized}")
-    else:
-        state_path = Path(config.logging.state_file)
-
+    state_path = state_file_path_for(group, config)
     state = parse_state_file(state_path)
 
     res_parts = []
@@ -520,8 +636,15 @@ def render_config_panel(win, y_start: int, y_end: int, width: int,
 
 
 def render_logs_panel(win, y_start: int, y_end: int, width: int,
-                       events: List[str], show_more: bool):
-    """Render the logs panel with yellow/gold background, edge to edge."""
+                       events: List[str], show_more: bool,
+                       *, graph_mode: str = "off", time_range: str = "1h",
+                       ups_index: int = 0, ups_total: int = 1):
+    """Render the logs panel with yellow/gold background, edge to edge.
+
+    The bottom-row key hints reflect the *current* graph mode, time
+    range, and (in multi-UPS) the active UPS index. Static hints would
+    leave operators guessing what state the cycle keys are in.
+    """
     gold_attr = curses.color_pair(C_GOLD_BG)
     gold_bold = gold_attr | curses.A_BOLD
     key_attr = curses.color_pair(C_GOLD_KEY) | curses.A_BOLD
@@ -562,17 +685,25 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
             safe_addstr(win, y, 0, display, gold_attr)
             y += 1
 
-    # Key hints at the bottom of the gold panel
+    # Key hints at the bottom of the gold panel.
+    # G/T/U descriptions interpolate the current cycle state so an
+    # operator can see at a glance "next press of T moves from 1h to 6h"
+    # without having to remember the cycle order.
     hint_y = y_end - 1
     x = 2
-    for label, descr in (
+    ups_descr = (f"UPS: {ups_index + 1}/{ups_total}" if ups_total > 1
+                 else "UPS")
+    hints = (
         ("<Q>", "Quit"),
         ("<R>", "Refresh"),
         ("<M>", "More logs"),
-        ("<G>", "Graph"),
-        ("<T>", "Time"),
-        ("<U>", "UPS"),
-    ):
+        ("<G>", f"Graph: {graph_mode}"),
+        ("<T>", f"Time: {time_range}"),
+        ("<U>", ups_descr),
+    )
+    for label, descr in hints:
+        if x + len(label) + len(descr) + 6 > width:
+            break  # ran out of horizontal space; skip remaining hints
         safe_addstr(win, hint_y, x, f" {label} ", key_attr)
         x += len(label) + 2
         safe_addstr(win, hint_y, x, f" {descr}   ", dim_attr)
@@ -687,7 +818,13 @@ def run_tui(config: Config, interval: int = 5):
             # Collect data. Prefer the SQLite events tier; fall back to the
             # log-tail parser when no DB is present (single-UPS pip installs
             # without /var/lib/eneru, fresh installs before first poll, etc.).
-            groups_data = [collect_group_data(g, config) for g in config.ups_groups]
+            # Also push a fresh state-file snapshot into each group's live
+            # buffer so the graph panel can blend SQLite + post-flush
+            # samples (spec 2.13 -- bridges the 0-10s flush gap).
+            groups_data = []
+            for g in config.ups_groups:
+                groups_data.append(collect_group_data(g, config))
+                update_live_buffer(g, config)
             window = TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
             log_events = query_events_for_display(config, window,
                                                   max_events=50 if show_more else max_log_events)
@@ -710,7 +847,11 @@ def run_tui(config: Config, interval: int = 5):
                 # Spacer between graph and logs
                 fill_row(stdscr, graph_end, curses.color_pair(C_BORDER))
             render_logs_panel(stdscr, logs_start, logs_end, width,
-                              log_events, show_more)
+                              log_events, show_more,
+                              graph_mode=graph_mode,
+                              time_range=time_range,
+                              ups_index=ups_index,
+                              ups_total=len(config.ups_groups) or 1)
 
             # Move cursor to bottom-right to avoid visual artifacts
             try:

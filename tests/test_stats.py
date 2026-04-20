@@ -113,6 +113,161 @@ class TestSchema:
         assert cur.fetchone()[0] == 0
         s2.close()
 
+    @pytest.mark.unit
+    def test_busy_timeout_pragma_on_writer_connection(self, store):
+        # Bounds writer waits when a slow TUI reader holds the lock.
+        cur = store._conn.execute("PRAGMA busy_timeout")
+        assert cur.fetchone()[0] == 500
+
+    @pytest.mark.unit
+    def test_busy_timeout_pragma_on_readonly_connection(self, store, tmp_path):
+        # The readonly connection inherits the same bound so a slow
+        # query never stalls the TUI refresh loop indefinitely.
+        # store fixture already opened+closed implicitly created the file.
+        store.flush()  # ensure file exists on disk
+        ro = StatsStore.open_readonly(store.db_path)
+        try:
+            cur = ro.execute("PRAGMA busy_timeout")
+            assert cur.fetchone()[0] == 500
+        finally:
+            ro.close()
+
+    @pytest.mark.unit
+    def test_v2_schema_includes_new_raw_nut_metrics(self, store):
+        # I2: spec 2.12 raw NUT metrics added in v5.1.0-rc6.
+        cols = {r[1] for r in store._conn.execute("PRAGMA table_info(samples)")}
+        assert {"battery_voltage", "ups_temperature",
+                "input_frequency", "output_frequency"} <= cols
+
+    @pytest.mark.unit
+    def test_v2_agg_tables_include_new_avg_columns(self, store):
+        # S3 + I2: closes the long-standing output_voltage_avg gap and
+        # adds the v2 metric aggregates.
+        for table in ("agg_5min", "agg_hourly"):
+            cols = {r[1] for r in store._conn.execute(f"PRAGMA table_info({table})")}
+            assert {"output_voltage_avg", "battery_voltage_avg",
+                    "ups_temperature_avg", "ups_temperature_min",
+                    "ups_temperature_max", "input_frequency_avg",
+                    "output_frequency_avg"} <= cols, (
+                f"missing v2 agg columns on {table}: {cols}"
+            )
+
+
+class TestSchemaMigration:
+    """v1 -> v2 idempotent migration of pre-rc6 databases."""
+
+    @staticmethod
+    def _build_v1_db(path: Path) -> None:
+        """Synthesize a v1-shaped DB by hand (no v2 columns)."""
+        c = sqlite3.connect(str(path), isolation_level=None)
+        c.execute("PRAGMA journal_mode = WAL")
+        c.execute(
+            "CREATE TABLE samples ("
+            "ts INTEGER NOT NULL, status TEXT, battery_charge REAL, "
+            "battery_runtime REAL, ups_load REAL, input_voltage REAL, "
+            "output_voltage REAL, depletion_rate REAL, "
+            "time_on_battery INTEGER, connection_state TEXT)"
+        )
+        for table in ("agg_5min", "agg_hourly"):
+            c.execute(
+                f"CREATE TABLE {table} ("
+                "ts INTEGER PRIMARY KEY, "
+                "battery_charge_avg REAL, battery_charge_min REAL, "
+                "battery_charge_max REAL, battery_runtime_avg REAL, "
+                "ups_load_avg REAL, ups_load_max REAL, "
+                "input_voltage_avg REAL, input_voltage_min REAL, "
+                "input_voltage_max REAL, samples_count INTEGER)"
+            )
+        c.execute(
+            "CREATE TABLE events (ts INTEGER NOT NULL, "
+            "event_type TEXT NOT NULL, detail TEXT)"
+        )
+        c.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        c.execute(
+            "INSERT INTO meta(key,value) VALUES (?, ?)",
+            ("schema_version", "1"),
+        )
+        # Seed a v1-shaped sample so we can prove preservation.
+        c.execute(
+            "INSERT INTO samples VALUES (1000,'OL',95.0,1800.0,15.0,"
+            "230.0,231.0,0.0,0,'OK')"
+        )
+        c.close()
+
+    @pytest.mark.unit
+    def test_v1_db_migrates_samples_to_v2(self, tmp_path):
+        path = tmp_path / "legacy.db"
+        self._build_v1_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            cols = {r[1] for r in s._conn.execute("PRAGMA table_info(samples)")}
+            assert {"battery_voltage", "ups_temperature",
+                    "input_frequency", "output_frequency"} <= cols
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v1_db_migrates_agg_tables_to_v2(self, tmp_path):
+        path = tmp_path / "legacy.db"
+        self._build_v1_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            for table in ("agg_5min", "agg_hourly"):
+                cols = {r[1] for r in s._conn.execute(
+                    f"PRAGMA table_info({table})"
+                )}
+                assert {"output_voltage_avg", "battery_voltage_avg",
+                        "ups_temperature_avg", "ups_temperature_min",
+                        "ups_temperature_max", "input_frequency_avg",
+                        "output_frequency_avg"} <= cols
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v1_data_preserved_after_migration(self, tmp_path):
+        path = tmp_path / "legacy.db"
+        self._build_v1_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            row = s._conn.execute(
+                "SELECT ts, status, battery_charge, battery_voltage FROM samples"
+            ).fetchone()
+            # Pre-existing row preserved; new column NULL until next sample.
+            assert row == (1000, "OL", 95.0, None)
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v1_to_v2_migration_bumps_meta(self, tmp_path):
+        path = tmp_path / "legacy.db"
+        self._build_v1_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            sv = s._conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            assert int(sv[0]) == SCHEMA_VERSION
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_migration_idempotent_on_repeated_open(self, tmp_path):
+        path = tmp_path / "legacy.db"
+        self._build_v1_db(path)
+        # Open + close + reopen must not raise (ALTER TABLE is wrapped).
+        StatsStore(path).open()
+        s2 = StatsStore(path)
+        s2.open()
+        try:
+            cols = {r[1] for r in s2._conn.execute("PRAGMA table_info(samples)")}
+            assert "battery_voltage" in cols
+        finally:
+            s2.close()
+
 
 # ===========================================================================
 # buffer_sample (hot path)
@@ -193,6 +348,35 @@ class TestBufferSample:
         assert row[2] == 30.0
         assert row[3] == 230.5
         assert row[4] == 230.0
+
+    @pytest.mark.unit
+    def test_buffer_extracts_v2_raw_nut_metrics(self, store):
+        # I2: the 4 v2 metric columns are extracted from the raw upsc dict.
+        store.buffer_sample({
+            **SAMPLE_UPS_DATA,
+            "battery.voltage": "26.4",
+            "ups.temperature": "31.5",
+            "input.frequency": "59.98",
+            "output.frequency": "60.00",
+        })
+        store.flush()
+        cur = store._conn.execute(
+            "SELECT battery_voltage, ups_temperature, "
+            "input_frequency, output_frequency FROM samples"
+        )
+        row = cur.fetchone()
+        assert row == (26.4, 31.5, pytest.approx(59.98), 60.00)
+
+    @pytest.mark.unit
+    def test_buffer_v2_metrics_default_to_null_when_missing(self, store):
+        # Most NUT drivers don't expose all 4 -- missing keys must NULL out.
+        store.buffer_sample(SAMPLE_UPS_DATA)
+        store.flush()
+        cur = store._conn.execute(
+            "SELECT battery_voltage, ups_temperature, "
+            "input_frequency, output_frequency FROM samples"
+        )
+        assert cur.fetchone() == (None, None, None, None)
 
 
 # ===========================================================================
@@ -279,6 +463,35 @@ class TestAggregate:
         avg, mn, mx, count = cur.fetchone()
         assert mn == 10.0 and mx == 90.0 and count == 3
         assert avg == pytest.approx(50.0)
+
+    @pytest.mark.unit
+    def test_aggregate_emits_v2_metric_columns(self, store):
+        # I2 + S3: prove the agg path actually computes the new columns
+        # rather than leaving them NULL.
+        ts = 4_000_000
+        for i, temp in enumerate([20.0, 25.0, 30.0]):
+            store.buffer_sample({
+                **SAMPLE_UPS_DATA,
+                "ups.temperature": str(temp),
+                "battery.voltage": "26.0",
+                "input.frequency": "60.0",
+                "output.frequency": "60.0",
+            }, ts=ts + i)
+        store.flush()
+        store.aggregate()
+        cur = store._conn.execute(
+            "SELECT output_voltage_avg, battery_voltage_avg, "
+            "ups_temperature_avg, ups_temperature_min, ups_temperature_max, "
+            "input_frequency_avg, output_frequency_avg "
+            "FROM agg_5min"
+        )
+        row = cur.fetchone()
+        assert row[0] == pytest.approx(230.0)        # output_voltage_avg
+        assert row[1] == pytest.approx(26.0)         # battery_voltage_avg
+        assert row[2] == pytest.approx(25.0)         # ups_temperature_avg
+        assert row[3] == 20.0 and row[4] == 30.0     # min/max
+        assert row[5] == pytest.approx(60.0)         # input_frequency_avg
+        assert row[6] == pytest.approx(60.0)         # output_frequency_avg
 
     @pytest.mark.unit
     def test_aggregate_rolls_5min_into_hourly(self, store):
@@ -626,7 +839,10 @@ class TestEdgeCases:
     def test_query_range_for_unaggregated_metric_at_agg_tier_returns_empty(
         self, store,
     ):
-        """``output_voltage`` and ``depletion_rate`` aren't in the agg tables.
+        """Eneru-derived state fields (``depletion_rate``,
+        ``time_on_battery``, ``connection_state``) intentionally aren't
+        carried into the agg tables -- they're state-shaped, not
+        signal-shaped.
 
         ``_agg_column_for`` falls back to the raw column name; the SQL
         therefore references a column that does not exist in agg_5min.
@@ -640,8 +856,10 @@ class TestEdgeCases:
         store.flush()
         store.aggregate()
         # Force the agg_5min tier (a 1-week window would also pick it).
+        # depletion_rate is one of the 3 v5.1 derived fields that
+        # deliberately have no aggregate column.
         results = store.query_range(
-            "output_voltage", ts, ts + 1, prefer_tier="agg_5min",
+            "depletion_rate", ts, ts + 1, prefer_tier="agg_5min",
         )
         assert results == []
 

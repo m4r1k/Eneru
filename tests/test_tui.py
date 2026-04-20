@@ -3,6 +3,7 @@
 import pytest
 import tempfile
 import os
+import time
 from pathlib import Path
 from io import StringIO
 from unittest.mock import patch
@@ -283,6 +284,302 @@ class TestStatsDbPath:
         )
         path = stats_db_path_for(config.ups_groups[0], config)
         assert path == tmp_path / "UPS1-10.0.0.1-3493.db"
+
+
+class TestLiveBufferBlending:
+    """Spec 2.13: TUI blends SQLite history with a per-UPS live deque
+    so the graph's right edge stays current between SQLite flushes."""
+
+    def _config(self, tmp_path):
+        from eneru import (
+            Config, UPSConfig, UPSGroupConfig, StatsConfig,
+            BehaviorConfig, LoggingConfig, NotificationsConfig,
+            LocalShutdownConfig,
+        )
+        return Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="TestUPS@localhost"),
+                is_local=True,
+            )],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "flag"),
+                file=None,
+            ),
+            notifications=NotificationsConfig(enabled=False),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+            statistics=StatsConfig(db_directory=str(tmp_path)),
+        )
+
+    def _write_state_file(self, path: Path, charge: float, voltage: float):
+        path.write_text(
+            "ups.status=OL CHRG\n"
+            f"battery.charge={charge}\n"
+            "battery.runtime=1800\n"
+            "ups.load=30\n"
+            f"input.voltage={voltage}\n"
+            "output.voltage=230\n"
+        )
+
+    @pytest.mark.unit
+    def test_update_live_buffer_pushes_state_snapshot(self, tmp_path):
+        from eneru.tui import (
+            update_live_buffer, _live_buffers, clear_live_buffers,
+            state_file_path_for, _buffer_key,
+        )
+        clear_live_buffers()
+        config = self._config(tmp_path)
+        group = config.ups_groups[0]
+        self._write_state_file(state_file_path_for(group, config), 87.0, 231.5)
+
+        update_live_buffer(group, config)
+        buf = _live_buffers[_buffer_key(group, config)]
+        assert len(buf) == 1
+        ts, sample = buf[-1]
+        assert sample["battery_charge"] == 87.0
+        assert sample["input_voltage"] == 231.5
+
+    @pytest.mark.unit
+    def test_update_live_buffer_dedupes_within_same_second(self, tmp_path):
+        from eneru.tui import (
+            update_live_buffer, _live_buffers, clear_live_buffers,
+            state_file_path_for, _buffer_key,
+        )
+        clear_live_buffers()
+        config = self._config(tmp_path)
+        group = config.ups_groups[0]
+        sf = state_file_path_for(group, config)
+
+        self._write_state_file(sf, 50.0, 230.0)
+        update_live_buffer(group, config)
+        # Same wall-clock second: second push must replace, not append.
+        self._write_state_file(sf, 51.0, 230.0)
+        update_live_buffer(group, config)
+
+        buf = _live_buffers[_buffer_key(group, config)]
+        assert len(buf) == 1
+        assert buf[-1][1]["battery_charge"] == 51.0
+
+    @pytest.mark.unit
+    def test_update_live_buffer_no_state_file_is_noop(self, tmp_path):
+        from eneru.tui import (
+            update_live_buffer, _live_buffers, clear_live_buffers,
+            _buffer_key,
+        )
+        clear_live_buffers()
+        config = self._config(tmp_path)
+        group = config.ups_groups[0]
+        # No state file written.
+        update_live_buffer(group, config)
+        # No buffer created (or empty -- both acceptable).
+        buf = _live_buffers.get(_buffer_key(group, config))
+        assert buf is None or len(buf) == 0
+
+    @pytest.mark.unit
+    def test_query_metric_series_extends_sqlite_with_live_deque(
+        self, tmp_path,
+    ):
+        from eneru import StatsStore
+        from eneru.tui import (
+            query_metric_series, stats_db_path_for, _live_buffer_for,
+            clear_live_buffers,
+        )
+        clear_live_buffers()
+        config = self._config(tmp_path)
+        group = config.ups_groups[0]
+
+        # SQLite tail at t-30s through t-21s (10 samples), then a gap.
+        store = StatsStore(stats_db_path_for(group, config))
+        store.open()
+        try:
+            now = int(time.time())
+            for i in range(10):
+                store.buffer_sample(
+                    {"ups.status": "OL", "battery.charge": str(50 + i),
+                     "battery.runtime": "1800", "ups.load": "30",
+                     "input.voltage": "230", "output.voltage": "230"},
+                    ts=now - 30 + i,
+                )
+            store.flush()
+        finally:
+            store.close()
+
+        # Inject 3 live deque samples newer than the SQLite tail.
+        buf = _live_buffer_for(group, config)
+        for i in range(3):
+            buf.append((now - 5 + i, {"battery_charge": 70.0 + i}))
+
+        merged = query_metric_series(config, group, "charge", 60)
+        # SQLite contributed 10, deque contributed 3 newer.
+        assert len(merged) == 13
+        # The deque samples must come last and be ordered.
+        assert merged[-3:] == [
+            (now - 5, 70.0), (now - 4, 71.0), (now - 3, 72.0),
+        ]
+        # SQLite block stays first and untouched.
+        assert merged[0] == (now - 30, 50.0)
+
+    @pytest.mark.unit
+    def test_query_metric_series_dedupes_overlap_with_sqlite_tail(
+        self, tmp_path,
+    ):
+        from eneru import StatsStore
+        from eneru.tui import (
+            query_metric_series, stats_db_path_for, _live_buffer_for,
+            clear_live_buffers,
+        )
+        clear_live_buffers()
+        config = self._config(tmp_path)
+        group = config.ups_groups[0]
+        store = StatsStore(stats_db_path_for(group, config))
+        store.open()
+        try:
+            now = int(time.time())
+            store.buffer_sample(
+                {"ups.status": "OL", "battery.charge": "50",
+                 "battery.runtime": "1800", "ups.load": "30",
+                 "input.voltage": "230", "output.voltage": "230"},
+                ts=now - 5,
+            )
+            store.flush()
+        finally:
+            store.close()
+
+        # Buffer carries the same ts as the SQLite tail, plus 2 newer.
+        buf = _live_buffer_for(group, config)
+        buf.append((now - 5, {"battery_charge": 999.0}))   # duplicate ts
+        buf.append((now - 3, {"battery_charge": 60.0}))
+        buf.append((now - 1, {"battery_charge": 61.0}))
+
+        merged = query_metric_series(config, group, "charge", 60)
+        # 3 distinct timestamps, duplicate from buffer dropped.
+        assert [ts for ts, _ in merged] == [now - 5, now - 3, now - 1]
+        # SQLite value wins for the overlapping ts (50.0, not 999.0).
+        assert merged[0] == (now - 5, 50.0)
+
+    @pytest.mark.unit
+    def test_live_buffers_are_per_ups(self, tmp_path):
+        from eneru import (
+            Config, UPSConfig, UPSGroupConfig, StatsConfig,
+            BehaviorConfig, LoggingConfig, NotificationsConfig,
+            LocalShutdownConfig,
+        )
+        from eneru.tui import (
+            update_live_buffer, _live_buffers, clear_live_buffers,
+            state_file_path_for, _buffer_key,
+        )
+        clear_live_buffers()
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS1@10.0.0.1:3493")),
+                UPSGroupConfig(ups=UPSConfig(name="UPS2@10.0.0.2:3493")),
+            ],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "flag"),
+                file=None,
+            ),
+            notifications=NotificationsConfig(enabled=False),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+            statistics=StatsConfig(db_directory=str(tmp_path)),
+        )
+
+        g1, g2 = config.ups_groups[0], config.ups_groups[1]
+        self._write_state_file(state_file_path_for(g1, config), 50.0, 230.0)
+        self._write_state_file(state_file_path_for(g2, config), 75.0, 230.0)
+
+        update_live_buffer(g1, config)
+        update_live_buffer(g2, config)
+
+        k1, k2 = _buffer_key(g1, config), _buffer_key(g2, config)
+        assert k1 != k2
+        assert _live_buffers[k1][-1][1]["battery_charge"] == 50.0
+        assert _live_buffers[k2][-1][1]["battery_charge"] == 75.0
+
+
+class TestDynamicFooter:
+    """``render_logs_panel`` interpolates current cycle state into the
+    G / T / U key hints (S2)."""
+
+    def _stub_window(self):
+        """Capture safe_addstr calls so we can assert footer content."""
+        captured: list = []
+
+        class _Win:
+            def addstr(self, y, x, text, attr=0):
+                captured.append((y, x, text, attr))
+            def addnstr(self, y, x, text, n, attr=0):
+                captured.append((y, x, text[:n], attr))
+            def getmaxyx(self):
+                return (24, 200)  # huge so all hints render
+
+        return _Win(), captured
+
+    @pytest.mark.unit
+    def test_footer_shows_current_graph_mode_and_time_range(self):
+        # render_logs_panel uses curses color pairs which require an
+        # initialized terminal; patch curses to no-ops so this stays
+        # a pure-Python test.
+        from unittest.mock import patch
+        with patch("eneru.tui.curses") as mc, \
+             patch("eneru.tui.fill_row"), \
+             patch("eneru.tui.safe_addstr") as sa:
+            mc.color_pair.side_effect = lambda c: c
+            mc.A_BOLD = 0
+            from eneru.tui import render_logs_panel
+            render_logs_panel(None, 0, 10, 200, ["evt1"], False,
+                              graph_mode="charge", time_range="6h",
+                              ups_index=0, ups_total=1)
+        # safe_addstr was called for each hint label + descr.
+        rendered = " ".join(call.args[3] for call in sa.call_args_list
+                            if isinstance(call.args[3], str))
+        assert "Graph: charge" in rendered
+        assert "Time: 6h" in rendered
+        # ups_total=1 means UPS hint stays generic.
+        assert "UPS: " not in rendered
+
+    @pytest.mark.unit
+    def test_footer_shows_ups_index_when_multi_ups(self):
+        from unittest.mock import patch
+        with patch("eneru.tui.curses") as mc, \
+             patch("eneru.tui.fill_row"), \
+             patch("eneru.tui.safe_addstr") as sa:
+            mc.color_pair.side_effect = lambda c: c
+            mc.A_BOLD = 0
+            from eneru.tui import render_logs_panel
+            render_logs_panel(None, 0, 10, 200, ["evt1"], False,
+                              graph_mode="off", time_range="1h",
+                              ups_index=1, ups_total=3)
+        rendered = " ".join(call.args[3] for call in sa.call_args_list
+                            if isinstance(call.args[3], str))
+        assert "UPS: 2/3" in rendered  # 1-indexed for humans
+
+    @pytest.mark.unit
+    def test_footer_truncates_when_terminal_too_narrow(self):
+        # Narrow width => render_logs_panel must skip overflowing hints
+        # rather than spilling past the right edge.
+        from unittest.mock import patch
+        with patch("eneru.tui.curses") as mc, \
+             patch("eneru.tui.fill_row"), \
+             patch("eneru.tui.safe_addstr") as sa:
+            mc.color_pair.side_effect = lambda c: c
+            mc.A_BOLD = 0
+            from eneru.tui import render_logs_panel
+            render_logs_panel(None, 0, 10, 30, [], False,
+                              graph_mode="voltage", time_range="24h",
+                              ups_index=0, ups_total=1)
+        rendered_strs = [c.args[3] for c in sa.call_args_list
+                         if isinstance(c.args[3], str)]
+        rendered = " ".join(rendered_strs)
+        # First hints (Q, R) make it; later ones may be skipped.
+        assert "<Q>" in rendered
+        # The combined width of all 6 full hints would exceed 30 cols,
+        # so at least one of the right-most hints must be skipped.
+        assert "<U>" not in rendered or "<T>" not in rendered
 
 
 class TestRenderGraphText:

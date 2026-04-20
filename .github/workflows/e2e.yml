@@ -81,6 +81,19 @@ jobs:
           echo "test data" | sudo tee /tmp/eneru-e2e-tmpfs/testfile
           mount | grep eneru-e2e-tmpfs
 
+      - name: Provision /var/lib/eneru (mirror deb/rpm install)
+        run: |
+          # nFPM creates /var/lib/eneru at deb/rpm install time (see
+          # nfpm.yaml). The unprivileged GH runner can't write there
+          # by default, which silently disabled stats persistence and
+          # spammed "stats store open failed" warnings across every
+          # e2e test. Provisioning here mirrors the production install
+          # path so tests exercise the same code users will hit.
+          sudo mkdir -p /var/lib/eneru
+          sudo chown "$USER":"$USER" /var/lib/eneru
+          sudo chmod 0755 /var/lib/eneru
+          ls -ld /var/lib/eneru
+
       - name: Test SSH connectivity
         run: |
           ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
