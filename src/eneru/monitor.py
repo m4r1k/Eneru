@@ -87,7 +87,8 @@ class UPSGroupMonitor(
                  log_prefix: str = "",
                  notification_worker: Optional[NotificationWorker] = None,
                  logger: Optional[UPSLogger] = None,
-                 state_file_suffix: str = ""):
+                 state_file_suffix: str = "",
+                 in_redundancy_group: bool = False):
         self.config = config
         self.state = MonitorState()
         self.logger: Optional[UPSLogger] = logger
@@ -95,6 +96,11 @@ class UPSGroupMonitor(
         self._shutdown_callback = shutdown_callback
         self._stop_event = stop_event or threading.Event()
         self._log_prefix = log_prefix
+        # When True, per-UPS triggers (T1-T4, FSD, FAILSAFE) become advisory:
+        # they record state under the snapshot lock instead of executing the
+        # local shutdown sequence. The redundancy-group evaluator owns the
+        # decision to actually drain shared resources.
+        self._in_redundancy_group = bool(in_redundancy_group)
 
         # Per-group state file paths (suffix for multi-UPS)
         sfx = f".{state_file_suffix}" if state_file_suffix else ""
@@ -106,6 +112,34 @@ class UPSGroupMonitor(
         self._compose_available: bool = False
         self._notification_worker: Optional[NotificationWorker] = notification_worker
         self._exit_after_shutdown = exit_after_shutdown
+
+    def _record_advisory_trigger(self, reason: str):
+        """Record an advisory trigger for the redundancy-group evaluator.
+
+        Called from the per-UPS trigger sites (T1-T4, FSD, FAILSAFE) when
+        this monitor's UPS belongs to a redundancy group. The state lock
+        guarantees the snapshot reader sees a consistent
+        ``(trigger_active, trigger_reason)`` pair.
+        """
+        with self.state._lock:
+            already_active = self.state.trigger_active
+            self.state.trigger_active = True
+            self.state.trigger_reason = reason
+        if not already_active:
+            self._log_message(
+                f"⚠️ Trigger condition met (advisory, redundancy group): {reason}"
+            )
+
+    def _clear_advisory_trigger(self):
+        """Clear the advisory trigger when conditions return to normal."""
+        with self.state._lock:
+            was_active = self.state.trigger_active
+            self.state.trigger_active = False
+            self.state.trigger_reason = ""
+        if was_active:
+            self._log_message(
+                "✅ Advisory trigger cleared (redundancy group): conditions normal."
+            )
 
     def run(self):
         """Main entry point."""
@@ -683,7 +717,12 @@ class UPSGroupMonitor(
             )
 
         if shutdown_reason:
-            self._trigger_immediate_shutdown(shutdown_reason)
+            if self._in_redundancy_group:
+                # Advisory mode: the redundancy-group evaluator decides whether
+                # the group should drain. Per-UPS shutdown is suppressed.
+                self._record_advisory_trigger(shutdown_reason)
+            else:
+                self._trigger_immediate_shutdown(shutdown_reason)
 
         # Log status every 5 seconds
         if int(time.time()) % 5 == 0:
@@ -719,6 +758,11 @@ class UPSGroupMonitor(
             self.state.on_battery_start_time = 0
             self.state.extended_time_logged = False
             self.state.battery_history.clear()
+
+            # Power restored on a redundancy-group member: drop any advisory
+            # trigger so the group evaluator sees this UPS as healthy again.
+            if self._in_redundancy_group:
+                self._clear_advisory_trigger()
 
         # Off-battery → no depletion-rate signal for the snapshot reader.
         with self.state._lock:
@@ -828,19 +872,32 @@ class UPSGroupMonitor(
                 if is_failsafe_trigger and "OB" in self.state.previous_status:
                     self.state.connection_state = "FAILED"
                     self.state.connection_lost_time = 0.0
-                    self._shutdown_flag_path.touch()
-                    self._log_message(
-                        "🚨 FAILSAFE TRIGGERED (FSB): Connection lost or data persistently stale "
-                        "while On Battery. Initiating emergency shutdown."
-                    )
-                    # Send notification (non-blocking - fire and forget)
-                    self._send_notification(
-                        "🚨 **FAILSAFE (FSB) TRIGGERED!**\n"
-                        "Connection to UPS lost or data stale while system was running On Battery.\n"
-                        "Assuming critical failure. Executing immediate shutdown.",
-                        self.config.NOTIFY_FAILURE
-                    )
-                    self._execute_shutdown_sequence()
+                    if self._in_redundancy_group:
+                        # Advisory mode: redundancy-group evaluator owns the
+                        # shutdown decision. Recording the trigger here +
+                        # reporting connection_state=FAILED is enough -- the
+                        # group's policy + min_healthy decide what happens.
+                        self._record_advisory_trigger(
+                            "FAILSAFE (FSB): connection lost while On Battery"
+                        )
+                        self._log_message(
+                            "🚨 FAILSAFE (advisory, redundancy group): connection lost "
+                            "while On Battery; deferring to group evaluator."
+                        )
+                    else:
+                        self._shutdown_flag_path.touch()
+                        self._log_message(
+                            "🚨 FAILSAFE TRIGGERED (FSB): Connection lost or data persistently stale "
+                            "while On Battery. Initiating emergency shutdown."
+                        )
+                        # Send notification (non-blocking - fire and forget)
+                        self._send_notification(
+                            "🚨 **FAILSAFE (FSB) TRIGGERED!**\n"
+                            "Connection to UPS lost or data stale while system was running On Battery.\n"
+                            "Assuming critical failure. Executing immediate shutdown.",
+                            self.config.NOTIFY_FAILURE
+                        )
+                        self._execute_shutdown_sequence()
 
                 # Grace period logic (only when NOT on battery)
                 elif is_failsafe_trigger:
@@ -900,6 +957,8 @@ class UPSGroupMonitor(
                 self.state.connection_lost_time = 0.0
                 self.state.connection_flap_count = 0
                 self.state.connection_first_flap_time = 0.0
+                if self._in_redundancy_group:
+                    self._clear_advisory_trigger()
 
             ups_status = ups_data.get('ups.status', '')
 
@@ -929,7 +988,14 @@ class UPSGroupMonitor(
             # ==================================================================
 
             if "FSD" in ups_status:
-                self._trigger_immediate_shutdown("UPS signaled FSD (Forced Shutdown) flag.")
+                if self._in_redundancy_group:
+                    self._record_advisory_trigger(
+                        "UPS signaled FSD (Forced Shutdown) flag."
+                    )
+                else:
+                    self._trigger_immediate_shutdown(
+                        "UPS signaled FSD (Forced Shutdown) flag."
+                    )
 
             elif "OB" in ups_status:
                 self._handle_on_battery(ups_data)

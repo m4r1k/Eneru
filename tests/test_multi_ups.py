@@ -1391,3 +1391,112 @@ class TestCoordinatorLogFallback:
         coord._log("hello world")
         captured = capsys.readouterr()
         assert "hello world" in captured.out
+
+
+# ==============================================================================
+# REDUNDANCY-GROUP COORDINATOR WIRING (Phase 2)
+# ==============================================================================
+
+class TestCoordinatorRedundancyWiring:
+    """The coordinator marks members as in_redundancy_group and starts evaluators."""
+
+    def _config_with_redundancy(self, tmp_path):
+        from eneru import RedundancyGroupConfig
+        return _coord_config(
+            tmp_path,
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS1@h"), is_local=False),
+                UPSGroupConfig(ups=UPSConfig(name="UPS2@h"), is_local=False),
+                UPSGroupConfig(ups=UPSConfig(name="UPS3@h"), is_local=False),
+            ],
+            redundancy_groups=[
+                RedundancyGroupConfig(
+                    name="rack-1",
+                    ups_sources=["UPS1@h", "UPS2@h"],
+                    min_healthy=1,
+                ),
+            ],
+        )
+
+    @pytest.mark.unit
+    def test_in_redundancy_set_computed_at_construction(self, tmp_path):
+        config = self._config_with_redundancy(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        assert coord._in_redundancy == {"UPS1@h", "UPS2@h"}
+        # UPS3 is independent
+        assert "UPS3@h" not in coord._in_redundancy
+
+    @pytest.mark.unit
+    def test_in_redundancy_empty_when_no_groups(self, tmp_path):
+        coord = MultiUPSCoordinator(_coord_config(tmp_path))
+        assert coord._in_redundancy == set()
+
+    @pytest.mark.unit
+    def test_start_monitors_passes_in_redundancy_flag(self, tmp_path):
+        config = self._config_with_redundancy(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+
+        with patch("eneru.multi_ups.threading.Thread"), \
+             patch("eneru.multi_ups.UPSGroupMonitor") as mock_monitor_cls, \
+             patch("eneru.multi_ups.RedundancyGroupExecutor"), \
+             patch("eneru.multi_ups.RedundancyGroupEvaluator"):
+            mock_monitor_cls.return_value = MagicMock()
+            coord._start_monitors()
+
+        # First two monitors are in redundancy; third is not.
+        flags = [c.kwargs["in_redundancy_group"]
+                 for c in mock_monitor_cls.call_args_list]
+        assert flags == [True, True, False]
+
+    @pytest.mark.unit
+    def test_start_monitors_creates_evaluator_per_redundancy_group(self, tmp_path):
+        config = self._config_with_redundancy(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+
+        with patch("eneru.multi_ups.threading.Thread"), \
+             patch("eneru.multi_ups.UPSGroupMonitor") as mock_monitor_cls, \
+             patch("eneru.multi_ups.RedundancyGroupExecutor") as mock_executor_cls, \
+             patch("eneru.multi_ups.RedundancyGroupEvaluator") as mock_eval_cls:
+            mock_monitor_cls.return_value = MagicMock()
+            mock_eval_cls.return_value = MagicMock()
+            coord._start_monitors()
+
+        assert mock_executor_cls.call_count == 1
+        assert mock_eval_cls.call_count == 1
+        assert "rack-1" in coord._redundancy_executors
+        assert len(coord._evaluator_threads) == 1
+        # Evaluator's start() was called
+        mock_eval_cls.return_value.start.assert_called_once()
+
+    @pytest.mark.unit
+    def test_no_evaluator_when_no_redundancy_groups(self, tmp_path):
+        coord = MultiUPSCoordinator(_coord_config(tmp_path))
+        coord._log = lambda msg: None
+
+        with patch("eneru.multi_ups.threading.Thread"), \
+             patch("eneru.multi_ups.UPSGroupMonitor") as mock_monitor_cls, \
+             patch("eneru.multi_ups.RedundancyGroupExecutor") as mock_executor_cls, \
+             patch("eneru.multi_ups.RedundancyGroupEvaluator") as mock_eval_cls:
+            mock_monitor_cls.return_value = MagicMock()
+            coord._start_monitors()
+
+        mock_executor_cls.assert_not_called()
+        mock_eval_cls.assert_not_called()
+        assert coord._evaluator_threads == []
+
+    @pytest.mark.unit
+    def test_handle_signal_joins_evaluator_threads(self, tmp_path):
+        coord = MultiUPSCoordinator(self._config_with_redundancy(tmp_path))
+        coord._logger = MagicMock()
+
+        joined_evals = []
+        for _ in range(2):
+            t = MagicMock()
+            t.join = lambda timeout=None, t=t: joined_evals.append(t)
+            coord._evaluator_threads.append(t)
+
+        with pytest.raises(SystemExit):
+            coord._handle_signal(15, None)
+        assert len(joined_evals) == 2

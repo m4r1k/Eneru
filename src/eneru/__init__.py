@@ -29,7 +29,9 @@ from eneru.logger import UPSLogger, TimezoneFormatter
 from eneru.notifications import NotificationWorker, APPRISE_AVAILABLE
 from eneru.utils import run_command, command_exists, is_numeric, format_seconds
 from eneru.actions import REMOTE_ACTIONS
+from eneru.health_model import UPSHealth, assess_health
 from eneru.monitor import UPSGroupMonitor
+from eneru.redundancy import RedundancyGroupEvaluator, RedundancyGroupExecutor
 from eneru.multi_ups import MultiUPSCoordinator
 from eneru.cli import main
 
@@ -62,6 +64,11 @@ __all__ = [
     "UPSGroupMonitor",
     "MultiUPSCoordinator",
     "NotificationWorker",
+    # Redundancy / health-model (Phase 2)
+    "UPSHealth",
+    "assess_health",
+    "RedundancyGroupEvaluator",
+    "RedundancyGroupExecutor",
     # Logger classes
     "UPSLogger",
     "TimezoneFormatter",

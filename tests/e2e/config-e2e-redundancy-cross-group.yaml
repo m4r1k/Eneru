@@ -1,0 +1,79 @@
+# Eneru E2E Test Configuration - Cross-group cascade
+#
+# UPS1 protects an independent server (with its own remote_servers).
+# UPS1 + UPS2 jointly protect a redundancy-group rack. UPS1 appears in
+# both tiers; UPS2 only in the redundancy tier. This exercises the rule
+# that an independent group's shutdown is independent of the redundancy
+# evaluator's decision (and vice versa), even when they share a UPS.
+
+ups:
+  - name: "UPS1@localhost:3493"
+    display_name: "E2E UPS1"
+    check_interval: 1
+    triggers:
+      low_battery_threshold: 20
+    remote_servers:
+      - name: "Independent server (UPS1)"
+        enabled: true
+        host: "localhost"
+        user: "testuser"
+        connect_timeout: 5
+        command_timeout: 10
+        shutdown_command: "sudo shutdown -h now"
+        ssh_options:
+          - "-o Port=2222"
+          - "-o StrictHostKeyChecking=no"
+          - "-o UserKnownHostsFile=/dev/null"
+          - "-o IdentityFile=/tmp/e2e-ssh-key"
+  - name: "UPS2@localhost:3493"
+    display_name: "E2E UPS2"
+    check_interval: 1
+
+triggers:
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+  depletion:
+    window: 300
+    critical_rate: 15.0
+    grace_period: 30
+  extended_time:
+    enabled: false
+
+redundancy_groups:
+  - name: "rack-1-dual-psu"
+    ups_sources:
+      - "UPS1@localhost:3493"
+      - "UPS2@localhost:3493"
+    min_healthy: 1
+    degraded_counts_as: "healthy"
+    unknown_counts_as: "critical"
+    is_local: false
+    remote_servers:
+      - name: "Redundancy rack server"
+        enabled: true
+        host: "localhost"
+        user: "testuser"
+        connect_timeout: 5
+        command_timeout: 10
+        shutdown_command: "sudo shutdown -h now"
+        ssh_options:
+          - "-o Port=2223"
+          - "-o StrictHostKeyChecking=no"
+          - "-o UserKnownHostsFile=/dev/null"
+          - "-o IdentityFile=/tmp/e2e-ssh-key"
+
+behavior:
+  dry_run: true
+
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-redundancy-state"
+  battery_history_file: "/tmp/eneru-e2e-redundancy-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-redundancy-shutdown-flag"
+
+notifications:
+  enabled: false
+
+local_shutdown:
+  enabled: false
+  trigger_on: "none"

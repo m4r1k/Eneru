@@ -29,7 +29,7 @@ def _cmd_run(args):
     if args.dry_run:
         config.behavior.dry_run = True
 
-    if config.multi_ups:
+    if config.multi_ups or config.redundancy_groups:
         coordinator = MultiUPSCoordinator(config, exit_after_shutdown=args.exit_after_shutdown)
         coordinator.run()
     else:

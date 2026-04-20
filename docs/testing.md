@@ -109,11 +109,13 @@ Tests `pip install .` to ensure `pyproject.toml` is valid:
 
 ## Test coverage
 
-410 tests across 20 files:
+529 tests across 22 files:
 
-- Configuration parsing (83 tests across 6 files) -- YAML options, defaults, multi-UPS detection, trigger inheritance, ownership validation, trigger_on enum validation, shutdown_order parsing and validation (incl. YAML type coercion edge cases, mutual-exclusion error with `parallel`), shutdown_safety_margin parsing and validation. Files: `test_config_loading.py` (10), `test_config_notifications.py` (9), `test_config_filesystems.py` (3), `test_config_vm_containers.py` (7), `test_config_remote.py` (29), `test_config_validation.py` (25)
-- Multi-UPS coordination (59 tests) -- coordinator routing, is_local/drain/trigger_on, defense-in-depth lock, battery anomaly with jitter filtering, notification prefixing, runtime is_local enforcement, exit_after_shutdown in coordinator, ownership rejection (VMs/containers/filesystems), plus full coverage of MultiUPSCoordinator lifecycle (initialize, start_monitors, run_monitor crash path, handle_signal, wait_for_completion, real local-shutdown command path, drain edge cases, log fallback)
-- Core monitor logic (45 tests) -- OL/OB/FSD state machine, all four shutdown triggers, failsafe, shutdown sequence ordering, multi-phase shutdown (compute_effective_order, phased execution, thread verification, backward compat, deadline-based join, per-server safety margin)
+- Configuration parsing (116 tests across 6 files) -- YAML options, defaults, multi-UPS detection, trigger inheritance, ownership validation, trigger_on enum validation, shutdown_order parsing and validation (incl. YAML type coercion edge cases, mutual-exclusion error with `parallel`), shutdown_safety_margin parsing and validation, plus the **redundancy-group** dataclass: parsing, defaults, inheritance, multi-group, malformed-entry handling (9 in `test_config_loading.py`), and validation rules (24 in `test_config_validation.py`: `min_healthy` bounds, unknown UPS references, duplicate sources, missing names, duplicate names, enum checks, local-resource ownership, cross-tier server conflicts, `is_local` uniqueness across all groups). Files: `test_config_loading.py` (19), `test_config_notifications.py` (9), `test_config_filesystems.py` (3), `test_config_vm_containers.py` (7), `test_config_remote.py` (29), `test_config_validation.py` (49)
+- Multi-UPS coordination (65 tests) -- coordinator routing, is_local/drain/trigger_on, defense-in-depth lock, battery anomaly with jitter filtering, notification prefixing, runtime is_local enforcement, exit_after_shutdown in coordinator, ownership rejection (VMs/containers/filesystems), plus full coverage of MultiUPSCoordinator lifecycle (initialize, start_monitors, run_monitor crash path, handle_signal, wait_for_completion, real local-shutdown command path, drain edge cases, log fallback). 6 new tests cover redundancy-group wiring inside the coordinator (in_redundancy set computation, in_redundancy_group flag passed to monitors, evaluator + executor instantiation, signal-handler join of evaluator threads).
+- Core monitor logic (57 tests) -- OL/OB/FSD state machine, all four shutdown triggers, failsafe, shutdown sequence ordering, multi-phase shutdown (compute_effective_order, phased execution, thread verification, backward compat, deadline-based join, per-server safety margin). 12 new tests cover the **advisory-mode** branches at the 3 trigger sites (T1-T4, FSD, FAILSAFE) under `in_redundancy_group=True`, plus regression tests verifying the legacy single-UPS / independent-group paths are byte-identical.
+- Health model (32 tests) -- pure-function classification of `HealthSnapshot` into `HEALTHY` / `DEGRADED` / `CRITICAL` / `UNKNOWN` per the documented priority (FAILED beats trigger_active beats FSD beats OB), `5 * check_interval` staleness rule, parametrised `ups.status` and `connection_state` table.
+- Redundancy runtime (28 tests) -- evaluator counting and policy translation for `degraded_counts_as` / `unknown_counts_as`, executor synthetic Config wiring + flag-file namespace + sanitisation, dry-run cleanup, idempotency (in-process + against pre-existing flag), local-resource gating on `is_local`, log-prefix and `@`-escape behaviour, evaluator thread lifecycle and exception swallowing, cross-group cascade regression.
 - Shutdown phase mixins (46 tests across 3 files) -- per-mixin coverage for the shutdown phase code: `test_shutdown_vms.py` (7) covers libvirt graceful shutdown, force-destroy on timeout, dry-run, missing virsh, no running VMs; `test_shutdown_containers.py` (26) covers runtime detection (docker/podman/auto), compose subcommand availability, compose-stack shutdown with per-file timeouts, container shutdown with dry-run + real-stop paths, ps failure handling; `test_shutdown_filesystems.py` (13) covers sync (real, dry-run, disabled), unmount with options, timeout (exit 124), busy-mount handling, already-unmounted detection, multi-mount independence
 - Remote commands (29 tests) -- SSH execution, pre-shutdown actions, parallel and sequential modes
 - Connection grace period (26 tests) -- OK/GRACE_PERIOD/FAILED transitions, flap detection, stale data
@@ -121,7 +123,8 @@ Tests `pip install .` to ensure `pyproject.toml` is valid:
 - CLI (20 tests) -- subcommands, bare invocation, multi-UPS validate
 - Calculations (17 tests) -- depletion rate, battery history
 - Notifications (16 tests) -- formatting, retry, Apprise
-- State, triggers, integration, command execution (46 tests combined)
+- State (23 tests) -- transition tests + new lock/snapshot/concurrent-write infrastructure (8) used by the redundancy evaluator
+- Triggers, integration, command execution (31 tests combined)
 
 To run tests locally:
 
@@ -188,7 +191,7 @@ The E2E tests use scenario files to simulate different UPS states:
 
 ### E2E test cases
 
-The E2E workflow (`.github/workflows/e2e.yml`) runs 19 tests on every push and PR:
+The E2E workflow (`.github/workflows/e2e.yml`) runs 27 tests on every push and PR:
 
 | Test | Description |
 |------|-------------|
@@ -211,6 +214,14 @@ The E2E workflow (`.github/workflows/e2e.yml`) runs 19 tests on every push and P
 | **Test 17** | Local no-drain (`drain_on_local_shutdown=false`): only local group shuts down |
 | **Test 18** | Power recovery: OB then power restored, no shutdown triggered |
 | **Test 19** | Multi-phase shutdown ordering: 3 SSH targets across 2 phases (`shutdown_order: 1, 1, 2`) — verifies all received shutdown, "Phase N/M (order=X)" log lines, and timestamp ordering across phases |
+| **Test 20** | Redundancy-group config validation: valid config passes (with `Redundancy groups (1):` summary); `min_healthy: 0` exits non-zero with the documented error |
+| **Test 21** | Redundancy quorum *holds* when 1 of 2 members healthy (`min_healthy: 1`) — no shutdown |
+| **Test 22** | Redundancy quorum *exhausted* (both critical) — `quorum LOST` log + `REDUNDANCY GROUP SHUTDOWN` sequence |
+| **Test 23** | UNKNOWN handling under default `unknown_counts_as: critical` — evaluator startup line confirmed |
+| **Test 24** | Both UPSes critical → fail-safe redundancy shutdown fires |
+| **Test 25** | Cross-group cascade: a UPS shared between an independent group and a redundancy group does not falsely fire the redundancy shutdown when the other member is healthy |
+| **Test 26** | Advisory-mode log signature: `Trigger condition met (advisory, redundancy group): ...` appears for redundancy members; `Triggering immediate shutdown` does *not* |
+| **Test 27** | Separate-Eneru-UPS topology: TestUPS protects the host (`is_local: true`), the redundancy group protects a remote rack — rack shutdown fires, host UPS unaffected |
 
 ### Running E2E tests locally
 

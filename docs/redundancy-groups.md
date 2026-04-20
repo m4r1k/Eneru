@@ -170,6 +170,58 @@ A complete dual-PSU config is shipped at
 Copy it as a starting point and adjust the `ups_sources`, `host`s, and
 SSH user names for your environment.
 
+## How it actually fires
+
+Each member UPS keeps polling on its own thread at its `check_interval`.
+When a per-UPS trigger condition is met (low battery, low runtime,
+depletion rate, extended time on battery, FSD signal, or FAILSAFE), the
+member doesn't run a local shutdown — it sets an **advisory flag** in its
+state snapshot and emits a log line:
+
+```
+⚠️ Trigger condition met (advisory, redundancy group): <reason>
+```
+
+A separate `RedundancyGroupEvaluator` thread (one per group, ~1 s tick)
+reads every member's snapshot under a lock, classifies each into
+`HEALTHY` / `DEGRADED` / `CRITICAL` / `UNKNOWN`, applies the group's
+`degraded_counts_as` / `unknown_counts_as` policy, and only fires the
+group's shutdown when:
+
+```
+healthy_count(group) < min_healthy
+```
+
+When the group fires, the executor reuses the same shutdown mixins as
+the per-UPS path — so multi-phase ordering (`shutdown_order`),
+`shutdown_safety_margin`, and deadline-based join behave identically.
+The group's flag file lives at
+`/var/run/ups-shutdown-redundancy-{sanitized-group-name}` and makes the
+shutdown idempotent across signals or restarts mid-flow.
+
+### Cascade timeline (dual-PSU, `min_healthy: 1`)
+
+| Time   | Event                                        | Group state                     |
+| ------ | -------------------------------------------- | ------------------------------- |
+| t = 0  | UPS-A loses input power → on battery         | UPS-A=DEGRADED, UPS-B=HEALTHY → quorum holds |
+| t = 30 | UPS-A battery drops below threshold          | UPS-A advisory trigger set; CRITICAL. UPS-B=HEALTHY → quorum still holds |
+| t = 90 | UPS-B also loses input power                 | UPS-B=DEGRADED → still 1 healthy via DEGRADED→healthy → quorum holds |
+| t = 95 | UPS-B battery also drops below threshold     | both CRITICAL → quorum LOST → executor fires |
+
+### Load redistribution guidance
+
+When one UPS in the group loses input power, the *other* UPS picks up
+the full rack load. Rack-level UPSes are typically sized for the *peak*
+load on a single feed, so this is fine — but verify your sizing:
+
+- Peak load per UPS during normal (both feeds up) ≤ 50% of rated output.
+- Peak load per UPS during single-feed degraded mode ≤ 80% of rated output.
+- Margin for inrush / boot transients is left at 20%.
+
+If the surviving UPS is overloaded (the `OVERLOAD` flag flips to ACTIVE),
+that UPS will likely flip to bypass or drop the load entirely. There is
+no software workaround — fix the load.
+
 ## See also
 
 - [Configuration reference](configuration.md) — every field, with defaults.
@@ -177,3 +229,5 @@ SSH user names for your environment.
   advisory mode for redundancy-group members).
 - [Remote servers](remote-servers.md) — SSH / pre-shutdown command
   semantics. Identical between independent and redundancy-group servers.
+- [Troubleshooting](troubleshooting.md) — "why isn't my redundancy
+  shutdown firing?" and friends.
