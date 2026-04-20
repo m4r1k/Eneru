@@ -364,6 +364,72 @@ If you see repeated false `Battery Anomaly Detected` warnings, check your UPS fi
 
 ---
 
+## Why isn't my redundancy-group server shutting down?
+
+A server lives under a [redundancy group](redundancy-groups.md), one
+UPS clearly failed, but Eneru did nothing. Walk through the list:
+
+**1. The group's quorum has not been lost yet.**
+
+By default `min_healthy: 1` means any single healthy member keeps the
+group up. Check the logs:
+
+```
+🛡️ Redundancy group 'rack-1' evaluator started (2 sources, min_healthy=1)
+```
+
+Then watch for either of these on every tick (~1 s):
+
+- No log line: quorum is healthy and steady.
+- `🚨 Redundancy group 'rack-1' quorum LOST`: the group dropped
+  below `min_healthy`. The next log line is
+  `🚨 ========== REDUNDANCY GROUP SHUTDOWN: rack-1 ==========`.
+
+If quorum is not lost but you expected it to be, `min_healthy` is set
+higher than you intended, or one UPS member is still being counted as
+healthy. Recheck `degraded_counts_as` / `unknown_counts_as` for the
+policies you actually want.
+
+**2. The member UPS is DEGRADED, not CRITICAL.**
+
+A UPS that is on battery but has not yet hit any per-UPS trigger
+condition (low battery, low runtime, depletion, extended time, FSD)
+is `DEGRADED`, not `CRITICAL`. With `degraded_counts_as: healthy`
+(default), a degraded UPS still contributes to `healthy_count`.
+
+For strict behaviour, set `degraded_counts_as: critical`.
+
+**3. The advisory trigger never fired.**
+
+If a per-UPS trigger should have fired but did not, check the member
+monitor's log for `Trigger condition met (advisory, redundancy
+group): ...`. If the line is missing, the per-UPS thresholds (e.g.
+`triggers.low_battery_threshold`) have not been crossed yet. Adjust
+them per [Shutdown triggers](triggers.md#triggers-in-redundancy-groups).
+
+**4. The redundancy executor's flag file is sticky.**
+
+The redundancy shutdown is gated by
+`/var/run/ups-shutdown-redundancy-{sanitized-group-name}` for
+idempotency. If a previous run created the flag and was killed before
+clearing it, the executor will skip subsequent shutdowns. Clean it up:
+
+```bash
+sudo rm /var/run/ups-shutdown-redundancy-*
+```
+
+This is normal after a manual `kill -9` of Eneru. SIGTERM and SIGINT
+clear the flag automatically.
+
+**5. The redundancy group references the wrong UPS names.**
+
+The names in `ups_sources` must match the `name:` field in the
+top-level `ups:` section exactly (including `@host:port` suffix). Run
+`eneru validate --config <path>`. Unknown references show up as
+`ERROR: Redundancy group 'X' references unknown UPS name(s): ...`.
+
+---
+
 ## Getting help
 
 If you're still stuck:

@@ -5,6 +5,7 @@ from eneru.config import (
     Config,
     UPSConfig,
     UPSGroupConfig,
+    RedundancyGroupConfig,
     TriggersConfig,
     DepletionConfig,
     ExtendedTimeConfig,
@@ -20,15 +21,21 @@ from eneru.config import (
     RemoteServerConfig,
     RemoteCommandConfig,
     LocalShutdownConfig,
+    StatsConfig,
+    StatsRetentionConfig,
     ConfigLoader,
     YAML_AVAILABLE,
 )
+from eneru.stats import StatsStore, StatsWriter
 from eneru.state import MonitorState
 from eneru.logger import UPSLogger, TimezoneFormatter
 from eneru.notifications import NotificationWorker, APPRISE_AVAILABLE
 from eneru.utils import run_command, command_exists, is_numeric, format_seconds
 from eneru.actions import REMOTE_ACTIONS
+from eneru.graph import BrailleGraph
+from eneru.health_model import UPSHealth, assess_health
 from eneru.monitor import UPSGroupMonitor
+from eneru.redundancy import RedundancyGroupEvaluator, RedundancyGroupExecutor
 from eneru.multi_ups import MultiUPSCoordinator
 from eneru.cli import main
 
@@ -38,6 +45,7 @@ __all__ = [
     "Config",
     "UPSConfig",
     "UPSGroupConfig",
+    "RedundancyGroupConfig",
     "TriggersConfig",
     "DepletionConfig",
     "ExtendedTimeConfig",
@@ -53,6 +61,11 @@ __all__ = [
     "RemoteServerConfig",
     "RemoteCommandConfig",
     "LocalShutdownConfig",
+    "StatsConfig",
+    "StatsRetentionConfig",
+    "StatsStore",
+    "StatsWriter",
+    "BrailleGraph",
     # State and loader
     "MonitorState",
     "ConfigLoader",
@@ -60,6 +73,11 @@ __all__ = [
     "UPSGroupMonitor",
     "MultiUPSCoordinator",
     "NotificationWorker",
+    # Redundancy / health-model (Phase 2)
+    "UPSHealth",
+    "assess_health",
+    "RedundancyGroupEvaluator",
+    "RedundancyGroupExecutor",
     # Logger classes
     "UPSLogger",
     "TimezoneFormatter",

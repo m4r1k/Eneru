@@ -22,6 +22,68 @@ When on battery power, triggers are evaluated in this order. The **first** condi
 
 ---
 
+## Voltage thresholds (auto-detected, not user-configurable)
+
+Issue [#27](https://github.com/m4r1k/Eneru/issues/27) asked for
+user-tunable over-voltage and brownout thresholds. **We deliberately
+do not expose those.** A misconfigured `warning_high: 200` on a 120V
+grid would mask a real damaging over-voltage condition — Eneru would
+sit silent while line voltage took out PSUs. The safety contract is
+non-negotiable: voltage thresholds are derived by the daemon, not
+typed by the operator.
+
+What Eneru does instead:
+
+1. **Auto-detect at startup.** Read `input.voltage.nominal` from NUT
+   and snap it to the nearest standard grid voltage from
+   `(100, 110, 115, 120, 127, 200, 208, 220, 230, 240)` if within 15V
+   tolerance. `warning_low` / `warning_high` derive as ±10% of the
+   snapped nominal (or from `input.transfer.{low,high}` when NUT
+   exposes those *and* they sit within sanity bounds of the snapped
+   nominal).
+2. **Cross-check with observed reality.** Some UPS firmwares (notably
+   on US 120V grids) mis-report `input.voltage.nominal=230`. After
+   ~10 polls Eneru takes the median of observed `input.voltage`
+   readings and re-snaps the nominal if the readings disagree with
+   NUT by more than 25V. The re-snap is logged and recorded as a
+   `VOLTAGE_AUTODETECT_MISMATCH` event in the SQLite events table:
+
+       sqlite3 /var/lib/eneru/<UPS>.db \
+         "SELECT * FROM events WHERE event_type='VOLTAGE_AUTODETECT_MISMATCH';"
+
+   If you see one of these rows, your UPS firmware is mis-reporting
+   nominal — the daemon corrected for you, but it's worth filing a
+   NUT driver bug upstream.
+3. **Hysteresis on notifications, not on logs.** The state log line
+   for `OVER_VOLTAGE_DETECTED` / `BROWNOUT_DETECTED` is always
+   written immediately on transition. The *notification* dispatch is
+   debounced by `notifications.voltage_hysteresis_seconds` (default
+   30s). A 2-second flap to 122V on a 120V grid no longer pages you;
+   a sustained 30s over-voltage still does — and arrives with a
+   `(persisted Ns)` annotation. See
+   [Notifications → Tuning alert noise](notifications.md#tuning-alert-noise).
+4. **Per-event mute, with a safety blocklist.**
+   `notifications.suppress: [...]` mutes specific informational
+   events (AVR cycling, voltage normalized) but rejects safety-
+   critical event names at config-load time. There is no way to
+   silence `OVER_VOLTAGE_DETECTED`, `BROWNOUT_DETECTED`,
+   `OVERLOAD_ACTIVE`, `BYPASS_MODE_ACTIVE`, `ON_BATTERY`,
+   `CONNECTION_LOST`, or any `SHUTDOWN_*` event.
+
+### What you'll see in the log
+
+```
+📊 Voltage Monitoring Active. Nominal: 230V (NUT=230). Low Warning: 207.0V. High Warning: 253.0V.
+📊 Voltage auto-detect re-snap: NUT=230V disagreed with observed median 120.0V (window=[120.5, 119.0, ...]V). Re-snapped to 120V; new thresholds 108.0V / 132.0V.
+⚡ POWER EVENT: VOLTAGE_AUTODETECT_MISMATCH - NUT nominal=230V, observed median=120.0V, re-snapped to 120V
+```
+
+The bottom row also lands in the SQLite `events` table with
+`notification_sent=0` so it doesn't ping you (it's startup
+information, not an active power event).
+
+---
+
 ## Low battery threshold
 
 ```yaml
@@ -425,3 +487,34 @@ triggers:
 ```
 
 Maximizes runtime, accepts higher risk. Only recommended with reliable UPS and new batteries.
+
+---
+
+## Triggers in redundancy groups
+
+When a UPS belongs to a [redundancy group](redundancy-groups.md), the
+triggers above (T1-T4, FSD, FAILSAFE) still evaluate on the member's
+monitor thread. Instead of running a local shutdown, they set an
+advisory flag on the per-UPS state snapshot:
+
+```
+⚠️ Trigger condition met (advisory, redundancy group): <reason>
+```
+
+The group's `RedundancyGroupEvaluator` reads those flags from every
+member, applies the group's quorum policy (`min_healthy`,
+`degraded_counts_as`, `unknown_counts_as`), and only fires the group's
+shutdown when fewer than `min_healthy` members contribute as healthy.
+See [Redundancy Groups](redundancy-groups.md) for the full lifecycle.
+
+A few notes when picking trigger values for redundancy members:
+
+- Per-UPS thresholds still matter. They decide when each member
+  contributes "critical" to the group.
+- The FAILSAFE rule (connection lost while On Battery) does not run a
+  local shutdown for a redundancy member. It sets
+  `connection_state=FAILED` plus the advisory trigger, and the group
+  evaluator decides via `unknown_counts_as`.
+- An independent UPS group (one not referenced by any redundancy
+  group) is unaffected. Its triggers run the local shutdown path
+  byte-identically to single-UPS mode.

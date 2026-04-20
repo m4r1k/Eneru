@@ -9,21 +9,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> Status: v5.1.0-rc7 is cut for hardware testing. Once that's done the
+> entry below is promoted from `[Unreleased]` to `[5.1.0] - YYYY-MM-DD`
+> with no other changes.
+
 ### Added
 - **Multi-phase shutdown ordering (`shutdown_order`):** Define shutdown phases for remote servers (#4)
     - Servers with the same `shutdown_order` run in parallel; different orders run sequentially (ascending)
-    - Enables complex dependency chains: e.g., compute (phase 1) → storage (phase 2) → network (phase 3)
+    - Enables dependency chains: e.g. compute (phase 1) → storage (phase 2) → network (phase 3)
     - Full backward compatibility: existing configs with `parallel: false` produce identical behavior
     - `eneru validate` now shows a shutdown sequence tree with phase grouping
     - Validation rejects invalid values (must be positive integer >= 1)
 - **Per-server `shutdown_safety_margin` (seconds, default `60`):** Tunable safety buffer added on top of (`pre_shutdown_commands` + `command_timeout` + `connect_timeout`) when waiting for a parallel-shutdown thread to finish. Replaces a previously hard-coded `60` constant. Raise for slow-flushing storage, lower for fast VMs, set `0` to opt out.
+- **Redundancy groups (Phase 2):** Protect resources fed by multiple UPS sources (dual-PSU servers, A+B feeds). Eneru only fires the group's shutdown when fewer than `min_healthy` member UPSes still report healthy.
+    - `RedundancyGroupConfig` mirrors `UPSGroupConfig` in full (`remote_servers`, `virtual_machines`, `containers`, `filesystems`).
+    - Configurable quorum (`min_healthy`, default `1`) plus `degraded_counts_as` (`healthy`/`critical`) and `unknown_counts_as` (`healthy`/`degraded`/`critical`, default `critical` for fail-safe).
+    - At most one group across all (UPS + redundancy) tiers can be `is_local: true`. Only that group may declare local resources.
+    - Per-UPS triggers (T1-T4, FSD, FAILSAFE) become advisory for redundancy members. They record state under the snapshot lock instead of running a local shutdown. Independent UPS groups remain byte-identical to single-UPS mode.
+    - `RedundancyGroupExecutor` composes the four shutdown mixins (VMs / containers / filesystems / remote), so redundancy shutdowns inherit multi-phase ordering and `shutdown_safety_margin` verbatim.
+    - Per-group flag file at `/var/run/ups-shutdown-redundancy-<sanitized-name>` keeps shutdowns idempotent.
+    - Evaluator startup grace (`5 * max(check_interval) + 5 s`) prevents a spurious "all UNKNOWN → quorum lost" fire at first tick.
+    - `docs/redundancy-groups.md` covers the model. `eneru validate` summarises every redundancy group with its quorum policy.
+- **Per-UPS SQLite statistics store (Phase 2 spec 2.12):** every poll is buffered into an in-memory deque (no I/O on the hot path). A background `StatsWriter` thread flushes to disk every 10 s, then aggregates and purges every 5 min.
+    - Per-UPS `.db` at `<statistics.db_directory>/<sanitized-ups-name>.db`. Default `db_directory: /var/lib/eneru` (created by deb/rpm; pip installs auto-create on first start).
+    - Schema (v2 in rc6): `samples` carries 13 metrics (`status`, `battery_charge`, `battery_runtime`, `ups_load`, `input_voltage`, `output_voltage`, `battery_voltage`, `ups_temperature`, `input_frequency`, `output_frequency`, plus the Eneru-derived `depletion_rate`, `time_on_battery`, `connection_state`) keyed by `ts`. `agg_5min` and `agg_hourly` carry avg/min/max for the signal-shaped metrics. `events` is the power-event log; `meta` tracks `schema_version`.
+    - Tier-aware retention: 24 h raw + 30 d 5-minute + 5 y hourly (configurable). Steady-state footprint per UPS ≈ 17 MB at the v2 column count.
+    - WAL + `synchronous=NORMAL`. `StatsStore.open_readonly` exposes a `?mode=ro` URI connection for the TUI.
+    - Failure isolation: every public method catches `sqlite3.Error` / `OSError`, logs once with rate-limit, swallows. SQLite outages can never crash the daemon.
+    - `docs/statistics.md` covers schema, SD-card storage profile, sqlite3 inspection recipes, backup, and failure modes.
+- **TUI graphs (Phase 2 spec 2.13):** `BrailleGraph` renderer (Unicode U+2800-U+28FF; falls back to block characters on `LANG=C`).
+    - Three new keybindings in `eneru monitor`: `G` (cycle metric: off → charge → load → voltage → runtime), `T` (cycle range: 1h → 6h → 24h → 7d → 30d), `U` (cycle UPS in multi-UPS mode).
+    - Lazy read-only DB open on first non-`off` graph mode.
+    - Headless rendering: `eneru monitor --once --graph charge --time 1h` prints the graph to stdout for scripts and CI.
+    - `docs/tui-graphs.md` documents keybindings and the time-range tier-selection table.
+- **TUI events panel sourced from SQLite:** the gold "Recent Events" panel now reads each UPS's `events` table via `StatsStore.open_readonly` and merges across UPSes (sorted by timestamp; `[label]` prefix in multi-UPS mode). Falls back to the log-tail parser when no DB exists. New `eneru monitor --once --events-only` flag for scripted log retrieval.
+- **rc6 — stats schema completed (v1 → v2):** four raw NUT metrics from spec 2.12 (`battery_voltage`, `ups_temperature`, `input_frequency`, `output_frequency`) added to `samples` with matching aggregate columns (and the previously-missing `output_voltage_avg`). The migration runs automatically on first start of rc6 against any pre-existing v1 DB via idempotent `ALTER TABLE` statements; existing rows are preserved with NULLs for the new columns. `meta.schema_version` is now bumped to `2`. Pattern documented for future schema growth in `src/eneru/CLAUDE.md` ("Stats schema evolution").
+- **rc6 — TUI graphs blend SQLite + a per-UPS live deque (spec 2.13):** the writer flushes every 10 s, but the state file is rewritten every poll. The TUI now keeps a 60-entry per-UPS deque populated each refresh from the state file; `query_metric_series` extends the SQLite tail with any newer deque points (deduped by timestamp). Result: the graph's right edge stays current between flushes instead of lagging up to 10 s.
+- **rc6 — TUI footer interpolates current cycle state.** The bottom-row hints show `<G> Graph: charge`, `<T> Time: 1h`, `<U> UPS: 1/2` instead of static labels, so an operator can see at a glance what state the cycle keys will move from.
+- **rc6 — `PRAGMA busy_timeout = 500` on every stats SQLite connection** (writer + readonly TUI). Bounds reader-writer contention to half a second on slow storage (SD cards on Pi-class hardware).
+- **rc7 — Smart voltage auto-detect (#27).** `input.voltage.nominal` from NUT is snapped to the nearest standard grid voltage from `(100, 110, 115, 120, 127, 200, 208, 220, 230, 240)` if within 15V tolerance. After ~10 polls, Eneru cross-checks the median of observed `input.voltage` readings against NUT's nominal; if they disagree by more than 25V the nominal is re-snapped (the headline US-grid case where firmware reports 230V on a 120V UPS) and a `VOLTAGE_AUTODETECT_MISMATCH` event is recorded. **No user-tunable voltage thresholds are exposed** -- a misconfiguration there would mask real over-voltage events that damage hardware.
+- **rc7 — Voltage notification hysteresis (#27).** `notifications.voltage_hysteresis_seconds` (default 30) defers the *notification* dispatch for `OVER_VOLTAGE_DETECTED` / `BROWNOUT_DETECTED` until the condition has held for the dwell. The state log line is always written immediately on transition. If the condition reverts inside the window, no notification fires and a `VOLTAGE_FLAP_SUPPRESSED` event is recorded. A 2s flap stops paging you; a sustained 30s over-voltage still does, with a `(persisted Ns)` annotation.
+- **rc7 — Per-event-type notification suppression (#27).** `notifications.suppress: [...]` mutes specific event types at the notification layer; logs and SQLite events are unaffected. Validation rejects safety-critical event names (`OVER_VOLTAGE_DETECTED`, `BROWNOUT_DETECTED`, `OVERLOAD_ACTIVE`, `BYPASS_MODE_ACTIVE`, `ON_BATTERY`, `CONNECTION_LOST`, anything starting with `SHUTDOWN_`) so a misconfiguration cannot silence the alerts that matter. The events table now records `notification_sent` (1=delivered, 0=muted) so users can audit what was suppressed.
+- **rc7 — Stats schema bumped 2 → 3.** Added `events.notification_sent INTEGER DEFAULT 1`. Auto-migrates v2 DBs via idempotent `ALTER TABLE` on first start; existing rows default to `1` (the v2 daemon always notified). Pattern documented as the second exercise of the schema-evolution mechanic introduced in rc6.
 
 ### Changed
-- **`shutdown_order` and `parallel` are now mutually exclusive** — setting both on the same server is a hard validation error (previously a warning). Pick one model: `shutdown_order` for multi-phase ordering, or `parallel` for the legacy two-group behaviour.
+- **`shutdown_order` and `parallel` are now mutually exclusive.** Setting both on the same server is a hard validation error (previously a warning). Pick one model: `shutdown_order` for multi-phase ordering, or `parallel` for the legacy two-group behaviour.
 - **Parallel-phase join is now deadline-based.** Previously each thread was joined with the full per-phase timeout, so a phase with N stuck servers could wait up to `N × max_timeout` before continuing. The total wait is now bounded by a single deadline, restoring the "dead hosts don't block" guarantee from v4.6.
+- **`MonitorState` exposes a lock-protected snapshot for cross-thread reads.** Adds a non-reentrant `_lock` (excluded from `__repr__` / `__eq__`), nine `latest_*` / `trigger_*` fields, and a `snapshot() -> HealthSnapshot` helper. The poll cycle writes all snapshot fields under one lock acquisition at the bottom of each successful pass. No behaviour change for legacy single-UPS deployments.
+- **`MultiUPSCoordinator` also routes when only `redundancy_groups` is set** (single UPS + 1 redundancy group is now legal).
+- **TUI `safe_addstr` and `render_logs_panel` clip by display-cell width**, not character count. Emoji and CJK glyphs no longer spill past the gold panel's right edge.
 
 ### Fixed
-- **Proxmox `stop_proxmox_vms` / `stop_proxmox_cts` now work for non-root SSH users (#4).** Surfaced by real-world testing: `qm` and `pct` reject non-root callers regardless of PVE-level ACLs (`vm.audit` + `vm.powermgmt` are insufficient on their own), so the templates were silently broken for any SSH user that wasn't root. Both templates now invoke `qm` / `pct` via `sudo`. Root-SSH setups keep working unchanged because Proxmox VE ships sudo with `root NOPASSWD: ALL` by default. Non-root users add a one-line sudoers entry — see [Passwordless sudo → Proxmox VE](remote-servers.md#proxmox-ve) in the docs.
+- **Proxmox `stop_proxmox_vms` / `stop_proxmox_cts` now work for non-root SSH users (#4).** Surfaced by real-world testing: `qm` and `pct` reject non-root callers regardless of PVE-level ACLs (`vm.audit` + `vm.powermgmt` are insufficient on their own), so the templates were silently broken for any SSH user that wasn't root. Both templates now invoke `qm` / `pct` via `sudo`. Root-SSH setups keep working unchanged because Proxmox VE ships sudo with `root NOPASSWD: ALL` by default. Non-root users add a one-line sudoers entry, see [Passwordless sudo → Proxmox VE](remote-servers.md#proxmox-ve) in the docs.
+
+### Migration notes
+- **Stats are on by default.** On first start of v5.1.0-rc5 the daemon creates `/var/lib/eneru/<sanitized-ups-name>.db` and begins recording samples. No config change required. Override with `statistics.db_directory: <path>` to put stats elsewhere (e.g. an attached SSD on Pi-class hardware).
+- **rc6 — stats schema migration is automatic.** Daemons upgraded from rc5 (`SCHEMA_VERSION = 1`) will run additive `ALTER TABLE` statements on first start to add the four new metric columns and the agg `*_avg`/`*_min`/`*_max` columns. Existing samples are preserved (NULL for new columns); `meta.schema_version` is bumped to `2`. The migration is idempotent — repeated rc6 starts re-run no work.
+- **rc7 — second schema migration (2 → 3).** Adds `events.notification_sent INTEGER DEFAULT 1`. Pre-existing event rows backfill to `1` (the v2 daemon always notified). Idempotent and safe to replay. After rc7's first start, every new event row records its disposition. The schema-evolution convention is documented in `src/eneru/CLAUDE.md` so future features follow the same pattern.
+- **rc7 — voltage notification behaviour change (#27).** Default `voltage_hysteresis_seconds=30` mutes 1-2 second flaps that previously emailed. To restore legacy "fire immediately" behaviour, set `notifications.voltage_hysteresis_seconds: 0`. The log line + SQLite event row are unchanged for any value (immediate on transition); only the notification dispatch is gated. No config change required for the auto-detect re-snap -- it's always on and only fires when there's a mismatch worth correcting.
+- **rc6 — CI exercises the production stats path.** Previously, every E2E test silently disabled stats because the GitHub runner couldn't write `/var/lib/eneru`. The workflow now provisions the directory upfront so Tests 1–27 actually persist samples + events, mirroring what users hit after `apt install eneru`. No user-facing change.
+- **Existing single-UPS configs continue to work unchanged.** `redundancy_groups:` is optional. The advisory-trigger code path only activates when a UPS appears in `ups_sources`.
+- **Storage on small devices.** Per-UPS DB is ~17 MB steady-state at the v2 column count with one `executemany` flush every 10 s, comparable to typical journald background writes. See `docs/statistics.md`, "Storage on small devices (Raspberry Pi / SD card)".
+
+### Technical details
+- New modules under `src/eneru/`: `health_model.py`, `redundancy.py`, `stats.py`, `graph.py`. All four are wired into `nfpm.yaml`.
+- Test counts (rc7): ~711 unit tests across 27 files; 32 E2E scenarios. New `tests/test_voltage.py` covers `STANDARD_GRIDS` snap behaviour, the auto-detect re-snap path, and notification hysteresis.
+- New structural-defense test (`tests/test_packaging.py`) asserts every `src/eneru/**/*.py` is referenced by `nfpm.yaml`. Catches the PR #23 class of bug where a missing entry passes pip CI silently and fails at deb/rpm install with `ModuleNotFoundError`.
+- **rc6 — schema migration mechanic.** `StatsStore._migrate_schema` reads `meta.schema_version` and applies append-only `ALTER TABLE` migrations gated by `_safe_alter` (idempotent: duplicate-column errors are swallowed). Pattern documented in `src/eneru/CLAUDE.md` and the root `CLAUDE.md` "Conventions" section. `meta.schema_version` is bumped *after* migrations succeed, so a crash mid-migration is replayed safely on the next start.
+- **rc7 — `SAFETY_CRITICAL_EVENTS` + `SUPPRESSIBLE_EVENTS` constants** in `src/eneru/config.py` enumerate the suppression policy. The validator rejects safety-critical names with a clear error message pointing operators at `voltage_hysteresis_seconds` for flap-debounce. Suppressible names are case-insensitive (validator upper-cases before checking). New event types `VOLTAGE_AUTODETECT_MISMATCH` and `VOLTAGE_FLAP_SUPPRESSED` round out the audit trail.
 
 ---
 

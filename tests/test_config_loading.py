@@ -14,6 +14,7 @@ from eneru import (
     ComposeFileConfig,
     RemoteServerConfig,
     RemoteCommandConfig,
+    RedundancyGroupConfig,
 )
 from test_constants import (
     TEST_DISCORD_WEBHOOK_ID,
@@ -170,5 +171,211 @@ local_shutdown:
         temp_config_file.write_text("invalid: yaml: content: [")
         config = ConfigLoader.load(str(temp_config_file))
         assert config.ups.name == "UPS@localhost"
+
+
+class TestRedundancyGroupLoading:
+    """Tests for the redundancy_groups YAML section."""
+
+    @pytest.mark.unit
+    def test_default_no_redundancy_groups(self, default_config):
+        """Default ``Config`` exposes an empty ``redundancy_groups`` list."""
+        assert default_config.redundancy_groups == []
+
+    @pytest.mark.unit
+    def test_load_minimal_redundancy_group(self, temp_config_file):
+        """Minimal redundancy group parses with documented defaults."""
+        temp_config_file.write_text("""
+ups:
+  - name: "UPS-A@10.0.0.1"
+  - name: "UPS-B@10.0.0.2"
+redundancy_groups:
+  - name: "rack-1"
+    ups_sources:
+      - "UPS-A@10.0.0.1"
+      - "UPS-B@10.0.0.2"
+""")
+        config = ConfigLoader.load(str(temp_config_file))
+        assert len(config.redundancy_groups) == 1
+        rg = config.redundancy_groups[0]
+        assert isinstance(rg, RedundancyGroupConfig)
+        assert rg.name == "rack-1"
+        assert rg.ups_sources == ["UPS-A@10.0.0.1", "UPS-B@10.0.0.2"]
+        assert rg.min_healthy == 1
+        assert rg.degraded_counts_as == "healthy"
+        assert rg.unknown_counts_as == "critical"
+        assert rg.is_local is False
+        assert rg.remote_servers == []
+        assert rg.virtual_machines.enabled is False
+
+    @pytest.mark.unit
+    def test_load_redundancy_group_with_overrides(self, temp_config_file):
+        """All redundancy-group fields round-trip through the loader."""
+        temp_config_file.write_text("""
+ups:
+  - name: "UPS-A@10.0.0.1"
+  - name: "UPS-B@10.0.0.2"
+  - name: "UPS-C@10.0.0.3"
+redundancy_groups:
+  - name: "triple-feed"
+    ups_sources: ["UPS-A@10.0.0.1", "UPS-B@10.0.0.2", "UPS-C@10.0.0.3"]
+    min_healthy: 2
+    degraded_counts_as: "critical"
+    unknown_counts_as: "degraded"
+    is_local: true
+    triggers:
+      low_battery_threshold: 25
+    remote_servers:
+      - name: "Switch"
+        enabled: true
+        host: "10.0.0.50"
+        user: "admin"
+    virtual_machines:
+      enabled: true
+      max_wait: 45
+    containers:
+      enabled: true
+      runtime: "podman"
+    filesystems:
+      sync_enabled: true
+      unmount:
+        enabled: true
+        mounts:
+          - "/mnt/data"
+""")
+        config = ConfigLoader.load(str(temp_config_file))
+        rg = config.redundancy_groups[0]
+        assert rg.min_healthy == 2
+        assert rg.degraded_counts_as == "critical"
+        assert rg.unknown_counts_as == "degraded"
+        assert rg.is_local is True
+        assert rg.triggers.low_battery_threshold == 25
+        # Inherited from global defaults
+        assert rg.triggers.critical_runtime_threshold == 600
+        assert len(rg.remote_servers) == 1
+        assert rg.remote_servers[0].host == "10.0.0.50"
+        assert rg.virtual_machines.enabled is True
+        assert rg.virtual_machines.max_wait == 45
+        assert rg.containers.runtime == "podman"
+        assert rg.filesystems.unmount.enabled is True
+        assert rg.filesystems.unmount.mounts == [{"path": "/mnt/data", "options": ""}]
+
+    @pytest.mark.unit
+    def test_load_multiple_redundancy_groups(self, temp_config_file):
+        """A config can declare multiple redundancy groups."""
+        temp_config_file.write_text("""
+ups:
+  - name: "UPS-A@10.0.0.1"
+  - name: "UPS-B@10.0.0.2"
+  - name: "UPS-C@10.0.0.3"
+  - name: "UPS-D@10.0.0.4"
+redundancy_groups:
+  - name: "rack-1"
+    ups_sources: ["UPS-A@10.0.0.1", "UPS-B@10.0.0.2"]
+  - name: "rack-2"
+    ups_sources: ["UPS-C@10.0.0.3", "UPS-D@10.0.0.4"]
+    min_healthy: 1
+""")
+        config = ConfigLoader.load(str(temp_config_file))
+        assert len(config.redundancy_groups) == 2
+        assert {g.name for g in config.redundancy_groups} == {"rack-1", "rack-2"}
+
+    @pytest.mark.unit
+    def test_load_redundancy_group_inherits_global_triggers(self, temp_config_file):
+        """When ``triggers:`` is omitted, the group inherits global triggers."""
+        temp_config_file.write_text("""
+ups:
+  - name: "UPS-A@10.0.0.1"
+  - name: "UPS-B@10.0.0.2"
+triggers:
+  low_battery_threshold: 30
+  critical_runtime_threshold: 1200
+redundancy_groups:
+  - name: "inherits"
+    ups_sources: ["UPS-A@10.0.0.1", "UPS-B@10.0.0.2"]
+""")
+        config = ConfigLoader.load(str(temp_config_file))
+        rg = config.redundancy_groups[0]
+        assert rg.triggers.low_battery_threshold == 30
+        assert rg.triggers.critical_runtime_threshold == 1200
+
+    @pytest.mark.unit
+    def test_load_redundancy_group_no_section(self, temp_config_file):
+        """Configs without a ``redundancy_groups`` key still load cleanly."""
+        temp_config_file.write_text("""
+ups:
+  - name: "UPS-A@10.0.0.1"
+""")
+        config = ConfigLoader.load(str(temp_config_file))
+        assert config.redundancy_groups == []
+
+    @pytest.mark.unit
+    def test_load_redundancy_group_preserves_remote_server_ordering(self, temp_config_file):
+        """``remote_servers`` ordering and ``shutdown_order`` round-trip."""
+        temp_config_file.write_text("""
+ups:
+  - name: "UPS-A@10.0.0.1"
+  - name: "UPS-B@10.0.0.2"
+redundancy_groups:
+  - name: "rg"
+    ups_sources: ["UPS-A@10.0.0.1", "UPS-B@10.0.0.2"]
+    remote_servers:
+      - name: "first"
+        enabled: true
+        host: "10.0.0.10"
+        user: "root"
+        shutdown_order: 1
+      - name: "second"
+        enabled: true
+        host: "10.0.0.11"
+        user: "root"
+        shutdown_order: 2
+""")
+        config = ConfigLoader.load(str(temp_config_file))
+        servers = config.redundancy_groups[0].remote_servers
+        assert [s.name for s in servers] == ["first", "second"]
+        assert [s.shutdown_order for s in servers] == [1, 2]
+
+    @pytest.mark.unit
+    def test_load_redundancy_group_skips_non_dict_entries(self, temp_config_file):
+        """Malformed YAML entries (e.g., bare strings) are skipped silently."""
+        temp_config_file.write_text("""
+ups:
+  - name: "UPS-A@10.0.0.1"
+  - name: "UPS-B@10.0.0.2"
+redundancy_groups:
+  - "bare-string"
+  - name: "good"
+    ups_sources: ["UPS-A@10.0.0.1", "UPS-B@10.0.0.2"]
+""")
+        config = ConfigLoader.load(str(temp_config_file))
+        assert len(config.redundancy_groups) == 1
+        assert config.redundancy_groups[0].name == "good"
+
+    @pytest.mark.unit
+    def test_load_redundancy_group_empty_section_yields_empty_list(self, temp_config_file):
+        """An empty (or null) ``redundancy_groups:`` block parses as ``[]``."""
+        temp_config_file.write_text("""
+ups:
+  - name: "UPS-A@10.0.0.1"
+redundancy_groups:
+""")
+        config = ConfigLoader.load(str(temp_config_file))
+        assert config.redundancy_groups == []
+
+    @pytest.mark.unit
+    def test_load_redundancy_group_string_coerced(self, temp_config_file):
+        """``name`` and ``ups_sources`` entries are coerced to strings."""
+        temp_config_file.write_text("""
+ups:
+  - name: "UPS-A@10.0.0.1"
+  - name: "UPS-B@10.0.0.2"
+redundancy_groups:
+  - name: 12345
+    ups_sources: ["UPS-A@10.0.0.1", "UPS-B@10.0.0.2"]
+""")
+        config = ConfigLoader.load(str(temp_config_file))
+        assert config.redundancy_groups[0].name == "12345"
+        assert all(isinstance(s, str)
+                   for s in config.redundancy_groups[0].ups_sources)
 
 

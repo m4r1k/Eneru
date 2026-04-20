@@ -1,0 +1,71 @@
+# Eneru E2E Test Configuration - Separate-Eneru-UPS topology
+#
+# TestUPS protects the Eneru host (is_local). UPS1 + UPS2 jointly protect
+# a remote rack via a redundancy group. Failure of UPS1+UPS2 must NOT take
+# the Eneru host down -- only the redundancy rack's remote servers go.
+
+ups:
+  - name: "TestUPS@localhost:3493"
+    display_name: "Eneru Host UPS"
+    check_interval: 1
+    is_local: true
+    triggers:
+      low_battery_threshold: 5
+  - name: "UPS1@localhost:3493"
+    display_name: "Rack PSU-A"
+    check_interval: 1
+  - name: "UPS2@localhost:3493"
+    display_name: "Rack PSU-B"
+    check_interval: 1
+
+triggers:
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+  depletion:
+    window: 300
+    critical_rate: 15.0
+    grace_period: 30
+  extended_time:
+    enabled: false
+
+redundancy_groups:
+  - name: "remote-rack"
+    ups_sources:
+      - "UPS1@localhost:3493"
+      - "UPS2@localhost:3493"
+    min_healthy: 1
+    degraded_counts_as: "healthy"
+    unknown_counts_as: "critical"
+    is_local: false
+    remote_servers:
+      - name: "Remote rack node"
+        enabled: true
+        host: "localhost"
+        user: "testuser"
+        connect_timeout: 5
+        command_timeout: 10
+        shutdown_command: "sudo shutdown -h now"
+        ssh_options:
+          - "-o Port=2222"
+          - "-o StrictHostKeyChecking=no"
+          - "-o UserKnownHostsFile=/dev/null"
+          - "-o IdentityFile=/tmp/e2e-ssh-key"
+
+behavior:
+  dry_run: true
+
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-redundancy-state"
+  battery_history_file: "/tmp/eneru-e2e-redundancy-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-redundancy-shutdown-flag"
+
+statistics:
+  db_directory: "/tmp/eneru-e2e-stats"
+
+notifications:
+  enabled: false
+
+local_shutdown:
+  enabled: false
+  trigger_on: "none"

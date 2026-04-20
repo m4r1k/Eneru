@@ -54,6 +54,9 @@ logging:
   battery_history_file: "/tmp/eneru-e2e-history"
   shutdown_flag_file: "/tmp/eneru-e2e-shutdown-flag"
 
+statistics:
+  db_directory: "/tmp/eneru-e2e-stats"
+
 notifications:
   enabled: false
 

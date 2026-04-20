@@ -19,6 +19,7 @@ from eneru.config import Config
 from eneru.logger import UPSLogger
 from eneru.notifications import APPRISE_AVAILABLE, NotificationWorker
 from eneru.monitor import UPSGroupMonitor
+from eneru.redundancy import RedundancyGroupEvaluator, RedundancyGroupExecutor
 from eneru.utils import run_command
 
 
@@ -44,6 +45,17 @@ class MultiUPSCoordinator:
         # Shared resources
         self._logger: Optional[UPSLogger] = None
         self._notification_worker: Optional[NotificationWorker] = None
+
+        # Redundancy-group runtime (Phase 2). Populated after monitors start.
+        self._redundancy_executors: dict = {}
+        self._evaluator_threads: List[threading.Thread] = []
+        # UPS names that belong to at least one redundancy group -- precomputed
+        # so each per-UPS monitor can be marked advisory at construction time.
+        self._in_redundancy = {
+            name
+            for rg in config.redundancy_groups
+            for name in rg.ups_sources
+        }
 
     def run(self):
         """Start all UPS group monitors and wait for shutdown or signal."""
@@ -101,6 +113,8 @@ class MultiUPSCoordinator:
             sanitized = group.ups.name.replace("@", "-").replace(":", "-").replace("/", "-")
             prefix = f"[{group.ups.label}] "
 
+            in_rg = group.ups.name in self._in_redundancy
+
             monitor = UPSGroupMonitor(
                 config=group_config,
                 exit_after_shutdown=self._exit_after_shutdown,
@@ -111,6 +125,7 @@ class MultiUPSCoordinator:
                 notification_worker=self._notification_worker,
                 logger=self._logger,
                 state_file_suffix=sanitized,
+                in_redundancy_group=in_rg,
             )
             self._monitors.append(monitor)
 
@@ -122,8 +137,41 @@ class MultiUPSCoordinator:
             )
             self._threads.append(thread)
             thread.start()
-            self._log(f"  Started monitor thread for {group.ups.label}"
-                      f"{' [is_local]' if group.is_local else ''}")
+            tags = []
+            if group.is_local:
+                tags.append("is_local")
+            if in_rg:
+                tags.append("redundancy")
+            tag_suffix = f" [{', '.join(tags)}]" if tags else ""
+            self._log(f"  Started monitor thread for {group.ups.label}{tag_suffix}")
+
+        # ------- Redundancy groups (Phase 2) -------
+        if self.config.redundancy_groups:
+            monitors_by_name = {m.config.ups.name: m for m in self._monitors}
+            for rg in self.config.redundancy_groups:
+                executor = RedundancyGroupExecutor(
+                    rg,
+                    base_config=self.config,
+                    logger=self._logger,
+                    log_prefix=f"[redundancy:{rg.name}] ",
+                    stop_event=self._stop_event,
+                    notification_worker=self._notification_worker,
+                )
+                self._redundancy_executors[rg.name] = executor
+                evaluator = RedundancyGroupEvaluator(
+                    rg,
+                    monitors_by_name,
+                    executor,
+                    stop_event=self._stop_event,
+                    logger=self._logger,
+                    log_prefix=f"[redundancy:{rg.name}] ",
+                )
+                evaluator.start()
+                self._evaluator_threads.append(evaluator)
+                self._log(
+                    f"  Started redundancy evaluator '{rg.name}' "
+                    f"({len(rg.ups_sources)} sources, min_healthy={rg.min_healthy})"
+                )
 
     def _run_monitor(self, monitor: UPSGroupMonitor, group):
         """Thread target: run a single UPS monitor."""
@@ -241,8 +289,9 @@ class MultiUPSCoordinator:
         """Block until all monitors finish or a signal is received."""
         try:
             while not self._stop_event.is_set():
-                # Check if any thread is still alive
+                # Check if any monitor or evaluator thread is still alive
                 alive = [t for t in self._threads if t.is_alive()]
+                alive += [t for t in self._evaluator_threads if t.is_alive()]
                 if not alive:
                     break
                 self._stop_event.wait(1)
@@ -261,8 +310,10 @@ class MultiUPSCoordinator:
 
         self._stop_event.set()
 
-        # Wait briefly for threads to finish
+        # Wait briefly for monitor + evaluator threads to finish
         for thread in self._threads:
+            thread.join(timeout=5)
+        for thread in self._evaluator_threads:
             thread.join(timeout=5)
 
         if self._notification_worker:

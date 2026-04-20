@@ -19,6 +19,7 @@ from eneru.config import Config, RemoteServerConfig
 from eneru.state import MonitorState
 from eneru.logger import UPSLogger
 from eneru.notifications import NotificationWorker, APPRISE_AVAILABLE
+from eneru.stats import StatsStore, StatsWriter
 from eneru.utils import run_command, command_exists, is_numeric, format_seconds
 from eneru.shutdown.vms import VMShutdownMixin
 from eneru.shutdown.containers import ContainerShutdownMixin
@@ -87,7 +88,8 @@ class UPSGroupMonitor(
                  log_prefix: str = "",
                  notification_worker: Optional[NotificationWorker] = None,
                  logger: Optional[UPSLogger] = None,
-                 state_file_suffix: str = ""):
+                 state_file_suffix: str = "",
+                 in_redundancy_group: bool = False):
         self.config = config
         self.state = MonitorState()
         self.logger: Optional[UPSLogger] = logger
@@ -95,6 +97,11 @@ class UPSGroupMonitor(
         self._shutdown_callback = shutdown_callback
         self._stop_event = stop_event or threading.Event()
         self._log_prefix = log_prefix
+        # When True, per-UPS triggers (T1-T4, FSD, FAILSAFE) become advisory:
+        # they record state under the snapshot lock instead of executing the
+        # local shutdown sequence. The redundancy-group evaluator owns the
+        # decision to actually drain shared resources.
+        self._in_redundancy_group = bool(in_redundancy_group)
 
         # Per-group state file paths (suffix for multi-UPS)
         sfx = f".{state_file_suffix}" if state_file_suffix else ""
@@ -106,6 +113,83 @@ class UPSGroupMonitor(
         self._compose_available: bool = False
         self._notification_worker: Optional[NotificationWorker] = notification_worker
         self._exit_after_shutdown = exit_after_shutdown
+
+        # Per-UPS SQLite stats store (always-on; per spec 2.12).
+        # Filename mirrors the per-group state-file sanitisation so each
+        # UPS keeps its own database next to its sibling state files.
+        sanitized = sfx.lstrip(".") or "default"
+        stats_dir = Path(config.statistics.db_directory)
+        self._stats_db_path = stats_dir / f"{sanitized}.db"
+        self._stats_store = StatsStore(
+            self._stats_db_path,
+            retention_raw_hours=config.statistics.retention.raw_hours,
+            retention_5min_days=config.statistics.retention.agg_5min_days,
+            retention_hourly_days=config.statistics.retention.agg_hourly_days,
+        )
+        self._stats_writer: Optional[StatsWriter] = None
+
+    def _start_stats(self):
+        """Open the per-UPS stats DB and start the background writer.
+
+        SQLite errors are isolated -- a failure here logs once and the
+        daemon continues to run without stats persistence.
+        """
+        try:
+            self._stats_store._logger = self.logger
+            self._stats_store.open()
+        except Exception as e:
+            self._log_message(
+                f"⚠️ WARNING: stats store open failed at {self._stats_db_path}: {e}. "
+                "Stats persistence disabled this run."
+            )
+            self._stats_writer = None
+            return
+        self._stats_writer = StatsWriter(
+            self._stats_store, self._stop_event,
+            log_prefix=self._log_prefix,
+        )
+        self._stats_writer.start()
+        self._stats_store.log_event(
+            "DAEMON_START",
+            f"Eneru v{__version__} monitoring {self.config.ups.name}",
+        )
+
+    def _stop_stats(self):
+        """Flush + close the stats store. Safe to call multiple times."""
+        if self._stats_writer is not None:
+            self._stats_writer = None  # daemon thread; stop_event was set
+        try:
+            self._stats_store.close()
+        except Exception:
+            pass
+
+    def _record_advisory_trigger(self, reason: str):
+        """Record an advisory trigger for the redundancy-group evaluator.
+
+        Called from the per-UPS trigger sites (T1-T4, FSD, FAILSAFE) when
+        this monitor's UPS belongs to a redundancy group. The state lock
+        guarantees the snapshot reader sees a consistent
+        ``(trigger_active, trigger_reason)`` pair.
+        """
+        with self.state._lock:
+            already_active = self.state.trigger_active
+            self.state.trigger_active = True
+            self.state.trigger_reason = reason
+        if not already_active:
+            self._log_message(
+                f"⚠️ Trigger condition met (advisory, redundancy group): {reason}"
+            )
+
+    def _clear_advisory_trigger(self):
+        """Clear the advisory trigger when conditions return to normal."""
+        with self.state._lock:
+            was_active = self.state.trigger_active
+            self.state.trigger_active = False
+            self.state.trigger_reason = ""
+        if was_active:
+            self._log_message(
+                "✅ Advisory trigger cleared (redundancy group): conditions normal."
+            )
 
     def run(self):
         """Main entry point."""
@@ -161,6 +245,7 @@ class UPSGroupMonitor(
         self._log_enabled_features()
         self._wait_for_initial_connection()
         self._initialize_voltage_thresholds()
+        self._start_stats()
 
     def _initialize_notifications(self):
         """Initialize the notification worker."""
@@ -280,8 +365,25 @@ class UPSGroupMonitor(
             blocking=actual_blocking
         )
 
-    def _log_power_event(self, event: str, details: str):
-        """Log power events with centralized notification logic."""
+    def _log_power_event(self, event: str, details: str,
+                         *, suppress_notification: bool = False):
+        """Log power events with centralized notification logic.
+
+        ``suppress_notification`` (kw-only) lets a caller explicitly
+        opt out of the notification dispatch -- used by the voltage
+        hysteresis path which logs the BROWNOUT/OVER_VOLTAGE row
+        immediately on the state transition and fires the notification
+        later (after the dwell timer elapses) via a separate code
+        path. Stats persistence and syslog still happen.
+
+        ``notifications.suppress`` (config) provides the user-facing
+        per-event-type mute. Logs always record the event; only the
+        notification dispatch is gated. Safety-critical events
+        (over-voltage, brownout, overload, bypass-active, on-battery,
+        connection-lost, anything starting with SHUTDOWN) are
+        validation-rejected from ``suppress`` so they cannot be
+        silenced here even if a user tried.
+        """
         self._log_message(f"⚡ POWER EVENT: {event} - {details}")
 
         try:
@@ -292,9 +394,8 @@ class UPSGroupMonitor(
         except Exception:
             pass
 
-        if self._shutdown_flag_path.exists():
-            return
-
+        # Determine notification disposition first so we can record an
+        # accurate notification_sent flag in the stats events row.
         notification: Optional[Tuple[str, str]] = None  # (body, type)
 
         event_handlers = {
@@ -348,8 +449,32 @@ class UPSGroupMonitor(
             ),
         }
 
-        # Skip these events for notifications
-        if event in ("VOLTAGE_NORMALIZED", "AVR_INACTIVE"):
+        # Reasons the notification dispatch may be skipped (the log row
+        # always lands; this only affects whether the operator gets
+        # pinged by Apprise). The stats events row records which path
+        # we took via notification_sent.
+        skipped_during_shutdown = self._shutdown_flag_path.exists()
+        always_silent = event in ("VOLTAGE_NORMALIZED", "AVR_INACTIVE",
+                                   "VOLTAGE_FLAP_SUPPRESSED",
+                                   "VOLTAGE_AUTODETECT_MISMATCH")
+        user_suppressed = event in set(
+            getattr(self.config.notifications, "suppress", []) or []
+        )
+
+        will_notify = not (suppress_notification or skipped_during_shutdown
+                           or always_silent or user_suppressed)
+
+        # Persist the event to the SQLite store (best-effort). Pass the
+        # disposition so `WHERE notification_sent = 0` can audit muted
+        # events even after the fact.
+        try:
+            self._stats_store.log_event(
+                event, details, notification_sent=will_notify,
+            )
+        except Exception:
+            pass
+
+        if not will_notify:
             return
 
         if event in event_handlers:
@@ -456,7 +581,7 @@ class UPSGroupMonitor(
             )
 
     def _save_state(self, ups_data: Dict[str, str]):
-        """Save current UPS state to file."""
+        """Save current UPS state to file + buffer one stats sample."""
         state_content = (
             f"STATUS={ups_data.get('ups.status', '')}\n"
             f"BATTERY={ups_data.get('battery.charge', '')}\n"
@@ -472,6 +597,22 @@ class UPSGroupMonitor(
             temp_file.replace(self._state_file_path)
         except Exception:
             pass
+
+        # Hot-path: append one sample to the in-memory deque (zero I/O).
+        # The StatsWriter flushes the deque to SQLite every 10 s.
+        try:
+            time_on_battery = (
+                int(time.time()) - self.state.on_battery_start_time
+                if self.state.on_battery_start_time > 0 else 0
+            )
+            self._stats_store.buffer_sample(
+                ups_data,
+                depletion_rate=self.state.latest_depletion_rate,
+                time_on_battery=time_on_battery,
+                connection_state=self.state.connection_state,
+            )
+        except Exception:
+            pass  # never let stats interfere with monitoring
 
     def _execute_shutdown_sequence(self):
         """Execute the controlled shutdown sequence."""
@@ -576,6 +717,7 @@ class UPSGroupMonitor(
         if self._shutdown_flag_path.exists():
             if self._notification_worker:
                 self._notification_worker.stop()
+            self._stop_stats()
             sys.exit(0)
 
         self._shutdown_flag_path.touch()
@@ -590,6 +732,7 @@ class UPSGroupMonitor(
 
         if self._notification_worker:
             self._notification_worker.stop()
+        self._stop_stats()
 
         self._shutdown_flag_path.unlink(missing_ok=True)
         sys.exit(0)
@@ -676,8 +819,19 @@ class UPSGroupMonitor(
                 )
                 self.state.extended_time_logged = True
 
+        # Publish the freshly computed depletion_rate for the snapshot reader.
+        with self.state._lock:
+            self.state.latest_depletion_rate = (
+                float(depletion_rate) if is_numeric(depletion_rate) else 0.0
+            )
+
         if shutdown_reason:
-            self._trigger_immediate_shutdown(shutdown_reason)
+            if self._in_redundancy_group:
+                # Advisory mode: the redundancy-group evaluator decides whether
+                # the group should drain. Per-UPS shutdown is suppressed.
+                self._record_advisory_trigger(shutdown_reason)
+            else:
+                self._trigger_immediate_shutdown(shutdown_reason)
 
         # Log status every 5 seconds
         if int(time.time()) % 5 == 0:
@@ -713,6 +867,15 @@ class UPSGroupMonitor(
             self.state.on_battery_start_time = 0
             self.state.extended_time_logged = False
             self.state.battery_history.clear()
+
+            # Power restored on a redundancy-group member: drop any advisory
+            # trigger so the group evaluator sees this UPS as healthy again.
+            if self._in_redundancy_group:
+                self._clear_advisory_trigger()
+
+        # Off-battery → no depletion-rate signal for the snapshot reader.
+        with self.state._lock:
+            self.state.latest_depletion_rate = 0.0
 
     def _handle_connection_failure(self, error_msg: str):
         """Handle connection failure with optional grace period.
@@ -818,19 +981,32 @@ class UPSGroupMonitor(
                 if is_failsafe_trigger and "OB" in self.state.previous_status:
                     self.state.connection_state = "FAILED"
                     self.state.connection_lost_time = 0.0
-                    self._shutdown_flag_path.touch()
-                    self._log_message(
-                        "🚨 FAILSAFE TRIGGERED (FSB): Connection lost or data persistently stale "
-                        "while On Battery. Initiating emergency shutdown."
-                    )
-                    # Send notification (non-blocking - fire and forget)
-                    self._send_notification(
-                        "🚨 **FAILSAFE (FSB) TRIGGERED!**\n"
-                        "Connection to UPS lost or data stale while system was running On Battery.\n"
-                        "Assuming critical failure. Executing immediate shutdown.",
-                        self.config.NOTIFY_FAILURE
-                    )
-                    self._execute_shutdown_sequence()
+                    if self._in_redundancy_group:
+                        # Advisory mode: redundancy-group evaluator owns the
+                        # shutdown decision. Recording the trigger here +
+                        # reporting connection_state=FAILED is enough -- the
+                        # group's policy + min_healthy decide what happens.
+                        self._record_advisory_trigger(
+                            "FAILSAFE (FSB): connection lost while On Battery"
+                        )
+                        self._log_message(
+                            "🚨 FAILSAFE (advisory, redundancy group): connection lost "
+                            "while On Battery; deferring to group evaluator."
+                        )
+                    else:
+                        self._shutdown_flag_path.touch()
+                        self._log_message(
+                            "🚨 FAILSAFE TRIGGERED (FSB): Connection lost or data persistently stale "
+                            "while On Battery. Initiating emergency shutdown."
+                        )
+                        # Send notification (non-blocking - fire and forget)
+                        self._send_notification(
+                            "🚨 **FAILSAFE (FSB) TRIGGERED!**\n"
+                            "Connection to UPS lost or data stale while system was running On Battery.\n"
+                            "Assuming critical failure. Executing immediate shutdown.",
+                            self.config.NOTIFY_FAILURE
+                        )
+                        self._execute_shutdown_sequence()
 
                 # Grace period logic (only when NOT on battery)
                 elif is_failsafe_trigger:
@@ -890,6 +1066,8 @@ class UPSGroupMonitor(
                 self.state.connection_lost_time = 0.0
                 self.state.connection_flap_count = 0
                 self.state.connection_first_flap_time = 0.0
+                if self._in_redundancy_group:
+                    self._clear_advisory_trigger()
 
             ups_status = ups_data.get('ups.status', '')
 
@@ -919,7 +1097,14 @@ class UPSGroupMonitor(
             # ==================================================================
 
             if "FSD" in ups_status:
-                self._trigger_immediate_shutdown("UPS signaled FSD (Forced Shutdown) flag.")
+                if self._in_redundancy_group:
+                    self._record_advisory_trigger(
+                        "UPS signaled FSD (Forced Shutdown) flag."
+                    )
+                else:
+                    self._trigger_immediate_shutdown(
+                        "UPS signaled FSD (Forced Shutdown) flag."
+                    )
 
             elif "OB" in ups_status:
                 self._handle_on_battery(ups_data)
@@ -942,6 +1127,19 @@ class UPSGroupMonitor(
             self._check_bypass_status(ups_status)
             self._check_overload_status(ups_status, ups_load)
 
-            self.state.previous_status = ups_status
+            # Publish the latest observation for redundancy-group evaluators.
+            # All snapshot fields (plus previous_status) are written under one
+            # lock acquisition so external readers see a consistent snapshot.
+            with self.state._lock:
+                self.state.latest_status = ups_status
+                self.state.latest_battery_charge = ups_data.get('battery.charge', '')
+                self.state.latest_runtime = ups_data.get('battery.runtime', '')
+                self.state.latest_load = ups_data.get('ups.load', '')
+                self.state.latest_time_on_battery = (
+                    int(time.time()) - self.state.on_battery_start_time
+                    if self.state.on_battery_start_time > 0 else 0
+                )
+                self.state.latest_update_time = time.time()
+                self.state.previous_status = ups_status
 
             self._stop_event.wait(self.config.ups.check_interval)

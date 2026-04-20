@@ -930,3 +930,222 @@ class TestRemoteShutdownSafetyMargin:
         # computing `deadline` and the first join, so the captured value
         # will be just under 127.
         assert captured["first_timeout"] == pytest.approx(127, abs=0.5)
+
+
+# ==============================================================================
+# ADVISORY MODE -- redundancy-group members suppress local shutdown
+# ==============================================================================
+
+class TestAdvisoryTriggers:
+    """Per-trigger-site verification of the in_redundancy_group branch."""
+
+    @pytest.mark.unit
+    def test_record_advisory_trigger_sets_state_under_lock(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = True
+
+        monitor._record_advisory_trigger("battery 5% < threshold 20%")
+
+        snap = monitor.state.snapshot()
+        assert snap.trigger_active is True
+        assert snap.trigger_reason == "battery 5% < threshold 20%"
+
+    @pytest.mark.unit
+    def test_record_advisory_trigger_idempotent_message(self, tmp_path):
+        """A second call with the same condition does not re-log the alert."""
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = True
+
+        monitor._record_advisory_trigger("low battery")
+        first_log_count = monitor.logger.log.call_count
+        monitor._record_advisory_trigger("low battery")
+        # State stays set; second call does not emit another alert message.
+        assert monitor.state.trigger_active is True
+        assert monitor.logger.log.call_count == first_log_count
+
+    @pytest.mark.unit
+    def test_clear_advisory_trigger_resets_state(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = True
+        monitor._record_advisory_trigger("low battery")
+        assert monitor.state.trigger_active is True
+
+        monitor._clear_advisory_trigger()
+        snap = monitor.state.snapshot()
+        assert snap.trigger_active is False
+        assert snap.trigger_reason == ""
+
+    @pytest.mark.unit
+    def test_t1_advisory_in_redundancy_group_does_not_call_immediate_shutdown(self, tmp_path):
+        """T1 fires as advisory in redundancy mode -- no immediate shutdown."""
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = True
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.on_battery_start_time = int(time.time()) - 10
+
+        ups_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "15",  # Below 20% threshold
+            "battery.runtime": "1200",
+            "ups.load": "30",
+        }
+        with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
+            monitor._handle_on_battery(ups_data)
+        mock_shutdown.assert_not_called()
+        assert monitor.state.trigger_active is True
+        assert "15%" in monitor.state.trigger_reason
+
+    @pytest.mark.unit
+    def test_t1_non_redundancy_path_unchanged_calls_immediate_shutdown(self, tmp_path):
+        """Regression: outside a redundancy group T1 still fires the local shutdown."""
+        monitor = make_monitor(tmp_path)
+        # in_redundancy_group defaults to False
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.on_battery_start_time = int(time.time()) - 10
+
+        ups_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "15",
+            "battery.runtime": "1200",
+            "ups.load": "30",
+        }
+        with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
+            monitor._handle_on_battery(ups_data)
+        mock_shutdown.assert_called_once()
+        assert monitor.state.trigger_active is False  # legacy path doesn't set advisory
+
+    @staticmethod
+    def _run_one_iteration(monitor, ups_data_response):
+        """Run ``_main_loop`` for exactly one iteration.
+
+        ``_main_loop`` calls ``self._stop_event.wait(timeout)`` at every
+        natural pause; we monkey-patch the wait so the first invocation also
+        sets the event. This guarantees one full pass through the loop body
+        before the loop exits.
+        """
+        original_wait = monitor._stop_event.wait
+        called = {"n": 0}
+
+        def wait_then_stop(timeout=None):
+            called["n"] += 1
+            monitor._stop_event.set()
+            return original_wait(0)
+
+        with patch.object(monitor, "_get_all_ups_data",
+                          return_value=ups_data_response):
+            with patch.object(monitor._stop_event, "wait", wait_then_stop):
+                monitor._main_loop()
+
+    @pytest.mark.unit
+    def test_fsd_advisory_in_redundancy_group(self, tmp_path):
+        """FSD signal in redundancy mode records advisory + skips local path."""
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = True
+        monitor.state.previous_status = "OL"
+
+        ups_data = {
+            "ups.status": "OL FSD",
+            "battery.charge": "100",
+            "battery.runtime": "1800",
+            "ups.load": "25",
+        }
+        with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
+            self._run_one_iteration(monitor, (True, ups_data, ""))
+
+        mock_shutdown.assert_not_called()
+        assert monitor.state.trigger_active is True
+        assert "FSD" in monitor.state.trigger_reason
+
+    @pytest.mark.unit
+    def test_fsd_non_redundancy_still_triggers_immediate_shutdown(self, tmp_path):
+        """Regression: outside redundancy, FSD path is byte-identical to legacy."""
+        monitor = make_monitor(tmp_path)
+        monitor.state.previous_status = "OL"
+
+        ups_data = {
+            "ups.status": "OL FSD",
+            "battery.charge": "100",
+            "battery.runtime": "1800",
+            "ups.load": "25",
+        }
+        with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
+            self._run_one_iteration(monitor, (True, ups_data, ""))
+
+        mock_shutdown.assert_called_once()
+        assert "FSD" in mock_shutdown.call_args[0][0]
+
+    @pytest.mark.unit
+    def test_failsafe_advisory_in_redundancy_group(self, tmp_path):
+        """FAILSAFE on a redundancy member records advisory and connection_state."""
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = True
+        monitor.state.previous_status = "OB DISCHRG"  # was on battery
+        # Push stale_data_count to threshold-1 -- this iteration increments to 3 and fires.
+        monitor.state.stale_data_count = 2
+        monitor.state.connection_state = "OK"
+
+        with patch.object(monitor, "_execute_shutdown_sequence") as mock_exec:
+            self._run_one_iteration(monitor, (False, {}, "Data stale"))
+
+        mock_exec.assert_not_called()
+        assert monitor.state.connection_state == "FAILED"
+        assert monitor.state.trigger_active is True
+        assert "FAILSAFE" in monitor.state.trigger_reason
+
+    @pytest.mark.unit
+    def test_failsafe_non_redundancy_unchanged_for_single_ups(self, tmp_path):
+        """Regression: legacy single-UPS failsafe path is byte-identical."""
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = False
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.stale_data_count = 2
+        monitor.state.connection_state = "OK"
+
+        with patch.object(monitor, "_execute_shutdown_sequence") as mock_exec:
+            self._run_one_iteration(monitor, (False, {}, "Data stale"))
+
+        mock_exec.assert_called_once()
+        assert monitor.state.connection_state == "FAILED"
+        assert monitor.state.trigger_active is False
+
+    @pytest.mark.unit
+    def test_failsafe_non_redundancy_unchanged_for_independent_group(self, tmp_path):
+        """Regression: independent (non-redundancy) UPS group also unchanged."""
+        # Same as the previous test -- "independent group" means the monitor
+        # was constructed with in_redundancy_group=False (the default).
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = False
+        monitor.state.previous_status = "OB DISCHRG"
+        # Connection error (not "Data stale") fires failsafe immediately.
+        monitor.state.stale_data_count = 0
+        monitor.state.connection_state = "OK"
+
+        with patch.object(monitor, "_execute_shutdown_sequence") as mock_exec:
+            self._run_one_iteration(monitor, (False, {}, "Network error"))
+
+        mock_exec.assert_called_once()
+
+    @pytest.mark.unit
+    def test_handle_on_line_clears_advisory_in_redundancy(self, tmp_path):
+        """Returning to OL on a redundancy member clears the advisory trigger."""
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = True
+        monitor.state.trigger_active = True
+        monitor.state.trigger_reason = "battery 5% < threshold 20%"
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.on_battery_start_time = int(time.time()) - 60
+
+        ups_data = {
+            "ups.status": "OL CHRG",
+            "battery.charge": "75",
+            "input.voltage": "230.5",
+        }
+        monitor._handle_on_line(ups_data)
+        snap = monitor.state.snapshot()
+        assert snap.trigger_active is False
+        assert snap.trigger_reason == ""
+
+    @pytest.mark.unit
+    def test_constructor_default_is_not_in_redundancy_group(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        assert monitor._in_redundancy_group is False

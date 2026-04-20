@@ -1,0 +1,41 @@
+# Eneru E2E Test Configuration - SQLite stats persistence
+#
+# Single-UPS dry-run; stats DB is written to a writable /tmp directory
+# (the GH runner can't write /var/lib/eneru without sudo).
+
+ups:
+  name: "TestUPS@localhost:3493"
+  display_name: "E2E Stats UPS"
+  check_interval: 1
+
+triggers:
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+  depletion:
+    window: 300
+    critical_rate: 15.0
+    grace_period: 30
+  extended_time:
+    enabled: false
+
+statistics:
+  db_directory: "/tmp/eneru-e2e-stats"
+  retention:
+    raw_hours: 24
+    agg_5min_days: 30
+    agg_hourly_days: 1825
+
+behavior:
+  dry_run: true
+
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-stats-state"
+  battery_history_file: "/tmp/eneru-e2e-stats-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-stats-shutdown-flag"
+
+notifications:
+  enabled: false
+
+local_shutdown:
+  enabled: false

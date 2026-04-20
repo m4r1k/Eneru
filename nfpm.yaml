@@ -141,6 +141,34 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/health_model.py
+    dst: /opt/ups-monitor/eneru/health_model.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/redundancy.py
+    dst: /opt/ups-monitor/eneru/redundancy.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/stats.py
+    dst: /opt/ups-monitor/eneru/stats.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/graph.py
+    dst: /opt/ups-monitor/eneru/graph.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   # eneru.shutdown subpackage (mixin per shutdown phase)
   - src: src/eneru/shutdown/__init__.py
     dst: /opt/ups-monitor/eneru/shutdown/__init__.py
@@ -264,6 +292,14 @@ contents:
 
   # Create the /etc/ups-monitor directory
   - dst: /etc/ups-monitor
+    type: dir
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Create the /var/lib/eneru directory for the per-UPS SQLite stats stores
+  - dst: /var/lib/eneru
     type: dir
     file_info:
       mode: 0755

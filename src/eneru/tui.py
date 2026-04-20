@@ -8,12 +8,206 @@ Two-panel layout:
 
 import curses
 import sys
+import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 
 from eneru.version import __version__
 from eneru.config import Config, UPSGroupConfig
+from eneru.graph import BrailleGraph
+from eneru.stats import StatsStore
+
+
+# Cycle order for the G key + --graph flag.
+GRAPH_MODES = ("off", "charge", "load", "voltage", "runtime")
+TIME_RANGES = ("1h", "6h", "24h", "7d", "30d")
+TIME_RANGE_SECONDS = {
+    "1h": 3600,
+    "6h": 6 * 3600,
+    "24h": 24 * 3600,
+    "7d": 7 * 86400,
+    "30d": 30 * 86400,
+}
+
+# Map graph modes to (metric column, y-axis label, y_min, y_max).
+METRIC_INFO = {
+    "charge":  ("battery_charge",  "0-100%",   0.0,   100.0),
+    "load":    ("ups_load",        "0-100%",   0.0,   100.0),
+    "voltage": ("input_voltage",   "V",        None,  None),
+    "runtime": ("battery_runtime", "seconds",  0.0,   None),
+}
+
+
+def stats_db_path_for(group: UPSGroupConfig, config: Config) -> Path:
+    """Return the per-UPS stats DB path the daemon would write to.
+
+    Mirrors the sanitisation in MultiUPSCoordinator and UPSGroupMonitor.
+    """
+    name = group.ups.name
+    if config.multi_ups:
+        sanitized = name.replace("@", "-").replace(":", "-").replace("/", "-")
+    else:
+        sanitized = "default"
+    return Path(config.statistics.db_directory) / f"{sanitized}.db"
+
+
+def state_file_path_for(group: UPSGroupConfig, config: Config) -> Path:
+    """Return the per-UPS state file path the daemon writes every poll.
+
+    Multi-UPS mode appends a sanitized suffix; single-UPS uses the bare
+    path. Used by both ``collect_group_data`` and ``update_live_buffer``.
+    """
+    name = group.ups.name
+    if config.multi_ups:
+        sanitized = name.replace("@", "-").replace(":", "-").replace("/", "-")
+        return Path(config.logging.state_file + f".{sanitized}")
+    return Path(config.logging.state_file)
+
+
+# ---- Live-sample blending (spec 2.13) ----
+#
+# The daemon's SQLite writer flushes every 10 s, but the state file is
+# rewritten every poll cycle (~1 s). Without blending, the TUI graph's
+# rightmost edge lags by up to 10 s while the live status panel stays
+# current. ``update_live_buffer`` is called once per TUI refresh per
+# group; it parses the same state file ``collect_group_data`` does and
+# pushes the snapshot into a per-UPS deque. ``query_metric_series``
+# then extends the SQLite result with any deque points newer than the
+# last SQLite sample, deduped by timestamp.
+_LIVE_BUFFER_MAXLEN = 60
+_live_buffers: Dict[str, "deque[Tuple[int, Dict[str, float]]]"] = {}
+
+# State-file keys (left) we promote into deque samples, mapped to the
+# stats schema's column names (right). Only the columns we render
+# graphs for need to be here -- adding a new graph metric means adding
+# its column to METRIC_INFO + the corresponding state-file key here.
+_STATE_FILE_TO_COLUMN: Dict[str, str] = {
+    "battery.charge": "battery_charge",
+    "battery.runtime": "battery_runtime",
+    "ups.load": "ups_load",
+    "input.voltage": "input_voltage",
+    "output.voltage": "output_voltage",
+    "battery.voltage": "battery_voltage",
+    "ups.temperature": "ups_temperature",
+    "input.frequency": "input_frequency",
+    "output.frequency": "output_frequency",
+}
+
+
+def _buffer_key(group: UPSGroupConfig, config: Config) -> str:
+    """Stable per-UPS key (matches the stats DB filename stem)."""
+    return stats_db_path_for(group, config).stem
+
+
+def _live_buffer_for(group: UPSGroupConfig, config: Config) -> deque:
+    key = _buffer_key(group, config)
+    buf = _live_buffers.get(key)
+    if buf is None:
+        buf = deque(maxlen=_LIVE_BUFFER_MAXLEN)
+        _live_buffers[key] = buf
+    return buf
+
+
+def _coerce_float(value) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def update_live_buffer(group: UPSGroupConfig, config: Config) -> None:
+    """Snapshot the state file into the per-UPS live deque.
+
+    Idempotent within the same wall-clock second: if called twice in
+    one second the latter call replaces the former (no duplicate
+    timestamps make it into the deque).
+    """
+    data = parse_state_file(state_file_path_for(group, config))
+    if not data:
+        return
+    sample: Dict[str, float] = {}
+    for state_key, column in _STATE_FILE_TO_COLUMN.items():
+        v = _coerce_float(data.get(state_key))
+        if v is not None:
+            sample[column] = v
+    if not sample:
+        return
+    ts = int(time.time())
+    buf = _live_buffer_for(group, config)
+    if buf and buf[-1][0] == ts:
+        buf[-1] = (ts, sample)
+    else:
+        buf.append((ts, sample))
+
+
+def clear_live_buffers() -> None:
+    """Drop all live buffers. Test helper -- the runtime never calls this."""
+    _live_buffers.clear()
+
+
+def query_metric_series(
+    config: Config,
+    group: UPSGroupConfig,
+    metric: str,
+    seconds: int,
+) -> List[Tuple[int, float]]:
+    """Return ``[(ts, value), ...]`` for a metric across a time window.
+
+    Source order:
+    1. The per-UPS SQLite stats DB (historical, possibly up to 10 s stale).
+    2. The per-UPS live deque (real-time tail since the last SQLite flush).
+
+    Returns an empty list if neither source has data for the metric --
+    callers should render a "(no data)" placeholder.
+    """
+    info = METRIC_INFO.get(metric)
+    if info is None:
+        return []
+    column = info[0]
+    end = int(time.time())
+    start = end - max(60, int(seconds))
+
+    sqlite_series: List[Tuple[int, float]] = []
+    db_path = stats_db_path_for(group, config)
+    conn = StatsStore.open_readonly(db_path)
+    if conn is not None:
+        try:
+            store = StatsStore(db_path)
+            store._conn = conn
+            try:
+                sqlite_series = store.query_range(column, start, end)
+            finally:
+                store._conn = None
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    # Blend with the live deque: anything newer than the last SQLite
+    # sample (or any point in-window if SQLite is empty), deduped by ts.
+    buf = _live_buffers.get(_buffer_key(group, config))
+    if not buf:
+        return sqlite_series
+    sqlite_tail_ts = sqlite_series[-1][0] if sqlite_series else (start - 1)
+    extra: List[Tuple[int, float]] = []
+    seen_ts = {ts for ts, _ in sqlite_series}
+    for ts, sample in buf:
+        if ts <= sqlite_tail_ts or ts in seen_ts or ts < start or ts > end:
+            continue
+        v = sample.get(column)
+        if v is None:
+            continue
+        extra.append((ts, float(v)))
+        seen_ts.add(ts)
+    if not extra:
+        return sqlite_series
+    extra.sort(key=lambda t: t[0])
+    return sqlite_series + extra
 
 
 # ==============================================================================
@@ -39,7 +233,7 @@ def parse_state_file(path: Path) -> Optional[Dict[str, str]]:
 
 
 def parse_log_events(log_path: str, max_events: int = 8) -> List[str]:
-    """Read recent power events from the log file tail."""
+    """Read recent power events from the log file tail (fallback path)."""
     INCLUDE = (
         "POWER EVENT", "Status changed", "SHUTDOWN", "shutdown",
         "CRITICAL", "FSD", "flap", "Flap", "On battery",
@@ -68,6 +262,67 @@ def parse_log_events(log_path: str, max_events: int = 8) -> List[str]:
         return events
     except Exception:
         return []
+
+
+def _format_event_line(ts: int, label: str, event_type: str,
+                       detail: str, multi_ups: bool) -> str:
+    """Format one event row from the SQLite events table for display."""
+    try:
+        time_str = datetime.fromtimestamp(int(ts)).strftime("%H:%M:%S")
+    except (TypeError, ValueError, OSError):
+        time_str = "??:??:??"
+    prefix = f"[{label}] " if multi_ups else ""
+    if detail:
+        return f"{time_str}  {prefix}{event_type}: {detail}"
+    return f"{time_str}  {prefix}{event_type}"
+
+
+def query_events_for_display(
+    config: Config,
+    time_range_seconds: int = 24 * 3600,
+    *,
+    max_events: int = 50,
+) -> List[str]:
+    """Pull recent events from each UPS's SQLite store, sorted by timestamp.
+
+    Returns formatted display strings ready to drop into the TUI events
+    panel. Returns an empty list when no per-UPS DB exists -- callers
+    should fall back to ``parse_log_events`` in that case.
+    """
+    end = int(time.time())
+    start = end - max(60, int(time_range_seconds))
+    multi_ups = config.multi_ups
+    rows: List[tuple] = []  # (ts, label, event_type, detail)
+    any_db_seen = False
+
+    for group in config.ups_groups:
+        db_path = stats_db_path_for(group, config)
+        conn = StatsStore.open_readonly(db_path)
+        if conn is None:
+            continue
+        any_db_seen = True
+        try:
+            store = StatsStore(db_path)
+            store._conn = conn
+            try:
+                events = store.query_events(start, end)
+            finally:
+                store._conn = None
+            for ts, etype, detail in events:
+                rows.append((int(ts), group.ups.label, etype, detail or ""))
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    if not any_db_seen:
+        return []  # signal "no DB" so callers can fall back
+
+    rows.sort(key=lambda r: r[0])
+    rows = rows[-max_events:]
+    return [_format_event_line(ts, label, etype, detail, multi_ups)
+            for ts, label, etype, detail in rows]
 
 
 # ==============================================================================
@@ -176,12 +431,7 @@ def collect_group_data(group: UPSGroupConfig, config: Config) -> Dict:
     label = group.ups.label
     name = group.ups.name
 
-    if config.multi_ups:
-        sanitized = name.replace("@", "-").replace(":", "-").replace("/", "-")
-        state_path = Path(config.logging.state_file + f".{sanitized}")
-    else:
-        state_path = Path(config.logging.state_file)
-
+    state_path = state_file_path_for(group, config)
     state = parse_state_file(state_path)
 
     res_parts = []
@@ -223,16 +473,64 @@ def format_runtime(runtime: str) -> str:
 # RENDERING HELPERS
 # ==============================================================================
 
+def display_width(text: str) -> int:
+    """Approximate the on-screen *cell* width of ``text``.
+
+    Conservative: any code point at or above U+1100 is treated as 2
+    cells. Covers the common cases that broke the events panel (emoji,
+    CJK), at the cost of occasionally over-truncating exotic glyphs.
+    """
+    width = 0
+    for ch in text:
+        cp = ord(ch)
+        if cp >= 0x1100:
+            width += 2
+        elif cp == 0:
+            # NUL is invisible; ignore.
+            continue
+        else:
+            width += 1
+    return width
+
+
+def truncate_to_width(text: str, max_width: int) -> str:
+    """Return the longest prefix of ``text`` whose display width <= max_width."""
+    if max_width <= 0:
+        return ""
+    if display_width(text) <= max_width:
+        return text
+    out = []
+    width = 0
+    for ch in text:
+        cw = 2 if ord(ch) >= 0x1100 else 1
+        if width + cw > max_width:
+            break
+        out.append(ch)
+        width += cw
+    return "".join(out)
+
+
 def safe_addstr(win, y: int, x: int, text: str, attr: int = 0):
-    """Write string to window, clipping to avoid curses errors."""
+    """Write string to window, clipping to display width to avoid overflow.
+
+    Critically, this must clip by *cell* width (which is what curses
+    actually paints), not character count. Emoji, CJK, and other
+    double-width glyphs would otherwise spill past the right edge of
+    the visible panel.
+    """
     max_y, max_x = win.getmaxyx()
     if y < 0 or y >= max_y or x >= max_x:
         return
-    available = max_x - x - 1
-    if available <= 0:
+    available_cells = max_x - x - 1
+    if available_cells <= 0:
+        return
+    truncated = truncate_to_width(text, available_cells)
+    if not truncated:
         return
     try:
-        win.addnstr(y, x, text, available, attr)
+        # We've already truncated to fit; pass len() so curses doesn't
+        # re-clip more aggressively than necessary.
+        win.addnstr(y, x, truncated, len(truncated), attr)
     except curses.error:
         pass
 
@@ -338,8 +636,15 @@ def render_config_panel(win, y_start: int, y_end: int, width: int,
 
 
 def render_logs_panel(win, y_start: int, y_end: int, width: int,
-                       events: List[str], show_more: bool):
-    """Render the logs panel with yellow/gold background, edge to edge."""
+                       events: List[str], show_more: bool,
+                       *, graph_mode: str = "off", time_range: str = "1h",
+                       ups_index: int = 0, ups_total: int = 1):
+    """Render the logs panel with yellow/gold background, edge to edge.
+
+    The bottom-row key hints reflect the *current* graph mode, time
+    range, and (in multi-UPS) the active UPS index. Static hints would
+    leave operators guessing what state the cycle keys are in.
+    """
     gold_attr = curses.color_pair(C_GOLD_BG)
     gold_bold = gold_attr | curses.A_BOLD
     key_attr = curses.color_pair(C_GOLD_KEY) | curses.A_BOLD
@@ -369,33 +674,88 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
         for event in display_events:
             if y >= y_end - footer_lines:
                 break
-            # Truncate to fit screen. Conservative for emoji double-width.
-            max_text = width - 6
+            # Account for the right-edge gutter and the leading 3-space
+            # indent. Use display-cell width (handles emoji + CJK) so
+            # lines never spill past the panel edge.
+            max_cells = max(0, width - 4)
             display = f"   {event}"
-            if len(display) > max_text:
-                display = display[:max_text - 2] + ".."
+            if display_width(display) > max_cells:
+                # Reserve 2 cells for the trailing ellipsis.
+                display = truncate_to_width(display, max_cells - 2) + ".."
             safe_addstr(win, y, 0, display, gold_attr)
             y += 1
 
-    # Key hints at the bottom of the gold panel
+    # Key hints at the bottom of the gold panel.
+    # G/T/U descriptions interpolate the current cycle state so an
+    # operator can see at a glance "next press of T moves from 1h to 6h"
+    # without having to remember the cycle order.
     hint_y = y_end - 1
     x = 2
-    safe_addstr(win, hint_y, x, " <Q> ", key_attr)
-    x += 5
-    safe_addstr(win, hint_y, x, " Quit   ", dim_attr)
-    x += 8
-    safe_addstr(win, hint_y, x, " <R> ", key_attr)
-    x += 5
-    safe_addstr(win, hint_y, x, " Refresh   ", dim_attr)
-    x += 11
-    safe_addstr(win, hint_y, x, " <M> ", key_attr)
-    x += 5
-    safe_addstr(win, hint_y, x, " More logs", dim_attr)
+    ups_descr = (f"UPS: {ups_index + 1}/{ups_total}" if ups_total > 1
+                 else "UPS")
+    hints = (
+        ("<Q>", "Quit"),
+        ("<R>", "Refresh"),
+        ("<M>", "More logs"),
+        ("<G>", f"Graph: {graph_mode}"),
+        ("<T>", f"Time: {time_range}"),
+        ("<U>", ups_descr),
+    )
+    for label, descr in hints:
+        if x + len(label) + len(descr) + 6 > width:
+            break  # ran out of horizontal space; skip remaining hints
+        safe_addstr(win, hint_y, x, f" {label} ", key_attr)
+        x += len(label) + 2
+        safe_addstr(win, hint_y, x, f" {descr}   ", dim_attr)
+        x += len(descr) + 4
 
 
 # ==============================================================================
 # MAIN TUI LOOP
 # ==============================================================================
+
+def cycle(values: tuple, current: str) -> str:
+    """Return the next value in ``values`` after ``current`` (wraps)."""
+    try:
+        idx = values.index(current)
+    except ValueError:
+        return values[0]
+    return values[(idx + 1) % len(values)]
+
+
+def render_graph_panel(stdscr, y_start: int, y_end: int, width: int,
+                       config: Config, group: UPSGroupConfig,
+                       graph_mode: str, time_range: str):
+    """Render the graph panel (bottom of the gray section) when active."""
+    gray_attr = curses.color_pair(C_GRAY_BG)
+    gray_bold = gray_attr | curses.A_BOLD
+    panel_h = y_end - y_start
+    if panel_h <= 1:
+        return
+    for row in range(y_start, y_end):
+        fill_row(stdscr, row, gray_attr)
+    title = f"   Graph: {graph_mode} ({time_range})  --  {group.ups.label}"
+    safe_addstr(stdscr, y_start, 0, title, gray_bold)
+    # Reserve 1 row for title; use the rest for the graph itself.
+    g_h = max(2, panel_h - 1)
+    g_w = max(10, width - 6)
+    info = METRIC_INFO.get(graph_mode)
+    if info is None:
+        safe_addstr(stdscr, y_start + 1, 3, "(unknown metric)", gray_attr)
+        return
+    seconds = TIME_RANGE_SECONDS.get(time_range, 3600)
+    series = query_metric_series(config, group, graph_mode, seconds)
+    if not series:
+        safe_addstr(stdscr, y_start + 1, 3, "(no data yet)", gray_attr)
+        return
+    values = [v for _, v in series]
+    rows = BrailleGraph.plot(
+        values, width=g_w, height=g_h,
+        y_min=info[2], y_max=info[3],
+    )
+    for i, line in enumerate(rows):
+        safe_addstr(stdscr, y_start + 1 + i, 3, line, gray_attr)
+
 
 def run_tui(config: Config, interval: int = 5):
     """Run the curses TUI dashboard."""
@@ -407,6 +767,9 @@ def run_tui(config: Config, interval: int = 5):
 
         show_more = False
         max_log_events = 8
+        graph_mode = "off"           # G key cycles through GRAPH_MODES
+        time_range = "1h"            # T key cycles through TIME_RANGES
+        ups_index = 0                # U key cycles which UPS the graph shows
 
         while True:
             stdscr.erase()
@@ -437,26 +800,58 @@ def run_tui(config: Config, interval: int = 5):
             config_end = min(config_start + groups_needed, height - 8)
             config_end = max(config_end, 6)
 
+            # Optional graph panel between config and logs (when graph_mode != off)
+            graph_start = config_end + 1
+            graph_end = graph_start
+            if graph_mode != "off" and config.ups_groups:
+                graph_end = graph_start + max(5, (height - config_end) // 2)
+                graph_end = min(graph_end, height - 6)
+
             # Black spacer row between panels
             spacer = config_end
             fill_row(stdscr, spacer, curses.color_pair(C_BORDER))
 
-            # Logs panel fills the rest (after spacer)
-            logs_start = config_end + 1
+            # Logs panel fills the rest (after spacer / graph)
+            logs_start = (graph_end + 1) if graph_end > graph_start else config_end + 1
             logs_end = height
 
-            # Collect data
-            groups_data = [collect_group_data(g, config) for g in config.ups_groups]
-            log_events = parse_log_events(
-                config.logging.file or "",
-                max_events=50 if show_more else max_log_events,
-            )
+            # Collect data. Prefer the SQLite events tier; fall back to the
+            # log-tail parser when no DB is present (single-UPS pip installs
+            # without /var/lib/eneru, fresh installs before first poll, etc.).
+            # Also push a fresh state-file snapshot into each group's live
+            # buffer so the graph panel can blend SQLite + post-flush
+            # samples (spec 2.13 -- bridges the 0-10s flush gap).
+            groups_data = []
+            for g in config.ups_groups:
+                groups_data.append(collect_group_data(g, config))
+                update_live_buffer(g, config)
+            window = TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
+            log_events = query_events_for_display(config, window,
+                                                  max_events=50 if show_more else max_log_events)
+            if not log_events:
+                log_events = parse_log_events(
+                    config.logging.file or "",
+                    max_events=50 if show_more else max_log_events,
+                )
 
             # Render panels edge-to-edge
             render_config_panel(stdscr, config_start, config_end, width,
                                 groups_data)
+            if graph_mode != "off" and graph_end > graph_start and config.ups_groups:
+                ups_index = max(0, min(ups_index, len(config.ups_groups) - 1))
+                render_graph_panel(
+                    stdscr, graph_start, graph_end, width,
+                    config, config.ups_groups[ups_index],
+                    graph_mode, time_range,
+                )
+                # Spacer between graph and logs
+                fill_row(stdscr, graph_end, curses.color_pair(C_BORDER))
             render_logs_panel(stdscr, logs_start, logs_end, width,
-                              log_events, show_more)
+                              log_events, show_more,
+                              graph_mode=graph_mode,
+                              time_range=time_range,
+                              ups_index=ups_index,
+                              ups_total=len(config.ups_groups) or 1)
 
             # Move cursor to bottom-right to avoid visual artifacts
             try:
@@ -474,6 +869,13 @@ def run_tui(config: Config, interval: int = 5):
                 continue
             elif key in (ord('m'), ord('M')):
                 show_more = not show_more
+            elif key in (ord('g'), ord('G')):
+                graph_mode = cycle(GRAPH_MODES, graph_mode)
+            elif key in (ord('t'), ord('T')):
+                time_range = cycle(TIME_RANGES, time_range)
+            elif key in (ord('u'), ord('U')):
+                if config.ups_groups:
+                    ups_index = (ups_index + 1) % len(config.ups_groups)
 
     curses.wrapper(_main)
 
@@ -482,8 +884,65 @@ def run_tui(config: Config, interval: int = 5):
 # --once MODE (no curses, stdout)
 # ==============================================================================
 
-def run_once(config: Config):
-    """Print a status snapshot to stdout and exit."""
+def render_graph_text(
+    config: Config,
+    group: UPSGroupConfig,
+    metric: str,
+    time_range: str,
+    *,
+    width: int = 60,
+    height: int = 6,
+    force_fallback: bool = False,
+) -> List[str]:
+    """Render an ASCII / Braille graph for a metric to stdout-friendly lines.
+
+    Always returns a non-empty list -- callers can print it directly.
+    Used by ``run_once --graph`` and re-used by the curses panel.
+    """
+    seconds = TIME_RANGE_SECONDS.get(time_range, 3600)
+    series = query_metric_series(config, group, metric, seconds)
+    info = METRIC_INFO.get(metric)
+    if info is None:
+        return [f"(unknown metric: {metric})"]
+    _, y_axis_label, y_min, y_max = info
+    title = f"{metric} -- last {time_range}  ({y_axis_label})"
+    if not series:
+        return [
+            title,
+            "(no data)",
+        ]
+    values = [v for _, v in series]
+    rows = BrailleGraph.plot(
+        values,
+        width=width,
+        height=height,
+        y_min=y_min,
+        y_max=y_max,
+        force_fallback=force_fallback,
+    )
+    return [title] + rows + [f"y-axis: {y_axis_label}"]
+
+
+def run_once(config: Config, *, graph_metric: Optional[str] = None,
+             time_range: str = "1h", events_only: bool = False):
+    """Print a status snapshot to stdout and exit.
+
+    With ``events_only=True`` the status / resource summary and graph
+    block are skipped -- only the events list (from SQLite if available,
+    otherwise the log tail) is printed. Useful for scripts and CI.
+    """
+    if events_only:
+        seconds = TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
+        events = query_events_for_display(config, seconds, max_events=50)
+        if not events:
+            events = parse_log_events(config.logging.file or "", max_events=50)
+        if events:
+            for line in events:
+                print(line)
+        else:
+            print("(no events)")
+        return
+
     print(f"Eneru v{__version__}")
     group_count = len(config.ups_groups)
     if group_count > 1:
@@ -522,10 +981,20 @@ def run_once(config: Config):
         if i < group_count - 1:
             print()
 
-    log_path = config.logging.file or ""
-    events = parse_log_events(log_path, max_events=10)
+    seconds = TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
+    events = query_events_for_display(config, seconds, max_events=10)
+    if not events:
+        events = parse_log_events(config.logging.file or "", max_events=10)
     if events:
         print()
         print("Recent Events:")
         for event in events:
             print(f"  {event}")
+
+    if graph_metric:
+        for group in config.ups_groups:
+            print()
+            print(f"Graph: {group.ups.label}")
+            for line in render_graph_text(config, group, graph_metric,
+                                          time_range):
+                print(line)
