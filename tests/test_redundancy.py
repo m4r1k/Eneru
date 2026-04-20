@@ -618,3 +618,84 @@ class TestCascade:
         assert healthy == 1
         assert per_ups["UPS-A"] == UPSHealth.CRITICAL
         executor.shutdown.assert_not_called()
+
+
+# ===========================================================================
+# Edge cases: mixed-state groups + executor notification content
+# ===========================================================================
+
+class TestThreeStateMix:
+    """A 3-UPS group with HEALTHY + DEGRADED + CRITICAL members at once.
+
+    The earlier policy tests cover all-of-one-state. These pin the
+    interaction between mixed states and ``degraded_counts_as``.
+    """
+
+    def _drive(self, group):
+        monitors = {
+            "A": _FakeMonitor("A", _snap()),                                    # HEALTHY
+            "B": _FakeMonitor("B", _snap(status="OB DISCHRG")),                 # DEGRADED
+            "C": _FakeMonitor("C", _snap(trigger_active=True,
+                                          trigger_reason="low")),               # CRITICAL
+        }
+        executor = MagicMock()
+        executor.shutdown.return_value = True
+        ev = RedundancyGroupEvaluator(
+            group, monitors, executor,
+            stop_event=threading.Event(), logger=None,
+            startup_grace_seconds=0,
+        )
+        return ev.evaluate_once(), executor
+
+    @pytest.mark.unit
+    def test_mix_with_degraded_as_healthy_yields_two_healthy(self):
+        """DEGRADED→healthy: A + B both count, C does not. healthy_count = 2."""
+        group = _redundancy_group(
+            ups_sources=["A", "B", "C"],
+            min_healthy=2,
+            degraded_counts_as="healthy",
+        )
+        (healthy, per_ups), executor = self._drive(group)
+        assert healthy == 2
+        assert per_ups["A"] == UPSHealth.HEALTHY
+        assert per_ups["B"] == UPSHealth.DEGRADED
+        assert per_ups["C"] == UPSHealth.CRITICAL
+        executor.shutdown.assert_not_called()  # quorum holds at 2
+
+    @pytest.mark.unit
+    def test_mix_with_degraded_as_critical_drops_to_one_healthy(self):
+        """DEGRADED→critical: only A counts. healthy_count = 1, fires shutdown."""
+        group = _redundancy_group(
+            ups_sources=["A", "B", "C"],
+            min_healthy=2,
+            degraded_counts_as="critical",
+        )
+        (healthy, _), executor = self._drive(group)
+        assert healthy == 1
+        executor.shutdown.assert_called_once()
+
+
+class TestExecutorNotificationContent:
+    """The shutdown notification body actually carries useful detail."""
+
+    @pytest.mark.unit
+    def test_notification_body_includes_name_reason_and_sources(self, tmp_path):
+        group = _redundancy_group(
+            name="rack-7",
+            ups_sources=["UPS-X@h", "UPS-Y@h"],
+        )
+        worker = MagicMock()
+        ex = RedundancyGroupExecutor(
+            group, base_config=_base_config(tmp_path=tmp_path),
+            notification_worker=worker,
+        )
+        ex.shutdown(reason="quorum lost: healthy=0 < min_healthy=1")
+        # Worker.send was called at least once for the headline alert.
+        assert worker.send.called
+        body = worker.send.call_args.kwargs["body"]
+        # Group name, reason, and both sources must appear in the body.
+        # (The @-escape inserts a zero-width space after each "@".)
+        assert "rack-7" in body
+        assert "quorum lost" in body
+        assert "UPS-X@\u200Bh" in body
+        assert "UPS-Y@\u200Bh" in body

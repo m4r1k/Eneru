@@ -578,6 +578,127 @@ class TestFailureIsolation:
         s.close()  # second close must not raise
 
 
+class TestEdgeCases:
+    """Edge cases the contract implies but earlier tests do not pin."""
+
+    @pytest.mark.unit
+    def test_schema_version_persists_across_reopen(self, tmp_path):
+        """The recorded ``schema_version`` survives close + reopen of the DB.
+
+        Catches the "we accidentally reset the schema on reopen" regression.
+        """
+        path = tmp_path / "x.db"
+        s1 = StatsStore(path)
+        s1.open()
+        # Bump the recorded version to make sure init does not stomp it.
+        s1._conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("schema_version", str(SCHEMA_VERSION)),
+        )
+        s1.close()
+
+        s2 = StatsStore(path)
+        s2.open()
+        try:
+            cur = s2._conn.execute(
+                "SELECT value FROM meta WHERE key = 'schema_version'"
+            )
+            assert int(cur.fetchone()[0]) == SCHEMA_VERSION
+        finally:
+            s2.close()
+
+    @pytest.mark.unit
+    def test_text_fields_round_trip(self, store):
+        """``status`` and ``connection_state`` survive flush -> read intact."""
+        store.buffer_sample(
+            dict(SAMPLE_UPS_DATA, **{"ups.status": "OB DISCHRG"}),
+            connection_state="GRACE_PERIOD",
+            ts=14_000_000,
+        )
+        store.flush()
+        cur = store._conn.execute(
+            "SELECT status, connection_state FROM samples WHERE ts = 14000000"
+        )
+        row = cur.fetchone()
+        assert row == ("OB DISCHRG", "GRACE_PERIOD")
+
+    @pytest.mark.unit
+    def test_query_range_for_unaggregated_metric_at_agg_tier_returns_empty(
+        self, store,
+    ):
+        """``output_voltage`` and ``depletion_rate`` aren't in the agg tables.
+
+        ``_agg_column_for`` falls back to the raw column name; the SQL
+        therefore references a column that does not exist in agg_5min.
+        ``query_range`` must catch the SQLite error and return [], not
+        propagate.
+        """
+        # Seed enough sample/agg data so the agg path actually runs.
+        ts = 15_000_000
+        for i in range(3):
+            store.buffer_sample(SAMPLE_UPS_DATA, ts=ts + i)
+        store.flush()
+        store.aggregate()
+        # Force the agg_5min tier (a 1-week window would also pick it).
+        results = store.query_range(
+            "output_voltage", ts, ts + 1, prefer_tier="agg_5min",
+        )
+        assert results == []
+
+    @pytest.mark.unit
+    def test_aggregate_single_sample_yields_min_eq_max_eq_avg(self, store):
+        """Single-sample bucket: min, max, and avg all equal the input."""
+        ts = 16_000_000
+        store.buffer_sample(
+            dict(SAMPLE_UPS_DATA, **{"battery.charge": "73"}),
+            ts=ts,
+        )
+        store.flush()
+        store.aggregate()
+        cur = store._conn.execute(
+            "SELECT battery_charge_avg, battery_charge_min, "
+            "battery_charge_max, samples_count FROM agg_5min "
+            "WHERE samples_count = 1"
+        )
+        avg, mn, mx, n = cur.fetchone()
+        assert mn == mx == avg == 73.0
+        assert n == 1
+
+    @pytest.mark.unit
+    def test_purge_keeps_row_at_exact_cutoff(self, tmp_path):
+        """Purge SQL is ``ts < cutoff``; a row at cutoff exactly stays."""
+        s = StatsStore(tmp_path / "boundary.db", retention_raw_hours=1)
+        s.open()
+        try:
+            now = int(time.time())
+            cutoff = now - 3600  # the rolling cutoff_raw
+            # One row strictly older, one at the cutoff.
+            s.buffer_sample(SAMPLE_UPS_DATA, ts=cutoff - 1)
+            s.buffer_sample(SAMPLE_UPS_DATA, ts=cutoff)
+            s.flush()
+            s.purge()
+            cur = s._conn.execute("SELECT ts FROM samples ORDER BY ts ASC")
+            tss = [r[0] for r in cur.fetchall()]
+            assert tss == [cutoff]
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_query_range_empty_window_returns_empty_list(self, store):
+        """No rows in window -> ``[]``, not an exception, not None."""
+        # Seed unrelated samples far outside the queried range.
+        store.buffer_sample(SAMPLE_UPS_DATA, ts=17_000_000)
+        store.flush()
+        # Window with no matching rows.
+        out = store.query_range("battery_charge", 0, 100, prefer_tier="samples")
+        assert out == []
+        # Inverted window (start > end) is also empty, no error.
+        out = store.query_range(
+            "battery_charge", 18_000_000, 17_999_000, prefer_tier="samples",
+        )
+        assert out == []
+
+
 # ===========================================================================
 # StatsConfig dataclass
 # ===========================================================================
