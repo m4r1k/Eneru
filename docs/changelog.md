@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`shutdown_order` and `parallel` are now mutually exclusive** — setting both on the same server is a hard validation error (previously a warning). Pick one model: `shutdown_order` for multi-phase ordering, or `parallel` for the legacy two-group behaviour.
 - **Parallel-phase join is now deadline-based.** Previously each thread was joined with the full per-phase timeout, so a phase with N stuck servers could wait up to `N × max_timeout` before continuing. The total wait is now bounded by a single deadline, restoring the "dead hosts don't block" guarantee from v4.6.
 
+### Fixed
+- **Proxmox `stop_proxmox_vms` / `stop_proxmox_cts` now work for non-root SSH users (#4).** Surfaced by real-world testing: `qm` and `pct` reject non-root callers regardless of PVE-level ACLs (`vm.audit` + `vm.powermgmt` are insufficient on their own), so the templates were silently broken for any SSH user that wasn't root. Both templates now invoke `qm` / `pct` via `sudo`. Root-SSH setups keep working unchanged because Proxmox VE ships sudo with `root NOPASSWD: ALL` by default. Non-root users add a one-line sudoers entry — see [Passwordless sudo → Proxmox VE](remote-servers.md#proxmox-ve) in the docs.
+
 ---
 
 ## [5.0.0] - 2026-04-11

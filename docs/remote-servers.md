@@ -60,8 +60,8 @@ Eneru can run a sequence of commands on remote servers before the final shutdown
 |--------|-------------|
 | `stop_containers` | Stop all Docker/Podman containers |
 | `stop_vms` | Gracefully shutdown libvirt/KVM VMs (then force-destroy remaining) |
-| `stop_proxmox_vms` | Gracefully shutdown Proxmox QEMU VMs (then force-stop remaining) |
-| `stop_proxmox_cts` | Gracefully shutdown Proxmox LXC containers (then force-stop remaining) |
+| `stop_proxmox_vms` | Gracefully shutdown Proxmox QEMU VMs, then force-stop remaining (runs via `sudo`) |
+| `stop_proxmox_cts` | Gracefully shutdown Proxmox LXC containers, then force-stop remaining (runs via `sudo`) |
 | `stop_xcpng_vms` | Gracefully shutdown XCP-ng/XenServer VMs (then force-shutdown remaining) |
 | `stop_esxi_vms` | Gracefully shutdown VMware ESXi VMs (then force-off remaining) |
 | `stop_compose` | Stop a compose stack (requires `path` parameter) |
@@ -274,6 +274,17 @@ sudo chmod 0440 /etc/sudoers.d/ups_shutdown
 echo "username ALL=(ALL) NOPASSWD: /sbin/poweroff" | sudo tee /etc/sudoers.d/ups_shutdown
 sudo chmod 0440 /etc/sudoers.d/ups_shutdown
 ```
+
+### Proxmox VE
+
+`stop_proxmox_vms` and `stop_proxmox_cts` invoke `qm` and `pct`, which require root regardless of PVE-level ACLs (`vm.audit` + `vm.powermgmt` are not sufficient). Required only if the SSH user is non-root — root logins work unchanged.
+
+```bash
+echo "username ALL=(ALL) NOPASSWD: /usr/sbin/qm, /usr/sbin/pct" | sudo tee /etc/sudoers.d/ups_proxmox
+sudo chmod 0440 /etc/sudoers.d/ups_proxmox
+```
+
+If you also want the same user to run the final `shutdown -h now`, add `/sbin/shutdown` to the same NOPASSWD line.
 
 ### TrueNAS SCALE
 

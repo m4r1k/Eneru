@@ -23,21 +23,23 @@ REMOTE_ACTIONS: Dict[str, str] = {
         'true'
     ),
 
-    # Stop Proxmox QEMU VMs with graceful shutdown, then force stop
+    # Stop Proxmox QEMU VMs with graceful shutdown, then force stop.
+    # Runs via sudo so the SSH user can be non-root with NOPASSWD on /usr/sbin/qm.
     "stop_proxmox_vms": (
-        'qm list | awk \'NR>1 && $3=="running" {{print $1}}\' | xargs -r -n1 qm shutdown --timeout {timeout}; '
+        'sudo qm list | awk \'NR>1 && $3=="running" {{print $1}}\' | xargs -r -n1 sudo qm shutdown --timeout {timeout}; '
         'end=$((SECONDS+{timeout})); '
-        'while [ $SECONDS -lt $end ] && qm list | awk \'$3=="running"\' | grep -q .; do sleep 1; done; '
-        'qm list | awk \'NR>1 && $3=="running" {{print $1}}\' | xargs -r -n1 qm stop 2>/dev/null; '
+        'while [ $SECONDS -lt $end ] && sudo qm list | awk \'$3=="running"\' | grep -q .; do sleep 1; done; '
+        'sudo qm list | awk \'NR>1 && $3=="running" {{print $1}}\' | xargs -r -n1 sudo qm stop 2>/dev/null; '
         'true'
     ),
 
-    # Stop Proxmox LXC containers with graceful shutdown, then force stop
+    # Stop Proxmox LXC containers with graceful shutdown, then force stop.
+    # Runs via sudo so the SSH user can be non-root with NOPASSWD on /usr/sbin/pct.
     "stop_proxmox_cts": (
-        'pct list | awk \'NR>1 && $2=="running" {{print $1}}\' | xargs -r -n1 pct shutdown --timeout {timeout}; '
+        'sudo pct list | awk \'NR>1 && $2=="running" {{print $1}}\' | xargs -r -n1 sudo pct shutdown --timeout {timeout}; '
         'end=$((SECONDS+{timeout})); '
-        'while [ $SECONDS -lt $end ] && pct list | awk \'$2=="running"\' | grep -q .; do sleep 1; done; '
-        'pct list | awk \'NR>1 && $2=="running" {{print $1}}\' | xargs -r -n1 pct stop 2>/dev/null; '
+        'while [ $SECONDS -lt $end ] && sudo pct list | awk \'$2=="running"\' | grep -q .; do sleep 1; done; '
+        'sudo pct list | awk \'NR>1 && $2=="running" {{print $1}}\' | xargs -r -n1 sudo pct stop 2>/dev/null; '
         'true'
     ),
 
