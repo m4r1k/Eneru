@@ -406,11 +406,11 @@ This checks for:
 - YAML syntax errors
 - Required fields and valid value ranges
 - Multi-UPS ownership rules (only `is_local` group can manage VMs/containers)
-- Redundancy-group rules (`min_healthy` bounds, unknown UPS references,
+- Redundancy-group rules: `min_healthy` bounds, unknown UPS references,
   `is_local` uniqueness across all groups, cross-tier remote-server
-  conflicts) — see [Redundancy Groups](redundancy-groups.md)
+  conflicts. See [Redundancy Groups](redundancy-groups.md).
 - Notification service availability
 - Reachable UPS (optional connectivity test)
 
-For the always-on per-UPS metrics store (`statistics:` section), see
+For the per-UPS metrics store (`statistics:` section), see
 [Statistics](statistics.md).

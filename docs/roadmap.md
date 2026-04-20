@@ -20,14 +20,16 @@ Feature requests and feedback: [GitHub Issues](https://github.com/m4r1k/Eneru/is
 
 ---
 
-## v5.1 -- Redundancy groups and statistics (planned)
+## v5.1 -- Redundancy groups and statistics (rc4)
 
-- Redundancy groups: bundle multiple UPSes protecting the same servers via redundant power, trigger shutdown only when redundancy is exhausted (`min_healthy` consensus)
-- UPS health model with four states (HEALTHY / DEGRADED / CRITICAL / UNKNOWN) and configurable policies for how degraded and unknown states count
-- SQLite time-series statistics -- battery charge, runtime, load, voltage, temperature, frequency -- with tiered retention (raw 24h, 5-min aggregates 30d, hourly aggregates 5y)
-- Braille character graphs in the TUI for battery, load, and voltage trends
-- Structured event log in SQLite, replacing log-file tail parsing
-- Separate stable and testing package channels for APT and YUM/DNF, so `apt upgrade` never installs an RC unless you opt in
+*Implementation complete; v5.1.0-rc4 available for hardware testing.*
+
+- ✅ Redundancy groups: bundle multiple UPSes protecting the same servers via redundant power, trigger shutdown only when redundancy is exhausted (`min_healthy` consensus)
+- ✅ UPS health model with four states (HEALTHY / DEGRADED / CRITICAL / UNKNOWN) and configurable policies for how degraded and unknown states count
+- ✅ SQLite time-series statistics: battery charge, runtime, load, voltage, depletion rate. Tiered retention (raw 24h, 5-min aggregates 30d, hourly aggregates 5y)
+- ✅ Braille character graphs in the TUI for battery, load, voltage, and runtime trends
+- ✅ Structured event log in SQLite (log-file tail parsing kept as a fallback for bare-metal pip installs without `/var/lib/eneru`)
+- Separate stable and testing package channels for APT and YUM/DNF: deferred to a future point release
 
 ---
 

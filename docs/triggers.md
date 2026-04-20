@@ -430,30 +430,29 @@ Maximizes runtime, accepts higher risk. Only recommended with reliable UPS and n
 
 ## Triggers in redundancy groups
 
-When a UPS belongs to a [redundancy group](redundancy-groups.md), all of
-the triggers above (T1-T4, FSD, FAILSAFE) still evaluate normally on the
-member's monitor thread — but instead of executing a local shutdown,
-they set an **advisory flag** on the per-UPS state snapshot:
+When a UPS belongs to a [redundancy group](redundancy-groups.md), the
+triggers above (T1-T4, FSD, FAILSAFE) still evaluate on the member's
+monitor thread. Instead of running a local shutdown, they set an
+advisory flag on the per-UPS state snapshot:
 
 ```
 ⚠️ Trigger condition met (advisory, redundancy group): <reason>
 ```
 
 The group's `RedundancyGroupEvaluator` reads those flags from every
-member, applies the group's quorum policy
-(`min_healthy`, `degraded_counts_as`, `unknown_counts_as`), and only
-fires the **group's** shutdown when fewer than `min_healthy` members
-contribute as healthy. See
-[Redundancy Groups](redundancy-groups.md) for the full lifecycle.
+member, applies the group's quorum policy (`min_healthy`,
+`degraded_counts_as`, `unknown_counts_as`), and only fires the group's
+shutdown when fewer than `min_healthy` members contribute as healthy.
+See [Redundancy Groups](redundancy-groups.md) for the full lifecycle.
 
-Practical implications when configuring triggers for redundancy members:
+A few notes when picking trigger values for redundancy members:
 
-- Per-UPS thresholds still need to be sensible — they decide *when*
-  each member contributes "critical" to the group.
+- Per-UPS thresholds still matter. They decide when each member
+  contributes "critical" to the group.
 - The FAILSAFE rule (connection lost while On Battery) does not run a
-  local shutdown for a redundancy member; it sets
-  `connection_state=FAILED` + the advisory trigger, and the group
+  local shutdown for a redundancy member. It sets
+  `connection_state=FAILED` plus the advisory trigger, and the group
   evaluator decides via `unknown_counts_as`.
-- An independent UPS group (one not referenced by any redundancy group)
-  is unaffected — its triggers run the local shutdown path
+- An independent UPS group (one not referenced by any redundancy
+  group) is unaffected. Its triggers run the local shutdown path
   byte-identically to single-UPS mode.

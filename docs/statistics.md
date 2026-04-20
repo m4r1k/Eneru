@@ -1,10 +1,10 @@
 # Statistics
 
-Eneru records every UPS poll into a per-UPS SQLite database for the TUI's
-graph view and for offline analysis with `sqlite3`, DataGrip, Grafana, or
-your scripting tool of choice. The statistics store is **always on** —
-no opt-in flag — and uses a hybrid in-memory + on-disk architecture so
-the polling hot path never touches the disk.
+Eneru records every UPS poll into a per-UPS SQLite database. The TUI
+graph view reads from it and you can run `sqlite3` (or DataGrip /
+Grafana / a script) for offline analysis. The store is on by default
+with no opt-in flag. The hot path is in-memory only; a background
+thread does the disk writes.
 
 ## Architecture
 
@@ -18,13 +18,13 @@ log_event()      ──────────────── direct INSERT 
 ```
 
 - The poll cycle calls `buffer_sample()`, a constant-time append to an
-  in-memory deque. **Zero I/O** on the hot path.
+  in-memory deque. No I/O on the hot path.
 - A background `StatsWriter` thread drains the deque to SQLite every
-  10 s with a single `executemany` transaction.
-- Every 5 min the writer also rolls samples into 5-minute buckets, then
+  10s with a single `executemany` transaction.
+- Every 5 min the writer rolls samples into 5-minute buckets, then
   5-minute buckets into hourly buckets, and applies retention.
-- All SQLite errors are caught, logged once with rate-limit, and
-  swallowed. Stats can never crash the monitor.
+- SQLite errors are caught, logged once with rate-limit, and swallowed.
+  Stats can never crash the monitor.
 
 ## Schema
 
@@ -84,26 +84,25 @@ Retention windows are independent per tier. Samples older than
 `raw_hours` are deleted from `samples`; their aggregations live on in
 `agg_5min` / `agg_hourly` until those tiers' own windows expire.
 
-The deb / rpm package creates `/var/lib/eneru` on install
-(mode 0755, owner root). Pip installs create the directory on first
-start of the daemon.
+The deb / rpm package creates `/var/lib/eneru` on install (mode 0755,
+owner root). Pip installs create the directory on first start.
 
 ## Storage on small devices (Raspberry Pi / SD card)
 
 Per-UPS database, steady state at 1 Hz polling:
 
-- Raw samples: ~100 bytes × 86,400 polls/day ≈ 8.6 MB/day. After 24 h
-  the older samples are aggregated and deleted.
+- Raw samples: ~100 bytes × 86,400 polls/day ≈ 8.6 MB/day. Older
+  samples are aggregated and deleted after 24 h.
 - 5-min aggregations: ~100 bytes × 288 buckets/day × 30 days ≈ 0.8 MB.
 - Hourly aggregations: ~100 bytes × 24 buckets/day × 5 years ≈ 4 MB.
-- Events table: a few hundred bytes per power event; usually negligible.
+- Events table: a few hundred bytes per power event, normally negligible.
 
-**Steady-state footprint per UPS ≈ 14 MB** (24 h raw + 30 d 5-min + 5 y
+Steady-state footprint per UPS ≈ 14 MB (24 h raw + 30 d 5-min + 5 y
 hourly). For a 4-UPS site that's ~56 MB.
 
-Disk I/O profile per UPS: one `executemany` transaction every 10 s,
-batching 10 inserts. That's roughly equivalent to a busy systemd
-journald write — meaningful on an SD card, but not enough to wear it
+Disk I/O profile per UPS: one `executemany` transaction every 10s,
+batching 10 inserts. That is roughly equivalent to a busy systemd
+journald write. Meaningful on an SD card, but not enough to wear it
 out faster than journald already does.
 
 If your device has slow or wear-sensitive storage, relocate the
@@ -114,8 +113,8 @@ statistics:
   db_directory: "/mnt/ssd/eneru-stats"
 ```
 
-The directory must be writable by the user the daemon runs as (root for
-deb/rpm installs).
+The directory must be writable by the user the daemon runs as (root
+for deb/rpm installs).
 
 ## Inspecting a database
 
@@ -142,8 +141,8 @@ sqlite3 /var/lib/eneru/UPS-host-3493.db \
 
 ## Backup
 
-Each `.db` is a self-contained SQLite file. Use `.backup` for an online
-hot backup that does not block the writer:
+Each `.db` is a self-contained SQLite file. Use `.backup` for an
+online hot backup that does not block the writer:
 
 ```bash
 sqlite3 /var/lib/eneru/UPS-host-3493.db ".backup '/srv/backups/UPS-host-3493.db'"
@@ -151,9 +150,9 @@ sqlite3 /var/lib/eneru/UPS-host-3493.db ".backup '/srv/backups/UPS-host-3493.db'
 
 ## Failure isolation
 
-If `/var/lib/eneru` becomes read-only, runs out of space, or the SQLite
-file gets corrupted, the daemon logs **one** warning and continues to
-poll without stats persistence. You'll see lines like:
+If `/var/lib/eneru` becomes read-only, runs out of space, or the
+SQLite file gets corrupted, the daemon logs one warning and keeps
+polling without stats persistence. You will see lines like:
 
 ```
 ⚠️ WARNING: stats store open failed at /var/lib/eneru/UPS-host.db: ...
@@ -170,6 +169,6 @@ daemon will reopen the database (or create a fresh one) and continue.
 
 ## See also
 
-- [Configuration reference](configuration.md) — full `statistics:` field
+- [Configuration reference](configuration.md). Full `statistics:` field
   reference.
-- [Troubleshooting](troubleshooting.md) — disk-related failure modes.
+- [Troubleshooting](troubleshooting.md). Disk-related failure modes.

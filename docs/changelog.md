@@ -9,21 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> Status: v5.1.0-rc4 is cut for hardware testing. Once that's done the
+> entry below is promoted from `[Unreleased]` to `[5.1.0] - YYYY-MM-DD`
+> with no other changes.
+
 ### Added
 - **Multi-phase shutdown ordering (`shutdown_order`):** Define shutdown phases for remote servers (#4)
     - Servers with the same `shutdown_order` run in parallel; different orders run sequentially (ascending)
-    - Enables complex dependency chains: e.g., compute (phase 1) → storage (phase 2) → network (phase 3)
+    - Enables dependency chains: e.g. compute (phase 1) → storage (phase 2) → network (phase 3)
     - Full backward compatibility: existing configs with `parallel: false` produce identical behavior
     - `eneru validate` now shows a shutdown sequence tree with phase grouping
     - Validation rejects invalid values (must be positive integer >= 1)
 - **Per-server `shutdown_safety_margin` (seconds, default `60`):** Tunable safety buffer added on top of (`pre_shutdown_commands` + `command_timeout` + `connect_timeout`) when waiting for a parallel-shutdown thread to finish. Replaces a previously hard-coded `60` constant. Raise for slow-flushing storage, lower for fast VMs, set `0` to opt out.
+- **Redundancy groups (Phase 2):** Protect resources fed by multiple UPS sources (dual-PSU servers, A+B feeds). Eneru only fires the group's shutdown when fewer than `min_healthy` member UPSes still report healthy.
+    - `RedundancyGroupConfig` mirrors `UPSGroupConfig` in full (`remote_servers`, `virtual_machines`, `containers`, `filesystems`).
+    - Configurable quorum (`min_healthy`, default `1`) plus `degraded_counts_as` (`healthy`/`critical`) and `unknown_counts_as` (`healthy`/`degraded`/`critical`, default `critical` for fail-safe).
+    - At most one group across all (UPS + redundancy) tiers can be `is_local: true`. Only that group may declare local resources.
+    - Per-UPS triggers (T1-T4, FSD, FAILSAFE) become advisory for redundancy members. They record state under the snapshot lock instead of running a local shutdown. Independent UPS groups remain byte-identical to single-UPS mode.
+    - `RedundancyGroupExecutor` composes the four shutdown mixins (VMs / containers / filesystems / remote), so redundancy shutdowns inherit multi-phase ordering and `shutdown_safety_margin` verbatim.
+    - Per-group flag file at `/var/run/ups-shutdown-redundancy-<sanitized-name>` keeps shutdowns idempotent.
+    - Evaluator startup grace (`5 * max(check_interval) + 5 s`) prevents a spurious "all UNKNOWN → quorum lost" fire at first tick.
+    - `docs/redundancy-groups.md` covers the model. `eneru validate` summarises every redundancy group with its quorum policy.
+- **Per-UPS SQLite statistics store (Phase 2 spec 2.12):** every poll is buffered into an in-memory deque (no I/O on the hot path). A background `StatsWriter` thread flushes to disk every 10 s, then aggregates and purges every 5 min.
+    - Per-UPS `.db` at `<statistics.db_directory>/<sanitized-ups-name>.db`. Default `db_directory: /var/lib/eneru` (created by deb/rpm; pip installs auto-create on first start).
+    - Schema: `samples` (10 metrics: status, battery_charge, battery_runtime, ups_load, input_voltage, output_voltage, depletion_rate, time_on_battery, connection_state, ts), `agg_5min` and `agg_hourly` (avg / min / max / count), `events` (power-event log), `meta`.
+    - Tier-aware retention: 24 h raw + 30 d 5-minute + 5 y hourly (configurable). Steady-state footprint per UPS ≈ 14 MB.
+    - WAL + `synchronous=NORMAL`. `StatsStore.open_readonly` exposes a `?mode=ro` URI connection for the TUI.
+    - Failure isolation: every public method catches `sqlite3.Error` / `OSError`, logs once with rate-limit, swallows. SQLite outages can never crash the daemon.
+    - `docs/statistics.md` covers schema, SD-card storage profile, sqlite3 inspection recipes, backup, and failure modes.
+- **TUI graphs (Phase 2 spec 2.13):** `BrailleGraph` renderer (Unicode U+2800-U+28FF; falls back to block characters on `LANG=C`).
+    - Three new keybindings in `eneru monitor`: `G` (cycle metric: off → charge → load → voltage → runtime), `T` (cycle range: 1h → 6h → 24h → 7d → 30d), `U` (cycle UPS in multi-UPS mode).
+    - Lazy read-only DB open on first non-`off` graph mode.
+    - Headless rendering: `eneru monitor --once --graph charge --time 1h` prints the graph to stdout for scripts and CI.
+    - `docs/tui-graphs.md` documents keybindings and the time-range tier-selection table.
+- **TUI events panel sourced from SQLite:** the gold "Recent Events" panel now reads each UPS's `events` table via `StatsStore.open_readonly` and merges across UPSes (sorted by timestamp; `[label]` prefix in multi-UPS mode). Falls back to the log-tail parser when no DB exists. New `eneru monitor --once --events-only` flag for scripted log retrieval.
 
 ### Changed
-- **`shutdown_order` and `parallel` are now mutually exclusive** — setting both on the same server is a hard validation error (previously a warning). Pick one model: `shutdown_order` for multi-phase ordering, or `parallel` for the legacy two-group behaviour.
+- **`shutdown_order` and `parallel` are now mutually exclusive.** Setting both on the same server is a hard validation error (previously a warning). Pick one model: `shutdown_order` for multi-phase ordering, or `parallel` for the legacy two-group behaviour.
 - **Parallel-phase join is now deadline-based.** Previously each thread was joined with the full per-phase timeout, so a phase with N stuck servers could wait up to `N × max_timeout` before continuing. The total wait is now bounded by a single deadline, restoring the "dead hosts don't block" guarantee from v4.6.
+- **`MonitorState` exposes a lock-protected snapshot for cross-thread reads.** Adds a non-reentrant `_lock` (excluded from `__repr__` / `__eq__`), nine `latest_*` / `trigger_*` fields, and a `snapshot() -> HealthSnapshot` helper. The poll cycle writes all snapshot fields under one lock acquisition at the bottom of each successful pass. No behaviour change for legacy single-UPS deployments.
+- **`MultiUPSCoordinator` also routes when only `redundancy_groups` is set** (single UPS + 1 redundancy group is now legal).
+- **TUI `safe_addstr` and `render_logs_panel` clip by display-cell width**, not character count. Emoji and CJK glyphs no longer spill past the gold panel's right edge.
 
 ### Fixed
-- **Proxmox `stop_proxmox_vms` / `stop_proxmox_cts` now work for non-root SSH users (#4).** Surfaced by real-world testing: `qm` and `pct` reject non-root callers regardless of PVE-level ACLs (`vm.audit` + `vm.powermgmt` are insufficient on their own), so the templates were silently broken for any SSH user that wasn't root. Both templates now invoke `qm` / `pct` via `sudo`. Root-SSH setups keep working unchanged because Proxmox VE ships sudo with `root NOPASSWD: ALL` by default. Non-root users add a one-line sudoers entry — see [Passwordless sudo → Proxmox VE](remote-servers.md#proxmox-ve) in the docs.
+- **Proxmox `stop_proxmox_vms` / `stop_proxmox_cts` now work for non-root SSH users (#4).** Surfaced by real-world testing: `qm` and `pct` reject non-root callers regardless of PVE-level ACLs (`vm.audit` + `vm.powermgmt` are insufficient on their own), so the templates were silently broken for any SSH user that wasn't root. Both templates now invoke `qm` / `pct` via `sudo`. Root-SSH setups keep working unchanged because Proxmox VE ships sudo with `root NOPASSWD: ALL` by default. Non-root users add a one-line sudoers entry, see [Passwordless sudo → Proxmox VE](remote-servers.md#proxmox-ve) in the docs.
+
+### Migration notes
+- **Stats are on by default.** On first start of v5.1.0-rc4 the daemon creates `/var/lib/eneru/<sanitized-ups-name>.db` and begins recording samples. No config change required. Override with `statistics.db_directory: <path>` to put stats elsewhere (e.g. an attached SSD on Pi-class hardware).
+- **Existing single-UPS configs continue to work unchanged.** `redundancy_groups:` is optional. The advisory-trigger code path only activates when a UPS appears in `ups_sources`.
+- **Storage on small devices.** Per-UPS DB is ~14 MB steady-state with one `executemany` flush every 10 s, comparable to typical journald background writes. See `docs/statistics.md`, "Storage on small devices (Raspberry Pi / SD card)".
+
+### Technical details
+- New modules under `src/eneru/`: `health_model.py`, `redundancy.py`, `stats.py`, `graph.py`. All four are wired into `nfpm.yaml`.
+- Test counts: 410 → 628 unit tests across 25 files; 19 → 31 E2E scenarios.
+- New structural-defense test (`tests/test_packaging.py`) asserts every `src/eneru/**/*.py` is referenced by `nfpm.yaml`. Catches the PR #23 class of bug where a missing entry passes pip CI silently and fails at deb/rpm install with `ModuleNotFoundError`.
 
 ---
 

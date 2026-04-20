@@ -1,17 +1,17 @@
 # TUI graphs
 
-Eneru's TUI (`eneru monitor`) renders compact line graphs from the
+`eneru monitor` renders line graphs from the
 [per-UPS SQLite stats](statistics.md). The graphs use the Unicode
-**Braille pattern block** (U+2800-U+28FF) so each terminal cell
-encodes a 2 × 4 dot grid — eight binary pixels — giving a tight,
-high-density plot in just a few rows of text.
+Braille pattern block (U+2800-U+28FF). Each terminal cell encodes a
+2 × 4 dot grid (8 binary pixels per cell), so a few rows of text
+hold a usable plot.
 
 ## Keybindings
 
 While the TUI is running:
 
 | Key | Action |
-|-----|--------|
+|---|---|
 | `Q` | Quit |
 | `R` | Refresh now (forces an out-of-band redraw) |
 | `M` | Toggle "more logs" |
@@ -23,18 +23,18 @@ The graph panel is hidden when the mode is `off` (the default).
 
 ## Time-range tier selection
 
-The TUI calls `StatsStore.query_range()`, which automatically picks the
-best aggregation tier for the requested window:
+`StatsStore.query_range()` picks the smallest aggregation tier that
+still covers the requested window:
 
 | Window | Tier used | Resolution |
-|--------|-----------|------------|
-| ≤ 24 h  | `samples`     | per poll (1 Hz typical) |
-| ≤ 30 d  | `agg_5min`    | 5-minute averages       |
-| > 30 d  | `agg_hourly`  | hourly averages         |
+|---|---|---|
+| ≤ 24 h | `samples` | per poll (1 Hz typical) |
+| ≤ 30 d | `agg_5min` | 5-minute averages |
+| > 30 d | `agg_hourly` | hourly averages |
 
-So the `1h` view is dot-accurate; the `7d` view is a smoothed 5-minute
-trend; the `30d` view aggregates further still. This keeps the database
-small and the queries fast even at 5-year retention.
+The `1h` view is dot-accurate. The `7d` view is a smoothed 5-minute
+trend. The `30d` view aggregates further still. Keeps the database
+small and the queries fast at 5-year retention.
 
 ## Headless rendering: `monitor --once --graph`
 
@@ -68,21 +68,21 @@ the renderer falls back to standard block characters
 
 ## Architecture
 
-- The renderer is `eneru.graph.BrailleGraph` — a pure, stateless module
-  with no curses dependency. `BrailleGraph.plot(values, width=, height=)`
+- `eneru.graph.BrailleGraph` is a pure, stateless module with no
+  curses dependency. `BrailleGraph.plot(values, width=, height=)`
   returns one string per terminal row.
-- The TUI opens the per-UPS DB **read-only** via
+- The TUI opens the per-UPS DB read-only via
   `StatsStore.open_readonly(path)` (`?mode=ro` URI), so it never
   contends with the daemon's writer thread. WAL mode keeps reads
-  non-blocking even while the writer is flushing.
-- The DB is opened lazily — on the first non-`off` graph mode — and
+  non-blocking while the writer flushes.
+- The DB is opened lazily on the first non-`off` graph mode and
   closed when the TUI exits.
 
 ## Troubleshooting
 
 **The graph is empty.**
-The daemon hasn't flushed any samples yet (writer flushes every 10 s)
-or the stats `db_directory` doesn't match the daemon's. Check with:
+The daemon has not flushed any samples yet (writer flushes every 10s),
+or the TUI's `db_directory` does not match the daemon's. Check with:
 
 ```bash
 ls -la /var/lib/eneru/
@@ -90,19 +90,19 @@ sqlite3 /var/lib/eneru/<sanitized-ups-name>.db "SELECT COUNT(*) FROM samples"
 ```
 
 **The graph shows blocks instead of Braille dots.**
-Your locale isn't UTF-8 capable, or your terminal font lacks Braille
+The locale is not UTF-8 capable, or the terminal font lacks Braille
 glyphs. Both are normal in stripped-down minimal images. The block
-fallback is fully accurate; only the rendering changes.
+fallback is accurate; only the rendering changes.
 
-## Events panel — sourced from SQLite
+## Events panel: sourced from SQLite
 
-The TUI's "Recent Events" panel now reads from each UPS's
-`events` table in the per-UPS SQLite store. When no DB is present
-(fresh installs before the first poll, sandbox runs without a writable
-`db_directory`, etc.) the panel falls back to tailing the log file —
-the same behaviour as v5.0.
+The TUI's "Recent Events" panel reads from each UPS's `events` table
+in the per-UPS SQLite store. When no DB is present (fresh installs
+before the first poll, sandbox runs without a writable `db_directory`,
+etc.), the panel falls back to tailing the log file. Same behaviour
+as v5.0.
 
-In multi-UPS mode each line is prefixed with the UPS label, so events
+In multi-UPS mode, each line is prefixed with the UPS label and rows
 from different sources interleave by timestamp:
 
 ```
@@ -111,7 +111,7 @@ from different sources interleave by timestamp:
 14:03:18  [Rack PSU-A] POWER_RESTORED: Outage 6s
 ```
 
-For headless / scripted use, `eneru monitor --once --events-only`
+For headless or scripted use, `eneru monitor --once --events-only`
 prints just the events list:
 
 ```bash
@@ -120,5 +120,5 @@ eneru monitor --once --events-only --time 24h
 
 ## See also
 
-- [Statistics](statistics.md) — the SQLite store the TUI reads from.
-- [Configuration](configuration.md) — `statistics:` and other settings.
+- [Statistics](statistics.md). The SQLite store the TUI reads from.
+- [Configuration](configuration.md). `statistics:` and other settings.
