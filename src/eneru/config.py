@@ -198,9 +198,41 @@ class UPSGroupConfig:
 
 
 @dataclass
+class RedundancyGroupConfig:
+    """A redundancy group: shared resources protected by 2+ UPS sources.
+
+    Mirrors :class:`UPSGroupConfig` so a group can own the same resource
+    surface (remote servers, VMs, containers, filesystems). Resources in a
+    redundancy group are shut down by the group evaluator only when fewer
+    than ``min_healthy`` member UPSes still report a healthy snapshot.
+    """
+    name: str = ""
+    ups_sources: List[str] = field(default_factory=list)
+    # Quorum threshold: shutdown fires when healthy_count < min_healthy.
+    # Default ``1`` matches a 2-UPS dual-PSU setup ("either UPS keeps us up").
+    min_healthy: int = 1
+    # How a DEGRADED member counts toward healthy_count.
+    #   "healthy"  -- counted as healthy (default; tolerant of voltage warnings)
+    #   "critical" -- counted as critical (strict; treats degraded as failed)
+    degraded_counts_as: str = "healthy"
+    # How an UNKNOWN member (stale snapshot, dropped NUT connection) counts.
+    #   "critical" -- treated as failed (default; fail-safe)
+    #   "degraded" -- counted via ``degraded_counts_as``
+    #   "healthy"  -- counted as healthy (risky -- assumes best on missing data)
+    unknown_counts_as: str = "critical"
+    is_local: bool = False
+    triggers: TriggersConfig = field(default_factory=TriggersConfig)
+    remote_servers: List[RemoteServerConfig] = field(default_factory=list)
+    virtual_machines: VMConfig = field(default_factory=VMConfig)
+    containers: ContainersConfig = field(default_factory=ContainersConfig)
+    filesystems: FilesystemsConfig = field(default_factory=FilesystemsConfig)
+
+
+@dataclass
 class Config:
     """Main configuration container."""
     ups_groups: List[UPSGroupConfig] = field(default_factory=list)
+    redundancy_groups: List[RedundancyGroupConfig] = field(default_factory=list)
     behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
@@ -592,6 +624,12 @@ class ConfigLoader:
             # --- Legacy single-UPS mode ---
             config.ups_groups = [cls._parse_legacy_ups(data, ups_raw, global_triggers)]
 
+        # --- Redundancy groups (Phase 2) ---
+        if 'redundancy_groups' in data:
+            config.redundancy_groups = cls._parse_redundancy_groups(
+                data['redundancy_groups'], global_triggers
+            )
+
         return config
 
     @classmethod
@@ -686,6 +724,61 @@ class ConfigLoader:
         return groups
 
     @classmethod
+    def _parse_redundancy_groups(cls, groups_data: list,
+                                  global_triggers: TriggersConfig) -> List[RedundancyGroupConfig]:
+        """Parse the ``redundancy_groups`` YAML section into config objects."""
+        groups: List[RedundancyGroupConfig] = []
+        for entry in groups_data or []:
+            if not isinstance(entry, dict):
+                continue
+
+            ups_sources_raw = entry.get('ups_sources', []) or []
+            ups_sources = [str(s) for s in ups_sources_raw]
+
+            # Per-group triggers inherit from global, overriding only fields
+            # the user actually re-specifies.
+            if 'triggers' in entry:
+                triggers = cls._parse_triggers_config(entry['triggers'], global_triggers)
+            else:
+                triggers = global_triggers
+
+            remote_servers: List[RemoteServerConfig] = []
+            if 'remote_servers' in entry:
+                remote_servers = cls._parse_remote_servers(entry['remote_servers'])
+
+            vm_config = VMConfig()
+            if 'virtual_machines' in entry:
+                vm_data = entry['virtual_machines']
+                vm_config = VMConfig(
+                    enabled=vm_data.get('enabled', False),
+                    max_wait=vm_data.get('max_wait', 30),
+                )
+
+            containers_config = ContainersConfig()
+            if 'containers' in entry:
+                containers_config = cls._parse_containers_config(entry['containers'])
+
+            fs_config = FilesystemsConfig()
+            if 'filesystems' in entry:
+                fs_config = cls._parse_filesystems_config(entry['filesystems'])
+
+            groups.append(RedundancyGroupConfig(
+                name=str(entry.get('name', '')),
+                ups_sources=ups_sources,
+                min_healthy=entry.get('min_healthy', 1),
+                degraded_counts_as=str(entry.get('degraded_counts_as', 'healthy')),
+                unknown_counts_as=str(entry.get('unknown_counts_as', 'critical')),
+                is_local=bool(entry.get('is_local', False)),
+                triggers=triggers,
+                remote_servers=remote_servers,
+                virtual_machines=vm_config,
+                containers=containers_config,
+                filesystems=fs_config,
+            ))
+
+        return groups
+
+    @classmethod
     def validate_config(cls, config: Config, raw_data: Optional[Dict[str, Any]] = None) -> List[str]:
         """Validate configuration and return list of warnings/info messages."""
         from eneru.notifications import APPRISE_AVAILABLE
@@ -718,15 +811,6 @@ class ConfigLoader:
 
         # Multi-UPS validation
         if config.multi_ups:
-            # Check that at most one group is marked is_local
-            local_groups = [g for g in config.ups_groups if g.is_local]
-            if len(local_groups) > 1:
-                local_names = [g.ups.label for g in local_groups]
-                messages.append(
-                    f"ERROR: Multiple UPS groups marked as is_local: {', '.join(local_names)}. "
-                    "At most one UPS group can power the Eneru host."
-                )
-
             # Check ownership: non-local groups must not have local resources
             for group in config.ups_groups:
                 if group.is_local:
@@ -756,6 +840,157 @@ class ConfigLoader:
                             f"WARNING: Top-level '{key}' section ignored in multi-UPS mode. "
                             f"Move resources under the appropriate UPS entry."
                         )
+
+        # is_local uniqueness (combined across UPS groups + redundancy groups)
+        local_ups = [g.ups.label for g in config.ups_groups if g.is_local]
+        local_redundancy = [g.name or "(unnamed)"
+                            for g in config.redundancy_groups if g.is_local]
+        all_local = local_ups + [f"redundancy:{n}" for n in local_redundancy]
+        if len(all_local) > 1:
+            messages.append(
+                f"ERROR: Multiple groups marked as is_local: {', '.join(all_local)}. "
+                "At most one group (UPS or redundancy) can power the Eneru host."
+            )
+
+        # --- Redundancy-group validation (Phase 2) ---
+        if config.redundancy_groups:
+            seen_names: Dict[str, int] = {}
+            ups_known = {g.ups.name for g in config.ups_groups}
+            ups_labels = {g.ups.name: g.ups.label for g in config.ups_groups}
+
+            # Index remote-server identities (host, user) per UPS group so we
+            # can detect cross-tier collisions cleanly.
+            ups_server_owners: Dict[tuple, str] = {}
+            for group in config.ups_groups:
+                for server in group.remote_servers:
+                    key = (server.host.strip().lower(), server.user.strip().lower())
+                    if key[0] and key[1]:
+                        ups_server_owners.setdefault(key, group.ups.label)
+
+            redundancy_server_owners: Dict[tuple, str] = {}
+
+            for rg in config.redundancy_groups:
+                label = rg.name or "(unnamed)"
+
+                # Name presence + uniqueness
+                if not rg.name:
+                    messages.append(
+                        "ERROR: Redundancy group missing 'name'. Every group needs a "
+                        "unique name for logs, notifications, and shutdown flag files."
+                    )
+                seen_names[rg.name] = seen_names.get(rg.name, 0) + 1
+
+                # ups_sources presence
+                if not rg.ups_sources:
+                    messages.append(
+                        f"ERROR: Redundancy group '{label}': 'ups_sources' is empty. "
+                        "A redundancy group needs at least 2 UPS sources to be useful."
+                    )
+
+                # ups_sources reference known UPSes
+                unknown_refs = [u for u in rg.ups_sources if u not in ups_known]
+                if unknown_refs:
+                    messages.append(
+                        f"ERROR: Redundancy group '{label}' references unknown UPS "
+                        f"name(s): {', '.join(unknown_refs)}. Known UPSes: "
+                        f"{', '.join(sorted(ups_known)) or '(none)'}."
+                    )
+
+                # ups_sources uniqueness within the group
+                if len(set(rg.ups_sources)) != len(rg.ups_sources):
+                    dups = sorted({u for u in rg.ups_sources
+                                   if rg.ups_sources.count(u) > 1})
+                    messages.append(
+                        f"ERROR: Redundancy group '{label}' lists duplicate UPS source(s): "
+                        f"{', '.join(dups)}."
+                    )
+
+                # min_healthy bounds
+                if not isinstance(rg.min_healthy, int) or isinstance(rg.min_healthy, bool):
+                    messages.append(
+                        f"ERROR: Redundancy group '{label}': min_healthy must be an "
+                        f"integer, got {rg.min_healthy!r}."
+                    )
+                elif rg.min_healthy < 1:
+                    messages.append(
+                        f"ERROR: Redundancy group '{label}': min_healthy must be >= 1, "
+                        f"got {rg.min_healthy}. A min_healthy of 0 would mean the group "
+                        "never triggers a shutdown -- remove the group instead."
+                    )
+                elif rg.ups_sources and rg.min_healthy > len(rg.ups_sources):
+                    messages.append(
+                        f"ERROR: Redundancy group '{label}': min_healthy "
+                        f"({rg.min_healthy}) exceeds the number of UPS sources "
+                        f"({len(rg.ups_sources)}). The group can never be healthy."
+                    )
+                elif rg.ups_sources and rg.min_healthy == len(rg.ups_sources):
+                    messages.append(
+                        f"WARNING: Redundancy group '{label}': min_healthy equals "
+                        f"the number of UPS sources ({len(rg.ups_sources)}). "
+                        "There is no redundancy -- any single UPS failure triggers shutdown."
+                    )
+
+                # degraded_counts_as / unknown_counts_as enums
+                if rg.degraded_counts_as not in ("healthy", "critical"):
+                    messages.append(
+                        f"ERROR: Redundancy group '{label}': degraded_counts_as must be "
+                        f"'healthy' or 'critical', got '{rg.degraded_counts_as}'."
+                    )
+                if rg.unknown_counts_as not in ("healthy", "degraded", "critical"):
+                    messages.append(
+                        f"ERROR: Redundancy group '{label}': unknown_counts_as must be "
+                        f"'healthy', 'degraded', or 'critical', got '{rg.unknown_counts_as}'."
+                    )
+
+                # Local-resource ownership
+                if not rg.is_local:
+                    if rg.virtual_machines.enabled:
+                        messages.append(
+                            f"ERROR: Redundancy group '{label}' has virtual_machines "
+                            "enabled but is not marked is_local. Only an is_local group "
+                            "(UPS or redundancy) can manage VMs."
+                        )
+                    if rg.containers.enabled:
+                        messages.append(
+                            f"ERROR: Redundancy group '{label}' has containers enabled "
+                            "but is not marked is_local. Only an is_local group "
+                            "(UPS or redundancy) can manage containers."
+                        )
+                    if rg.filesystems.unmount.enabled:
+                        messages.append(
+                            f"ERROR: Redundancy group '{label}' has filesystem unmount "
+                            "enabled but is not marked is_local. Only an is_local group "
+                            "(UPS or redundancy) can manage filesystems."
+                        )
+
+                # Remote-server cross-tier conflict detection
+                for server in rg.remote_servers:
+                    key = (server.host.strip().lower(), server.user.strip().lower())
+                    if not key[0] or not key[1]:
+                        continue
+                    if key in ups_server_owners:
+                        owner = ups_server_owners[key]
+                        messages.append(
+                            f"ERROR: Remote server '{server.name or server.host}' "
+                            f"({server.user}@{server.host}) is owned by both UPS group "
+                            f"'{owner}' and redundancy group '{label}'. A remote server "
+                            "must belong to exactly one tier."
+                        )
+                    if key in redundancy_server_owners:
+                        owner = redundancy_server_owners[key]
+                        messages.append(
+                            f"ERROR: Remote server '{server.name or server.host}' "
+                            f"({server.user}@{server.host}) appears in two redundancy "
+                            f"groups: '{owner}' and '{label}'."
+                        )
+                    redundancy_server_owners.setdefault(key, label)
+
+            # Duplicate group names
+            duplicates = sorted(n for n, c in seen_names.items() if c > 1 and n)
+            if duplicates:
+                messages.append(
+                    f"ERROR: Duplicate redundancy group name(s): {', '.join(duplicates)}."
+                )
 
         # Validate shutdown_order, shutdown_safety_margin, and the
         # mutual-exclusion of shutdown_order vs parallel.

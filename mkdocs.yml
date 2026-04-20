@@ -33,6 +33,7 @@ nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - Configuration: configuration.md
+  - Redundancy Groups: redundancy-groups.md
   - Shutdown Triggers: triggers.md
   - Notifications: notifications.md
   - Remote Servers: remote-servers.md

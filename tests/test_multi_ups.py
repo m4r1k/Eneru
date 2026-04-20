@@ -238,7 +238,7 @@ ups:
 """)
         config = ConfigLoader.load(str(config_file))
         msgs = ConfigLoader.validate_config(config)
-        assert any("Multiple UPS groups marked as is_local" in m for m in msgs)
+        assert any("Multiple groups marked as is_local" in m for m in msgs)
 
     @pytest.mark.unit
     def test_toplevel_resources_warned(self, tmp_path):

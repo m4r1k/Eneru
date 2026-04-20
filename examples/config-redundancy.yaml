@@ -1,0 +1,53 @@
+# Eneru Configuration: Dual-PSU Redundancy Group Example
+#
+# Two UPSes feed redundant PSUs on the same compute rack. Either UPS alone
+# keeps the rack powered, so Eneru only triggers a shutdown when *both*
+# UPSes report failure (min_healthy: 1). Each UPS still observes
+# independently on its own thread; per-UPS triggers are advisory.
+
+ups:
+  - name: "UPS-A@10.0.0.10"
+    display_name: "Rack PSU-A"
+    check_interval: 1
+  - name: "UPS-B@10.0.0.11"
+    display_name: "Rack PSU-B"
+    check_interval: 1
+
+triggers:
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+
+redundancy_groups:
+  - name: "rack-1-dual-psu"
+    ups_sources:
+      - "UPS-A@10.0.0.10"
+      - "UPS-B@10.0.0.11"
+    # Quorum: 1 of 2 healthy keeps the rack up; 0 of 2 triggers shutdown.
+    min_healthy: 1
+    degraded_counts_as: "healthy"
+    unknown_counts_as: "critical"
+    is_local: false
+    remote_servers:
+      - name: "Compute Node 1"
+        enabled: true
+        host: "10.0.0.20"
+        user: "root"
+        shutdown_order: 1
+        shutdown_command: "shutdown -h now"
+      - name: "Compute Node 2"
+        enabled: true
+        host: "10.0.0.21"
+        user: "root"
+        shutdown_order: 1
+        shutdown_command: "shutdown -h now"
+      - name: "Top-of-Rack Switch"
+        enabled: true
+        host: "10.0.0.254"
+        user: "admin"
+        shutdown_order: 2
+        shutdown_command: "shutdown -h now"
+
+local_shutdown:
+  # No is_local UPS or redundancy group declared, so the Eneru host stays up.
+  enabled: false
+  trigger_on: "none"

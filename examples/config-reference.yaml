@@ -332,3 +332,66 @@ local_shutdown:
   # "any" = any group's shutdown triggers local shutdown (default)
   # "none" = Eneru host never shuts itself down (recommended for multi-UPS)
   trigger_on: "any"
+
+# ==============================================================================
+# REDUNDANCY GROUPS (Phase 2)
+# ==============================================================================
+# Define groups of resources protected by *multiple* UPS sources. Eneru only
+# triggers a redundancy-group shutdown when fewer than `min_healthy` member
+# UPSes still report a healthy snapshot. UPSes inside a redundancy group keep
+# observing on their own threads, but their per-UPS triggers (low_battery,
+# critical_runtime, depletion, extended_time) and FSD/FAILSAFE conditions only
+# fire as advisory signals -- the group evaluator decides when to act.
+#
+# Each member UPS *must* still be declared in the top-level `ups:` section
+# (single-UPS or multi-UPS list); the redundancy group references them by name.
+# A UPS may appear in both an independent UPS group AND a redundancy group.
+#
+# Across all groups (UPS + redundancy), at most ONE may set is_local: true.
+# Only that one group can declare local resources (virtual_machines, containers,
+# filesystems). Remote servers may be assigned to either tier, but never both.
+#
+# redundancy_groups:
+#   - name: "dual-psu-rack"
+#     # 2+ UPS names from the top-level `ups:` section (must match exactly).
+#     ups_sources:
+#       - "UPS-A@10.0.0.10"
+#       - "UPS-B@10.0.0.11"
+#     # Quorum: trigger when healthy_count < min_healthy. For a 2-UPS dual-PSU
+#     # setup, min_healthy: 1 means "shut down only when both UPSes fail".
+#     min_healthy: 1
+#     # How a DEGRADED UPS (e.g., voltage warning, AVR active) counts:
+#     #   "healthy"  -- degraded still counts as healthy (default; tolerant)
+#     #   "critical" -- degraded counts as failed (strict)
+#     degraded_counts_as: "healthy"
+#     # How an UNKNOWN UPS (stale snapshot, dropped NUT connection) counts:
+#     #   "critical" -- treated as failed (default; fail-safe)
+#     #   "degraded" -- counted via degraded_counts_as
+#     #   "healthy"  -- assume best (NOT recommended)
+#     unknown_counts_as: "critical"
+#     # If true, this group can declare local resources (VMs, containers, FS).
+#     # At most one group across the whole config may set is_local: true.
+#     is_local: false
+#     # Optional per-group triggers; inherits from top-level `triggers:` if omitted.
+#     # triggers:
+#     #   low_battery_threshold: 20
+#     #   critical_runtime_threshold: 600
+#     # Remote servers shut down when this group's quorum is lost.
+#     remote_servers:
+#       - name: "Compute Node 1"
+#         enabled: true
+#         host: "10.0.0.20"
+#         user: "root"
+#         shutdown_order: 1
+#       - name: "Compute Node 2"
+#         enabled: true
+#         host: "10.0.0.21"
+#         user: "root"
+#         shutdown_order: 1
+#     # Local resources (only valid if is_local: true).
+#     # virtual_machines:
+#     #   enabled: true
+#     # containers:
+#     #   enabled: true
+#     # filesystems:
+#     #   sync_enabled: true

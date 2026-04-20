@@ -145,6 +145,36 @@ def _cmd_validate(args):
         if idx < len(config.ups_groups):
             print()
 
+    if config.redundancy_groups:
+        print()
+        print(f"  Redundancy groups ({len(config.redundancy_groups)}):")
+        for rg_idx, rg in enumerate(config.redundancy_groups, 1):
+            label = rg.name or "(unnamed)"
+            tags = []
+            if rg.is_local:
+                tags.append("is_local")
+            tag_suffix = f" [{', '.join(tags)}]" if tags else ""
+            sources = ", ".join(rg.ups_sources) if rg.ups_sources else "(none)"
+            print(f"    {rg_idx}. {label}{tag_suffix}")
+            print(f"       Sources ({len(rg.ups_sources)}): {sources}")
+            print(
+                f"       Quorum: min_healthy={rg.min_healthy} "
+                f"(degraded→{rg.degraded_counts_as}, unknown→{rg.unknown_counts_as})"
+            )
+            enabled_servers = [s for s in rg.remote_servers if s.enabled]
+            if enabled_servers:
+                names = ", ".join(s.name or s.host for s in enabled_servers)
+                print(f"       Remote servers ({len(enabled_servers)}): {names}")
+            local_parts = []
+            if rg.is_local and rg.virtual_machines.enabled:
+                local_parts.append("VMs")
+            if rg.is_local and rg.containers.enabled:
+                local_parts.append("containers")
+            if rg.is_local and (rg.filesystems.sync_enabled or rg.filesystems.unmount.enabled):
+                local_parts.append("filesystems")
+            if local_parts:
+                print(f"       Local resources: {', '.join(local_parts)}")
+
     print(f"  Dry-run: {config.behavior.dry_run}")
 
     # Notification status
