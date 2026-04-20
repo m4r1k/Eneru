@@ -1,6 +1,7 @@
 """Tests for state tracking and transitions."""
 
 import pytest
+import threading
 import time
 from unittest.mock import patch, MagicMock
 
@@ -8,6 +9,7 @@ from eneru import (
     UPSGroupMonitor,
     MonitorState,
 )
+from eneru.state import HealthSnapshot
 
 
 class TestStateTransitions:
@@ -298,3 +300,148 @@ class TestOverloadStateTracking:
             mock_log.assert_called_once()
             assert mock_log.call_args[0][0] == "OVERLOAD_RESOLVED"
             assert monitor.state.overload_state == "INACTIVE"
+
+
+class TestMonitorStateSnapshot:
+    """Tests for the snapshot/lock infrastructure used by redundancy groups."""
+
+    @pytest.mark.unit
+    def test_lock_attribute_exists(self):
+        """``MonitorState`` exposes a non-reentrant Lock under ``_lock``."""
+        state = MonitorState()
+        # threading.Lock() returns the lock factory; verify it is acquirable.
+        assert hasattr(state, "_lock")
+        assert state._lock.acquire(blocking=False) is True
+        state._lock.release()
+
+    @pytest.mark.unit
+    def test_snapshot_defaults(self):
+        """A freshly created state snapshots to documented zero defaults."""
+        state = MonitorState()
+        snap = state.snapshot()
+        assert isinstance(snap, HealthSnapshot)
+        assert snap.status == ""
+        assert snap.battery_charge == ""
+        assert snap.runtime == ""
+        assert snap.load == ""
+        assert snap.depletion_rate == 0.0
+        assert snap.time_on_battery == 0
+        assert snap.last_update_time == 0.0
+        assert snap.connection_state == "OK"
+        assert snap.trigger_active is False
+        assert snap.trigger_reason == ""
+
+    @pytest.mark.unit
+    def test_snapshot_reflects_writes(self):
+        """``snapshot()`` returns the latest values written under the lock."""
+        state = MonitorState()
+        with state._lock:
+            state.latest_status = "OB DISCHRG"
+            state.latest_battery_charge = "57"
+            state.latest_runtime = "920"
+            state.latest_load = "42"
+            state.latest_depletion_rate = 3.25
+            state.latest_time_on_battery = 180
+            state.latest_update_time = 1700000000.0
+            state.connection_state = "GRACE_PERIOD"
+            state.trigger_active = True
+            state.trigger_reason = "battery 5% below threshold"
+
+        snap = state.snapshot()
+        assert snap.status == "OB DISCHRG"
+        assert snap.battery_charge == "57"
+        assert snap.runtime == "920"
+        assert snap.load == "42"
+        assert snap.depletion_rate == 3.25
+        assert snap.time_on_battery == 180
+        assert snap.last_update_time == 1700000000.0
+        assert snap.connection_state == "GRACE_PERIOD"
+        assert snap.trigger_active is True
+        assert snap.trigger_reason == "battery 5% below threshold"
+
+    @pytest.mark.unit
+    def test_snapshot_concurrent_writes_observe_consistent_pairs(self):
+        """A reader thread never observes a torn (mid-update) snapshot.
+
+        The writer flips ``latest_status`` and ``trigger_reason`` together
+        between two paired sets ("A"/"reason-A", "B"/"reason-B"). The reader
+        must always see one matched pair, never a mix.
+        """
+        state = MonitorState()
+        state.latest_status = "A"
+        state.trigger_reason = "reason-A"
+
+        stop_flag = threading.Event()
+
+        def writer():
+            cycle = 0
+            while not stop_flag.is_set():
+                with state._lock:
+                    if cycle % 2 == 0:
+                        state.latest_status = "A"
+                        state.trigger_reason = "reason-A"
+                    else:
+                        state.latest_status = "B"
+                        state.trigger_reason = "reason-B"
+                cycle += 1
+
+        observed_mixed = []
+
+        def reader():
+            for _ in range(2000):
+                snap = state.snapshot()
+                pair = (snap.status, snap.trigger_reason)
+                if pair not in (("A", "reason-A"), ("B", "reason-B")):
+                    observed_mixed.append(pair)
+
+        wt = threading.Thread(target=writer)
+        rt = threading.Thread(target=reader)
+        wt.start()
+        rt.start()
+        rt.join()
+        stop_flag.set()
+        wt.join()
+
+        assert observed_mixed == []
+
+    @pytest.mark.unit
+    def test_dataclass_equality_unaffected_by_lock(self):
+        """Two fresh states compare equal even though each owns its own lock."""
+        a = MonitorState()
+        b = MonitorState()
+        # Distinct lock instances...
+        assert a._lock is not b._lock
+        # ...but dataclass equality ignores `_lock` (compare=False).
+        assert a == b
+
+    @pytest.mark.unit
+    def test_dataclass_repr_omits_lock(self):
+        """``repr(MonitorState())`` does not surface the lock object."""
+        text = repr(MonitorState())
+        assert "_lock" not in text
+        assert "Lock" not in text
+
+    @pytest.mark.unit
+    def test_snapshot_holds_lock_only_briefly(self):
+        """``snapshot()`` releases the lock before returning."""
+        state = MonitorState()
+        snap = state.snapshot()
+        # If snapshot() somehow held the lock past return, this would block.
+        acquired = state._lock.acquire(blocking=False)
+        assert acquired is True
+        state._lock.release()
+        assert isinstance(snap, HealthSnapshot)
+
+    @pytest.mark.unit
+    def test_default_state_round_trip(self):
+        """The new fields don't break existing default-state assumptions."""
+        state = MonitorState()
+        # Existing fields remain at their documented defaults
+        assert state.previous_status == ""
+        assert state.connection_state == "OK"
+        assert state.voltage_state == "NORMAL"
+        # New snapshot/trigger fields default to inert values
+        assert state.latest_status == ""
+        assert state.latest_depletion_rate == 0.0
+        assert state.trigger_active is False
+        assert state.trigger_reason == ""

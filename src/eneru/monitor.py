@@ -676,6 +676,12 @@ class UPSGroupMonitor(
                 )
                 self.state.extended_time_logged = True
 
+        # Publish the freshly computed depletion_rate for the snapshot reader.
+        with self.state._lock:
+            self.state.latest_depletion_rate = (
+                float(depletion_rate) if is_numeric(depletion_rate) else 0.0
+            )
+
         if shutdown_reason:
             self._trigger_immediate_shutdown(shutdown_reason)
 
@@ -713,6 +719,10 @@ class UPSGroupMonitor(
             self.state.on_battery_start_time = 0
             self.state.extended_time_logged = False
             self.state.battery_history.clear()
+
+        # Off-battery → no depletion-rate signal for the snapshot reader.
+        with self.state._lock:
+            self.state.latest_depletion_rate = 0.0
 
     def _handle_connection_failure(self, error_msg: str):
         """Handle connection failure with optional grace period.
@@ -942,6 +952,19 @@ class UPSGroupMonitor(
             self._check_bypass_status(ups_status)
             self._check_overload_status(ups_status, ups_load)
 
-            self.state.previous_status = ups_status
+            # Publish the latest observation for redundancy-group evaluators.
+            # All snapshot fields (plus previous_status) are written under one
+            # lock acquisition so external readers see a consistent snapshot.
+            with self.state._lock:
+                self.state.latest_status = ups_status
+                self.state.latest_battery_charge = ups_data.get('battery.charge', '')
+                self.state.latest_runtime = ups_data.get('battery.runtime', '')
+                self.state.latest_load = ups_data.get('ups.load', '')
+                self.state.latest_time_on_battery = (
+                    int(time.time()) - self.state.on_battery_start_time
+                    if self.state.on_battery_start_time > 0 else 0
+                )
+                self.state.latest_update_time = time.time()
+                self.state.previous_status = ups_status
 
             self._stop_event.wait(self.config.ups.check_interval)
