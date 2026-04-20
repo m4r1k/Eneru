@@ -94,6 +94,30 @@ Your locale isn't UTF-8 capable, or your terminal font lacks Braille
 glyphs. Both are normal in stripped-down minimal images. The block
 fallback is fully accurate; only the rendering changes.
 
+## Events panel — sourced from SQLite
+
+The TUI's "Recent Events" panel now reads from each UPS's
+`events` table in the per-UPS SQLite store. When no DB is present
+(fresh installs before the first poll, sandbox runs without a writable
+`db_directory`, etc.) the panel falls back to tailing the log file —
+the same behaviour as v5.0.
+
+In multi-UPS mode each line is prefixed with the UPS label, so events
+from different sources interleave by timestamp:
+
+```
+14:03:12  [Rack PSU-A] ON_BATTERY: Battery: 85%
+14:03:14  [Rack PSU-B] ON_BATTERY: Battery: 82%
+14:03:18  [Rack PSU-A] POWER_RESTORED: Outage 6s
+```
+
+For headless / scripted use, `eneru monitor --once --events-only`
+prints just the events list:
+
+```bash
+eneru monitor --once --events-only --time 24h
+```
+
 ## See also
 
 - [Statistics](statistics.md) — the SQLite store the TUI reads from.

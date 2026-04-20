@@ -1176,6 +1176,52 @@ jobs:
           fi
           echo "PASS: monitor --once --graph renders correctly"
 
+      # ========================================
+      # TEST 31: Events panel sourced from SQLite
+      # ========================================
+      - name: "Test 31: monitor --once --events-only reads from SQLite"
+        run: |
+          echo "=== Test 31: events from SQLite ==="
+          DB="/tmp/eneru-e2e-stats/default.db"
+
+          # Reuse the seeded DB from Test 28; if absent, seed manually
+          # (Test 31 may be the first that needs the DB after a prior
+          # cleanup step in the same run).
+          if [ ! -f "$DB" ]; then
+            echo "  no DB from earlier tests; seeding fresh..."
+            mkdir -p /tmp/eneru-e2e-stats
+            cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply.dev
+            sleep 3
+            for i in {1..15}; do
+              if upsc TestUPS@localhost:3493 ups.status 2>/dev/null | grep -q .; then
+                break
+              fi
+              sleep 1
+            done
+            PYTHONUNBUFFERED=1 timeout 50s eneru run --config ${{ env.E2E_DIR }}/config-e2e-stats.yaml --exit-after-shutdown > /tmp/test31-daemon.log 2>&1 || true
+          fi
+
+          if [ ! -f "$DB" ]; then
+            echo "FAIL: stats DB still missing after seeding attempt"
+            ls -la /tmp/eneru-e2e-stats/ 2>&1 || true
+            tail -30 /tmp/test31-daemon.log 2>&1 || true
+            exit 1
+          fi
+
+          # Inject a known event row directly so we have something to assert.
+          NOW=$(date +%s)
+          sqlite3 "$DB" "INSERT INTO events (ts, event_type, detail) VALUES ($NOW, 'TEST31_MARKER', 'e2e injected');"
+
+          # Read back via the new --events-only mode.
+          eneru monitor --once --events-only --time 1h --config ${{ env.E2E_DIR }}/config-e2e-stats.yaml 2>&1 | tee /tmp/test31.log
+
+          if ! grep -q "TEST31_MARKER: e2e injected" /tmp/test31.log; then
+            echo "FAIL: injected event not surfaced by --events-only"
+            tail -20 /tmp/test31.log
+            exit 1
+          fi
+          echo "PASS: events panel reads from SQLite"
+
       - name: Collect logs on failure
         if: failure()
         run: |

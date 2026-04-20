@@ -316,6 +316,7 @@ def _cmd_monitor(args):
             config,
             graph_metric=getattr(args, "graph", None),
             time_range=getattr(args, "time", "1h"),
+            events_only=getattr(args, "events_only", False),
         )
     else:
         run_tui(config, interval=args.interval)
@@ -368,6 +369,8 @@ def main():
                             help="With --once: render an ASCII/Braille graph for the metric")
     mon_parser.add_argument("--time", default="1h",
                             help="With --once + --graph: time range (1h/6h/24h/7d/30d)")
+    mon_parser.add_argument("--events-only", action="store_true",
+                            help="With --once: print only the events list (SQLite, log-tail fallback)")
     mon_parser.set_defaults(func=_cmd_monitor)
 
     # --- test-notifications ---

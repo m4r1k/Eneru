@@ -112,7 +112,7 @@ def parse_state_file(path: Path) -> Optional[Dict[str, str]]:
 
 
 def parse_log_events(log_path: str, max_events: int = 8) -> List[str]:
-    """Read recent power events from the log file tail."""
+    """Read recent power events from the log file tail (fallback path)."""
     INCLUDE = (
         "POWER EVENT", "Status changed", "SHUTDOWN", "shutdown",
         "CRITICAL", "FSD", "flap", "Flap", "On battery",
@@ -141,6 +141,67 @@ def parse_log_events(log_path: str, max_events: int = 8) -> List[str]:
         return events
     except Exception:
         return []
+
+
+def _format_event_line(ts: int, label: str, event_type: str,
+                       detail: str, multi_ups: bool) -> str:
+    """Format one event row from the SQLite events table for display."""
+    try:
+        time_str = datetime.fromtimestamp(int(ts)).strftime("%H:%M:%S")
+    except (TypeError, ValueError, OSError):
+        time_str = "??:??:??"
+    prefix = f"[{label}] " if multi_ups else ""
+    if detail:
+        return f"{time_str}  {prefix}{event_type}: {detail}"
+    return f"{time_str}  {prefix}{event_type}"
+
+
+def query_events_for_display(
+    config: Config,
+    time_range_seconds: int = 24 * 3600,
+    *,
+    max_events: int = 50,
+) -> List[str]:
+    """Pull recent events from each UPS's SQLite store, sorted by timestamp.
+
+    Returns formatted display strings ready to drop into the TUI events
+    panel. Returns an empty list when no per-UPS DB exists -- callers
+    should fall back to ``parse_log_events`` in that case.
+    """
+    end = int(time.time())
+    start = end - max(60, int(time_range_seconds))
+    multi_ups = config.multi_ups
+    rows: List[tuple] = []  # (ts, label, event_type, detail)
+    any_db_seen = False
+
+    for group in config.ups_groups:
+        db_path = stats_db_path_for(group, config)
+        conn = StatsStore.open_readonly(db_path)
+        if conn is None:
+            continue
+        any_db_seen = True
+        try:
+            store = StatsStore(db_path)
+            store._conn = conn
+            try:
+                events = store.query_events(start, end)
+            finally:
+                store._conn = None
+            for ts, etype, detail in events:
+                rows.append((int(ts), group.ups.label, etype, detail or ""))
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    if not any_db_seen:
+        return []  # signal "no DB" so callers can fall back
+
+    rows.sort(key=lambda r: r[0])
+    rows = rows[-max_events:]
+    return [_format_event_line(ts, label, etype, detail, multi_ups)
+            for ts, label, etype, detail in rows]
 
 
 # ==============================================================================
@@ -296,16 +357,64 @@ def format_runtime(runtime: str) -> str:
 # RENDERING HELPERS
 # ==============================================================================
 
+def display_width(text: str) -> int:
+    """Approximate the on-screen *cell* width of ``text``.
+
+    Conservative: any code point at or above U+1100 is treated as 2
+    cells. Covers the common cases that broke the events panel (emoji,
+    CJK), at the cost of occasionally over-truncating exotic glyphs.
+    """
+    width = 0
+    for ch in text:
+        cp = ord(ch)
+        if cp >= 0x1100:
+            width += 2
+        elif cp == 0:
+            # NUL is invisible; ignore.
+            continue
+        else:
+            width += 1
+    return width
+
+
+def truncate_to_width(text: str, max_width: int) -> str:
+    """Return the longest prefix of ``text`` whose display width <= max_width."""
+    if max_width <= 0:
+        return ""
+    if display_width(text) <= max_width:
+        return text
+    out = []
+    width = 0
+    for ch in text:
+        cw = 2 if ord(ch) >= 0x1100 else 1
+        if width + cw > max_width:
+            break
+        out.append(ch)
+        width += cw
+    return "".join(out)
+
+
 def safe_addstr(win, y: int, x: int, text: str, attr: int = 0):
-    """Write string to window, clipping to avoid curses errors."""
+    """Write string to window, clipping to display width to avoid overflow.
+
+    Critically, this must clip by *cell* width (which is what curses
+    actually paints), not character count. Emoji, CJK, and other
+    double-width glyphs would otherwise spill past the right edge of
+    the visible panel.
+    """
     max_y, max_x = win.getmaxyx()
     if y < 0 or y >= max_y or x >= max_x:
         return
-    available = max_x - x - 1
-    if available <= 0:
+    available_cells = max_x - x - 1
+    if available_cells <= 0:
+        return
+    truncated = truncate_to_width(text, available_cells)
+    if not truncated:
         return
     try:
-        win.addnstr(y, x, text, available, attr)
+        # We've already truncated to fit; pass len() so curses doesn't
+        # re-clip more aggressively than necessary.
+        win.addnstr(y, x, truncated, len(truncated), attr)
     except curses.error:
         pass
 
@@ -442,11 +551,14 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
         for event in display_events:
             if y >= y_end - footer_lines:
                 break
-            # Truncate to fit screen. Conservative for emoji double-width.
-            max_text = width - 6
+            # Account for the right-edge gutter and the leading 3-space
+            # indent. Use display-cell width (handles emoji + CJK) so
+            # lines never spill past the panel edge.
+            max_cells = max(0, width - 4)
             display = f"   {event}"
-            if len(display) > max_text:
-                display = display[:max_text - 2] + ".."
+            if display_width(display) > max_cells:
+                # Reserve 2 cells for the trailing ellipsis.
+                display = truncate_to_width(display, max_cells - 2) + ".."
             safe_addstr(win, y, 0, display, gold_attr)
             y += 1
 
@@ -572,12 +684,18 @@ def run_tui(config: Config, interval: int = 5):
             logs_start = (graph_end + 1) if graph_end > graph_start else config_end + 1
             logs_end = height
 
-            # Collect data
+            # Collect data. Prefer the SQLite events tier; fall back to the
+            # log-tail parser when no DB is present (single-UPS pip installs
+            # without /var/lib/eneru, fresh installs before first poll, etc.).
             groups_data = [collect_group_data(g, config) for g in config.ups_groups]
-            log_events = parse_log_events(
-                config.logging.file or "",
-                max_events=50 if show_more else max_log_events,
-            )
+            window = TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
+            log_events = query_events_for_display(config, window,
+                                                  max_events=50 if show_more else max_log_events)
+            if not log_events:
+                log_events = parse_log_events(
+                    config.logging.file or "",
+                    max_events=50 if show_more else max_log_events,
+                )
 
             # Render panels edge-to-edge
             render_config_panel(stdscr, config_start, config_end, width,
@@ -665,8 +783,25 @@ def render_graph_text(
 
 
 def run_once(config: Config, *, graph_metric: Optional[str] = None,
-             time_range: str = "1h"):
-    """Print a status snapshot to stdout and exit."""
+             time_range: str = "1h", events_only: bool = False):
+    """Print a status snapshot to stdout and exit.
+
+    With ``events_only=True`` the status / resource summary and graph
+    block are skipped -- only the events list (from SQLite if available,
+    otherwise the log tail) is printed. Useful for scripts and CI.
+    """
+    if events_only:
+        seconds = TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
+        events = query_events_for_display(config, seconds, max_events=50)
+        if not events:
+            events = parse_log_events(config.logging.file or "", max_events=50)
+        if events:
+            for line in events:
+                print(line)
+        else:
+            print("(no events)")
+        return
+
     print(f"Eneru v{__version__}")
     group_count = len(config.ups_groups)
     if group_count > 1:
@@ -705,8 +840,10 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
         if i < group_count - 1:
             print()
 
-    log_path = config.logging.file or ""
-    events = parse_log_events(log_path, max_events=10)
+    seconds = TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
+    events = query_events_for_display(config, seconds, max_events=10)
+    if not events:
+        events = parse_log_events(config.logging.file or "", max_events=10)
     if events:
         print()
         print("Recent Events:")

@@ -407,3 +407,267 @@ class TestRunOnceGraphFlag:
         run_once(config)
         out = capsys.readouterr().out
         assert "Graph:" not in out
+
+
+# ===========================================================================
+# Events panel sourced from SQLite (Phase 2 -- TUI events)
+# ===========================================================================
+
+def _events_config(tmp_path, ups_names=("TestUPS@localhost",)):
+    from eneru import (
+        Config, UPSConfig, UPSGroupConfig, StatsConfig,
+        BehaviorConfig, LoggingConfig, NotificationsConfig,
+        LocalShutdownConfig,
+    )
+    return Config(
+        ups_groups=[UPSGroupConfig(ups=UPSConfig(name=n)) for n in ups_names],
+        behavior=BehaviorConfig(dry_run=True),
+        logging=LoggingConfig(
+            state_file=str(tmp_path / "state"),
+            battery_history_file=str(tmp_path / "history"),
+            shutdown_flag_file=str(tmp_path / "flag"),
+            file=str(tmp_path / "eneru.log"),
+        ),
+        notifications=NotificationsConfig(enabled=False),
+        local_shutdown=LocalShutdownConfig(enabled=False),
+        statistics=StatsConfig(db_directory=str(tmp_path)),
+    )
+
+
+def _seed_events(config, group, events):
+    """Open the per-UPS DB the TUI would read and seed events."""
+    from eneru import StatsStore
+    from eneru.tui import stats_db_path_for
+    store = StatsStore(stats_db_path_for(group, config))
+    store.open()
+    try:
+        for ts, etype, detail in events:
+            store.log_event(etype, detail, ts=ts)
+    finally:
+        store.close()
+
+
+class TestQueryEventsForDisplay:
+
+    @pytest.mark.unit
+    def test_no_db_returns_empty(self, tmp_path):
+        from eneru.tui import query_events_for_display
+        config = _events_config(tmp_path)
+        assert query_events_for_display(config) == []
+
+    @pytest.mark.unit
+    def test_single_ups_events_no_label_prefix(self, tmp_path):
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 60, "ON_BATTERY", "Battery: 85%"),
+            (now - 30, "POWER_RESTORED", "Outage 30s"),
+        ])
+        lines = query_events_for_display(config, time_range_seconds=3600)
+        assert len(lines) == 2
+        # Single-UPS configs do not prefix with [LABEL].
+        assert "[" not in lines[0]
+        assert "ON_BATTERY: Battery: 85%" in lines[0]
+        assert "POWER_RESTORED: Outage 30s" in lines[1]
+
+    @pytest.mark.unit
+    def test_multi_ups_events_prefixed_with_label(self, tmp_path):
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path,
+                                ups_names=("UPS1@host1", "UPS2@host2"))
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0],
+                     [(now - 60, "ON_BATTERY", "ups1")])
+        _seed_events(config, config.ups_groups[1],
+                     [(now - 30, "ON_BATTERY", "ups2")])
+        lines = query_events_for_display(config, time_range_seconds=3600)
+        assert len(lines) == 2
+        # Sorted by ts ascending, prefixed with [label].
+        assert "[UPS1@host1] ON_BATTERY: ups1" in lines[0]
+        assert "[UPS2@host2] ON_BATTERY: ups2" in lines[1]
+
+    @pytest.mark.unit
+    def test_multi_ups_events_interleaved_by_timestamp(self, tmp_path):
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path,
+                                ups_names=("UPS1@h", "UPS2@h"))
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0],
+                     [(now - 100, "A", ""), (now - 20, "C", "")])
+        _seed_events(config, config.ups_groups[1],
+                     [(now - 60, "B", "")])
+        lines = query_events_for_display(config, time_range_seconds=3600)
+        # Order: A (UPS1), B (UPS2), C (UPS1)
+        assert "[UPS1@h] A" in lines[0]
+        assert "[UPS2@h] B" in lines[1]
+        assert "[UPS1@h] C" in lines[2]
+
+    @pytest.mark.unit
+    def test_outside_time_window_excluded(self, tmp_path):
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 7200, "OLD", "two hours ago"),
+            (now - 60, "RECENT", "one minute ago"),
+        ])
+        # 1-hour window -> only RECENT included.
+        lines = query_events_for_display(config, time_range_seconds=3600)
+        assert len(lines) == 1
+        assert "RECENT" in lines[0]
+
+    @pytest.mark.unit
+    def test_max_events_caps_results(self, tmp_path):
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - i, f"EVT{i}", "") for i in range(1, 11)
+        ])
+        lines = query_events_for_display(
+            config, time_range_seconds=3600, max_events=3,
+        )
+        # Most recent 3 events.
+        assert len(lines) == 3
+
+
+class TestRunOnceEventsOnly:
+
+    @pytest.mark.unit
+    def test_events_only_prints_only_events(self, tmp_path, capsys):
+        from eneru.tui import run_once
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 60, "ON_BATTERY", "85%"),
+        ])
+        run_once(config, events_only=True)
+        out = capsys.readouterr().out
+        assert "ON_BATTERY: 85%" in out
+        # Status / resources / graph header must NOT appear.
+        assert "Eneru v" not in out
+        assert "Status:" not in out
+        assert "Graph:" not in out
+
+    @pytest.mark.unit
+    def test_events_only_no_db_falls_back_to_log(self, tmp_path, capsys):
+        from eneru.tui import run_once
+        config = _events_config(tmp_path)
+        # Seed a log file with one matching line; no DB exists.
+        log_path = Path(config.logging.file)
+        log_path.write_text(
+            "2026-04-20 10:00:00 - ⚡ POWER EVENT: ON_BATTERY - 85%\n"
+        )
+        run_once(config, events_only=True)
+        out = capsys.readouterr().out
+        assert "POWER EVENT: ON_BATTERY" in out
+
+    @pytest.mark.unit
+    def test_events_only_no_db_no_log_prints_placeholder(self, tmp_path, capsys):
+        from eneru.tui import run_once
+        config = _events_config(tmp_path)
+        run_once(config, events_only=True)
+        out = capsys.readouterr().out
+        assert "(no events)" in out
+
+
+class TestDisplayWidthAndTruncate:
+    """The cell-aware width helpers behind the events panel overflow fix."""
+
+    @pytest.mark.unit
+    def test_ascii_width_equals_length(self):
+        from eneru.tui import display_width
+        assert display_width("hello world") == 11
+
+    @pytest.mark.unit
+    def test_emoji_counted_as_two_cells(self):
+        from eneru.tui import display_width
+        # The "⚡" emoji (U+26A1) and the broader emoji range are
+        # double-width on most terminals.
+        assert display_width("⚡") == 2
+        assert display_width("a⚡b") == 4
+
+    @pytest.mark.unit
+    def test_cjk_counted_as_two_cells(self):
+        from eneru.tui import display_width
+        assert display_width("漢字") == 4
+
+    @pytest.mark.unit
+    def test_truncate_fits_when_short_enough(self):
+        from eneru.tui import truncate_to_width
+        assert truncate_to_width("hello", 10) == "hello"
+
+    @pytest.mark.unit
+    def test_truncate_clips_ascii(self):
+        from eneru.tui import truncate_to_width
+        assert truncate_to_width("0123456789", 5) == "01234"
+
+    @pytest.mark.unit
+    def test_truncate_clips_before_partial_emoji(self):
+        from eneru.tui import truncate_to_width
+        # 4 cells for "ab" + emoji; 3 cells leaves "ab" only because the
+        # emoji (2 cells) wouldn't fit in the remaining 1 cell.
+        assert truncate_to_width("ab⚡cd", 3) == "ab"
+
+    @pytest.mark.unit
+    def test_truncate_zero_max_returns_empty(self):
+        from eneru.tui import truncate_to_width
+        assert truncate_to_width("anything", 0) == ""
+
+    @pytest.mark.unit
+    def test_render_logs_panel_clips_emoji_lines(self):
+        """Regression for the 'events overflow past the gold panel' bug.
+
+        We use a fake window that records every addnstr() call and check
+        that no painted line overflows the visible width when the events
+        contain emojis.
+        """
+        from eneru.tui import render_logs_panel
+        import curses as _c
+
+        class FakeWin:
+            def __init__(self, h, w):
+                self._h = h
+                self._w = w
+                self.painted = []
+            def getmaxyx(self):
+                return (self._h, self._w)
+            def addnstr(self, y, x, text, n, attr=0):
+                self.painted.append((y, x, text[:n]))
+
+        # 30-cell wide panel. Event has lots of emoji that would each
+        # double the rendered width.
+        win = FakeWin(20, 30)
+        evt = "⚡⚡⚡ POWER EVENT: ON_BATTERY - " + "🔋" * 10
+        # Stub out curses pair lookups so render_logs_panel does not crash.
+        try:
+            _c.color_pair  # noqa: B018
+        except Exception:
+            pass
+        # render_logs_panel calls curses.color_pair(...) which requires
+        # curses init -- patch it via module-level monkey.
+        import eneru.tui as tui_mod
+        with patch.object(tui_mod, "curses", _CursesStub()):
+            render_logs_panel(win, 1, 19, 30, [evt], show_more=False)
+
+        # Every painted text must fit in the 30-cell window.
+        from eneru.tui import display_width
+        for _y, _x, text in win.painted:
+            assert display_width(text) <= 30
+
+
+class _CursesStub:
+    """Minimal curses stub used by the render-overflow regression test."""
+    A_BOLD = 0
+    error = type("error", (Exception,), {})
+
+    @staticmethod
+    def color_pair(_n):
+        return 0
