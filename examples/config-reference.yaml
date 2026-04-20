@@ -334,6 +334,29 @@ local_shutdown:
   trigger_on: "any"
 
 # ==============================================================================
+# STATISTICS (always-on per-UPS SQLite store)
+# ==============================================================================
+# Eneru records every poll into a per-UPS SQLite database for the TUI's
+# graph view and for offline analysis with sqlite3 / DataGrip / Grafana.
+# The hot path is in-memory only -- a background writer flushes to disk
+# every 10 s, then aggregates+purges every 5 min. Writing is best-effort:
+# SQLite errors are logged once and swallowed; monitoring keeps running.
+statistics:
+  # Directory holding one .db per UPS, named after the sanitized UPS name.
+  # On deb/rpm installs this directory is created by the package
+  # (mode 0755, root:root). On pip installs the daemon creates it on
+  # first start. Relocate it to an SSD/USB stick on devices with slow
+  # SD-card storage (Raspberry Pi etc.).
+  db_directory: "/var/lib/eneru"
+  retention:
+    # Raw 1-Hz samples. Older rows are deleted; rolled into agg_5min.
+    raw_hours: 24
+    # 5-minute aggregations -- 30 days = ~8,640 rows per UPS.
+    agg_5min_days: 30
+    # Hourly aggregations -- 5 years = ~43,800 rows per UPS.
+    agg_hourly_days: 1825
+
+# ==============================================================================
 # REDUNDANCY GROUPS (Phase 2)
 # ==============================================================================
 # Define groups of resources protected by *multiple* UPS sources. Eneru only

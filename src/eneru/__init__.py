@@ -21,9 +21,12 @@ from eneru.config import (
     RemoteServerConfig,
     RemoteCommandConfig,
     LocalShutdownConfig,
+    StatsConfig,
+    StatsRetentionConfig,
     ConfigLoader,
     YAML_AVAILABLE,
 )
+from eneru.stats import StatsStore, StatsWriter
 from eneru.state import MonitorState
 from eneru.logger import UPSLogger, TimezoneFormatter
 from eneru.notifications import NotificationWorker, APPRISE_AVAILABLE
@@ -57,6 +60,10 @@ __all__ = [
     "RemoteServerConfig",
     "RemoteCommandConfig",
     "LocalShutdownConfig",
+    "StatsConfig",
+    "StatsRetentionConfig",
+    "StatsStore",
+    "StatsWriter",
     # State and loader
     "MonitorState",
     "ConfigLoader",

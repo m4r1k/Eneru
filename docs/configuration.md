@@ -411,3 +411,6 @@ This checks for:
   conflicts) — see [Redundancy Groups](redundancy-groups.md)
 - Notification service availability
 - Reachable UPS (optional connectivity test)
+
+For the always-on per-UPS metrics store (`statistics:` section), see
+[Statistics](statistics.md).

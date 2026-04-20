@@ -794,7 +794,9 @@ jobs:
 
           # 1 healthy member meets min_healthy=1 -- the evaluator must NOT fire.
           # Use a finite timeout since --exit-after-shutdown wouldn't trigger.
-          timeout 10s eneru run --config ${{ env.E2E_DIR }}/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test21.log || true
+          # The evaluator has a startup grace (~10s for check_interval=1)
+          # so we must run *past* the grace to prove no spurious fire.
+          timeout 18s eneru run --config ${{ env.E2E_DIR }}/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test21.log || true
 
           # Evaluator must have started but never logged "quorum LOST"
           if ! grep -q "Redundancy group 'rack-1-dual-psu' evaluator started" /tmp/test21.log; then
@@ -827,7 +829,8 @@ jobs:
           cp ${{ env.E2E_DIR }}/scenarios/low-battery.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS2.dev
           sleep 3
 
-          timeout 20s eneru run --config ${{ env.E2E_DIR }}/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test22.log || true
+          # Grace ~10s, then evaluator ticks each second.
+          timeout 30s eneru run --config ${{ env.E2E_DIR }}/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test22.log || true
 
           if ! grep -q "quorum LOST" /tmp/test22.log; then
             echo "FAIL: expected 'quorum LOST' log line"
@@ -862,7 +865,8 @@ jobs:
           cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS2.dev
           sleep 2
 
-          timeout 8s eneru run --config ${{ env.E2E_DIR }}/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test23.log || true
+          # Long enough to clear the startup grace and confirm steady state.
+          timeout 18s eneru run --config ${{ env.E2E_DIR }}/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test23.log || true
 
           # Evaluator must reference its policies in the startup line.
           if ! grep -q "Redundancy group 'rack-1-dual-psu' evaluator started" /tmp/test23.log; then
@@ -895,7 +899,7 @@ jobs:
           cp ${{ env.E2E_DIR }}/scenarios/low-battery.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS2.dev
           sleep 3
 
-          timeout 20s eneru run --config ${{ env.E2E_DIR }}/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test24.log || true
+          timeout 30s eneru run --config ${{ env.E2E_DIR }}/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test24.log || true
 
           if ! grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test24.log; then
             echo "FAIL: expected fail-safe shutdown"
@@ -925,7 +929,7 @@ jobs:
           cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS2.dev
           sleep 3
 
-          timeout 12s eneru run --config ${{ env.E2E_DIR }}/config-e2e-redundancy-cross-group.yaml --exit-after-shutdown 2>&1 | tee /tmp/test25.log || true
+          timeout 18s eneru run --config ${{ env.E2E_DIR }}/config-e2e-redundancy-cross-group.yaml --exit-after-shutdown 2>&1 | tee /tmp/test25.log || true
 
           # Redundancy quorum should hold
           if grep -q "rack-1-dual-psu.* quorum LOST" /tmp/test25.log; then
@@ -952,7 +956,7 @@ jobs:
           cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS2.dev
           sleep 3
 
-          timeout 12s eneru run --config ${{ env.E2E_DIR }}/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test26.log || true
+          timeout 18s eneru run --config ${{ env.E2E_DIR }}/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test26.log || true
 
           # The advisory-mode log line is "Trigger condition met (advisory, redundancy group): ..."
           if ! grep -q "Trigger condition met (advisory, redundancy group)" /tmp/test26.log; then
@@ -989,7 +993,7 @@ jobs:
           cp ${{ env.E2E_DIR }}/scenarios/low-battery.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS2.dev
           sleep 3
 
-          timeout 25s eneru run --config ${{ env.E2E_DIR }}/config-e2e-redundancy-separate-eneru.yaml --exit-after-shutdown 2>&1 | tee /tmp/test27.log || true
+          timeout 35s eneru run --config ${{ env.E2E_DIR }}/config-e2e-redundancy-separate-eneru.yaml --exit-after-shutdown 2>&1 | tee /tmp/test27.log || true
 
           if ! grep -q "remote-rack.* quorum LOST" /tmp/test27.log; then
             echo "FAIL: expected remote-rack quorum loss"
@@ -1013,6 +1017,105 @@ jobs:
           cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply-UPS2.dev
           sleep 2
           echo "PASS: Separate-Eneru-UPS topology verified"
+
+      # ========================================
+      # TEST 28: SQLite stats DB created + samples + start-up event
+      # ========================================
+      - name: "Test 28: SQLite stats persistence"
+        run: |
+          echo "=== Test 28: SQLite stats persistence ==="
+          rm -rf /tmp/eneru-e2e-stats /tmp/eneru-e2e-stats-*
+          mkdir -p /tmp/eneru-e2e-stats
+
+          cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply.dev
+          sleep 2
+
+          # Run for ~25s -- writer flushes every 10s, so we should see
+          # at least one flush land. Daemon stays up; we kill via timeout.
+          timeout 25s eneru run --config ${{ env.E2E_DIR }}/config-e2e-stats.yaml --exit-after-shutdown 2>&1 | tee /tmp/test28.log || true
+
+          # 1. DB file must exist
+          DB="/tmp/eneru-e2e-stats/TestUPS-localhost-3493.db"
+          if [ ! -f "$DB" ]; then
+            echo "FAIL: stats DB not created at $DB"
+            ls -la /tmp/eneru-e2e-stats/
+            tail -30 /tmp/test28.log
+            exit 1
+          fi
+
+          # 2. samples table must have rows
+          SAMPLES=$(sqlite3 "$DB" "SELECT COUNT(*) FROM samples")
+          echo "Samples in DB: $SAMPLES"
+          if [ "$SAMPLES" -lt 1 ]; then
+            echo "FAIL: no samples persisted (expected at least 1)"
+            sqlite3 "$DB" ".schema"
+            tail -30 /tmp/test28.log
+            exit 1
+          fi
+
+          # 3. events table must contain the DAEMON_START event
+          EVENTS=$(sqlite3 "$DB" "SELECT event_type FROM events WHERE event_type='DAEMON_START'")
+          if [ -z "$EVENTS" ]; then
+            echo "FAIL: DAEMON_START event not recorded"
+            sqlite3 "$DB" "SELECT * FROM events"
+            tail -30 /tmp/test28.log
+            exit 1
+          fi
+          echo "PASS: stats DB has $SAMPLES sample(s) + DAEMON_START event"
+
+      # ========================================
+      # TEST 29: Stats writer failure is non-fatal
+      # ========================================
+      - name: "Test 29: Stats writer failure is non-fatal"
+        run: |
+          echo "=== Test 29: Stats writer failure isolation ==="
+          rm -rf /tmp/eneru-e2e-stats-broken
+          # Create a *file* where the daemon expects a *directory*. open()
+          # will hit OSError; the daemon must keep monitoring without
+          # crashing.
+          touch /tmp/eneru-e2e-stats-broken
+
+          cat > /tmp/config-e2e-stats-broken.yaml <<'EOF'
+          ups:
+            name: "TestUPS@localhost:3493"
+            check_interval: 1
+          triggers:
+            low_battery_threshold: 20
+          statistics:
+            db_directory: "/tmp/eneru-e2e-stats-broken"
+          behavior:
+            dry_run: true
+          logging:
+            file: null
+            state_file: "/tmp/eneru-e2e-stats-broken-state"
+            battery_history_file: "/tmp/eneru-e2e-stats-broken-history"
+            shutdown_flag_file: "/tmp/eneru-e2e-stats-broken-flag"
+          notifications:
+            enabled: false
+          local_shutdown:
+            enabled: false
+          EOF
+
+          cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply.dev
+          sleep 2
+
+          timeout 10s eneru run --config /tmp/config-e2e-stats-broken.yaml --exit-after-shutdown 2>&1 | tee /tmp/test29.log || true
+
+          # The daemon must have logged the warning AND kept polling.
+          if ! grep -q "stats store open failed" /tmp/test29.log; then
+            echo "FAIL: expected 'stats store open failed' warning"
+            tail -30 /tmp/test29.log
+            exit 1
+          fi
+          # And it must NOT have logged a Python traceback / FATAL ERROR.
+          if grep -q "Traceback\|FATAL ERROR" /tmp/test29.log; then
+            echo "FAIL: daemon crashed on stats failure"
+            tail -30 /tmp/test29.log
+            exit 1
+          fi
+          # Cleanup
+          rm -f /tmp/eneru-e2e-stats-broken /tmp/config-e2e-stats-broken.yaml
+          echo "PASS: stats failure isolated; daemon kept running"
 
       - name: Collect logs on failure
         if: failure()

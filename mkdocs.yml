@@ -34,6 +34,7 @@ nav:
   - Getting Started: getting-started.md
   - Configuration: configuration.md
   - Redundancy Groups: redundancy-groups.md
+  - Statistics: statistics.md
   - Shutdown Triggers: triggers.md
   - Notifications: notifications.md
   - Remote Servers: remote-servers.md

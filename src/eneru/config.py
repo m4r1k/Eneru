@@ -178,6 +178,21 @@ class BehaviorConfig:
 
 
 @dataclass
+class StatsRetentionConfig:
+    """Per-tier retention windows for the SQLite stats store."""
+    raw_hours: int = 24
+    agg_5min_days: int = 30
+    agg_hourly_days: int = 1825
+
+
+@dataclass
+class StatsConfig:
+    """Always-on per-UPS SQLite statistics store configuration."""
+    db_directory: str = "/var/lib/eneru"
+    retention: StatsRetentionConfig = field(default_factory=StatsRetentionConfig)
+
+
+@dataclass
 class UPSGroupConfig:
     """A UPS and the resources it protects."""
     ups: UPSConfig = field(default_factory=UPSConfig)
@@ -237,6 +252,7 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     local_shutdown: LocalShutdownConfig = field(default_factory=LocalShutdownConfig)
+    statistics: StatsConfig = field(default_factory=StatsConfig)
 
     # Notification types mapped to colors/severity
     NOTIFY_FAILURE: str = "failure"
@@ -613,6 +629,20 @@ class ConfigLoader:
         global_triggers = TriggersConfig()
         if 'triggers' in data:
             global_triggers = cls._parse_triggers_config(data['triggers'])
+
+        # Statistics (always-on per-UPS SQLite store)
+        if 'statistics' in data:
+            stats_data = data.get('statistics') or {}
+            retention_data = stats_data.get('retention') or {}
+            defaults = StatsRetentionConfig()
+            config.statistics = StatsConfig(
+                db_directory=stats_data.get('db_directory', config.statistics.db_directory),
+                retention=StatsRetentionConfig(
+                    raw_hours=retention_data.get('raw_hours', defaults.raw_hours),
+                    agg_5min_days=retention_data.get('agg_5min_days', defaults.agg_5min_days),
+                    agg_hourly_days=retention_data.get('agg_hourly_days', defaults.agg_hourly_days),
+                ),
+            )
 
         # Detect legacy vs multi-UPS format
         ups_raw = data.get('ups', {})

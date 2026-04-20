@@ -336,6 +336,7 @@ class TestEvaluatorThreadLifecycle:
         ev = RedundancyGroupEvaluator(
             group, monitors, executor,
             stop_event=stop_event, logger=None, tick=0.05,
+            startup_grace_seconds=0,  # bypass startup grace for fast tests
         )
         ev.start()
         time.sleep(0.15)  # let it tick a couple of times
@@ -357,12 +358,73 @@ class TestEvaluatorThreadLifecycle:
         ev = RedundancyGroupEvaluator(
             group, monitors, MagicMock(),
             stop_event=stop_event, logger=None, tick=0.05,
+            startup_grace_seconds=0,
         )
         ev.start()
         time.sleep(0.15)
         stop_event.set()
         ev.join(timeout=2)
         assert not ev.is_alive()
+
+    @pytest.mark.unit
+    def test_evaluator_startup_grace_default_uses_check_interval(self):
+        """Default grace is ``5 * max(check_interval) + 5`` across members."""
+        group = _redundancy_group(min_healthy=1)
+        monitors = {
+            "UPS-A": _FakeMonitor("UPS-A", _snap(), check_interval=2),
+            "UPS-B": _FakeMonitor("UPS-B", _snap(), check_interval=4),
+        }
+        ev = RedundancyGroupEvaluator(
+            group, monitors, MagicMock(),
+            stop_event=threading.Event(), logger=None,
+        )
+        # max(2, 4) * 5 + 5 = 25.
+        assert ev._startup_grace == pytest.approx(25.0)
+
+    @pytest.mark.unit
+    def test_evaluator_startup_grace_explicit_override(self):
+        ev = RedundancyGroupEvaluator(
+            _redundancy_group(),
+            {}, MagicMock(),
+            stop_event=threading.Event(), logger=None,
+            startup_grace_seconds=42.0,
+        )
+        assert ev._startup_grace == 42.0
+
+    @pytest.mark.unit
+    def test_evaluator_startup_grace_prevents_spurious_unknown_fire(self):
+        """Regression: at start of run() every member is UNKNOWN
+        (last_update_time=0). With unknown_counts_as=critical the evaluator
+        WOULD fire shutdown -- but the startup grace must hold it off long
+        enough for monitors to publish their initial snapshots."""
+        group = _redundancy_group(min_healthy=1, unknown_counts_as="critical")
+        # Build monitors whose snapshots have last_update_time=0 (no poll yet).
+        monitors = {
+            "UPS-A": _FakeMonitor("UPS-A", _snap(last_update_time=0)),
+            "UPS-B": _FakeMonitor("UPS-B", _snap(last_update_time=0)),
+        }
+        executor = MagicMock()
+        executor.shutdown.return_value = True
+        stop_event = threading.Event()
+        ev = RedundancyGroupEvaluator(
+            group, monitors, executor,
+            stop_event=stop_event, logger=None, tick=0.05,
+            startup_grace_seconds=0.5,  # short grace for the test
+        )
+        ev.start()
+        # Inside the grace window: no evaluation yet -> shutdown not called.
+        time.sleep(0.1)
+        executor.shutdown.assert_not_called()
+        # Before the grace expires, swap in healthy snapshots for both members.
+        for m in monitors.values():
+            with m.state._lock:
+                m.state.latest_update_time = time.time()
+                m.state.latest_status = "OL"
+        # Wait past the grace + a couple of ticks.
+        time.sleep(0.6)
+        stop_event.set()
+        ev.join(timeout=2)
+        executor.shutdown.assert_not_called()
 
 
 # ===========================================================================

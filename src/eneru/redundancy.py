@@ -230,6 +230,7 @@ class RedundancyGroupEvaluator(threading.Thread):
         logger: Optional[UPSLogger] = None,
         log_prefix: str = "",
         tick: float = 1.0,
+        startup_grace_seconds: Optional[float] = None,
     ):
         super().__init__(name=f"redundancy-{_sanitize(group.name)}", daemon=True)
         self._group = group
@@ -239,6 +240,23 @@ class RedundancyGroupEvaluator(threading.Thread):
         self._logger = logger
         self._log_prefix = log_prefix
         self._tick = tick
+        # Startup grace: delay the first evaluation so the per-UPS monitors
+        # have time to take their initial poll and publish a snapshot.
+        # Default = 5 * max(check_interval across members) + 5s, mirroring
+        # the stale-snapshot rule. Without this, the evaluator's very first
+        # tick would see every member as UNKNOWN (last_update_time == 0)
+        # and -- with default unknown_counts_as=critical -- spuriously
+        # fire the group shutdown immediately on startup.
+        if startup_grace_seconds is None:
+            check_intervals = []
+            for m in monitors_by_ups_name.values():
+                try:
+                    check_intervals.append(int(m.config.ups.check_interval))
+                except Exception:
+                    pass
+            base = max(check_intervals) if check_intervals else 1
+            startup_grace_seconds = 5 * max(1, base) + 5
+        self._startup_grace = float(startup_grace_seconds)
         # Edge-state tracking so we only emit lifecycle log lines on transitions.
         self._was_quorum_lost = False
         self._fired = False
@@ -322,8 +340,13 @@ class RedundancyGroupEvaluator(threading.Thread):
         self._log(
             f"🛡️ Redundancy group '{self._group.name}' evaluator started "
             f"({len(self._group.ups_sources)} sources, "
-            f"min_healthy={self._group.min_healthy})"
+            f"min_healthy={self._group.min_healthy}, "
+            f"startup_grace={self._startup_grace:.0f}s)"
         )
+        # Startup grace: hold off the first evaluation so the per-UPS
+        # monitor threads have time to publish their initial snapshots.
+        if self._startup_grace > 0:
+            self._stop_event.wait(self._startup_grace)
         try:
             while not self._stop_event.is_set():
                 try:
