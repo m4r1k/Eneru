@@ -315,8 +315,8 @@ pre_shutdown_commands:
 |--------|-------------|
 | `stop_containers` | Stop all Docker/Podman containers |
 | `stop_vms` | Gracefully shutdown libvirt/KVM VMs |
-| `stop_proxmox_vms` | Gracefully shutdown Proxmox QEMU VMs |
-| `stop_proxmox_cts` | Gracefully shutdown Proxmox LXC containers |
+| `stop_proxmox_vms` | Gracefully shutdown Proxmox QEMU VMs (runs via `sudo`) |
+| `stop_proxmox_cts` | Gracefully shutdown Proxmox LXC containers (runs via `sudo`) |
 | `stop_xcpng_vms` | Gracefully shutdown XCP-ng/XenServer VMs |
 | `stop_esxi_vms` | Gracefully shutdown VMware ESXi VMs |
 | `stop_compose` | Stop a compose stack (requires `path` parameter) |

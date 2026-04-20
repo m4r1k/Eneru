@@ -239,6 +239,10 @@ remote_servers:
     # shutdown_safety_margin: 60
 
   # Example: Proxmox server with VMs and containers
+  # stop_proxmox_vms / stop_proxmox_cts run qm and pct via sudo. The SSH user
+  # must either be root, or have NOPASSWD sudo for /usr/sbin/qm and /usr/sbin/pct
+  # (PVE-level vm.audit + vm.powermgmt are not enough on their own).
+  # See docs/remote-servers.md "Passwordless sudo → Proxmox VE".
   # - name: "Proxmox Host"
   #   enabled: true
   #   host: "192.168.178.100"

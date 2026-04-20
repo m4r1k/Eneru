@@ -40,6 +40,8 @@ class TestRemoteActionTemplates:
         template = REMOTE_ACTIONS["stop_proxmox_vms"]
         assert "qm" in template
         assert "shutdown" in template
+        # qm requires root; sudo is mandatory so non-root SSH users can drive it.
+        assert "sudo qm" in template
 
     @pytest.mark.unit
     def test_stop_proxmox_cts_template_exists(self):
@@ -48,6 +50,8 @@ class TestRemoteActionTemplates:
         template = REMOTE_ACTIONS["stop_proxmox_cts"]
         assert "pct" in template
         assert "shutdown" in template
+        # pct requires root; sudo is mandatory so non-root SSH users can drive it.
+        assert "sudo pct" in template
 
     @pytest.mark.unit
     def test_stop_xcpng_vms_template_exists(self):
