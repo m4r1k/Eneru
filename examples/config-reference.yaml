@@ -88,6 +88,38 @@ notifications:
   # Timeout for notification delivery (seconds)
   timeout: 10
 
+  # ----- Issue #27: alert noise tuning ------------------------------
+  # Defer voltage notifications until the condition has held for this
+  # many seconds. The state log line is *always* written immediately
+  # when voltage_state transitions to HIGH/LOW; only the notification
+  # dispatch is deferred. If voltage returns to NORMAL inside the
+  # window, no notification fires and the daemon records a
+  # `VOLTAGE_FLAP_SUPPRESSED` event for visibility. Default 30s.
+  # Set to 0 for the legacy "fire immediately" behavior.
+  voltage_hysteresis_seconds: 30
+
+  # Per-event-type notification mute. Logs always record these events
+  # (and the SQLite events table records them with notification_sent=0
+  # so you can audit what was muted). The list below is examples --
+  # any combination of these names is accepted:
+  #   POWER_RESTORED, VOLTAGE_NORMALIZED,
+  #   AVR_BOOST_ACTIVE, AVR_TRIM_ACTIVE, AVR_INACTIVE,
+  #   BYPASS_MODE_INACTIVE, OVERLOAD_RESOLVED, CONNECTION_RESTORED,
+  #   VOLTAGE_AUTODETECT_MISMATCH, VOLTAGE_FLAP_SUPPRESSED
+  # Safety-critical events CANNOT be muted by design (the config
+  # validator rejects them): OVER_VOLTAGE_DETECTED, BROWNOUT_DETECTED,
+  # OVERLOAD_ACTIVE, BYPASS_MODE_ACTIVE, ON_BATTERY, CONNECTION_LOST,
+  # any SHUTDOWN_*. Use `voltage_hysteresis_seconds` to tame transient
+  # voltage flaps; never silence real over-voltage / brownout alerts.
+  suppress: []
+  # Example -- mute the chatty AVR cycling events but keep everything
+  # safety-critical:
+  # suppress:
+  #   - AVR_BOOST_ACTIVE
+  #   - AVR_TRIM_ACTIVE
+  #   - AVR_INACTIVE
+  # ------------------------------------------------------------------
+
   # Notification service URLs
   urls:
     # Discord

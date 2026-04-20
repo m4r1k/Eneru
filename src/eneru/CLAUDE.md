@@ -84,6 +84,86 @@ What mixins MUST do when adding a new module file:
    convention (root `CLAUDE.md`): every feature ships with both synthetic
    tests in `tests/` AND an E2E step.
 
+## Stats schema evolution (when to add a column)
+
+The SQLite stats DB (`src/eneru/stats.py`) ships a `SCHEMA_VERSION`
+integer + a migration block in `_init_schema`. Bump and migrate as the
+daemon grows new persistent state.
+
+**When to add a DB column** (vs. keeping state in-memory only):
+
+- The data has long-term analytical value (capacity planning, debugging
+  power events months later, cross-correlation with hardware behavior).
+- It's queryable per row — a user with `sqlite3 /var/lib/eneru/*.db`
+  should be able to ask a useful question with it.
+- Its grain matches an existing table (per-poll → `samples`, per-event
+  → `events`, per-aggregation-window → `agg_5min` / `agg_hourly`).
+
+**When NOT to add a column:**
+
+- Pure runtime state (locks, pending timers, in-flight buffers) — keep
+  in `MonitorState` or local variables.
+- Configuration that's already in `config.yaml` — don't denormalize.
+- Anything written every poll that's a derivative of existing columns
+  (compute it on read instead).
+
+**Migration pattern** (real examples: v1→v2 added 4 raw NUT metrics +
+`output_voltage_avg`; v2→v3 added `events.notification_sent`):
+
+```python
+SCHEMA_VERSION = 3   # bump
+
+def _migrate_schema(self) -> None:
+    cur = self._conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()
+    if cur is None:
+        return  # brand-new DB; CREATE TABLE already includes everything
+    current = int(cur[0]) if cur[0] else 1
+
+    if current < 2:
+        # v1 -> v2 deltas (additive ALTERs only).
+        for col in ("battery_voltage REAL", "ups_temperature REAL", ...):
+            self._safe_alter("samples", col)
+        for table in ("agg_5min", "agg_hourly"):
+            for col in ("output_voltage_avg REAL", ...):
+                self._safe_alter(table, col)
+
+    if current < 3:
+        # v2 -> v3 deltas. Append-only -- never edit the v1->v2 block.
+        self._safe_alter("events",
+                         "notification_sent INTEGER DEFAULT 1")
+
+def _safe_alter(self, table: str, column_def: str) -> None:
+    """Idempotent ALTER TABLE ... ADD COLUMN."""
+    try:
+        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")
+    except sqlite3.OperationalError:
+        pass  # column already exists -- benign on retries
+```
+
+**Rules:**
+
+1. **Migrations are append-only.** Never modify a previous version's
+   block. If you got the v1→v2 migration wrong, fix it forward in v2→v3.
+2. Every `ALTER TABLE` goes through `_safe_alter` — the daemon must
+   tolerate running against a partially-migrated DB.
+3. `meta.schema_version` is updated last, so a crash mid-migration is
+   replayed safely on next start.
+4. `_init_schema` is called inside `open()`. Failure raises and the
+   `monitor.py` call site swallows + logs once + sets stats to no-op
+   (per the failure-isolation contract). A migration must never take
+   down the daemon's safety-critical path.
+5. **New event types do NOT need a schema bump** — `events.event_type`
+   is `TEXT`. Bump only when adding columns or tables.
+6. Update `docs/statistics.md` when bumping: extend the schema block,
+   bump the storage-volume number if material, add the new column to
+   any sqlite3 query examples.
+7. Add tests in `tests/test_stats.py`'s `TestSchemaMigration` class:
+   one that proves the new column is added, one that proves it's
+   idempotent on repeated open, one that proves existing rows are
+   preserved.
+
 ## Conventions specific to this package
 
 - Emoji semantics in log messages are documented in the root `CLAUDE.md`

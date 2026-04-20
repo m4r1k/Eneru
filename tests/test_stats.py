@@ -268,6 +268,142 @@ class TestSchemaMigration:
         finally:
             s2.close()
 
+    @staticmethod
+    def _build_v2_db(path: Path) -> None:
+        """Synthesize a v2-shaped DB (post-rc6 / pre-issue-#27)."""
+        c = sqlite3.connect(str(path), isolation_level=None)
+        c.execute("PRAGMA journal_mode = WAL")
+        c.execute(
+            "CREATE TABLE samples (ts INTEGER NOT NULL, status TEXT, "
+            "battery_charge REAL, battery_runtime REAL, ups_load REAL, "
+            "input_voltage REAL, output_voltage REAL, depletion_rate REAL, "
+            "time_on_battery INTEGER, connection_state TEXT, "
+            "battery_voltage REAL, ups_temperature REAL, "
+            "input_frequency REAL, output_frequency REAL)"
+        )
+        for table in ("agg_5min", "agg_hourly"):
+            c.execute(
+                f"CREATE TABLE {table} (ts INTEGER PRIMARY KEY, "
+                "battery_charge_avg REAL, samples_count INTEGER)"
+            )
+        # v2 events table: NO notification_sent column.
+        c.execute(
+            "CREATE TABLE events (ts INTEGER NOT NULL, "
+            "event_type TEXT NOT NULL, detail TEXT)"
+        )
+        c.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        c.execute(
+            "INSERT INTO meta(key,value) VALUES (?, ?)",
+            ("schema_version", "2"),
+        )
+        # Seed a v2 event row to prove preservation.
+        c.execute(
+            "INSERT INTO events(ts, event_type, detail) "
+            "VALUES (?, ?, ?)", (1500, "ON_BATTERY", "pre-rc7 row"),
+        )
+        c.close()
+
+    @pytest.mark.unit
+    def test_v2_db_migrates_events_to_v3(self, tmp_path):
+        # B4: ALTER TABLE events ADD COLUMN notification_sent
+        path = tmp_path / "v2.db"
+        self._build_v2_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            cols = {r[1] for r in s._conn.execute("PRAGMA table_info(events)")}
+            assert "notification_sent" in cols
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v2_to_v3_migration_bumps_meta_to_3(self, tmp_path):
+        path = tmp_path / "v2.db"
+        self._build_v2_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            sv = s._conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            assert int(sv[0]) == SCHEMA_VERSION  # currently 3
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v2_events_preserved_with_default_notification_sent(
+        self, tmp_path,
+    ):
+        path = tmp_path / "v2.db"
+        self._build_v2_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            row = s._conn.execute(
+                "SELECT ts, event_type, notification_sent FROM events"
+            ).fetchone()
+            # Pre-existing row defaults notification_sent to 1 (the
+            # event WAS notified back when v2 ran -- there was no way
+            # to suppress).
+            assert row == (1500, "ON_BATTERY", 1)
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v3_migration_idempotent(self, tmp_path):
+        path = tmp_path / "v2.db"
+        self._build_v2_db(path)
+        # Open + close + reopen + reopen must all succeed.
+        StatsStore(path).open()
+        StatsStore(path).open()
+        s = StatsStore(path)
+        s.open()
+        try:
+            cols = {r[1] for r in s._conn.execute("PRAGMA table_info(events)")}
+            assert "notification_sent" in cols
+        finally:
+            s.close()
+
+
+class TestLogEventNotificationSent:
+    """B4: log_event records the notification_sent flag (v3+)."""
+
+    @pytest.mark.unit
+    def test_default_is_one(self, store):
+        store.log_event("ON_BATTERY", "default", ts=42)
+        cur = store._conn.execute(
+            "SELECT notification_sent FROM events WHERE ts=42"
+        )
+        assert cur.fetchone()[0] == 1
+
+    @pytest.mark.unit
+    def test_explicit_true_is_one(self, store):
+        store.log_event("POWER_RESTORED", "ok", ts=100, notification_sent=True)
+        assert store._conn.execute(
+            "SELECT notification_sent FROM events WHERE ts=100"
+        ).fetchone()[0] == 1
+
+    @pytest.mark.unit
+    def test_explicit_false_is_zero(self, store):
+        store.log_event("VOLTAGE_FLAP_SUPPRESSED", "state=HIGH duration=2s",
+                        ts=200, notification_sent=False)
+        assert store._conn.execute(
+            "SELECT notification_sent FROM events WHERE ts=200"
+        ).fetchone()[0] == 0
+
+    @pytest.mark.unit
+    def test_audit_query_works(self, store):
+        # The user-facing analytical query the column exists for.
+        store.log_event("AVR_BOOST_ACTIVE", "...", ts=1, notification_sent=True)
+        store.log_event("AVR_BOOST_ACTIVE", "...", ts=2, notification_sent=False)
+        store.log_event("AVR_BOOST_ACTIVE", "...", ts=3, notification_sent=False)
+        store.log_event("OVER_VOLTAGE_DETECTED", "...", ts=4, notification_sent=True)
+        muted = store._conn.execute(
+            "SELECT event_type, COUNT(*) FROM events "
+            "WHERE notification_sent = 0 GROUP BY event_type"
+        ).fetchall()
+        assert muted == [("AVR_BOOST_ACTIVE", 2)]
+
 
 # ===========================================================================
 # buffer_sample (hot path)

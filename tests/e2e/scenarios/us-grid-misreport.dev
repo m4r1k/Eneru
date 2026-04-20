@@ -1,0 +1,25 @@
+# Scenario: US 120V grid, but UPS firmware mis-reports nominal as 230V.
+# Used by Test 32 to exercise the issue #27 auto-detect re-snap path:
+# Eneru's _check_voltage_autodetect should observe the consistent
+# 120V readings, conclude the NUT-reported nominal is wrong, and
+# re-snap to 120V (logging VOLTAGE_AUTODETECT_MISMATCH).
+ups.status: OL CHRG
+ups.load: 25
+
+battery.charge: 100
+battery.runtime: 1800
+battery.voltage: 13.6
+
+input.voltage: 120.5
+input.voltage.nominal: 230
+input.frequency: 60.0
+input.transfer.low: 170
+input.transfer.high: 280
+
+output.voltage: 120.0
+output.frequency: 60.0
+
+ups.temperature: 27.0
+
+device.mfr: Eneru
+device.model: E2E Test UPS (US grid, mis-reporting nominal)

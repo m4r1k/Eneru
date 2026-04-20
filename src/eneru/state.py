@@ -56,6 +56,25 @@ class MonitorState:
     pending_anomaly_time: float = 0.0
     pending_anomaly_count: int = 0  # consecutive polls confirming the anomaly
 
+    # Voltage notification hysteresis (#27 / B2). The state log line is
+    # always written immediately on a NORMAL→HIGH/LOW transition; the
+    # *notification* dispatch is deferred until the condition has held
+    # for ``notifications.voltage_hysteresis_seconds``. If the condition
+    # reverts inside the window, no notification is sent and a
+    # VOLTAGE_FLAP_SUPPRESSED event is recorded.
+    voltage_pending_state: str = ""    # "" / "LOW" / "HIGH" -- pending notify
+    voltage_pending_since: float = 0.0
+    voltage_pending_voltage: float = 0.0
+    voltage_pending_threshold: float = 0.0
+    voltage_pending_notified: bool = False  # already fired during this dwell
+
+    # Voltage auto-detection (#27 / B1): a small rolling window of
+    # observed input.voltage readings used to cross-check NUT's reported
+    # input.voltage.nominal at startup. Fixed-size deque so we don't
+    # leak memory; evaluated once after ~10 polls and never again.
+    voltage_observed: deque = field(default_factory=lambda: deque(maxlen=10))
+    voltage_autodetect_done: bool = False
+
     # ----- Snapshot fields published to redundancy-group evaluators -----
     # The poll cycle writes these atomically under ``_lock`` once per cycle so
     # external readers (RedundancyGroupEvaluator) can call ``snapshot()`` and

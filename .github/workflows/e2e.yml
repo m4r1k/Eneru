@@ -1235,6 +1235,90 @@ jobs:
           fi
           echo "PASS: events panel reads from SQLite"
 
+      # ========================================
+      # TEST 32: Voltage auto-detect (issue #27)
+      # ========================================
+      - name: "Test 32: Voltage auto-detect re-snaps NUT mis-reported nominal"
+        run: |
+          echo "=== Test 32: Voltage auto-detect (issue #27) ==="
+
+          # Activate the US-grid mis-report scenario: NUT exposes
+          # input.voltage.nominal=230 but input.voltage stays at ~120V.
+          cp ${{ env.E2E_DIR }}/scenarios/us-grid-misreport.dev \
+             ${{ env.E2E_DIR }}/scenarios/apply.dev
+          sleep 3
+
+          # Verify the dummy is serving the new scenario.
+          upsc TestUPS@localhost:3493 input.voltage 2>&1 | head -1
+          upsc TestUPS@localhost:3493 input.voltage.nominal 2>&1 | head -1
+
+          # Run for ~15s -- long enough for the autodetect window
+          # (10 polls at 1 Hz) to fill and the re-snap to fire.
+          rm -f /tmp/eneru-e2e-voltage-* /var/lib/eneru/TestUPS-localhost-3493.db
+          PYTHONUNBUFFERED=1 timeout 15s eneru run \
+            --config ${{ env.E2E_DIR }}/config-e2e-voltage-autodetect.yaml \
+            > /tmp/test32-daemon.log 2>&1 || true
+
+          echo "--- daemon log (last 40 lines) ---"
+          tail -40 /tmp/test32-daemon.log
+
+          # Initial threshold log: NUT=230 (snapped only if close enough,
+          # which 230 already is). Confirms _initialize ran.
+          if ! grep -q "Voltage Monitoring Active" /tmp/test32-daemon.log; then
+            echo "FAIL: voltage init log line missing"
+            exit 1
+          fi
+          echo "PASS (32a): voltage initialization line emitted"
+
+          # Re-snap log: cross-check observed observed-median 120V vs
+          # NUT's 230V; snap to 120 and announce it.
+          if ! grep -q "auto-detect re-snap" /tmp/test32-daemon.log; then
+            echo "FAIL: auto-detect re-snap line missing"
+            exit 1
+          fi
+          if ! grep -E "Re-snapped to 120(\\.0)?V" /tmp/test32-daemon.log; then
+            echo "FAIL: re-snap target voltage not 120V"
+            exit 1
+          fi
+          echo "PASS (32b): NUT/observed mismatch re-snapped to 120V"
+
+          # SQLite events table must record the auto-detect mismatch
+          # AND mark notification_sent=0 (the event is in our
+          # always-silent set; suppression keeps the audit trail).
+          DB="/var/lib/eneru/TestUPS-localhost-3493.db"
+          if [ ! -f "$DB" ]; then
+            echo "FAIL: stats DB not created"
+            ls -la /var/lib/eneru/ 2>&1 || true
+            exit 1
+          fi
+          rows=$(sqlite3 "$DB" "SELECT event_type, notification_sent FROM events WHERE event_type='VOLTAGE_AUTODETECT_MISMATCH';")
+          echo "  events row(s): $rows"
+          if [ -z "$rows" ]; then
+            echo "FAIL: VOLTAGE_AUTODETECT_MISMATCH row not in events table"
+            sqlite3 "$DB" "SELECT * FROM events;" | head -20
+            exit 1
+          fi
+          if ! echo "$rows" | grep -q "VOLTAGE_AUTODETECT_MISMATCH|0"; then
+            echo "FAIL: VOLTAGE_AUTODETECT_MISMATCH should have notification_sent=0"
+            exit 1
+          fi
+          echo "PASS (32c): events table records mismatch with notification_sent=0"
+
+          # Schema version must be 3 after rc7-class daemon's first start.
+          ver=$(sqlite3 "$DB" "SELECT value FROM meta WHERE key='schema_version';")
+          if [ "$ver" != "3" ]; then
+            echo "FAIL: expected schema_version=3, got '$ver'"
+            exit 1
+          fi
+          echo "PASS (32d): meta.schema_version=3"
+
+          # Restore for downstream tests
+          cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev \
+             ${{ env.E2E_DIR }}/scenarios/apply.dev
+
+          echo ""
+          echo "=== Test 32 PASSED: voltage auto-detect verified ==="
+
       - name: Collect logs on failure
         if: failure()
         run: |

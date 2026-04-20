@@ -1,0 +1,53 @@
+# E2E config for Test 32: voltage auto-detect + hysteresis (issue #27).
+#
+# Pairs with tests/e2e/scenarios/us-grid-misreport.dev where the dummy
+# NUT exposes input.voltage.nominal=230 (incorrect for a US 120V UPS)
+# but actual input.voltage readings sit consistently around 120V.
+# Eneru should observe the discrepancy, re-snap to 120V, and emit a
+# VOLTAGE_AUTODETECT_MISMATCH event into the SQLite events table.
+
+ups:
+  name: "TestUPS@localhost:3493"
+  display_name: "E2E US-grid UPS"
+  check_interval: 1
+
+triggers:
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+  depletion:
+    window: 300
+    critical_rate: 15.0
+    grace_period: 30
+  extended_time:
+    enabled: false
+
+statistics:
+  db_directory: "/var/lib/eneru"
+  retention:
+    raw_hours: 24
+    agg_5min_days: 30
+    agg_hourly_days: 1825
+
+behavior:
+  dry_run: true
+
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-voltage-state"
+  battery_history_file: "/tmp/eneru-e2e-voltage-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-voltage-shutdown-flag"
+
+notifications:
+  enabled: false
+  # B2: 30 s default mutes 1-2 s flaps without weakening response to
+  # sustained over-voltage. B3 example: mute the chatty informational
+  # AVR cycling events but never the safety-critical ones.
+  voltage_hysteresis_seconds: 30
+  suppress:
+    - AVR_BOOST_ACTIVE
+    - AVR_TRIM_ACTIVE
+    - AVR_INACTIVE
+
+local_shutdown:
+  enabled: false
+  trigger_on: "none"

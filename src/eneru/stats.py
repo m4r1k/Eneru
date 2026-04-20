@@ -44,7 +44,7 @@ SAMPLE_FIELDS: Tuple[str, ...] = (
 # Bump and add a migration block in StatsStore._init_schema whenever the
 # samples / agg_5min / agg_hourly / events / meta schema gains a column
 # or table. See src/eneru/CLAUDE.md "Stats schema evolution".
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Bucket sizes for aggregation tiers.
 BUCKET_5MIN = 5 * 60
@@ -233,7 +233,8 @@ class StatsStore:
                 CREATE TABLE IF NOT EXISTS events (
                     ts INTEGER NOT NULL,
                     event_type TEXT NOT NULL,
-                    detail TEXT
+                    detail TEXT,
+                    notification_sent INTEGER DEFAULT 1
                 );
                 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 
@@ -297,6 +298,17 @@ class StatsStore:
             for table in ("agg_5min", "agg_hourly"):
                 for col in v2_agg:
                     self._safe_alter(table, col)
+
+        if current < 3:
+            # v2 -> v3: events.notification_sent (1 = logged + notified,
+            # 0 = logged but suppressed). Default 1 for backfilled rows
+            # so historical events stay queryable without losing the
+            # "yes, this fired before suppression existed" interpretation.
+            # Lets users audit muted events:
+            #   SELECT event_type, COUNT(*) FROM events
+            #   WHERE notification_sent = 0 GROUP BY event_type;
+            self._safe_alter("events",
+                             "notification_sent INTEGER DEFAULT 1")
 
     def _safe_alter(self, table: str, column_def: str) -> None:
         """Idempotent ``ALTER TABLE ... ADD COLUMN``; ignores duplicates."""
@@ -457,16 +469,29 @@ class StatsStore:
     # ----- events API -----
 
     def log_event(self, event_type: str, detail: str = "",
-                  ts: Optional[int] = None) -> None:
-        """Insert one event row. Safe to call from any thread."""
+                  ts: Optional[int] = None,
+                  *, notification_sent: bool = True) -> None:
+        """Insert one event row. Safe to call from any thread.
+
+        ``notification_sent`` (v3+) records whether the daemon dispatched
+        a notification for this event. Pass ``False`` when the event
+        was logged but the notification was suppressed (via
+        ``notifications.suppress`` or hysteresis debounce). Logs are
+        sacred -- this column lets users audit what was muted:
+
+            SELECT event_type, COUNT(*) FROM events
+            WHERE notification_sent = 0 GROUP BY event_type;
+        """
         if self._conn is None:
             return
         ts = int(ts if ts is not None else time.time())
         try:
             with self._conn:
                 self._conn.execute(
-                    "INSERT INTO events (ts, event_type, detail) VALUES (?, ?, ?)",
-                    (ts, str(event_type), str(detail)),
+                    "INSERT INTO events (ts, event_type, detail, "
+                    "notification_sent) VALUES (?, ?, ?, ?)",
+                    (ts, str(event_type), str(detail),
+                     1 if notification_sent else 0),
                 )
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: log_event failed: {e}")

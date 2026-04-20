@@ -76,14 +76,46 @@ agg_5min, agg_hourly (
 events (
     ts INTEGER NOT NULL,             -- epoch seconds
     event_type TEXT NOT NULL,        -- ON_BATTERY, POWER_RESTORED, ...
-    detail TEXT
+    detail TEXT,
+    notification_sent INTEGER DEFAULT 1   -- (v3) 1=delivered, 0=muted
 )
 
 meta (
     key TEXT PRIMARY KEY,
-    value TEXT                       -- e.g. schema_version=2
+    value TEXT                       -- e.g. schema_version=3
 )
 ```
+
+### `events.notification_sent` (v3)
+
+Added in v5.1.0-rc7 alongside the [issue #27](https://github.com/m4r1k/Eneru/issues/27)
+notification suppression work. Records whether the daemon dispatched
+a notification for an event:
+
+- `1` (default for backfilled rows from v2 DBs) — event was logged
+  AND a notification was dispatched.
+- `0` — event was logged but the notification was muted, either
+  because it was in `notifications.suppress`, the voltage
+  hysteresis dwell hadn't elapsed, or the event is in the always-
+  silent set (`VOLTAGE_NORMALIZED`, `AVR_INACTIVE`,
+  `VOLTAGE_FLAP_SUPPRESSED`, `VOLTAGE_AUTODETECT_MISMATCH`).
+
+Audit query:
+
+```bash
+sqlite3 /var/lib/eneru/<UPS>.db \
+  "SELECT event_type, COUNT(*) FROM events
+   WHERE notification_sent = 0
+   GROUP BY event_type
+   ORDER BY 2 DESC;"
+```
+
+### New event types in v3
+
+| Event | When |
+|-------|------|
+| `VOLTAGE_AUTODETECT_MISMATCH` | NUT's `input.voltage.nominal` disagreed with the observed `input.voltage` median by > 25V at startup. The `detail` carries `nut={N}V, observed median={M}V, re-snapped to {S}V`. |
+| `VOLTAGE_FLAP_SUPPRESSED` | A voltage state transition (NORMAL→HIGH/LOW) reverted within `notifications.voltage_hysteresis_seconds`. The `detail` carries `state={LOW|HIGH} duration=Ns peak={V}V`. |
 
 The 3 Eneru-derived columns (`depletion_rate`, `time_on_battery`,
 `connection_state`) intentionally have no `*_avg` companion in the agg

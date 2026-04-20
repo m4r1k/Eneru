@@ -260,6 +260,96 @@ Eneru sends notifications for these events:
 
 ---
 
+## Tuning alert noise
+
+Issue [#27](https://github.com/m4r1k/Eneru/issues/27) reported "a lot
+of email" from chatty UPS firmware on a US 120V grid. Eneru ships
+two knobs to tune notification volume — both designed so a
+misconfiguration cannot silence a real safety-critical event.
+
+### `voltage_hysteresis_seconds` — debounce transient flaps
+
+```yaml
+notifications:
+  voltage_hysteresis_seconds: 30   # default; 0 = legacy immediate
+```
+
+When `voltage_state` transitions to HIGH or LOW, the
+`OVER_VOLTAGE_DETECTED` / `BROWNOUT_DETECTED` log line and SQLite
+event row are written **immediately** (operational record is
+sacred). The notification dispatch is held for
+`voltage_hysteresis_seconds`. If the condition reverts inside the
+window, no notification fires and a `VOLTAGE_FLAP_SUPPRESSED` event
+is recorded for visibility:
+
+```bash
+sqlite3 /var/lib/eneru/<UPS>.db \
+  "SELECT ts, event_type, detail FROM events
+   WHERE event_type='VOLTAGE_FLAP_SUPPRESSED'
+   ORDER BY ts DESC LIMIT 10;"
+```
+
+If the condition persists past the dwell, the notification fires
+with a `(persisted Ns)` annotation so you can see it was held.
+
+### `notifications.suppress` — mute specific event types
+
+```yaml
+notifications:
+  suppress:
+    - AVR_BOOST_ACTIVE
+    - AVR_TRIM_ACTIVE
+    - AVR_INACTIVE
+```
+
+Mutes notifications for the listed event types. The events still
+land in the log file and the SQLite `events` table — only the
+notification dispatch is gated. The events table records
+`notification_sent=0` for muted events so you can audit later:
+
+```bash
+sqlite3 /var/lib/eneru/<UPS>.db \
+  "SELECT event_type, COUNT(*) FROM events
+   WHERE notification_sent = 0
+   GROUP BY event_type;"
+```
+
+**Suppressible event names** (any combination is accepted; case-
+insensitive):
+
+- `POWER_RESTORED`
+- `VOLTAGE_NORMALIZED`
+- `AVR_BOOST_ACTIVE`, `AVR_TRIM_ACTIVE`, `AVR_INACTIVE`
+- `BYPASS_MODE_INACTIVE`
+- `OVERLOAD_RESOLVED`
+- `CONNECTION_RESTORED`
+- `VOLTAGE_AUTODETECT_MISMATCH`
+- `VOLTAGE_FLAP_SUPPRESSED`
+
+### Safety-critical blocklist
+
+The following event names **cannot** appear in
+`notifications.suppress`. The config validator rejects them with a
+clear error pointing at `voltage_hysteresis_seconds` for
+flap-debounce:
+
+- `OVER_VOLTAGE_DETECTED`
+- `BROWNOUT_DETECTED`
+- `OVERLOAD_ACTIVE`
+- `BYPASS_MODE_ACTIVE`
+- `ON_BATTERY`
+- `CONNECTION_LOST`
+- Anything starting with `SHUTDOWN_`
+
+These exist to alert you to potential hardware damage or imminent
+service loss; silencing them defeats the safety contract. If you're
+seeing frequent over-voltage warnings on a US grid, the right fix
+is the auto-detect re-snap (see
+[Triggers → Voltage thresholds](triggers.md#voltage-thresholds-auto-detected-not-user-configurable)),
+not muting the alert.
+
+---
+
 ## Troubleshooting
 
 ### Notifications not arriving

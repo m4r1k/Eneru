@@ -86,6 +86,109 @@ class TestConfigValidation:
             assert not any("trigger_on" in m for m in messages)
 
 
+class TestNotificationsSuppressValidation:
+    """Issue #27 / B3: per-event notification suppression with safety blocklist."""
+
+    def _errors(self, messages):
+        return [m for m in messages if m.startswith("ERROR:")]
+
+    @pytest.mark.unit
+    def test_default_suppress_is_empty_and_validates(self, minimal_config):
+        # No suppress entries -> no errors, behaviour unchanged from rc5.
+        assert minimal_config.notifications.suppress == []
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert not any("suppress" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_suppress_accepts_known_event_names(self, minimal_config):
+        minimal_config.notifications.suppress = [
+            "AVR_BOOST_ACTIVE", "AVR_TRIM_ACTIVE",
+            "VOLTAGE_NORMALIZED", "VOLTAGE_FLAP_SUPPRESSED",
+        ]
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert not any("suppress" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_suppress_rejects_safety_critical_events(self, minimal_config):
+        minimal_config.notifications.suppress = [
+            "OVER_VOLTAGE_DETECTED", "AVR_BOOST_ACTIVE",
+        ]
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert any("safety-critical" in e for e in errors)
+        assert any("OVER_VOLTAGE_DETECTED" in e for e in errors)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("ev", [
+        "OVER_VOLTAGE_DETECTED", "BROWNOUT_DETECTED", "OVERLOAD_ACTIVE",
+        "BYPASS_MODE_ACTIVE", "ON_BATTERY", "CONNECTION_LOST",
+    ])
+    def test_each_safety_critical_event_is_blocked(self, minimal_config, ev):
+        minimal_config.notifications.suppress = [ev]
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert any("safety-critical" in e for e in errors), \
+            f"Expected {ev} to be rejected as safety-critical"
+
+    @pytest.mark.unit
+    def test_suppress_rejects_shutdown_prefix(self, minimal_config):
+        # Anything starting with SHUTDOWN is dynamically blocked.
+        minimal_config.notifications.suppress = ["SHUTDOWN_INITIATED"]
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert any("safety-critical" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_suppress_rejects_unknown_event_names(self, minimal_config):
+        # Typo-catching: not in SUPPRESSIBLE_EVENTS, not safety-critical.
+        minimal_config.notifications.suppress = ["AVRR_BOOST_ACTIVE"]
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert any("unknown event names" in e for e in errors)
+        assert any("AVRR_BOOST_ACTIVE" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_suppress_normalizes_case(self, minimal_config):
+        # Lowercase entries are valid (we upper-case before checking).
+        minimal_config.notifications.suppress = ["avr_boost_active"]
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert not any("suppress" in e for e in errors)
+
+
+class TestVoltageHysteresisValidation:
+    """Issue #27 / B2: notifications.voltage_hysteresis_seconds validation."""
+
+    def _errors(self, messages):
+        return [m for m in messages if m.startswith("ERROR:")]
+
+    @pytest.mark.unit
+    def test_default_value_is_30(self, minimal_config):
+        assert minimal_config.notifications.voltage_hysteresis_seconds == 30
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert not any("voltage_hysteresis_seconds" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_zero_is_accepted_and_means_immediate(self, minimal_config):
+        minimal_config.notifications.voltage_hysteresis_seconds = 0
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert not any("voltage_hysteresis_seconds" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_negative_value_rejected(self, minimal_config):
+        minimal_config.notifications.voltage_hysteresis_seconds = -5
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert any("voltage_hysteresis_seconds" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_non_integer_value_rejected(self, minimal_config):
+        minimal_config.notifications.voltage_hysteresis_seconds = "thirty"
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert any("voltage_hysteresis_seconds" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_very_long_dwell_warns(self, minimal_config):
+        minimal_config.notifications.voltage_hysteresis_seconds = 900
+        messages = ConfigLoader.validate_config(minimal_config)
+        warnings = [m for m in messages if m.startswith("WARNING:")]
+        assert any("voltage_hysteresis_seconds" in w for w in warnings)
+
+
 class TestConfigParsingEdgeCases:
     """Test edge cases in configuration parsing."""
 

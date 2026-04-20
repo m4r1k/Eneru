@@ -365,8 +365,25 @@ class UPSGroupMonitor(
             blocking=actual_blocking
         )
 
-    def _log_power_event(self, event: str, details: str):
-        """Log power events with centralized notification logic."""
+    def _log_power_event(self, event: str, details: str,
+                         *, suppress_notification: bool = False):
+        """Log power events with centralized notification logic.
+
+        ``suppress_notification`` (kw-only) lets a caller explicitly
+        opt out of the notification dispatch -- used by the voltage
+        hysteresis path which logs the BROWNOUT/OVER_VOLTAGE row
+        immediately on the state transition and fires the notification
+        later (after the dwell timer elapses) via a separate code
+        path. Stats persistence and syslog still happen.
+
+        ``notifications.suppress`` (config) provides the user-facing
+        per-event-type mute. Logs always record the event; only the
+        notification dispatch is gated. Safety-critical events
+        (over-voltage, brownout, overload, bypass-active, on-battery,
+        connection-lost, anything starting with SHUTDOWN) are
+        validation-rejected from ``suppress`` so they cannot be
+        silenced here even if a user tried.
+        """
         self._log_message(f"⚡ POWER EVENT: {event} - {details}")
 
         try:
@@ -377,15 +394,8 @@ class UPSGroupMonitor(
         except Exception:
             pass
 
-        # Persist the event to the SQLite store (best-effort).
-        try:
-            self._stats_store.log_event(event, details)
-        except Exception:
-            pass
-
-        if self._shutdown_flag_path.exists():
-            return
-
+        # Determine notification disposition first so we can record an
+        # accurate notification_sent flag in the stats events row.
         notification: Optional[Tuple[str, str]] = None  # (body, type)
 
         event_handlers = {
@@ -439,8 +449,32 @@ class UPSGroupMonitor(
             ),
         }
 
-        # Skip these events for notifications
-        if event in ("VOLTAGE_NORMALIZED", "AVR_INACTIVE"):
+        # Reasons the notification dispatch may be skipped (the log row
+        # always lands; this only affects whether the operator gets
+        # pinged by Apprise). The stats events row records which path
+        # we took via notification_sent.
+        skipped_during_shutdown = self._shutdown_flag_path.exists()
+        always_silent = event in ("VOLTAGE_NORMALIZED", "AVR_INACTIVE",
+                                   "VOLTAGE_FLAP_SUPPRESSED",
+                                   "VOLTAGE_AUTODETECT_MISMATCH")
+        user_suppressed = event in set(
+            getattr(self.config.notifications, "suppress", []) or []
+        )
+
+        will_notify = not (suppress_notification or skipped_during_shutdown
+                           or always_silent or user_suppressed)
+
+        # Persist the event to the SQLite store (best-effort). Pass the
+        # disposition so `WHERE notification_sent = 0` can audit muted
+        # events even after the fact.
+        try:
+            self._stats_store.log_event(
+                event, details, notification_sent=will_notify,
+            )
+        except Exception:
+            pass
+
+        if not will_notify:
             return
 
         if event in event_handlers:

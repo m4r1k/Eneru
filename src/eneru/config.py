@@ -85,6 +85,50 @@ class NotificationsConfig:
     avatar_url: Optional[str] = None
     timeout: int = 10
     retry_interval: int = 5  # Seconds between retry attempts for failed notifications
+    # Per-event-type notification suppression. Logs always record these
+    # events; only the notification dispatch is muted. See
+    # SAFETY_CRITICAL_EVENTS in this module for the blocklist of names
+    # that cannot be silenced.
+    suppress: List[str] = field(default_factory=list)
+    # Voltage-state notification debounce (seconds). A NORMAL→HIGH/LOW
+    # transition is logged immediately; the notification is delayed for
+    # this many seconds and only fires if the condition persists.
+    # Default 30 s mutes 1-2 second NUT-driver flaps without weakening
+    # the response to a real sustained event. 0 = immediate (legacy).
+    voltage_hysteresis_seconds: int = 30
+
+
+# Power events whose notifications cannot be suppressed via
+# `notifications.suppress`. Allowing a user to silence these would
+# defeat the safety contract: an unannounced sustained over-voltage,
+# brownout, overload, bypass-active, or shutdown can damage hardware
+# or data. ``voltage_hysteresis_seconds`` exists for tuning noise on
+# transient flaps without losing the alert when it matters.
+SAFETY_CRITICAL_EVENTS: frozenset = frozenset({
+    "OVER_VOLTAGE_DETECTED",
+    "BROWNOUT_DETECTED",
+    "OVERLOAD_ACTIVE",
+    "BYPASS_MODE_ACTIVE",
+    "ON_BATTERY",
+    "CONNECTION_LOST",
+    # Shutdown-family events: any event name beginning with "SHUTDOWN"
+    # is blocked dynamically in validation, not enumerated here.
+})
+
+# Event names that ARE allowed in notifications.suppress (anything not
+# in this set is rejected to catch typos). Order is informational only.
+SUPPRESSIBLE_EVENTS: frozenset = frozenset({
+    "POWER_RESTORED",
+    "VOLTAGE_NORMALIZED",
+    "AVR_BOOST_ACTIVE",
+    "AVR_TRIM_ACTIVE",
+    "AVR_INACTIVE",
+    "BYPASS_MODE_INACTIVE",
+    "OVERLOAD_RESOLVED",
+    "CONNECTION_RESTORED",
+    "VOLTAGE_AUTODETECT_MISMATCH",
+    "VOLTAGE_FLAP_SUPPRESSED",
+})
 
 
 @dataclass
@@ -837,6 +881,58 @@ class ConfigLoader:
             messages.append(
                 "INFO: Legacy Discord webhook_url detected. Using Apprise for notifications. "
                 "Consider migrating to the 'notifications.urls' format."
+            )
+
+        # notifications.suppress: every entry must be a known suppressible
+        # event name. Safety-critical events (over-voltage, brownout,
+        # overload, bypass-active, on-battery, connection-lost, anything
+        # starting with SHUTDOWN) are rejected -- silencing them would
+        # hide hardware-damaging conditions.
+        if config.notifications.suppress:
+            suppress = config.notifications.suppress
+            if not isinstance(suppress, list):
+                messages.append(
+                    "ERROR: notifications.suppress must be a list of "
+                    "event-type strings."
+                )
+            else:
+                blocked = []
+                unknown = []
+                for ev in suppress:
+                    name = str(ev).strip().upper()
+                    if name in SAFETY_CRITICAL_EVENTS or name.startswith("SHUTDOWN"):
+                        blocked.append(name)
+                    elif name not in SUPPRESSIBLE_EVENTS:
+                        unknown.append(name)
+                if blocked:
+                    messages.append(
+                        "ERROR: notifications.suppress cannot include "
+                        f"safety-critical events: {sorted(set(blocked))}. "
+                        "These exist to alert you to potential hardware "
+                        "damage and cannot be muted. Use "
+                        "notifications.voltage_hysteresis_seconds to "
+                        "debounce transient voltage flaps instead."
+                    )
+                if unknown:
+                    messages.append(
+                        "ERROR: notifications.suppress contains unknown "
+                        f"event names: {sorted(set(unknown))}. Valid "
+                        f"options: {sorted(SUPPRESSIBLE_EVENTS)}"
+                    )
+
+        # voltage_hysteresis_seconds must be non-negative; absurdly long
+        # values get a warning (delayed alerts may exceed shutdown timing).
+        hys = config.notifications.voltage_hysteresis_seconds
+        if not isinstance(hys, int) or hys < 0:
+            messages.append(
+                "ERROR: notifications.voltage_hysteresis_seconds must be a "
+                f"non-negative integer (got {hys!r})."
+            )
+        elif hys > 600:
+            messages.append(
+                "WARNING: notifications.voltage_hysteresis_seconds > 600s "
+                f"(got {hys}). A flap longer than ~10 minutes is no longer "
+                "a flap; consider lowering this value."
             )
 
         # Multi-UPS validation

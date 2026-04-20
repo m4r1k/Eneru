@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> Status: v5.1.0-rc6 is cut for hardware testing. Once that's done the
+> Status: v5.1.0-rc7 is cut for hardware testing. Once that's done the
 > entry below is promoted from `[Unreleased]` to `[5.1.0] - YYYY-MM-DD`
 > with no other changes.
 
@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **rc6 — TUI graphs blend SQLite + a per-UPS live deque (spec 2.13):** the writer flushes every 10 s, but the state file is rewritten every poll. The TUI now keeps a 60-entry per-UPS deque populated each refresh from the state file; `query_metric_series` extends the SQLite tail with any newer deque points (deduped by timestamp). Result: the graph's right edge stays current between flushes instead of lagging up to 10 s.
 - **rc6 — TUI footer interpolates current cycle state.** The bottom-row hints show `<G> Graph: charge`, `<T> Time: 1h`, `<U> UPS: 1/2` instead of static labels, so an operator can see at a glance what state the cycle keys will move from.
 - **rc6 — `PRAGMA busy_timeout = 500` on every stats SQLite connection** (writer + readonly TUI). Bounds reader-writer contention to half a second on slow storage (SD cards on Pi-class hardware).
+- **rc7 — Smart voltage auto-detect (#27).** `input.voltage.nominal` from NUT is snapped to the nearest standard grid voltage from `(100, 110, 115, 120, 127, 200, 208, 220, 230, 240)` if within 15V tolerance. After ~10 polls, Eneru cross-checks the median of observed `input.voltage` readings against NUT's nominal; if they disagree by more than 25V the nominal is re-snapped (the headline US-grid case where firmware reports 230V on a 120V UPS) and a `VOLTAGE_AUTODETECT_MISMATCH` event is recorded. **No user-tunable voltage thresholds are exposed** -- a misconfiguration there would mask real over-voltage events that damage hardware.
+- **rc7 — Voltage notification hysteresis (#27).** `notifications.voltage_hysteresis_seconds` (default 30) defers the *notification* dispatch for `OVER_VOLTAGE_DETECTED` / `BROWNOUT_DETECTED` until the condition has held for the dwell. The state log line is always written immediately on transition. If the condition reverts inside the window, no notification fires and a `VOLTAGE_FLAP_SUPPRESSED` event is recorded. A 2s flap stops paging you; a sustained 30s over-voltage still does, with a `(persisted Ns)` annotation.
+- **rc7 — Per-event-type notification suppression (#27).** `notifications.suppress: [...]` mutes specific event types at the notification layer; logs and SQLite events are unaffected. Validation rejects safety-critical event names (`OVER_VOLTAGE_DETECTED`, `BROWNOUT_DETECTED`, `OVERLOAD_ACTIVE`, `BYPASS_MODE_ACTIVE`, `ON_BATTERY`, `CONNECTION_LOST`, anything starting with `SHUTDOWN_`) so a misconfiguration cannot silence the alerts that matter. The events table now records `notification_sent` (1=delivered, 0=muted) so users can audit what was suppressed.
+- **rc7 — Stats schema bumped 2 → 3.** Added `events.notification_sent INTEGER DEFAULT 1`. Auto-migrates v2 DBs via idempotent `ALTER TABLE` on first start; existing rows default to `1` (the v2 daemon always notified). Pattern documented as the second exercise of the schema-evolution mechanic introduced in rc6.
 
 ### Changed
 - **`shutdown_order` and `parallel` are now mutually exclusive.** Setting both on the same server is a hard validation error (previously a warning). Pick one model: `shutdown_order` for multi-phase ordering, or `parallel` for the legacy two-group behaviour.
@@ -61,15 +65,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Migration notes
 - **Stats are on by default.** On first start of v5.1.0-rc5 the daemon creates `/var/lib/eneru/<sanitized-ups-name>.db` and begins recording samples. No config change required. Override with `statistics.db_directory: <path>` to put stats elsewhere (e.g. an attached SSD on Pi-class hardware).
 - **rc6 — stats schema migration is automatic.** Daemons upgraded from rc5 (`SCHEMA_VERSION = 1`) will run additive `ALTER TABLE` statements on first start to add the four new metric columns and the agg `*_avg`/`*_min`/`*_max` columns. Existing samples are preserved (NULL for new columns); `meta.schema_version` is bumped to `2`. The migration is idempotent — repeated rc6 starts re-run no work.
+- **rc7 — second schema migration (2 → 3).** Adds `events.notification_sent INTEGER DEFAULT 1`. Pre-existing event rows backfill to `1` (the v2 daemon always notified). Idempotent and safe to replay. After rc7's first start, every new event row records its disposition. The schema-evolution convention is documented in `src/eneru/CLAUDE.md` so future features follow the same pattern.
+- **rc7 — voltage notification behaviour change (#27).** Default `voltage_hysteresis_seconds=30` mutes 1-2 second flaps that previously emailed. To restore legacy "fire immediately" behaviour, set `notifications.voltage_hysteresis_seconds: 0`. The log line + SQLite event row are unchanged for any value (immediate on transition); only the notification dispatch is gated. No config change required for the auto-detect re-snap -- it's always on and only fires when there's a mismatch worth correcting.
 - **rc6 — CI exercises the production stats path.** Previously, every E2E test silently disabled stats because the GitHub runner couldn't write `/var/lib/eneru`. The workflow now provisions the directory upfront so Tests 1–27 actually persist samples + events, mirroring what users hit after `apt install eneru`. No user-facing change.
 - **Existing single-UPS configs continue to work unchanged.** `redundancy_groups:` is optional. The advisory-trigger code path only activates when a UPS appears in `ups_sources`.
 - **Storage on small devices.** Per-UPS DB is ~17 MB steady-state at the v2 column count with one `executemany` flush every 10 s, comparable to typical journald background writes. See `docs/statistics.md`, "Storage on small devices (Raspberry Pi / SD card)".
 
 ### Technical details
 - New modules under `src/eneru/`: `health_model.py`, `redundancy.py`, `stats.py`, `graph.py`. All four are wired into `nfpm.yaml`.
-- Test counts (rc6): ~650 unit tests across 26 files; 31 E2E scenarios.
+- Test counts (rc7): ~711 unit tests across 27 files; 32 E2E scenarios. New `tests/test_voltage.py` covers `STANDARD_GRIDS` snap behaviour, the auto-detect re-snap path, and notification hysteresis.
 - New structural-defense test (`tests/test_packaging.py`) asserts every `src/eneru/**/*.py` is referenced by `nfpm.yaml`. Catches the PR #23 class of bug where a missing entry passes pip CI silently and fails at deb/rpm install with `ModuleNotFoundError`.
 - **rc6 — schema migration mechanic.** `StatsStore._migrate_schema` reads `meta.schema_version` and applies append-only `ALTER TABLE` migrations gated by `_safe_alter` (idempotent: duplicate-column errors are swallowed). Pattern documented in `src/eneru/CLAUDE.md` and the root `CLAUDE.md` "Conventions" section. `meta.schema_version` is bumped *after* migrations succeed, so a crash mid-migration is replayed safely on the next start.
+- **rc7 — `SAFETY_CRITICAL_EVENTS` + `SUPPRESSIBLE_EVENTS` constants** in `src/eneru/config.py` enumerate the suppression policy. The validator rejects safety-critical names with a clear error message pointing operators at `voltage_hysteresis_seconds` for flap-debounce. Suppressible names are case-insensitive (validator upper-cases before checking). New event types `VOLTAGE_AUTODETECT_MISMATCH` and `VOLTAGE_FLAP_SUPPRESSED` round out the audit trail.
 
 ---
 
