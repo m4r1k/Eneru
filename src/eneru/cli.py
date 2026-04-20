@@ -312,7 +312,11 @@ def _cmd_monitor(args):
     from eneru.tui import run_tui, run_once
 
     if args.once:
-        run_once(config)
+        run_once(
+            config,
+            graph_metric=getattr(args, "graph", None),
+            time_range=getattr(args, "time", "1h"),
+        )
     else:
         run_tui(config, interval=args.interval)
 
@@ -359,6 +363,11 @@ def main():
                             help="Print status snapshot and exit (no TUI)")
     mon_parser.add_argument("--interval", type=int, default=5,
                             help="Refresh interval in seconds (default: 5)")
+    mon_parser.add_argument("--graph",
+                            choices=["charge", "load", "voltage", "runtime"],
+                            help="With --once: render an ASCII/Braille graph for the metric")
+    mon_parser.add_argument("--time", default="1h",
+                            help="With --once + --graph: time range (1h/6h/24h/7d/30d)")
     mon_parser.set_defaults(func=_cmd_monitor)
 
     # --- test-notifications ---

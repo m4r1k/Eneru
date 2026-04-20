@@ -35,6 +35,7 @@ nav:
   - Configuration: configuration.md
   - Redundancy Groups: redundancy-groups.md
   - Statistics: statistics.md
+  - TUI Graphs: tui-graphs.md
   - Shutdown Triggers: triggers.md
   - Notifications: notifications.md
   - Remote Servers: remote-servers.md

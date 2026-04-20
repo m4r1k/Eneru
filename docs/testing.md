@@ -109,7 +109,7 @@ Tests `pip install .` to ensure `pyproject.toml` is valid:
 
 ## Test coverage
 
-577 tests across 24 files:
+611 tests across 25 files:
 
 - Configuration parsing (116 tests across 6 files) -- YAML options, defaults, multi-UPS detection, trigger inheritance, ownership validation, trigger_on enum validation, shutdown_order parsing and validation (incl. YAML type coercion edge cases, mutual-exclusion error with `parallel`), shutdown_safety_margin parsing and validation, plus the **redundancy-group** dataclass: parsing, defaults, inheritance, multi-group, malformed-entry handling (9 in `test_config_loading.py`), and validation rules (24 in `test_config_validation.py`: `min_healthy` bounds, unknown UPS references, duplicate sources, missing names, duplicate names, enum checks, local-resource ownership, cross-tier server conflicts, `is_local` uniqueness across all groups). Files: `test_config_loading.py` (19), `test_config_notifications.py` (9), `test_config_filesystems.py` (3), `test_config_vm_containers.py` (7), `test_config_remote.py` (29), `test_config_validation.py` (49)
 - Multi-UPS coordination (65 tests) -- coordinator routing, is_local/drain/trigger_on, defense-in-depth lock, battery anomaly with jitter filtering, notification prefixing, runtime is_local enforcement, exit_after_shutdown in coordinator, ownership rejection (VMs/containers/filesystems), plus full coverage of MultiUPSCoordinator lifecycle (initialize, start_monitors, run_monitor crash path, handle_signal, wait_for_completion, real local-shutdown command path, drain edge cases, log fallback). 6 new tests cover redundancy-group wiring inside the coordinator (in_redundancy set computation, in_redundancy_group flag passed to monitors, evaluator + executor instantiation, signal-handler join of evaluator threads).
@@ -119,7 +119,8 @@ Tests `pip install .` to ensure `pyproject.toml` is valid:
 - Shutdown phase mixins (46 tests across 3 files) -- per-mixin coverage for the shutdown phase code: `test_shutdown_vms.py` (7) covers libvirt graceful shutdown, force-destroy on timeout, dry-run, missing virsh, no running VMs; `test_shutdown_containers.py` (26) covers runtime detection (docker/podman/auto), compose subcommand availability, compose-stack shutdown with per-file timeouts, container shutdown with dry-run + real-stop paths, ps failure handling; `test_shutdown_filesystems.py` (13) covers sync (real, dry-run, disabled), unmount with options, timeout (exit 124), busy-mount handling, already-unmounted detection, multi-mount independence
 - Remote commands (29 tests) -- SSH execution, pre-shutdown actions, parallel and sequential modes
 - Connection grace period (26 tests) -- OK/GRACE_PERIOD/FAILED transitions, flap detection, stale data
-- TUI dashboard (23 tests) -- state file parsing, log filtering, human-readable status, --once output
+- TUI dashboard (33 tests) -- state file parsing, log filtering, human-readable status, --once output, plus the new graph integration: `cycle()` keybinding helper, per-UPS stats DB path mirroring the daemon's sanitization, `render_graph_text` no-data + with-samples + unknown-metric paths, `run_once --graph` block.
+- BrailleGraph (24 tests) -- code-point arithmetic against hand-computed glyphs (top-left, top-right, bottom row); `supported()` detection (LANG=C, UTF-8 vs ISO-8859-1); `plot()` geometry (height/width match request, empty data, zero dims); auto-scale (max at top, min at bottom, zero-range padding); explicit bounds clipping (above/below, NULL skipped); fallback character path; `render_to_window` curses helper.
 - CLI (20 tests) -- subcommands, bare invocation, multi-UPS validate
 - Calculations (17 tests) -- depletion rate, battery history
 - Notifications (16 tests) -- formatting, retry, Apprise
@@ -193,7 +194,7 @@ The E2E tests use scenario files to simulate different UPS states:
 
 ### E2E test cases
 
-The E2E workflow (`.github/workflows/e2e.yml`) runs 29 tests on every push and PR:
+The E2E workflow (`.github/workflows/e2e.yml`) runs 30 tests on every push and PR:
 
 | Test | Description |
 |------|-------------|
@@ -226,6 +227,7 @@ The E2E workflow (`.github/workflows/e2e.yml`) runs 29 tests on every push and P
 | **Test 27** | Separate-Eneru-UPS topology: TestUPS protects the host (`is_local: true`), the redundancy group protects a remote rack — rack shutdown fires, host UPS unaffected |
 | **Test 28** | SQLite stats DB created at `db_directory`, `samples` table populated, `events` table contains the `DAEMON_START` row |
 | **Test 29** | Stats writer failure isolation: a broken `db_directory` (file where a directory was expected) logs the warning but does *not* crash the daemon |
+| **Test 30** | `eneru monitor --once --graph charge --time 1h` renders the ASCII / Braille graph header and y-axis label with seeded sample data |
 
 ### Running E2E tests locally
 

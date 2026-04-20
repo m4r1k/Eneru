@@ -225,3 +225,185 @@ class TestRunOnce:
         output = capsys.readouterr().out
         assert "multi-UPS" in output
         assert "2 groups" in output
+
+
+# ===========================================================================
+# Graph integration (Phase 2 -- TUI graphs)
+# ===========================================================================
+
+class TestTUIGraphCycle:
+    """``cycle()`` helper used by the G/T/U keybindings."""
+
+    @pytest.mark.unit
+    def test_cycle_advances_one_step(self):
+        from eneru.tui import cycle, GRAPH_MODES
+        assert cycle(GRAPH_MODES, "off") == "charge"
+        assert cycle(GRAPH_MODES, "charge") == "load"
+
+    @pytest.mark.unit
+    def test_cycle_wraps_around(self):
+        from eneru.tui import cycle, GRAPH_MODES
+        last = GRAPH_MODES[-1]
+        assert cycle(GRAPH_MODES, last) == GRAPH_MODES[0]
+
+    @pytest.mark.unit
+    def test_cycle_unknown_value_resets_to_first(self):
+        from eneru.tui import cycle, GRAPH_MODES
+        assert cycle(GRAPH_MODES, "nonsense") == GRAPH_MODES[0]
+
+
+class TestStatsDbPath:
+    """Path computation must mirror MultiUPSCoordinator's sanitization."""
+
+    @pytest.mark.unit
+    def test_single_ups_uses_default_filename(self, tmp_path):
+        from eneru.tui import stats_db_path_for
+        from eneru import (
+            Config, UPSConfig, UPSGroupConfig, StatsConfig,
+        )
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@host"))],
+            statistics=StatsConfig(db_directory=str(tmp_path)),
+        )
+        path = stats_db_path_for(config.ups_groups[0], config)
+        assert path == tmp_path / "default.db"
+
+    @pytest.mark.unit
+    def test_multi_ups_uses_sanitized_ups_name(self, tmp_path):
+        from eneru.tui import stats_db_path_for
+        from eneru import (
+            Config, UPSConfig, UPSGroupConfig, StatsConfig,
+        )
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS1@10.0.0.1:3493")),
+                UPSGroupConfig(ups=UPSConfig(name="UPS2@10.0.0.2:3493")),
+            ],
+            statistics=StatsConfig(db_directory=str(tmp_path)),
+        )
+        path = stats_db_path_for(config.ups_groups[0], config)
+        assert path == tmp_path / "UPS1-10.0.0.1-3493.db"
+
+
+class TestRenderGraphText:
+    """``render_graph_text`` is what ``run_once --graph`` prints."""
+
+    def _config_with_db(self, tmp_path):
+        from eneru import (
+            Config, UPSConfig, UPSGroupConfig, StatsConfig,
+            BehaviorConfig, LoggingConfig, NotificationsConfig,
+            LocalShutdownConfig,
+        )
+        return Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="TestUPS@localhost"),
+                is_local=True,
+            )],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "flag"),
+                file=None,
+            ),
+            notifications=NotificationsConfig(enabled=False),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+            statistics=StatsConfig(db_directory=str(tmp_path)),
+        )
+
+    @pytest.mark.unit
+    def test_render_graph_text_no_data_placeholder(self, tmp_path):
+        from eneru.tui import render_graph_text
+        config = self._config_with_db(tmp_path)
+        # No DB file exists at all -- expect the "(no data)" placeholder.
+        lines = render_graph_text(config, config.ups_groups[0],
+                                  "charge", "1h")
+        assert lines[0].startswith("charge -- last 1h")
+        assert any("no data" in ln for ln in lines)
+
+    @pytest.mark.unit
+    def test_render_graph_text_with_real_samples(self, tmp_path):
+        from eneru.tui import render_graph_text
+        from eneru import StatsStore
+        import time as _time
+        config = self._config_with_db(tmp_path)
+        # Seed the per-UPS DB with samples mirroring the daemon's path.
+        from eneru.tui import stats_db_path_for
+        store = StatsStore(stats_db_path_for(config.ups_groups[0], config))
+        store.open()
+        try:
+            now = int(_time.time())
+            for i in range(20):
+                store.buffer_sample(
+                    {"ups.status": "OL CHRG",
+                     "battery.charge": str(50 + i),
+                     "battery.runtime": "1800",
+                     "ups.load": "30",
+                     "input.voltage": "230",
+                     "output.voltage": "230"},
+                    ts=now - 10 + i,
+                )
+            store.flush()
+        finally:
+            store.close()
+
+        lines = render_graph_text(config, config.ups_groups[0],
+                                  "charge", "1h",
+                                  width=40, height=4,
+                                  force_fallback=True)
+        # Header + 4 graph rows + y-axis label = 6 lines.
+        assert len(lines) == 6
+        # The graph rows must contain at least one non-blank cell.
+        graph_rows = lines[1:5]
+        assert any(any(c != " " for c in r) for r in graph_rows)
+
+    @pytest.mark.unit
+    def test_render_graph_text_unknown_metric(self, tmp_path):
+        from eneru.tui import render_graph_text
+        config = self._config_with_db(tmp_path)
+        lines = render_graph_text(config, config.ups_groups[0],
+                                  "nonsense", "1h")
+        assert any("unknown metric" in ln for ln in lines)
+
+
+class TestRunOnceGraphFlag:
+    """``run_once`` accepts ``graph_metric`` and prints the graph block."""
+
+    @pytest.mark.unit
+    def test_run_once_with_graph_prints_block(self, tmp_path, capsys):
+        from eneru.tui import run_once
+        from eneru import (
+            Config, UPSConfig, UPSGroupConfig, StatsConfig,
+            LoggingConfig, NotificationsConfig, LocalShutdownConfig,
+            BehaviorConfig,
+        )
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="TestUPS@localhost"))],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "flag"),
+                file=None,
+            ),
+            notifications=NotificationsConfig(enabled=False),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+            statistics=StatsConfig(db_directory=str(tmp_path)),
+        )
+        run_once(config, graph_metric="charge", time_range="1h")
+        out = capsys.readouterr().out
+        assert "Graph: TestUPS@localhost" in out
+        assert "charge -- last 1h" in out
+
+    @pytest.mark.unit
+    def test_run_once_without_graph_prints_no_graph_block(self, tmp_path, capsys):
+        from eneru.tui import run_once
+        from eneru import (
+            Config, UPSConfig, UPSGroupConfig,
+        )
+        config = Config(ups_groups=[
+            UPSGroupConfig(ups=UPSConfig(name="TestUPS@localhost")),
+        ])
+        run_once(config)
+        out = capsys.readouterr().out
+        assert "Graph:" not in out

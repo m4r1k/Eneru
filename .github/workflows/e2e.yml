@@ -1028,14 +1028,26 @@ jobs:
           mkdir -p /tmp/eneru-e2e-stats
 
           cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply.dev
-          sleep 2
+          sleep 3
 
-          # Run for ~25s -- writer flushes every 10s, so we should see
-          # at least one flush land. Daemon stays up; we kill via timeout.
-          timeout 25s eneru run --config ${{ env.E2E_DIR }}/config-e2e-stats.yaml --exit-after-shutdown 2>&1 | tee /tmp/test28.log || true
+          # Pre-check: NUT must answer for TestUPS@localhost:3493 before we
+          # start the daemon, otherwise its `_wait_for_initial_connection`
+          # eats up to 30 seconds of the test timeout.
+          for i in {1..15}; do
+            if upsc TestUPS@localhost:3493 ups.status 2>/dev/null | grep -q .; then
+              echo "  NUT responding (attempt $i)"
+              break
+            fi
+            sleep 1
+          done
 
-          # 1. DB file must exist
-          DB="/tmp/eneru-e2e-stats/TestUPS-localhost-3493.db"
+          # Run for ~50s -- worst case 30s for the connection wait + 10s
+          # for the writer to flush + headroom. PYTHONUNBUFFERED keeps
+          # stdout flushing under tee.
+          PYTHONUNBUFFERED=1 timeout 50s eneru run --config ${{ env.E2E_DIR }}/config-e2e-stats.yaml --exit-after-shutdown 2>&1 | tee /tmp/test28.log || true
+
+          # 1. DB file must exist (single-UPS uses the "default.db" filename)
+          DB="/tmp/eneru-e2e-stats/default.db"
           if [ ! -f "$DB" ]; then
             echo "FAIL: stats DB not created at $DB"
             ls -la /tmp/eneru-e2e-stats/
@@ -1116,6 +1128,53 @@ jobs:
           # Cleanup
           rm -f /tmp/eneru-e2e-stats-broken /tmp/config-e2e-stats-broken.yaml
           echo "PASS: stats failure isolated; daemon kept running"
+
+      # ========================================
+      # TEST 30: monitor --once --graph renders ASCII graph
+      # ========================================
+      - name: "Test 30: monitor --once --graph renders ASCII graph"
+        run: |
+          echo "=== Test 30: monitor --once --graph ==="
+          # Reuse the DB seeded by Test 28 if it's still on disk; otherwise
+          # spin a fresh daemon to populate it.
+          DB="/tmp/eneru-e2e-stats/default.db"
+          if [ ! -f "$DB" ] || [ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM samples')" -lt 1 ]; then
+            rm -rf /tmp/eneru-e2e-stats /tmp/eneru-e2e-stats-*
+            mkdir -p /tmp/eneru-e2e-stats
+
+            cp ${{ env.E2E_DIR }}/scenarios/online-charging.dev ${{ env.E2E_DIR }}/scenarios/apply.dev
+            sleep 3
+
+            for i in {1..15}; do
+              if upsc TestUPS@localhost:3493 ups.status 2>/dev/null | grep -q .; then
+                break
+              fi
+              sleep 1
+            done
+
+            PYTHONUNBUFFERED=1 timeout 50s eneru run --config ${{ env.E2E_DIR }}/config-e2e-stats.yaml --exit-after-shutdown > /tmp/test30-daemon.log 2>&1 || true
+          fi
+
+          if [ ! -f "$DB" ]; then
+            echo "FAIL: stats DB missing at $DB"
+            ls -la /tmp/eneru-e2e-stats/
+            exit 1
+          fi
+
+          # Run the TUI in --once mode with the new --graph flag
+          eneru monitor --once --graph charge --time 1h --config ${{ env.E2E_DIR }}/config-e2e-stats.yaml 2>&1 | tee /tmp/test30.log
+
+          if ! grep -q "charge -- last 1h" /tmp/test30.log; then
+            echo "FAIL: graph header not present"
+            tail -20 /tmp/test30.log
+            exit 1
+          fi
+          if ! grep -q "y-axis: 0-100%" /tmp/test30.log; then
+            echo "FAIL: y-axis label not present"
+            tail -20 /tmp/test30.log
+            exit 1
+          fi
+          echo "PASS: monitor --once --graph renders correctly"
 
       - name: Collect logs on failure
         if: failure()

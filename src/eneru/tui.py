@@ -8,12 +8,85 @@ Two-panel layout:
 
 import curses
 import sys
+import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 
 from eneru.version import __version__
 from eneru.config import Config, UPSGroupConfig
+from eneru.graph import BrailleGraph
+from eneru.stats import StatsStore
+
+
+# Cycle order for the G key + --graph flag.
+GRAPH_MODES = ("off", "charge", "load", "voltage", "runtime")
+TIME_RANGES = ("1h", "6h", "24h", "7d", "30d")
+TIME_RANGE_SECONDS = {
+    "1h": 3600,
+    "6h": 6 * 3600,
+    "24h": 24 * 3600,
+    "7d": 7 * 86400,
+    "30d": 30 * 86400,
+}
+
+# Map graph modes to (metric column, y-axis label, y_min, y_max).
+METRIC_INFO = {
+    "charge":  ("battery_charge",  "0-100%",   0.0,   100.0),
+    "load":    ("ups_load",        "0-100%",   0.0,   100.0),
+    "voltage": ("input_voltage",   "V",        None,  None),
+    "runtime": ("battery_runtime", "seconds",  0.0,   None),
+}
+
+
+def stats_db_path_for(group: UPSGroupConfig, config: Config) -> Path:
+    """Return the per-UPS stats DB path the daemon would write to.
+
+    Mirrors the sanitisation in MultiUPSCoordinator and UPSGroupMonitor.
+    """
+    name = group.ups.name
+    if config.multi_ups:
+        sanitized = name.replace("@", "-").replace(":", "-").replace("/", "-")
+    else:
+        sanitized = "default"
+    return Path(config.statistics.db_directory) / f"{sanitized}.db"
+
+
+def query_metric_series(
+    config: Config,
+    group: UPSGroupConfig,
+    metric: str,
+    seconds: int,
+) -> List[Tuple[int, float]]:
+    """Open the per-UPS stats DB read-only and return ``[(ts, value), ...]``.
+
+    Returns an empty list if the DB doesn't exist or the metric is
+    unknown -- callers should render a "(no data)" placeholder.
+    """
+    info = METRIC_INFO.get(metric)
+    if info is None:
+        return []
+    column = info[0]
+    db_path = stats_db_path_for(group, config)
+    conn = StatsStore.open_readonly(db_path)
+    if conn is None:
+        return []
+    try:
+        end = int(time.time())
+        start = end - max(60, int(seconds))
+        # Build a temporary store to reuse query_range tier-selection.
+        store = StatsStore(db_path)
+        store._conn = conn
+        try:
+            return store.query_range(column, start, end)
+        finally:
+            store._conn = None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 # ==============================================================================
@@ -380,22 +453,66 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
     # Key hints at the bottom of the gold panel
     hint_y = y_end - 1
     x = 2
-    safe_addstr(win, hint_y, x, " <Q> ", key_attr)
-    x += 5
-    safe_addstr(win, hint_y, x, " Quit   ", dim_attr)
-    x += 8
-    safe_addstr(win, hint_y, x, " <R> ", key_attr)
-    x += 5
-    safe_addstr(win, hint_y, x, " Refresh   ", dim_attr)
-    x += 11
-    safe_addstr(win, hint_y, x, " <M> ", key_attr)
-    x += 5
-    safe_addstr(win, hint_y, x, " More logs", dim_attr)
+    for label, descr in (
+        ("<Q>", "Quit"),
+        ("<R>", "Refresh"),
+        ("<M>", "More logs"),
+        ("<G>", "Graph"),
+        ("<T>", "Time"),
+        ("<U>", "UPS"),
+    ):
+        safe_addstr(win, hint_y, x, f" {label} ", key_attr)
+        x += len(label) + 2
+        safe_addstr(win, hint_y, x, f" {descr}   ", dim_attr)
+        x += len(descr) + 4
 
 
 # ==============================================================================
 # MAIN TUI LOOP
 # ==============================================================================
+
+def cycle(values: tuple, current: str) -> str:
+    """Return the next value in ``values`` after ``current`` (wraps)."""
+    try:
+        idx = values.index(current)
+    except ValueError:
+        return values[0]
+    return values[(idx + 1) % len(values)]
+
+
+def render_graph_panel(stdscr, y_start: int, y_end: int, width: int,
+                       config: Config, group: UPSGroupConfig,
+                       graph_mode: str, time_range: str):
+    """Render the graph panel (bottom of the gray section) when active."""
+    gray_attr = curses.color_pair(C_GRAY_BG)
+    gray_bold = gray_attr | curses.A_BOLD
+    panel_h = y_end - y_start
+    if panel_h <= 1:
+        return
+    for row in range(y_start, y_end):
+        fill_row(stdscr, row, gray_attr)
+    title = f"   Graph: {graph_mode} ({time_range})  --  {group.ups.label}"
+    safe_addstr(stdscr, y_start, 0, title, gray_bold)
+    # Reserve 1 row for title; use the rest for the graph itself.
+    g_h = max(2, panel_h - 1)
+    g_w = max(10, width - 6)
+    info = METRIC_INFO.get(graph_mode)
+    if info is None:
+        safe_addstr(stdscr, y_start + 1, 3, "(unknown metric)", gray_attr)
+        return
+    seconds = TIME_RANGE_SECONDS.get(time_range, 3600)
+    series = query_metric_series(config, group, graph_mode, seconds)
+    if not series:
+        safe_addstr(stdscr, y_start + 1, 3, "(no data yet)", gray_attr)
+        return
+    values = [v for _, v in series]
+    rows = BrailleGraph.plot(
+        values, width=g_w, height=g_h,
+        y_min=info[2], y_max=info[3],
+    )
+    for i, line in enumerate(rows):
+        safe_addstr(stdscr, y_start + 1 + i, 3, line, gray_attr)
+
 
 def run_tui(config: Config, interval: int = 5):
     """Run the curses TUI dashboard."""
@@ -407,6 +524,9 @@ def run_tui(config: Config, interval: int = 5):
 
         show_more = False
         max_log_events = 8
+        graph_mode = "off"           # G key cycles through GRAPH_MODES
+        time_range = "1h"            # T key cycles through TIME_RANGES
+        ups_index = 0                # U key cycles which UPS the graph shows
 
         while True:
             stdscr.erase()
@@ -437,12 +557,19 @@ def run_tui(config: Config, interval: int = 5):
             config_end = min(config_start + groups_needed, height - 8)
             config_end = max(config_end, 6)
 
+            # Optional graph panel between config and logs (when graph_mode != off)
+            graph_start = config_end + 1
+            graph_end = graph_start
+            if graph_mode != "off" and config.ups_groups:
+                graph_end = graph_start + max(5, (height - config_end) // 2)
+                graph_end = min(graph_end, height - 6)
+
             # Black spacer row between panels
             spacer = config_end
             fill_row(stdscr, spacer, curses.color_pair(C_BORDER))
 
-            # Logs panel fills the rest (after spacer)
-            logs_start = config_end + 1
+            # Logs panel fills the rest (after spacer / graph)
+            logs_start = (graph_end + 1) if graph_end > graph_start else config_end + 1
             logs_end = height
 
             # Collect data
@@ -455,6 +582,15 @@ def run_tui(config: Config, interval: int = 5):
             # Render panels edge-to-edge
             render_config_panel(stdscr, config_start, config_end, width,
                                 groups_data)
+            if graph_mode != "off" and graph_end > graph_start and config.ups_groups:
+                ups_index = max(0, min(ups_index, len(config.ups_groups) - 1))
+                render_graph_panel(
+                    stdscr, graph_start, graph_end, width,
+                    config, config.ups_groups[ups_index],
+                    graph_mode, time_range,
+                )
+                # Spacer between graph and logs
+                fill_row(stdscr, graph_end, curses.color_pair(C_BORDER))
             render_logs_panel(stdscr, logs_start, logs_end, width,
                               log_events, show_more)
 
@@ -474,6 +610,13 @@ def run_tui(config: Config, interval: int = 5):
                 continue
             elif key in (ord('m'), ord('M')):
                 show_more = not show_more
+            elif key in (ord('g'), ord('G')):
+                graph_mode = cycle(GRAPH_MODES, graph_mode)
+            elif key in (ord('t'), ord('T')):
+                time_range = cycle(TIME_RANGES, time_range)
+            elif key in (ord('u'), ord('U')):
+                if config.ups_groups:
+                    ups_index = (ups_index + 1) % len(config.ups_groups)
 
     curses.wrapper(_main)
 
@@ -482,7 +625,47 @@ def run_tui(config: Config, interval: int = 5):
 # --once MODE (no curses, stdout)
 # ==============================================================================
 
-def run_once(config: Config):
+def render_graph_text(
+    config: Config,
+    group: UPSGroupConfig,
+    metric: str,
+    time_range: str,
+    *,
+    width: int = 60,
+    height: int = 6,
+    force_fallback: bool = False,
+) -> List[str]:
+    """Render an ASCII / Braille graph for a metric to stdout-friendly lines.
+
+    Always returns a non-empty list -- callers can print it directly.
+    Used by ``run_once --graph`` and re-used by the curses panel.
+    """
+    seconds = TIME_RANGE_SECONDS.get(time_range, 3600)
+    series = query_metric_series(config, group, metric, seconds)
+    info = METRIC_INFO.get(metric)
+    if info is None:
+        return [f"(unknown metric: {metric})"]
+    _, y_axis_label, y_min, y_max = info
+    title = f"{metric} -- last {time_range}  ({y_axis_label})"
+    if not series:
+        return [
+            title,
+            "(no data)",
+        ]
+    values = [v for _, v in series]
+    rows = BrailleGraph.plot(
+        values,
+        width=width,
+        height=height,
+        y_min=y_min,
+        y_max=y_max,
+        force_fallback=force_fallback,
+    )
+    return [title] + rows + [f"y-axis: {y_axis_label}"]
+
+
+def run_once(config: Config, *, graph_metric: Optional[str] = None,
+             time_range: str = "1h"):
     """Print a status snapshot to stdout and exit."""
     print(f"Eneru v{__version__}")
     group_count = len(config.ups_groups)
@@ -529,3 +712,11 @@ def run_once(config: Config):
         print("Recent Events:")
         for event in events:
             print(f"  {event}")
+
+    if graph_metric:
+        for group in config.ups_groups:
+            print()
+            print(f"Graph: {group.ups.label}")
+            for line in render_graph_text(config, group, graph_metric,
+                                          time_range):
+                print(line)
