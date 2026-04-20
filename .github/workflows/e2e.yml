@@ -1252,9 +1252,18 @@ jobs:
           upsc TestUPS@localhost:3493 input.voltage 2>&1 | head -1
           upsc TestUPS@localhost:3493 input.voltage.nominal 2>&1 | head -1
 
+          # Single-UPS configs (legacy `ups: { name: ... }` dict form) always
+          # write the stats DB to `<db_directory>/default.db` -- the
+          # sanitized-name-based path is reserved for multi-UPS configs.
+          # Capture the timestamp BEFORE the daemon starts so we can
+          # filter event-table rows to ones produced by *this* test step
+          # (default.db is shared with earlier single-UPS tests).
+          DB="/var/lib/eneru/default.db"
+          rm -f /tmp/eneru-e2e-voltage-*
+          T_START=$(date +%s)
+
           # Run for ~15s -- long enough for the autodetect window
           # (10 polls at 1 Hz) to fill and the re-snap to fire.
-          rm -f /tmp/eneru-e2e-voltage-* /var/lib/eneru/TestUPS-localhost-3493.db
           PYTHONUNBUFFERED=1 timeout 15s eneru run \
             --config ${{ env.E2E_DIR }}/config-e2e-voltage-autodetect.yaml \
             > /tmp/test32-daemon.log 2>&1 || true
@@ -1285,17 +1294,16 @@ jobs:
           # SQLite events table must record the auto-detect mismatch
           # AND mark notification_sent=0 (the event is in our
           # always-silent set; suppression keeps the audit trail).
-          DB="/var/lib/eneru/TestUPS-localhost-3493.db"
           if [ ! -f "$DB" ]; then
-            echo "FAIL: stats DB not created"
+            echo "FAIL: stats DB not created at $DB"
             ls -la /var/lib/eneru/ 2>&1 || true
             exit 1
           fi
-          rows=$(sqlite3 "$DB" "SELECT event_type, notification_sent FROM events WHERE event_type='VOLTAGE_AUTODETECT_MISMATCH';")
-          echo "  events row(s): $rows"
+          rows=$(sqlite3 "$DB" "SELECT event_type, notification_sent FROM events WHERE event_type='VOLTAGE_AUTODETECT_MISMATCH' AND ts >= $T_START;")
+          echo "  fresh events row(s): $rows"
           if [ -z "$rows" ]; then
             echo "FAIL: VOLTAGE_AUTODETECT_MISMATCH row not in events table"
-            sqlite3 "$DB" "SELECT * FROM events;" | head -20
+            sqlite3 "$DB" "SELECT ts, event_type, notification_sent FROM events ORDER BY ts DESC LIMIT 20;"
             exit 1
           fi
           if ! echo "$rows" | grep -q "VOLTAGE_AUTODETECT_MISMATCH|0"; then
