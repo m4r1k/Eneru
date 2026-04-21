@@ -290,7 +290,27 @@ sqlite3 /var/lib/eneru/<UPS>.db \
 ```
 
 If the condition persists past the dwell, the notification fires
-with a `(persisted Ns)` annotation so you can see it was held.
+with a `Persisted Ns.` annotation so you can see it was held.
+
+**Severity bypass (rc9, 5.1.0).** Non-severe voltage warnings (up
+to and including ±15% from nominal) go through the dwell as
+described above. **Severe deviations** (greater than ±15% from
+nominal) bypass the dwell entirely and notify immediately, with a
+`(severe, X.X% below/above nominal)` tag and an
+`Approaching UPS battery-switch threshold` callout when NUT
+exposes the UPS's transfer points. The reasoning:
+- Non-severe events are usually flap from neighbour appliances
+  cycling — the 30s filter is the right call. Note that with
+  narrow UPS transfer points the warning thresholds may be tighter
+  than ±10%, so the "non-severe" band can fire at less than 10%
+  deviation; the dwell still applies.
+- Severe deviations indicate real grid trouble (utility fault,
+  generator instability, site wiring issue) — the operator wants
+  to know immediately, not 30s later.
+
+The bypass threshold (15%) is hard-coded — there's deliberately no
+config knob for it, same reasoning as the warning thresholds: a
+misconfiguration there would mask real over-voltage events.
 
 ### `notifications.suppress` — mute specific event types
 

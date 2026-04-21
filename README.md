@@ -4,12 +4,12 @@
 
 **UPS monitoring and shutdown orchestration for NUT**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![NUT Compatible](https://img.shields.io/badge/NUT-compatible-green.svg)](https://networkupstools.org/)
-[![codecov](https://codecov.io/gh/m4r1k/Eneru/branch/main/graph/badge.svg)](https://codecov.io/gh/m4r1k/Eneru)
-[![Documentation](https://img.shields.io/badge/docs-Read%20The%20Docs-blue.svg)](https://eneru.readthedocs.io/)
-[![PyPI](https://img.shields.io/pypi/v/eneru.svg)](https://pypi.org/project/eneru/)
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-e8e8ed?style=for-the-badge&labelColor=090909" alt="MIT"></a>
+<a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.9+-e8e8ed?style=for-the-badge&labelColor=090909" alt="Python 3.9+"></a>
+<a href="https://networkupstools.org/"><img src="https://img.shields.io/badge/NUT-compatible-e8e8ed?style=for-the-badge&labelColor=090909" alt="NUT compatible"></a>
+<a href="https://codecov.io/gh/m4r1k/Eneru"><img src="https://img.shields.io/codecov/c/github/m4r1k/Eneru?style=for-the-badge&labelColor=090909&color=e8e8ed&label=Coverage" alt="Coverage"></a>
+<a href="https://eneru.readthedocs.io/"><img src="https://img.shields.io/badge/Docs-Read%20The%20Docs-e8e8ed?style=for-the-badge&labelColor=090909" alt="Documentation"></a>
+<a href="https://pypi.org/project/eneru/"><img src="https://img.shields.io/pypi/v/eneru?style=for-the-badge&labelColor=090909&color=e8e8ed&label=PyPI" alt="PyPI"></a>
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-diagram.svg" alt="Eneru Architecture" width="600">

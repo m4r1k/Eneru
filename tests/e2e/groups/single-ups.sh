@@ -173,11 +173,54 @@ sleep 2
 # Run briefly to detect brownout
 timeout 8 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test6.log || true
 
-# Verify brownout was detected (should log a voltage warning)
-if grep -q -i "voltage\|brownout" /tmp/test6.log; then
-  echo "PASS: Voltage event detected"
+# Verify brownout was specifically detected -- not just any voltage
+# log line. The startup `Voltage Monitoring Active` line would match
+# `voltage` and let a regression slip through; require the actual
+# BROWNOUT_DETECTED event marker.
+if grep -q "BROWNOUT_DETECTED" /tmp/test6.log; then
+  echo "PASS (6a): BROWNOUT_DETECTED event fired"
 else
-  echo "Note: Voltage event may not have been logged in short window"
+  echo "FAIL (6a): brownout scenario did not produce BROWNOUT_DETECTED log"
+  exit 1
+fi
+
+# rc9: startup log line should expose BOTH the grid-quality warning
+# thresholds AND (when NUT reports them) the UPS battery-switch points.
+# Operators rely on both lines to understand whether a notification
+# means "grid is wobbly" vs "UPS is about to switch".
+if grep -q "Grid-quality warnings:" /tmp/test6.log; then
+  echo "PASS (6b): startup log shows Grid-quality warnings line"
+else
+  echo "FAIL (6b): startup log missing 'Grid-quality warnings:' line"
+  exit 1
+fi
+
+# Conditionally hard-assert the UPS battery-switch-points line: if NUT
+# actually reports input.transfer.{low,high} for this UPS, the line MUST
+# be in the log -- otherwise rc9's startup-summary regression would
+# slip through silently. Probe upsc directly to decide.
+if upsc TestUPS@localhost:3493 2>/dev/null | grep -qE "^input\.transfer\.(low|high):"; then
+  if grep -q "UPS battery-switch points:" /tmp/test6.log; then
+    echo "PASS (6c): startup log shows UPS battery-switch points line"
+  else
+    echo "FAIL (6c): NUT reports input.transfer.{low,high} but startup"
+    echo "  log is missing the 'UPS battery-switch points:' line."
+    exit 1
+  fi
+else
+  echo "Note (6c): NUT does not expose input.transfer.{low,high} for this"
+  echo "  driver -- skipping the UPS battery-switch points assertion."
+fi
+
+# rc9: the BROWNOUT detail must include the % deviation framing.
+# Notification dispatch is gated by hysteresis (default 30s) so it
+# may not fire in our 8s window, but the immediate BROWNOUT_DETECTED
+# log row carries the same detail string -- so this MUST be present.
+if grep -q "below.*nominal" /tmp/test6.log; then
+  echo "PASS (6d): brownout log carries 'below nominal' framing"
+else
+  echo "FAIL (6d): brownout log missing rc9 '<X>% below <Y>V nominal' framing"
+  exit 1
 fi
 )
 
