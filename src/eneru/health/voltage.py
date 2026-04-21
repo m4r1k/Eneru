@@ -61,9 +61,18 @@ def _derive_warning_low(nominal: float, low_transfer) -> float:
     """Pick the warning-low threshold: the *tighter* (higher) of ±10% and (transfer + buffer).
 
     Tighter = warns earlier = better grid-quality signal. NUT's
-    transfer point is honored only when it's plausibly close to the
-    expected ±10% line (within ±25%); a wildly mis-reported transfer
-    value is ignored so we always have at least the ±10% safety net.
+    transfer point is honored only when:
+      - it's numeric,
+      - it's BELOW the nominal (a low-transfer at or above nominal is
+        nonsense -- means the UPS would switch on perfectly normal mains),
+      - and it's within ±25% of the expected ±10% line.
+
+    The "below nominal" guard catches the bug where a NUT driver
+    reports a high value (e.g., 250 on a 230V grid) in the low-transfer
+    field; without the guard we'd compute warning_low = 255V and then
+    230V mains would falsely fire BROWNOUT_DETECTED. With the guard
+    the bogus value is ignored and we fall back to ±10%.
+
     Rounded to one decimal so the log line and notification text stay
     clean (avoids 253.00000000000003 from float multiplication).
     """
@@ -71,18 +80,25 @@ def _derive_warning_low(nominal: float, low_transfer) -> float:
     candidates = [pct_band]
     if is_numeric(low_transfer):
         lt = float(low_transfer)
-        if abs(lt - pct_band) <= nominal * 0.25:
+        if lt < nominal and abs(lt - pct_band) <= nominal * 0.25:
             candidates.append(lt + TRANSFER_BUFFER_V)
     return round(max(candidates), 1)
 
 
 def _derive_warning_high(nominal: float, high_transfer) -> float:
-    """Pick the warning-high threshold: the *tighter* (lower) of ±10% and (transfer - buffer)."""
+    """Pick the warning-high threshold: the *tighter* (lower) of ±10% and (transfer - buffer).
+
+    Symmetric guard to ``_derive_warning_low``: high transfer must be
+    ABOVE nominal to be plausible. A NUT driver reporting 200 on a 230V
+    grid in the high-transfer field would otherwise compute a warning
+    of 195V, well below the 207V ±10% threshold -- forcing the warning
+    band wider rather than tighter, which defeats the whole clamp.
+    """
     pct_band = nominal * (1 + GRID_QUALITY_DEVIATION_PCT)
     candidates = [pct_band]
     if is_numeric(high_transfer):
         ht = float(high_transfer)
-        if abs(ht - pct_band) <= nominal * 0.25:
+        if ht > nominal and abs(ht - pct_band) <= nominal * 0.25:
             candidates.append(ht - TRANSFER_BUFFER_V)
     return round(min(candidates), 1)
 
@@ -337,6 +353,10 @@ class VoltageMonitorMixin:
         # transfer point. For severe events, frame as "battery may
         # engage shortly"; for mild, frame as "this is a grid quality
         # issue, not an imminent power loss".
+        # NOTE: do NOT imply EN 50160 considers the UPS switch point
+        # acceptable. EN 50160 caps at nominal × 1.1 (e.g., 253V on
+        # 230V), well below typical UPS switch points (e.g., 280V).
+        # The two are independent thresholds with different purposes.
         ups_switch = (self.state.ups_transfer_low if direction == "low"
                       else self.state.ups_transfer_high)
         if ups_switch is not None:
@@ -344,15 +364,10 @@ class VoltageMonitorMixin:
                 tail = (f"Approaching UPS battery-switch threshold "
                         f"({ups_switch}V) -- battery may engage shortly.")
             else:
-                en50160_note = (
-                    "EN 50160 considers up to that level acceptable; "
-                    if direction == "high" else ""
-                )
                 tail = (f"UPS will not switch to battery until "
-                        f"{ups_switch}V (firmware setting); "
-                        f"{en50160_note}"
-                        f"this is a grid-quality issue, not an "
-                        f"imminent power loss.")
+                        f"{ups_switch}V (firmware setting); this is "
+                        f"a grid-quality issue (outside the EN 50160 "
+                        f"±10% envelope), not an imminent power loss.")
         else:
             tail = ""
 

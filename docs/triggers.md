@@ -82,11 +82,14 @@ What Eneru does instead:
    `OVER_VOLTAGE_DETECTED` / `BROWNOUT_DETECTED` is always written
    immediately on transition. The *notification* dispatch is gated by
    severity:
-   - **Mild deviations** (10–15% from nominal) go through
-     `notifications.voltage_hysteresis_seconds` (default 30s). A
-     2-second flap to 122V on a 120V grid no longer pages you; a
-     sustained event still does — and arrives with a
-     `Persisted Ns.` annotation.
+   - **Non-severe voltage warnings** (up to and including ±15% from
+     nominal) go through `notifications.voltage_hysteresis_seconds`
+     (default 30s). A 2-second flap to 105V on a 120V grid (12.5%
+     under nominal — past the warning threshold but not severe) no
+     longer pages you; a sustained event still does, and arrives
+     with a `Persisted Ns.` annotation. With narrow UPS transfer
+     points the warning band can be tighter than ±10%, so non-severe
+     events can fire at less than 10% deviation.
    - **Severe deviations** (`>±15%` from nominal) bypass the dwell
      and notify **immediately** with a `(severe, X.X% below/above
      nominal)` tag. These signal real grid trouble — utility fault,
@@ -105,7 +108,7 @@ What Eneru does instead:
 
 ### What you'll see in the log
 
-```
+```text
 📊 Voltage Monitoring Active.
    Nominal: 230.0V (NUT=230.0).
    Grid-quality warnings: 207.0V / 253.0V (±10% nominal, EN 50160 envelope).
@@ -122,16 +125,17 @@ information, not an active power event).
 
 **Mild brownout (UPS won't switch):**
 
-```
+```text
 🔻 BROWNOUT_DETECTED: input voltage 200.0V is 13.0% below 230V nominal
    (warning threshold 207.0V). Persisted 30s.
    UPS will not switch to battery until 170.0V (firmware setting);
-   this is a grid-quality issue, not an imminent power loss.
+   this is a grid-quality issue (outside the EN 50160 ±10% envelope),
+   not an imminent power loss.
 ```
 
 **Severe brownout (UPS may switch shortly):**
 
-```
+```text
 🔻 BROWNOUT_DETECTED: (severe, 21.7% below nominal): input voltage 180.0V.
    Notifying immediately (bypassed hysteresis).
    Approaching UPS battery-switch threshold (170.0V) -- battery may

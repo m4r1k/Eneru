@@ -371,6 +371,26 @@ class TestThresholdClamp:
         assert _derive_warning_high(120, 50) == 132.0   # 50 way off |50-132|=82 > 30
 
     @pytest.mark.unit
+    def test_low_transfer_at_or_above_nominal_is_rejected(self):
+        # Regression for CodeRabbit major: NUT reporting low_transfer
+        # >= nominal is nonsense (UPS would switch on perfectly normal
+        # mains). Without the guard, low_transfer=250 on 230V passes
+        # the ±25% sanity (|250-207|=43 ≤ 57.5) and would yield
+        # warning_low=255, making 230V mains read as a brownout.
+        assert _derive_warning_low(230, 250) == 207.0   # rejected, fall back to ±10%
+        assert _derive_warning_low(230, 230) == 207.0   # equal also rejected
+        assert _derive_warning_low(230, 231) == 207.0   # just-above also rejected
+
+    @pytest.mark.unit
+    def test_high_transfer_at_or_below_nominal_is_rejected(self):
+        # Symmetric guard: high_transfer <= nominal is nonsense.
+        # 200 on 230V would otherwise yield warning_high = 195V,
+        # below the 207V low warning -- impossible band.
+        assert _derive_warning_high(230, 200) == 253.0   # rejected
+        assert _derive_warning_high(230, 230) == 253.0   # equal also rejected
+        assert _derive_warning_high(230, 229) == 253.0   # just-below also rejected
+
+    @pytest.mark.unit
     def test_state_records_ups_transfer_points(self):
         h = _TestHost(ups_vars={
             "input.voltage.nominal": "230",
@@ -564,7 +584,14 @@ class TestNotificationText:
         assert "13.0% below" in body
 
     @pytest.mark.unit
-    def test_mild_overvoltage_includes_en50160_hint(self):
+    def test_mild_overvoltage_explains_en50160_envelope_correctly(self):
+        # Regression for CodeRabbit major: the previous "EN 50160
+        # considers up to that level acceptable" wording was wrong --
+        # it implied EN 50160 accepts the UPS switch threshold (e.g.,
+        # 280V), but EN 50160 actually caps at nominal × 1.1 (253V on
+        # 230V). The corrected message frames the warning as outside
+        # the EN 50160 ±10% envelope without putting words into the
+        # standard's mouth about higher voltages.
         h = _TestHost(ups_vars={
             "input.voltage.nominal": "230",
             "input.transfer.high": "280",
@@ -572,5 +599,8 @@ class TestNotificationText:
         h._initialize_voltage_thresholds()
         h._check_voltage_issues("OL", "256")  # 11.3% above, mild
         body, _ = h.notifications[0]
-        assert "EN 50160 considers up to that level acceptable" in body
+        # Corrected wording: warning is OUTSIDE the EN 50160 envelope.
+        assert "outside the EN 50160" in body
         assert "UPS will not switch to battery until 280.0V" in body
+        # The buggy wording must NOT appear.
+        assert "EN 50160 considers up to that level acceptable" not in body

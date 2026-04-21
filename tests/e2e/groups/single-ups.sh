@@ -173,11 +173,15 @@ sleep 2
 # Run briefly to detect brownout
 timeout 8 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test6.log || true
 
-# Verify brownout was detected (should log a voltage warning)
-if grep -q -i "voltage\|brownout" /tmp/test6.log; then
-  echo "PASS (6a): Voltage event detected"
+# Verify brownout was specifically detected -- not just any voltage
+# log line. The startup `Voltage Monitoring Active` line would match
+# `voltage` and let a regression slip through; require the actual
+# BROWNOUT_DETECTED event marker.
+if grep -q "BROWNOUT_DETECTED" /tmp/test6.log; then
+  echo "PASS (6a): BROWNOUT_DETECTED event fired"
 else
-  echo "Note: Voltage event may not have been logged in short window"
+  echo "FAIL (6a): brownout scenario did not produce BROWNOUT_DETECTED log"
+  exit 1
 fi
 
 # rc9: startup log line should expose BOTH the grid-quality warning
@@ -204,11 +208,12 @@ fi
 # rc9: the BROWNOUT detail must include the % deviation framing.
 # Notification dispatch is gated by hysteresis (default 30s) so it
 # may not fire in our 8s window, but the immediate BROWNOUT_DETECTED
-# log row carries the same detail string.
+# log row carries the same detail string -- so this MUST be present.
 if grep -q "below.*nominal" /tmp/test6.log; then
   echo "PASS (6d): brownout log carries 'below nominal' framing"
 else
-  echo "Note (6d): 'below nominal' framing absent in test window"
+  echo "FAIL (6d): brownout log missing rc9 '<X>% below <Y>V nominal' framing"
+  exit 1
 fi
 )
 
