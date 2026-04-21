@@ -92,6 +92,9 @@ class BrailleGraph:
         height: int,
         y_min: Optional[float] = None,
         y_max: Optional[float] = None,
+        x_values: Optional[Sequence[float]] = None,
+        x_min: Optional[float] = None,
+        x_max: Optional[float] = None,
         force_fallback: bool = False,
     ) -> List[str]:
         """Return a ``height``-row × ``width``-cell rendering of ``data``.
@@ -101,6 +104,14 @@ class BrailleGraph:
             width: number of terminal cells (each Braille cell holds 2 columns).
             height: number of terminal rows (each Braille cell holds 4 rows).
             y_min, y_max: explicit Y bounds; auto-scaled from ``data`` when omitted.
+            x_values: optional X coordinates (e.g. timestamps) the same length as
+                ``data``. When provided alongside ``x_min``/``x_max``, samples
+                are positioned at their actual X location within the requested
+                window rather than spread evenly across the full width. This
+                prevents a sparse 12h dataset from looking like 30d of data
+                when the operator selects a long timescale.
+            x_min, x_max: bounds of the X window. Required when ``x_values``
+                is given; otherwise ignored.
             force_fallback: skip Braille and use block characters even when
                 ``supported()`` would return True.
 
@@ -129,9 +140,18 @@ class BrailleGraph:
         # Allocate the dot grid as bool[col][row] indexed by absolute pixel.
         grid = [[False] * grid_h for _ in range(grid_w)]
 
-        # Project each input sample to a horizontal pixel column. We
-        # *don't* interpolate -- the goal is fast, accurate plotting of
-        # the latest N samples.
+        # Decide between time-based X positioning (samples placed at their
+        # real timestamp within [x_min, x_max]) and the legacy
+        # spread-evenly mode (used when callers only have values).
+        use_x_window = (
+            x_values is not None
+            and x_min is not None
+            and x_max is not None
+            and x_max > x_min
+            and len(x_values) == len(data)
+        )
+        x_span = (x_max - x_min) if use_x_window else 0.0
+
         n = len(data)
         for i, value in enumerate(data):
             if value is None:
@@ -140,8 +160,18 @@ class BrailleGraph:
                 v = float(value)
             except (TypeError, ValueError):
                 continue
-            # Horizontal: spread samples across the full grid width.
-            if n == 1:
+            # Horizontal: either project onto the requested time window
+            # (so a 12h dataset in a 30d view stays in its left ~1.6%
+            # of the chart) or spread evenly across the grid width.
+            if use_x_window:
+                try:
+                    xv = float(x_values[i])
+                except (TypeError, ValueError):
+                    continue
+                if xv < x_min or xv > x_max:
+                    continue
+                gx = int(round((xv - x_min) / x_span * (grid_w - 1)))
+            elif n == 1:
                 gx = grid_w - 1
             else:
                 gx = int(round(i * (grid_w - 1) / (n - 1)))

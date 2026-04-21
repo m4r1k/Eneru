@@ -240,3 +240,97 @@ class TestRenderToWindow:
             BoomWin(), 0, 0, height=2, width=4,
             data=[1, 2, 3], title="t",
         )
+
+
+# ===========================================================================
+# Time-windowed X positioning (item 5: no phantom dots on long timescales)
+# ===========================================================================
+
+class TestPlotXWindow:
+    """When x_values + x_min/x_max are provided, samples must land at their
+    actual time position within the requested window -- not get spread evenly
+    across the full chart width."""
+
+    @pytest.mark.unit
+    def test_sparse_data_stays_in_left_portion(self):
+        """10 samples spanning t=0..600 inside a t=0..6000 window should
+        only paint dots in the leftmost ~10% of a 100-cell row.
+
+        Regression: the previous implementation projected sample index
+        onto chart width via ``i * (grid_w - 1) / (n - 1)``, which made
+        12h of data look like a full 30d chart.
+        """
+        n = 10
+        x_values = [i * 60 for i in range(n)]  # 0, 60, 120, ..., 540 seconds
+        data = list(range(n))
+        rows = BrailleGraph.plot(
+            data,
+            width=100, height=2,
+            y_min=0, y_max=n,
+            x_values=x_values,
+            x_min=0, x_max=6000,   # 100x wider than the actual data span
+        )
+        # The first row's leftmost 10 cells should contain at least one
+        # non-blank Braille char; the right 80% must be entirely blank.
+        for row in rows:
+            assert len(row) == 100
+            right_portion = row[20:]   # cells 20..99 (right 80%)
+            assert all(ch == "⠀" for ch in right_portion), (
+                "right portion of chart should be empty when data is "
+                "confined to the left of the window"
+            )
+
+    @pytest.mark.unit
+    def test_full_window_data_uses_full_width(self):
+        """Sanity: when data does span the full window, dots reach both edges."""
+        n = 10
+        x_values = [i * 100 for i in range(n)]   # 0, 100, ..., 900
+        data = [50 for _ in range(n)]
+        rows = BrailleGraph.plot(
+            data,
+            width=20, height=2,
+            y_min=0, y_max=100,
+            x_values=x_values,
+            x_min=0, x_max=900,   # data spans the whole window
+        )
+        flat = "".join(rows)
+        # At least one non-blank cell in each half of the row.
+        left_half = "".join(row[:10] for row in rows)
+        right_half = "".join(row[10:] for row in rows)
+        assert any(ch != "⠀" for ch in left_half)
+        assert any(ch != "⠀" for ch in right_half)
+
+    @pytest.mark.unit
+    def test_x_window_skips_out_of_range_samples(self):
+        """Samples outside [x_min, x_max] must be silently dropped, not clipped
+        to the nearest edge (which would create a misleading dot pile-up)."""
+        rows = BrailleGraph.plot(
+            [10.0, 20.0, 30.0],
+            width=20, height=2,
+            y_min=0, y_max=50,
+            x_values=[100, 200, 5000],   # third sample is outside [0, 1000]
+            x_min=0, x_max=1000,
+        )
+        # If the third sample were clipped to the right edge, the rightmost
+        # cell would have a dot. Verify that's NOT the case.
+        for row in rows:
+            assert row[-1] == "⠀", (
+                "out-of-range sample must be dropped, not clipped to edge"
+            )
+
+    @pytest.mark.unit
+    def test_legacy_mode_still_spreads_evenly(self):
+        """Backward compat: callers that don't pass x_values keep the old
+        behavior (spread samples evenly). --once mode relies on this."""
+        rows = BrailleGraph.plot(
+            [1.0, 2.0, 3.0, 4.0, 5.0],
+            width=20, height=2,
+            y_min=0, y_max=10,
+        )
+        flat = "".join(rows)
+        # Without x_values, 5 samples spread across 20 cells should
+        # touch both the left and right portions of the row.
+        left = "".join(row[:5] for row in rows)
+        right = "".join(row[15:] for row in rows)
+        assert any(ch != "⠀" for ch in left)
+        assert any(ch != "⠀" for ch in right)

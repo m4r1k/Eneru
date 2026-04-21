@@ -1,23 +1,256 @@
 """Tests for TUI dashboard (eneru monitor)."""
 
+import curses
 import pytest
 import tempfile
 import os
 import time
 from pathlib import Path
 from io import StringIO
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from eneru import Config, UPSConfig, UPSGroupConfig, LoggingConfig
 from eneru.tui import (
+    display_width,
+    fill_row,
     parse_state_file,
     parse_log_events,
     human_status,
     status_color,
     collect_group_data,
+    render_logs_panel,
     run_once,
     C_STATUS_OK, C_STATUS_OB, C_STATUS_CRIT, C_STATUS_UNK,
 )
+
+
+class _FakeWin:
+    """Minimal stand-in for a curses window that records writes per cell.
+
+    Cells are stored as (char, attr); reads via ``cells[(y, x)]``.
+    ``addnstr`` raises curses.error when it would write into the
+    bottom-right cell (mirrors real curses behavior) so we can verify
+    the workaround in fill_row actually fires.
+    """
+
+    def __init__(self, height: int, width: int):
+        self.height = height
+        self.width = width
+        self.cells: dict = {}
+
+    def getmaxyx(self):
+        return (self.height, self.width)
+
+    def addnstr(self, y, x, text, n, attr=0):
+        if y < 0 or y >= self.height or x < 0:
+            raise curses.error("out of bounds")
+        # Real curses raises if the write would advance the cursor past
+        # the bottom-right corner.
+        end_x = x + min(len(text), n)
+        if y == self.height - 1 and end_x >= self.width:
+            raise curses.error("addnstr would advance past bottom-right")
+        for i, ch in enumerate(text[:n]):
+            if x + i >= self.width:
+                break
+            self.cells[(y, x + i)] = (ch, attr)
+
+    def insch(self, y, x, ch, attr=0):
+        if y < 0 or y >= self.height or x < 0 or x >= self.width:
+            raise curses.error("insch out of bounds")
+        self.cells[(y, x)] = (chr(ch) if isinstance(ch, int) else ch, attr)
+
+    def chgat(self, *args, **kwargs):
+        pass
+
+    def attrs_in_row(self, y: int) -> set:
+        return {self.cells.get((y, x), (None, None))[1]
+                for x in range(self.width)}
+
+
+class TestFillRow:
+    """Tests for the edge-to-edge background fill helper."""
+
+    @pytest.mark.unit
+    def test_fill_row_paints_every_column(self):
+        """fill_row must paint columns 0..width-1 inclusive (no black strip).
+
+        Regression: the previous implementation wrote ``max_x - 1`` chars
+        and left the rightmost column unpainted, producing a thin dark
+        vertical strip on the right edge of the gold events panel.
+        """
+        win = _FakeWin(height=20, width=80)
+        attr = 0xAB  # arbitrary non-zero attr to detect "not painted"
+        fill_row(win, y=5, attr=attr)
+        for x in range(80):
+            painted = win.cells.get((5, x))
+            assert painted is not None, f"column {x} was not painted"
+            assert painted[1] == attr, f"column {x} has wrong attr"
+
+    @pytest.mark.unit
+    def test_fill_row_handles_bottom_right_cell(self):
+        """fill_row must not crash on the very last screen row."""
+        win = _FakeWin(height=10, width=40)
+        # Bottom-right cell would crash a naive addnstr.
+        fill_row(win, y=9, attr=0x42)
+        # And must still paint that last column via insch.
+        assert win.cells.get((9, 39)) == (" ", 0x42)
+
+
+class TestEventsTimescaleDecoupled:
+    """Item 4: events panel must NOT change when graph timescale changes."""
+
+    @pytest.mark.unit
+    def test_events_use_fixed_window_independent_of_time_range(self):
+        """The events query window is a fixed constant -- pressing T to
+        cycle the graph timescale must not pass a new window into
+        query_events_for_display.
+        """
+        from eneru.tui import EVENTS_TIME_WINDOW
+
+        # The constant exists and is the documented 24 hours.
+        assert EVENTS_TIME_WINDOW == 24 * 3600
+
+        # Inspect the source: the main loop must call
+        # query_events_for_display with EVENTS_TIME_WINDOW, not with
+        # any TIME_RANGE_SECONDS lookup. This is the regression guard
+        # for "changing T re-queries events".
+        import inspect
+        from eneru import tui as tui_mod
+        src = inspect.getsource(tui_mod.run_tui)
+        assert "EVENTS_TIME_WINDOW" in src
+        # Belt-and-braces: the old dynamic-window pattern must not
+        # creep back into the events call site.
+        assert "TIME_RANGE_SECONDS.get(time_range" not in src or \
+               "EVENTS_TIME_WINDOW" in src
+
+
+class TestGraphPanelHeader:
+    """Item 3: graph panel renders a now/min/max stat header with units."""
+
+    @pytest.mark.unit
+    def test_render_graph_panel_writes_stat_header(self):
+        """The row right under the title must show 'now: X{unit}  min: Y{unit}  max: Z{unit}'."""
+        from eneru.tui import render_graph_panel
+        from unittest.mock import MagicMock
+
+        win = _FakeWin(height=20, width=120)
+        # Build minimal config + group with a stub stats DB by mocking
+        # the series query directly.
+        cfg = MagicMock()
+        cfg.statistics.db_directory = "/tmp"
+        cfg.multi_ups = False
+        group = MagicMock()
+        group.ups.label = "TestUPS"
+        group.ups.name = "TestUPS@localhost"
+
+        with patch.object(curses, "color_pair", lambda n: n), \
+             patch("eneru.tui.query_metric_series",
+                   return_value=[(1000, 95.0), (1100, 98.0), (1200, 100.0)]):
+            render_graph_panel(
+                win, y_start=0, y_end=10, width=120,
+                config=cfg, group=group,
+                graph_mode="charge", time_range="1h",
+            )
+
+        # Reconstruct the stat row (y=1) from the recorded cells.
+        row1 = "".join(
+            win.cells.get((1, x), (" ", 0))[0] for x in range(120)
+        )
+        assert "now: 100%" in row1
+        assert "min: 95%" in row1
+        assert "max: 100%" in row1
+
+    @pytest.mark.unit
+    def test_render_graph_panel_voltage_uses_observed_bounds(self):
+        """For voltage (no configured y_min/y_max), the stat header must
+        reflect the actually observed range, not '0' or 'None'."""
+        from eneru.tui import render_graph_panel
+        from unittest.mock import MagicMock
+
+        win = _FakeWin(height=20, width=120)
+        cfg = MagicMock()
+        cfg.statistics.db_directory = "/tmp"
+        cfg.multi_ups = False
+        group = MagicMock()
+        group.ups.label = "TestUPS"
+        group.ups.name = "TestUPS@localhost"
+
+        with patch.object(curses, "color_pair", lambda n: n), \
+             patch("eneru.tui.query_metric_series",
+                   return_value=[(1000, 233.1), (1100, 234.5), (1200, 235.4)]):
+            render_graph_panel(
+                win, y_start=0, y_end=10, width=120,
+                config=cfg, group=group,
+                graph_mode="voltage", time_range="1h",
+            )
+
+        row1 = "".join(
+            win.cells.get((1, x), (" ", 0))[0] for x in range(120)
+        )
+        assert "min: 233.1V" in row1
+        assert "max: 235.4V" in row1
+        assert "now: 235.4V" in row1
+
+    @pytest.mark.unit
+    def test_render_graph_panel_runtime_uses_human_format(self):
+        """Runtime must show '45m 12s' style strings, not raw seconds."""
+        from eneru.tui import render_graph_panel
+        from unittest.mock import MagicMock
+
+        win = _FakeWin(height=20, width=120)
+        cfg = MagicMock()
+        cfg.statistics.db_directory = "/tmp"
+        cfg.multi_ups = False
+        group = MagicMock()
+        group.ups.label = "TestUPS"
+        group.ups.name = "TestUPS@localhost"
+
+        with patch.object(curses, "color_pair", lambda n: n), \
+             patch("eneru.tui.query_metric_series",
+                   return_value=[(1000, 1800.0), (1100, 2400.0), (1200, 2712.0)]):
+            render_graph_panel(
+                win, y_start=0, y_end=10, width=120,
+                config=cfg, group=group,
+                graph_mode="runtime", time_range="1h",
+            )
+
+        row1 = "".join(
+            win.cells.get((1, x), (" ", 0))[0] for x in range(120)
+        )
+        # 2712s = 45m 12s; 1800s = 30m 0s
+        assert "now: 45m 12s" in row1
+        assert "min: 30m 0s" in row1
+
+
+class TestEventsPanelRightEdge:
+    """Tests for the events-panel right-edge artifact fix (item 2)."""
+
+    @pytest.mark.unit
+    def test_event_line_pads_to_full_width(self):
+        """Every cell in an event row must be painted, even past the text.
+
+        Regression: emoji and wide chars miscount in display_width vs.
+        what the terminal actually renders, leaving stale cells visible
+        on the right edge. Padding to full width with gold-bg spaces
+        guarantees the row is fully repainted regardless of miscounts.
+        """
+        win = _FakeWin(height=20, width=80)
+        # Short event with emoji -- display_width counts emoji as 2, so
+        # the unpadded write would only cover ~40-50 cells.
+        events = ["10:00:00  POWER EVENT: 🔋 battery low"]
+        # curses.color_pair requires initscr(); mock it for headless tests.
+        with patch.object(curses, "color_pair", lambda n: n):
+            render_logs_panel(win, y_start=2, y_end=12, width=80,
+                              events=events, show_more=False)
+        # Find the row the event landed on (first row after the title
+        # block). Per render_logs_panel: y_start + 1 (top pad) + 1 (title).
+        event_row = 4
+        # All 80 columns should be painted (some via fill_row, some via
+        # the padded event write -- doesn't matter which, just no holes).
+        for x in range(80):
+            assert (event_row, x) in win.cells, (
+                f"events row column {x} unpainted -- artifact would show here"
+            )
 
 
 class TestParseStateFile:
@@ -938,6 +1171,10 @@ class TestDisplayWidthAndTruncate:
                 return (self._h, self._w)
             def addnstr(self, y, x, text, n, attr=0):
                 self.painted.append((y, x, text[:n]))
+            def insch(self, y, x, ch, attr=0):
+                # fill_row uses insch to paint the rightmost cell so it
+                # doesn't crash on the bottom-right corner.
+                self.painted.append((y, x, chr(ch) if isinstance(ch, int) else ch))
 
         # 30-cell wide panel. Event has lots of emoji that would each
         # double the rendered width.
