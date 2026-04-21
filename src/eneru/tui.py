@@ -31,12 +31,40 @@ TIME_RANGE_SECONDS = {
     "30d": 30 * 86400,
 }
 
-# Map graph modes to (metric column, y-axis label, y_min, y_max).
+# The events panel is intentionally decoupled from the graph timescale:
+# pressing T to change the graph window must not shrink/grow the events
+# list. 24h is the operational sweet spot -- short enough that the list
+# stays readable, long enough to cover an overnight power event.
+EVENTS_TIME_WINDOW = 24 * 3600
+
+# Map graph modes to (column, unit_suffix, y_min, y_max, value_formatter).
+# value_formatter takes a float and returns the user-facing display
+# string for axis labels and the now/min/max header. None bounds
+# auto-scale from the observed data.
+def _fmt_int(v: float) -> str:
+    return f"{int(round(v))}"
+
+def _fmt_volts(v: float) -> str:
+    return f"{v:.1f}"
+
+def _fmt_runtime_seconds(v: float) -> str:
+    # Reuses the same logic as format_runtime() but accepts a float
+    # directly (format_runtime expects a string from the state file).
+    try:
+        rt = int(round(float(v)))
+    except (TypeError, ValueError):
+        return "?"
+    if rt >= 3600:
+        return f"{rt // 3600}h {(rt % 3600) // 60}m"
+    if rt >= 60:
+        return f"{rt // 60}m {rt % 60}s"
+    return f"{rt}s"
+
 METRIC_INFO = {
-    "charge":  ("battery_charge",  "0-100%",   0.0,   100.0),
-    "load":    ("ups_load",        "0-100%",   0.0,   100.0),
-    "voltage": ("input_voltage",   "V",        None,  None),
-    "runtime": ("battery_runtime", "seconds",  0.0,   None),
+    "charge":  ("battery_charge",  "%",  0.0,   100.0,  _fmt_int),
+    "load":    ("ups_load",        "%",  0.0,   100.0,  _fmt_int),
+    "voltage": ("input_voltage",   "V",  None,  None,   _fmt_volts),
+    "runtime": ("battery_runtime", "",   0.0,   None,   _fmt_runtime_seconds),
 }
 
 
@@ -536,12 +564,22 @@ def safe_addstr(win, y: int, x: int, text: str, attr: int = 0):
 
 
 def fill_row(win, y: int, attr: int):
-    """Fill an entire row with a background color, edge to edge."""
+    """Fill an entire row with a background color, edge to edge.
+
+    Curses raises when writing the bottom-right cell (cursor would advance
+    past the screen), so we paint the first ``max_x - 1`` cells with
+    ``addnstr`` and the rightmost cell with ``insch`` -- the standard
+    workaround that avoids the unpainted vertical strip on the right edge.
+    """
     max_y, max_x = win.getmaxyx()
-    if y < 0 or y >= max_y:
+    if y < 0 or y >= max_y or max_x <= 0:
         return
     try:
         win.addnstr(y, 0, " " * (max_x - 1), max_x - 1, attr)
+    except curses.error:
+        pass
+    try:
+        win.insch(y, max_x - 1, ord(" "), attr)
     except curses.error:
         pass
 
@@ -682,7 +720,13 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
             if display_width(display) > max_cells:
                 # Reserve 2 cells for the trailing ellipsis.
                 display = truncate_to_width(display, max_cells - 2) + ".."
-            safe_addstr(win, y, 0, display, gold_attr)
+            # Pad to full row width with gold-bg spaces so the line
+            # overwrites every cell of the row, not just where the text
+            # ends. Mobile SSH clients often render emoji at a different
+            # cell width than display_width predicts; without this pad,
+            # any miscount leaves cells with stale or unpainted bg.
+            pad_cells = max(0, width - display_width(display))
+            safe_addstr(win, y, 0, display + (" " * pad_cells), gold_attr)
             y += 1
 
     # Key hints at the bottom of the gold panel.
@@ -726,7 +770,14 @@ def cycle(values: tuple, current: str) -> str:
 def render_graph_panel(stdscr, y_start: int, y_end: int, width: int,
                        config: Config, group: UPSGroupConfig,
                        graph_mode: str, time_range: str):
-    """Render the graph panel (bottom of the gray section) when active."""
+    """Render the graph panel (bottom of the gray section) when active.
+
+    Layout per panel (top to bottom):
+      0: title       --  ``Graph: charge (1h)  --  TestUPS``
+      1: stat header --  ``now: 100%   min: 98%   max: 100%``
+      2..N-1: graph rows with a left ``Y-axis label`` gutter
+      N: footer     --  ``data: 12h of 30d`` (only when sparse)
+    """
     gray_attr = curses.color_pair(C_GRAY_BG)
     gray_bold = gray_attr | curses.A_BOLD
     panel_h = y_end - y_start
@@ -734,27 +785,94 @@ def render_graph_panel(stdscr, y_start: int, y_end: int, width: int,
         return
     for row in range(y_start, y_end):
         fill_row(stdscr, row, gray_attr)
+
     title = f"   Graph: {graph_mode} ({time_range})  --  {group.ups.label}"
     safe_addstr(stdscr, y_start, 0, title, gray_bold)
-    # Reserve 1 row for title; use the rest for the graph itself.
-    g_h = max(2, panel_h - 1)
-    g_w = max(10, width - 6)
+
     info = METRIC_INFO.get(graph_mode)
     if info is None:
         safe_addstr(stdscr, y_start + 1, 3, "(unknown metric)", gray_attr)
         return
+    column, unit, cfg_y_min, cfg_y_max, fmt = info
+
     seconds = TIME_RANGE_SECONDS.get(time_range, 3600)
     series = query_metric_series(config, group, graph_mode, seconds)
     if not series:
         safe_addstr(stdscr, y_start + 1, 3, "(no data yet)", gray_attr)
         return
+
     values = [v for _, v in series]
+    timestamps = [ts for ts, _ in series]
+    end_ts = int(time.time())
+    start_ts = end_ts - seconds
+
+    # Y-axis bounds: prefer the metric's configured range (charge/load
+    # are 0-100); fall back to observed range for unbounded metrics
+    # (voltage/runtime). Without this, voltage with a 0.5V swing
+    # autoscales to that swing AND we still want the display to read
+    # the actual range, not "0-235".
+    obs_min = min(values)
+    obs_max = max(values)
+    y_min = cfg_y_min if cfg_y_min is not None else obs_min
+    y_max = cfg_y_max if cfg_y_max is not None else obs_max
+    if y_max <= y_min:  # single sample or flat line
+        pad = max(abs(y_min) * 0.05, 1.0)
+        y_min -= pad
+        y_max += pad
+
+    # Stat header (row 1): now / min / max in human units.
+    current = values[-1]
+    stat_line = (f"   now: {fmt(current)}{unit}"
+                 f"   min: {fmt(obs_min)}{unit}"
+                 f"   max: {fmt(obs_max)}{unit}")
+    safe_addstr(stdscr, y_start + 1, 0, stat_line, gray_attr)
+
+    # Reserve rows for title (1), stat header (1), and an optional
+    # footer when data is sparse. Graph itself takes the remainder.
+    actual_span = max(0, (timestamps[-1] - timestamps[0]) if timestamps else 0)
+    sparse = actual_span < int(seconds * 0.5) and actual_span > 0
+    footer_rows = 1 if sparse else 0
+    graph_top = y_start + 2
+    graph_bot = y_end - footer_rows
+    g_h = max(2, graph_bot - graph_top)
+
+    # Y-axis label gutter. Width is computed from the actual labels we'd
+    # produce so longer values like "235.4V" or "1h 30m" don't overflow
+    # into the graph area. Each label is "<value><unit> <tick>" -- e.g.
+    # "100% ┤" (6 cells) or "235.4V ┤" (8 cells). We add 1 cell of
+    # left-margin so the labels aren't flush against column 0.
+    tick = "┤" if BrailleGraph.supported() else "|"
+    sample_labels = [f"{fmt(v)}{unit}" for v in (y_min, (y_min + y_max) / 2.0, y_max)]
+    label_w = max(len(s) for s in sample_labels) + 3   # value + " " + tick + 1 margin
+    g_w = max(10, width - label_w - 3)
+
     rows = BrailleGraph.plot(
         values, width=g_w, height=g_h,
-        y_min=info[2], y_max=info[3],
+        y_min=y_min, y_max=y_max,
+        x_values=timestamps, x_min=start_ts, x_max=end_ts,
     )
+    # Y-axis labels on top, middle, bottom rows of the graph. Labels
+    # are right-aligned within the gutter so the graph itself starts at
+    # a consistent column regardless of label length.
+    def axis_label(value: float) -> str:
+        return f"{fmt(value)}{unit} {tick}".rjust(label_w)
+
+    if g_h >= 1:
+        safe_addstr(stdscr, graph_top,             0, axis_label(y_max), gray_attr)
+    if g_h >= 3:
+        safe_addstr(stdscr, graph_top + g_h // 2,  0,
+                    axis_label((y_min + y_max) / 2.0), gray_attr)
+    if g_h >= 2:
+        safe_addstr(stdscr, graph_top + g_h - 1,   0, axis_label(y_min), gray_attr)
+
     for i, line in enumerate(rows):
-        safe_addstr(stdscr, y_start + 1 + i, 3, line, gray_attr)
+        safe_addstr(stdscr, graph_top + i, label_w, line, gray_attr)
+
+    if sparse:
+        from eneru.utils import format_seconds
+        footer = (f"   data: {format_seconds(actual_span)} "
+                  f"of {format_seconds(seconds)} requested")
+        safe_addstr(stdscr, y_end - 1, 0, footer, gray_attr)
 
 
 def run_tui(config: Config, interval: int = 5):
@@ -825,8 +943,7 @@ def run_tui(config: Config, interval: int = 5):
             for g in config.ups_groups:
                 groups_data.append(collect_group_data(g, config))
                 update_live_buffer(g, config)
-            window = TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
-            log_events = query_events_for_display(config, window,
+            log_events = query_events_for_display(config, EVENTS_TIME_WINDOW,
                                                   max_events=50 if show_more else max_log_events)
             if not log_events:
                 log_events = parse_log_events(
@@ -904,7 +1021,14 @@ def render_graph_text(
     info = METRIC_INFO.get(metric)
     if info is None:
         return [f"(unknown metric: {metric})"]
-    _, y_axis_label, y_min, y_max = info
+    _, unit, y_min, y_max, _ = info
+    # Reconstruct the axis label users got pre-v5.1.0 ("0-100%" /
+    # "seconds" / "V") so existing --once output stays stable; the live
+    # TUI uses richer labels (see render_graph_panel).
+    if y_min is not None and y_max is not None:
+        y_axis_label = f"{int(y_min)}-{int(y_max)}{unit}"
+    else:
+        y_axis_label = unit or "value"
     title = f"{metric} -- last {time_range}  ({y_axis_label})"
     if not series:
         return [

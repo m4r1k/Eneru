@@ -63,6 +63,12 @@ Changelog = "https://eneru.readthedocs.io/latest/changelog/"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# Ship the bash/zsh/fish completion scripts inside the installed wheel
+# so `eneru completion <shell>` can read them via importlib.resources
+# regardless of install method (pip vs deb/rpm).
+"eneru.completion" = ["*.bash", "*.zsh", "*.fish"]
+
 [tool.setuptools.dynamic]
 version = {attr = "eneru.__version__"}
 

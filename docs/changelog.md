@@ -9,11 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> Status: v5.1.0-rc7 is cut for hardware testing. Once that's done the
-> entry below is promoted from `[Unreleased]` to `[5.1.0] - YYYY-MM-DD`
-> with no other changes.
+> Status: v5.1.0-rc8 is the final candidate before v5.1.0 GA. The rc8
+> changes (`tui` CLI alias, TUI right-edge fix, graph axes/units,
+> events-list decoupling, time-windowed graph X positioning, parallel
+> E2E matrix, shell completion) are the last polish items from
+> hardware testing on rc7. Once GA the entry below is promoted from
+> `[Unreleased]` to `[5.1.0] - YYYY-MM-DD` with no other changes.
 
 ### Added
+- **rc8 — `eneru tui` CLI alias.** First-class subcommand, identical options + dispatch to `eneru monitor`. Both spellings show in top-level help; the same `--config / --once / --interval / --graph / --time / --events-only` options work for either.
+- **rc8 — Graph Y-axis labels, units, and now/min/max header in the live TUI.** Each graph panel prints a stat row under the title (`now: 100%   min: 95%   max: 100%`) and labels the top/middle/bottom rows of the chart with values + units (`100% ┤`, `50% ┤`, `0% ┤`). Voltage and runtime graphs use observed bounds (e.g. `235.4V` / `233.1V`); runtime values render as `45m 12s` instead of raw seconds.
+- **rc8 — Time-windowed X positioning in `BrailleGraph.plot`.** New optional `x_values` / `x_min` / `x_max` arguments place each sample at its actual time within the requested window instead of spreading evenly across the chart. Without this, a 12h dataset in a 30d view looked like 30 days of data; sparse data now stays in the leftmost slice and a `data: 12h of 30d requested` footer surfaces the gap. `--once` mode keeps the legacy behaviour by not passing the new arguments.
+- **rc8 — Self-contained shell completion for bash/zsh/fish.** `eneru completion {bash,zsh,fish}` prints a stand-alone completion script to stdout (the kubectl/helm pattern). The bash script uses only bash builtins (`compgen`, `complete`) — *no* dependency on the `bash-completion` package, so it works on minimal systems. nfpm.yaml drops the scripts at the canonical FHS paths (`/usr/share/bash-completion/completions/eneru`, `/usr/share/zsh/site-functions/_eneru`, `/usr/share/fish/vendor_completions.d/eneru.fish`) so they auto-load *if* the user has the corresponding completion framework installed. PyPI users source it manually: `source <(eneru completion bash)`.
 - **Multi-phase shutdown ordering (`shutdown_order`):** Define shutdown phases for remote servers (#4)
     - Servers with the same `shutdown_order` run in parallel; different orders run sequentially (ascending)
     - Enables dependency chains: e.g. compute (phase 1) → storage (phase 2) → network (phase 3)
@@ -53,6 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **rc7 — Stats schema bumped 2 → 3.** Added `events.notification_sent INTEGER DEFAULT 1`. Auto-migrates v2 DBs via idempotent `ALTER TABLE` on first start; existing rows default to `1` (the v2 daemon always notified). Pattern documented as the second exercise of the schema-evolution mechanic introduced in rc6.
 
 ### Changed
+- **rc8 — TUI events panel is decoupled from the graph timescale.** Pressing `<T>` to cycle the graph window (1h → 6h → 24h → 7d → 30d) no longer re-queries the events list. The events panel uses a fixed `EVENTS_TIME_WINDOW = 24 * 3600` regardless of `<T>`, and `<M>` keeps toggling between 8 and 50 max rows. The two controls are now orthogonal — the graph is the variable view, the events list is the stable recent-history view.
+- **rc8 — E2E workflow runs as a 4-way parallel matrix.** The single `e2e-test` job is replaced by four matrix jobs visible in the GitHub Checks tab as `E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, and `E2E Redundancy and Stats`. Setup steps are a composite action at `.github/actions/e2e-setup/`; test bodies live in `tests/e2e/groups/{group}.sh`. Total wall-clock is bounded by the slowest group instead of the sum of all 32 tests. **Operator action (one-time, manual):** branch protection on `main` previously required `e2e-test`. Replace it with the four new checks listed above. GitHub allows adding checks before they exist (status: *expected*), so do this immediately before/after the merge so PRs aren't blocked on a check that no longer runs.
 - **`shutdown_order` and `parallel` are now mutually exclusive.** Setting both on the same server is a hard validation error (previously a warning). Pick one model: `shutdown_order` for multi-phase ordering, or `parallel` for the legacy two-group behaviour.
 - **Parallel-phase join is now deadline-based.** Previously each thread was joined with the full per-phase timeout, so a phase with N stuck servers could wait up to `N × max_timeout` before continuing. The total wait is now bounded by a single deadline, restoring the "dead hosts don't block" guarantee from v4.6.
 - **`MonitorState` exposes a lock-protected snapshot for cross-thread reads.** Adds a non-reentrant `_lock` (excluded from `__repr__` / `__eq__`), nine `latest_*` / `trigger_*` fields, and a `snapshot() -> HealthSnapshot` helper. The poll cycle writes all snapshot fields under one lock acquisition at the bottom of each successful pass. No behaviour change for legacy single-UPS deployments.
@@ -60,6 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TUI `safe_addstr` and `render_logs_panel` clip by display-cell width**, not character count. Emoji and CJK glyphs no longer spill past the gold panel's right edge.
 
 ### Fixed
+- **rc8 — Right-edge artifacts in the events panel.** Mobile SSH clients (Termius and similar) showed a thin black strip with stray glyph fragments on the right edge of the gold panel. Two combined causes: `fill_row` only painted `width - 1` columns (leaving the last column at terminal default), and event rows weren't padded out to full width when emoji rendered narrower than `display_width` predicted. `fill_row` now uses `insch` for the bottom-right corner (the standard curses workaround) and event rows pad with gold-bg spaces so the entire row is overwritten every frame.
 - **Proxmox `stop_proxmox_vms` / `stop_proxmox_cts` now work for non-root SSH users (#4).** Surfaced by real-world testing: `qm` and `pct` reject non-root callers regardless of PVE-level ACLs (`vm.audit` + `vm.powermgmt` are insufficient on their own), so the templates were silently broken for any SSH user that wasn't root. Both templates now invoke `qm` / `pct` via `sudo`. Root-SSH setups keep working unchanged because Proxmox VE ships sudo with `root NOPASSWD: ALL` by default. Non-root users add a one-line sudoers entry, see [Passwordless sudo → Proxmox VE](remote-servers.md#proxmox-ve) in the docs.
 
 ### Migration notes

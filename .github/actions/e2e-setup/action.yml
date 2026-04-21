@@ -1,0 +1,104 @@
+name: "E2E setup"
+description: >-
+  Brings up the docker-compose environment used by every E2E group:
+  installs Eneru + nut-client, generates SSH keys, builds containers,
+  waits for NUT and SSH to come online, and provisions /var/lib/eneru.
+  All four E2E matrix jobs invoke this action so they share an
+  identical, isolated test environment.
+
+inputs:
+  e2e-dir:
+    description: "Path to the tests/e2e directory inside the repo"
+    default: "tests/e2e"
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.11'
+
+    - name: Install Eneru
+      shell: bash
+      run: pip install ".[notifications]"
+
+    - name: Install system dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y nut-client openssh-client
+
+    - name: Generate SSH keys for E2E tests
+      shell: bash
+      run: |
+        ssh-keygen -t ed25519 -f /tmp/e2e-ssh-key -N "" -C "eneru-e2e-test"
+        mkdir -p ${{ inputs.e2e-dir }}/ssh-target
+        cp /tmp/e2e-ssh-key.pub ${{ inputs.e2e-dir }}/ssh-target/authorized_keys
+
+    - name: Build and start E2E environment
+      shell: bash
+      run: |
+        cd ${{ inputs.e2e-dir }}
+        docker compose up -d --build
+        docker compose ps
+
+    - name: Wait for services to be ready
+      shell: bash
+      run: |
+        echo "Waiting for NUT server..."
+        for i in {1..30}; do
+          if upsc TestUPS@localhost:3493 2>/dev/null | grep -q "ups.status"; then
+            echo "NUT server ready!"
+            break
+          fi
+          echo "  Attempt $i/30..."
+          sleep 2
+        done
+
+        echo ""
+        echo "Waiting for SSH servers (ports 2222, 2223, 2224)..."
+        for port in 2222 2223 2224; do
+          for i in {1..30}; do
+            if nc -z localhost "$port" 2>/dev/null; then
+              echo "  SSH server on $port ready!"
+              break
+            fi
+            echo "  Attempt $i/30 for $port..."
+            sleep 2
+          done
+        done
+
+        echo ""
+        echo "=== E2E Environment Ready ==="
+        upsc TestUPS@localhost:3493 2>/dev/null | head -15
+
+    - name: Create tmpfs mount for unmount testing
+      shell: bash
+      run: |
+        sudo mkdir -p /tmp/eneru-e2e-tmpfs
+        sudo mount -t tmpfs -o size=1M tmpfs /tmp/eneru-e2e-tmpfs
+        echo "test data" | sudo tee /tmp/eneru-e2e-tmpfs/testfile
+        mount | grep eneru-e2e-tmpfs
+
+    - name: Provision /var/lib/eneru (mirror deb/rpm install)
+      shell: bash
+      run: |
+        # nFPM creates /var/lib/eneru at deb/rpm install time (see
+        # nfpm.yaml). The unprivileged GH runner can't write there
+        # by default, which silently disables stats persistence and
+        # spams "stats store open failed" warnings across every
+        # e2e test. Provisioning here mirrors the production install
+        # path so tests exercise the same code users will hit.
+        sudo mkdir -p /var/lib/eneru
+        sudo chown "$USER":"$USER" /var/lib/eneru
+        sudo chmod 0755 /var/lib/eneru
+        ls -ld /var/lib/eneru
+
+    - name: Test SSH connectivity
+      shell: bash
+      run: |
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -i /tmp/e2e-ssh-key -p 2222 testuser@localhost \
+          "echo 'SSH connection successful!'"
