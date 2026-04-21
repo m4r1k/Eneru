@@ -283,6 +283,20 @@ When releasing a new version, update `docs/changelog.md` with the comparison tab
 | Feature Name | Old behavior | New behavior |
 ```
 
+### Changelog workflow: verbose during dev, trim before release
+
+The `[Unreleased]` section is a **working surface, not a published artifact**. During development add detail freely — per-rc breakouts (`rc6 — added X`, `rc7 — fixed Y`), file references, code snippets, design rationale. The reasoning: future Claude sessions pick up context cheaper from a single long file than by reading individual commits with `git log -p` (one paragraph in a markdown file ≪ one full diff). Trade a fat `[Unreleased]` block for fewer tokens spent reconstructing what changed.
+
+**Before tagging the release**, consolidate the verbose `[Unreleased]` block into a published-quality entry that matches the size and density of prior shipped releases. Reference points: v5.0.0 was ~600 words; v5.1.0 was trimmed from ~2950 words (rc1 through rc9 accumulated) down to ~1100 words (the published entry). Reader-friendly always wins at release time.
+
+The trim pass is part of the release-cut commit, not a separate step. Specifically:
+
+1. Drop `rcN —` prefixes — the user sees one consolidated 5.X.0 release, not the rc history
+2. Collapse paragraph bullets into bullet + sub-bullets (the v5.0.0 style)
+3. Move design rationale into `docs/<feature>.md` if it isn't already there; the changelog should *summarise*, not explain
+4. Cut walkthrough text and behavioural deep-dives — link to `docs/` instead
+5. Run the `humanizer` skill on the trimmed entry for one final pass to remove AI-isms (em-dashes-as-style, promotional adjectives, copula avoidance, signposting). Don't mention the humanizer pass in the commit message.
+
 ## Installation Paths
 
 Eneru has two installation methods with different invocation paths:
