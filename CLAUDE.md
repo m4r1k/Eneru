@@ -203,7 +203,7 @@ This repo deliberately keeps individual files small (`monitor.py` is now ~830 li
 `main` is protected. All changes go through feature branches and pull requests.
 
 **Branch protection on `main`:**
-- Required CI checks before merge: `validate` (Python 3.9-3.14) + `e2e-test` (7 checks total)
+- Required CI checks before merge: `validate` (Python 3.9-3.14, 6 jobs) + 4 parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy and Stats`) — **10 checks total**
 - Strict mode: branch must be up-to-date with main before merge
 - Enforce admins: maintainers follow the same rules
 - No force pushes, no branch deletion
@@ -216,7 +216,7 @@ This repo deliberately keeps individual files small (`monitor.py` is now ~830 li
 2. Create feature branch from the up-to-date main
 3. Develop, commit, push
 4. Open PR against main
-5. CI checks must pass (all 7)
+5. CI checks must pass (all 10)
 6. Merge via GitHub (branch auto-deletes)
 ```
 

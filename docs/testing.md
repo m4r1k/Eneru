@@ -194,41 +194,46 @@ The E2E tests use scenario files to simulate different UPS states:
 
 ### E2E test cases
 
-The E2E workflow (`.github/workflows/e2e.yml`) runs 31 tests on every push and PR:
+The E2E workflow (`.github/workflows/e2e.yml`) runs 32 tests on every push and PR.
+Tests are partitioned into four parallel matrix jobs (`E2E CLI`,
+`E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy and Stats`) so the
+total wall-clock is bounded by the slowest group rather than the sum of
+all 32 tests.
 
-| Test | Description |
-|------|-------------|
-| **Test 1** | Validate E2E config against real NUT server |
-| **Test 2** | Monitor normal state - verify no false shutdown triggers |
-| **Test 3** | Detect power failure in dry-run mode |
-| **Test 4** | SSH remote shutdown with real command execution |
-| **Test 5** | FSD (Forced Shutdown) flag triggers immediate shutdown |
-| **Test 6** | Voltage event detection (brownout, AVR) |
-| **Test 7** | Notification delivery (if `E2E_NOTIFICATION_URL` secret configured) |
-| **Test 8** | Multi-UPS config validation against real NUT (both UPS1 and UPS2) |
-| **Test 9** | Multi-UPS isolation: UPS1 fails, UPS2 unaffected |
-| **Test 10** | Multi-UPS both online: no false shutdown triggers |
-| **Test 11** | Ownership validation: non-local group with containers rejected |
-| **Test 12** | CLI safety: bare `eneru` shows help, does not start daemon |
-| **Test 13** | TUI `--once` snapshot outputs UPS status |
-| **Test 14** | Multi-UPS concurrent failure: both UPSes fail, both groups shut down |
-| **Test 15** | Non-local failure: UPS2 fails, UPS1 and local resources unaffected |
-| **Test 16** | Local drain (`drain_on_local_shutdown=true`): all groups drain before local shutdown |
-| **Test 17** | Local no-drain (`drain_on_local_shutdown=false`): only local group shuts down |
-| **Test 18** | Power recovery: OB then power restored, no shutdown triggered |
-| **Test 19** | Multi-phase shutdown ordering: 3 SSH targets across 2 phases (`shutdown_order: 1, 1, 2`) — verifies all received shutdown, "Phase N/M (order=X)" log lines, and timestamp ordering across phases |
-| **Test 20** | Redundancy-group config validation: valid config passes (with `Redundancy groups (1):` summary); `min_healthy: 0` exits non-zero with the documented error |
-| **Test 21** | Redundancy quorum *holds* when 1 of 2 members healthy (`min_healthy: 1`) — no shutdown |
-| **Test 22** | Redundancy quorum *exhausted* (both critical) — `quorum LOST` log + `REDUNDANCY GROUP SHUTDOWN` sequence |
-| **Test 23** | UNKNOWN handling under default `unknown_counts_as: critical` — evaluator startup line confirmed |
-| **Test 24** | Both UPSes critical → fail-safe redundancy shutdown fires |
-| **Test 25** | Cross-group cascade: a UPS shared between an independent group and a redundancy group does not falsely fire the redundancy shutdown when the other member is healthy |
-| **Test 26** | Advisory-mode log signature: `Trigger condition met (advisory, redundancy group): ...` appears for redundancy members; `Triggering immediate shutdown` does *not* |
-| **Test 27** | Separate-Eneru-UPS topology: TestUPS protects the host (`is_local: true`), the redundancy group protects a remote rack — rack shutdown fires, host UPS unaffected |
-| **Test 28** | SQLite stats DB created at `db_directory`, `samples` table populated, `events` table contains the `DAEMON_START` row |
-| **Test 29** | Stats writer failure isolation: a broken `db_directory` (file where a directory was expected) logs the warning but does *not* crash the daemon |
-| **Test 30** | `eneru monitor --once --graph charge --time 1h` renders the ASCII / Braille graph header and y-axis label with seeded sample data |
-| **Test 31** | `eneru monitor --once --events-only` reads from the SQLite events table — verified by injecting a known event row into the DB and asserting the line surfaces in the output |
+| Test | Group | Description |
+|------|-------|-------------|
+| **Test 1** | CLI | Validate E2E config against real NUT server |
+| **Test 2** | UPS Single | Monitor normal state - verify no false shutdown triggers |
+| **Test 3** | UPS Single | Detect power failure in dry-run mode |
+| **Test 4** | UPS Single | SSH remote shutdown with real command execution |
+| **Test 5** | UPS Single | FSD (Forced Shutdown) flag triggers immediate shutdown |
+| **Test 6** | UPS Single | Voltage event detection (brownout, AVR) |
+| **Test 7** | UPS Single | Notification delivery (if `E2E_NOTIFICATION_URL` secret configured) |
+| **Test 8** | CLI | Multi-UPS config validation against real NUT (both UPS1 and UPS2) |
+| **Test 9** | UPS Multi | Multi-UPS isolation: UPS1 fails, UPS2 unaffected |
+| **Test 10** | UPS Multi | Multi-UPS both online: no false shutdown triggers |
+| **Test 11** | CLI | Ownership validation: non-local group with containers rejected |
+| **Test 12** | CLI | CLI safety: bare `eneru` shows help, does not start daemon |
+| **Test 13** | CLI | TUI `--once` snapshot outputs UPS status |
+| **Test 14** | UPS Multi | Multi-UPS concurrent failure: both UPSes fail, both groups shut down |
+| **Test 15** | UPS Multi | Non-local failure: UPS2 fails, UPS1 and local resources unaffected |
+| **Test 16** | UPS Multi | Local drain (`drain_on_local_shutdown=true`): all groups drain before local shutdown |
+| **Test 17** | UPS Multi | Local no-drain (`drain_on_local_shutdown=false`): only local group shuts down |
+| **Test 18** | UPS Multi | Power recovery: OB then power restored, no shutdown triggered |
+| **Test 19** | UPS Multi | Multi-phase shutdown ordering: 3 SSH targets across 2 phases (`shutdown_order: 1, 1, 2`) — verifies all received shutdown, "Phase N/M (order=X)" log lines, and timestamp ordering across phases |
+| **Test 20** | CLI | Redundancy-group config validation: valid config passes (with `Redundancy groups (1):` summary); `min_healthy: 0` exits non-zero with the documented error |
+| **Test 21** | Redundancy and Stats | Redundancy quorum *holds* when 1 of 2 members healthy (`min_healthy: 1`) — no shutdown |
+| **Test 22** | Redundancy and Stats | Redundancy quorum *exhausted* (both critical) — `quorum LOST` log + `REDUNDANCY GROUP SHUTDOWN` sequence |
+| **Test 23** | Redundancy and Stats | UNKNOWN handling under default `unknown_counts_as: critical` — evaluator startup line confirmed |
+| **Test 24** | Redundancy and Stats | Both UPSes critical → fail-safe redundancy shutdown fires |
+| **Test 25** | Redundancy and Stats | Cross-group cascade: a UPS shared between an independent group and a redundancy group does not falsely fire the redundancy shutdown when the other member is healthy |
+| **Test 26** | Redundancy and Stats | Advisory-mode log signature: `Trigger condition met (advisory, redundancy group): ...` appears for redundancy members; `Triggering immediate shutdown` does *not* |
+| **Test 27** | Redundancy and Stats | Separate-Eneru-UPS topology: TestUPS protects the host (`is_local: true`), the redundancy group protects a remote rack — rack shutdown fires, host UPS unaffected |
+| **Test 28** | Redundancy and Stats | SQLite stats DB created at `db_directory`, `samples` table populated, `events` table contains the `DAEMON_START` row |
+| **Test 29** | Redundancy and Stats | Stats writer failure isolation: a broken `db_directory` (file where a directory was expected) logs the warning but does *not* crash the daemon |
+| **Test 30** | Redundancy and Stats | `eneru monitor --once --graph charge --time 1h` renders the ASCII / Braille graph header and y-axis label with seeded sample data |
+| **Test 31** | Redundancy and Stats | `eneru monitor --once --events-only` reads from the SQLite events table — verified by injecting a known event row into the DB and asserting the line surfaces in the output |
+| **Test 32** | Redundancy and Stats | Voltage auto-detect re-snaps NUT mis-reported nominal — scenario `us-grid-misreport.dev` reports `input.voltage.nominal=230V` while actual `input.voltage=120V`; daemon detects the mismatch, logs `auto-detect re-snap`, records a `VOLTAGE_AUTODETECT_MISMATCH` event with `notification_sent=0`, and confirms `meta.schema_version=3` |
 
 ### Running E2E tests locally
 
