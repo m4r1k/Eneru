@@ -42,6 +42,91 @@ class TestCLIVersion:
         assert "run" in captured.out
         assert "validate" in captured.out
         assert "monitor" in captured.out
+        # `tui` is an alias for `monitor` -- both must surface in the
+        # top-level help so users discover either spelling.
+        assert "tui" in captured.out
+
+
+class TestCLITuiAlias:
+    """Test that `eneru tui` is registered as an alias for `eneru monitor`."""
+
+    @pytest.mark.unit
+    def test_tui_and_monitor_share_handler(self):
+        """Both subcommands must dispatch to the same _cmd_monitor handler."""
+        from eneru import cli as cli_mod
+
+        for cmd in ("monitor", "tui"):
+            with patch.object(sys, "argv", ["eneru", cmd, "--once"]):
+                with patch.object(cli_mod, "_cmd_monitor") as mock_handler:
+                    main()
+                    mock_handler.assert_called_once()
+
+    @pytest.mark.unit
+    def test_tui_help_lists_same_options_as_monitor(self, capsys):
+        """`eneru tui --help` must list the same options as `eneru monitor --help`.
+
+        We compare the set of option strings (--once, --interval, etc.)
+        rather than full text -- argparse's usage-line wrap depends on
+        program-name length, so whitespace differs between the two even
+        though the options are identical.
+        """
+        import re
+
+        option_re = re.compile(r"--[a-z][a-z0-9-]+")
+
+        opts_seen = {}
+        for cmd in ("monitor", "tui"):
+            with patch.object(sys, "argv", ["eneru", cmd, "--help"]):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+                assert exc_info.value.code == 0
+            opts_seen[cmd] = set(option_re.findall(capsys.readouterr().out))
+
+        assert opts_seen["monitor"] == opts_seen["tui"]
+        # Sanity: must include the monitor-specific options, not just
+        # the universal --help / --config.
+        assert {"--once", "--interval", "--graph", "--time",
+                "--events-only"}.issubset(opts_seen["tui"])
+
+
+class TestCLICompletion:
+    """Test `eneru completion {bash,zsh,fish}` emits a usable script."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
+    def test_completion_emits_non_empty_script(self, shell, capsys):
+        with patch.object(sys, "argv", ["eneru", "completion", shell]):
+            main()
+        out = capsys.readouterr().out
+        assert len(out) > 100, f"{shell} completion output suspiciously short"
+        # Each script must reference 'eneru' so it actually completes
+        # the right command.
+        assert "eneru" in out
+
+    @pytest.mark.unit
+    def test_bash_completion_uses_complete_builtin(self, capsys):
+        """The bash script must register itself with `complete -F`."""
+        with patch.object(sys, "argv", ["eneru", "completion", "bash"]):
+            main()
+        out = capsys.readouterr().out
+        assert "complete -F _eneru eneru" in out
+        # Self-contained: must not call helpers from the bash-completion
+        # package. Strip comments before checking so the file's
+        # explanatory header (which names these functions to say we
+        # *don't* use them) doesn't trigger a false positive.
+        code = "\n".join(line.split("#", 1)[0]
+                         for line in out.splitlines())
+        assert "_init_completion" not in code
+        assert "_filedir" not in code
+
+    @pytest.mark.unit
+    def test_invalid_shell_rejected(self):
+        """`eneru completion ksh` must fail at argparse, not at file-read."""
+        with patch.object(sys, "argv", ["eneru", "completion", "ksh"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            # argparse exits 2 on invalid choice.
+            assert exc_info.value.code == 2
 
 
 class TestCLIValidateConfig:

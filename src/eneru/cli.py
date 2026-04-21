@@ -305,6 +305,45 @@ def _cmd_version(args):
     print(f"Eneru v{__version__}")
 
 
+def _cmd_completion(args):
+    """Print a self-contained shell completion script to stdout.
+
+    Scripts live alongside the Python source so deb/rpm builds can ship
+    them via nfpm.yaml AND the subcommand can read them at runtime --
+    keeping a single source of truth. PyPI users source the output
+    directly: ``source <(eneru completion bash)``.
+    """
+    import importlib.resources
+
+    shell = args.shell
+    filename = {"bash": "eneru.bash",
+                "zsh":  "eneru.zsh",
+                "fish": "eneru.fish"}[shell]
+
+    # The completion files are deliberately NOT inside the eneru package
+    # so they're easy to ship at the canonical FHS paths via nfpm.yaml.
+    # Try a few candidate locations and use the first one that exists.
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        # Editable-install / source checkout: ../../packaging/completion/
+        os.path.join(here, "..", "..", "packaging", "completion", filename),
+        # Site-packages relative: also walk up to a sibling packaging dir.
+        os.path.join(here, "..", "packaging", "completion", filename),
+        # Deb/rpm install: file is dropped at the canonical FHS path.
+        f"/usr/share/{'bash-completion/completions' if shell == 'bash' else ('zsh/site-functions' if shell == 'zsh' else 'fish/vendor_completions.d')}/{'eneru' if shell == 'bash' else ('_eneru' if shell == 'zsh' else 'eneru.fish')}",
+    ]
+    for path in candidates:
+        try:
+            with open(path, "r") as f:
+                sys.stdout.write(f.read())
+                return
+        except (FileNotFoundError, IsADirectoryError):
+            continue
+    print(f"Error: completion script for '{shell}' not found", file=sys.stderr)
+    sys.exit(1)
+
+
 def _cmd_monitor(args):
     """Launch the TUI dashboard."""
     config = _load_config(args)
@@ -331,13 +370,15 @@ def main():
             "subcommands:\n"
             "  run                  Start the monitoring daemon\n"
             "  validate             Validate configuration and show overview\n"
-            "  monitor              Launch real-time TUI dashboard\n"
+            "  monitor / tui        Launch real-time TUI dashboard\n"
             "  test-notifications   Send a test notification\n"
+            "  completion           Print shell completion script (bash/zsh/fish)\n"
             "  version              Show version information\n"
             "\nExamples:\n"
             "  eneru run --config /etc/ups-monitor/config.yaml\n"
             "  eneru validate --config /etc/ups-monitor/config.yaml\n"
             "  eneru monitor --config /etc/ups-monitor/config.yaml\n"
+            "  eneru tui --config /etc/ups-monitor/config.yaml\n"
         ),
     )
 
@@ -357,21 +398,32 @@ def main():
     val_parser.add_argument("-c", "--config", help="Path to configuration file", default=None)
     val_parser.set_defaults(func=_cmd_validate)
 
-    # --- monitor ---
+    # --- monitor / tui ---
+    # `tui` is an alias for `monitor` -- same handler, same options. We
+    # register two parsers (rather than argparse `aliases=`) so each shows
+    # up as a first-class entry in the top-level help and gets its own
+    # `--help` page that names the subcommand the user actually typed.
+    def _add_monitor_args(p):
+        p.add_argument("-c", "--config", help="Path to configuration file", default=None)
+        p.add_argument("--once", action="store_true",
+                       help="Print status snapshot and exit (no TUI)")
+        p.add_argument("--interval", type=int, default=5,
+                       help="Refresh interval in seconds (default: 5)")
+        p.add_argument("--graph",
+                       choices=["charge", "load", "voltage", "runtime"],
+                       help="With --once: render an ASCII/Braille graph for the metric")
+        p.add_argument("--time", default="1h",
+                       help="With --once + --graph: time range (1h/6h/24h/7d/30d)")
+        p.add_argument("--events-only", action="store_true",
+                       help="With --once: print only the events list (SQLite, log-tail fallback)")
+        p.set_defaults(func=_cmd_monitor)
+
     mon_parser = subparsers.add_parser("monitor", help="Launch real-time TUI dashboard")
-    mon_parser.add_argument("-c", "--config", help="Path to configuration file", default=None)
-    mon_parser.add_argument("--once", action="store_true",
-                            help="Print status snapshot and exit (no TUI)")
-    mon_parser.add_argument("--interval", type=int, default=5,
-                            help="Refresh interval in seconds (default: 5)")
-    mon_parser.add_argument("--graph",
-                            choices=["charge", "load", "voltage", "runtime"],
-                            help="With --once: render an ASCII/Braille graph for the metric")
-    mon_parser.add_argument("--time", default="1h",
-                            help="With --once + --graph: time range (1h/6h/24h/7d/30d)")
-    mon_parser.add_argument("--events-only", action="store_true",
-                            help="With --once: print only the events list (SQLite, log-tail fallback)")
-    mon_parser.set_defaults(func=_cmd_monitor)
+    _add_monitor_args(mon_parser)
+
+    tui_parser = subparsers.add_parser(
+        "tui", help="Alias for 'monitor' -- launch real-time TUI dashboard")
+    _add_monitor_args(tui_parser)
 
     # --- test-notifications ---
     tn_parser = subparsers.add_parser("test-notifications",
@@ -382,6 +434,14 @@ def main():
     # --- version ---
     ver_parser = subparsers.add_parser("version", help="Show version information")
     ver_parser.set_defaults(func=_cmd_version)
+
+    # --- completion ---
+    comp_parser = subparsers.add_parser(
+        "completion",
+        help="Print shell completion script (source it: source <(eneru completion bash))")
+    comp_parser.add_argument("shell", choices=["bash", "zsh", "fish"],
+                             help="Shell to emit completion for")
+    comp_parser.set_defaults(func=_cmd_completion)
 
     args = parser.parse_args()
 
