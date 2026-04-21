@@ -195,14 +195,21 @@ else
   exit 1
 fi
 
-# The dummy NUT driver in this E2E env reports input.transfer.{low,high},
-# so the second informational line should be present too. Soft-PASS
-# (don't fail) because some NUT drivers don't expose those fields.
-if grep -q "UPS battery-switch points:" /tmp/test6.log; then
-  echo "PASS (6c): startup log shows UPS battery-switch points line"
+# Conditionally hard-assert the UPS battery-switch-points line: if NUT
+# actually reports input.transfer.{low,high} for this UPS, the line MUST
+# be in the log -- otherwise rc9's startup-summary regression would
+# slip through silently. Probe upsc directly to decide.
+if upsc TestUPS@localhost:3493 2>/dev/null | grep -qE "^input\.transfer\.(low|high):"; then
+  if grep -q "UPS battery-switch points:" /tmp/test6.log; then
+    echo "PASS (6c): startup log shows UPS battery-switch points line"
+  else
+    echo "FAIL (6c): NUT reports input.transfer.{low,high} but startup"
+    echo "  log is missing the 'UPS battery-switch points:' line."
+    exit 1
+  fi
 else
-  echo "Note (6c): UPS battery-switch points line absent -- driver may"
-  echo "  not expose input.transfer.{low,high}."
+  echo "Note (6c): NUT does not expose input.transfer.{low,high} for this"
+  echo "  driver -- skipping the UPS battery-switch points assertion."
 fi
 
 # rc9: the BROWNOUT detail must include the % deviation framing.

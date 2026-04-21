@@ -391,6 +391,30 @@ class TestThresholdClamp:
         assert _derive_warning_high(230, 229) == 253.0   # just-below also rejected
 
     @pytest.mark.unit
+    def test_low_transfer_buffered_candidate_above_nominal_is_rejected(self):
+        # Cubic P1 regression on PR #29: a low_transfer value can sit
+        # below nominal (passing the first guard) but the buffered
+        # candidate `lt + 5` can land above nominal -- which would make
+        # warning_low > nominal and trigger BROWNOUT on every normal
+        # poll. transfer.low=226 on 230V → candidate=231 > 230 → reject,
+        # fall back to ±10%.
+        assert _derive_warning_low(230, 226) == 207.0   # 226+5=231 > 230
+        assert _derive_warning_low(230, 225) == 207.0   # 225+5=230, not strictly < nominal
+        # 224 + 5 = 229, strictly below 230 -- accepted.
+        assert _derive_warning_low(230, 224) == 229.0
+
+    @pytest.mark.unit
+    def test_high_transfer_buffered_candidate_below_nominal_is_rejected(self):
+        # Symmetric Cubic P1: high_transfer above nominal but
+        # ht - buffer falls below. transfer.high=234 on 230V → candidate
+        # = 229 < 230 → reject. transfer.high=235 → candidate=230, not
+        # strictly > nominal → reject. transfer.high=236 → candidate=231
+        # → accepted.
+        assert _derive_warning_high(230, 234) == 253.0   # 234-5=229
+        assert _derive_warning_high(230, 235) == 253.0   # 235-5=230
+        assert _derive_warning_high(230, 236) == 231.0   # 236-5=231 ✓
+
+    @pytest.mark.unit
     def test_state_records_ups_transfer_points(self):
         h = _TestHost(ups_vars={
             "input.voltage.nominal": "230",

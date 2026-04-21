@@ -65,13 +65,17 @@ def _derive_warning_low(nominal: float, low_transfer) -> float:
       - it's numeric,
       - it's BELOW the nominal (a low-transfer at or above nominal is
         nonsense -- means the UPS would switch on perfectly normal mains),
-      - and it's within ±25% of the expected ±10% line.
+      - it's within ±25% of the expected ±10% line, AND
+      - the BUFFERED candidate (``lt + TRANSFER_BUFFER_V``) is also
+        strictly below nominal -- otherwise applying the buffer would
+        push the warning threshold above nominal and every healthy
+        reading would trip BROWNOUT_DETECTED.
 
-    The "below nominal" guard catches the bug where a NUT driver
-    reports a high value (e.g., 250 on a 230V grid) in the low-transfer
-    field; without the guard we'd compute warning_low = 255V and then
-    230V mains would falsely fire BROWNOUT_DETECTED. With the guard
-    the bogus value is ignored and we fall back to ±10%.
+    Both guards matter. The first catches obviously-wrong-side values
+    like ``low_transfer=250`` on 230V. The second catches subtler
+    cases like ``low_transfer=226`` on 230V: 226 < 230 looks fine, but
+    ``226 + 5 = 231`` is above nominal -- a regression caught by Cubic
+    on PR #29.
 
     Rounded to one decimal so the log line and notification text stay
     clean (avoids 253.00000000000003 from float multiplication).
@@ -80,26 +84,33 @@ def _derive_warning_low(nominal: float, low_transfer) -> float:
     candidates = [pct_band]
     if is_numeric(low_transfer):
         lt = float(low_transfer)
-        if lt < nominal and abs(lt - pct_band) <= nominal * 0.25:
-            candidates.append(lt + TRANSFER_BUFFER_V)
+        candidate = lt + TRANSFER_BUFFER_V
+        if (lt < nominal
+                and candidate < nominal
+                and abs(lt - pct_band) <= nominal * 0.25):
+            candidates.append(candidate)
     return round(max(candidates), 1)
 
 
 def _derive_warning_high(nominal: float, high_transfer) -> float:
     """Pick the warning-high threshold: the *tighter* (lower) of ±10% and (transfer - buffer).
 
-    Symmetric guard to ``_derive_warning_low``: high transfer must be
-    ABOVE nominal to be plausible. A NUT driver reporting 200 on a 230V
-    grid in the high-transfer field would otherwise compute a warning
-    of 195V, well below the 207V ±10% threshold -- forcing the warning
-    band wider rather than tighter, which defeats the whole clamp.
+    Symmetric guard to ``_derive_warning_low``. High transfer must be
+    above nominal AND the buffered candidate (``ht - TRANSFER_BUFFER_V``)
+    must remain above nominal. Otherwise an over-tight transfer like
+    ``high_transfer=234`` on 230V (raw value passes "above nominal"
+    but ``234 - 5 = 229`` lands below) would compute warning_high=229
+    and trip OVER_VOLTAGE_DETECTED on every normal reading.
     """
     pct_band = nominal * (1 + GRID_QUALITY_DEVIATION_PCT)
     candidates = [pct_band]
     if is_numeric(high_transfer):
         ht = float(high_transfer)
-        if ht > nominal and abs(ht - pct_band) <= nominal * 0.25:
-            candidates.append(ht - TRANSFER_BUFFER_V)
+        candidate = ht - TRANSFER_BUFFER_V
+        if (ht > nominal
+                and candidate > nominal
+                and abs(ht - pct_band) <= nominal * 0.25):
+            candidates.append(candidate)
     return round(min(candidates), 1)
 
 
