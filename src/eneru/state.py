@@ -4,6 +4,7 @@ import threading
 import time
 from collections import deque, namedtuple
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 # Frozen snapshot of the fields a redundancy-group evaluator needs to read.
@@ -44,6 +45,13 @@ class MonitorState:
     voltage_warning_low: float = 0.0
     voltage_warning_high: float = 0.0
     nominal_voltage: float = 230.0
+    # UPS firmware's switch-to-battery thresholds, populated from
+    # ``input.transfer.{low,high}`` at startup. Informational only --
+    # used by voltage notification text to give the operator context
+    # ("warning fired but UPS won't switch until X V"). None when NUT
+    # doesn't report transfer points.
+    ups_transfer_low: Optional[float] = None
+    ups_transfer_high: Optional[float] = None
     battery_history: deque = field(default_factory=lambda: deque(maxlen=1000))
     # Battery anomaly detection (recalibration, sudden drops while online)
     last_battery_charge: float = -1.0  # -1 = not yet initialized
@@ -67,6 +75,11 @@ class MonitorState:
     voltage_pending_voltage: float = 0.0
     voltage_pending_threshold: float = 0.0
     voltage_pending_notified: bool = False  # already fired during this dwell
+    # Severity-aware bypass (rc9): when True, the pending notification
+    # skips the voltage_hysteresis_seconds dwell and dispatches on the
+    # next _maybe_notify_voltage_pending tick -- triggered when the
+    # deviation from nominal exceeds VOLTAGE_SEVERE_DEVIATION_PCT.
+    voltage_pending_severe: bool = False
 
     # Voltage auto-detection (#27 / B1): a small rolling window of
     # observed input.voltage readings used to cross-check NUT's reported

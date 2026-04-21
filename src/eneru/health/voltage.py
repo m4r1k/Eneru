@@ -32,6 +32,22 @@ AUTODETECT_OBSERVATION_COUNT = 10
 # small fluctuations stays inside.
 AUTODETECT_DISCREPANCY_V = 25.0
 
+# Voltage-warning derivation: the EN 50160 / IEC 60038 ±10% envelope
+# is the operator-relevant "grid quality" band. NUT's transfer points
+# are honored only when they're TIGHTER than ±10% (managed UPSes with
+# narrow transfer config); otherwise we clamp to ±10% so wide-range
+# UPS firmware defaults don't make our warnings useless.
+GRID_QUALITY_DEVIATION_PCT = 0.10  # ±10% from nominal = warning band
+TRANSFER_BUFFER_V = 5.0            # buffer when using NUT transfer points
+
+# Severity bypass: deviations above this threshold skip the
+# voltage_hysteresis_seconds dwell and notify immediately. Mild
+# deviations (in the 10-15% band) usually represent grid noise that
+# settles within seconds; severe deviations indicate real grid trouble
+# (utility fault, generator instability, site wiring) that the
+# operator wants to know about NOW, not 30s from now.
+VOLTAGE_SEVERE_DEVIATION_PCT = 0.15  # >±15% from nominal = severe
+
 
 def _snap_to_standard_grid(value: float) -> float:
     """Return the nearest STANDARD_GRIDS entry within tolerance, else value."""
@@ -39,6 +55,36 @@ def _snap_to_standard_grid(value: float) -> float:
         return value
     nearest = min(STANDARD_GRIDS, key=lambda g: abs(g - value))
     return float(nearest) if abs(nearest - value) <= GRID_SNAP_TOLERANCE else float(value)
+
+
+def _derive_warning_low(nominal: float, low_transfer) -> float:
+    """Pick the warning-low threshold: the *tighter* (higher) of ±10% and (transfer + buffer).
+
+    Tighter = warns earlier = better grid-quality signal. NUT's
+    transfer point is honored only when it's plausibly close to the
+    expected ±10% line (within ±25%); a wildly mis-reported transfer
+    value is ignored so we always have at least the ±10% safety net.
+    Rounded to one decimal so the log line and notification text stay
+    clean (avoids 253.00000000000003 from float multiplication).
+    """
+    pct_band = nominal * (1 - GRID_QUALITY_DEVIATION_PCT)
+    candidates = [pct_band]
+    if is_numeric(low_transfer):
+        lt = float(low_transfer)
+        if abs(lt - pct_band) <= nominal * 0.25:
+            candidates.append(lt + TRANSFER_BUFFER_V)
+    return round(max(candidates), 1)
+
+
+def _derive_warning_high(nominal: float, high_transfer) -> float:
+    """Pick the warning-high threshold: the *tighter* (lower) of ±10% and (transfer - buffer)."""
+    pct_band = nominal * (1 + GRID_QUALITY_DEVIATION_PCT)
+    candidates = [pct_band]
+    if is_numeric(high_transfer):
+        ht = float(high_transfer)
+        if abs(ht - pct_band) <= nominal * 0.25:
+            candidates.append(ht - TRANSFER_BUFFER_V)
+    return round(min(candidates), 1)
 
 
 class VoltageMonitorMixin:
@@ -51,9 +97,9 @@ class VoltageMonitorMixin:
 
         1. **Startup snap.** Read ``input.voltage.nominal`` from NUT and
            snap it to the nearest standard grid voltage. Derive
-           ``warning_low`` / ``warning_high`` as ±10% (or from
-           ``input.transfer.{low,high}`` if NUT exposes those AND they
-           sit within sanity bounds of the snapped nominal).
+           ``warning_low`` / ``warning_high`` as the *tighter* of the
+           ±10% grid-quality band and (NUT ``input.transfer.{low,high}``
+           ± buffer) when those are sensible -- never wider than ±10%.
         2. **Observed-range cross-check** (runs each poll until done; see
            ``_check_voltage_autodetect``). If the median of the first
            ~10 observed ``input.voltage`` readings disagrees with NUT's
@@ -61,6 +107,15 @@ class VoltageMonitorMixin:
            to the standard grid nearest the observed median and emit a
            ``VOLTAGE_AUTODETECT_MISMATCH`` event so the operator knows
            Eneru second-guessed NUT.
+
+        Eneru's framing has shifted from pure shutdown orchestration to
+        grid-quality reporting. Wide UPS firmware transfer points
+        (typical APC default: 170 / 280 on 230V) made the previous
+        warnings useless -- they fired only ~5V before the UPS itself
+        switched to battery. The clamp to ±10% ensures BROWNOUT and
+        OVER_VOLTAGE warnings serve the operator's grid-quality
+        question, while the UPS-switch points remain available
+        separately for notification context.
 
         We intentionally do NOT expose any ``warning_low`` /
         ``warning_high`` / ``nominal_override`` config keys: a
@@ -82,24 +137,36 @@ class VoltageMonitorMixin:
             self.state.nominal_voltage = 230.0
             origin = "NUT=missing, default"
 
-        # Apply NUT's transfer bands only if they bracket the snapped
-        # nominal sensibly (within ±25%); otherwise fall back to ±10%.
-        nom = self.state.nominal_voltage
-        if is_numeric(low_transfer) and abs(float(low_transfer) - nom * 0.9) <= nom * 0.25:
-            self.state.voltage_warning_low = float(low_transfer) + 5
-        else:
-            self.state.voltage_warning_low = nom * 0.9
+        # Stash the raw transfer values for notification context; they're
+        # informational only and never used to gate any decision.
+        self.state.ups_transfer_low = (
+            float(low_transfer) if is_numeric(low_transfer) else None
+        )
+        self.state.ups_transfer_high = (
+            float(high_transfer) if is_numeric(high_transfer) else None
+        )
 
-        if is_numeric(high_transfer) and abs(float(high_transfer) - nom * 1.1) <= nom * 0.25:
-            self.state.voltage_warning_high = float(high_transfer) - 5
-        else:
-            self.state.voltage_warning_high = nom * 1.1
+        nom = self.state.nominal_voltage
+        self.state.voltage_warning_low = _derive_warning_low(nom, low_transfer)
+        self.state.voltage_warning_high = _derive_warning_high(nom, high_transfer)
 
         self._log_message(
-            f"📊 Voltage Monitoring Active. Nominal: {self.state.nominal_voltage}V "
-            f"({origin}). Low Warning: {self.state.voltage_warning_low}V. "
-            f"High Warning: {self.state.voltage_warning_high}V."
+            f"📊 Voltage Monitoring Active.\n"
+            f"   Nominal: {nom}V ({origin}).\n"
+            f"   Grid-quality warnings: {self.state.voltage_warning_low}V"
+            f" / {self.state.voltage_warning_high}V"
+            f" (±{int(GRID_QUALITY_DEVIATION_PCT * 100)}% nominal,"
+            f" EN 50160 envelope)."
         )
+        if self.state.ups_transfer_low is not None or self.state.ups_transfer_high is not None:
+            lo = (f"{self.state.ups_transfer_low}V"
+                  if self.state.ups_transfer_low is not None else "?")
+            hi = (f"{self.state.ups_transfer_high}V"
+                  if self.state.ups_transfer_high is not None else "?")
+            self._log_message(
+                f"   UPS battery-switch points: {lo} / {hi}"
+                f" (from NUT input.transfer.{{low,high}})."
+            )
 
     def _check_voltage_autodetect(self, input_voltage: str):
         """Once-per-startup observed-range cross-check (see issue #27).
@@ -128,8 +195,15 @@ class VoltageMonitorMixin:
         if abs(median - old_nominal) > AUTODETECT_DISCREPANCY_V:
             new_nominal = _snap_to_standard_grid(median)
             self.state.nominal_voltage = new_nominal
-            self.state.voltage_warning_low = new_nominal * 0.9
-            self.state.voltage_warning_high = new_nominal * 1.1
+            # Reapply the tighter-of clamp against the cached transfer
+            # values from startup -- a re-snap shouldn't widen the
+            # thresholds beyond ±10% of the new nominal.
+            self.state.voltage_warning_low = _derive_warning_low(
+                new_nominal, self.state.ups_transfer_low,
+            )
+            self.state.voltage_warning_high = _derive_warning_high(
+                new_nominal, self.state.ups_transfer_high,
+            )
             self._log_message(
                 f"📊 Voltage auto-detect re-snap: NUT={old_nominal}V "
                 f"disagreed with observed median {median:.1f}V "
@@ -146,7 +220,14 @@ class VoltageMonitorMixin:
         self.state.voltage_autodetect_done = True
 
     def _check_voltage_issues(self, ups_status: str, input_voltage: str):
-        """Check for voltage quality issues, with notification hysteresis."""
+        """Check for voltage quality issues, with severity-aware hysteresis.
+
+        Mild deviations (10-15% from nominal) go through the
+        ``voltage_hysteresis_seconds`` dwell so flap from neighbour
+        appliances doesn't spam notifications. Severe deviations
+        (>±15%) bypass the dwell and notify immediately -- those signal
+        real grid trouble where the operator wants to know now.
+        """
         # Cross-check NUT's reported nominal against observed reality.
         # Runs only until enough samples accumulate; cheap no-op after.
         self._check_voltage_autodetect(input_voltage)
@@ -161,17 +242,26 @@ class VoltageMonitorMixin:
             return
 
         voltage = float(input_voltage)
+        nominal = self.state.nominal_voltage
+        deviation_pct = (
+            abs(voltage - nominal) / nominal if nominal > 0 else 0.0
+        )
+        is_severe = deviation_pct > VOLTAGE_SEVERE_DEVIATION_PCT
 
         if voltage < self.state.voltage_warning_low:
             target = "LOW"
             event = "BROWNOUT_DETECTED"
             threshold = self.state.voltage_warning_low
-            detail = f"Voltage is low: {voltage}V (Threshold: {threshold}V)"
+            detail = self._format_voltage_detail(
+                "low", voltage, threshold, nominal, deviation_pct, is_severe,
+            )
         elif voltage > self.state.voltage_warning_high:
             target = "HIGH"
             event = "OVER_VOLTAGE_DETECTED"
             threshold = self.state.voltage_warning_high
-            detail = f"Voltage is high: {voltage}V (Threshold: {threshold}V)"
+            detail = self._format_voltage_detail(
+                "high", voltage, threshold, nominal, deviation_pct, is_severe,
+            )
         else:
             target = "NORMAL"
             event = None
@@ -180,7 +270,7 @@ class VoltageMonitorMixin:
 
         # State log line is sacred -- always written immediately on
         # transition. The notification path is gated by the hysteresis
-        # logic in _maybe_notify_voltage_pending.
+        # logic in _maybe_notify_voltage_pending unless severe.
         if target != self.state.voltage_state:
             if target == "NORMAL":
                 self._log_power_event(
@@ -197,14 +287,16 @@ class VoltageMonitorMixin:
                     suppress_notification=True,  # gated by hysteresis below
                 )
             self.state.voltage_state = target
-            self._set_voltage_pending(target, voltage, threshold)
+            self._set_voltage_pending(
+                target, voltage, threshold, is_severe=is_severe,
+            )
 
         # Re-evaluate the pending notification each poll regardless of
         # whether the state changed -- the hysteresis fires when the
         # dwell time elapses, not on a state transition.
         self._maybe_notify_voltage_pending()
 
-    # ----- helpers (B2: notification hysteresis) -----
+    # ----- helpers (B2: notification hysteresis + severity bypass) -----
 
     def _hysteresis_seconds(self) -> int:
         """Return the configured dwell, defaulting to 0 if unset."""
@@ -213,7 +305,66 @@ class VoltageMonitorMixin:
         except (AttributeError, TypeError, ValueError):
             return 0
 
-    def _set_voltage_pending(self, target: str, voltage: float, threshold: float):
+    def _format_voltage_detail(self, direction: str, voltage: float,
+                               threshold: float, nominal: float,
+                               deviation_pct: float, is_severe: bool,
+                               annotation: str = "") -> str:
+        """Build the detail string used by both the log line and the notification.
+
+        Structure is always:
+          ``<head>. [<annotation>] [<ups_switch_context>]``
+
+        Mild events get "% deviation + threshold + UPS-switch context"
+        (operator can see this is a grid-quality issue, not an imminent
+        UPS reaction). Severe events get a "(severe, X.X% ...)" tag and
+        an "approaching UPS battery-switch threshold" callout when the
+        UPS is likely to react soon. ``annotation`` (e.g.
+        ``"Persisted 30s."`` or ``"Notifying immediately."``) is
+        injected between head and tail when supplied.
+        """
+        relative = "below" if direction == "low" else "above"
+        pct_str = f"{deviation_pct * 100:.1f}%"
+
+        if is_severe:
+            head = (f"(severe, {pct_str} {relative} nominal): "
+                    f"input voltage {voltage}V.")
+        else:
+            head = (f"input voltage {voltage}V is {pct_str} {relative} "
+                    f"{int(nominal)}V nominal "
+                    f"(warning threshold {threshold}V).")
+
+        # UPS-switch context -- only when NUT exposes the matching
+        # transfer point. For severe events, frame as "battery may
+        # engage shortly"; for mild, frame as "this is a grid quality
+        # issue, not an imminent power loss".
+        ups_switch = (self.state.ups_transfer_low if direction == "low"
+                      else self.state.ups_transfer_high)
+        if ups_switch is not None:
+            if is_severe:
+                tail = (f"Approaching UPS battery-switch threshold "
+                        f"({ups_switch}V) -- battery may engage shortly.")
+            else:
+                en50160_note = (
+                    "EN 50160 considers up to that level acceptable; "
+                    if direction == "high" else ""
+                )
+                tail = (f"UPS will not switch to battery until "
+                        f"{ups_switch}V (firmware setting); "
+                        f"{en50160_note}"
+                        f"this is a grid-quality issue, not an "
+                        f"imminent power loss.")
+        else:
+            tail = ""
+
+        parts = [head]
+        if annotation:
+            parts.append(annotation)
+        if tail:
+            parts.append(tail)
+        return " ".join(parts)
+
+    def _set_voltage_pending(self, target: str, voltage: float,
+                             threshold: float, *, is_severe: bool = False):
         """Open a new pending notification window for a HIGH/LOW transition."""
         if target not in ("HIGH", "LOW"):
             self._clear_voltage_pending()
@@ -226,9 +377,10 @@ class VoltageMonitorMixin:
         self.state.voltage_pending_voltage = voltage
         self.state.voltage_pending_threshold = threshold
         self.state.voltage_pending_notified = False
-        # Hysteresis = 0 means "behave like the legacy code path":
-        # the notification fires immediately on this same poll.
-        if self._hysteresis_seconds() == 0:
+        self.state.voltage_pending_severe = is_severe
+        # Severe deviations bypass the dwell (notify on this same poll);
+        # hysteresis = 0 also fires immediately (legacy behavior).
+        if is_severe or self._hysteresis_seconds() == 0:
             self._maybe_notify_voltage_pending()
 
     def _clear_voltage_pending(self):
@@ -237,28 +389,34 @@ class VoltageMonitorMixin:
         self.state.voltage_pending_voltage = 0.0
         self.state.voltage_pending_threshold = 0.0
         self.state.voltage_pending_notified = False
+        self.state.voltage_pending_severe = False
 
     def _maybe_notify_voltage_pending(self):
-        """Fire the deferred notification when the dwell time elapses."""
+        """Fire the deferred notification when the dwell time elapses (or immediately if severe)."""
         target = self.state.voltage_pending_state
         if not target or self.state.voltage_pending_notified:
             return
         elapsed = time.time() - self.state.voltage_pending_since
-        if elapsed < self._hysteresis_seconds():
+        is_severe = self.state.voltage_pending_severe
+        # Severe events skip the dwell entirely; otherwise honor it.
+        if not is_severe and elapsed < self._hysteresis_seconds():
             return
-        # Dwell elapsed and condition still holds -- send the real
-        # notification with a `(persisted Ns)` annotation.
         v = self.state.voltage_pending_voltage
         t = self.state.voltage_pending_threshold
+        nominal = self.state.nominal_voltage
+        deviation_pct = abs(v - nominal) / nominal if nominal > 0 else 0.0
         elapsed_int = int(round(elapsed))
-        if target == "LOW":
-            event = "BROWNOUT_DETECTED"
-            detail = (f"Voltage is low: {v}V (Threshold: {t}V) "
-                      f"(persisted {elapsed_int}s)")
-        else:
-            event = "OVER_VOLTAGE_DETECTED"
-            detail = (f"Voltage is high: {v}V (Threshold: {t}V) "
-                      f"(persisted {elapsed_int}s)")
+        direction = "low" if target == "LOW" else "high"
+        event = ("BROWNOUT_DETECTED" if target == "LOW"
+                 else "OVER_VOLTAGE_DETECTED")
+
+        annotation = ("Notifying immediately (bypassed hysteresis)."
+                      if is_severe
+                      else f"Persisted {elapsed_int}s.")
+        detail = self._format_voltage_detail(
+            direction, v, t, nominal, deviation_pct, is_severe,
+            annotation=annotation,
+        )
         # Notify only -- the BROWNOUT/OVER_VOLTAGE log+event row was
         # already written when we set the pending state, so don't
         # double-log. The notification dispatch itself is on the

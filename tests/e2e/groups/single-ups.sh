@@ -175,9 +175,40 @@ timeout 8 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/te
 
 # Verify brownout was detected (should log a voltage warning)
 if grep -q -i "voltage\|brownout" /tmp/test6.log; then
-  echo "PASS: Voltage event detected"
+  echo "PASS (6a): Voltage event detected"
 else
   echo "Note: Voltage event may not have been logged in short window"
+fi
+
+# rc9: startup log line should expose BOTH the grid-quality warning
+# thresholds AND (when NUT reports them) the UPS battery-switch points.
+# Operators rely on both lines to understand whether a notification
+# means "grid is wobbly" vs "UPS is about to switch".
+if grep -q "Grid-quality warnings:" /tmp/test6.log; then
+  echo "PASS (6b): startup log shows Grid-quality warnings line"
+else
+  echo "FAIL (6b): startup log missing 'Grid-quality warnings:' line"
+  exit 1
+fi
+
+# The dummy NUT driver in this E2E env reports input.transfer.{low,high},
+# so the second informational line should be present too. Soft-PASS
+# (don't fail) because some NUT drivers don't expose those fields.
+if grep -q "UPS battery-switch points:" /tmp/test6.log; then
+  echo "PASS (6c): startup log shows UPS battery-switch points line"
+else
+  echo "Note (6c): UPS battery-switch points line absent -- driver may"
+  echo "  not expose input.transfer.{low,high}."
+fi
+
+# rc9: the BROWNOUT detail must include the % deviation framing.
+# Notification dispatch is gated by hysteresis (default 30s) so it
+# may not fire in our 8s window, but the immediate BROWNOUT_DETECTED
+# log row carries the same detail string.
+if grep -q "below.*nominal" /tmp/test6.log; then
+  echo "PASS (6d): brownout log carries 'below nominal' framing"
+else
+  echo "Note (6d): 'below nominal' framing absent in test window"
 fi
 )
 

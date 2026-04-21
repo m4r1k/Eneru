@@ -37,11 +37,33 @@ What Eneru does instead:
 1. **Auto-detect at startup.** Read `input.voltage.nominal` from NUT
    and snap it to the nearest standard grid voltage from
    `(100, 110, 115, 120, 127, 200, 208, 220, 230, 240)` if within 15V
-   tolerance. `warning_low` / `warning_high` derive as ±10% of the
-   snapped nominal (or from `input.transfer.{low,high}` when NUT
-   exposes those *and* they sit within sanity bounds of the snapped
-   nominal).
-2. **Cross-check with observed reality.** Some UPS firmwares (notably
+   tolerance.
+2. **Derive grid-quality warning thresholds.** `warning_low` /
+   `warning_high` are computed as the **tighter** of:
+   - the EN 50160 / IEC 60038 ±10% envelope (`nominal × 0.9` /
+     `nominal × 1.1`), and
+   - NUT's `input.transfer.{low,high}` ± 5V buffer (when NUT exposes
+     those *and* they sit within sanity bounds of the snapped nominal).
+
+   Tighter = warns earlier = better grid-quality signal. UPS firmware
+   defaults are often *wide* (typical APC: `transfer.low=170` /
+   `transfer.high=280` on 230V) to avoid switching to battery for
+   routine grid wiggles; if Eneru honored those without clamping, a
+   real-world brownout where mains drops to 200V (a 13% sag, definitely
+   operator-relevant) would never log `BROWNOUT_DETECTED`. The clamp
+   ensures Eneru's warnings serve the operator's grid-quality question
+   while the UPS firmware's switch points remain available separately
+   for context.
+
+   Behaviour table for a 230V nominal:
+
+   | UPS transfer points | warning_low / warning_high | Why |
+   |---------------------|----------------------------|-----|
+   | 170 / 280 (wide, APC default) | 207 / 253 | ±10% wins (transfer too wide) |
+   | 215 / 245 (narrow, managed) | 220 / 240 | transfer ± 5V wins (tighter) |
+   | not reported | 207 / 253 | ±10% fallback |
+
+3. **Cross-check with observed reality.** Some UPS firmwares (notably
    on US 120V grids) mis-report `input.voltage.nominal=230`. After
    ~10 polls Eneru takes the median of observed `input.voltage`
    readings and re-snaps the nominal if the readings disagree with
@@ -53,16 +75,27 @@ What Eneru does instead:
 
    If you see one of these rows, your UPS firmware is mis-reporting
    nominal — the daemon corrected for you, but it's worth filing a
-   NUT driver bug upstream.
-3. **Hysteresis on notifications, not on logs.** The state log line
-   for `OVER_VOLTAGE_DETECTED` / `BROWNOUT_DETECTED` is always
-   written immediately on transition. The *notification* dispatch is
-   debounced by `notifications.voltage_hysteresis_seconds` (default
-   30s). A 2-second flap to 122V on a 120V grid no longer pages you;
-   a sustained 30s over-voltage still does — and arrives with a
-   `(persisted Ns)` annotation. See
-   [Notifications → Tuning alert noise](notifications.md#tuning-alert-noise).
-4. **Per-event mute, with a safety blocklist.**
+   NUT driver bug upstream. The re-snap also re-applies the
+   tighter-of-±10%-and-transfer clamp against the new nominal.
+
+4. **Severity-aware notification hysteresis.** The state log line for
+   `OVER_VOLTAGE_DETECTED` / `BROWNOUT_DETECTED` is always written
+   immediately on transition. The *notification* dispatch is gated by
+   severity:
+   - **Mild deviations** (10–15% from nominal) go through
+     `notifications.voltage_hysteresis_seconds` (default 30s). A
+     2-second flap to 122V on a 120V grid no longer pages you; a
+     sustained event still does — and arrives with a
+     `Persisted Ns.` annotation.
+   - **Severe deviations** (`>±15%` from nominal) bypass the dwell
+     and notify **immediately** with a `(severe, X.X% below/above
+     nominal)` tag. These signal real grid trouble — utility fault,
+     generator instability, site wiring — that the operator wants to
+     know about NOW, not 30 seconds from now.
+
+   See [Notifications → Tuning alert noise](notifications.md#tuning-alert-noise).
+
+5. **Per-event mute, with a safety blocklist.**
    `notifications.suppress: [...]` mutes specific informational
    events (AVR cycling, voltage normalized) but rejects safety-
    critical event names at config-load time. There is no way to
@@ -73,14 +106,37 @@ What Eneru does instead:
 ### What you'll see in the log
 
 ```
-📊 Voltage Monitoring Active. Nominal: 230V (NUT=230). Low Warning: 207.0V. High Warning: 253.0V.
+📊 Voltage Monitoring Active.
+   Nominal: 230.0V (NUT=230.0).
+   Grid-quality warnings: 207.0V / 253.0V (±10% nominal, EN 50160 envelope).
+   UPS battery-switch points: 170.0V / 280.0V (from NUT input.transfer.{low,high}).
 📊 Voltage auto-detect re-snap: NUT=230V disagreed with observed median 120.0V (window=[120.5, 119.0, ...]V). Re-snapped to 120V; new thresholds 108.0V / 132.0V.
 ⚡ POWER EVENT: VOLTAGE_AUTODETECT_MISMATCH - NUT nominal=230V, observed median=120.0V, re-snapped to 120V
 ```
 
-The bottom row also lands in the SQLite `events` table with
+The autodetect-mismatch row lands in the SQLite `events` table with
 `notification_sent=0` so it doesn't ping you (it's startup
 information, not an active power event).
+
+### What you'll see in a brownout notification
+
+**Mild brownout (UPS won't switch):**
+
+```
+🔻 BROWNOUT_DETECTED: input voltage 200.0V is 13.0% below 230V nominal
+   (warning threshold 207.0V). Persisted 30s.
+   UPS will not switch to battery until 170.0V (firmware setting);
+   this is a grid-quality issue, not an imminent power loss.
+```
+
+**Severe brownout (UPS may switch shortly):**
+
+```
+🔻 BROWNOUT_DETECTED: (severe, 21.7% below nominal): input voltage 180.0V.
+   Notifying immediately (bypassed hysteresis).
+   Approaching UPS battery-switch threshold (170.0V) -- battery may
+   engage shortly.
+```
 
 ---
 

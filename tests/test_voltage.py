@@ -24,8 +24,13 @@ from eneru.health.voltage import (
     VoltageMonitorMixin,
     STANDARD_GRIDS,
     GRID_SNAP_TOLERANCE,
+    GRID_QUALITY_DEVIATION_PCT,
+    VOLTAGE_SEVERE_DEVIATION_PCT,
+    TRANSFER_BUFFER_V,
     AUTODETECT_OBSERVATION_COUNT,
     _snap_to_standard_grid,
+    _derive_warning_low,
+    _derive_warning_high,
 )
 
 
@@ -140,16 +145,18 @@ class TestInitializeVoltageThresholds:
         assert any("default" in m for m in h.logs)
 
     @pytest.mark.unit
-    def test_init_uses_transfer_bands_when_in_range(self):
+    def test_init_uses_transfer_bands_when_tighter_than_ten_percent(self):
+        # Narrow transfer band (managed UPS): transfer.low=110, transfer.high=130
+        # on 120V nominal. transfer-derived candidates 115 / 125 are tighter
+        # than ±10% (108 / 132), so they win the clamp.
         h = _TestHost(ups_vars={
             "input.voltage.nominal": "120",
-            "input.transfer.low": "100",
-            "input.transfer.high": "140",
+            "input.transfer.low": "110",
+            "input.transfer.high": "130",
         })
         h._initialize_voltage_thresholds()
-        # 100+5 / 140-5 (NUT-derived).
-        assert h.state.voltage_warning_low == 105.0
-        assert h.state.voltage_warning_high == 135.0
+        assert h.state.voltage_warning_low == 115.0   # 110 + 5
+        assert h.state.voltage_warning_high == 125.0  # 130 - 5
 
     @pytest.mark.unit
     def test_init_ignores_transfer_bands_when_inconsistent(self):
@@ -290,7 +297,7 @@ class TestVoltageHysteresis:
         assert h.notifications, "expected the deferred notification to fire"
         body, _ = h.notifications[0]
         assert "OVER_VOLTAGE" in body or "VOLTAGE ISSUE" in body
-        assert "persisted" in body  # the dwell-annotation is present
+        assert "Persisted" in body  # the dwell-annotation is present
 
         # Same poll cycle running again must NOT double-fire.
         n_before = len(h.notifications)
@@ -312,11 +319,258 @@ class TestVoltageHysteresis:
     @pytest.mark.unit
     def test_brownout_path_also_hysteresis_gated(self):
         # Symmetry check: BROWNOUT goes through the same dwell logic.
+        # Use 200V (13% under nominal -- below the warning threshold of
+        # 207V but mild enough to NOT trigger the rc9 severity bypass at
+        # ±15%). 180V would be severe and notify immediately.
         h = _TestHost(ups_vars={"input.voltage.nominal": "230"}, hysteresis=30)
         h._initialize_voltage_thresholds()
-        h._check_voltage_issues("OL", "180")  # below 207V (= 230*0.9)
+        h._check_voltage_issues("OL", "200")  # below 207V (= 230*0.9), mild
         assert h.state.voltage_state == "LOW"
         assert h.notifications == []
         # And the immediate log/event fires (with suppress_notification=True).
         assert any(ev[0] == "BROWNOUT_DETECTED" and ev[2]
                    for ev in h.power_events)
+
+
+# ===========================================================================
+# rc9: threshold clamp -- tighter of (±10% nominal) and (transfer ± buffer)
+# ===========================================================================
+
+class TestThresholdClamp:
+    """Item 1 (rc9): voltage warnings clamp to the tighter of the EN 50160
+    ±10% envelope and the NUT transfer points ± 5V buffer. Wide UPS
+    firmware defaults can no longer produce useless warnings."""
+
+    @pytest.mark.unit
+    def test_wide_transfer_clamped_to_ten_percent(self):
+        # APC default-wide on 230V: transfer 170/280 (24%/22% from nominal).
+        # The transfer-derived candidates (175/275) are MUCH wider than ±10%
+        # (207/253). The clamp picks the tighter -- ±10% wins.
+        assert _derive_warning_low(230, 170) == 207.0
+        assert _derive_warning_high(230, 280) == 253.0
+
+    @pytest.mark.unit
+    def test_narrow_transfer_uses_transfer_based(self):
+        # Managed UPS configured tight: transfer 215/245 on 230V. Transfer-
+        # derived (220/240) is tighter than ±10% (207/253), so it wins.
+        assert _derive_warning_low(230, 215) == 220.0
+        assert _derive_warning_high(230, 245) == 240.0
+
+    @pytest.mark.unit
+    def test_no_transfer_uses_ten_percent_fallback(self):
+        # No NUT transfer info -- ±10% is the only candidate.
+        assert _derive_warning_low(230, None) == 207.0
+        assert _derive_warning_high(230, None) == 253.0
+
+    @pytest.mark.unit
+    def test_garbage_transfer_falls_back_to_ten_percent(self):
+        # Wildly wrong transfer (e.g., NUT firmware bug reporting EU
+        # values on a US grid): ignored by the ±25% sanity check, falls
+        # back to ±10%.
+        assert _derive_warning_low(120, 250) == 108.0   # 250 way off |250-108|=142 > 30
+        assert _derive_warning_high(120, 50) == 132.0   # 50 way off |50-132|=82 > 30
+
+    @pytest.mark.unit
+    def test_state_records_ups_transfer_points(self):
+        h = _TestHost(ups_vars={
+            "input.voltage.nominal": "230",
+            "input.transfer.low": "170",
+            "input.transfer.high": "280",
+        })
+        h._initialize_voltage_thresholds()
+        # Raw transfer values stashed verbatim for notification context.
+        assert h.state.ups_transfer_low == 170.0
+        assert h.state.ups_transfer_high == 280.0
+        # Warnings clamped to ±10%, NOT 175/275.
+        assert h.state.voltage_warning_low == 207.0
+        assert h.state.voltage_warning_high == 253.0
+
+    @pytest.mark.unit
+    def test_state_transfer_is_none_when_nut_silent(self):
+        h = _TestHost(ups_vars={"input.voltage.nominal": "230"})
+        h._initialize_voltage_thresholds()
+        assert h.state.ups_transfer_low is None
+        assert h.state.ups_transfer_high is None
+
+    @pytest.mark.unit
+    def test_startup_log_includes_grid_quality_and_ups_switch_lines(self):
+        h = _TestHost(ups_vars={
+            "input.voltage.nominal": "230",
+            "input.transfer.low": "170",
+            "input.transfer.high": "280",
+        })
+        h._initialize_voltage_thresholds()
+        joined = "\n".join(h.logs)
+        assert "Grid-quality warnings: 207.0V / 253.0V" in joined
+        assert "UPS battery-switch points: 170.0V / 280.0V" in joined
+        assert "EN 50160 envelope" in joined
+
+    @pytest.mark.unit
+    def test_startup_log_omits_ups_switch_line_when_silent(self):
+        h = _TestHost(ups_vars={"input.voltage.nominal": "230"})
+        h._initialize_voltage_thresholds()
+        joined = "\n".join(h.logs)
+        assert "Grid-quality warnings:" in joined
+        assert "UPS battery-switch points:" not in joined
+
+    @pytest.mark.unit
+    def test_autodetect_resnap_applies_clamp(self):
+        # NUT says 230, transfer 170/280 (wide). Real grid is 120 -- the
+        # autodetect re-snaps to 120V. New thresholds must use the SAME
+        # tighter-of clamp (not raw 0.9/1.1), and the cached transfer
+        # values are too wide for 120V to be applied (|170-108|=62 > 30).
+        h = _TestHost(ups_vars={
+            "input.voltage.nominal": "230",
+            "input.transfer.low": "170",
+            "input.transfer.high": "280",
+        })
+        h._initialize_voltage_thresholds()
+        # Confirm initial transfer caches.
+        assert h.state.ups_transfer_low == 170.0
+        # Feed observations near 120V.
+        for v in [118, 119, 120, 120, 121, 122, 119, 120, 121, 120]:
+            h._check_voltage_autodetect(str(v))
+        assert h.state.voltage_autodetect_done
+        assert h.state.nominal_voltage == 120.0
+        # Transfer points were valid for 230V but are >25% off for 120V,
+        # so the clamp ignores them and uses ±10% of the new nominal.
+        assert h.state.voltage_warning_low == 108.0
+        assert h.state.voltage_warning_high == 132.0
+
+
+# ===========================================================================
+# rc9: severity-aware notification bypass
+# ===========================================================================
+
+class TestSeverityBypass:
+    """Item 2 (rc9): deviations >±15% bypass the voltage_hysteresis_seconds
+    dwell and notify immediately. Mild deviations (10-15%) still go through
+    the dwell so neighbour-appliance flap doesn't spam."""
+
+    @pytest.mark.unit
+    def test_mild_deviation_uses_hysteresis(self):
+        # 200V on 230V = 13.0% below -- inside the 10-15% mild band.
+        # Hysteresis applies: no immediate notification.
+        h = _TestHost(ups_vars={"input.voltage.nominal": "230"}, hysteresis=30)
+        h._initialize_voltage_thresholds()
+        h._check_voltage_issues("OL", "200")
+        assert h.state.voltage_state == "LOW"
+        assert h.state.voltage_pending_state == "LOW"
+        assert h.state.voltage_pending_severe is False
+        assert h.notifications == []
+
+    @pytest.mark.unit
+    def test_severe_deviation_bypasses_hysteresis(self):
+        # 180V on 230V = 21.7% below -- severe. Notification fires
+        # immediately on the first poll past the threshold, even with
+        # a 30s dwell configured.
+        h = _TestHost(ups_vars={"input.voltage.nominal": "230"}, hysteresis=30)
+        h._initialize_voltage_thresholds()
+        h._check_voltage_issues("OL", "180")
+        assert h.state.voltage_state == "LOW"
+        assert h.state.voltage_pending_severe is True
+        assert h.notifications, "severe deviation must notify immediately"
+        body, _ = h.notifications[0]
+        assert "BROWNOUT_DETECTED" in body
+        assert "(severe," in body
+
+    @pytest.mark.unit
+    def test_severity_threshold_is_15_percent(self):
+        # Exactly +15.0% (264.5V on 230V) is NOT severe -- threshold is `>`.
+        # +15.1% (264.73V) IS severe.
+        h_mild = _TestHost(ups_vars={"input.voltage.nominal": "230"}, hysteresis=30)
+        h_mild._initialize_voltage_thresholds()
+        h_mild._check_voltage_issues("OL", "264.5")
+        assert h_mild.state.voltage_pending_severe is False
+        assert h_mild.notifications == []
+
+        h_severe = _TestHost(ups_vars={"input.voltage.nominal": "230"}, hysteresis=30)
+        h_severe._initialize_voltage_thresholds()
+        h_severe._check_voltage_issues("OL", "265")  # ~15.2%
+        assert h_severe.state.voltage_pending_severe is True
+        assert h_severe.notifications  # immediate
+
+    @pytest.mark.unit
+    def test_severe_overvoltage_also_bypasses(self):
+        # Symmetry check on the high side.
+        h = _TestHost(ups_vars={"input.voltage.nominal": "230"}, hysteresis=30)
+        h._initialize_voltage_thresholds()
+        h._check_voltage_issues("OL", "280")  # 21.7% above
+        assert h.state.voltage_state == "HIGH"
+        assert h.state.voltage_pending_severe is True
+        assert h.notifications
+        body, _ = h.notifications[0]
+        assert "OVER_VOLTAGE_DETECTED" in body
+        assert "(severe," in body
+
+    @pytest.mark.unit
+    def test_severe_notification_marks_immediate_dispatch(self):
+        h = _TestHost(ups_vars={"input.voltage.nominal": "230"}, hysteresis=30)
+        h._initialize_voltage_thresholds()
+        h._check_voltage_issues("OL", "180")
+        body, _ = h.notifications[0]
+        assert "Notifying immediately" in body
+        assert "bypassed hysteresis" in body
+
+
+# ===========================================================================
+# rc9: notification text -- grid-quality framing + UPS-switch context
+# ===========================================================================
+
+class TestNotificationText:
+    """Item 3 (rc9): notifications carry % deviation, threshold, and a
+    UPS-switch-context line so the operator understands whether this is
+    a quality issue or an imminent UPS reaction."""
+
+    @pytest.mark.unit
+    def test_mild_brownout_includes_ups_switch_context(self):
+        # Force immediate dispatch via hysteresis=0.
+        h = _TestHost(ups_vars={
+            "input.voltage.nominal": "230",
+            "input.transfer.low": "170",
+            "input.transfer.high": "280",
+        }, hysteresis=0)
+        h._initialize_voltage_thresholds()
+        h._check_voltage_issues("OL", "200")  # 13% below, mild
+        assert h.notifications
+        body, _ = h.notifications[0]
+        assert "13.0% below" in body
+        assert "230V nominal" in body
+        assert "warning threshold 207.0V" in body
+        assert "UPS will not switch to battery until 170.0V" in body
+        assert "grid-quality issue" in body
+
+    @pytest.mark.unit
+    def test_severe_brownout_includes_severity_tag_and_warns_about_ups(self):
+        h = _TestHost(ups_vars={
+            "input.voltage.nominal": "230",
+            "input.transfer.low": "170",
+        }, hysteresis=30)
+        h._initialize_voltage_thresholds()
+        h._check_voltage_issues("OL", "180")  # 21.7%, severe
+        body, _ = h.notifications[0]
+        assert "(severe, 21.7% below nominal)" in body
+        assert "Approaching UPS battery-switch threshold (170.0V)" in body
+
+    @pytest.mark.unit
+    def test_message_omits_ups_context_when_transfer_unknown(self):
+        h = _TestHost(ups_vars={"input.voltage.nominal": "230"}, hysteresis=0)
+        h._initialize_voltage_thresholds()
+        h._check_voltage_issues("OL", "200")
+        body, _ = h.notifications[0]
+        assert "UPS will not switch" not in body
+        assert "Approaching UPS" not in body
+        # But the % deviation framing is still present.
+        assert "13.0% below" in body
+
+    @pytest.mark.unit
+    def test_mild_overvoltage_includes_en50160_hint(self):
+        h = _TestHost(ups_vars={
+            "input.voltage.nominal": "230",
+            "input.transfer.high": "280",
+        }, hysteresis=0)
+        h._initialize_voltage_thresholds()
+        h._check_voltage_issues("OL", "256")  # 11.3% above, mild
+        body, _ = h.notifications[0]
+        assert "EN 50160 considers up to that level acceptable" in body
+        assert "UPS will not switch to battery until 280.0V" in body
