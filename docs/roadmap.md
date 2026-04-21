@@ -4,32 +4,7 @@ Planned direction for Eneru. None of this is built yet -- things will change as 
 
 Feature requests and feedback: [GitHub Issues](https://github.com/m4r1k/Eneru/issues).
 
----
-
-## v5.0 -- Multi-UPS and TUI dashboard (released)
-
-*Released 2026-04-11*
-
-- Multi-UPS monitoring with per-group triggers and independent shutdown sequences
-- `is_local` ownership model for local resource isolation
-- `drain_on_local_shutdown` coordination across UPS groups
-- CLI subcommands (`run`, `validate`, `monitor`, `test-notifications`, `version`)
-- Curses TUI dashboard with color-coded status
-- Battery anomaly detection and alerting
-- 6 independent shutdown triggers including depletion rate and time-on-battery
-
----
-
-## v5.1 -- Redundancy groups and statistics (rc5)
-
-*Implementation complete; v5.1.0-rc5 available for hardware testing.*
-
-- ✅ Redundancy groups: bundle multiple UPSes protecting the same servers via redundant power, trigger shutdown only when redundancy is exhausted (`min_healthy` consensus)
-- ✅ UPS health model with four states (HEALTHY / DEGRADED / CRITICAL / UNKNOWN) and configurable policies for how degraded and unknown states count
-- ✅ SQLite time-series statistics: battery charge, runtime, load, voltage, depletion rate. Tiered retention (raw 24h, 5-min aggregates 30d, hourly aggregates 5y)
-- ✅ Braille character graphs in the TUI for battery, load, voltage, and runtime trends
-- ✅ Structured event log in SQLite (log-file tail parsing kept as a fallback for bare-metal pip installs without `/var/lib/eneru`)
-- Separate stable and testing package channels for APT and YUM/DNF: deferred to a future point release
+Recently shipped: v5.0 (2026-04-11) and v5.1 (2026-04-21). See the [changelog](changelog.md) for details.
 
 ---
 
