@@ -249,6 +249,32 @@ contents:
       owner: root
       group: root
 
+  # Shell completion scripts. Dropped at the canonical FHS paths so they
+  # are auto-loaded IFF the user has bash-completion / zsh / fish
+  # installed -- we do NOT add bash-completion as a runtime dep. Users
+  # without shell-completion still get tab completion via the runtime
+  # subcommand: `source <(eneru completion bash)`.
+  - src: packaging/completion/eneru.bash
+    dst: /usr/share/bash-completion/completions/eneru
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: packaging/completion/eneru.zsh
+    dst: /usr/share/zsh/site-functions/_eneru
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: packaging/completion/eneru.fish
+    dst: /usr/share/fish/vendor_completions.d/eneru.fish
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   # Default configuration file (marked as config file - won't be overwritten)
   - src: examples/config-reference.yaml
     dst: /etc/ups-monitor/config.yaml
