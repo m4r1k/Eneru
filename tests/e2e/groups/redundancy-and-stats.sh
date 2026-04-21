@@ -3,8 +3,11 @@
 # E2E group: redundancy-and-stats
 #
 # Auto-extracted from .github/workflows/e2e.yml. Tests in this
-# group run sequentially; each group runs as a separate parallel
-# matrix job (see .github/workflows/e2e.yml).
+# group run sequentially; each test body is wrapped in a subshell
+# so cd / env changes do NOT leak between tests (the original
+# workflow had per-step shell isolation -- we preserve it here).
+# Each group runs as a separate parallel matrix job (see
+# .github/workflows/e2e.yml).
 
 set -euo pipefail
 
@@ -14,6 +17,7 @@ export E2E_DIR
 # ======================================================================
 # Test 21: Redundancy quorum holds when 1 of 2 healthy
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 21: Redundancy quorum holds when 1 of 2 healthy"
 
@@ -49,10 +53,12 @@ if grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test21.log; then
   exit 1
 fi
 echo "PASS: Quorum held; no shutdown"
+)
 
 # ======================================================================
 # Test 22: Both UPSes critical → redundancy shutdown fires
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 22: Both UPSes critical → redundancy shutdown fires"
 
@@ -82,10 +88,12 @@ cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 2
 echo "PASS: Redundancy shutdown fired on exhausted quorum"
+)
 
 # ======================================================================
 # Test 23: unknown_counts_as=critical surfaces UNKNOWN as failure
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 23: unknown_counts_as=critical surfaces UNKNOWN as failure"
 
@@ -117,10 +125,12 @@ if grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test23.log; then
   exit 1
 fi
 echo "PASS: UNKNOWN handling default verified"
+)
 
 # ======================================================================
 # Test 24: Both UPSes UNKNOWN -> fail-safe shutdown
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 24: Both UPSes UNKNOWN -> fail-safe shutdown"
 
@@ -148,10 +158,12 @@ cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 2
 echo "PASS: Fail-safe shutdown fired"
+)
 
 # ======================================================================
 # Test 25: Cross-group cascade (UPS in both tiers)
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 25: Cross-group cascade (UPS in both tiers)"
 
@@ -179,10 +191,12 @@ fi
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
 sleep 2
 echo "PASS: Cross-group cascade behaved correctly"
+)
 
 # ======================================================================
 # Test 26: Advisory-mode log signature
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 26: Advisory-mode log signature"
 
@@ -213,10 +227,12 @@ fi
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
 sleep 2
 echo "PASS: Advisory-mode log signature verified"
+)
 
 # ======================================================================
 # Test 27: Separate-Eneru-UPS topology
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 27: Separate-Eneru-UPS topology"
 
@@ -257,10 +273,12 @@ cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 2
 echo "PASS: Separate-Eneru-UPS topology verified"
+)
 
 # ======================================================================
 # Test 28: SQLite stats persistence
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 28: SQLite stats persistence"
 
@@ -315,10 +333,12 @@ if [ -z "$EVENTS" ]; then
   exit 1
 fi
 echo "PASS: stats DB has $SAMPLES sample(s) + DAEMON_START event"
+)
 
 # ======================================================================
 # Test 29: Stats writer failure is non-fatal
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 29: Stats writer failure is non-fatal"
 
@@ -370,10 +390,12 @@ fi
 # Cleanup
 rm -f /tmp/eneru-e2e-stats-broken /tmp/config-e2e-stats-broken.yaml
 echo "PASS: stats failure isolated; daemon kept running"
+)
 
 # ======================================================================
 # Test 30: monitor --once --graph renders ASCII graph
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 30: monitor --once --graph renders ASCII graph"
 
@@ -418,10 +440,12 @@ if ! grep -q "y-axis: 0-100%" /tmp/test30.log; then
   exit 1
 fi
 echo "PASS: monitor --once --graph renders correctly"
+)
 
 # ======================================================================
 # Test 31: monitor --once --events-only reads from SQLite
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 31: monitor --once --events-only reads from SQLite"
 
@@ -465,10 +489,12 @@ if ! grep -q "TEST31_MARKER: e2e injected" /tmp/test31.log; then
   exit 1
 fi
 echo "PASS: events panel reads from SQLite"
+)
 
 # ======================================================================
 # Test 32: Voltage auto-detect re-snaps NUT mis-reported nominal
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 32: Voltage auto-detect re-snaps NUT mis-reported nominal"
 
@@ -558,7 +584,7 @@ cp $E2E_DIR/scenarios/online-charging.dev \
 
 echo ""
 echo "=== Test 32 PASSED: voltage auto-detect verified ==="
-
+)
 
 echo ""
 echo "=== Group 'redundancy-and-stats' completed successfully ==="

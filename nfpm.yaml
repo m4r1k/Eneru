@@ -249,26 +249,61 @@ contents:
       owner: root
       group: root
 
-  # Shell completion scripts. Dropped at the canonical FHS paths so they
-  # are auto-loaded IFF the user has bash-completion / zsh / fish
-  # installed -- we do NOT add bash-completion as a runtime dep. Users
-  # without shell-completion still get tab completion via the runtime
-  # subcommand: `source <(eneru completion bash)`.
-  - src: packaging/completion/eneru.bash
+  # Shell completion scripts. Single source is the eneru.completion
+  # subpackage; nfpm copies each file to two destinations:
+  #   1. /opt/ups-monitor/eneru/completion/  -- so `eneru completion
+  #      <shell>` can read it via importlib.resources at runtime.
+  #   2. /usr/share/<framework>/...          -- canonical FHS path so
+  #      bash-completion / zsh / fish auto-load it when the user has
+  #      that completion framework installed. We do NOT add
+  #      bash-completion as a runtime dep -- users without it can still
+  #      get tab completion via `source <(eneru completion bash)`.
+
+  # eneru.completion subpackage (importlib.resources reads from here).
+  - src: src/eneru/completion/__init__.py
+    dst: /opt/ups-monitor/eneru/completion/__init__.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/completion/eneru.bash
+    dst: /opt/ups-monitor/eneru/completion/eneru.bash
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/completion/eneru.zsh
+    dst: /opt/ups-monitor/eneru/completion/eneru.zsh
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/completion/eneru.fish
+    dst: /opt/ups-monitor/eneru/completion/eneru.fish
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  # FHS drops for shell auto-discovery (same files, second destination).
+  - src: src/eneru/completion/eneru.bash
     dst: /usr/share/bash-completion/completions/eneru
     file_info:
       mode: 0644
       owner: root
       group: root
 
-  - src: packaging/completion/eneru.zsh
+  - src: src/eneru/completion/eneru.zsh
     dst: /usr/share/zsh/site-functions/_eneru
     file_info:
       mode: 0644
       owner: root
       group: root
 
-  - src: packaging/completion/eneru.fish
+  - src: src/eneru/completion/eneru.fish
     dst: /usr/share/fish/vendor_completions.d/eneru.fish
     file_info:
       mode: 0644
@@ -310,6 +345,14 @@ contents:
 
   # Create the /opt/ups-monitor/eneru/health subpackage directory
   - dst: /opt/ups-monitor/eneru/health
+    type: dir
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Create the /opt/ups-monitor/eneru/completion subpackage directory
+  - dst: /opt/ups-monitor/eneru/completion
     type: dir
     file_info:
       mode: 0755

@@ -3,8 +3,11 @@
 # E2E group: single-ups
 #
 # Auto-extracted from .github/workflows/e2e.yml. Tests in this
-# group run sequentially; each group runs as a separate parallel
-# matrix job (see .github/workflows/e2e.yml).
+# group run sequentially; each test body is wrapped in a subshell
+# so cd / env changes do NOT leak between tests (the original
+# workflow had per-step shell isolation -- we preserve it here).
+# Each group runs as a separate parallel matrix job (see
+# .github/workflows/e2e.yml).
 
 set -euo pipefail
 
@@ -14,6 +17,7 @@ export E2E_DIR
 # ======================================================================
 # Test 2: Monitor normal state (no shutdown triggered)
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 2: Monitor normal state (no shutdown triggered)"
 
@@ -33,10 +37,12 @@ if grep -q "SHUTDOWN SEQUENCE" /tmp/test2.log; then
 fi
 
 echo "PASS: No shutdown triggered during normal operation"
+)
 
 # ======================================================================
 # Test 3: Detect power failure (dry-run)
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 3: Detect power failure (dry-run)"
 
@@ -65,10 +71,12 @@ if ! grep -q "DRY-RUN" /tmp/test3.log; then
 fi
 
 echo "PASS: Low battery correctly triggered shutdown (dry-run)"
+)
 
 # ======================================================================
 # Test 4: SSH remote shutdown
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 4: SSH remote shutdown"
 
@@ -107,10 +115,12 @@ docker compose exec -T ssh-target cat /var/log/shutdown.log || true
 
 echo ""
 echo "=== Test 4 PASSED: SSH remote shutdown executed successfully ==="
+)
 
 # ======================================================================
 # Test 5: FSD flag triggers immediate shutdown
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 5: FSD flag triggers immediate shutdown"
 
@@ -134,10 +144,12 @@ if ! grep -q "FSD" /tmp/test5.log; then
 fi
 
 echo "PASS: FSD correctly triggered shutdown"
+)
 
 # ======================================================================
 # Test 6: Voltage event detection
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 6: Voltage event detection"
 
@@ -163,10 +175,12 @@ if grep -q -i "voltage\|brownout" /tmp/test6.log; then
 else
   echo "Note: Voltage event may not have been logged in short window"
 fi
+)
 
 # ======================================================================
 # Test 7: Notification delivery
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 7: Notification delivery"
 
@@ -185,7 +199,7 @@ sed "s|\${E2E_NOTIFICATION_URL}|${E2E_NOTIFICATION_URL}|g" \
 eneru test-notifications --config /tmp/config-notif.yaml
 
 echo "PASS: Notification sent successfully"
-
+)
 
 echo ""
 echo "=== Group 'single-ups' completed successfully ==="

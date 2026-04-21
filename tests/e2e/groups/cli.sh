@@ -3,8 +3,11 @@
 # E2E group: cli
 #
 # Auto-extracted from .github/workflows/e2e.yml. Tests in this
-# group run sequentially; each group runs as a separate parallel
-# matrix job (see .github/workflows/e2e.yml).
+# group run sequentially; each test body is wrapped in a subshell
+# so cd / env changes do NOT leak between tests (the original
+# workflow had per-step shell isolation -- we preserve it here).
+# Each group runs as a separate parallel matrix job (see
+# .github/workflows/e2e.yml).
 
 set -euo pipefail
 
@@ -14,15 +17,18 @@ export E2E_DIR
 # ======================================================================
 # Test 1: Validate E2E config
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 1: Validate E2E config"
 
 echo "=== Test 1: Config Validation ==="
 eneru validate --config $E2E_DIR/config-e2e.yaml
+)
 
 # ======================================================================
 # Test 8: Multi-UPS config validation
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 8: Multi-UPS config validation"
 
@@ -38,10 +44,12 @@ echo "Both UPS1 and UPS2 reachable on NUT server"
 eneru validate --config $E2E_DIR/config-e2e-multi-ups.yaml
 
 echo "PASS: Multi-UPS config validates against real NUT server"
+)
 
 # ======================================================================
 # Test 11: Ownership validation rejects non-local containers
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 11: Ownership validation rejects non-local containers"
 
@@ -66,10 +74,12 @@ else
   echo "$OUTPUT"
   exit 1
 fi
+)
 
 # ======================================================================
 # Test 12: CLI safety - bare eneru shows help
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 12: CLI safety - bare eneru shows help"
 
@@ -85,10 +95,12 @@ else
   echo "$OUTPUT"
   exit 1
 fi
+)
 
 # ======================================================================
 # Test 13: TUI --once snapshot
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 13: TUI --once snapshot"
 
@@ -103,10 +115,12 @@ else
   echo "$OUTPUT"
   exit 1
 fi
+)
 
 # ======================================================================
 # Test 20: Redundancy-group config validation
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 20: Redundancy-group config validation"
 
@@ -165,14 +179,16 @@ fi
 
 echo ""
 echo "=== Test 20 PASSED: redundancy-group config validation verified ==="
+)
 
 # ======================================================================
-# Test E1 (group-local): shell completion script is syntactically valid
+# Test E1: shell completion is syntactically valid
 # ======================================================================
 # Not numbered in docs/testing.md -- a smoke-only check that the
-# `eneru completion bash` subcommand emits a valid bash script. Item 7
-# from the 5.1.0-rc8 work; lives in the `cli` group because it's a CLI
-# concern and that group is fast.
+# `eneru completion bash` subcommand emits a valid bash script.
+# Item 7 from the 5.1.0-rc8 work; lives in the `cli` group because
+# it is a CLI concern and that group is fast.
+(
 echo ""
 echo ">>> Running: Test E1: shell completion is syntactically valid"
 
@@ -183,8 +199,8 @@ eneru completion zsh | head -1 | grep -q "^#compdef eneru"
 echo "PASS (E1b): zsh completion script has #compdef header"
 
 eneru completion fish | grep -q "complete -c eneru"
-echo "PASS (E1c): fish completion script registers 'complete -c eneru'"
-
+echo "PASS (E1c): fish completion script registers complete -c eneru"
+)
 
 echo ""
 echo "=== Group 'cli' completed successfully ==="

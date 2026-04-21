@@ -3,8 +3,11 @@
 # E2E group: multi-ups
 #
 # Auto-extracted from .github/workflows/e2e.yml. Tests in this
-# group run sequentially; each group runs as a separate parallel
-# matrix job (see .github/workflows/e2e.yml).
+# group run sequentially; each test body is wrapped in a subshell
+# so cd / env changes do NOT leak between tests (the original
+# workflow had per-step shell isolation -- we preserve it here).
+# Each group runs as a separate parallel matrix job (see
+# .github/workflows/e2e.yml).
 
 set -euo pipefail
 
@@ -14,6 +17,7 @@ export E2E_DIR
 # ======================================================================
 # Test 9: Multi-UPS isolation (UPS1 fails, UPS2 normal)
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 9: Multi-UPS isolation (UPS1 fails, UPS2 normal)"
 
@@ -72,10 +76,12 @@ else
 fi
 
 echo "PASS: Multi-UPS isolation working correctly"
+)
 
 # ======================================================================
 # Test 10: Multi-UPS both online (no false triggers)
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 10: Multi-UPS both online (no false triggers)"
 
@@ -98,10 +104,12 @@ if grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED" /tmp/test10.log; then
 fi
 
 echo "PASS: No false shutdown triggers with both UPSes online"
+)
 
 # ======================================================================
 # Test 14: Multi-UPS concurrent failure (both UPSes fail)
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 14: Multi-UPS concurrent failure (both UPSes fail)"
 
@@ -139,10 +147,12 @@ else
 fi
 
 echo "PASS: Concurrent failure handled correctly"
+)
 
 # ======================================================================
 # Test 15: Non-local failure (UPS2 fails, UPS1 unaffected)
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 15: Non-local failure (UPS2 fails, UPS1 unaffected)"
 
@@ -180,10 +190,12 @@ else
 fi
 
 echo "PASS: Non-local failure correctly handled"
+)
 
 # ======================================================================
 # Test 16: Local drain (drain_on_local_shutdown=true)
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 16: Local drain (drain_on_local_shutdown=true)"
 
@@ -217,10 +229,12 @@ else
 fi
 
 echo "PASS: Local drain correctly executed"
+)
 
 # ======================================================================
 # Test 17: Local no-drain (drain_on_local_shutdown=false)
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 17: Local no-drain (drain_on_local_shutdown=false)"
 
@@ -251,10 +265,12 @@ if grep -qi "drain" /tmp/test17.log; then
 fi
 
 echo "PASS: No-drain correctly skipped drain step"
+)
 
 # ======================================================================
 # Test 18: Recovery - power restored before shutdown
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 18: Recovery - power restored before shutdown"
 
@@ -297,10 +313,12 @@ if grep -q "SHUTDOWN SEQUENCE" /tmp/test18.log; then
 fi
 
 echo "PASS: Recovery correctly handled - no shutdown, power restored logged"
+)
 
 # ======================================================================
 # Test 19: Multi-phase shutdown ordering (shutdown_order)
 # ======================================================================
+(
 echo ""
 echo ">>> Running: Test 19: Multi-phase shutdown ordering (shutdown_order)"
 
@@ -386,7 +404,7 @@ fi
 
 echo ""
 echo "=== Test 19 PASSED: multi-phase shutdown ordering verified ==="
-
+)
 
 echo ""
 echo "=== Group 'multi-ups' completed successfully ==="

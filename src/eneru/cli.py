@@ -308,10 +308,13 @@ def _cmd_version(args):
 def _cmd_completion(args):
     """Print a self-contained shell completion script to stdout.
 
-    Scripts live alongside the Python source so deb/rpm builds can ship
-    them via nfpm.yaml AND the subcommand can read them at runtime --
-    keeping a single source of truth. PyPI users source the output
-    directly: ``source <(eneru completion bash)``.
+    Scripts live inside the ``eneru.completion`` subpackage so they ship
+    with both pip and deb/rpm installs and can be read via
+    ``importlib.resources`` regardless of how the package was installed.
+    nfpm.yaml additionally drops them at the canonical FHS paths so the
+    host shell auto-loads them when bash-completion / zsh / fish is
+    present. PyPI users source the runtime output directly:
+    ``source <(eneru completion bash)``.
     """
     import importlib.resources
 
@@ -319,29 +322,13 @@ def _cmd_completion(args):
     filename = {"bash": "eneru.bash",
                 "zsh":  "eneru.zsh",
                 "fish": "eneru.fish"}[shell]
-
-    # The completion files are deliberately NOT inside the eneru package
-    # so they're easy to ship at the canonical FHS paths via nfpm.yaml.
-    # Try a few candidate locations and use the first one that exists.
-    import os
-    here = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        # Editable-install / source checkout: ../../packaging/completion/
-        os.path.join(here, "..", "..", "packaging", "completion", filename),
-        # Site-packages relative: also walk up to a sibling packaging dir.
-        os.path.join(here, "..", "packaging", "completion", filename),
-        # Deb/rpm install: file is dropped at the canonical FHS path.
-        f"/usr/share/{'bash-completion/completions' if shell == 'bash' else ('zsh/site-functions' if shell == 'zsh' else 'fish/vendor_completions.d')}/{'eneru' if shell == 'bash' else ('_eneru' if shell == 'zsh' else 'eneru.fish')}",
-    ]
-    for path in candidates:
-        try:
-            with open(path, "r") as f:
-                sys.stdout.write(f.read())
-                return
-        except (FileNotFoundError, IsADirectoryError):
-            continue
-    print(f"Error: completion script for '{shell}' not found", file=sys.stderr)
-    sys.exit(1)
+    try:
+        text = (importlib.resources.files("eneru.completion") / filename).read_text()
+    except (FileNotFoundError, ModuleNotFoundError) as exc:
+        print(f"Error: completion script for '{shell}' not found ({exc})",
+              file=sys.stderr)
+        sys.exit(1)
+    sys.stdout.write(text)
 
 
 def _cmd_monitor(args):
