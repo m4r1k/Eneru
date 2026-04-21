@@ -12,6 +12,10 @@
 set -euo pipefail
 
 : "${E2E_DIR:=tests/e2e}"
+# Always work with an absolute path so a test that `cd`s elsewhere
+# and then references $E2E_DIR/... still resolves correctly. Without
+# this, `tests/e2e` would be re-resolved relative to the new cwd.
+E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
 # ======================================================================

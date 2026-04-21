@@ -12,6 +12,10 @@
 set -euo pipefail
 
 : "${E2E_DIR:=tests/e2e}"
+# Always work with an absolute path so a test that `cd`s elsewhere
+# and then references $E2E_DIR/... still resolves correctly. Without
+# this, `tests/e2e` would be re-resolved relative to the new cwd.
+E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
 # ======================================================================
@@ -186,14 +190,21 @@ echo ">>> Running: Test 7: Notification delivery"
 
 echo "=== Test 7: Notification Delivery ==="
 
-if [ -z "$E2E_NOTIFICATION_URL" ]; then
+# Use ${VAR:-} default expansion so set -u doesn't abort on PR runs
+# where the secret isn't injected (forks, first-run PRs, etc.).
+if [ -z "${E2E_NOTIFICATION_URL:-}" ]; then
   echo "SKIP: E2E_NOTIFICATION_URL secret not configured"
   exit 0
 fi
 
-# Create config with notification URL substituted
-sed "s|\${E2E_NOTIFICATION_URL}|${E2E_NOTIFICATION_URL}|g" \
-  $E2E_DIR/config-e2e-notifications.yaml > /tmp/config-notif.yaml
+# Substitute the URL via env-var + python rather than sed, since sed's
+# replacement string treats `&` as backref and would corrupt URLs that
+# contain `&`. python's str.replace is literal.
+URL="$E2E_NOTIFICATION_URL" python3 - <<'PY' > /tmp/config-notif.yaml
+import os, sys, pathlib
+src = pathlib.Path(os.environ["E2E_DIR"]) / "config-e2e-notifications.yaml"
+sys.stdout.write(src.read_text().replace("${E2E_NOTIFICATION_URL}", os.environ["URL"]))
+PY
 
 # Test notification delivery
 eneru test-notifications --config /tmp/config-notif.yaml

@@ -12,6 +12,10 @@
 set -euo pipefail
 
 : "${E2E_DIR:=tests/e2e}"
+# Always work with an absolute path so a test that `cd`s elsewhere
+# and then references $E2E_DIR/... still resolves correctly. Without
+# this, `tests/e2e` would be re-resolved relative to the new cwd.
+E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
 # ======================================================================
@@ -192,14 +196,25 @@ echo "=== Test 20 PASSED: redundancy-group config validation verified ==="
 echo ""
 echo ">>> Running: Test E1: shell completion is syntactically valid"
 
-eneru completion bash | bash -n
+# Capture each script first, then assert. Piping straight into
+# `grep -q` under `set -o pipefail` can SIGPIPE the producer (`grep -q`
+# closes stdin on first match), surfacing as exit 141 and tripping
+# `set -e`. Capturing avoids the pipe entirely.
+BASH_COMPLETION="$(eneru completion bash)"
+echo "$BASH_COMPLETION" | bash -n
 echo "PASS (E1a): bash completion script syntax-checks"
 
-eneru completion zsh | head -1 | grep -q "^#compdef eneru"
-echo "PASS (E1b): zsh completion script has #compdef header"
+ZSH_COMPLETION="$(eneru completion zsh)"
+case "$ZSH_COMPLETION" in
+  '#compdef eneru'*) echo "PASS (E1b): zsh completion script has #compdef header" ;;
+  *) echo "FAIL (E1b): zsh completion missing #compdef header"; exit 1 ;;
+esac
 
-eneru completion fish | grep -q "complete -c eneru"
-echo "PASS (E1c): fish completion script registers complete -c eneru"
+FISH_COMPLETION="$(eneru completion fish)"
+case "$FISH_COMPLETION" in
+  *"complete -c eneru"*) echo "PASS (E1c): fish completion registers complete -c eneru" ;;
+  *) echo "FAIL (E1c): fish completion missing 'complete -c eneru' line"; exit 1 ;;
+esac
 )
 
 echo ""

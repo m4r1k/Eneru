@@ -836,11 +836,14 @@ def render_graph_panel(stdscr, y_start: int, y_end: int, width: int,
     graph_bot = y_end - footer_rows
     g_h = max(2, graph_bot - graph_top)
 
-    # Y-axis label gutter on the left (7 cells: 5 for value + " " + tick).
-    # Use a plain pipe when the Braille font isn't likely available so
-    # the fallback rendering stays consistent.
+    # Y-axis label gutter. Width is computed from the actual labels we'd
+    # produce so longer values like "235.4V" or "1h 30m" don't overflow
+    # into the graph area. Each label is "<value><unit> <tick>" -- e.g.
+    # "100% ┤" (6 cells) or "235.4V ┤" (8 cells). We add 1 cell of
+    # left-margin so the labels aren't flush against column 0.
     tick = "┤" if BrailleGraph.supported() else "|"
-    label_w = 7
+    sample_labels = [f"{fmt(v)}{unit}" for v in (y_min, (y_min + y_max) / 2.0, y_max)]
+    label_w = max(len(s) for s in sample_labels) + 3   # value + " " + tick + 1 margin
     g_w = max(10, width - label_w - 3)
 
     rows = BrailleGraph.plot(
@@ -849,8 +852,8 @@ def render_graph_panel(stdscr, y_start: int, y_end: int, width: int,
         x_values=timestamps, x_min=start_ts, x_max=end_ts,
     )
     # Y-axis labels on top, middle, bottom rows of the graph. Labels
-    # are right-aligned within a fixed gutter so the graph itself starts
-    # at a consistent column regardless of label length ("100%" vs "235.4V").
+    # are right-aligned within the gutter so the graph itself starts at
+    # a consistent column regardless of label length.
     def axis_label(value: float) -> str:
         return f"{fmt(value)}{unit} {tick}".rjust(label_w)
 

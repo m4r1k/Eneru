@@ -246,6 +246,11 @@ class TestRenderToWindow:
 # Time-windowed X positioning (item 5: no phantom dots on long timescales)
 # ===========================================================================
 
+# The blank cell is U+2800 in Braille mode and " " in block-fallback mode.
+# Detect dynamically so the suite passes under both LANG=C and UTF-8.
+_BLANK = BrailleGraph.code_point(0) if BrailleGraph.supported() else " "
+
+
 class TestPlotXWindow:
     """When x_values + x_min/x_max are provided, samples must land at their
     actual time position within the requested window -- not get spread evenly
@@ -275,7 +280,7 @@ class TestPlotXWindow:
         for row in rows:
             assert len(row) == 100
             right_portion = row[20:]   # cells 20..99 (right 80%)
-            assert all(ch == "⠀" for ch in right_portion), (
+            assert all(ch == _BLANK for ch in right_portion), (
                 "right portion of chart should be empty when data is "
                 "confined to the left of the window"
             )
@@ -297,8 +302,8 @@ class TestPlotXWindow:
         # At least one non-blank cell in each half of the row.
         left_half = "".join(row[:10] for row in rows)
         right_half = "".join(row[10:] for row in rows)
-        assert any(ch != "⠀" for ch in left_half)
-        assert any(ch != "⠀" for ch in right_half)
+        assert any(ch != _BLANK for ch in left_half)
+        assert any(ch != _BLANK for ch in right_half)
 
     @pytest.mark.unit
     def test_x_window_skips_out_of_range_samples(self):
@@ -314,7 +319,7 @@ class TestPlotXWindow:
         # If the third sample were clipped to the right edge, the rightmost
         # cell would have a dot. Verify that's NOT the case.
         for row in rows:
-            assert row[-1] == "⠀", (
+            assert row[-1] == _BLANK, (
                 "out-of-range sample must be dropped, not clipped to edge"
             )
 
@@ -332,5 +337,5 @@ class TestPlotXWindow:
         # touch both the left and right portions of the row.
         left = "".join(row[:5] for row in rows)
         right = "".join(row[15:] for row in rows)
-        assert any(ch != "⠀" for ch in left)
-        assert any(ch != "⠀" for ch in right)
+        assert any(ch != _BLANK for ch in left)
+        assert any(ch != _BLANK for ch in right)
