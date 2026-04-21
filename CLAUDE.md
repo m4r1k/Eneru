@@ -234,6 +234,42 @@ This repo deliberately keeps individual files small (`monitor.py` is now ~830 li
 
 Tags are the immutable release snapshots. No release branches -- tags are sufficient for a single active version. GitHub Releases, .deb/.rpm packages, and PyPI artifacts are all built from tags via CI.
 
+## Code review workflow (manual AI invocation)
+
+This repo uses **two AI review tools**: `coderabbitai` and `cubic-dev-ai`. Both are configured to require **manual invocation** rather than reviewing every PR commit automatically.
+
+**Why manual:**
+- **CodeRabbit** free tier allows one review per 45 minutes. Per-commit auto-review burns the quota fast and produces noisy partial reviews against intermediate diffs.
+- **cubic.dev** free tier allows 40 reviews per month. Same problem.
+- We deliberately push commits early so the GitHub Actions E2E suite (`E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy and Stats`) gates work-in-progress and gives feedback fast on real-world scenarios. That CI feedback loop must stay cheap; AI review should not bottleneck it.
+
+**Workflow on every non-trivial PR:**
+```
+1. Push commits early; let CI run on each push (E2E especially)
+2. Iterate based on CI failures
+3. When all commits are in AND every required check is green, post:
+       @coderabbitai full review
+       @cubic-dev-ai review this pull request
+   in PR comments (one per line, separate comments are fine)
+4. Triage findings; push fixes; CI re-runs automatically
+5. Re-trigger AI review only if substantive new code was added
+6. Merge when both AI reviewers + branch protection are satisfied
+```
+
+**Optional for trivial PRs.** Skip both AI reviews for:
+- Documentation-only changes (README, docs/, comments)
+- Version bumps + changelog promotion (release-prep PRs)
+- Single-line typo fixes
+- Pure dependency upgrades with no code changes
+
+For trivial PRs the CI gates (validate × 6 + E2E × 4) are sufficient. Saves quota for substantive changes.
+
+**Configuration:**
+- **CodeRabbit:** `.coderabbit.yaml` at repo root sets `reviews.auto_review.enabled: false`. The file also documents the manual-trigger phrase.
+- **cubic.dev:** No config-file approach exists. Auto-review is disabled via the cubic.dev dashboard (Settings → Repository → disable "Auto-review on PR open"). Setting persists per-repository.
+
+**If you forget and trigger an auto-review:** harmless but wastes quota. Just close the auto-review and trigger manually after CI is green.
+
 ## Changelog
 
 A single changelog is maintained at `docs/changelog.md`. This is the comprehensive version with detailed changes, migration notes, and version comparison tables. It is rendered on [ReadTheDocs](https://eneru.readthedocs.io/latest/changelog/).
@@ -246,6 +282,20 @@ When releasing a new version, update `docs/changelog.md` with the comparison tab
 |---------|------|------|
 | Feature Name | Old behavior | New behavior |
 ```
+
+### Changelog workflow: verbose during dev, trim before release
+
+The `[Unreleased]` section is a **working surface, not a published artifact**. During development add detail freely — per-rc breakouts (`rc6 — added X`, `rc7 — fixed Y`), file references, code snippets, design rationale. The reasoning: future Claude sessions pick up context cheaper from a single long file than by reading individual commits with `git log -p` (one paragraph in a markdown file ≪ one full diff). Trade a fat `[Unreleased]` block for fewer tokens spent reconstructing what changed.
+
+**Before tagging the release**, consolidate the verbose `[Unreleased]` block into a published-quality entry that matches the size and density of prior shipped releases. Reference points: v5.0.0 was ~600 words; v5.1.0 was trimmed from ~2950 words (rc1 through rc9 accumulated) down to ~1100 words (the published entry). Reader-friendly always wins at release time.
+
+The trim pass is part of the release-cut commit, not a separate step. Specifically:
+
+1. Drop `rcN —` prefixes — the user sees one consolidated 5.X.0 release, not the rc history
+2. Collapse paragraph bullets into bullet + sub-bullets (the v5.0.0 style)
+3. Move design rationale into `docs/<feature>.md` if it isn't already there; the changelog should *summarise*, not explain
+4. Cut walkthrough text and behavioural deep-dives — link to `docs/` instead
+5. Run the `humanizer` skill on the trimmed entry for one final pass to remove AI-isms (em-dashes-as-style, promotional adjectives, copula avoidance, signposting). Don't mention the humanizer pass in the commit message.
 
 ## Installation Paths
 

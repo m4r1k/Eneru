@@ -1,0 +1,19 @@
+# CodeRabbit configuration.
+# Docs: https://docs.coderabbit.ai/configuration/auto-review
+#
+# We disable per-commit auto-review to stay inside CodeRabbit's free
+# tier (one review per 45 minutes). Push commits early so the GitHub
+# Actions E2E suite gates work-in-progress; once all commits are in
+# AND CI is fully green, manually trigger the review by posting:
+#
+#     @coderabbitai full review
+#
+# in a PR comment. This batches one focused review per PR instead of
+# burning the quota on every intermediate commit.
+#
+# See CLAUDE.md "Code review workflow" for the full policy and the
+# corresponding cubic.dev manual-invocation flow.
+
+reviews:
+  auto_review:
+    enabled: false
