@@ -1060,6 +1060,7 @@ class TestEdgeCases:
 class TestStatsConfig:
 
     @pytest.mark.unit
+    @pytest.mark.no_stats_isolation
     def test_defaults(self):
         cfg = StatsConfig()
         assert cfg.db_directory == "/var/lib/eneru"
@@ -1098,6 +1099,7 @@ statistics:
         assert config.statistics.retention.agg_hourly_days == 90
 
     @pytest.mark.unit
+    @pytest.mark.no_stats_isolation
     def test_default_yaml_omitted_section(self, tmp_path):
         from eneru import ConfigLoader
         cfg_path = tmp_path / "config.yaml"

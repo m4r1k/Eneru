@@ -388,7 +388,12 @@ class UPSGroupMonitor(
 
         try:
             run_command([
-                "logger", "-t", "ups-monitor", "-p", "daemon.warning",
+                # syslog identifier renamed from the legacy "ups-monitor"
+                # to "eneru" — the package + service rebrand happened in
+                # v5.0 but this side-channel was missed, so power events
+                # showed up under a different identifier than every
+                # other journal line emitted by the daemon.
+                "logger", "-t", "eneru", "-p", "daemon.warning",
                 f"⚡ POWER EVENT: {event} - {details}"
             ])
         except Exception:

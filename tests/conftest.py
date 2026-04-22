@@ -36,23 +36,70 @@ from eneru import (
     ConfigLoader,
 )
 from eneru import config as eneru_config_module
+from eneru import stats as eneru_stats_module
 
 
 @pytest.fixture(autouse=True)
-def isolate_stats_db_directory(tmp_path, monkeypatch):
-    """Redirect every test's StatsConfig.db_directory default to a
-    per-test tmp_path so any code that constructs StatsConfig() without
-    overriding the field doesn't write SQLite files into the real
-    /var/lib/eneru. Without this fixture every test that instantiates
-    UPSGroupMonitor (or StatsStore directly) leaks `default.db` and
-    per-UPS DBs onto the host."""
+def isolate_stats_db_directory(request, tmp_path, monkeypatch):
+    """Redirect every test's StatsConfig.db_directory default and any
+    direct StatsStore(db_path=...) call to a per-test tmp_path, so no
+    test leaks SQLite files into the real /var/lib/eneru.
+
+    Tests that specifically need to verify the unmodified production
+    default (e.g. asserting StatsConfig().db_directory == "/var/lib/
+    eneru") can opt out via @pytest.mark.no_stats_isolation.
+
+    Two layers of defense are required when the fixture is active:
+
+    1. ``StatsConfig.__init__`` — the dataclass-generated ``__init__``
+       captures the literal default ``"/var/lib/eneru"`` at class
+       decoration time, so monkeypatching the class attribute is a
+       no-op for new instances. We replace ``__init__`` with a
+       wrapper that substitutes the isolated path when the caller
+       didn't supply one, regardless of how the dataclass was
+       generated.
+
+    2. ``StatsStore.__init__`` — direct ``StatsStore(Path("/var/lib/
+       eneru/foo.db"))`` calls (e.g. via TUI helpers) bypass
+       StatsConfig entirely. Redirect any ``db_path`` whose parent is
+       ``/var/lib/eneru`` into the isolated dir so it lands in
+       tmp_path instead.
+    """
+    if request.node.get_closest_marker("no_stats_isolation"):
+        yield None
+        return
+
     isolated = tmp_path / "stats"
     isolated.mkdir(parents=True, exist_ok=True)
+    isolated_str = str(isolated)
+    real_dir = Path("/var/lib/eneru")
+
+    # Layer 1: StatsConfig default.
+    original_cfg_init = eneru_config_module.StatsConfig.__init__
+
+    def patched_cfg_init(self, db_directory=isolated_str, **kw):
+        return original_cfg_init(self, db_directory=db_directory, **kw)
+
     monkeypatch.setattr(
-        eneru_config_module.StatsConfig,
-        "db_directory",
-        str(isolated),
+        eneru_config_module.StatsConfig, "__init__", patched_cfg_init,
     )
+
+    # Layer 2: direct StatsStore instantiation.
+    original_store_init = eneru_stats_module.StatsStore.__init__
+
+    def patched_store_init(self, db_path, *args, **kw):
+        try:
+            p = Path(db_path)
+        except TypeError:
+            return original_store_init(self, db_path, *args, **kw)
+        if p.parent == real_dir:
+            p = isolated / p.name
+        return original_store_init(self, p, *args, **kw)
+
+    monkeypatch.setattr(
+        eneru_stats_module.StatsStore, "__init__", patched_store_init,
+    )
+
     yield isolated
 
 
