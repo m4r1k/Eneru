@@ -1,9 +1,14 @@
-# Scenario: Low battery - should trigger shutdown (below 20% threshold)
+# Scenario: Low battery — should trigger shutdown via the LOW BATTERY
+# (charge < 20%) trigger, NOT via the critical-runtime trigger.
+# runtime is set ABOVE the 600 s critical-runtime threshold so the
+# shutdown is unambiguously attributable to the low-battery path; the
+# previous value of 180 s also crossed the critical-runtime threshold,
+# making test failures hard to localise.
 ups.status: OB DISCHRG LB
 ups.load: 35
 
 battery.charge: 15
-battery.runtime: 180
+battery.runtime: 900
 battery.voltage: 44.0
 
 input.voltage: 0.0

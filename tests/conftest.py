@@ -35,6 +35,25 @@ from eneru import (
     MonitorState,
     ConfigLoader,
 )
+from eneru import config as eneru_config_module
+
+
+@pytest.fixture(autouse=True)
+def isolate_stats_db_directory(tmp_path, monkeypatch):
+    """Redirect every test's StatsConfig.db_directory default to a
+    per-test tmp_path so any code that constructs StatsConfig() without
+    overriding the field doesn't write SQLite files into the real
+    /var/lib/eneru. Without this fixture every test that instantiates
+    UPSGroupMonitor (or StatsStore directly) leaks `default.db` and
+    per-UPS DBs onto the host."""
+    isolated = tmp_path / "stats"
+    isolated.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        eneru_config_module.StatsConfig,
+        "db_directory",
+        str(isolated),
+    )
+    yield isolated
 
 
 @pytest.fixture
@@ -174,6 +193,39 @@ def mock_run_command():
     with patch("eneru.monitor.run_command") as mock:
         mock.return_value = (0, "", "")
         yield mock
+
+
+@pytest.fixture
+def patch_run_command_everywhere():
+    """Patch ``run_command`` in every module that imported it under its
+    own name. ``from eneru.utils import run_command`` binds the symbol
+    at import time, so ``patch("eneru.utils.run_command")`` is a no-op
+    for already-imported modules — tests that go through a shutdown
+    mixin (vms/containers/filesystems/remote) must patch each binding
+    explicitly or the mixin's call will hit real ``virsh``/``umount``/
+    ``ssh`` despite the test's intent.
+
+    Yields a dict mapping the module path → MagicMock so a test can
+    assert against any specific binding. Each mock returns
+    ``(0, "", "")`` by default; override per-test as needed.
+    """
+    targets = [
+        "eneru.monitor.run_command",
+        "eneru.multi_ups.run_command",
+        "eneru.shutdown.vms.run_command",
+        "eneru.shutdown.containers.run_command",
+        "eneru.shutdown.filesystems.run_command",
+        "eneru.shutdown.remote.run_command",
+    ]
+    patchers = [patch(t) for t in targets]
+    mocks = {t: p.start() for t, p in zip(targets, patchers)}
+    for m in mocks.values():
+        m.return_value = (0, "", "")
+    try:
+        yield mocks
+    finally:
+        for p in patchers:
+            p.stop()
 
 
 @pytest.fixture

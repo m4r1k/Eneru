@@ -362,6 +362,12 @@ class TestEvaluatorThreadLifecycle:
         )
         ev.start()
         time.sleep(0.15)
+        # F3: assert the evaluator thread survived the exception storm
+        # BEFORE we signal stop. A thread killed by the unhandled
+        # RuntimeError would still leave `not ev.is_alive()` True after
+        # join (a dead thread joins instantly), so the original test
+        # would silently pass even if the swallowing contract broke.
+        assert ev.is_alive()
         stop_event.set()
         ev.join(timeout=2)
         assert not ev.is_alive()

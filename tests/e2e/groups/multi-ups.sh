@@ -387,6 +387,13 @@ parse_epoch() {
   local line
   line=$(docker compose exec -T "$svc" cat /var/log/shutdown.log)
   local ts="${line%%: Shutdown*}"
+  # Fail loudly on empty timestamp instead of letting `date` produce a
+  # bogus "now" epoch that would silently corrupt the phase-ordering
+  # comparison below.
+  if [ -z "$ts" ]; then
+    echo "ERROR: parse_epoch($svc): /var/log/shutdown.log is empty or missing the expected prefix" >&2
+    return 1
+  fi
   date -d "$ts" +%s
 }
 

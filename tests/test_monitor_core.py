@@ -310,19 +310,25 @@ class TestFailsafe:
 
     @pytest.mark.unit
     def test_connection_lost_while_ob_triggers_shutdown(self, tmp_path):
-        """Connection failure while on battery triggers immediate shutdown."""
+        """Connection failure while on battery triggers immediate shutdown.
+
+        Routes through the real ``_main_loop`` via ``_run_one_iteration``
+        rather than inlining the failsafe logic — otherwise a regression
+        in the loop's failsafe path would leave this test green because
+        the assertions only check the inline simulation.
+        """
         monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = False
         monitor.state.previous_status = "OB DISCHRG"
         monitor.state.connection_state = "OK"
+        # Trigger failsafe immediately (non-stale-data path).
+        with patch.object(monitor, "_execute_shutdown_sequence") as mock_exec:
+            TestAdvisoryTriggers._run_one_iteration(
+                monitor, (False, {}, "Network error"),
+            )
 
-        # Simulate the failsafe logic from _main_loop
-        is_failsafe_trigger = True
-        if is_failsafe_trigger and "OB" in monitor.state.previous_status:
-            monitor.state.connection_state = "FAILED"
-            monitor._shutdown_flag_path.touch()
-
+        mock_exec.assert_called_once()
         assert monitor.state.connection_state == "FAILED"
-        assert monitor._shutdown_flag_path.exists()
 
     @pytest.mark.unit
     def test_connection_lost_while_ol_enters_grace_period(self, tmp_path):
@@ -418,8 +424,14 @@ class TestShutdownSequence:
         assert flag_existed
 
     @pytest.mark.unit
-    def test_shutdown_continues_on_step_failure(self, tmp_path):
-        """Shutdown sequence continues even if a step raises an exception."""
+    def test_shutdown_aborts_on_step_failure(self, tmp_path):
+        """Documents current behavior: an unhandled exception inside a
+        shutdown step propagates up and ABORTS the remaining steps. The
+        steps themselves handle expected failures internally; only an
+        unexpected raise reaches the orchestrator. If we ever decide to
+        wrap each step in try/except so subsequent steps run as
+        best-effort, this test must change to assert the new contract.
+        """
         monitor = make_monitor(tmp_path)
         call_order = []
 
@@ -433,15 +445,11 @@ class TestShutdownSequence:
         monitor._unmount_filesystems = lambda: call_order.append("unmount")
         monitor._shutdown_remote_servers = lambda: call_order.append("remote")
 
-        # The sequence should not abort on VM failure
-        # (current implementation doesn't wrap each step in try/except,
-        # but the steps themselves handle errors internally)
-        try:
+        with pytest.raises(RuntimeError, match="VM shutdown failed"):
             monitor._execute_shutdown_sequence()
-        except RuntimeError:
-            pass
 
-        assert "vms" in call_order
+        # Only the failing step ran; subsequent steps did NOT execute.
+        assert call_order == ["vms"]
 
 
 # ==============================================================================
