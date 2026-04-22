@@ -9,48 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [5.1.1] - 2026-04-22
 
-Bug-fix release with one small TUI improvement. Bundles fixes from a third-party AI code review (CodeRabbit Pro + Cubic.Dev) of the v5.1.0 codebase. Drop-in upgrade.
+Bug-fix release with one small TUI improvement. Bundles fixes from a third-party AI code review (CodeRabbit Pro + Cubic.Dev) of the v5.1.0 codebase. Drop-in upgrade. See `git log v5.1.0..v5.1.1` for per-commit detail with reviewer attribution.
 
 ### Added
-- **TUI events panel: full history with arrow-key scrolling.** The events panel no longer truncates to a 24h window; it pulls every event from the SQLite store and lets the operator scroll with `↑/↓` (one row), `PgUp/PgDn` (ten rows), and `Home/End` (oldest/newest). `<M>` still toggles between 8 and 500 visible rows.
+- **TUI events panel: full history with arrow-key scrolling.** Drops the 24h window; `↑/↓` scrolls one row, `PgUp/PgDn` ten, `Home/End` jumps to oldest/newest. `<M>` still toggles between 8 and 500 visible rows.
 
 ### Fixed
-- **XCP-ng VM shutdown silently no-op'd.** `stop_xcpng_vms` passed UUIDs positionally to `xe vm-shutdown uuid=`; `xe` parses arguments as `key=value` and ignored them. UUIDs are now bound via `xargs -I {}`, and the force pass uses `xe`'s `force=true` keyword instead of `--force`.
-- **Redundancy `is_local` quorum loss never powered off the host.** The executor stopped local services and remote peers but skipped the local poweroff command. The redundancy executor now delegates to the coordinator's `_handle_local_shutdown` (defense-in-depth lock + global flag) so a concurrent per-UPS trigger can't fire twice.
-- **Multi-UPS state-file write race.** `with_suffix('.tmp')` replaced each per-UPS suffix with `.tmp`, collapsing every monitor's temp file onto a shared `eneru.state.tmp` and racing the atomic rename. Same pattern fixed in the battery-history persist path.
-- **TUI live-blending key mismatch.** `_STATE_FILE_TO_COLUMN` used NUT's dotted lowercase names but the daemon writes uppercase state-file keys, so live blending received zero samples and graph right edges lagged ~10s behind SQLite.
-- **`virsh list` failure during VM wait loop produced false success.** If `libvirtd` died mid-shutdown, empty stdout was read as "all VMs stopped" and `virsh destroy` never fired. The wait loop now treats non-zero exit as transient and keeps the prior remaining-VM list.
-- **Voltage severity escalation never fired.** A brownout that crossed the severe threshold AFTER the LOW state was already pending kept the original `is_severe=False` flag, so operators waited the full hysteresis window for an immediate-class alert. Severity is now re-evaluated every poll.
-- **Silent config drops.** `notifications.suppress`, `notifications.voltage_hysteresis_seconds`, and the per-group `statistics` section in multi-UPS mode were never read from YAML; the parser quietly used dataclass defaults. All three now round-trip.
-- **Legacy `ups-monitor` syslog tag.** Power events shelled out to `logger -t ups-monitor`, the pre-v5.0 package name. Renamed to `eneru` so journalctl filtering matches the rest of the daemon's output.
-- **Long tail of robustness fixes** across `shutdown/remote.py` (`timeout=0` no longer promotes to default, thread exceptions logged instead of swallowed, `ssh_options` accepts non-`-o` flags), `shutdown/filesystems.py` (`umount` options split via `shlex`), `multi_ups.py` (drain phase signals stop_event before triggering peer shutdown), `graph.py` (numeric filtering before `min`/`max`; pixel-row aggregator picks the topmost set pixel), `health/battery.py` (anomaly drop magnitude re-validated before firing), `logger.py` (handler cleanup closes fds + disables propagation), `stats.py` (`with self._conn:` actually batches `executemany`; SQLite URI quoted against paths containing `?`/`#`), `utils.py` (`run_command` normalises None stdout/stderr to `""`), `cli.py` (validate surfaces YAML errors regardless of `--config` form), and `completion/eneru.bash` (`mapfile -t` for filenames with spaces).
+- **XCP-ng VM shutdown silently no-op'd.** `stop_xcpng_vms` passed UUIDs positionally to `xe vm-shutdown uuid=`; `xe` ignored them. Now bound via `xargs -I {}` with `force=true`.
+- **Redundancy `is_local` quorum loss never powered off the host.** The executor stopped local services and remote peers but skipped the local poweroff command. Now delegates to the coordinator's `_handle_local_shutdown`.
+- **Multi-UPS state-file write race.** `with_suffix('.tmp')` collapsed every monitor's atomic-rename temp file onto a shared name. Same fix in the battery-history persist path.
+- **TUI live-blending key mismatch.** Graph right edges lagged ~10s behind SQLite because `_STATE_FILE_TO_COLUMN` used NUT's dotted lowercase names but the daemon writes uppercase keys.
+- **`virsh list` failure during VM wait loop produced false success.** A wedged `libvirtd` made the wait loop report "all VMs stopped" and skip force-destroy. Non-zero exit is now treated as transient.
+- **Voltage severity escalation never fired** when a brownout crossed the severe threshold AFTER the LOW state was already pending. Severity is now re-evaluated every poll.
+- **Silent config drops.** `notifications.suppress`, `notifications.voltage_hysteresis_seconds`, and per-group `statistics` in multi-UPS mode were never read from YAML. All three now round-trip.
+- **Legacy `ups-monitor` syslog tag** renamed to `eneru` so journalctl filtering matches the rest of the daemon's output.
+- **Long tail of robustness fixes** across `shutdown/`, `health/`, `graph.py`, `logger.py`, `stats.py`, `utils.py`, `cli.py`, and bash completion.
 
 ### Security
-- **`stop_compose` remote-shell injection.** Template double-quoting didn't block `$()`, backticks, or `${...}` expansion on the remote host. The template no longer wraps `{path}`; `shlex.quote` runs at the call site.
-- **PyPI workflow OIDC token scope.** Publish workflow split into a `build` job (`contents: read`) and a `publish` job (`needs: build`, `id-token: write`), so `pip install build twine` can no longer reach the publishing token. The `workflow_dispatch` version input is validated against a strict PEP-440 allow-list before any shell interpolation; same fix applied to `release.yml`.
-- **CI supply-chain hardening.** Every third-party GitHub Actions invocation is now SHA-pinned. nFPM is version-pinned and verified against the goreleaser-published `checksums.txt` before extraction. Dropped `git push -f` from the gh-pages step. Dropped `|| true` masks that hid `dpkg`/`rpm` install failures.
+- **`stop_compose` remote-shell injection.** Template double-quoting didn't block `$()`/backticks/`${...}`. `shlex.quote` now runs at the call site.
+- **PyPI publish OIDC token scope.** Workflow split so `pip install build twine` can't reach the publishing token; the `workflow_dispatch` version input is validated against PEP-440 before any shell interpolation.
+- **CI supply-chain.** Every third-party GitHub Actions invocation is SHA-pinned. nFPM version-pinned + checksum-verified. Dropped `git push -f` to gh-pages and `|| true` masks on dpkg/rpm install.
 
 ### Packaging
-- **Dynamic version target.** `pyproject.toml` reads from `eneru.version.__version__` instead of `eneru.__version__`, so a future top-level import in `__init__.py` cannot break wheel builds.
-- **DEB lifecycle handling.** prerm/postrm replaced with explicit `case` statements covering the full Debian Policy enumeration (`failed-upgrade`, `deconfigure`, `abort-install`, `abort-upgrade`, `disappear`); the if/elif cascade previously fell through to "actual removal" on every non-removal lifecycle.
-- **postinstall fresh-vs-upgrade.** Disambiguated via `$2` (previous version, empty on fresh install) instead of the always-present unit file.
-- **chroot/container guard.** `systemctl daemon-reload` skipped when `/run/systemd/system` is missing, so package builds inside chroots no longer abort under `set -e`.
+- **DEB lifecycle handling.** prerm/postrm rewritten with explicit `case` for the full Debian Policy enumeration; the if/elif cascade was stopping the service on every non-removal lifecycle (`failed-upgrade`, `deconfigure`, etc.).
+- **postinstall fresh-vs-upgrade** disambiguated via `$2`; **chroot guard** on `systemctl daemon-reload`; `pyproject.toml` reads version from `eneru.version.__version__` so a future top-level `__init__.py` import can't break wheel builds.
 
 ### Examples
-- Reference and dual-UPS configs no longer ship `StrictHostKeyChecking=no` as the default; the option is commented out and marked testing-only.
-- `config-reference.yaml`: `compose_files: []` (was `compose_files:`, which parses as YAML null and the loader rejects).
+- Reference / dual-UPS configs no longer ship `StrictHostKeyChecking=no` as the default.
+- `config-reference.yaml`: `compose_files: []` (was `compose_files:`, parsing as YAML null).
 - `config-enterprise.yaml`: Slack URL switched to the documented Apprise webhook form.
-- `config-homelab.yaml`: corrected the `parallel: false` comment that promised "shut down LAST" — the legacy flag actually runs servers BEFORE the parallel-order=0 batch. Switched to `shutdown_order: 2` and documented the legacy flag's real semantics.
+- `config-homelab.yaml`: `parallel: false` does the OPPOSITE of "shut down LAST" — switched to `shutdown_order: 2` and corrected the misleading comment.
 
 ### Test quality
-- Autouse `tests/conftest.py` fixture monkeypatches `StatsConfig.__init__` and `StatsStore.__init__` so no test can leak SQLite files into `/var/lib/eneru`. Opt out via `@pytest.mark.no_stats_isolation`.
-- Failsafe tests now route through the real `_main_loop`; the redundancy-evaluator thread test asserts `is_alive()` BEFORE signalling stop; e2e shell scripts assert exit codes via `PIPESTATUS` instead of swallowing them with `|| true`; e2e SSH-target Dockerfile creates `/var/run/sshd`; the low-battery scenario runtime is now above the critical-runtime threshold so the test unambiguously exercises the low-battery path.
+Autouse fixture redirects `StatsConfig` / `StatsStore` defaults to a per-test tmp_path so tests can't leak SQLite files into `/var/lib/eneru`. Failsafe / redundancy-evaluator tests now exercise real code paths; e2e shell scripts assert exit codes via `PIPESTATUS` instead of swallowing them.
 
 ### Migration notes
-None. Every change is a bug fix or additive against the v5.1.0 contract.
-
-### See also
-- `git log v5.1.0..v5.1.1` for per-commit detail with reviewer attribution on every fix.
+None.
 
 ---
 
