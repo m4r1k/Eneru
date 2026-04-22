@@ -5,6 +5,7 @@ Owns the multi-server orchestration (sequential vs parallel batching by
 followed by the final shutdown command.
 """
 
+import shlex
 import threading
 import time
 from typing import Dict, List, Tuple
@@ -207,11 +208,15 @@ class RemoteShutdownMixin:
                     )
                     continue
 
-                # Get command template and substitute placeholders
+                # Get command template and substitute placeholders.
+                # `path` is shlex-quoted because the template embeds it
+                # directly into the remote shell — without quoting, a
+                # malicious or malformed path could expand $(), `…`, or
+                # ${…} on the remote host.
                 command_template = REMOTE_ACTIONS[action_name]
                 command = command_template.format(
                     timeout=timeout,
-                    path=cmd_config.path or ""
+                    path=shlex.quote(cmd_config.path or "")
                 )
                 description = action_name
 

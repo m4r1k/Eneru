@@ -46,12 +46,22 @@ jobs:
 
       - name: Extract version
         id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # Manual trigger - use input version
-            VERSION="${{ github.event.inputs.version }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Manual trigger — use input version
+            VERSION="$INPUT_VERSION"
+            # Strict allow-list: the version is later interpolated into
+            # `sed` and other shell calls. Reject anything that isn't a
+            # PEP-440-style release or pre-release (rc/alpha/beta).
+            if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){1,2}(-(rc|alpha|beta)[0-9]+)?$'; then
+              echo "Invalid version: $VERSION" >&2
+              exit 1
+            fi
           else
-            # Release trigger - extract from tag (e.g., v4.3.0 -> 4.3.0)
+            # Release trigger — extract from tag (e.g., v4.3.0 -> 4.3.0)
             VERSION="${GITHUB_REF#refs/tags/v}"
           fi
 
@@ -59,28 +69,31 @@ jobs:
           SHORT_HASH=$(git rev-parse --short HEAD)
           VERSION_FULL="${VERSION}-${SHORT_HASH}"
 
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "VERSION_FULL=$VERSION_FULL" >> $GITHUB_OUTPUT
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "VERSION_FULL=$VERSION_FULL" >> "$GITHUB_OUTPUT"
           echo "Building packages version: $VERSION"
           echo "Code version: $VERSION_FULL"
 
       - name: Determine channel
         id: channel
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          VERSION="${{ steps.version.outputs.VERSION }}"
           if [[ "$VERSION" =~ -(rc|beta|alpha) ]]; then
             CHANNEL="testing"
           else
             CHANNEL="stable"
           fi
-          echo "CHANNEL=$CHANNEL" >> $GITHUB_OUTPUT
+          echo "CHANNEL=$CHANNEL" >> "$GITHUB_OUTPUT"
           echo "Channel: $CHANNEL for version: $VERSION"
 
       - name: Update version in script
+        env:
+          VERSION_FULL: ${{ steps.version.outputs.VERSION_FULL }}
         run: |
           # Update __version__ with full version including git hash
           # This only affects the code display (--version, logs), not package versions
-          sed -i "s/^__version__ = .*/__version__ = \"${{ steps.version.outputs.VERSION_FULL }}\"/" src/eneru/version.py
+          sed -i "s/^__version__ = .*/__version__ = \"$VERSION_FULL\"/" src/eneru/version.py
           # Verify the change
           grep "__version__" src/eneru/version.py
 

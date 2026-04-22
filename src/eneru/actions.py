@@ -43,17 +43,20 @@ REMOTE_ACTIONS: Dict[str, str] = {
         'true'
     ),
 
-    # Stop XCP-ng/XenServer VMs with graceful shutdown, then force
+    # Stop XCP-ng/XenServer VMs with graceful shutdown, then force.
+    # `xe` parses arguments as key=value pairs, so the UUID must be bound
+    # to the `uuid=` parameter via `-I {{}}`; passing it positionally
+    # makes `xe` silently ignore it.
     "stop_xcpng_vms": (
         'ids=$(xe vm-list power-state=running is-control-domain=false --minimal); '
         '[ -z "$ids" ] && exit 0; '
-        'echo "$ids" | tr \',\' \'\\n\' | xargs -r -n1 xe vm-shutdown uuid= 2>/dev/null; '
+        'echo "$ids" | tr \',\' \'\\n\' | xargs -r -I {{}} xe vm-shutdown uuid={{}} 2>/dev/null; '
         'end=$((SECONDS+{timeout})); '
         'while [ $SECONDS -lt $end ]; do '
         'ids=$(xe vm-list power-state=running is-control-domain=false --minimal); '
         '[ -z "$ids" ] && break; sleep 1; done; '
         'xe vm-list power-state=running is-control-domain=false --minimal | tr \',\' \'\\n\' | '
-        'xargs -r -n1 xe vm-shutdown uuid= --force 2>/dev/null; '
+        'xargs -r -I {{}} xe vm-shutdown uuid={{}} force=true 2>/dev/null; '
         'true'
     ),
 
@@ -71,13 +74,17 @@ REMOTE_ACTIONS: Dict[str, str] = {
         'true'
     ),
 
-    # Stop docker/podman compose stack
+    # Stop docker/podman compose stack.
+    # {path} is shell-quoted at the format() call site (see
+    # RemoteShutdownMixin._execute_remote_pre_shutdown) — leaving the
+    # placeholder bare here so shlex.quote provides the only quoting
+    # boundary; double-quoting wouldn't block $(), backticks, or ${...}.
     "stop_compose": (
         't={timeout}; '
         'if command -v docker &>/dev/null && docker compose version &>/dev/null; then '
-        'docker compose -f "{path}" down -t $t; '
+        'docker compose -f {path} down -t $t; '
         'elif command -v podman &>/dev/null; then '
-        'podman compose -f "{path}" down -t $t; fi; '
+        'podman compose -f {path} down -t $t; fi; '
         'true'
     ),
 

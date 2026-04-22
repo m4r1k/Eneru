@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to publish (e.g., 4.9)'
+        description: 'Version to publish (e.g., 5.1.1 or 5.1.1-rc1)'
         required: true
         type: string
       ref:
@@ -15,12 +15,16 @@ on:
         type: string
         default: 'main'
 
+# Split build and publish into separate jobs so the OIDC `id-token:
+# write` permission only applies to the publish step, not to
+# `pip install build twine`. A compromised build-time dependency
+# therefore cannot exfiltrate the OIDC token used for trusted
+# publishing.
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
-      id-token: write
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -39,22 +43,32 @@ jobs:
 
       - name: Extract version
         id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # Manual trigger - use input version
-            VERSION="${{ github.event.inputs.version }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
+            # Strict allow-list: the version is later interpolated into
+            # `sed`. Reject anything that isn't a PEP-440-style release
+            # or pre-release (rc/alpha/beta) identifier.
+            if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){1,2}(-(rc|alpha|beta)[0-9]+)?$'; then
+              echo "Invalid version: $VERSION" >&2
+              exit 1
+            fi
           else
-            # Release trigger - extract from tag (e.g., v4.9 -> 4.9)
             VERSION="${GITHUB_REF#refs/tags/v}"
           fi
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Publishing package version: $VERSION"
 
       - name: Update version in script
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
           # Update __version__ with clean version for PyPI
           # PyPI does not allow local version identifiers (+hash)
-          sed -i "s/^__version__ = .*/__version__ = \"${{ steps.version.outputs.VERSION }}\"/" src/eneru/version.py
+          sed -i "s/^__version__ = .*/__version__ = \"$VERSION\"/" src/eneru/version.py
           grep "__version__" src/eneru/version.py
 
       - name: Build package
@@ -62,6 +76,25 @@ jobs:
 
       - name: Check package
         run: twine check dist/*
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
