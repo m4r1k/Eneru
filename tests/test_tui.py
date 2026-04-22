@@ -97,40 +97,34 @@ class TestFillRow:
 
 
 class TestEventsTimescaleDecoupled:
-    """Item 4: events panel must NOT change when graph timescale changes."""
+    """Events panel pulls every event and ignores the graph timescale."""
 
     @pytest.mark.unit
-    def test_events_use_fixed_window_independent_of_time_range(self):
-        """The events query window is a fixed constant -- pressing T to
-        cycle the graph timescale must not pass a new window into
-        query_events_for_display.
+    def test_events_query_passes_no_time_window(self):
+        """``query_events_for_display`` must be called WITHOUT a
+        time_range_seconds argument (or with None), so the panel always
+        sees every event in the SQLite store. Pressing T to cycle the
+        graph timescale must not feed a dynamic window in here.
         """
         import inspect
         import re as _re
-        from eneru.tui import EVENTS_TIME_WINDOW
         from eneru import tui as tui_mod
 
-        # The constant exists and is the documented 24 hours.
-        assert EVENTS_TIME_WINDOW == 24 * 3600
-
-        # The actual call site to query_events_for_display must pass
-        # EVENTS_TIME_WINDOW as the window argument. Match the call
-        # specifically rather than just looking for the symbol anywhere
-        # in the function body, so a stray comment can't hide a real
-        # regression where the call site goes back to the dynamic
-        # TIME_RANGE_SECONDS pattern.
         src = inspect.getsource(tui_mod.run_tui)
+        # The call must NOT pass TIME_RANGE_SECONDS or any positional
+        # time-range argument; only `config` and the keyword `max_events`.
+        assert "TIME_RANGE_SECONDS.get(time_range" not in src, (
+            "run_tui re-introduces a dynamic time-range window for events; "
+            "the panel must scan the full events table."
+        )
+        # Confirm the call site uses keyword max_events (no positional
+        # second argument that could become a window).
         call_re = _re.compile(
-            r"query_events_for_display\s*\(\s*config\s*,\s*EVENTS_TIME_WINDOW",
+            r"query_events_for_display\s*\(\s*config\s*,\s*max_events\s*=",
         )
         assert call_re.search(src), (
-            "run_tui must call query_events_for_display(config, EVENTS_TIME_WINDOW, ...) "
-            "-- not a dynamic TIME_RANGE_SECONDS-based window."
-        )
-        # And the dynamic pattern must not appear at the events call site.
-        assert "TIME_RANGE_SECONDS.get(time_range" not in src, (
-            "run_tui re-introduces the dynamic events window pattern; "
-            "see the EVENTS_TIME_WINDOW decoupling fix."
+            "run_tui must call query_events_for_display(config, max_events=...) "
+            "with no positional time-range argument."
         )
 
 

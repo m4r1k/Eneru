@@ -33,9 +33,12 @@ TIME_RANGE_SECONDS = {
 
 # The events panel is intentionally decoupled from the graph timescale:
 # pressing T to change the graph window must not shrink/grow the events
-# list. 24h is the operational sweet spot -- short enough that the list
-# stays readable, long enough to cover an overnight power event.
-EVENTS_TIME_WINDOW = 24 * 3600
+# list. The panel pulls every event from the SQLite store (the events
+# table is one row per power event, not per poll, so even years of
+# history stay tiny) and lets the operator scroll through with the
+# arrow keys.
+EVENTS_MAX_ROWS_NORMAL = 8
+EVENTS_MAX_ROWS_MORE = 500
 
 # Map graph modes to (column, unit_suffix, y_min, y_max, value_formatter).
 # value_formatter takes a float and returns the user-facing display
@@ -308,18 +311,20 @@ def _format_event_line(ts: int, label: str, event_type: str,
 
 def query_events_for_display(
     config: Config,
-    time_range_seconds: int = 24 * 3600,
+    time_range_seconds: Optional[int] = None,
     *,
-    max_events: int = 50,
+    max_events: int = EVENTS_MAX_ROWS_MORE,
 ) -> List[str]:
-    """Pull recent events from each UPS's SQLite store, sorted by timestamp.
+    """Pull events from each UPS's SQLite store, sorted by timestamp.
 
-    Returns formatted display strings ready to drop into the TUI events
-    panel. Returns an empty list when no per-UPS DB exists -- callers
-    should fall back to ``parse_log_events`` in that case.
+    ``time_range_seconds=None`` (default) returns everything in the
+    events table; pass an explicit window to limit by age. Returns
+    formatted display strings ready to drop into the TUI events panel.
+    Returns an empty list when no per-UPS DB exists -- callers should
+    fall back to ``parse_log_events`` in that case.
     """
     end = int(time.time())
-    start = end - max(60, int(time_range_seconds))
+    start = 0 if time_range_seconds is None else end - max(60, int(time_range_seconds))
     multi_ups = config.multi_ups
     rows: List[tuple] = []  # (ts, label, event_type, detail)
     any_db_seen = False
@@ -677,7 +682,8 @@ def render_config_panel(win, y_start: int, y_end: int, width: int,
 def render_logs_panel(win, y_start: int, y_end: int, width: int,
                        events: List[str], show_more: bool,
                        *, graph_mode: str = "off", time_range: str = "1h",
-                       ups_index: int = 0, ups_total: int = 1):
+                       ups_index: int = 0, ups_total: int = 1,
+                       scroll_offset: int = 0):
     """Render the logs panel with yellow/gold background, edge to edge.
 
     The bottom-row key hints reflect the *current* graph mode, time
@@ -705,10 +711,18 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
     else:
         footer_lines = 2
         available = y_end - y - footer_lines
-        if not show_more:
-            display_events = events[-min(len(events), max(3, available)):] if available > 0 else []
+        if available <= 0:
+            display_events = []
         else:
-            display_events = events[-max(1, available):]
+            visible = max(3, available) if not show_more else max(1, available)
+            # scroll_offset = 0 anchors the bottom (most recent) on the
+            # last visible row. Larger offsets reveal older events; clamp
+            # so the user can never scroll past the oldest entry.
+            max_offset = max(0, len(events) - visible)
+            offset = max(0, min(scroll_offset, max_offset))
+            end_idx = len(events) - offset
+            start_idx = max(0, end_idx - visible)
+            display_events = events[start_idx:end_idx]
 
         for event in display_events:
             if y >= y_end - footer_lines:
@@ -742,6 +756,7 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
         ("<Q>", "Quit"),
         ("<R>", "Refresh"),
         ("<M>", "More logs"),
+        ("<↑↓>", "Scroll"),
         ("<G>", f"Graph: {graph_mode}"),
         ("<T>", f"Time: {time_range}"),
         ("<U>", ups_descr),
@@ -885,10 +900,10 @@ def run_tui(config: Config, interval: int = 5):
         stdscr.bkgd(' ', curses.color_pair(C_BORDER))
 
         show_more = False
-        max_log_events = 8
         graph_mode = "off"           # G key cycles through GRAPH_MODES
         time_range = "1h"            # T key cycles through TIME_RANGES
         ups_index = 0                # U key cycles which UPS the graph shows
+        events_scroll = 0            # ↑/↓ scrolls events panel; 0 = bottom
 
         while True:
             stdscr.erase()
@@ -944,12 +959,16 @@ def run_tui(config: Config, interval: int = 5):
             for g in config.ups_groups:
                 groups_data.append(collect_group_data(g, config))
                 update_live_buffer(g, config)
-            log_events = query_events_for_display(config, EVENTS_TIME_WINDOW,
-                                                  max_events=50 if show_more else max_log_events)
+            events_cap = (
+                EVENTS_MAX_ROWS_MORE if show_more else EVENTS_MAX_ROWS_NORMAL
+            )
+            log_events = query_events_for_display(
+                config, max_events=events_cap,
+            )
             if not log_events:
                 log_events = parse_log_events(
                     config.logging.file or "",
-                    max_events=50 if show_more else max_log_events,
+                    max_events=events_cap,
                 )
 
             # Render panels edge-to-edge
@@ -964,12 +983,17 @@ def run_tui(config: Config, interval: int = 5):
                 )
                 # Spacer between graph and logs
                 fill_row(stdscr, graph_end, curses.color_pair(C_BORDER))
+            # Bound the scroll offset to the current events list so a
+            # refresh that shrinks the list doesn't strand the user on
+            # an empty view.
+            events_scroll = max(0, min(events_scroll, max(0, len(log_events) - 1)))
             render_logs_panel(stdscr, logs_start, logs_end, width,
                               log_events, show_more,
                               graph_mode=graph_mode,
                               time_range=time_range,
                               ups_index=ups_index,
-                              ups_total=len(config.ups_groups) or 1)
+                              ups_total=len(config.ups_groups) or 1,
+                              scroll_offset=events_scroll)
 
             # Move cursor to bottom-right to avoid visual artifacts
             try:
@@ -984,6 +1008,7 @@ def run_tui(config: Config, interval: int = 5):
             if key in (ord('q'), ord('Q'), 27):
                 break
             elif key == ord('r'):
+                events_scroll = 0
                 continue
             elif key in (ord('m'), ord('M')):
                 show_more = not show_more
@@ -994,6 +1019,21 @@ def run_tui(config: Config, interval: int = 5):
             elif key in (ord('u'), ord('U')):
                 if config.ups_groups:
                     ups_index = (ups_index + 1) % len(config.ups_groups)
+            elif key == curses.KEY_UP:
+                # Scroll one event toward older history. The render
+                # function clamps to the current list size.
+                events_scroll += 1
+            elif key == curses.KEY_DOWN:
+                events_scroll = max(0, events_scroll - 1)
+            elif key == curses.KEY_PPAGE:    # PgUp
+                events_scroll += 10
+            elif key == curses.KEY_NPAGE:    # PgDn
+                events_scroll = max(0, events_scroll - 10)
+            elif key == curses.KEY_HOME:
+                # Jump to the oldest event currently in the list.
+                events_scroll = max(0, len(log_events))
+            elif key == curses.KEY_END:
+                events_scroll = 0
 
     curses.wrapper(_main)
 
