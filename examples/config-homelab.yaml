@@ -65,10 +65,13 @@ filesystems:
       - path: "/mnt/nas"
         options: "-l"
 
-# Remote servers with optional pre-shutdown commands
-# Servers are processed in two phases:
-#   1. Sequential: Servers with parallel: false are shutdown one by one (in config order)
-#   2. Parallel: Remaining servers (parallel: true, the default) are shutdown concurrently
+# Remote servers with optional pre-shutdown commands.
+# Servers are processed by their effective shutdown_order (lowest first);
+# servers sharing the same order run concurrently.
+#   - Default: order 0 (parallel batch)
+#   - shutdown_order: N (>=1): explicit later phase; higher numbers run last
+#   - Legacy parallel: false: assigned a unique negative order so the server
+#     runs in a phase BEFORE the order-0 batch (NOT after — see the NAS block)
 remote_servers:
   # Proxmox hypervisor - gracefully stop VMs/CTs before shutdown
   # Runs in parallel (default) with other parallel servers

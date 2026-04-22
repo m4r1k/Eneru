@@ -257,6 +257,11 @@ def patch_run_command_everywhere():
     ``(0, "", "")`` by default; override per-test as needed.
     """
     targets = [
+        # eneru.utils is the home of `run_command`; patching it here too
+        # catches indirect callers that resolve through utils at call
+        # time (e.g. command_exists() in eneru.utils, which would
+        # otherwise still shell out during shutdown tests).
+        "eneru.utils.run_command",
         "eneru.monitor.run_command",
         "eneru.multi_ups.run_command",
         "eneru.shutdown.vms.run_command",

@@ -61,7 +61,18 @@ class FilesystemShutdownMixin:
                 # Multi-flag option strings like "-l -f" must be split into
                 # separate argv entries — appending the literal would make
                 # umount reject "-l -f" as a single unknown option.
-                cmd.extend(shlex.split(options))
+                # Wrap shlex.split because it raises ValueError on
+                # malformed input (unclosed quotes, etc.); a misconfigured
+                # YAML must never crash the shutdown sequence — log and
+                # skip THIS mount instead.
+                try:
+                    cmd.extend(shlex.split(options))
+                except ValueError as exc:
+                    self._log_message(
+                        f"  ❌ Invalid umount options for {mount_point}: "
+                        f"{exc}. Skipping this mount."
+                    )
+                    continue
             cmd.append(mount_point)
 
             exit_code, _, stderr = run_command(cmd, timeout=timeout)

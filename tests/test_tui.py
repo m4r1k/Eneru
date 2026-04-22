@@ -128,6 +128,60 @@ class TestEventsTimescaleDecoupled:
         )
 
 
+class TestKeypadEnabled:
+    """5.1.1 (cubic P1): the curses TUI must enable keypad translation
+    or arrow / page / home / end keys arrive as raw escape sequences and
+    the leading ESC byte hits the quit branch instead of scrolling."""
+
+    @pytest.mark.unit
+    def test_run_tui_enables_keypad_mode(self):
+        import inspect
+        import re as _re
+        from eneru import tui as tui_mod
+
+        src = inspect.getsource(tui_mod.run_tui)
+        # `stdscr.keypad(True)` must be called before the input loop
+        # binds curses.KEY_* constants; without it those constants are
+        # never delivered (curses returns the raw escape sequence).
+        assert _re.search(r"stdscr\.keypad\s*\(\s*True\s*\)", src), (
+            "run_tui must call stdscr.keypad(True) so KEY_UP/KEY_DOWN/"
+            "KEY_PPAGE/KEY_NPAGE/KEY_HOME/KEY_END are delivered as the "
+            "expected curses key codes."
+        )
+
+
+class TestEventsScrollAutoPromote:
+    """5.1.1 (CodeRabbit): scrolling toward older history while in
+    normal-cap mode (8 rows) used to be a silent no-op because the
+    cap matched the visible window. ↑ / PgUp / Home now auto-promote
+    show_more=True so scroll has somewhere to scroll to."""
+
+    @pytest.mark.unit
+    def test_arrow_keys_auto_promote_show_more(self):
+        import inspect
+        from eneru import tui as tui_mod
+
+        src = inspect.getsource(tui_mod.run_tui)
+        # The branch must group KEY_UP / KEY_PPAGE / KEY_HOME together
+        # and assign show_more = True before performing the scroll math.
+        # Match the structural pattern rather than exact whitespace so
+        # a re-format doesn't break the test.
+        assert "curses.KEY_UP" in src
+        assert "curses.KEY_PPAGE" in src
+        assert "curses.KEY_HOME" in src
+        # show_more flips to True inside the auto-promote branch.
+        idx_up = src.find("curses.KEY_UP, curses.KEY_PPAGE, curses.KEY_HOME")
+        assert idx_up >= 0, (
+            "auto-promote branch must group KEY_UP / KEY_PPAGE / KEY_HOME "
+            "into a single elif so show_more flips before scrolling"
+        )
+        following = src[idx_up:idx_up + 800]
+        assert "show_more = True" in following, (
+            "auto-promote branch must set show_more = True before the "
+            "scroll math runs"
+        )
+
+
 class TestGraphPanelHeader:
     """Item 3: graph panel renders a now/min/max stat header with units."""
 

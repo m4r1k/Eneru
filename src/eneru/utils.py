@@ -1,5 +1,6 @@
 """Utility functions for Eneru."""
 
+import math
 import subprocess
 import os
 from typing import Any, List, Tuple
@@ -12,7 +13,6 @@ def is_numeric(value: Any) -> bool:
     expect a real comparable number, and `int(float("nan"))` raises
     while `float("inf")` propagates into bucket math as garbage.
     """
-    import math
     if value is None:
         return False
     if isinstance(value, bool):

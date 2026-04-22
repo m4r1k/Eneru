@@ -134,6 +134,47 @@ def test_unmount_filesystems_includes_options(tmp_path):
 
 
 @pytest.mark.unit
+def test_unmount_filesystems_multi_flag_options_split(tmp_path):
+    """Multi-flag option strings like "-l -f" must be split into
+    separate argv entries; the previous cmd.append(options) was passing
+    them as one argument and umount rejected the literal as unknown."""
+    monitor = _make_fs_monitor(
+        tmp_path, mounts=[{"path": "/mnt/data", "options": "-l -f"}],
+    )
+    with patch("eneru.shutdown.filesystems.run_command", return_value=(0, "", "")) as mock_run:
+        monitor._unmount_filesystems()
+    cmd = mock_run.call_args.args[0]
+    assert cmd == ["umount", "-l", "-f", "/mnt/data"]
+
+
+@pytest.mark.unit
+def test_unmount_filesystems_malformed_options_skip_mount(tmp_path, capsys):
+    """A malformed options string (unclosed quote) used to crash the
+    shutdown sequence with ValueError out of shlex.split. Cubic P1:
+    catch and skip the offending mount instead of propagating."""
+    monitor = _make_fs_monitor(
+        tmp_path,
+        mounts=[
+            {"path": "/mnt/bad", "options": '"unclosed'},
+            {"path": "/mnt/good", "options": "-l"},
+        ],
+    )
+    monitor.logger = MagicMock()
+    with patch("eneru.shutdown.filesystems.run_command", return_value=(0, "", "")) as mock_run:
+        # Must not raise.
+        monitor._unmount_filesystems()
+    # Only the good mount reached run_command; the bad one was skipped.
+    cmds = [c.args[0] for c in mock_run.call_args_list]
+    assert ["umount", "-l", "/mnt/good"] in cmds
+    assert all(c[1] != "/mnt/bad" for c in cmds), \
+        "malformed-options mount must NOT reach umount"
+    # And the failure was logged with the offending mount path.
+    log_lines = [str(c) for c in monitor.logger.log.call_args_list]
+    assert any("/mnt/bad" in line and "Invalid umount options" in line
+               for line in log_lines)
+
+
+@pytest.mark.unit
 def test_unmount_filesystems_timeout_proceeds(tmp_path):
     """umount returning 124 (timeout) is logged but does not raise."""
     monitor = _make_fs_monitor(tmp_path)

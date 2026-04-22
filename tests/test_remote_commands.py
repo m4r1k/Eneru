@@ -273,6 +273,35 @@ class TestRemotePreShutdownExecution:
             mock_run.assert_not_called()
 
     @pytest.mark.unit
+    def test_stop_compose_without_path_does_not_render_template(self, remote_monitor):
+        """5.1.1 fix: the path-presence check now runs BEFORE the
+        REMOTE_ACTIONS template is fetched/rendered with shlex.quote("").
+        Validate by patching .format on the template string and asserting
+        it was never called when path is missing — proves the precondition
+        is authoritative rather than a dead-code warning after rendering.
+        """
+        from eneru import REMOTE_ACTIONS
+        server = RemoteServerConfig(
+            name="Test Server",
+            enabled=True,
+            host="192.168.1.50",
+            user="root",
+            command_timeout=30,
+            pre_shutdown_commands=[
+                RemoteCommandConfig(action="stop_compose"),  # No path!
+            ],
+        )
+        with patch.dict(
+            REMOTE_ACTIONS,
+            {"stop_compose": MagicMock(wraps=REMOTE_ACTIONS["stop_compose"])},
+        ) as patched:
+            with patch.object(remote_monitor, "_run_remote_command") as mock_run:
+                remote_monitor._execute_remote_pre_shutdown(server)
+            # The template's .format must not have been invoked at all.
+            patched["stop_compose"].format.assert_not_called()
+            mock_run.assert_not_called()
+
+    @pytest.mark.unit
     def test_execute_pre_shutdown_unknown_action_skipped(self, remote_monitor):
         """Test that unknown action is skipped."""
         server = RemoteServerConfig(

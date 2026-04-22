@@ -898,6 +898,12 @@ def run_tui(config: Config, interval: int = 5):
         curses.curs_set(0)
         stdscr.timeout(interval * 1000)
         stdscr.bkgd(' ', curses.color_pair(C_BORDER))
+        # Enable keypad translation so curses delivers KEY_UP / KEY_DOWN /
+        # KEY_PPAGE / KEY_NPAGE / KEY_HOME / KEY_END for the events-panel
+        # scroll bindings. Without this, arrow keys arrive as raw escape
+        # sequences (ESC + [ + A) and the leading ESC byte (27) hits the
+        # quit branch instead of scrolling.
+        stdscr.keypad(True)
 
         show_more = False
         graph_mode = "off"           # G key cycles through GRAPH_MODES
@@ -1019,19 +1025,29 @@ def run_tui(config: Config, interval: int = 5):
             elif key in (ord('u'), ord('U')):
                 if config.ups_groups:
                     ups_index = (ups_index + 1) % len(config.ups_groups)
-            elif key == curses.KEY_UP:
-                # Scroll one event toward older history. The render
-                # function clamps to the current list size.
-                events_scroll += 1
+            elif key in (curses.KEY_UP, curses.KEY_PPAGE, curses.KEY_HOME):
+                # First scroll auto-promotes to More mode so the cap is
+                # the bigger 500-row window. Without this, normal mode's
+                # 8-row cap means there's nothing to scroll back to and
+                # the arrow keys are a silent no-op despite the visible
+                # `<↑↓> Scroll` hint.
+                if not show_more:
+                    show_more = True
+                if key == curses.KEY_UP:
+                    # Scroll one event toward older history. The render
+                    # function clamps to the current list size.
+                    events_scroll += 1
+                elif key == curses.KEY_PPAGE:    # PgUp
+                    events_scroll += 10
+                else:                            # KEY_HOME
+                    # Jump to the oldest event currently in the list.
+                    # render_logs_panel clamps so the value just needs
+                    # to overshoot the visible window.
+                    events_scroll = len(log_events)
             elif key == curses.KEY_DOWN:
                 events_scroll = max(0, events_scroll - 1)
-            elif key == curses.KEY_PPAGE:    # PgUp
-                events_scroll += 10
             elif key == curses.KEY_NPAGE:    # PgDn
                 events_scroll = max(0, events_scroll - 10)
-            elif key == curses.KEY_HOME:
-                # Jump to the oldest event currently in the list.
-                events_scroll = max(0, len(log_events))
             elif key == curses.KEY_END:
                 events_scroll = 0
 

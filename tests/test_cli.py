@@ -231,7 +231,7 @@ notifications:
         assert "Title: UPS Alert" in captured.out
 
     @pytest.mark.unit
-    def test_validate_config_nonexistent_file(self, capsys):
+    def test_validate_config_nonexistent_file(self, tmp_path, capsys):
         """Validate against a non-existent path: ConfigLoader.load
         prints a warning and falls back to defaults; the resulting
         defaults are valid, so exit is 0.
@@ -241,8 +241,13 @@ notifications:
         was silently ignored. This now also asserts the fallback
         warning containing the typo'd path appears in stdout, so a
         future regression that swallowed the warning would fail loud.
+        Uses tmp_path so the assertion is deterministic across
+        environments (the previous hard-coded /nonexistent/path could
+        in theory exist on a developer machine).
         """
-        typo_path = "/nonexistent/path/config.yaml"
+        typo_path = str(tmp_path / "missing-config.yaml")
+        # Sanity: ensure we're not racing a pre-existing file in tmp_path.
+        assert not (tmp_path / "missing-config.yaml").exists()
         with patch.object(sys, "argv", [
             "eneru", "validate", "-c", typo_path,
         ]):

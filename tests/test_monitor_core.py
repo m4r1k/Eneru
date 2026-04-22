@@ -59,6 +59,30 @@ def make_monitor(tmp_path, **overrides):
     return monitor
 
 
+def _run_one_iteration(monitor, ups_data_response):
+    """Run ``_main_loop`` for exactly one iteration.
+
+    ``_main_loop`` calls ``self._stop_event.wait(timeout)`` at every
+    natural pause; we monkey-patch the wait so the first invocation
+    also sets the event. This guarantees one full pass through the
+    loop body before the loop exits. Promoted to module scope so any
+    test class can route through the real loop instead of inlining
+    the failsafe simulation.
+    """
+    original_wait = monitor._stop_event.wait
+    called = {"n": 0}
+
+    def wait_then_stop(timeout=None):
+        called["n"] += 1
+        monitor._stop_event.set()
+        return original_wait(0)
+
+    with patch.object(monitor, "_get_all_ups_data",
+                      return_value=ups_data_response):
+        with patch.object(monitor._stop_event, "wait", wait_then_stop):
+            monitor._main_loop()
+
+
 # ==============================================================================
 # STATUS STATE MACHINE
 # ==============================================================================
@@ -323,9 +347,7 @@ class TestFailsafe:
         monitor.state.connection_state = "OK"
         # Trigger failsafe immediately (non-stale-data path).
         with patch.object(monitor, "_execute_shutdown_sequence") as mock_exec:
-            TestAdvisoryTriggers._run_one_iteration(
-                monitor, (False, {}, "Network error"),
-            )
+            _run_one_iteration(monitor, (False, {}, "Network error"))
 
         mock_exec.assert_called_once()
         assert monitor.state.connection_state == "FAILED"
@@ -1022,27 +1044,12 @@ class TestAdvisoryTriggers:
         mock_shutdown.assert_called_once()
         assert monitor.state.trigger_active is False  # legacy path doesn't set advisory
 
-    @staticmethod
-    def _run_one_iteration(monitor, ups_data_response):
-        """Run ``_main_loop`` for exactly one iteration.
-
-        ``_main_loop`` calls ``self._stop_event.wait(timeout)`` at every
-        natural pause; we monkey-patch the wait so the first invocation also
-        sets the event. This guarantees one full pass through the loop body
-        before the loop exits.
-        """
-        original_wait = monitor._stop_event.wait
-        called = {"n": 0}
-
-        def wait_then_stop(timeout=None):
-            called["n"] += 1
-            monitor._stop_event.set()
-            return original_wait(0)
-
-        with patch.object(monitor, "_get_all_ups_data",
-                          return_value=ups_data_response):
-            with patch.object(monitor._stop_event, "wait", wait_then_stop):
-                monitor._main_loop()
+    # _run_one_iteration moved to module scope (see top of this file)
+    # so other test classes can route through the real loop without
+    # cross-class coupling. Class-level shim kept for backward
+    # compatibility with the existing self._run_one_iteration calls
+    # below.
+    _run_one_iteration = staticmethod(_run_one_iteration)
 
     @pytest.mark.unit
     def test_fsd_advisory_in_redundancy_group(self, tmp_path):

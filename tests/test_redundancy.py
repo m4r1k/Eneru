@@ -705,3 +705,73 @@ class TestExecutorNotificationContent:
         assert "quorum lost" in body
         assert "UPS-X@\u200Bh" in body
         assert "UPS-Y@\u200Bh" in body
+
+
+class TestLocalShutdownCallback:
+    """5.1.1 fix: an is_local redundancy group must invoke the
+    coordinator's _handle_local_shutdown after the remote-shutdown
+    phase. Without this, quorum loss completed cleanly with the local
+    host still running."""
+
+    @pytest.mark.unit
+    def test_callback_fires_on_is_local_quorum_loss(self, tmp_path):
+        callback = MagicMock()
+        group = _redundancy_group(name="rack-local", is_local=True)
+        ex = RedundancyGroupExecutor(
+            group, base_config=_base_config(tmp_path=tmp_path),
+            local_shutdown_callback=callback,
+        )
+        ex.shutdown(reason="quorum lost")
+        callback.assert_called_once()
+        # The reason carries the redundancy group's name so the
+        # coordinator's defense-in-depth lock log can attribute it.
+        assert "rack-local" in callback.call_args[0][0]
+
+    @pytest.mark.unit
+    def test_callback_NOT_invoked_for_non_local_group(self, tmp_path):
+        # is_local=False is the typical "managed remote rack" case;
+        # the local poweroff must NEVER fire on this path even when
+        # a callback is wired up.
+        callback = MagicMock()
+        group = _redundancy_group(name="rack-remote", is_local=False)
+        ex = RedundancyGroupExecutor(
+            group, base_config=_base_config(tmp_path=tmp_path),
+            local_shutdown_callback=callback,
+        )
+        ex.shutdown(reason="quorum lost")
+        callback.assert_not_called()
+
+    @pytest.mark.unit
+    def test_callback_optional_no_crash_when_unset(self, tmp_path):
+        # Single-UPS-coordinator-less setups won't wire a callback.
+        # The executor must not raise when local_shutdown_callback=None.
+        group = _redundancy_group(name="standalone", is_local=True)
+        ex = RedundancyGroupExecutor(
+            group, base_config=_base_config(tmp_path=tmp_path),
+            # No local_shutdown_callback supplied -> defaults to None.
+        )
+        # Must not raise.
+        assert ex.shutdown(reason="quorum lost") is True
+
+    @pytest.mark.unit
+    def test_callback_skipped_when_remote_shutdown_raises(self, tmp_path):
+        # The callback is positioned AFTER _shutdown_remote_servers
+        # inside the try-block, so an exception in remote shutdown
+        # short-circuits the callback. The coordinator's monitor-side
+        # path can still trigger local shutdown via its own lock; the
+        # redundancy callback is a redundant signal in that scenario.
+        callback = MagicMock()
+        group = _redundancy_group(name="rack-local", is_local=True)
+        ex = RedundancyGroupExecutor(
+            group, base_config=_base_config(tmp_path=tmp_path),
+            local_shutdown_callback=callback,
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            def boom():
+                raise RuntimeError("ssh dead")
+            mp.setattr(ex, "_shutdown_remote_servers", boom)
+            ex.shutdown(reason="quorum lost")
+        # Exception was caught by the executor's try/except; the
+        # callback was NOT invoked because the raise happened before
+        # the callback line in the try-block.
+        callback.assert_not_called()

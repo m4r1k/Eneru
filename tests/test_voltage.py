@@ -558,6 +558,86 @@ class TestSeverityBypass:
 
 
 # ===========================================================================
+# F1 (5.1.1): severity escalation within the same LOW/HIGH state must
+# refresh `voltage_pending_severe` so the immediate-notify bypass fires.
+# ===========================================================================
+
+class TestVoltageSeverityEscalation:
+    """A brownout that worsens past the severe threshold AFTER the LOW
+    state was already pending must lift the pending record's severe
+    flag (and refresh the recorded voltage / threshold) so the next
+    `_maybe_notify_voltage_pending` fires immediately. Without this,
+    operators would wait the full hysteresis window for an alert that
+    should have been immediate."""
+
+    @pytest.mark.unit
+    def test_mild_then_severe_escalates_to_immediate_notify(self):
+        h = _TestHost(ups_vars={"input.voltage.nominal": "230"}, hysteresis=30)
+        h._initialize_voltage_thresholds()
+
+        # Poll 1: mild brownout (200V, 13.0% below 230V). Pending state
+        # is opened but no notification — dwell in effect.
+        h._check_voltage_issues("OL", "200")
+        assert h.state.voltage_state == "LOW"
+        assert h.state.voltage_pending_state == "LOW"
+        assert h.state.voltage_pending_severe is False
+        assert h.notifications == []
+        assert h.state.voltage_pending_voltage == 200.0
+
+        # Poll 2: deviation worsens past the 15% severe threshold
+        # (180V, 21.7% below). State is unchanged (still LOW), so the
+        # state-transition branch in _check_voltage_issues doesn't fire.
+        # The escalation branch must lift `voltage_pending_severe` and
+        # refresh the recorded voltage / threshold; then
+        # _maybe_notify_voltage_pending fires immediately.
+        h._check_voltage_issues("OL", "180")
+        assert h.state.voltage_state == "LOW"  # unchanged
+        assert h.state.voltage_pending_severe is True
+        assert h.state.voltage_pending_voltage == 180.0
+        assert h.notifications, "severity escalation must fire immediate notify"
+        body, _ = h.notifications[0]
+        assert "BROWNOUT_DETECTED" in body
+        assert "(severe," in body
+        assert "Notifying immediately" in body
+
+    @pytest.mark.unit
+    def test_escalation_does_not_fire_after_already_notified(self):
+        # Once a notification has been dispatched, the escalation branch
+        # must NOT re-mark the record severe (would be harmless but
+        # would muddy the state machine). Reuse the severe-bypass path
+        # to consume the notification, then push a more severe reading.
+        h = _TestHost(ups_vars={"input.voltage.nominal": "230"}, hysteresis=30)
+        h._initialize_voltage_thresholds()
+        h._check_voltage_issues("OL", "180")  # severe immediately
+        assert h.state.voltage_pending_notified is True
+        notif_count = len(h.notifications)
+
+        # Worsen further; pending_notified gate must keep us silent.
+        h._check_voltage_issues("OL", "150")
+        assert h.state.voltage_pending_notified is True
+        assert len(h.notifications) == notif_count, (
+            "no second notification should fire while pending is already notified"
+        )
+
+    @pytest.mark.unit
+    def test_high_side_escalation_also_refreshes(self):
+        # Symmetry check on the OVER_VOLTAGE path.
+        h = _TestHost(ups_vars={"input.voltage.nominal": "230"}, hysteresis=30)
+        h._initialize_voltage_thresholds()
+        h._check_voltage_issues("OL", "260")  # mild HIGH (~13%)
+        assert h.state.voltage_pending_state == "HIGH"
+        assert h.state.voltage_pending_severe is False
+        assert h.notifications == []
+
+        h._check_voltage_issues("OL", "280")  # 21.7% — severe
+        assert h.state.voltage_pending_severe is True
+        assert h.notifications
+        body, _ = h.notifications[0]
+        assert "OVER_VOLTAGE_DETECTED" in body
+        assert "(severe," in body
+
+
+# ===========================================================================
 # rc9: notification text -- grid-quality framing + UPS-switch context
 # ===========================================================================
 

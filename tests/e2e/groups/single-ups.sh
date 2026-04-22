@@ -34,14 +34,17 @@ sleep 3
 # Run Eneru for 5 seconds — should NOT trigger shutdown.
 # Capture eneru's exit code explicitly; the previous `|| true` masked
 # any crash (e.g. exit 1) and let the test pass even when eneru never
-# actually ran. 124 is timeout's SIGTERM (expected here); 0 is also
-# acceptable; anything else is a real failure.
+# actually ran. The ONLY acceptable exit is 124 (SIGTERM from timeout),
+# which proves the daemon was still running when the timer hit. A
+# clean 0 here would mean the daemon exited on its own — premature
+# termination during a "monitor normal state" check is itself a bug
+# this test must surface.
 set +e
 timeout 5 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test2.log
 RC=${PIPESTATUS[0]}
 set -e
-if [ "$RC" -ne 124 ] && [ "$RC" -ne 0 ]; then
-  echo "FAIL: eneru exited with code $RC (expected 0 or 124)"
+if [ "$RC" -ne 124 ]; then
+  echo "FAIL: eneru exited with code $RC (expected 124 = killed by timeout)"
   cat /tmp/test2.log
   exit 1
 fi

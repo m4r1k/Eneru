@@ -229,6 +229,17 @@ class RemoteShutdownMixin:
                     )
                     continue
 
+                # Validate stop_compose has path BEFORE rendering the
+                # template; otherwise the precondition warning becomes
+                # dead code (shlex.quote("") would happily produce ''
+                # and a future template change might let the bad command
+                # slip through).
+                if action_name == "stop_compose" and not cmd_config.path:
+                    self._log_message(
+                        f"    ⚠️ [{idx}/{cmd_count}] stop_compose requires 'path' parameter (skipping)"
+                    )
+                    continue
+
                 # Get command template and substitute placeholders.
                 # `path` is shlex-quoted because the template embeds it
                 # directly into the remote shell — without quoting, a
@@ -240,13 +251,6 @@ class RemoteShutdownMixin:
                     path=shlex.quote(cmd_config.path or "")
                 )
                 description = action_name
-
-                # Validate stop_compose has path
-                if action_name == "stop_compose" and not cmd_config.path:
-                    self._log_message(
-                        f"    ⚠️ [{idx}/{cmd_count}] stop_compose requires 'path' parameter (skipping)"
-                    )
-                    continue
 
             # Handle custom command
             elif cmd_config.command:

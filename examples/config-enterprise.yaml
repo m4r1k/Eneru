@@ -51,7 +51,7 @@ notifications:
   #   slack://TokenA/TokenB/TokenC/#channel-name
   # See https://github.com/caronc/apprise/wiki/Notify_slack for the
   # bot-OAuth form (slack://botname@oauth-token/#channel).
-  - "slack://TokenA/TokenB/TokenC/#operations?footer=no"
+  - "slack://TokenA/TokenB/TokenC?footer=no/#operations"
 
   # Secondary: PagerDuty - Critical alerts
   # - "pagerduty://INTEGRATION_KEY@ROUTING_KEY"
