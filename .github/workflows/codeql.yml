@@ -9,23 +9,32 @@ on:
     # Run weekly on Monday at 06:00 UTC
     - cron: '0 6 * * 1'
 
+# All third-party action invocations are SHA-pinned (with the
+# corresponding tag in a comment) so a moved tag in the upstream
+# action repo cannot silently change what runs in CI. Refresh by
+# re-running `gh api repos/<owner>/<repo>/git/refs/tags/<tag>` and
+# updating both the SHA and the comment.
 jobs:
   analyze:
     name: Analyze (Python)
     runs-on: ubuntu-latest
     permissions:
+      # actions/checkout needs `contents: read` on private repos;
+      # without it the checkout step fails because every other
+      # permission defaults to `none` once any one is declared.
+      contents: read
       security-events: write
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@b25d0ebf40e5b63ee81e1bd6e5d2a12b7c2aeb61  # v4
         with:
           languages: python
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@b25d0ebf40e5b63ee81e1bd6e5d2a12b7c2aeb61  # v4
         with:
           category: "/language:python"

@@ -13,8 +13,11 @@ RUN adduser -D -s /bin/bash testuser && \
     echo "testuser:testpass" | chpasswd && \
     echo "testuser ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
-# Generate host keys
-RUN ssh-keygen -A
+# Generate host keys. Alpine's openssh-server doesn't create
+# /var/run/sshd at install time, and sshd refuses to start without it
+# (it uses the directory as the privsep chroot). Without this mkdir
+# the container exits immediately after launch.
+RUN mkdir -p /var/run/sshd && ssh-keygen -A
 
 # Setup SSH directory for testuser
 RUN mkdir -p /home/testuser/.ssh && \

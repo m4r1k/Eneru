@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to build (e.g., 4.3.0-rc0)'
+        description: 'Version to build (e.g., 5.1.1 or 5.1.1-rc1)'
         required: true
         type: string
       ref:
@@ -14,6 +14,10 @@ on:
         required: true
         type: string
         default: 'main'
+
+# nFPM is pinned + checksum-verified; bump NFPM_VERSION here to refresh.
+env:
+  NFPM_VERSION: "2.41.3"
 
 permissions:
   contents: write
@@ -23,12 +27,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         with:
           python-version: '3.11'
 
@@ -99,14 +103,18 @@ jobs:
 
       - name: Install nFPM
         run: |
-          echo "Installing nFPM..."
-          # Download latest nFPM release directly from GitHub
-          NFPM_VERSION=$(curl -s https://api.github.com/repos/goreleaser/nfpm/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
-          echo "Installing nFPM version: $NFPM_VERSION"
-          curl -sLO "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
-          tar -xzf "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" nfpm
+          # Pinned version + checksum verification: protect the release
+          # path against an upstream tag mutation or in-flight tamper.
+          # NFPM_VERSION is set in this workflow's `env:` block.
+          BASE="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}"
+          ARCHIVE="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          echo "Installing nFPM ${NFPM_VERSION}"
+          curl -sLO "${BASE}/${ARCHIVE}"
+          curl -sL "${BASE}/checksums.txt" -o nfpm_checksums.txt
+          grep " ${ARCHIVE}\$" nfpm_checksums.txt | sha256sum -c -
+          tar -xzf "${ARCHIVE}" nfpm
           sudo mv nfpm /usr/local/bin/
-          rm "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          rm "${ARCHIVE}" nfpm_checksums.txt
           nfpm --version
 
       - name: Build .deb package
@@ -121,7 +129,7 @@ jobs:
 
       - name: Upload packages to GitHub Release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: |
@@ -135,7 +143,7 @@ jobs:
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
 
       - name: Checkout gh-pages branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           ref: gh-pages
           path: gh-pages
@@ -481,7 +489,10 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
           git commit -m "Update repository for v${{ steps.version.outputs.VERSION }}" || echo "No changes to commit"
-          git push -f https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git gh-pages
+          # No --force: a non-fast-forward push (e.g. concurrent release
+          # job already updated gh-pages) should fail loudly so the
+          # operator can decide how to reconcile, not silently clobber.
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git gh-pages
 
       - name: Summary
         run: |

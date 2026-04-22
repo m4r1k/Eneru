@@ -187,7 +187,10 @@ containers:
   # Each file is processed with 'docker/podman compose -f <path> down'
   # Compose files are stopped BEFORE remaining containers
   # Format: path string or {path: "/path", stop_timeout: 120}
-  compose_files:
+  # Explicit `[]` so a copy-paste of this file with the entries kept
+  # commented parses as an empty list, not as YAML null (which the
+  # loader rejects).
+  compose_files: []
   #  - "/opt/critical-db/docker-compose.yml"
   #  - path: "/opt/app-stack/docker-compose.yml"
   #    stop_timeout: 120  # Override global timeout for this file
@@ -248,9 +251,13 @@ remote_servers:
     command_timeout: 30
     # Shutdown command (default: "sudo shutdown -h now")
     shutdown_command: "sudo -i synoshutdown -s"
-    # SSH options (optional)
-    ssh_options:
-      - "-o StrictHostKeyChecking=no"
+    # SSH options (optional). Production deployments should rely on the
+    # default StrictHostKeyChecking=ask + a populated known_hosts so a
+    # MITM cannot replace the remote host's key without operator notice.
+    # The commented-out line below is for ephemeral testing only — DO
+    # NOT use in production.
+    # ssh_options:
+    #   - "-o StrictHostKeyChecking=no"  # testing only — DO NOT use in production
     # Shutdown order (optional, positive integer >= 1)
     # Servers with the same shutdown_order run in parallel.
     # Lower orders run first. A server alone in its order runs sequentially.
