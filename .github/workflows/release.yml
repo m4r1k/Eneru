@@ -15,9 +15,27 @@ on:
         type: string
         default: 'main'
 
+# All third-party action invocations are SHA-pinned (with the
+# corresponding tag in a comment) so a moved tag in the upstream
+# action repo cannot silently change what runs in CI. Refresh
+# periodically by re-running
+# `gh api repos/<owner>/<repo>/git/refs/tags/<tag>` (or, for branch-
+# tracked actions like pypa/gh-action-pypi-publish@release/v1,
+# `gh api repos/<owner>/<repo>/branches/<branch>`) and updating both
+# the SHA and the comment in lockstep across every workflow.
+#
 # nFPM is pinned + checksum-verified; bump NFPM_VERSION here to refresh.
 env:
   NFPM_VERSION: "2.41.3"
+
+# Serialize gh-pages deploys so concurrent releases (e.g. a tag push
+# overlapping with a manual workflow_dispatch, or two rc cuts close
+# together) don't both rebuild + sign packages and then race the
+# non-fast-forward push at the end. cancel-in-progress: false so the
+# winner finishes; the second run waits for the first to complete.
+concurrency:
+  group: release-gh-pages
+  cancel-in-progress: false
 
 permissions:
   contents: write

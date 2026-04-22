@@ -1110,3 +1110,54 @@ ups:
         config = ConfigLoader.load(str(cfg_path))
         assert config.statistics.db_directory == "/var/lib/eneru"
         assert config.statistics.retention.raw_hours == 24
+
+
+# ===========================================================================
+# 5.1.1 (CodeRabbit): isolate_stats_db_directory fixture must tolerate
+# StatsConfig signature growth. The fixture is the user-facing guard
+# against test runs writing into /var/lib/eneru, so its `*args/**kw`
+# wrapper has to be exercised across the supported call shapes.
+# ===========================================================================
+
+
+class TestIsolateStatsDbDirectoryFixture:
+    """The autouse fixture wraps StatsConfig.__init__ with a *args/**kw
+    shim. Verify it injects the isolated default ONLY when the caller
+    didn't supply one — keyword and positional callers must keep their
+    explicit value."""
+
+    @pytest.mark.unit
+    def test_default_construction_uses_isolated_path(self, tmp_path):
+        # No args, no kwargs → the autouse fixture must inject its
+        # tmp_path-rooted default; the production "/var/lib/eneru" must
+        # never appear here.
+        cfg = StatsConfig()
+        assert cfg.db_directory != "/var/lib/eneru"
+        assert "stats" in cfg.db_directory  # fixture writes under tmp_path/stats
+
+    @pytest.mark.unit
+    def test_explicit_keyword_db_directory_is_preserved(self):
+        # Caller passed db_directory by keyword → fixture must NOT
+        # overwrite it.
+        cfg = StatsConfig(db_directory="/srv/explicit")
+        assert cfg.db_directory == "/srv/explicit"
+
+    @pytest.mark.unit
+    def test_explicit_positional_db_directory_is_preserved(self):
+        # Caller passed db_directory positionally → fixture must NOT
+        # overwrite it. Today db_directory is the first dataclass
+        # field; if a future field is added before it, this test will
+        # fail loud and the fixture wrapper needs another look.
+        cfg = StatsConfig("/srv/positional")
+        assert cfg.db_directory == "/srv/positional"
+
+    @pytest.mark.unit
+    def test_other_kwargs_pass_through(self):
+        # The wrapper must forward unrelated kwargs untouched.
+        from eneru.config import StatsRetentionConfig
+        retention = StatsRetentionConfig(raw_hours=48)
+        cfg = StatsConfig(retention=retention)
+        # db_directory still gets the isolated default…
+        assert cfg.db_directory != "/var/lib/eneru"
+        # …and the explicit retention came through.
+        assert cfg.retention.raw_hours == 48

@@ -75,10 +75,18 @@ def isolate_stats_db_directory(request, tmp_path, monkeypatch):
     real_dir = Path("/var/lib/eneru")
 
     # Layer 1: StatsConfig default.
+    # Use *args/**kw rather than baking `db_directory` into the
+    # signature. Today db_directory is the first dataclass field so
+    # `StatsConfig("/path")` works; if a future field is added before
+    # it, a positional call would misroute. Detect whether the caller
+    # actually supplied db_directory and only inject the isolated
+    # default when they didn't.
     original_cfg_init = eneru_config_module.StatsConfig.__init__
 
-    def patched_cfg_init(self, db_directory=isolated_str, **kw):
-        return original_cfg_init(self, db_directory=db_directory, **kw)
+    def patched_cfg_init(self, *args, **kw):
+        if "db_directory" not in kw and not args:
+            kw["db_directory"] = isolated_str
+        return original_cfg_init(self, *args, **kw)
 
     monkeypatch.setattr(
         eneru_config_module.StatsConfig, "__init__", patched_cfg_init,

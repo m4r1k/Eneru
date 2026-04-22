@@ -6,6 +6,15 @@ description: >-
   All four E2E matrix jobs invoke this action so they share an
   identical, isolated test environment.
 
+# All third-party action invocations are SHA-pinned (with the
+# corresponding tag in a comment) so a moved tag in the upstream
+# action repo cannot silently change what runs in CI. Refresh
+# periodically by re-running
+# `gh api repos/<owner>/<repo>/git/refs/tags/<tag>` (or, for branch-
+# tracked actions, `gh api repos/<owner>/<repo>/branches/<branch>`)
+# and updating both the SHA and the comment in lockstep across every
+# workflow.
+
 inputs:
   e2e-dir:
     description: "Path to the tests/e2e directory inside the repo"

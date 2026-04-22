@@ -3,6 +3,7 @@
 import os
 import shlex
 import time
+from typing import List
 
 from eneru.utils import run_command
 
@@ -50,30 +51,30 @@ class FilesystemShutdownMixin:
             options_display = f" {options}" if options else ""
             self._log_message(f"  ➡️ Unmounting {mount_point}{options_display}")
 
-            if self.config.behavior.dry_run:
-                self._log_message(
-                    f"  🧪 [DRY-RUN] Would execute: timeout {timeout}s umount {options} {mount_point}"
-                )
-                continue
-
-            cmd = ["umount"]
+            # Build the argv up-front so the dry-run log can render the
+            # exact tokens that would be exec'd (was: the dry-run line
+            # printed the raw `options` string, which doesn't match what
+            # actually runs after shlex.split). Malformed-options
+            # detection now also happens in dry-run mode, surfacing
+            # config errors before a real shutdown.
+            opt_args: List[str] = []
             if options:
-                # Multi-flag option strings like "-l -f" must be split into
-                # separate argv entries — appending the literal would make
-                # umount reject "-l -f" as a single unknown option.
-                # Wrap shlex.split because it raises ValueError on
-                # malformed input (unclosed quotes, etc.); a misconfigured
-                # YAML must never crash the shutdown sequence — log and
-                # skip THIS mount instead.
                 try:
-                    cmd.extend(shlex.split(options))
+                    opt_args = shlex.split(options)
                 except ValueError as exc:
                     self._log_message(
                         f"  ❌ Invalid umount options for {mount_point}: "
                         f"{exc}. Skipping this mount."
                     )
                     continue
-            cmd.append(mount_point)
+            cmd = ["umount", *opt_args, mount_point]
+
+            if self.config.behavior.dry_run:
+                rendered = " ".join(shlex.quote(a) for a in cmd)
+                self._log_message(
+                    f"  🧪 [DRY-RUN] Would execute: timeout {timeout}s {rendered}"
+                )
+                continue
 
             exit_code, _, stderr = run_command(cmd, timeout=timeout)
 
