@@ -317,6 +317,22 @@ class VoltageMonitorMixin:
             self._set_voltage_pending(
                 target, voltage, threshold, is_severe=is_severe,
             )
+        else:
+            # Severity escalation within the same state: a brownout that
+            # was mild on the previous poll may now have crossed the
+            # severe-deviation threshold. _set_voltage_pending only fires
+            # on state transition, so without this update the pending
+            # record keeps the original is_severe=False and the dwell
+            # bypass for severe events never triggers.
+            if (
+                is_severe
+                and self.state.voltage_pending_state in ("HIGH", "LOW")
+                and not self.state.voltage_pending_severe
+                and not self.state.voltage_pending_notified
+            ):
+                self.state.voltage_pending_severe = True
+                self.state.voltage_pending_voltage = voltage
+                self.state.voltage_pending_threshold = threshold
 
         # Re-evaluate the pending notification each poll regardless of
         # whether the state changed -- the hysteresis fires when the

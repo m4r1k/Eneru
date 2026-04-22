@@ -1276,7 +1276,10 @@ class TestCoordinatorDrainEdgeCases:
 
         coord._drain_all_groups(timeout=0)
 
-        live_thread.join.assert_called_once()
+        # _drain_all_groups now joins twice per thread: a short window after
+        # signaling stop_event so peer monitors finish their poll cycle,
+        # then a final wait once the per-monitor shutdown sequences have run.
+        assert live_thread.join.called
         assert any("still running after drain timeout" in m for m in logs)
 
 

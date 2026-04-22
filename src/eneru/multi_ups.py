@@ -100,13 +100,17 @@ class MultiUPSCoordinator:
     def _start_monitors(self):
         """Create and start one UPSGroupMonitor thread per group."""
         for group in self.config.ups_groups:
-            # Build a single-group Config for this monitor
+            # Build a single-group Config for this monitor. Every shared
+            # field on Config that affects per-group behavior must be passed
+            # through here -- omissions silently fall back to dataclass
+            # defaults and the user's YAML is ignored in multi-UPS mode.
             group_config = Config(
                 ups_groups=[group],
                 behavior=self.config.behavior,
                 logging=self.config.logging,
                 notifications=self.config.notifications,
                 local_shutdown=self.config.local_shutdown,
+                statistics=self.config.statistics,
             )
 
             # Sanitize UPS name for file paths
@@ -156,6 +160,7 @@ class MultiUPSCoordinator:
                     log_prefix=f"[redundancy:{rg.name}] ",
                     stop_event=self._stop_event,
                     notification_worker=self._notification_worker,
+                    local_shutdown_callback=self._handle_local_shutdown,
                 )
                 self._redundancy_executors[rg.name] = executor
                 evaluator = RedundancyGroupEvaluator(
@@ -263,10 +268,26 @@ class MultiUPSCoordinator:
         This triggers each monitor's shutdown sequence (VMs, containers,
         remote servers) before stopping the monitoring loops. Resources
         are actively shut down, not just abandoned.
+
+        Order matters: signal stop_event first so peer monitors stop
+        their main loops, give them a brief window to drain, then run
+        the per-monitor shutdown sequence sequentially. Running shutdown
+        on peers while their loops are still active risked concurrent
+        access to the same shutdown path (notifications, state-file
+        writes) inside the peer's poll cycle.
         """
         self._log("⏳ Draining all UPS groups -- shutting down their resources...")
 
-        # First, trigger shutdown on each monitor that hasn't already shut down
+        # Phase 1: signal every peer monitor to stop its poll loop, then
+        # join with a short window so the loops exit before we run their
+        # shutdown sequences.
+        self._stop_event.set()
+        join_deadline = time.time() + max(1, timeout // 4)
+        for thread in self._threads:
+            remaining = max(0.0, join_deadline - time.time())
+            thread.join(timeout=remaining)
+
+        # Phase 2: run each monitor's shutdown sequence sequentially.
         for monitor in self._monitors:
             if not monitor._shutdown_flag_path.exists():
                 self._log(f"  ➡️ Triggering shutdown for {monitor._log_prefix.strip()}")
@@ -275,11 +296,10 @@ class MultiUPSCoordinator:
                 except Exception as e:
                     self._log(f"  ⚠️ Error during drain shutdown: {e}")
 
-        # Then stop the monitoring loops
-        self._stop_event.set()
+        # Final join window for any threads still wrapping up.
         deadline = time.time() + timeout
         for thread in self._threads:
-            remaining = max(0, deadline - time.time())
+            remaining = max(0.0, deadline - time.time())
             thread.join(timeout=remaining)
         still_running = [t for t in self._threads if t.is_alive()]
         if still_running:

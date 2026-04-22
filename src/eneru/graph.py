@@ -123,10 +123,18 @@ class BrailleGraph:
         if not data:
             return [" " * width for _ in range(height)]
 
-        if y_min is None:
-            y_min = min(data)
-        if y_max is None:
-            y_max = max(data)
+        # Auto-bound from the numeric subset only — `data` may carry
+        # None or non-numeric placeholders for missing samples; min/max
+        # over a mixed list raises TypeError on Python 3.
+        if y_min is None or y_max is None:
+            numeric = [v for v in data if isinstance(v, (int, float))]
+            if not numeric:
+                # Nothing to scale against; render an empty grid.
+                return [" " * width for _ in range(height)]
+            if y_min is None:
+                y_min = min(numeric)
+            if y_max is None:
+                y_max = max(numeric)
         # Avoid a zero range: pad symmetrically.
         if y_max <= y_min:
             pad = abs(y_min) * 0.05 if y_min else 1.0
@@ -204,17 +212,21 @@ class BrailleGraph:
     @staticmethod
     def _fallback_char(grid, cell_col: int, cell_row: int) -> str:
         """Pick a single block char for the 2x4 cell sub-grid."""
-        # Count the highest "on" pixel within the cell across both columns.
-        highest_on = -1
+        # Find the TOPMOST "on" pixel within the cell across both columns
+        # (smallest row index). The block-char ladder is sized so a higher
+        # data value yields a taller block, so we must aggregate via min,
+        # not max — picking the bottommost pixel was making cells with any
+        # "on" pixel render as the tiniest block, hiding the data peaks.
+        topmost_on = -1
         for col_off in (0, 1):
             for r in range(4):
                 if grid[cell_col * 2 + col_off][cell_row * 4 + r]:
-                    if r > highest_on:
-                        highest_on = r
-        if highest_on < 0:
+                    if topmost_on < 0 or r < topmost_on:
+                        topmost_on = r
+        if topmost_on < 0:
             return _BLOCK_FALLBACK[0]
         # row 0 (top dot) -> tall block; row 3 (bottom) -> tiny block.
-        return _BLOCK_FALLBACK[8 - 2 * highest_on if highest_on > 0 else 8]
+        return _BLOCK_FALLBACK[8 - 2 * topmost_on if topmost_on > 0 else 8]
 
     @classmethod
     def render_to_window(

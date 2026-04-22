@@ -34,7 +34,14 @@ def run_command(
             timeout=timeout,
             env={**os.environ, 'LC_NUMERIC': 'C'}
         )
-        return result.returncode, result.stdout, result.stderr
+        # subprocess.run returns stdout/stderr=None when capture_output
+        # is False; normalize to empty strings so callers can always
+        # `.strip()` / index the values without a TypeError.
+        return (
+            result.returncode,
+            result.stdout if result.stdout is not None else "",
+            result.stderr if result.stderr is not None else "",
+        )
     except subprocess.TimeoutExpired:
         return 124, "", "Command timed out"
     except FileNotFoundError:

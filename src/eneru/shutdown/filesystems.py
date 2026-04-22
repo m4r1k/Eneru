@@ -1,6 +1,7 @@
 """Filesystem sync + unmount phase of the shutdown sequence."""
 
 import os
+import shlex
 import time
 
 from eneru.utils import run_command
@@ -57,7 +58,10 @@ class FilesystemShutdownMixin:
 
             cmd = ["umount"]
             if options:
-                cmd.append(options)
+                # Multi-flag option strings like "-l -f" must be split into
+                # separate argv entries — appending the literal would make
+                # umount reject "-l -f" as a single unknown option.
+                cmd.extend(shlex.split(options))
             cmd.append(mount_point)
 
             exit_code, _, stderr = run_command(cmd, timeout=timeout)

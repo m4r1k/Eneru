@@ -108,19 +108,20 @@ _LIVE_BUFFER_MAXLEN = 60
 _live_buffers: Dict[str, "deque[Tuple[int, Dict[str, float]]]"] = {}
 
 # State-file keys (left) we promote into deque samples, mapped to the
-# stats schema's column names (right). Only the columns we render
-# graphs for need to be here -- adding a new graph metric means adding
-# its column to METRIC_INFO + the corresponding state-file key here.
+# stats schema's column names (right). The daemon writes the state
+# file as uppercase ``KEY=value`` lines (see UPSGroupMonitor._save_state),
+# NOT in NUT's dotted lowercase form -- the keys here must match the
+# state-file format or live blending receives zero samples and the
+# rightmost edge of the graph lags behind the SQLite write cadence
+# by ~10 s. Metrics whose values aren't persisted to the state file
+# (battery voltage, temperature, frequencies) cannot be live-blended
+# and are intentionally absent.
 _STATE_FILE_TO_COLUMN: Dict[str, str] = {
-    "battery.charge": "battery_charge",
-    "battery.runtime": "battery_runtime",
-    "ups.load": "ups_load",
-    "input.voltage": "input_voltage",
-    "output.voltage": "output_voltage",
-    "battery.voltage": "battery_voltage",
-    "ups.temperature": "ups_temperature",
-    "input.frequency": "input_frequency",
-    "output.frequency": "output_frequency",
+    "BATTERY": "battery_charge",
+    "RUNTIME": "battery_runtime",
+    "LOAD": "ups_load",
+    "INPUT_VOLTAGE": "input_voltage",
+    "OUTPUT_VOLTAGE": "output_voltage",
 }
 
 

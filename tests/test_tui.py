@@ -557,13 +557,15 @@ class TestLiveBufferBlending:
         )
 
     def _write_state_file(self, path: Path, charge: float, voltage: float):
+        # Match UPSGroupMonitor._save_state's actual on-disk format:
+        # uppercase KEY=value lines, NOT NUT's dotted lowercase.
         path.write_text(
-            "ups.status=OL CHRG\n"
-            f"battery.charge={charge}\n"
-            "battery.runtime=1800\n"
-            "ups.load=30\n"
-            f"input.voltage={voltage}\n"
-            "output.voltage=230\n"
+            "STATUS=OL CHRG\n"
+            f"BATTERY={charge}\n"
+            "RUNTIME=1800\n"
+            "LOAD=30\n"
+            f"INPUT_VOLTAGE={voltage}\n"
+            "OUTPUT_VOLTAGE=230\n"
         )
 
     @pytest.mark.unit
