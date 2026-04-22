@@ -3,22 +3,31 @@
 # Called after package files are installed
 #
 # RPM: $1 = 1 (install), $1 = 2+ (upgrade)
-# DEB: $1 = "configure"
+# DEB: $1 = "configure"; $2 = previous version (empty on fresh install)
 set -e
 
-# Reload systemd to pick up the new/updated service file
-systemctl daemon-reload
+# Reload systemd to pick up the new/updated service file. Skip in
+# environments without a live systemd (chroot, container build layer):
+# `systemctl daemon-reload` aborts under `set -e` and leaves the package
+# half-applied if pid 1 isn't systemd.
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+fi
 
-# Detect if this is an upgrade or fresh install
+# Detect whether this invocation is an upgrade or a fresh install.
 is_upgrade=false
 was_running=false
-was_enabled=false
 
-# RPM passes a number, DEB passes action name
+# RPM passes a number, DEB passes the action name plus the previous
+# version string (when relevant).
 if [ -n "$1" ]; then
     if [ "$1" = "configure" ]; then
-        # DEB upgrade detection: check if service existed before
-        if systemctl list-unit-files eneru.service &>/dev/null; then
+        # DEB: postinst runs with `configure` for BOTH a fresh install
+        # AND an upgrade. The disambiguator is $2: empty on a fresh
+        # install, populated with the previous package version on an
+        # upgrade. (Listing the unit file is not sufficient — the unit
+        # file is part of the new package and is always present here.)
+        if [ -n "$2" ]; then
             is_upgrade=true
         fi
     elif [ "$1" -ge 2 ] 2>/dev/null; then
@@ -30,9 +39,6 @@ fi
 # Check current service state (before we potentially restart)
 if systemctl is-active --quiet eneru.service 2>/dev/null; then
     was_running=true
-fi
-if systemctl is-enabled --quiet eneru.service 2>/dev/null; then
-    was_enabled=true
 fi
 
 if [ "$is_upgrade" = true ]; then

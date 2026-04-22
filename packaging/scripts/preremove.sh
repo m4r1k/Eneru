@@ -3,24 +3,33 @@
 # Called before package files are removed
 #
 # RPM: $1 = 0 (removal), $1 = 1+ (upgrade - old package being removed)
-# DEB: $1 = "remove" or "upgrade"
+# DEB: $1 ∈ {remove, purge, upgrade, failed-upgrade, deconfigure,
+#            abort-install, abort-upgrade, disappear}
 set -e
 
-# Detect if this is a removal or upgrade
-is_removal=true
+is_removal=false
 
-if [ -n "$1" ]; then
-    if [ "$1" = "upgrade" ]; then
-        # DEB: upgrade means new version replacing old
-        is_removal=false
-    elif [ "$1" -ge 1 ] 2>/dev/null; then
-        # RPM: $1 >= 1 means upgrade (packages remaining after this one removed)
-        is_removal=false
-    elif [ "$1" = "0" ]; then
-        # RPM: $1 = 0 means actual removal
+case "$1" in
+    remove|purge)
+        # DEB: actual removal. (purge invokes prerm with "remove" first
+        # and then with "purge" — both should stop and disable.)
         is_removal=true
-    fi
-fi
+        ;;
+    upgrade|failed-upgrade|deconfigure|abort-install|abort-upgrade|disappear)
+        # DEB: every non-removal lifecycle. The previous if/elif cascade
+        # silently treated all of these as removals.
+        is_removal=false
+        ;;
+    0)
+        # RPM: actual removal.
+        is_removal=true
+        ;;
+    *)
+        # RPM: $1 >= 1 means upgrade; anything else: leave the service
+        # alone rather than stop/disable on an unknown lifecycle arg.
+        is_removal=false
+        ;;
+esac
 
 if [ "$is_removal" = true ]; then
     # ACTUAL REMOVAL: Stop and disable the service
@@ -34,4 +43,5 @@ if [ "$is_removal" = true ]; then
         systemctl disable eneru.service
     fi
 fi
-# UPGRADE: Do nothing - let postinstall of new package handle restart
+# UPGRADE / non-removal lifecycle: do nothing — postinstall of new
+# package handles restart.
