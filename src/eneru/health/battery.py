@@ -33,13 +33,24 @@ class BatteryMonitorMixin:
         self.state.battery_history.append((current_time, current_battery_float))
 
         try:
-            temp_file = self._battery_history_path.with_suffix('.tmp')
+            # with_name(name + '.tmp') preserves the per-UPS suffix on the
+            # path (e.g. 'ups-battery-history.ups1') so concurrent writers
+            # in multi-UPS mode never share a temp file. with_suffix('.tmp')
+            # would replace the per-UPS suffix and race on the rename.
+            temp_file = self._battery_history_path.with_name(
+                self._battery_history_path.name + '.tmp'
+            )
             with open(temp_file, 'w') as f:
                 for ts, bat in self.state.battery_history:
                     f.write(f"{ts}:{bat}\n")
             temp_file.replace(self._battery_history_path)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Persisting battery history is best-effort; the in-memory deque
+            # is the source of truth and a single failed write doesn't break
+            # depletion calculations. Log so silent disk errors are visible.
+            self._log_message(
+                f"⚠️ Battery history persist failed: {exc}"
+            )
 
         if len(self.state.battery_history) < 30:
             return 0.0
@@ -125,9 +136,19 @@ class BatteryMonitorMixin:
             if self.state.pending_anomaly_count < 3:
                 return
 
-            # Confirmed anomaly (sustained across 3 polls)
+            # Re-validate the drop magnitude before notifying. Without this
+            # check the confirmation can fire after the charge has crept
+            # back up to within a few % of the original (drop < 20),
+            # producing a false-alarm "battery dropped X%" message that
+            # contradicts the current reading.
             anomaly_prev = self.state.pending_anomaly_prev_charge
             anomaly_drop = anomaly_prev - current_charge
+            if anomaly_drop <= 20:
+                self.state.pending_anomaly_charge = -1.0
+                self.state.pending_anomaly_count = 0
+                return
+
+            # Confirmed anomaly (sustained across 3 polls)
             anomaly_elapsed = current_time - self.state.pending_anomaly_time
             self.state.pending_anomaly_charge = -1.0
             self.state.pending_anomaly_count = 0

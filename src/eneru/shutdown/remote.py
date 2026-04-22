@@ -5,6 +5,7 @@ Owns the multi-server orchestration (sequential vs parallel batching by
 followed by the final shutdown command.
 """
 
+import shlex
 import threading
 import time
 from typing import Dict, List, Tuple
@@ -89,8 +90,12 @@ class RemoteShutdownMixin:
         errors are logged inside _shutdown_remote_server).
         """
         def calc_server_timeout(server: RemoteServerConfig) -> int:
+            # Explicit None check so a per-command timeout of 0 (e.g. for
+            # a command the user wants to fire-and-forget) isn't promoted
+            # to server.command_timeout via Python's truthiness.
             pre_cmd_time = sum(
-                (cmd.timeout or server.command_timeout) for cmd in server.pre_shutdown_commands
+                (cmd.timeout if cmd.timeout is not None else server.command_timeout)
+                for cmd in server.pre_shutdown_commands
             )
             return (
                 pre_cmd_time
@@ -105,8 +110,14 @@ class RemoteShutdownMixin:
             """Thread worker for shutting down a single server."""
             try:
                 self._shutdown_remote_server(server)
-            except Exception:
-                pass  # Errors logged inside _shutdown_remote_server
+            except Exception as exc:
+                # _shutdown_remote_server only catches SSH-style errors;
+                # bubbling exceptions (network, AttributeError, OOM…) would
+                # otherwise vanish silently in the worker thread.
+                display = server.name or server.host
+                self._log_message(
+                    f"  ❌ Remote shutdown thread for {display} crashed: {exc}"
+                )
 
         threads: List[threading.Thread] = []
         for server in servers:
@@ -151,9 +162,18 @@ class RemoteShutdownMixin:
 
         ssh_cmd = ["ssh"]
 
-        # Add configured SSH options
+        # Add configured SSH options. Three cases:
+        #   1. "-o KEY=VALUE" / "-o KEY VALUE" (single string with space):
+        #      split into two argv entries so ssh's getopt parser sees
+        #      flag and value separately.
+        #   2. Any other "-flag …" form (e.g. "-i", "-p"): pass through
+        #      unchanged. Multi-token flags like "-i /path/key" must be
+        #      provided as separate ssh_options entries by the user.
+        #   3. Bare "KEY=VALUE": prepend "-o" as the implicit form.
         for opt in server.ssh_options:
-            if opt.startswith("-o"):
+            if opt.startswith("-o "):
+                ssh_cmd.extend(opt.split(None, 1))
+            elif opt.startswith("-"):
                 ssh_cmd.append(opt)
             else:
                 ssh_cmd.extend(["-o", opt])
@@ -180,8 +200,10 @@ class RemoteShutdownMixin:
         """Execute pre-shutdown commands on a remote server.
 
         Returns:
-            True if all commands executed (success or best-effort failure)
-            False if SSH connection failed entirely
+            True once the loop has iterated through every command.
+            Per-command failures are logged and execution continues
+            (best-effort) — there is no current code path that returns
+            False.
         """
         if not server.pre_shutdown_commands:
             return True
@@ -207,20 +229,28 @@ class RemoteShutdownMixin:
                     )
                     continue
 
-                # Get command template and substitute placeholders
-                command_template = REMOTE_ACTIONS[action_name]
-                command = command_template.format(
-                    timeout=timeout,
-                    path=cmd_config.path or ""
-                )
-                description = action_name
-
-                # Validate stop_compose has path
+                # Validate stop_compose has path BEFORE rendering the
+                # template; otherwise the precondition warning becomes
+                # dead code (shlex.quote("") would happily produce ''
+                # and a future template change might let the bad command
+                # slip through).
                 if action_name == "stop_compose" and not cmd_config.path:
                     self._log_message(
                         f"    ⚠️ [{idx}/{cmd_count}] stop_compose requires 'path' parameter (skipping)"
                     )
                     continue
+
+                # Get command template and substitute placeholders.
+                # `path` is shlex-quoted because the template embeds it
+                # directly into the remote shell — without quoting, a
+                # malicious or malformed path could expand $(), `…`, or
+                # ${…} on the remote host.
+                command_template = REMOTE_ACTIONS[action_name]
+                command = command_template.format(
+                    timeout=timeout,
+                    path=shlex.quote(cmd_config.path or "")
+                )
+                description = action_name
 
             # Handle custom command
             elif cmd_config.command:

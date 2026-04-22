@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.1.1] - 2026-04-22
+
+Bug-fix release with one small TUI improvement. Bundles fixes from a third-party AI code review (CodeRabbit Pro + Cubic.Dev) of the v5.1.0 codebase. Drop-in upgrade. See `git log v5.1.0..v5.1.1` for per-commit detail with reviewer attribution.
+
+### Added
+- **TUI events panel: full history with arrow-key scrolling.** Drops the 24h window; `↑/↓` scrolls one row, `PgUp/PgDn` ten, `Home/End` jumps to oldest/newest. `<M>` still toggles between 8 and 500 visible rows.
+
+### Fixed
+- **XCP-ng VM shutdown silently no-op'd.** `stop_xcpng_vms` passed UUIDs positionally to `xe vm-shutdown uuid=`; `xe` ignored them. Now bound via `xargs -I {}` with `force=true`.
+- **Redundancy `is_local` quorum loss never powered off the host.** The executor stopped local services and remote peers but skipped the local poweroff command. Now delegates to the coordinator's `_handle_local_shutdown`.
+- **Multi-UPS state-file write race.** `with_suffix('.tmp')` collapsed every monitor's atomic-rename temp file onto a shared name. Same fix in the battery-history persist path.
+- **TUI live-blending key mismatch.** Graph right edges lagged ~10s behind SQLite because `_STATE_FILE_TO_COLUMN` used NUT's dotted lowercase names but the daemon writes uppercase keys.
+- **`virsh list` failure during VM wait loop produced false success.** A wedged `libvirtd` made the wait loop report "all VMs stopped" and skip force-destroy. Non-zero exit is now treated as transient.
+- **Voltage severity escalation never fired** when a brownout crossed the severe threshold AFTER the LOW state was already pending. Severity is now re-evaluated every poll.
+- **Silent config drops.** `notifications.suppress`, `notifications.voltage_hysteresis_seconds`, and per-group `statistics` in multi-UPS mode were never read from YAML. All three now round-trip.
+- **Legacy `ups-monitor` syslog tag** renamed to `eneru` so journalctl filtering matches the rest of the daemon's output.
+- **Long tail of robustness fixes** across `shutdown/`, `health/`, `graph.py`, `logger.py`, `stats.py`, `utils.py`, `cli.py`, and bash completion.
+
+### Security
+- **`stop_compose` remote-shell injection.** Template double-quoting didn't block `$()`/backticks/`${...}`. `shlex.quote` now runs at the call site.
+- **PyPI publish OIDC token scope.** Workflow split so `pip install build twine` can't reach the publishing token; the `workflow_dispatch` version input is validated against PEP-440 before any shell interpolation.
+- **CI supply-chain.** Every third-party GitHub Actions invocation is SHA-pinned. nFPM version-pinned + checksum-verified. Dropped `git push -f` to gh-pages and `|| true` masks on dpkg/rpm install.
+
+### Packaging
+- **DEB lifecycle handling.** prerm/postrm rewritten with explicit `case` for the full Debian Policy enumeration; the if/elif cascade was stopping the service on every non-removal lifecycle (`failed-upgrade`, `deconfigure`, etc.).
+- **postinstall fresh-vs-upgrade** disambiguated via `$2`; **chroot guard** on `systemctl daemon-reload`; `pyproject.toml` reads version from `eneru.version.__version__` so a future top-level `__init__.py` import can't break wheel builds.
+
+### Examples
+- Reference / dual-UPS configs no longer ship `StrictHostKeyChecking=no` as the default.
+- `config-reference.yaml`: `compose_files: []` (was `compose_files:`, parsing as YAML null).
+- `config-enterprise.yaml`: Slack URL switched to the documented Apprise webhook form.
+- `config-homelab.yaml`: `parallel: false` does the OPPOSITE of "shut down LAST" — switched to `shutdown_order: 2` and corrected the misleading comment.
+
+### Test quality
+Autouse fixture redirects `StatsConfig` / `StatsStore` defaults to a per-test tmp_path so tests can't leak SQLite files into `/var/lib/eneru`. Failsafe / redundancy-evaluator tests now exercise real code paths; e2e shell scripts assert exit codes via `PIPESTATUS` instead of swallowing them.
+
+### Migration notes
+None.
+
+---
+
 ## [5.1.0] - 2026-04-21
 
 ### Added

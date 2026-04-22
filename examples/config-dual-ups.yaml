@@ -58,8 +58,11 @@ ups:
         connect_timeout: 10
         command_timeout: 30
         shutdown_command: "shutdown -h now"
-        ssh_options:
-          - "-o StrictHostKeyChecking=no"
+        # ssh_options block intentionally omitted: production should
+        # rely on the host's known_hosts file. Uncomment only for an
+        # ephemeral homelab box you'd never trust in production:
+        #   ssh_options:
+        #     - "-o StrictHostKeyChecking=no"  # testing only
         pre_shutdown_commands:
           - action: "stop_proxmox_vms"
             timeout: 120
@@ -82,8 +85,8 @@ ups:
         connect_timeout: 10
         command_timeout: 30
         shutdown_command: "sudo -i synoshutdown -s"
-        ssh_options:
-          - "-o StrictHostKeyChecking=no"
+        # ssh_options block intentionally omitted (see comment above on
+        # the Proxmox host). Production should rely on known_hosts.
         pre_shutdown_commands:
           - action: "sync"
 

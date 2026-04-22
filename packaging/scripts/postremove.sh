@@ -3,27 +3,36 @@
 # Called after package files are removed
 #
 # RPM: $1 = 0 (removal complete), $1 = 1+ (upgrade - old removed, new installed)
-# DEB: $1 = "remove", "purge", or "upgrade"
+# DEB: $1 ∈ {remove, purge, upgrade, failed-upgrade, abort-install,
+#            abort-upgrade, disappear}
 set -e
 
-# Detect if this is a removal or upgrade
-is_removal=true
+is_removal=false
 
-if [ -n "$1" ]; then
-    if [ "$1" = "upgrade" ]; then
-        # DEB: upgrade
-        is_removal=false
-    elif [ "$1" -ge 1 ] 2>/dev/null; then
-        # RPM: $1 >= 1 means upgrade
-        is_removal=false
-    elif [ "$1" = "0" ]; then
-        # RPM: $1 = 0 means actual removal
+case "$1" in
+    remove|purge)
         is_removal=true
-    fi
-fi
+        ;;
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        is_removal=false
+        ;;
+    0)
+        # RPM: actual removal.
+        is_removal=true
+        ;;
+    *)
+        # RPM: $1 >= 1 means upgrade; anything else: don't message.
+        is_removal=false
+        ;;
+esac
 
-# Always reload systemd
-systemctl daemon-reload
+# Reload systemd, but only when the package manager is running on a host
+# with a live systemd. Container / chroot builds (e.g. Docker layers)
+# have no systemd; calling daemon-reload there aborts under set -e and
+# leaves the package half-applied.
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+fi
 
 if [ "$is_removal" = true ]; then
     echo ""
@@ -33,4 +42,4 @@ if [ "$is_removal" = true ]; then
     echo "To remove them completely: rm -rf /etc/ups-monitor/"
     echo ""
 fi
-# UPGRADE: Silent - no message needed
+# UPGRADE: silent — no message needed

@@ -119,6 +119,33 @@ class TestRemoteActionTemplates:
         assert "{path}" not in result
         assert "t=30" in result
 
+    @pytest.mark.unit
+    def test_stop_xcpng_vms_binds_uuid_via_xargs_placeholder(self):
+        """The xe template must bind UUIDs into uuid= via xargs -I {},
+        not pass them positionally — `xe` parses arguments as key=value
+        pairs and silently ignores positional UUIDs."""
+        template = REMOTE_ACTIONS["stop_xcpng_vms"]
+        rendered = template.format(timeout=120)
+        # Both the graceful and force passes must bind UUID via xargs -I {}.
+        assert "xargs -r -I {} xe vm-shutdown uuid={}" in rendered
+        # Force pass uses xe's key=value form, not --force.
+        assert "force=true" in rendered
+        assert "--force" not in rendered
+        # The bug pattern (uuid= with no following bound value) must not appear.
+        assert "uuid= " not in rendered
+        assert "uuid=\n" not in rendered
+        assert "uuid=2" not in rendered  # not joined with the next arg either
+
+    @pytest.mark.unit
+    def test_stop_compose_template_does_not_double_quote_path(self):
+        """stop_compose must leave {path} unquoted in the template; quoting
+        happens via shlex.quote at the format() call site so $(), backticks,
+        and ${...} cannot expand on the remote host."""
+        template = REMOTE_ACTIONS["stop_compose"]
+        # Bare placeholder, no surrounding double quotes.
+        assert '"{path}"' not in template
+        assert "-f {path}" in template
+
 
 class TestRemotePreShutdownExecution:
     """Test remote pre-shutdown command execution logic."""
@@ -243,6 +270,35 @@ class TestRemotePreShutdownExecution:
 
             assert result is True
             # Command should NOT be called since path is missing
+            mock_run.assert_not_called()
+
+    @pytest.mark.unit
+    def test_stop_compose_without_path_does_not_render_template(self, remote_monitor):
+        """5.1.1 fix: the path-presence check now runs BEFORE the
+        REMOTE_ACTIONS template is fetched/rendered with shlex.quote("").
+        Validate by patching .format on the template string and asserting
+        it was never called when path is missing — proves the precondition
+        is authoritative rather than a dead-code warning after rendering.
+        """
+        from eneru import REMOTE_ACTIONS
+        server = RemoteServerConfig(
+            name="Test Server",
+            enabled=True,
+            host="192.168.1.50",
+            user="root",
+            command_timeout=30,
+            pre_shutdown_commands=[
+                RemoteCommandConfig(action="stop_compose"),  # No path!
+            ],
+        )
+        with patch.dict(
+            REMOTE_ACTIONS,
+            {"stop_compose": MagicMock(wraps=REMOTE_ACTIONS["stop_compose"])},
+        ) as patched:
+            with patch.object(remote_monitor, "_run_remote_command") as mock_run:
+                remote_monitor._execute_remote_pre_shutdown(server)
+            # The template's .format must not have been invoked at all.
+            patched["stop_compose"].format.assert_not_called()
             mock_run.assert_not_called()
 
     @pytest.mark.unit
@@ -400,6 +456,38 @@ class TestRemotePreShutdownExecution:
 
             assert result is True
             mock_run.assert_not_called()
+
+    @pytest.mark.unit
+    def test_stop_compose_path_is_shell_quoted(self, remote_monitor):
+        """A path containing shell metacharacters must be shlex-quoted by
+        _execute_remote_pre_shutdown before it lands in the rendered command,
+        so $(), backticks, and ${...} cannot expand on the remote host."""
+        import shlex
+
+        malicious_path = "/tmp/$(rm -rf /)/docker-compose.yml"
+        server = RemoteServerConfig(
+            name="Test Server",
+            enabled=True,
+            host="192.168.1.50",
+            user="root",
+            command_timeout=30,
+            pre_shutdown_commands=[
+                RemoteCommandConfig(
+                    action="stop_compose",
+                    path=malicious_path,
+                    timeout=30,
+                ),
+            ],
+        )
+
+        with patch.object(remote_monitor, "_run_remote_command") as mock_run:
+            mock_run.return_value = (True, "")
+            remote_monitor._execute_remote_pre_shutdown(server)
+
+        rendered = mock_run.call_args[0][1]
+        # The path must appear in its shlex-quoted form so the remote shell
+        # treats it as a literal string.
+        assert shlex.quote(malicious_path) in rendered
 
     @pytest.mark.unit
     def test_dry_run_skips_remote_commands(self, remote_monitor):

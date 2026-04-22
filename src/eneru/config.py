@@ -589,6 +589,9 @@ class ConfigLoader:
         avatar_url = None
         notif_timeout = 10
         notif_retry_interval = 5
+        # Defaults match NotificationsConfig dataclass.
+        notif_suppress: List[str] = []
+        notif_voltage_hysteresis = 30
 
         if 'notifications' in data:
             notif_data = data['notifications']
@@ -596,6 +599,10 @@ class ConfigLoader:
             avatar_url = notif_data.get('avatar_url')
             notif_timeout = notif_data.get('timeout', 10)
             notif_retry_interval = notif_data.get('retry_interval', 5)
+            notif_suppress = notif_data.get('suppress', notif_suppress)
+            notif_voltage_hysteresis = notif_data.get(
+                'voltage_hysteresis_seconds', notif_voltage_hysteresis,
+            )
 
             if 'urls' in notif_data:
                 for url in notif_data.get('urls', []):
@@ -628,6 +635,8 @@ class ConfigLoader:
             avatar_url=avatar_url,
             timeout=notif_timeout,
             retry_interval=notif_retry_interval,
+            suppress=notif_suppress,
+            voltage_hysteresis_seconds=notif_voltage_hysteresis,
         )
 
     @classmethod

@@ -36,7 +36,10 @@ _eneru() {
     # Value-of-flag completion is shared across subcommands.
     case "$prev" in
         -c|--config)
-            COMPREPLY=( $(compgen -f -- "$cur") )
+            # mapfile -t preserves filenames containing spaces or other
+            # word-splitting metacharacters; the bare $(...) form would
+            # split each name into separate completions.
+            mapfile -t COMPREPLY < <(compgen -f -- "$cur")
             return 0
             ;;
         --graph)

@@ -1,9 +1,18 @@
-# Scenario: Low battery - should trigger shutdown (below 20% threshold)
+# Scenario: Low battery — should trigger shutdown via the LOW BATTERY
+# (charge < threshold) trigger, NOT via the critical-runtime trigger.
+# runtime is ABOVE the 600 s critical-runtime threshold so the shutdown
+# is unambiguously attributable to the low-battery path; the previous
+# value of 180 s also crossed the critical-runtime threshold and made
+# failures hard to localise.
+# charge is 14 (not 15) so it fires both UPS1 (threshold 20, single-UPS
+# tests) AND UPS2 in tests/e2e/config-e2e-multi-ups.yaml (threshold 15).
+# The trigger uses strict `<`, so a value equal to the threshold doesn't
+# fire and Test 15 in multi-ups.sh would never trigger UPS2's shutdown.
 ups.status: OB DISCHRG LB
 ups.load: 35
 
-battery.charge: 15
-battery.runtime: 180
+battery.charge: 14
+battery.runtime: 900
 battery.voltage: 44.0
 
 input.voltage: 0.0

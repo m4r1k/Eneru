@@ -70,7 +70,10 @@ where = ["src"]
 "eneru.completion" = ["*.bash", "*.zsh", "*.fish"]
 
 [tool.setuptools.dynamic]
-version = {attr = "eneru.__version__"}
+# Resolve directly from src/eneru/version.py — pointing at
+# `eneru.__version__` would import src/eneru/__init__.py during build,
+# so any future top-level import added there could break wheel builds.
+version = {attr = "eneru.version.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

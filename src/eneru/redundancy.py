@@ -19,7 +19,7 @@ catches concurrent calls inside one process.
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 from eneru.config import (
     Config,
@@ -63,6 +63,7 @@ class RedundancyGroupExecutor(
         log_prefix: str = "",
         stop_event: Optional[threading.Event] = None,
         notification_worker: Optional[NotificationWorker] = None,
+        local_shutdown_callback: Optional[Callable[[str], None]] = None,
     ):
         # Build a one-group Config so the shutdown mixins' lookups
         # (self.config.behavior, self.config.remote_servers,
@@ -121,6 +122,12 @@ class RedundancyGroupExecutor(
             except Exception:
                 self._container_runtime = None
                 self._compose_available = False
+
+        # Callback into the MultiUPSCoordinator's _handle_local_shutdown.
+        # The coordinator owns the in-memory lock and global flag that
+        # prevent the per-UPS path and this redundancy path from
+        # double-firing the local poweroff command.
+        self._local_shutdown_callback = local_shutdown_callback
 
         self._lock = threading.Lock()
         self._shutdown_done = False
@@ -195,6 +202,20 @@ class RedundancyGroupExecutor(
                 f"✅ ========== REDUNDANCY GROUP SHUTDOWN COMPLETE: "
                 f"{self._group.name} =========="
             )
+            # is_local quorum-loss must also fire the local poweroff.
+            # Without this, the executor stops local services and remote
+            # peers but leaves the host running. Delegate to the
+            # coordinator's _handle_local_shutdown so the in-memory lock
+            # and global flag prevent a double-fire if the per-UPS path
+            # also requested a local shutdown. The coordinator itself
+            # checks dry_run and local_shutdown.enabled.
+            if (
+                self._group.is_local
+                and self._local_shutdown_callback is not None
+            ):
+                self._local_shutdown_callback(
+                    f"redundancy:{self._group.name}"
+                )
         except Exception as e:
             self._log_message(
                 f"❌ Redundancy group '{self._group.name}' shutdown error: {e}"

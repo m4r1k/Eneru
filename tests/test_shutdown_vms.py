@@ -111,9 +111,20 @@ def test_shutdown_vms_graceful_shutdown_completes_first_poll(tmp_path):
         (0, "", ""),                # poll: no VMs running
     ]
     with patch("eneru.shutdown.vms.command_exists", return_value=True), \
-         patch("eneru.shutdown.vms.run_command", side_effect=call_outputs), \
+         patch("eneru.shutdown.vms.run_command", side_effect=call_outputs) as mock_run, \
          patch("eneru.shutdown.vms.time.sleep"):
         monitor._shutdown_vms()
+
+    # Assert the actual virsh command sequence — without this, the test
+    # passed even when the wrong command (or no command at all) was
+    # issued during shutdown.
+    issued = [c.args[0] for c in mock_run.call_args_list]
+    assert issued[0] == ["virsh", "list", "--name", "--state-running"]
+    # Per-VM shutdowns are issued in the order virsh list returned them.
+    assert ["virsh", "shutdown", "vm1"] in issued
+    assert ["virsh", "shutdown", "vm2"] in issued
+    # No `destroy` should fire when graceful shutdown completes cleanly.
+    assert not any(c[:2] == ["virsh", "destroy"] for c in issued)
 
 
 @pytest.mark.unit

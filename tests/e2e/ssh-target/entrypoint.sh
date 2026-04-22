@@ -21,5 +21,9 @@ echo "SSH target server starting..."
 echo "User: testuser"
 echo "Password: testpass (also accepts SSH keys)"
 
+# Defensive: re-create /var/run/sshd if a tmpfs / volume mount wiped
+# what the Dockerfile created. Cheap when the directory already exists.
+mkdir -p /var/run/sshd
+
 # Start sshd in foreground
 exec /usr/sbin/sshd -D -e

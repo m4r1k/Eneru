@@ -111,6 +111,47 @@ def test_unmount_filesystems_dry_run_skips_real_call(tmp_path):
 
 
 @pytest.mark.unit
+def test_unmount_filesystems_dry_run_log_renders_actual_argv(tmp_path):
+    """5.1.1 (CodeRabbit): the dry-run log line used to print the raw
+    `options` string (`umount -l -f /mnt`), which doesn't match the
+    actual argv that would be exec'd after shlex.split. Confirm the
+    log renders the same tokenized form as a real run."""
+    monitor = _make_fs_monitor(
+        tmp_path, mounts=[{"path": "/mnt/data", "options": "-l -f"}],
+        dry_run=True,
+    )
+    monitor.logger = MagicMock()
+    monitor._unmount_filesystems()
+    log_lines = [str(c) for c in monitor.logger.log.call_args_list]
+    # The dry-run line must contain the tokens as they would appear in
+    # the argv (separately quoted by shlex.quote where needed).
+    dry_run_line = next(line for line in log_lines if "DRY-RUN" in line)
+    assert "umount -l -f /mnt/data" in dry_run_line, (
+        f"dry-run log must show real argv form; got: {dry_run_line!r}"
+    )
+
+
+@pytest.mark.unit
+def test_unmount_filesystems_dry_run_catches_malformed_options(tmp_path):
+    """5.1.1: malformed options are caught even in dry-run so a config
+    error surfaces BEFORE the operator runs the daemon for real."""
+    monitor = _make_fs_monitor(
+        tmp_path,
+        mounts=[{"path": "/mnt/bad", "options": '"unclosed'}],
+        dry_run=True,
+    )
+    monitor.logger = MagicMock()
+    with patch("eneru.shutdown.filesystems.run_command") as mock_run:
+        monitor._unmount_filesystems()  # Must not raise
+    mock_run.assert_not_called()
+    log_lines = [str(c) for c in monitor.logger.log.call_args_list]
+    assert any("Invalid umount options" in line and "/mnt/bad" in line
+               for line in log_lines), (
+        "dry-run must surface the malformed-options error too"
+    )
+
+
+@pytest.mark.unit
 def test_unmount_filesystems_success(tmp_path):
     """Successful umount logs success and stops."""
     monitor = _make_fs_monitor(tmp_path)
@@ -131,6 +172,47 @@ def test_unmount_filesystems_includes_options(tmp_path):
         monitor._unmount_filesystems()
     cmd = mock_run.call_args.args[0]
     assert cmd == ["umount", "-l", "/mnt/data"]
+
+
+@pytest.mark.unit
+def test_unmount_filesystems_multi_flag_options_split(tmp_path):
+    """Multi-flag option strings like "-l -f" must be split into
+    separate argv entries; the previous cmd.append(options) was passing
+    them as one argument and umount rejected the literal as unknown."""
+    monitor = _make_fs_monitor(
+        tmp_path, mounts=[{"path": "/mnt/data", "options": "-l -f"}],
+    )
+    with patch("eneru.shutdown.filesystems.run_command", return_value=(0, "", "")) as mock_run:
+        monitor._unmount_filesystems()
+    cmd = mock_run.call_args.args[0]
+    assert cmd == ["umount", "-l", "-f", "/mnt/data"]
+
+
+@pytest.mark.unit
+def test_unmount_filesystems_malformed_options_skip_mount(tmp_path, capsys):
+    """A malformed options string (unclosed quote) used to crash the
+    shutdown sequence with ValueError out of shlex.split. Cubic P1:
+    catch and skip the offending mount instead of propagating."""
+    monitor = _make_fs_monitor(
+        tmp_path,
+        mounts=[
+            {"path": "/mnt/bad", "options": '"unclosed'},
+            {"path": "/mnt/good", "options": "-l"},
+        ],
+    )
+    monitor.logger = MagicMock()
+    with patch("eneru.shutdown.filesystems.run_command", return_value=(0, "", "")) as mock_run:
+        # Must not raise.
+        monitor._unmount_filesystems()
+    # Only the good mount reached run_command; the bad one was skipped.
+    cmds = [c.args[0] for c in mock_run.call_args_list]
+    assert ["umount", "-l", "/mnt/good"] in cmds
+    assert all(c[1] != "/mnt/bad" for c in cmds), \
+        "malformed-options mount must NOT reach umount"
+    # And the failure was logged with the offending mount path.
+    log_lines = [str(c) for c in monitor.logger.log.call_args_list]
+    assert any("/mnt/bad" in line and "Invalid umount options" in line
+               for line in log_lines)
 
 
 @pytest.mark.unit

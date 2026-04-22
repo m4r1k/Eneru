@@ -26,8 +26,20 @@ class UPSLogger:
         self.logger = logging.getLogger("ups-monitor")
         self.logger.setLevel(logging.INFO)
 
-        if self.logger.handlers:
-            self.logger.handlers.clear()
+        # Iterate-and-close so file descriptors held by previously
+        # registered FileHandlers are released. Bare `.handlers.clear()`
+        # leaks the underlying file objects when re-init runs against
+        # a logger that had a FileHandler attached.
+        for h in list(self.logger.handlers):
+            self.logger.removeHandler(h)
+            try:
+                h.close()
+            except Exception:
+                pass
+        # Don't propagate to the root logger — Eneru manages its own
+        # console + file output; propagation would duplicate every line
+        # if the embedding application configured root handlers.
+        self.logger.propagate = False
 
         formatter = TimezoneFormatter(
             '%(asctime)s %(timezone)s - %(message)s',

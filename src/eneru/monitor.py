@@ -388,7 +388,12 @@ class UPSGroupMonitor(
 
         try:
             run_command([
-                "logger", "-t", "ups-monitor", "-p", "daemon.warning",
+                # syslog identifier renamed from the legacy "ups-monitor"
+                # to "eneru" — the package + service rebrand happened in
+                # v5.0 but this side-channel was missed, so power events
+                # showed up under a different identifier than every
+                # other journal line emitted by the daemon.
+                "logger", "-t", "eneru", "-p", "daemon.warning",
                 f"⚡ POWER EVENT: {event} - {details}"
             ])
         except Exception:
@@ -592,7 +597,13 @@ class UPSGroupMonitor(
             f"TIMESTAMP={datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         )
         try:
-            temp_file = self._state_file_path.with_suffix('.tmp')
+            # with_name(name + '.tmp') appends '.tmp' to the full filename;
+            # with_suffix('.tmp') would replace the per-UPS suffix
+            # (e.g. '.ups1') and collapse every monitor's temp file onto
+            # a shared 'ups-state.tmp', racing on the atomic rename.
+            temp_file = self._state_file_path.with_name(
+                self._state_file_path.name + '.tmp'
+            )
             temp_file.write_text(state_content)
             temp_file.replace(self._state_file_path)
         except Exception:

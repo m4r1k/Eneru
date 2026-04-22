@@ -3,6 +3,7 @@
 import argparse
 import sys
 from datetime import datetime
+from pathlib import Path
 
 from eneru.version import __version__
 from eneru.config import ConfigLoader
@@ -201,15 +202,23 @@ def _cmd_validate(args):
     else:
         print(f"    Disabled")
 
-    # Run validation checks (pass raw YAML data for top-level resource warnings)
+    # Run validation checks (pass raw YAML data for top-level resource warnings).
+    # Re-parse for both single-UPS and multi-UPS configs so the top-level
+    # warnings reach single-UPS users too. ConfigLoader.load already
+    # handles missing files gracefully and warned the user; only the
+    # "file exists but YAML is malformed" branch must surface the error
+    # here so it isn't silently swallowed.
     raw_data = None
-    if config.multi_ups and args.config:
+    if args.config and Path(args.config).exists():
         try:
             import yaml
             with open(args.config, 'r') as f:
                 raw_data = yaml.safe_load(f) or {}
-        except Exception:
-            pass
+        except Exception as exc:
+            print()
+            print(f"  ERROR: Failed to re-parse {args.config} for top-level "
+                  f"validation: {exc}")
+            exit_code = 1
     messages = ConfigLoader.validate_config(config, raw_data=raw_data)
     if messages:
         print()

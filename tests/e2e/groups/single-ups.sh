@@ -31,8 +31,23 @@ echo "=== Test 2: Normal State Monitoring ==="
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
 sleep 3
 
-# Run Eneru for 5 seconds - should NOT trigger shutdown
-timeout 5 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test2.log || true
+# Run Eneru for 5 seconds — should NOT trigger shutdown.
+# Capture eneru's exit code explicitly; the previous `|| true` masked
+# any crash (e.g. exit 1) and let the test pass even when eneru never
+# actually ran. The ONLY acceptable exit is 124 (SIGTERM from timeout),
+# which proves the daemon was still running when the timer hit. A
+# clean 0 here would mean the daemon exited on its own — premature
+# termination during a "monitor normal state" check is itself a bug
+# this test must surface.
+set +e
+timeout 5 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test2.log
+RC=${PIPESTATUS[0]}
+set -e
+if [ "$RC" -ne 124 ]; then
+  echo "FAIL: eneru exited with code $RC (expected 124 = killed by timeout)"
+  cat /tmp/test2.log
+  exit 1
+fi
 
 # Verify no shutdown was triggered
 if grep -q "SHUTDOWN SEQUENCE" /tmp/test2.log; then
@@ -59,8 +74,18 @@ rm -f /tmp/eneru-e2e-shutdown-flag
 cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply.dev
 sleep 3
 
-# Run Eneru in dry-run mode
-eneru run --config $E2E_DIR/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test3.log || true
+# Run Eneru in dry-run mode. With --exit-after-shutdown, eneru should
+# exit 0 once the dry-run shutdown sequence completes; anything else
+# is a real failure that the previous `|| true` was masking.
+set +e
+eneru run --config $E2E_DIR/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test3.log
+RC=${PIPESTATUS[0]}
+set -e
+if [ "$RC" -ne 0 ]; then
+  echo "FAIL: eneru exited with code $RC (expected 0)"
+  cat /tmp/test3.log
+  exit 1
+fi
 
 # Verify shutdown was triggered (in dry-run)
 if ! grep -q "SHUTDOWN SEQUENCE" /tmp/test3.log; then

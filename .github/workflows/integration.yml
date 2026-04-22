@@ -6,6 +6,23 @@ on:
   pull_request:
     branches: [main]
 
+# All third-party action invocations are SHA-pinned (with the
+# corresponding tag in a comment) so a moved tag in the upstream
+# action repo cannot silently change what runs in CI. Refresh
+# periodically by re-running
+# `gh api repos/<owner>/<repo>/git/refs/tags/<tag>` (or, for branch-
+# tracked actions like pypa/gh-action-pypi-publish@release/v1,
+# `gh api repos/<owner>/<repo>/branches/<branch>`) and updating both
+# the SHA and the comment in lockstep across every workflow.
+#
+# nFPM is pinned to a specific release AND its archive is verified
+# against the goreleaser-published checksums.txt before extraction.
+# Update both NFPM_VERSION and the comment in any future bump; the
+# checksum check will fail loudly if the published file's hash changes
+# without an explicit version pin update on our side.
+env:
+  NFPM_VERSION: "2.41.3"
+
 jobs:
   # Build packages once, then test on multiple OSes
   build-packages:
@@ -14,10 +31,10 @@ jobs:
       version: ${{ steps.version.outputs.VERSION }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         with:
           python-version: '3.11'
 
@@ -25,16 +42,23 @@ jobs:
         id: version
         run: |
           VERSION=$(grep -oP '__version__\s*=\s*"\K[^"]+' src/eneru/version.py)
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building version: $VERSION"
 
       - name: Install nFPM
         run: |
-          NFPM_VERSION=$(curl -s https://api.github.com/repos/goreleaser/nfpm/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
-          curl -sLO "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
-          tar -xzf "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" nfpm
+          BASE="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}"
+          ARCHIVE="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -sLO "${BASE}/${ARCHIVE}"
+          curl -sL "${BASE}/checksums.txt" -o nfpm_checksums.txt
+          # Verify the downloaded archive against the publisher's
+          # signed checksum file so an in-flight tamper is caught
+          # before extraction and `sudo mv` install.
+          grep " ${ARCHIVE}\$" nfpm_checksums.txt | sha256sum -c -
+          tar -xzf "${ARCHIVE}" nfpm
           sudo mv nfpm /usr/local/bin/
-          rm "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          rm "${ARCHIVE}" nfpm_checksums.txt
+          nfpm --version
 
       - name: Build .deb package
         run: VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager deb --target .
@@ -43,7 +67,7 @@ jobs:
         run: VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager rpm --target .
 
       - name: Upload packages
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: packages
           path: |
@@ -61,10 +85,10 @@ jobs:
     continue-on-error: ${{ matrix.python-version == '3.15-dev' }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         with:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: true
@@ -112,10 +136,10 @@ jobs:
       image: ${{ matrix.distro }}:${{ matrix.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
       - name: Download packages
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: packages
 
@@ -125,9 +149,12 @@ jobs:
         run: |
           apt-get update
           apt-get install -y python3 python3-yaml
-          # Install the .deb package (ignore dependency on nut-client for CI)
-          dpkg --force-depends -i eneru_*.deb || true
-          apt-get install -f -y --no-install-recommends || true
+          # --force-depends lets us install even though nut-client isn't
+          # in the test container; subsequent `apt-get install -f` then
+          # resolves any dependencies it can. Real install failures must
+          # surface, so the trailing `|| true` mask is gone.
+          dpkg --force-depends -i eneru_*.deb
+          apt-get install -f -y --no-install-recommends
 
       - name: Verify installation
         run: |
@@ -169,18 +196,20 @@ jobs:
       image: ${{ matrix.image }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
       - name: Download packages
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: packages
 
       - name: Install dependencies and package
         run: |
           dnf install -y ${{ matrix.python_pkg }}
-          # Install the .rpm package (ignore dependency on nut-client for CI)
-          rpm -ivh --nodeps eneru-*.rpm || dnf install -y ./eneru-*.rpm --skip-broken || true
+          # Try rpm first (fast, with --nodeps for the missing nut-client).
+          # If that fails for non-dep reasons, fall back to dnf with
+          # --skip-broken. Real install failures still propagate.
+          rpm -ivh --nodeps eneru-*.rpm || dnf install -y ./eneru-*.rpm --skip-broken
 
       - name: Verify installation
         run: |
@@ -230,7 +259,7 @@ jobs:
       image: ${{ matrix.image || format('{0}:{1}', matrix.distro, matrix.version) }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
       - name: Install pip and dependencies (Debian/Ubuntu)
         if: matrix.distro != ''

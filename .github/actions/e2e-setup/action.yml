@@ -6,6 +6,15 @@ description: >-
   All four E2E matrix jobs invoke this action so they share an
   identical, isolated test environment.
 
+# All third-party action invocations are SHA-pinned (with the
+# corresponding tag in a comment) so a moved tag in the upstream
+# action repo cannot silently change what runs in CI. Refresh
+# periodically by re-running
+# `gh api repos/<owner>/<repo>/git/refs/tags/<tag>` (or, for branch-
+# tracked actions, `gh api repos/<owner>/<repo>/branches/<branch>`)
+# and updating both the SHA and the comment in lockstep across every
+# workflow.
+
 inputs:
   e2e-dir:
     description: "Path to the tests/e2e directory inside the repo"
@@ -16,7 +25,7 @@ runs:
   using: composite
   steps:
     - name: Set up Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
       with:
         python-version: '3.11'
 
@@ -48,26 +57,38 @@ runs:
       shell: bash
       run: |
         echo "Waiting for NUT server..."
+        nut_ready=false
         for i in {1..30}; do
           if upsc TestUPS@localhost:3493 2>/dev/null | grep -q "ups.status"; then
             echo "NUT server ready!"
+            nut_ready=true
             break
           fi
           echo "  Attempt $i/30..."
           sleep 2
         done
+        if [ "$nut_ready" != "true" ]; then
+          echo "ERROR: NUT server never became ready (TestUPS@localhost:3493)" >&2
+          exit 1
+        fi
 
         echo ""
         echo "Waiting for SSH servers (ports 2222, 2223, 2224)..."
         for port in 2222 2223 2224; do
+          ssh_ready=false
           for i in {1..30}; do
             if nc -z localhost "$port" 2>/dev/null; then
               echo "  SSH server on $port ready!"
+              ssh_ready=true
               break
             fi
             echo "  Attempt $i/30 for $port..."
             sleep 2
           done
+          if [ "$ssh_ready" != "true" ]; then
+            echo "ERROR: SSH server on port $port never became ready" >&2
+            exit 1
+          fi
         done
 
         echo ""

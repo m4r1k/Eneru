@@ -35,6 +35,80 @@ from eneru import (
     MonitorState,
     ConfigLoader,
 )
+from eneru import config as eneru_config_module
+from eneru import stats as eneru_stats_module
+
+
+@pytest.fixture(autouse=True)
+def isolate_stats_db_directory(request, tmp_path, monkeypatch):
+    """Redirect every test's StatsConfig.db_directory default and any
+    direct StatsStore(db_path=...) call to a per-test tmp_path, so no
+    test leaks SQLite files into the real /var/lib/eneru.
+
+    Tests that specifically need to verify the unmodified production
+    default (e.g. asserting StatsConfig().db_directory == "/var/lib/
+    eneru") can opt out via @pytest.mark.no_stats_isolation.
+
+    Two layers of defense are required when the fixture is active:
+
+    1. ``StatsConfig.__init__`` — the dataclass-generated ``__init__``
+       captures the literal default ``"/var/lib/eneru"`` at class
+       decoration time, so monkeypatching the class attribute is a
+       no-op for new instances. We replace ``__init__`` with a
+       wrapper that substitutes the isolated path when the caller
+       didn't supply one, regardless of how the dataclass was
+       generated.
+
+    2. ``StatsStore.__init__`` — direct ``StatsStore(Path("/var/lib/
+       eneru/foo.db"))`` calls (e.g. via TUI helpers) bypass
+       StatsConfig entirely. Redirect any ``db_path`` whose parent is
+       ``/var/lib/eneru`` into the isolated dir so it lands in
+       tmp_path instead.
+    """
+    if request.node.get_closest_marker("no_stats_isolation"):
+        yield None
+        return
+
+    isolated = tmp_path / "stats"
+    isolated.mkdir(parents=True, exist_ok=True)
+    isolated_str = str(isolated)
+    real_dir = Path("/var/lib/eneru")
+
+    # Layer 1: StatsConfig default.
+    # Use *args/**kw rather than baking `db_directory` into the
+    # signature. Today db_directory is the first dataclass field so
+    # `StatsConfig("/path")` works; if a future field is added before
+    # it, a positional call would misroute. Detect whether the caller
+    # actually supplied db_directory and only inject the isolated
+    # default when they didn't.
+    original_cfg_init = eneru_config_module.StatsConfig.__init__
+
+    def patched_cfg_init(self, *args, **kw):
+        if "db_directory" not in kw and not args:
+            kw["db_directory"] = isolated_str
+        return original_cfg_init(self, *args, **kw)
+
+    monkeypatch.setattr(
+        eneru_config_module.StatsConfig, "__init__", patched_cfg_init,
+    )
+
+    # Layer 2: direct StatsStore instantiation.
+    original_store_init = eneru_stats_module.StatsStore.__init__
+
+    def patched_store_init(self, db_path, *args, **kw):
+        try:
+            p = Path(db_path)
+        except TypeError:
+            return original_store_init(self, db_path, *args, **kw)
+        if p.parent == real_dir:
+            p = isolated / p.name
+        return original_store_init(self, p, *args, **kw)
+
+    monkeypatch.setattr(
+        eneru_stats_module.StatsStore, "__init__", patched_store_init,
+    )
+
+    yield isolated
 
 
 @pytest.fixture
@@ -174,6 +248,44 @@ def mock_run_command():
     with patch("eneru.monitor.run_command") as mock:
         mock.return_value = (0, "", "")
         yield mock
+
+
+@pytest.fixture
+def patch_run_command_everywhere():
+    """Patch ``run_command`` in every module that imported it under its
+    own name. ``from eneru.utils import run_command`` binds the symbol
+    at import time, so ``patch("eneru.utils.run_command")`` is a no-op
+    for already-imported modules — tests that go through a shutdown
+    mixin (vms/containers/filesystems/remote) must patch each binding
+    explicitly or the mixin's call will hit real ``virsh``/``umount``/
+    ``ssh`` despite the test's intent.
+
+    Yields a dict mapping the module path → MagicMock so a test can
+    assert against any specific binding. Each mock returns
+    ``(0, "", "")`` by default; override per-test as needed.
+    """
+    targets = [
+        # eneru.utils is the home of `run_command`; patching it here too
+        # catches indirect callers that resolve through utils at call
+        # time (e.g. command_exists() in eneru.utils, which would
+        # otherwise still shell out during shutdown tests).
+        "eneru.utils.run_command",
+        "eneru.monitor.run_command",
+        "eneru.multi_ups.run_command",
+        "eneru.shutdown.vms.run_command",
+        "eneru.shutdown.containers.run_command",
+        "eneru.shutdown.filesystems.run_command",
+        "eneru.shutdown.remote.run_command",
+    ]
+    patchers = [patch(t) for t in targets]
+    mocks = {t: p.start() for t, p in zip(targets, patchers)}
+    for m in mocks.values():
+        m.return_value = (0, "", "")
+    try:
+        yield mocks
+    finally:
+        for p in patchers:
+            p.stop()
 
 
 @pytest.fixture

@@ -1,5 +1,5 @@
 """Version information for Eneru."""
 
 # Version is set at build time via git describe --tags
-# Format: "4.3.0" for tagged releases, "4.3.0-5-gabcdef1" for dev builds
-__version__ = "5.1.0"
+# Format: "5.1.0" for tagged releases, "5.1.0-5-gabcdef1" for dev builds
+__version__ = "5.1.1"

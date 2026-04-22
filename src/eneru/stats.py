@@ -16,6 +16,7 @@ import time
 from collections import deque
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+from urllib.parse import quote as urlquote
 
 
 # Sample columns: 10 raw NUT metrics from spec 2.12 (battery.charge,
@@ -145,9 +146,14 @@ class StatsStore:
         except OSError as e:
             self._log_error_once(f"stats: mkdir {self.db_path.parent} failed: {e}")
             raise
+        # Default deferred isolation: sqlite3 opens an implicit
+        # transaction on first DML, and the `with self._conn:` blocks
+        # below commit/rollback as expected. With isolation_level=None
+        # the connection runs in autocommit mode and the `with` blocks
+        # become no-ops, so executemany() would have committed every
+        # row individually instead of batching the flush.
         self._conn = sqlite3.connect(
             str(self.db_path),
-            isolation_level=None,  # explicit transactions
             check_same_thread=False,
         )
         self._conn.execute("PRAGMA journal_mode = WAL")
@@ -592,7 +598,7 @@ class StatsStore:
     # ----- read-only API for the TUI -----
 
     @classmethod
-    def open_readonly(cls, db_path: Path) -> sqlite3.Connection:
+    def open_readonly(cls, db_path: Path) -> Optional[sqlite3.Connection]:
         """Open a read-only ``sqlite3.Connection`` (URI mode=ro).
 
         Returns ``None`` if the file doesn't exist; otherwise the
@@ -601,8 +607,11 @@ class StatsStore:
         """
         path = Path(db_path)
         if not path.exists():
-            return None  # type: ignore[return-value]
-        uri = f"file:{path}?mode=ro"
+            return None
+        # urlquote so a path containing '?' or '#' (legal on POSIX
+        # filesystems, illegal in a SQLite URI without escaping) doesn't
+        # truncate the path or get parsed as the URI's query / fragment.
+        uri = f"file:{urlquote(str(path))}?mode=ro"
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
         # Same bound as the writer connection: a slow query against the
         # writer's WAL can't stall the TUI refresh for more than 500 ms.

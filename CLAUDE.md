@@ -270,6 +270,39 @@ For trivial PRs the CI gates (validate × 6 + E2E × 4) are sufficient. Saves qu
 
 **If you forget and trigger an auto-review:** harmless but wastes quota. Just close the auto-review and trigger manually after CI is green.
 
+## GitHub Actions SHA pin maintenance
+
+Every third-party GitHub Actions invocation across the workflows (`validate.yml`, `integration.yml`, `e2e.yml`, `codeql.yml`, `pypi.yml`, `release.yml`, plus `.github/actions/e2e-setup/action.yml`) is pinned to a full commit SHA with the corresponding tag in a trailing comment. A moved upstream tag therefore cannot silently change what runs in CI — the pinned SHA is the single source of truth.
+
+These pins drift over time as upstream actions ship security fixes, dependency bumps, and bug fixes under the same major-version tag. The repo doesn't auto-renew them; refresh **about every 3 months**, or when a security advisory lands for one of the pinned actions, or when an upstream major-version bump is needed.
+
+**How to refresh:**
+
+```bash
+# For tag-tracked actions (most cases — actions/checkout@v6, etc.):
+gh api repos/<owner>/<repo>/git/refs/tags/<tag> --jq '.object.sha'
+
+# For branch-tracked actions (pypa/gh-action-pypi-publish@release/v1):
+gh api repos/<owner>/<repo>/branches/<branch> --jq '.commit.sha'
+```
+
+Update both the SHA and the `# vX.Y` trailing comment in lockstep. After bumping, run the full CI matrix on a throwaway branch before merging — silent breakage is the failure mode the pins exist to prevent in the first place.
+
+The current pinned set (as of 2026-04-22):
+
+| Action | Tag | SHA prefix |
+|---|---|---|
+| `actions/checkout` | `v6` | `de0fac2e…` |
+| `actions/setup-python` | `v6` | `a309ff8b…` |
+| `actions/upload-artifact` | `v4` / `v7` | `ea165f8d…` / `043fb46d…` |
+| `actions/download-artifact` | `v4` / `v8` | `d3f86a10…` / `3e5f45b2…` |
+| `codecov/codecov-action` | `v6` | `57e3a136…` |
+| `github/codeql-action` | `v4` | `b25d0ebf…` |
+| `pypa/gh-action-pypi-publish` | `release/v1` | `cef22109…` |
+| `softprops/action-gh-release` | `v3` | `b4309332…` |
+
+`nFPM` is similarly pinned (`NFPM_VERSION` env var in `release.yml` and `integration.yml`) and verified against the goreleaser-published `checksums.txt` before extraction. Bump the version constant and the checksum check still verifies the new download.
+
 ## Changelog
 
 A single changelog is maintained at `docs/changelog.md`. This is the comprehensive version with detailed changes, migration notes, and version comparison tables. It is rendered on [ReadTheDocs](https://eneru.readthedocs.io/latest/changelog/).

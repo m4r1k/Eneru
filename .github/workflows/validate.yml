@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [ main ]
 
+# All third-party action invocations are SHA-pinned (with the
+# corresponding tag in a comment) so a moved tag in the upstream
+# action repo cannot silently change what runs in CI. Refresh
+# periodically by re-running
+# `gh api repos/<owner>/<repo>/git/refs/tags/<tag>` (or, for branch-
+# tracked actions like pypa/gh-action-pypi-publish@release/v1,
+# `gh api repos/<owner>/<repo>/branches/<branch>`) and updating both
+# the SHA and the comment in lockstep across every workflow.
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -16,10 +24,10 @@ jobs:
     continue-on-error: ${{ matrix.python-version == '3.15-dev' }}
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
       with:
         python-version: ${{ matrix.python-version }}
         allow-prereleases: true
@@ -36,7 +44,7 @@ jobs:
 
     - name: Upload coverage to Codecov
       if: matrix.python-version == '3.11'
-      uses: codecov/codecov-action@v6
+      uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2  # v6
       with:
         files: ./coverage.xml
         fail_ci_if_error: false

@@ -65,10 +65,13 @@ filesystems:
       - path: "/mnt/nas"
         options: "-l"
 
-# Remote servers with optional pre-shutdown commands
-# Servers are processed in two phases:
-#   1. Sequential: Servers with parallel: false are shutdown one by one (in config order)
-#   2. Parallel: Remaining servers (parallel: true, the default) are shutdown concurrently
+# Remote servers with optional pre-shutdown commands.
+# Servers are processed by their effective shutdown_order (lowest first);
+# servers sharing the same order run concurrently.
+#   - Default: order 0 (parallel batch)
+#   - shutdown_order: N (>=1): explicit later phase; higher numbers run last
+#   - Legacy parallel: false: assigned a unique negative order so the server
+#     runs in a phase BEFORE the order-0 batch (NOT after — see the NAS block)
 remote_servers:
   # Proxmox hypervisor - gracefully stop VMs/CTs before shutdown
   # Runs in parallel (default) with other parallel servers
@@ -85,13 +88,23 @@ remote_servers:
       - action: "sync"
     shutdown_command: "shutdown -h now"
 
-  # NAS - shutdown LAST since other servers may mount its storage
-  # parallel: false ensures this runs after all parallel servers complete
+  # NAS — shutdown LAST since other servers may mount its storage.
+  # Use `shutdown_order` for "later phase" ordering: every other
+  # server keeps its default order (0) and runs in parallel; the NAS
+  # gets a higher number so it runs in a later phase, after the
+  # mounting clients have stopped.
+  #
+  # NOTE: the legacy `parallel: false` flag does the OPPOSITE of what
+  # its name suggests for this use case — it runs the server in a
+  # phase BEFORE the parallel-order=0 batch (see config.py
+  # RemoteServerConfig: "False = run sequentially before the parallel
+  # batch"). Use `shutdown_order: <int>>=1` instead when you need
+  # "after the parallel batch".
   - name: "Synology NAS"
     enabled: true
     host: "192.168.1.50"
     user: "admin"
-    parallel: false  # Shutdown sequentially (after parallel batch)
+    shutdown_order: 2  # Runs in phase 2, after the order=0 parallel batch
     shutdown_command: "sudo -i synoshutdown -s"
 
 local_shutdown:
