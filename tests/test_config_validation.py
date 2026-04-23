@@ -189,6 +189,85 @@ class TestVoltageHysteresisValidation:
         assert any("voltage_hysteresis_seconds" in w for w in warnings)
 
 
+class TestVoltageSensitivityValidation:
+    """Issue #4 / v5.1.2: triggers.voltage_sensitivity strict-enum validation."""
+
+    def _errors(self, messages):
+        return [m for m in messages if m.startswith("ERROR:")]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("preset", ["tight", "normal", "loose"])
+    def test_known_presets_accepted(self, minimal_config, preset):
+        minimal_config.triggers.voltage_sensitivity = preset
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert not any("voltage_sensitivity" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_default_is_normal(self, minimal_config):
+        assert minimal_config.triggers.voltage_sensitivity == "normal"
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert not any("voltage_sensitivity" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_unknown_preset_rejected(self, minimal_config):
+        minimal_config.triggers.voltage_sensitivity = "bogus"
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert any("voltage_sensitivity" in e and "bogus" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_typo_with_capital_rejected(self, minimal_config):
+        # Strict enum -- "Normal" (capitalised) is NOT accepted. Common
+        # YAML-fingers typo; we want a hard error rather than a silent
+        # fallback to default.
+        minimal_config.triggers.voltage_sensitivity = "Normal"
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert any("voltage_sensitivity" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_empty_string_rejected(self, minimal_config):
+        minimal_config.triggers.voltage_sensitivity = ""
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert any("voltage_sensitivity" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_yaml_round_trip_sets_explicit_flag(self, tmp_path):
+        # The mixin uses voltage_sensitivity_explicit to suppress the
+        # one-time migration warning. The flag must round-trip from YAML:
+        # absent in file -> False; present (any value) -> True.
+        explicit = tmp_path / "explicit.yaml"
+        explicit.write_text(
+            "triggers:\n  voltage_sensitivity: loose\n"
+        )
+        cfg = ConfigLoader.load(str(explicit))
+        assert cfg.triggers.voltage_sensitivity == "loose"
+        assert cfg.triggers.voltage_sensitivity_explicit is True
+
+        absent = tmp_path / "absent.yaml"
+        absent.write_text("triggers:\n  low_battery_threshold: 25\n")
+        cfg2 = ConfigLoader.load(str(absent))
+        assert cfg2.triggers.voltage_sensitivity == "normal"
+        assert cfg2.triggers.voltage_sensitivity_explicit is False
+
+    @pytest.mark.unit
+    def test_per_ups_validation_rejects_bogus(self, tmp_path):
+        # Multi-UPS path: each per-UPS triggers block is validated.
+        cfg_path = tmp_path / "multi.yaml"
+        cfg_path.write_text(
+            "ups:\n"
+            "  - name: 'UPS-A@10.0.0.1'\n"
+            "    triggers:\n"
+            "      voltage_sensitivity: bogus\n"
+            "  - name: 'UPS-B@10.0.0.2'\n"
+            "    triggers:\n"
+            "      voltage_sensitivity: tight\n"
+        )
+        cfg = ConfigLoader.load(str(cfg_path))
+        errors = self._errors(ConfigLoader.validate_config(cfg))
+        assert any("voltage_sensitivity" in e and "bogus" in e for e in errors)
+        # Valid sibling UPS is not flagged.
+        assert not any("UPS-B" in e and "voltage_sensitivity" in e for e in errors)
+
+
 class TestConfigParsingEdgeCases:
     """Test edge cases in configuration parsing."""
 
