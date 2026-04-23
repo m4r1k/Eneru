@@ -295,8 +295,27 @@ rm -f /tmp/eneru-e2e-shutdown-flag
 # Apply Chris's exact NUT data: 120V nominal, transfer 106/127, input
 # voltage at a routine 122.4V. v5.1.1 would have set warning_high=122
 # and false-alarmed; v5.1.2 default 'normal' (10%) sets it to 132.
+#
+# Unlike Test 6 (where every scenario shares input.voltage.nominal=230),
+# this test CHANGES the nominal between the prior scenario and Chris's
+# 120V scenario. The dummy NUT scenario watcher polls /scenarios every
+# 1s, then dummy-ups has its own pollinterval before upsd serves the new
+# value -- a blind `sleep 2` races. Active-poll `upsc` until it returns
+# input.voltage.nominal=120 before launching the daemon, so the daemon's
+# one-shot _initialize_voltage_thresholds reads the right nominal.
 cp $E2E_DIR/scenarios/us-grid-hot.dev $E2E_DIR/scenarios/apply.dev
-sleep 2
+for i in $(seq 1 20); do
+  nominal=$(upsc TestUPS@localhost:3493 input.voltage.nominal 2>/dev/null || true)
+  if [ "$nominal" = "120" ]; then
+    echo "  NUT serving nominal=120 after ${i}s"
+    break
+  fi
+  sleep 1
+done
+if [ "$nominal" != "120" ]; then
+  echo "FAIL (8-setup): NUT never reported input.voltage.nominal=120 (last=${nominal:-empty})"
+  exit 1
+fi
 
 timeout 12 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test33.log || true
 
@@ -320,9 +339,21 @@ else
 fi
 
 # (8c) Drop to 107V (real brownout, just under the 108V warning_low).
-# Brownout MUST fire even though false alarms are gone.
+# Brownout MUST fire even though false alarms are gone. Active-poll on
+# input.voltage so we don't race the dummy NUT's reload cycle.
 cp $E2E_DIR/scenarios/us-grid-brownout.dev $E2E_DIR/scenarios/apply.dev
-sleep 2
+for i in $(seq 1 20); do
+  voltage=$(upsc TestUPS@localhost:3493 input.voltage 2>/dev/null || true)
+  if [ "$voltage" = "107.0" ] || [ "$voltage" = "107" ]; then
+    echo "  NUT serving input.voltage=${voltage} after ${i}s"
+    break
+  fi
+  sleep 1
+done
+if [ "$voltage" != "107.0" ] && [ "$voltage" != "107" ]; then
+  echo "FAIL (8c-setup): NUT never reported input.voltage=107 (last=${voltage:-empty})"
+  exit 1
+fi
 timeout 8 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test33b.log || true
 
 if grep -q "BROWNOUT_DETECTED" /tmp/test33b.log; then

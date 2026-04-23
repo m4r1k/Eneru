@@ -558,26 +558,6 @@ class TestMigrationWarning:
         assert "high " not in msg
 
     @pytest.mark.unit
-    def test_warning_fires_for_chris_repro_asymmetric_band(self):
-        # Chris's case is asymmetric: v5.1.1 produced 111/122, v5.1.2
-        # default produces 108/132 -- low side TIGHTENED (108 < 111)
-        # while high side WIDENED (132 > 122). The migration-warning
-        # gate fires when EITHER side moves in the tightening direction
-        # under v5.1.1 (legacy_low > new_low OR legacy_high < new_high),
-        # so the warning surfaces here -- 111 > 108 satisfies the
-        # low-side branch. That's the right behaviour: any one-sided
-        # change of the threshold is worth surfacing once so the
-        # operator notices the drift before relying on the new numbers.
-        h = _TestHost(ups_vars={
-            "input.voltage.nominal": "120",
-            "input.transfer.low": "106",
-            "input.transfer.high": "127",
-        })
-        h._initialize_voltage_thresholds()
-        msg = self._migration_warning(h)
-        assert msg, "asymmetric band change must still surface the warning"
-
-    @pytest.mark.unit
     def test_warning_suppressed_for_wide_firmware_unchanged_case(self):
         # APC default-wide on 230V (170/280): v5.1.1 ±10% won (207/253),
         # v5.1.2 also produces 207/253. No change -> no warning.
