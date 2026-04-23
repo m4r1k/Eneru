@@ -19,17 +19,22 @@ env:
 # the SHA and the comment in lockstep across every workflow.
 #
 # Each E2E group runs as a separate matrix job so they execute in
-# parallel. Total wall-clock is bounded by the slowest group
-# (`Redundancy and Stats`, ~5 minutes including setup) instead of the
-# previous ~6+ minute single sequential job.
+# parallel. Total wall-clock is bounded by the slowest group instead
+# of the previous ~6+ minute single sequential job.
 #
-# OPERATOR ACTION REQUIRED on first merge: branch protection on `main`
-# previously required `e2e-test` (single check). Replace it with the
-# four new checks shown in the GitHub UI:
+# v5.1.2 split the previous `Redundancy and Stats` job into two
+# (`Redundancy` runs tests 21-27, `Stats` runs tests 28-32) so the
+# heaviest group no longer gates the matrix on its own.
+#
+# OPERATOR ACTION REQUIRED when this PR's branch protection updates:
+# the required checks on `main` are now FIVE E2E jobs (was four).
+# Drop `E2E Redundancy and Stats`; add `E2E Redundancy` and `E2E Stats`.
+# The validate matrix (×6) is unchanged. Total required checks: 11.
 #   - E2E CLI
 #   - E2E UPS Single
 #   - E2E UPS Multi
-#   - E2E Redundancy and Stats
+#   - E2E Redundancy
+#   - E2E Stats
 jobs:
   e2e:
     name: "E2E ${{ matrix.label }}"
@@ -39,10 +44,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { group: cli,                  label: "CLI" }
-          - { group: single-ups,           label: "UPS Single" }
-          - { group: multi-ups,            label: "UPS Multi" }
-          - { group: redundancy-and-stats, label: "Redundancy and Stats" }
+          - { group: cli,        label: "CLI" }
+          - { group: single-ups, label: "UPS Single" }
+          - { group: multi-ups,  label: "UPS Multi" }
+          - { group: redundancy, label: "Redundancy" }
+          - { group: stats,      label: "Stats" }
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6

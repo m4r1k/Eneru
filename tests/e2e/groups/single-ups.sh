@@ -280,5 +280,76 @@ eneru test-notifications --config /tmp/config-notif.yaml
 echo "PASS: Notification sent successfully"
 )
 
+# ======================================================================
+# Test 33: Issue #4 -- voltage_sensitivity preset prevents Chris's
+# false-alarm flood on a US 120V grid running slightly hot.
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 33: voltage_sensitivity preset (issue #4)"
+
+echo "=== Test 33: voltage_sensitivity preset ==="
+
+rm -f /tmp/eneru-e2e-shutdown-flag
+
+# Apply Chris's exact NUT data: 120V nominal, transfer 106/127, input
+# voltage at a routine 122.4V. v5.1.1 would have set warning_high=122
+# and false-alarmed; v5.1.2 default 'normal' (10%) sets it to 132.
+cp $E2E_DIR/scenarios/us-grid-hot.dev $E2E_DIR/scenarios/apply.dev
+sleep 2
+
+timeout 12 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test33.log || true
+
+# (8a) Startup log must report the percentage-band threshold honestly.
+if grep -q "Grid-quality warnings: 108.0V / 132.0V" /tmp/test33.log \
+   && grep -q "sensitivity=normal" /tmp/test33.log; then
+  echo "PASS (8a): startup log honest -- 108/132 at sensitivity=normal"
+else
+  echo "FAIL (8a): startup log missing 108/132 or sensitivity=normal"
+  grep -E "Grid-quality|sensitivity" /tmp/test33.log || true
+  exit 1
+fi
+
+# (8b) NO false OVER_VOLTAGE_DETECTED at 122.4V.
+if grep -q "OVER_VOLTAGE_DETECTED" /tmp/test33.log; then
+  echo "FAIL (8b): 122.4V on a 120V/106/127 UPS must NOT fire OVER_VOLTAGE"
+  grep "OVER_VOLTAGE" /tmp/test33.log || true
+  exit 1
+else
+  echo "PASS (8b): no false OVER_VOLTAGE_DETECTED at 122.4V"
+fi
+
+# (8c) Drop to 107V (real brownout, just under the 108V warning_low).
+# Brownout MUST fire even though false alarms are gone.
+cp $E2E_DIR/scenarios/us-grid-brownout.dev $E2E_DIR/scenarios/apply.dev
+sleep 2
+timeout 8 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test33b.log || true
+
+if grep -q "BROWNOUT_DETECTED" /tmp/test33b.log; then
+  echo "PASS (8c): real brownout (107V) still fires BROWNOUT_DETECTED"
+else
+  echo "FAIL (8c): brownout at 107V must still fire on the v5.1.2 formula"
+  tail -30 /tmp/test33b.log
+  exit 1
+fi
+
+# (8d) Migration warning fires for narrow-firmware UPSes. v5.1.1 would
+# have produced 111/122 on this UPS; v5.1.2 produces 108/132. The
+# warning lists the per-side delta and exposes the legacy values so an
+# upgrading operator can spot the change end-to-end.
+if grep -q "Voltage warning band changed from v5.1.1" /tmp/test33.log \
+   && grep -q "low 111.0V" /tmp/test33.log \
+   && grep -q "high 122.0V" /tmp/test33.log; then
+  echo "PASS (8d): migration warning surfaces with per-side delta against v5.1.1 numbers"
+else
+  echo "FAIL (8d): migration warning missing or per-side delta absent"
+  grep -E "Voltage warning band|widened|tightened" /tmp/test33.log || true
+  exit 1
+fi
+
+# Restore baseline scenario for any downstream tests added later.
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+)
+
 echo ""
 echo "=== Group 'single-ups' completed successfully ==="

@@ -1,0 +1,25 @@
+# Scenario: Chris's setup (issue #4) under brownout. Same UPS firmware
+# as us-grid-hot.dev (transfer 106/127 on 120V nominal), but input
+# dropped to 107V -- below the v5.1.2 warning_low of 108V. Used to
+# prove that on the same NUT data where 122.4V no longer false-alarms,
+# a real brownout still fires BROWNOUT_DETECTED.
+ups.status: OL
+ups.load: 25
+
+battery.charge: 100
+battery.runtime: 1800
+battery.voltage: 13.6
+
+input.voltage: 107.0
+input.voltage.nominal: 120
+input.frequency: 60.0
+input.transfer.low: 106
+input.transfer.high: 127
+
+output.voltage: 120.0
+output.frequency: 60.0
+
+ups.temperature: 27.0
+
+device.mfr: Eneru
+device.model: E2E Test UPS (issue #4 brownout)

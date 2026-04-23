@@ -1,0 +1,27 @@
+# Scenario: Chris's setup (issue #4) -- US 120V grid running slightly hot.
+# UPS firmware: APC SUA/SMT-style transfer points (106 / 127). Grid is
+# at 122.4V -- well within the EN 50160 ±10% envelope but only 2V away
+# from v5.1.1's transfer-derived warning_high (122.0V), which produced
+# a flood of false OVER_VOLTAGE_DETECTED + VOLTAGE_FLAP_SUPPRESSED noise.
+# v5.1.2's percentage-only formula puts warning_high at 132.0V -- 122.4V
+# is normal, no alarm.
+ups.status: OL CHRG
+ups.load: 25
+
+battery.charge: 100
+battery.runtime: 1800
+battery.voltage: 13.6
+
+input.voltage: 122.4
+input.voltage.nominal: 120
+input.frequency: 60.0
+input.transfer.low: 106
+input.transfer.high: 127
+
+output.voltage: 120.0
+output.frequency: 60.0
+
+ups.temperature: 27.0
+
+device.mfr: Eneru
+device.model: E2E Test UPS (issue #4 repro -- US 120V hot grid)
