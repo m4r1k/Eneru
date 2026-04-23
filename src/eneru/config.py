@@ -40,6 +40,23 @@ class TriggersConfig:
     critical_runtime_threshold: int = 600
     depletion: DepletionConfig = field(default_factory=DepletionConfig)
     extended_time: ExtendedTimeConfig = field(default_factory=ExtendedTimeConfig)
+    # Voltage warning band as a fraction of input.voltage.nominal.
+    # `tight` = ±5%, `normal` = ±10% (EN 50160), `loose` = ±15%.
+    # Per-UPS-group so a clean PDU and a generator-fed leg in the same
+    # daemon can use different thresholds. The voltage mixin maps this
+    # to a percentage at startup; misconfiguration is rejected at load.
+    voltage_sensitivity: str = "normal"
+    # True iff `voltage_sensitivity` was explicitly present in the YAML
+    # (vs. dataclass default). Gates the v5.1.1→v5.1.2 migration warning
+    # so users who've already chosen a preset don't get a recurring nag.
+    voltage_sensitivity_explicit: bool = False
+
+
+VOLTAGE_SENSITIVITY_PRESETS: Dict[str, float] = {
+    "tight": 0.05,
+    "normal": 0.10,
+    "loose": 0.15,
+}
 
 
 @dataclass
@@ -474,6 +491,17 @@ class ConfigLoader:
             defaults = TriggersConfig()
         depletion_data = triggers_data.get('depletion', {})
         extended_data = triggers_data.get('extended_time', {})
+        # Distinguish "key absent" (use inherited default, leave explicit
+        # flag alone) from "key present" (mark explicit so the migration
+        # warning suppresses on the next daemon start). The explicit flag
+        # propagates from defaults so a per-UPS block inherits a global
+        # explicit choice unless it overrides.
+        sensitivity_explicit = (
+            'voltage_sensitivity' in triggers_data
+            or defaults.voltage_sensitivity_explicit
+        )
+        sensitivity = triggers_data.get('voltage_sensitivity',
+                                        defaults.voltage_sensitivity)
         return TriggersConfig(
             low_battery_threshold=triggers_data.get('low_battery_threshold',
                                                     defaults.low_battery_threshold),
@@ -490,6 +518,8 @@ class ConfigLoader:
                 enabled=extended_data.get('enabled', defaults.extended_time.enabled),
                 threshold=extended_data.get('threshold', defaults.extended_time.threshold),
             ),
+            voltage_sensitivity=sensitivity,
+            voltage_sensitivity_explicit=sensitivity_explicit,
         )
 
     @classmethod
@@ -928,6 +958,32 @@ class ConfigLoader:
                         f"event names: {sorted(set(unknown))}. Valid "
                         f"options: {sorted(SUPPRESSIBLE_EVENTS)}"
                     )
+
+        # voltage_sensitivity is a strict enum -- typos must error rather
+        # than silently fall back to "normal", because "loose" vs "tight"
+        # is a meaningful operator decision and we don't want a fat-fingered
+        # value to mask it. The validator walks every UPS group (including
+        # the single legacy entry, which `Config.triggers` aliases via
+        # property -- no separate check needed for the legacy alias) and
+        # every redundancy group's triggers block too, so a typo there
+        # surfaces at config load instead of silently parsing as a string.
+        for group in config.ups_groups:
+            value = group.triggers.voltage_sensitivity
+            if value not in VOLTAGE_SENSITIVITY_PRESETS:
+                messages.append(
+                    f"ERROR: invalid ups[{group.ups.label!r}]."
+                    f"triggers.voltage_sensitivity {value!r}; "
+                    f"expected one of {sorted(VOLTAGE_SENSITIVITY_PRESETS)}."
+                )
+        for rg in config.redundancy_groups:
+            value = rg.triggers.voltage_sensitivity
+            if value not in VOLTAGE_SENSITIVITY_PRESETS:
+                label = rg.name or "(unnamed)"
+                messages.append(
+                    f"ERROR: invalid redundancy_groups[{label!r}]."
+                    f"triggers.voltage_sensitivity {value!r}; "
+                    f"expected one of {sorted(VOLTAGE_SENSITIVITY_PRESETS)}."
+                )
 
         # voltage_hysteresis_seconds must be non-negative; absurdly long
         # values get a warning (delayed alerts may exceed shutdown timing).

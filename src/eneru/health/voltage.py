@@ -9,6 +9,7 @@ power-event log lines (``BROWNOUT_DETECTED``, ``OVER_VOLTAGE_DETECTED``,
 import statistics
 import time
 
+from eneru.config import VOLTAGE_SENSITIVITY_PRESETS
 from eneru.utils import is_numeric
 
 
@@ -32,13 +33,27 @@ AUTODETECT_OBSERVATION_COUNT = 10
 # small fluctuations stays inside.
 AUTODETECT_DISCREPANCY_V = 25.0
 
-# Voltage-warning derivation: the EN 50160 / IEC 60038 ±10% envelope
-# is the operator-relevant "grid quality" band. NUT's transfer points
-# are honored only when they're TIGHTER than ±10% (managed UPSes with
-# narrow transfer config); otherwise we clamp to ±10% so wide-range
-# UPS firmware defaults don't make our warnings useless.
-GRID_QUALITY_DEVIATION_PCT = 0.10  # ±10% from nominal = warning band
-TRANSFER_BUFFER_V = 5.0            # buffer when using NUT transfer points
+# Default percentage when the per-monitor sensitivity preset can't be
+# resolved (config schema validation should normally prevent this).
+# Matches the EN 50160 / IEC 60038 ±10% envelope.
+DEFAULT_GRID_QUALITY_DEVIATION_PCT = 0.10
+
+# v5.1.1 legacy constants -- retained ONLY for the migration warning
+# computation. v5.1.2's threshold formula is a single percentage band;
+# the legacy "tighter of percentage or (transfer ± 5V)" candidate is
+# computed at startup purely so we can detect cases where the new band
+# is wider than the old one would have been on this UPS, and prompt
+# the operator to set ``voltage_sensitivity: tight`` if they want the
+# pre-5.1.2 behaviour back.
+#
+# TODO(v5.2): drop these constants together with `_legacy_warning_low`
+# / `_legacy_warning_high` and `_maybe_log_voltage_migration_warning`
+# once the upgrade window is past (target: when v5.1.2 has been on
+# every changelog for at least two minor releases). At that point
+# operators upgrading directly from v5.1.1 are rare enough that the
+# nag is more cost than benefit.
+_LEGACY_GRID_QUALITY_DEVIATION_PCT = 0.10
+_LEGACY_TRANSFER_BUFFER_V = 5.0
 
 # Severity bypass: deviations above this threshold skip the
 # voltage_hysteresis_seconds dwell and notify immediately. Mild
@@ -57,34 +72,42 @@ def _snap_to_standard_grid(value: float) -> float:
     return float(nearest) if abs(nearest - value) <= GRID_SNAP_TOLERANCE else float(value)
 
 
-def _derive_warning_low(nominal: float, low_transfer) -> float:
-    """Pick the warning-low threshold: the *tighter* (higher) of ±10% and (transfer + buffer).
+def _resolve_sensitivity_pct(sensitivity: str) -> float:
+    """Map a ``voltage_sensitivity`` preset string to a deviation fraction.
 
-    Tighter = warns earlier = better grid-quality signal. NUT's
-    transfer point is honored only when:
-      - it's numeric,
-      - it's BELOW the nominal (a low-transfer at or above nominal is
-        nonsense -- means the UPS would switch on perfectly normal mains),
-      - it's within ±25% of the expected ±10% line, AND
-      - the BUFFERED candidate (``lt + TRANSFER_BUFFER_V``) is also
-        strictly below nominal -- otherwise applying the buffer would
-        push the warning threshold above nominal and every healthy
-        reading would trip BROWNOUT_DETECTED.
-
-    Both guards matter. The first catches obviously-wrong-side values
-    like ``low_transfer=250`` on 230V. The second catches subtler
-    cases like ``low_transfer=226`` on 230V: 226 < 230 looks fine, but
-    ``226 + 5 = 231`` is above nominal -- a regression caught by Cubic
-    on PR #29.
-
-    Rounded to one decimal so the log line and notification text stay
-    clean (avoids 253.00000000000003 from float multiplication).
+    Falls back to the EN 50160 ±10% envelope on any unknown value --
+    schema validation should reject typos at config load, so this is
+    only a safety net for direct programmatic instantiation in tests.
     """
-    pct_band = nominal * (1 - GRID_QUALITY_DEVIATION_PCT)
+    return VOLTAGE_SENSITIVITY_PRESETS.get(
+        sensitivity, DEFAULT_GRID_QUALITY_DEVIATION_PCT,
+    )
+
+
+def _derive_warning_low(nominal: float, pct: float) -> float:
+    """Warning-low threshold: ``nominal × (1 − pct)``, rounded to 1 decimal.
+
+    Single-source formula -- the v5.1.1 dual-candidate "tighter of
+    percentage or transfer ± buffer" logic was dropped because it
+    conflated grid-quality reporting with "approaching firmware
+    transfer point" and produced operator-confusing thresholds on
+    narrow-firmware UPSes (issue #4).
+    """
+    return round(nominal * (1 - pct), 1)
+
+
+def _derive_warning_high(nominal: float, pct: float) -> float:
+    """Warning-high threshold: ``nominal × (1 + pct)``, rounded to 1 decimal."""
+    return round(nominal * (1 + pct), 1)
+
+
+def _legacy_warning_low(nominal: float, low_transfer) -> float:
+    """Recompute the v5.1.1 warning_low for migration-warning comparison only."""
+    pct_band = nominal * (1 - _LEGACY_GRID_QUALITY_DEVIATION_PCT)
     candidates = [pct_band]
     if is_numeric(low_transfer):
         lt = float(low_transfer)
-        candidate = lt + TRANSFER_BUFFER_V
+        candidate = lt + _LEGACY_TRANSFER_BUFFER_V
         if (lt < nominal
                 and candidate < nominal
                 and abs(lt - pct_band) <= nominal * 0.25):
@@ -92,21 +115,13 @@ def _derive_warning_low(nominal: float, low_transfer) -> float:
     return round(max(candidates), 1)
 
 
-def _derive_warning_high(nominal: float, high_transfer) -> float:
-    """Pick the warning-high threshold: the *tighter* (lower) of ±10% and (transfer - buffer).
-
-    Symmetric guard to ``_derive_warning_low``. High transfer must be
-    above nominal AND the buffered candidate (``ht - TRANSFER_BUFFER_V``)
-    must remain above nominal. Otherwise an over-tight transfer like
-    ``high_transfer=234`` on 230V (raw value passes "above nominal"
-    but ``234 - 5 = 229`` lands below) would compute warning_high=229
-    and trip OVER_VOLTAGE_DETECTED on every normal reading.
-    """
-    pct_band = nominal * (1 + GRID_QUALITY_DEVIATION_PCT)
+def _legacy_warning_high(nominal: float, high_transfer) -> float:
+    """Recompute the v5.1.1 warning_high for migration-warning comparison only."""
+    pct_band = nominal * (1 + _LEGACY_GRID_QUALITY_DEVIATION_PCT)
     candidates = [pct_band]
     if is_numeric(high_transfer):
         ht = float(high_transfer)
-        candidate = ht - TRANSFER_BUFFER_V
+        candidate = ht - _LEGACY_TRANSFER_BUFFER_V
         if (ht > nominal
                 and candidate > nominal
                 and abs(ht - pct_band) <= nominal * 0.25):
@@ -124,9 +139,10 @@ class VoltageMonitorMixin:
 
         1. **Startup snap.** Read ``input.voltage.nominal`` from NUT and
            snap it to the nearest standard grid voltage. Derive
-           ``warning_low`` / ``warning_high`` as the *tighter* of the
-           ±10% grid-quality band and (NUT ``input.transfer.{low,high}``
-           ± buffer) when those are sensible -- never wider than ±10%.
+           ``warning_low`` / ``warning_high`` as ``nominal × (1 ∓ pct)``
+           where ``pct`` comes from
+           ``triggers.voltage_sensitivity`` (tight=5%, normal=10%,
+           loose=15%; default normal = EN 50160 / IEC 60038 envelope).
         2. **Observed-range cross-check** (runs each poll until done; see
            ``_check_voltage_autodetect``). If the median of the first
            ~10 observed ``input.voltage`` readings disagrees with NUT's
@@ -135,20 +151,23 @@ class VoltageMonitorMixin:
            ``VOLTAGE_AUTODETECT_MISMATCH`` event so the operator knows
            Eneru second-guessed NUT.
 
-        Eneru's framing has shifted from pure shutdown orchestration to
-        grid-quality reporting. Wide UPS firmware transfer points
-        (typical APC default: 170 / 280 on 230V) made the previous
-        warnings useless -- they fired only ~5V before the UPS itself
-        switched to battery. The clamp to ±10% ensures BROWNOUT and
-        OVER_VOLTAGE warnings serve the operator's grid-quality
-        question, while the UPS-switch points remain available
-        separately for notification context.
+        v5.1.2 dropped the v5.1.0/5.1.1 dual-candidate "tighter of ±10%
+        or NUT transfer ± 5V" logic in favour of the single percentage
+        formula above (issue #4). The UPS firmware transfer points
+        remain available as informational context (printed alongside the
+        warning band, quoted in ``BROWNOUT_DETECTED`` /
+        ``OVER_VOLTAGE_DETECTED`` event detail) but no longer compute
+        thresholds. On UPSes whose transfer points were narrower than
+        the percentage band, the new formula widens the warning band;
+        a one-line migration warning fires at startup unless
+        ``voltage_sensitivity`` is explicitly set in YAML, so an
+        upgrading operator notices and can opt back into a tighter
+        preset.
 
         We intentionally do NOT expose any ``warning_low`` /
         ``warning_high`` / ``nominal_override`` config keys: a
         misconfiguration there would mask real over-voltage events that
-        damage hardware. The auto-detect path solves the ``[FEATURE]
-        Overvoltage alerts`` (#27) US-grid pain without that risk.
+        damage hardware. The bounded preset is the escape hatch.
         """
         nominal_raw = self._get_ups_var("input.voltage.nominal")
         low_transfer = self._get_ups_var("input.transfer.low")
@@ -174,16 +193,21 @@ class VoltageMonitorMixin:
         )
 
         nom = self.state.nominal_voltage
-        self.state.voltage_warning_low = _derive_warning_low(nom, low_transfer)
-        self.state.voltage_warning_high = _derive_warning_high(nom, high_transfer)
+        sensitivity = getattr(
+            self.config.triggers, "voltage_sensitivity", "normal",
+        )
+        pct = _resolve_sensitivity_pct(sensitivity)
+        self.state.voltage_deviation_pct = pct
+        self.state.voltage_warning_low = _derive_warning_low(nom, pct)
+        self.state.voltage_warning_high = _derive_warning_high(nom, pct)
 
         self._log_message(
             f"📊 Voltage Monitoring Active.\n"
             f"   Nominal: {nom}V ({origin}).\n"
             f"   Grid-quality warnings: {self.state.voltage_warning_low}V"
             f" / {self.state.voltage_warning_high}V"
-            f" (±{int(GRID_QUALITY_DEVIATION_PCT * 100)}% nominal,"
-            f" EN 50160 envelope)."
+            f" (±{int(pct * 100)}% nominal,"
+            f" sensitivity={sensitivity})."
         )
         if self.state.ups_transfer_low is not None or self.state.ups_transfer_high is not None:
             lo = (f"{self.state.ups_transfer_low}V"
@@ -194,6 +218,60 @@ class VoltageMonitorMixin:
                 f"   UPS battery-switch points: {lo} / {hi}"
                 f" (from NUT input.transfer.{{low,high}})."
             )
+
+        self._maybe_log_voltage_migration_warning(
+            nom, low_transfer, high_transfer, sensitivity,
+        )
+
+    def _maybe_log_voltage_migration_warning(
+        self, nominal: float, low_transfer, high_transfer, sensitivity: str,
+    ):
+        """Warn at startup if v5.1.1 would have produced a tighter band on either side.
+
+        Suppressed when ``voltage_sensitivity`` was set explicitly in
+        YAML (the operator has already chosen). Fires only when the
+        legacy candidate would have been tighter than the new
+        percentage band on at least one side -- the wide-firmware case
+        (where ±10% always won under v5.1.1) sees no warning. Drops
+        in v5.2 once the upgrade is well past.
+        """
+        if getattr(self.config.triggers, "voltage_sensitivity_explicit", False):
+            return
+        new_low = self.state.voltage_warning_low
+        new_high = self.state.voltage_warning_high
+        legacy_low = _legacy_warning_low(nominal, low_transfer)
+        legacy_high = _legacy_warning_high(nominal, high_transfer)
+        # "Tighter" = closer to nominal: legacy_low > new_low (warning
+        # fired sooner on the way down) or legacy_high < new_high
+        # (warning fired sooner on the way up). If neither side moved
+        # in the tightening direction, the upgrade didn't change the
+        # band for this operator -- nothing to warn about.
+        if legacy_low <= new_low and legacy_high >= new_high:
+            return
+        # Per-side delta in honest words. The asymmetric case (e.g.
+        # Chris's 120V/106/127: 111->108 widens low, 122->132 widens
+        # high; 215/245 on 230V: 220->207 widens low, 240->253 widens
+        # high) gets an accurate "low ... ; high ..." breakdown.
+        sides = []
+        if legacy_low != new_low:
+            verb = "widened" if new_low < legacy_low else "tightened"
+            sides.append(f"low {legacy_low}V→{new_low}V ({verb})")
+        if legacy_high != new_high:
+            verb = "widened" if new_high > legacy_high else "tightened"
+            sides.append(f"high {legacy_high}V→{new_high}V ({verb})")
+        delta = "; ".join(sides) if sides else "(no change)"
+        self._log_message(
+            f"⚠️ Voltage warning band changed from v5.1.1 on this UPS: "
+            f"{delta}. v5.1.2 dropped the tighter-of-percentage-or-transfer "
+            f"clamp in favour of a single percentage-band formula (issue #4). "
+            f"Current band is ±{int(self.state.voltage_deviation_pct * 100)}% "
+            f"nominal ({new_low}V/{new_high}V). Set "
+            f"'voltage_sensitivity: tight' under this UPS's triggers block "
+            f"to restore a tighter band, or set "
+            f"'voltage_sensitivity: normal' to acknowledge the new default "
+            f"and silence this warning. See "
+            f"https://eneru.readthedocs.io/latest/changelog/ for details."
+        )
 
     def _check_voltage_autodetect(self, input_voltage: str):
         """Once-per-startup observed-range cross-check (see issue #27).
@@ -222,15 +300,13 @@ class VoltageMonitorMixin:
         if abs(median - old_nominal) > AUTODETECT_DISCREPANCY_V:
             new_nominal = _snap_to_standard_grid(median)
             self.state.nominal_voltage = new_nominal
-            # Reapply the tighter-of clamp against the cached transfer
-            # values from startup -- a re-snap shouldn't widen the
-            # thresholds beyond ±10% of the new nominal.
-            self.state.voltage_warning_low = _derive_warning_low(
-                new_nominal, self.state.ups_transfer_low,
-            )
-            self.state.voltage_warning_high = _derive_warning_high(
-                new_nominal, self.state.ups_transfer_high,
-            )
+            # Reapply the percentage band against the new nominal.
+            # voltage_deviation_pct was set by _initialize_voltage_thresholds
+            # from the per-UPS sensitivity preset; preserve it across the
+            # re-snap so the operator's chosen sensitivity carries through.
+            pct = self.state.voltage_deviation_pct
+            self.state.voltage_warning_low = _derive_warning_low(new_nominal, pct)
+            self.state.voltage_warning_high = _derive_warning_high(new_nominal, pct)
             self._log_message(
                 f"📊 Voltage auto-detect re-snap: NUT={old_nominal}V "
                 f"disagreed with observed median {median:.1f}V "
@@ -380,10 +456,10 @@ class VoltageMonitorMixin:
         # transfer point. For severe events, frame as "battery may
         # engage shortly"; for mild, frame as "this is a grid quality
         # issue, not an imminent power loss".
-        # NOTE: do NOT imply EN 50160 considers the UPS switch point
-        # acceptable. EN 50160 caps at nominal × 1.1 (e.g., 253V on
-        # 230V), well below typical UPS switch points (e.g., 280V).
-        # The two are independent thresholds with different purposes.
+        # NOTE: keep wording independent of EN 50160 -- the warning
+        # band is now operator-configurable via voltage_sensitivity,
+        # so a "the spec says..." framing would mislead anyone running
+        # `tight` (5%) or `loose` (15%).
         ups_switch = (self.state.ups_transfer_low if direction == "low"
                       else self.state.ups_transfer_high)
         if ups_switch is not None:
@@ -391,10 +467,12 @@ class VoltageMonitorMixin:
                 tail = (f"Approaching UPS battery-switch threshold "
                         f"({ups_switch}V) -- battery may engage shortly.")
             else:
+                pct = self.state.voltage_deviation_pct
                 tail = (f"UPS will not switch to battery until "
                         f"{ups_switch}V (firmware setting); this is "
-                        f"a grid-quality issue (outside the EN 50160 "
-                        f"±10% envelope), not an imminent power loss.")
+                        f"a grid-quality issue (outside the configured "
+                        f"±{int(pct * 100)}% nominal band), not an "
+                        f"imminent power loss.")
         else:
             tail = ""
 
