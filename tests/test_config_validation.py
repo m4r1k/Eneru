@@ -230,6 +230,24 @@ class TestVoltageSensitivityValidation:
         assert any("voltage_sensitivity" in e for e in errors)
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("bad", [
+        ["tight"],          # list literal in YAML
+        {"value": "tight"},  # mapping in YAML
+        42,                 # int (also unhashable-for-our-purposes if we ever add lists)
+        None,               # YAML null
+    ])
+    def test_non_string_value_rejected_without_typeerror(self, minimal_config, bad):
+        # Cubic P2: a malformed YAML like `voltage_sensitivity: [tight]`
+        # parses as a list -- the membership check `value not in ...`
+        # would TypeError on unhashable inputs and bypass the validator.
+        # Type-check guards both the validator and the mixin's enum lookup.
+        minimal_config.triggers.voltage_sensitivity = bad
+        errors = self._errors(ConfigLoader.validate_config(minimal_config))
+        assert any("voltage_sensitivity" in e for e in errors), (
+            f"expected validator to reject {bad!r} cleanly, got {errors}"
+        )
+
+    @pytest.mark.unit
     def test_yaml_round_trip_sets_explicit_flag(self, tmp_path):
         # The mixin uses voltage_sensitivity_explicit to suppress the
         # one-time migration warning. The flag must round-trip from YAML:

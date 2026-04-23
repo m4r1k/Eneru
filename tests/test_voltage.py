@@ -419,6 +419,16 @@ class TestThresholdFormula:
         assert _resolve_sensitivity_pct("bogus") == DEFAULT_GRID_QUALITY_DEVIATION_PCT
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("bad", [None, 42, ["tight"], {"v": "tight"}])
+    def test_resolve_sensitivity_non_string_falls_back_to_default(self, bad):
+        # Cubic P2: voltage init must never TypeError on unhashable
+        # values. Schema validation catches these at config load, but
+        # the mixin runs even when validation is skipped (e.g., direct
+        # programmatic instantiation in tests, or a future caller of
+        # ConfigLoader that bypasses validate_config).
+        assert _resolve_sensitivity_pct(bad) == DEFAULT_GRID_QUALITY_DEVIATION_PCT
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("nominal, preset, low, high", [
         # Chris's case (issue #4): every preset.
         (120.0, "tight",  114.0, 126.0),

@@ -216,7 +216,7 @@ This repo deliberately keeps individual files small (`monitor.py` is now ~830 li
 2. Create feature branch from the up-to-date main
 3. Develop, commit, push
 4. Open PR against main
-5. CI checks must pass (all 10)
+5. CI checks must pass (all 11)
 6. Merge via GitHub (branch auto-deletes)
 ```
 

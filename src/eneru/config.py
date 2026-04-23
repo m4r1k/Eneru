@@ -967,9 +967,16 @@ class ConfigLoader:
         # property -- no separate check needed for the legacy alias) and
         # every redundancy group's triggers block too, so a typo there
         # surfaces at config load instead of silently parsing as a string.
+        # Type-check before the membership lookup: an unhashable YAML
+        # value (e.g., `voltage_sensitivity: [tight]` parses as a list)
+        # would otherwise raise TypeError inside `value not in ...` and
+        # bypass the validator's normal error-reporting flow.
+        def _is_invalid_sensitivity(v) -> bool:
+            return not isinstance(v, str) or v not in VOLTAGE_SENSITIVITY_PRESETS
+
         for group in config.ups_groups:
             value = group.triggers.voltage_sensitivity
-            if value not in VOLTAGE_SENSITIVITY_PRESETS:
+            if _is_invalid_sensitivity(value):
                 messages.append(
                     f"ERROR: invalid ups[{group.ups.label!r}]."
                     f"triggers.voltage_sensitivity {value!r}; "
@@ -977,7 +984,7 @@ class ConfigLoader:
                 )
         for rg in config.redundancy_groups:
             value = rg.triggers.voltage_sensitivity
-            if value not in VOLTAGE_SENSITIVITY_PRESETS:
+            if _is_invalid_sensitivity(value):
                 label = rg.name or "(unnamed)"
                 messages.append(
                     f"ERROR: invalid redundancy_groups[{label!r}]."

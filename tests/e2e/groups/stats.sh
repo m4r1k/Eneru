@@ -236,6 +236,11 @@ echo "PASS: events panel reads from SQLite"
 
 # ======================================================================
 # Test 32: Voltage auto-detect re-snaps NUT mis-reported nominal
+# (Co-located in the Stats group rather than a dedicated Voltage one
+# because it leans on the SQLite events table seeded by Tests 28/31 to
+# verify VOLTAGE_AUTODETECT_MISMATCH lands with notification_sent=0.
+# A failure under E2E Stats whose log mentions "voltage auto-detect"
+# is THIS test, not a stats-writer regression.)
 # ======================================================================
 (
 echo ""

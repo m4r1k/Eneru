@@ -72,13 +72,20 @@ def _snap_to_standard_grid(value: float) -> float:
     return float(nearest) if abs(nearest - value) <= GRID_SNAP_TOLERANCE else float(value)
 
 
-def _resolve_sensitivity_pct(sensitivity: str) -> float:
+def _resolve_sensitivity_pct(sensitivity) -> float:
     """Map a ``voltage_sensitivity`` preset string to a deviation fraction.
 
     Falls back to the EN 50160 ±10% envelope on any unknown value --
     schema validation should reject typos at config load, so this is
-    only a safety net for direct programmatic instantiation in tests.
+    only a safety net for direct programmatic instantiation in tests
+    or for the case where validation was skipped (e.g.,
+    ``ConfigLoader.load_dict`` callers that bypass ``validate_config``).
+    Non-string inputs (lists, dicts from a malformed YAML) hit the
+    ``isinstance`` guard before the dict lookup so we never raise
+    ``TypeError`` on the safety-critical voltage-init path.
     """
+    if not isinstance(sensitivity, str):
+        return DEFAULT_GRID_QUALITY_DEVIATION_PCT
     return VOLTAGE_SENSITIVITY_PRESETS.get(
         sensitivity, DEFAULT_GRID_QUALITY_DEVIATION_PCT,
     )
