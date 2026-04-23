@@ -7,69 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [5.1.2] - 2026-04-23
 
-Bug-fix release addressing issue #4 (continued): voltage warning thresholds
-were misleading for users with narrow UPS firmware transfer points on
-hot-running grids. Drop-in upgrade for the common `normal` (±10%) case;
-operators with managed / narrow-firmware UPSes get a one-time startup
-warning and a documented migration tip.
+Bug-fix release for issue #4: voltage warning thresholds were misleading on narrow-firmware UPSes (US 120V APC defaults, EU managed units). Drop-in upgrade for the common wide-firmware case. Sites with narrow firmware get a one-time startup warning and a documented migration tip. See `git log v5.1.1..v5.1.2` for per-commit detail.
 
 ### Added
-- **`triggers.voltage_sensitivity` preset (per-UPS-group).** Bounded
-  escape hatch for operators in less-clean environments:
-  `tight` = ±5%, `normal` = ±10% (default, EN 50160), `loose` = ±15%.
-  Per-UPS so a clean PDU and a generator-fed leg in the same daemon can
-  use different bands. Strict-enum validation at config load — typos
-  (`"Normal"`, `"medium"`) fail fast rather than silently fall back.
-- **One-time startup migration warning** when v5.1.1's narrower
-  transfer-derived band would have produced a tighter result on the
-  current UPS. The warning surfaces both the legacy and new band, names
-  the migration tip (`voltage_sensitivity: tight`), and suppresses
-  itself once the operator sets any explicit preset.
+- **`triggers.voltage_sensitivity` preset (per-UPS-group):** `tight` (±5%), `normal` (±10%, default, matches EN 50160), `loose` (±15%). Strict-enum validated. Per-UPS so a clean PDU and a generator-fed leg can use different bands in the same daemon.
+- **One-time startup migration warning** with per-side delta when v5.1.1's algorithm would have produced a tighter band on the current UPS. Suppressed once `voltage_sensitivity` is set explicitly in YAML.
 
-### Changed
-- **Voltage warning band derivation simplified to a single percentage
-  formula** (`nominal × (1 ∓ pct)`). The v5.1.1 dual-candidate "tighter
-  of ±10% nominal or `input.transfer.{low,high}` ± 5V" logic was
-  dropped — it conflated grid-quality reporting with "approaching
-  firmware transfer point" and produced operator-confusing thresholds
-  on US-120V firmware on hot-running grids.
-  - Chris's case (issue #4): nominal=120V, transfer=106/127. Old band:
-    111 / 122 (false `OVER_VOLTAGE_DETECTED` at routine 122.4V grid).
-    New band on default `normal`: 108 / 132. No more flap noise.
-  - Wide-firmware sites (APC default 170/280 on 230V): no change.
-    ±10% already won the v5.1.1 clamp, so the new formula produces the
-    same 207 / 253.
-  - Narrow-firmware sites (managed 215/245 on 230V): warning band
-    widens from 220 / 240 to 207 / 253 on default. Migration tip:
-    `voltage_sensitivity: tight` → 218.5 / 241.5 (close to old band).
-- **Startup log line is truthful by construction.** `Grid-quality
-  warnings: 207.0V / 253.0V (±10% nominal, sensitivity=normal)` —
-  whatever the daemon prints is what the percentage formula computed,
-  no dual-candidate provenance to disclose.
-- **Brownout / over-voltage notification text** drops the hardcoded
-  `EN 50160 ±10% envelope` framing in favour of the actual configured
-  band (`outside the configured ±10% nominal band`). Honest under any
-  preset.
-
-### Docs
-- `docs/triggers.md` "Voltage thresholds" section rewritten around the
-  preset model. New per-grid resolution table (`tight | normal | loose`
-  resolved at every standard-grid nominal) and a new vendor reference
-  section with `upsc` verification tip.
-- `docs/configuration.md` per-UPS triggers table gains
-  `voltage_sensitivity`.
-- `examples/config-reference.yaml` documents the preset under the
-  per-group `triggers:` block.
+### Fixed
+- **Voltage warning band misleading on narrow-firmware UPSes.** v5.1.1 picked the tighter of `nominal × (1 ± 0.10)` or `input.transfer.{low,high} ± 5V`, then unconditionally labelled the result `(±10% nominal, EN 50160 envelope)`. The log lied whenever the transfer-derived candidate won. On a 120V grid with APC firmware (transfer 106/127), the band landed at 111/122; routine 122.4V utility readings tripped `OVER_VOLTAGE_DETECTED` repeatedly. Threshold derivation is now a single percentage formula. Transfer points stay informational only, still printed on the second startup-log line and quoted in event messages.
+- **Brownout / over-voltage notification text** no longer hardcodes `EN 50160 ±10% envelope`. The wording is now `outside the configured ±10% nominal band`, which stays accurate under any preset.
 
 ### Migration notes
-None for the common case (wide-firmware UPSes, no transfer points
-reported, or any site already using `voltage_sensitivity` explicitly).
-For managed / narrow-firmware sites: the warning band widens on default;
-set `voltage_sensitivity: tight` to restore approximately the old
-behaviour. The startup migration warning surfaces the comparison the
-first time the daemon starts after upgrading.
+None for wide-firmware UPSes (APC defaults of 170/280 on 230V, or no transfer points reported at all). Managed / narrow-firmware sites see the warning band widen on default (`220/240` → `207/253` on a 230V/215/245 unit). Set `voltage_sensitivity: tight` to restore approximately the old behaviour, or `voltage_sensitivity: normal` to acknowledge the new default and silence the startup warning.
 
 ---
 
