@@ -203,7 +203,7 @@ This repo deliberately keeps individual files small (`monitor.py` is now ~830 li
 `main` is protected. All changes go through feature branches and pull requests.
 
 **Branch protection on `main`:**
-- Required CI checks before merge: `validate` (Python 3.9-3.14, 6 jobs) + 4 parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy and Stats`) — **10 checks total**
+- Required CI checks before merge: `validate` (Python 3.9-3.14, 6 jobs) + 5 parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy`, `E2E Stats`) — **11 checks total**
 - Strict mode: branch must be up-to-date with main before merge
 - Enforce admins: maintainers follow the same rules
 - No force pushes, no branch deletion
@@ -236,33 +236,43 @@ Tags are the immutable release snapshots. No release branches -- tags are suffic
 
 ## Code review workflow (manual AI invocation)
 
-This repo uses **two AI review tools**: `coderabbitai` and `cubic-dev-ai`. Both are configured to require **manual invocation** rather than reviewing every PR commit automatically.
+This repo uses **three layers of AI review**: a Claude-side pre-push review via the `agent-skills:code-reviewer` subagent, plus two GitHub-side reviewers (`coderabbitai` and `cubic-dev-ai`) invoked manually after CI is green. All three are configured for **manual invocation** rather than reviewing every PR commit automatically.
 
 **Why manual:**
 - **CodeRabbit** free tier allows one review per 45 minutes. Per-commit auto-review burns the quota fast and produces noisy partial reviews against intermediate diffs.
 - **cubic.dev** free tier allows 40 reviews per month. Same problem.
-- We deliberately push commits early so the GitHub Actions E2E suite (`E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy and Stats`) gates work-in-progress and gives feedback fast on real-world scenarios. That CI feedback loop must stay cheap; AI review should not bottleneck it.
+- We deliberately push commits early so the GitHub Actions E2E suite (`E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy`, `E2E Stats`) gates work-in-progress and gives feedback fast on real-world scenarios. That CI feedback loop must stay cheap; AI review should not bottleneck it.
+
+**Pre-push: spawn `agent-skills:code-reviewer` as a SUBAGENT (model=opus).**
+
+Before pushing a substantive feature branch, the Claude session running the work MUST spawn the `agent-skills:code-reviewer` skill via the `Agent` tool with `subagent_type: agent-skills:code-reviewer` and `model: opus`. Two reasons:
+
+1. **Minimal context = efficient.** The reviewer runs in a fresh context; the main session's token budget stays unaffected.
+2. **Minimal context = independent opinion.** The reviewer doesn't see what the main session decided, defended, or rationalized. That separation is the whole value — a same-session review is biased toward defending its own choices. Findings come back categorized P0/P1/P2/P3; triage and fix before pushing.
 
 **Workflow on every non-trivial PR:**
 ```
-1. Push commits early; let CI run on each push (E2E especially)
-2. Iterate based on CI failures
-3. When all commits are in AND every required check is green, post:
+1. Implement the change. Run pytest in the uv venv. Iterate.
+2. PRE-PUSH: spawn agent-skills:code-reviewer subagent (opus) with the
+   diff, the plan file, and any specific concerns. Triage findings.
+3. Push commits. Let CI run on each push (E2E especially). Iterate on
+   CI failures.
+4. When all commits are in AND every required check is green, post:
        @coderabbitai full review
        @cubic-dev-ai review this pull request
-   in PR comments (one per line, separate comments are fine)
-4. Triage findings; push fixes; CI re-runs automatically
-5. Re-trigger AI review only if substantive new code was added
-6. Merge when both AI reviewers + branch protection are satisfied
+   in PR comments (one per line, separate comments are fine).
+5. Triage GitHub-side findings; push fixes; CI re-runs automatically.
+6. Re-trigger AI review only if substantive new code was added.
+7. Merge when both GitHub-side AI reviewers + branch protection are satisfied.
 ```
 
-**Optional for trivial PRs.** Skip both AI reviews for:
+**Optional for trivial PRs.** Skip the AI reviews (all three) for:
 - Documentation-only changes (README, docs/, comments)
 - Version bumps + changelog promotion (release-prep PRs)
 - Single-line typo fixes
 - Pure dependency upgrades with no code changes
 
-For trivial PRs the CI gates (validate × 6 + E2E × 4) are sufficient. Saves quota for substantive changes.
+For trivial PRs the CI gates (validate × 6 + E2E × 5) are sufficient. Saves quota for substantive changes.
 
 **Configuration:**
 - **CodeRabbit:** `.coderabbit.yaml` at repo root sets `reviews.auto_review.enabled: false`. The file also documents the manual-trigger phrase.
