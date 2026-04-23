@@ -23,10 +23,14 @@ ups:
       duration: 60
       flap_threshold: 5
 
-    # Per-UPS trigger thresholds (override global defaults below)
+    # Per-UPS trigger thresholds (override global defaults below).
+    # voltage_sensitivity is per-UPS so a clean leg and a noisy / generator-fed
+    # leg can use different warning bands without running two daemons.
+    # tight=±5%, normal=±10% (default, EN 50160), loose=±15%.
     triggers:
       low_battery_threshold: 20
       critical_runtime_threshold: 600
+      voltage_sensitivity: tight      # clean PDU, want early warning
 
     # Local resources (only allowed because is_local: true)
     virtual_machines:
@@ -74,7 +78,10 @@ ups:
     display_name: "Backup Rack UPS"
     check_interval: 1
 
-    # Uses the global trigger defaults (no override)
+    # Generator-fed leg: dial back voltage sensitivity so routine
+    # generator wobble doesn't spam OVER_VOLTAGE_DETECTED.
+    triggers:
+      voltage_sensitivity: loose      # noisy utility / generator
 
     # Remote resources only (not is_local)
     remote_servers:

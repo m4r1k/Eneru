@@ -201,6 +201,7 @@ shutdown regardless of the grace period setting.
 | `depletion.grace_period` | `90` | Seconds to ignore high depletion after power loss |
 | `extended_time.enabled` | `true` | Enable extended time on battery shutdown |
 | `extended_time.threshold` | `900` | Seconds on battery before shutdown |
+| `voltage_sensitivity` | `normal` | Voltage warning band preset: `tight` (±5%), `normal` (±10%, EN 50160), or `loose` (±15%). See [voltage thresholds](triggers.md#voltage-thresholds-auto-detected-not-user-configurable). |
 
 See [Shutdown triggers](triggers.md) for details on each trigger.
 

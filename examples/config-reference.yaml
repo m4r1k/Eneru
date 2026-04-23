@@ -54,6 +54,19 @@ triggers:
     # Time threshold (seconds) - 900 = 15 minutes
     threshold: 900
 
+  # Voltage warning band preset (per-UPS-group). The daemon does NOT
+  # expose raw warning_low / warning_high volt-level overrides -- a
+  # misconfigured `warning_high: 200` on a 120V grid would mask a real
+  # damaging over-voltage. This bounded preset is the escape hatch.
+  #
+  #   tight  -> +/- 5%  (warns earlier; clean PDU / lab / managed UPS)
+  #   normal -> +/- 10% (default; matches EN 50160 / IEC 60038)
+  #   loose  -> +/- 15% (noisy utility, generator-fed leg, hot grid)
+  #
+  # Per-UPS so a clean leg and a noisy leg in the same daemon can use
+  # different sensitivities. See docs/triggers.md "Voltage thresholds".
+  voltage_sensitivity: normal
+
 # ==============================================================================
 # BEHAVIOR
 # ==============================================================================
