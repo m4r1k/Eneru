@@ -45,6 +45,11 @@ class MonitorState:
     voltage_warning_low: float = 0.0
     voltage_warning_high: float = 0.0
     nominal_voltage: float = 230.0
+    # Resolved voltage_sensitivity preset as a deviation fraction
+    # (0.05 / 0.10 / 0.15). Set once by _initialize_voltage_thresholds
+    # and reused by the autodetect re-snap path so a per-UPS preset
+    # carries through if NUT's nominal turns out to be wrong.
+    voltage_deviation_pct: float = 0.10
     # UPS firmware's switch-to-battery thresholds, populated from
     # ``input.transfer.{low,high}`` at startup. Informational only --
     # used by voltage notification text to give the operator context

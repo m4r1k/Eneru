@@ -280,5 +280,107 @@ eneru test-notifications --config /tmp/config-notif.yaml
 echo "PASS: Notification sent successfully"
 )
 
+# ======================================================================
+# Test 33: Issue #4 -- voltage_sensitivity preset prevents Chris's
+# false-alarm flood on a US 120V grid running slightly hot.
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 33: voltage_sensitivity preset (issue #4)"
+
+echo "=== Test 33: voltage_sensitivity preset ==="
+
+rm -f /tmp/eneru-e2e-shutdown-flag
+
+# Apply Chris's exact NUT data: 120V nominal, transfer 106/127, input
+# voltage at a routine 122.4V. v5.1.1 would have set warning_high=122
+# and false-alarmed; v5.1.2 default 'normal' (10%) sets it to 132.
+#
+# Unlike Test 6 (where every scenario shares input.voltage.nominal=230),
+# this test CHANGES the nominal between the prior scenario and Chris's
+# 120V scenario. The dummy NUT scenario watcher polls /scenarios every
+# 1s, then dummy-ups has its own pollinterval before upsd serves the new
+# value -- a blind `sleep 2` races. Active-poll `upsc` until it returns
+# input.voltage.nominal=120 before launching the daemon, so the daemon's
+# one-shot _initialize_voltage_thresholds reads the right nominal.
+cp $E2E_DIR/scenarios/us-grid-hot.dev $E2E_DIR/scenarios/apply.dev
+for i in $(seq 1 20); do
+  nominal=$(upsc TestUPS@localhost:3493 input.voltage.nominal 2>/dev/null || true)
+  if [ "$nominal" = "120" ]; then
+    echo "  NUT serving nominal=120 after ${i}s"
+    break
+  fi
+  sleep 1
+done
+if [ "$nominal" != "120" ]; then
+  echo "FAIL (8-setup): NUT never reported input.voltage.nominal=120 (last=${nominal:-empty})"
+  exit 1
+fi
+
+timeout 12 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test33.log || true
+
+# (8a) Startup log must report the percentage-band threshold honestly.
+if grep -q "Grid-quality warnings: 108.0V / 132.0V" /tmp/test33.log \
+   && grep -q "sensitivity=normal" /tmp/test33.log; then
+  echo "PASS (8a): startup log honest -- 108/132 at sensitivity=normal"
+else
+  echo "FAIL (8a): startup log missing 108/132 or sensitivity=normal"
+  grep -E "Grid-quality|sensitivity" /tmp/test33.log || true
+  exit 1
+fi
+
+# (8b) NO false OVER_VOLTAGE_DETECTED at 122.4V.
+if grep -q "OVER_VOLTAGE_DETECTED" /tmp/test33.log; then
+  echo "FAIL (8b): 122.4V on a 120V/106/127 UPS must NOT fire OVER_VOLTAGE"
+  grep "OVER_VOLTAGE" /tmp/test33.log || true
+  exit 1
+else
+  echo "PASS (8b): no false OVER_VOLTAGE_DETECTED at 122.4V"
+fi
+
+# (8c) Drop to 107V (real brownout, just under the 108V warning_low).
+# Brownout MUST fire even though false alarms are gone. Active-poll on
+# input.voltage so we don't race the dummy NUT's reload cycle.
+cp $E2E_DIR/scenarios/us-grid-brownout.dev $E2E_DIR/scenarios/apply.dev
+for i in $(seq 1 20); do
+  voltage=$(upsc TestUPS@localhost:3493 input.voltage 2>/dev/null || true)
+  if [ "$voltage" = "107.0" ] || [ "$voltage" = "107" ]; then
+    echo "  NUT serving input.voltage=${voltage} after ${i}s"
+    break
+  fi
+  sleep 1
+done
+if [ "$voltage" != "107.0" ] && [ "$voltage" != "107" ]; then
+  echo "FAIL (8c-setup): NUT never reported input.voltage=107 (last=${voltage:-empty})"
+  exit 1
+fi
+timeout 8 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test33b.log || true
+
+if grep -q "BROWNOUT_DETECTED" /tmp/test33b.log; then
+  echo "PASS (8c): real brownout (107V) still fires BROWNOUT_DETECTED"
+else
+  echo "FAIL (8c): brownout at 107V must still fire on the v5.1.2 formula"
+  tail -30 /tmp/test33b.log
+  exit 1
+fi
+
+# (8d) Migration warning fires for narrow-firmware UPSes. v5.1.1 would
+# have produced 111/122 on this UPS; v5.1.2 produces 108/132. The
+# warning lists the per-side delta and exposes the legacy values so an
+# upgrading operator can spot the change end-to-end.
+if grep -q "Voltage warning band changed from v5.1.1" /tmp/test33.log \
+   && grep -q "low 111.0V" /tmp/test33.log \
+   && grep -q "high 122.0V" /tmp/test33.log; then
+  echo "PASS (8d): migration warning surfaces with per-side delta against v5.1.1 numbers"
+else
+  echo "FAIL (8d): migration warning missing or per-side delta absent"
+  grep -E "Voltage warning band|widened|tightened" /tmp/test33.log || true
+  exit 1
+fi
+
+# Restore baseline scenario for any downstream tests added later.
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+)
+
 echo ""
 echo "=== Group 'single-ups' completed successfully ==="

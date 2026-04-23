@@ -365,7 +365,7 @@ These exist to alert you to potential hardware damage or imminent
 service loss; silencing them defeats the safety contract. If you're
 seeing frequent over-voltage warnings on a US grid, the right fix
 is the auto-detect re-snap (see
-[Triggers → Voltage thresholds](triggers.md#voltage-thresholds-auto-detected-not-user-configurable)),
+[Triggers → Voltage thresholds](triggers.md#voltage-thresholds-preset-driven-raw-thresholds-not-user-configurable)),
 not muting the alert.
 
 ---

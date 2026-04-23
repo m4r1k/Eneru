@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.1.2] - 2026-04-23
+
+Bug-fix release for issue #4: voltage warning thresholds were misleading on narrow-firmware UPSes (US 120V APC defaults, EU managed units). Drop-in upgrade for the common wide-firmware case. Sites with narrow firmware get a one-time startup warning and a documented migration tip. See `git log v5.1.1..v5.1.2` for per-commit detail.
+
+### Added
+- **`triggers.voltage_sensitivity` preset (per-UPS-group):** `tight` (±5%), `normal` (±10%, default, matches EN 50160), `loose` (±15%). Strict-enum validated. Per-UPS so a clean PDU and a generator-fed leg can use different bands in the same daemon.
+- **One-time startup migration warning** with per-side delta when v5.1.1's algorithm would have produced a tighter band on the current UPS. Suppressed once `voltage_sensitivity` is set explicitly in YAML.
+
+### Fixed
+- **Voltage warning band misleading on narrow-firmware UPSes.** v5.1.1 picked the tighter of `nominal × (1 ± 0.10)` or `input.transfer.{low,high} ± 5V`, then unconditionally labelled the result `(±10% nominal, EN 50160 envelope)`. The log lied whenever the transfer-derived candidate won. On a 120V grid with APC firmware (transfer 106/127), the band landed at 111/122; routine 122.4V utility readings tripped `OVER_VOLTAGE_DETECTED` repeatedly. Threshold derivation is now a single percentage formula. Transfer points stay informational only, still printed on the second startup-log line and quoted in event messages.
+- **Brownout / over-voltage notification text** no longer hardcodes `EN 50160 ±10% envelope`. The wording is now `outside the configured ±10% nominal band`, which stays accurate under any preset.
+
+### Migration notes
+None for wide-firmware UPSes (APC defaults of 170/280 on 230V, or no transfer points reported at all). Managed / narrow-firmware sites see the warning band widen on default (`220/240` → `207/253` on a 230V/215/245 unit). Set `voltage_sensitivity: tight` to restore approximately the old behaviour, or `voltage_sensitivity: normal` to acknowledge the new default and silence the startup warning.
+
+---
+
 ## [5.1.1] - 2026-04-22
 
 Bug-fix release with one small TUI improvement. Bundles fixes from a third-party AI code review (CodeRabbit Pro + Cubic.Dev) of the v5.1.0 codebase. Drop-in upgrade. See `git log v5.1.0..v5.1.1` for per-commit detail with reviewer attribution.

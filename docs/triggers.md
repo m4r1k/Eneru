@@ -22,46 +22,87 @@ When on battery power, triggers are evaluated in this order. The **first** condi
 
 ---
 
-## Voltage thresholds (auto-detected, not user-configurable)
+## Voltage thresholds (preset-driven; raw thresholds not user-configurable)
 
 Issue [#27](https://github.com/m4r1k/Eneru/issues/27) asked for
-user-tunable over-voltage and brownout thresholds. **We deliberately
-do not expose those.** A misconfigured `warning_high: 200` on a 120V
-grid would mask a real damaging over-voltage condition — Eneru would
-sit silent while line voltage took out PSUs. The safety contract is
-non-negotiable: voltage thresholds are derived by the daemon, not
-typed by the operator.
+user-tunable over-voltage and brownout thresholds. **Raw volt-level
+overrides are deliberately not exposed.** A misconfigured
+`warning_high: 200` on a 120V grid would mask a real damaging
+over-voltage condition — Eneru would sit silent while line voltage took
+out PSUs. The safety contract is non-negotiable.
 
-What Eneru does instead:
+The bounded escape hatch is the `voltage_sensitivity` preset (added in
+v5.1.2 after issue [#4](https://github.com/m4r1k/Eneru/issues/4)),
+configured per UPS group:
+
+```yaml
+ups:
+  - name: "Tower UPS"
+    triggers:
+      voltage_sensitivity: loose      # noisy utility, dial it back
+  - name: "Main Rack UPS"
+    triggers:
+      voltage_sensitivity: tight      # clean PDU, want early warning
+  - name: "Generator-fed Rack"
+    # voltage_sensitivity omitted -> defaults to `normal`
+```
+
+| Preset  | Band              | When to pick                                                  |
+|---------|-------------------|---------------------------------------------------------------|
+| `tight` | ±5% from nominal  | Clean PDU / managed UPS / lab environment; want early signal  |
+| `normal`| ±10% from nominal | **Default.** Matches the EN 50160 / IEC 60038 envelope        |
+| `loose` | ±15% from nominal | Noisy utility, generator-fed leg, hot-running grid            |
+
+What Eneru does:
 
 1. **Auto-detect at startup.** Read `input.voltage.nominal` from NUT
    and snap it to the nearest standard grid voltage from
    `(100, 110, 115, 120, 127, 200, 208, 220, 230, 240)` if within 15V
    tolerance.
 2. **Derive grid-quality warning thresholds.** `warning_low` /
-   `warning_high` are computed as the **tighter** of:
-   - the EN 50160 / IEC 60038 ±10% envelope (`nominal × 0.9` /
-     `nominal × 1.1`), and
-   - NUT's `input.transfer.{low,high}` ± 5V buffer (when NUT exposes
-     those *and* they sit within sanity bounds of the snapped nominal).
+   `warning_high` = `nominal × (1 ∓ pct)` where `pct` comes from the
+   `voltage_sensitivity` preset above. NUT's
+   `input.transfer.{low,high}` are **cached for context only** — the
+   daemon surfaces them in the startup log and in every brownout /
+   over-voltage notification so the operator knows when the UPS firmware
+   itself will switch to battery — but they no longer compute the
+   warning band.
 
-   Tighter = warns earlier = better grid-quality signal. UPS firmware
-   defaults are often *wide* (typical APC: `transfer.low=170` /
-   `transfer.high=280` on 230V) to avoid switching to battery for
-   routine grid wiggles; if Eneru honored those without clamping, a
-   real-world brownout where mains drops to 200V (a 13% sag, definitely
-   operator-relevant) would never log `BROWNOUT_DETECTED`. The clamp
-   ensures Eneru's warnings serve the operator's grid-quality question
-   while the UPS firmware's switch points remain available separately
-   for context.
+   Resolved thresholds across the standard grids (output of `round(nominal × (1 ∓ pct), 1)` —
+   Python's banker's rounding rounds .X5 floats to even, so 109.25 prints as
+   109.2 and 132.25 as 132.2; the daemon log line shows the same values):
 
-   Behaviour table for a 230V nominal:
+   | Nominal | tight (±5%)   | normal (±10%) | loose (±15%)  |
+   |--------:|--------------:|--------------:|--------------:|
+   | 100 V   | 95.0 / 105.0  | 90.0 / 110.0  | 85.0 / 115.0  |
+   | 110 V   | 104.5 / 115.5 | 99.0 / 121.0  | 93.5 / 126.5  |
+   | 115 V   | 109.2 / 120.8 | 103.5 / 126.5 | 97.8 / 132.2  |
+   | 120 V   | 114.0 / 126.0 | 108.0 / 132.0 | 102.0 / 138.0 |
+   | 127 V   | 120.6 / 133.3 | 114.3 / 139.7 | 108.0 / 146.0 |
+   | 200 V   | 190.0 / 210.0 | 180.0 / 220.0 | 170.0 / 230.0 |
+   | 208 V   | 197.6 / 218.4 | 187.2 / 228.8 | 176.8 / 239.2 |
+   | 220 V   | 209.0 / 231.0 | 198.0 / 242.0 | 187.0 / 253.0 |
+   | 230 V   | 218.5 / 241.5 | 207.0 / 253.0 | 195.5 / 264.5 |
+   | 240 V   | 228.0 / 252.0 | 216.0 / 264.0 | 204.0 / 276.0 |
 
-   | UPS transfer points | warning_low / warning_high | Why |
-   |---------------------|----------------------------|-----|
-   | 170 / 280 (wide, APC default) | 207 / 253 | ±10% wins (transfer too wide) |
-   | 215 / 245 (narrow, managed) | 220 / 240 | transfer ± 5V wins (tighter) |
-   | not reported | 207 / 253 | ±10% fallback |
+   ### Vendor reference (verify against your unit)
+
+   UPS firmware transfer points vary by family, region, and field
+   tuning. The numbers below are **typical defaults, not contracts** —
+   always verify against your actual hardware before relying on them:
+
+   ```bash
+   upsc <ups@host> input.voltage.nominal input.transfer.low input.transfer.high
+   ```
+
+   | Vendor / family               | Region    | Typical `transfer.low` / `transfer.high` | Behaviour with `normal` (±10%)                                            |
+   |-------------------------------|:---------:|:---------------------------------------:|---------------------------------------------------------------------------|
+   | APC Smart-UPS SUA / SMT / SMC | US 120 V  | ~106 / ~127 V                            | Warnings at 108 / 132 V. UPS won't switch to battery until 106 / 127 V.   |
+   | APC Smart-UPS (default-wide)  | EU 230 V  | 170 / 280 V                              | Warnings at 207 / 253 V. UPS won't switch until ±20% from nominal.        |
+   | APC SMX / Symmetra (managed)  | EU 230 V  | operator-tightened, often ~207 / ~253    | Warnings at 207 / 253 V. Use `tight` for 218.5 / 241.5 V.                 |
+   | Eaton 5P / 9PX                | EU 230 V  | typically narrow defaults                | Warnings at 207 / 253 V. Use `tight` for an early signal.                 |
+   | CyberPower CP1500             | US 120 V  | ~95 / ~140 V (wide)                      | Warnings at 108 / 132 V. UPS won't switch until 95 / 140 V.               |
+   | Tripp Lite SMART series       | EU 230 V  | typically narrow                         | Warnings at 207 / 253 V.                                                   |
 
 3. **Cross-check with observed reality.** Some UPS firmwares (notably
    on US 120V grids) mis-report `input.voltage.nominal=230`. After
@@ -75,8 +116,9 @@ What Eneru does instead:
 
    If you see one of these rows, your UPS firmware is mis-reporting
    nominal — the daemon corrected for you, but it's worth filing a
-   NUT driver bug upstream. The re-snap also re-applies the
-   tighter-of-±10%-and-transfer clamp against the new nominal.
+   NUT driver bug upstream. The re-snap re-applies the same percentage
+   band against the new nominal (your `voltage_sensitivity` preset
+   carries through).
 
 4. **Severity-aware notification hysteresis.** The state log line for
    `OVER_VOLTAGE_DETECTED` / `BROWNOUT_DETECTED` is always written
@@ -111,11 +153,31 @@ What Eneru does instead:
 ```text
 📊 Voltage Monitoring Active.
    Nominal: 230.0V (NUT=230.0).
-   Grid-quality warnings: 207.0V / 253.0V (±10% nominal, EN 50160 envelope).
+   Grid-quality warnings: 207.0V / 253.0V (±10% nominal, sensitivity=normal).
    UPS battery-switch points: 170.0V / 280.0V (from NUT input.transfer.{low,high}).
 📊 Voltage auto-detect re-snap: NUT=230V disagreed with observed median 120.0V (window=[120.5, 119.0, ...]V). Re-snapped to 120V; new thresholds 108.0V / 132.0V.
 ⚡ POWER EVENT: VOLTAGE_AUTODETECT_MISMATCH - NUT nominal=230V, observed median=120.0V, re-snapped to 120V
 ```
+
+If you upgraded from v5.1.1 and one of your UPSes had narrow firmware
+transfer points (the `transfer ± 5V` candidate beat ±10% of nominal),
+the daemon emits a one-time startup warning with a per-side delta so
+you don't miss the change:
+
+```text
+⚠️ Voltage warning band changed from v5.1.1 on this UPS: low 220.0V→207.0V
+   (widened); high 240.0V→253.0V (widened). v5.1.2 dropped the
+   tighter-of-percentage-or-transfer clamp in favour of a single percentage-
+   band formula (issue #4). Current band is ±10% nominal (207.0V/253.0V).
+   Set 'voltage_sensitivity: tight' under this UPS's triggers block to
+   restore a tighter band, or set 'voltage_sensitivity: normal' to
+   acknowledge the new default and silence this warning. See
+   https://eneru.readthedocs.io/latest/changelog/ for details.
+```
+
+The warning suppresses once you set `voltage_sensitivity` explicitly
+(any value, even `normal`) — the daemon takes that as your decision and
+stops nagging.
 
 The autodetect-mismatch row lands in the SQLite `events` table with
 `notification_sent=0` so it doesn't ping you (it's startup
@@ -129,7 +191,7 @@ information, not an active power event).
 🔻 BROWNOUT_DETECTED: input voltage 200.0V is 13.0% below 230V nominal
    (warning threshold 207.0V). Persisted 30s.
    UPS will not switch to battery until 170.0V (firmware setting);
-   this is a grid-quality issue (outside the EN 50160 ±10% envelope),
+   this is a grid-quality issue (outside the configured ±10% nominal band),
    not an imminent power loss.
 ```
 
