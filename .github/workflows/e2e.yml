@@ -59,6 +59,14 @@ jobs:
           e2e-dir: ${{ env.E2E_DIR }}
 
       - name: "Run E2E group: ${{ matrix.label }}"
+        env:
+          # Test 7 (single-ups.sh) needs this secret to actually verify
+          # notification delivery; without it the test SKIPs. The per-
+          # step env was dropped when this workflow was split into the
+          # matrix groups in commit ade1d16 — restoring it on every
+          # matrix entry is harmless (only Test 7 reads it) and avoids
+          # making the workflow group-aware.
+          E2E_NOTIFICATION_URL: ${{ secrets.E2E_NOTIFICATION_URL }}
         run: bash tests/e2e/groups/${{ matrix.group }}.sh
 
       - name: Collect logs on failure
