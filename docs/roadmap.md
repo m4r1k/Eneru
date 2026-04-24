@@ -8,7 +8,7 @@ Recently shipped: v5.0 (2026-04-11) and v5.1 (2026-04-21). See the [changelog](c
 
 ---
 
-## v5.2 -- API and observability (planned)
+## v5.3 -- API and observability (planned)
 
 Right now nothing can talk to Eneru programmatically. This version adds the plumbing for that.
 
