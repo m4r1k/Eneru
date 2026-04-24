@@ -625,9 +625,17 @@ class UPSGroupMonitor(
             )
 
         if notification:
-            self._send_notification(
-                *notification, category="power_event",
-            )
+            # Sub-typed categories for the Slice 4 brief-outage coalescer:
+            # the worker pairs on_battery + on_line by exact category match
+            # so it doesn't have to grep the user-visible body strings
+            # (which can change wording without anyone updating the
+            # coalescer). Other power events stay on the generic category.
+            event_to_category = {
+                "ON_BATTERY": "power_event_on_battery",
+                "POWER_RESTORED": "power_event_on_line",
+            }
+            category = event_to_category.get(event, "power_event")
+            self._send_notification(*notification, category=category)
 
     def _check_dependencies(self):
         """Check for required and optional dependencies."""

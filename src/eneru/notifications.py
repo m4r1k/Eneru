@@ -313,52 +313,65 @@ class NotificationWorker:
             )
 
     def _coalesce_pending_outages(self, store) -> int:
-        """Pair pending ON_BATTERY + POWER_RESTORED rows into a single
+        """Pair pending on_battery + on_line rows into a single
         "Brief outage" summary. Returns count of pairs coalesced.
 
-        The match is body-substring based — both events come through
-        ``_log_power_event`` and the body always carries the event name
-        in ``"⚡ **Event:** <NAME>\\n..."`` form. Cheap to scan; runs
-        once per worker iteration.
+        Pairs are identified by sub-typed category (set in
+        ``UPSGroupMonitor._log_power_event``):
+        ``power_event_on_battery`` and ``power_event_on_line``. Exact
+        category match keeps the coalescer from depending on the
+        user-visible body wording, which changes more often than the
+        category enum.
 
         Both rows must still be ``pending`` for coalescing to apply.
         Once one of the pair has shipped (the network was up at one end
         but not the other), they go out separately.
         """
-        rows = store.find_pending_by_category("power_event") or []
-        coalesced = 0
+        on_batt_rows = store.find_pending_by_category(
+            "power_event_on_battery"
+        ) or []
+        on_line_rows = store.find_pending_by_category(
+            "power_event_on_line"
+        ) or []
+        if not on_batt_rows or not on_line_rows:
+            return 0
+
         from datetime import datetime
         from eneru.utils import format_seconds
 
-        on_battery = None
-        for row_id, ts, body, notify_type in rows:
-            body_str = str(body)
-            if "ON_BATTERY" in body_str:
-                # If we'd already seen one without finding its restore,
-                # keep the latest (the most recent outage start).
-                on_battery = (row_id, ts, body_str, notify_type)
-                continue
-            if on_battery and "POWER_RESTORED" in body_str:
-                ob_id, ob_ts, _, _ = on_battery
-                duration = max(0, ts - ob_ts)
-                start_str = datetime.fromtimestamp(ob_ts).strftime("%H:%M:%S")
-                end_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
-                summary_body = (
-                    f"📊 **Brief Power Outage**\n"
-                    f"On battery for {format_seconds(duration)} "
-                    f"({start_str} → {end_str})."
-                )
-                # Use the end timestamp so the summary sorts AFTER any
-                # other unrelated pending power events from before the
-                # outage.
-                store.enqueue_notification(
-                    body=summary_body, notify_type="info",
-                    category="power_event", ts=ts,
-                )
-                store.cancel_notification(ob_id, "coalesced")
-                store.cancel_notification(row_id, "coalesced")
-                coalesced += 1
-                on_battery = None
+        # Pair each on_battery with the next on_line whose ts is later.
+        # Both lists are sorted by ts ASC from the store query.
+        coalesced = 0
+        line_idx = 0
+        for ob_id, ob_ts, _, _ in on_batt_rows:
+            # Advance the on_line cursor past anything older than this
+            # on_battery (those come from a previous outage and either
+            # already shipped or will pair with an older on_battery).
+            while line_idx < len(on_line_rows) and on_line_rows[line_idx][1] <= ob_ts:
+                line_idx += 1
+            if line_idx >= len(on_line_rows):
+                break
+            ol_id, ol_ts, _, _ = on_line_rows[line_idx]
+            duration = max(0, ol_ts - ob_ts)
+            start_str = datetime.fromtimestamp(ob_ts).strftime("%H:%M:%S")
+            end_str = datetime.fromtimestamp(ol_ts).strftime("%H:%M:%S")
+            summary_body = (
+                f"📊 **Brief Power Outage**\n"
+                f"On battery for {format_seconds(duration)} "
+                f"({start_str} → {end_str})."
+            )
+            # Use the end timestamp so the summary sorts AFTER any
+            # other unrelated pending power events from before the
+            # outage. Keep the generic category so a downstream "where
+            # are my power events?" query still finds it.
+            store.enqueue_notification(
+                body=summary_body, notify_type="info",
+                category="power_event", ts=ol_ts,
+            )
+            store.cancel_notification(ob_id, "coalesced")
+            store.cancel_notification(ol_id, "coalesced")
+            line_idx += 1
+            coalesced += 1
         return coalesced
 
     def _next_due_candidate(self) -> Optional[Tuple]:

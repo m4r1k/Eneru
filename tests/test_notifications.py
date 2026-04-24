@@ -581,14 +581,19 @@ class TestPowerEventCoalescing:
         # the cap test had on Python 3.13.
         worker.stop()
 
-        # Simulate the on_battery → on_line pair with realistic bodies.
+        # Simulate the on_battery → on_line pair using the sub-typed
+        # categories that _log_power_event sets in production. The
+        # body wording is irrelevant to the coalescer (intentionally —
+        # it doesn't grep user-visible strings).
         registered_store.enqueue_notification(
-            body="⚡ **Event:** ON_BATTERY\nDetails: Battery 80%, Runtime 600s",
-            notify_type="failure", category="power_event", ts=1000,
+            body="⚠️ **POWER FAILURE DETECTED!**\nDetails: Battery 80%",
+            notify_type="warning",
+            category="power_event_on_battery", ts=1000,
         )
         registered_store.enqueue_notification(
-            body="⚡ **Event:** POWER_RESTORED\nDetails: outage 60s",
-            notify_type="success", category="power_event", ts=1060,
+            body="✅ **POWER RESTORED**\nDetails: Outage 60s",
+            notify_type="success",
+            category="power_event_on_line", ts=1060,
         )
         coalesced = worker._coalesce_pending_outages(registered_store)
         assert coalesced == 1
@@ -626,8 +631,9 @@ class TestPowerEventCoalescing:
         worker.stop()
 
         registered_store.enqueue_notification(
-            body="⚡ **Event:** ON_BATTERY\nDetails: Battery 80%",
-            notify_type="failure", category="power_event", ts=1000,
+            body="⚠️ **POWER FAILURE DETECTED!**\nDetails: Battery 80%",
+            notify_type="warning",
+            category="power_event_on_battery", ts=1000,
         )
         coalesced = worker._coalesce_pending_outages(registered_store)
         assert coalesced == 0
