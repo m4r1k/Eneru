@@ -4,11 +4,11 @@ Planned direction for Eneru. None of this is built yet -- things will change as 
 
 Feature requests and feedback: [GitHub Issues](https://github.com/m4r1k/Eneru/issues).
 
-Recently shipped: v5.0 (2026-04-11) and v5.1 (2026-04-21). See the [changelog](changelog.md) for details.
+Recently shipped: v5.0 (2026-04-11), v5.1 (2026-04-21), v5.2 (2026-04-24). See the [changelog](changelog.md) for details.
 
 ---
 
-## v5.2 -- API and observability (planned)
+## v5.3 -- API and observability (planned)
 
 Right now nothing can talk to Eneru programmatically. This version adds the plumbing for that.
 

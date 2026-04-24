@@ -86,7 +86,10 @@ class _TestHost(VoltageMonitorMixin):
     def _log_power_event(self, event, details, *, suppress_notification=False):
         self.power_events.append((event, details, suppress_notification))
 
-    def _send_notification(self, body, notify_type="info", blocking=False):
+    def _send_notification(self, body, notify_type="info", blocking=False,
+                           category="general"):
+        # category is a v5.2 addition (Slice 4 coalescer hook); the
+        # voltage tests don't assert on it, but the stub must accept it.
         self.notifications.append((body, notify_type))
 
 

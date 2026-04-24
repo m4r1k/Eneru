@@ -1,0 +1,62 @@
+# Eneru E2E test config — Slice 4 panic-attack coalescing.
+#
+# Notifications are enabled but pointed at an unreachable Apprise URL,
+# so every Apprise call returns False and the rows stay 'pending'. Once
+# eneru cycles ON_BATTERY → POWER_RESTORED, the worker's coalescer
+# folds the pair into a single "Brief Power Outage" summary row. The
+# test then inspects the SQLite notifications table directly to assert
+# the contract.
+#
+# The key reason the URL never resolves successfully is that
+# 192.0.2.0/24 is RFC 5737 TEST-NET-1 — guaranteed not to point at any
+# real host. Apprise gives up quickly and returns False.
+
+ups:
+  name: "TestUPS@localhost:3493"
+  display_name: "E2E Coalesce UPS"
+  check_interval: 1
+
+triggers:
+  low_battery_threshold: 5      # high enough that ON_BATTERY fires but
+  critical_runtime_threshold: 1 # neither low_battery nor critical_runtime
+  depletion:                    # trigger an emergency shutdown — we just
+    window: 300                 # want the on-battery / on-line cycle.
+    critical_rate: 1000.0
+    grace_period: 300
+  extended_time:
+    enabled: false
+
+statistics:
+  db_directory: "/tmp/eneru-e2e-coalesce"
+  retention:
+    raw_hours: 24
+    agg_5min_days: 30
+    agg_hourly_days: 1825
+
+behavior:
+  dry_run: true
+
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-coalesce-state"
+  battery_history_file: "/tmp/eneru-e2e-coalesce-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-coalesce-shutdown-flag"
+
+notifications:
+  enabled: true
+  urls:
+    # json:// scheme posts to a generic webhook URL. 192.0.2.x is
+    # guaranteed-unreachable per RFC 5737 — every call fails, every
+    # row stays pending, the coalescer gets to do its job.
+    - "json://192.0.2.1/notify"
+  # 1 s Apprise timeout so the worker doesn't sit blocked on the
+  # unreachable TEST-NET-1 host for 10 s × N pending; we need it to
+  # cycle back to the coalesce pass quickly (the on_line arrives ~4 s
+  # after on_battery in the scenario).
+  timeout: 1
+  retry_interval: 1
+  retry_backoff_max: 5
+  max_attempts: 0
+
+local_shutdown:
+  enabled: false

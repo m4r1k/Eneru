@@ -560,7 +560,9 @@ class VoltageMonitorMixin:
         # bypassing _log_power_event to avoid double-logging.
         body = f"⚠️ **VOLTAGE ISSUE:** {event}\nDetails: {detail}"
         try:
-            self._send_notification(body, self.config.NOTIFY_WARNING)
+            self._send_notification(
+                body, self.config.NOTIFY_WARNING, category="voltage",
+            )
         except Exception:
             pass
 

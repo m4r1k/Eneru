@@ -20,6 +20,18 @@ from eneru.state import MonitorState
 from eneru.logger import UPSLogger
 from eneru.notifications import NotificationWorker, APPRISE_AVAILABLE
 from eneru.stats import StatsStore, StatsWriter
+from eneru.lifecycle import (
+    REASON_FATAL,
+    REASON_SEQUENCE_COMPLETE,
+    REASON_SIGNAL,
+    classify_startup,
+    coalesce_recovered_with_prev_shutdown,
+    delete_shutdown_marker,
+    delete_upgrade_marker,
+    read_shutdown_marker,
+    read_upgrade_marker,
+    write_shutdown_marker,
+)
 from eneru.utils import run_command, command_exists, is_numeric, format_seconds
 from eneru.shutdown.vms import VMShutdownMixin
 from eneru.shutdown.containers import ContainerShutdownMixin
@@ -129,14 +141,20 @@ class UPSGroupMonitor(
         self._stats_writer: Optional[StatsWriter] = None
 
     def _start_stats(self):
-        """Open the per-UPS stats DB and start the background writer.
+        """Open the per-UPS stats DB (if not already open) and start the
+        background writer.
 
-        SQLite errors are isolated -- a failure here logs once and the
-        daemon continues to run without stats persistence.
+        v5.2: ``_initialize_notifications`` opens the store earlier so
+        the notification worker can persist messages from the very first
+        notification. We keep the open() call here for the
+        ``notifications.enabled=False`` path where _initialize_notifications
+        skips the open. SQLite errors are isolated — a failure here
+        logs once and the daemon continues without stats persistence.
         """
         try:
-            self._stats_store._logger = self.logger
-            self._stats_store.open()
+            if self._stats_store._conn is None:
+                self._stats_store._logger = self.logger
+                self._stats_store.open()
         except Exception as e:
             self._log_message(
                 f"⚠️ WARNING: stats store open failed at {self._stats_db_path}: {e}. "
@@ -202,8 +220,21 @@ class UPSGroupMonitor(
             self._log_message(f"❌ FATAL ERROR: {e}")
             self._send_notification(
                 f"❌ **FATAL ERROR**\nError: {e}",
-                self.config.NOTIFY_FAILURE
+                self.config.NOTIFY_FAILURE,
+                category="lifecycle",
             )
+            # Slice 3: tag this exit so the next start emits
+            # "🚀 Restarted (last instance exited fatally)" rather than
+            # a generic Started.
+            try:
+                from pathlib import Path
+                write_shutdown_marker(
+                    Path(self.config.statistics.db_directory),
+                    version=__version__, reason=REASON_FATAL,
+                )
+            except Exception:
+                # Marker write must never mask the original FATAL.
+                pass
             raise
 
     def _initialize(self):
@@ -234,10 +265,12 @@ class UPSGroupMonitor(
         self._check_dependencies()
 
         self._log_message(f"🚀 Eneru v{__version__} starting - monitoring {self.config.ups.name}")
-        self._send_notification(
-            f"🚀 **Eneru v{__version__} Started**\nMonitoring {self.config.ups.name}",
-            self.config.NOTIFY_INFO
-        )
+        # Always invoke — the helper updates meta.last_seen_version for
+        # next-start upgrade detection. The actual SEND is suppressed in
+        # coordinator mode because the coordinator emits ONE classified
+        # lifecycle notification at the multi_ups level (per-monitor
+        # sends would be N copies of the same event).
+        self._emit_lifecycle_startup_notification()
 
         if self.config.behavior.dry_run:
             self._log_message("🧪 *** RUNNING IN DRY-RUN MODE - NO ACTUAL SHUTDOWN WILL OCCUR ***")
@@ -248,9 +281,36 @@ class UPSGroupMonitor(
         self._start_stats()
 
     def _initialize_notifications(self):
-        """Initialize the notification worker."""
-        # In coordinator mode, the notification worker is shared and pre-initialized
+        """Initialize the notification worker.
+
+        v5.2 wires the worker to the per-UPS stats DB so notifications
+        can be persisted and replayed across restarts. The store is
+        opened early (here) — earlier than ``_start_stats()`` — because
+        the very first notification (the lifecycle "Started" / "Recovered"
+        message) fires before stats opens by the legacy ordering, and
+        we want it persisted too.
+
+        In coordinator mode the worker is created externally and shared;
+        we still open + register our store so the shared worker can pick
+        up our pending rows on the next iteration.
+        """
+        # Open the per-UPS stats store now (idempotent; _start_stats
+        # will skip the open() call if it sees us already opened it).
+        try:
+            if self._stats_store._conn is None:
+                self._stats_store._logger = self.logger
+                self._stats_store.open()
+        except Exception as e:
+            self._log_message(
+                f"⚠️ WARNING: stats store open failed at "
+                f"{self._stats_db_path}: {e}. Notifications will not "
+                "persist across restarts."
+            )
+
         if self._notification_worker is not None:
+            # Coordinator mode: register our store with the shared worker.
+            if self._stats_store._conn is not None:
+                self._notification_worker.register_store(self._stats_store)
             return
 
         if not self.config.notifications.enabled:
@@ -265,11 +325,96 @@ class UPSGroupMonitor(
 
         self._notification_worker = NotificationWorker(self.config)
         if self._notification_worker.start():
+            if self._stats_store._conn is not None:
+                self._notification_worker.register_store(self._stats_store)
             service_count = self._notification_worker.get_service_count()
             self._log_message(f"📢 Notifications: enabled ({service_count} service(s))")
         else:
             self._log_message("⚠️ WARNING: Failed to initialize notifications")
             self.config.notifications.enabled = False
+
+    def _emit_lifecycle_startup_notification(self):
+        """Update lifecycle meta + (single-UPS only) emit the classified
+        startup notification.
+
+        Replaces the v5.1 unconditional ``🚀 Started`` so the user sees:
+        - ``📦 Upgraded vX → vY`` after a deb/rpm upgrade
+        - ``📊 Recovered`` after a power-loss-triggered shutdown
+        - ``🔄 Restarted`` after a quick `systemctl restart`
+        - ``🚀 Started (after crash)`` if the previous instance died
+          without writing its marker
+        - ``🚀 Started`` on a fresh install
+
+        In coordinator mode the coordinator emits the single classified
+        notification at the multi_ups level (firing per monitor would be
+        N copies of the same event); we still update
+        ``meta.last_seen_version`` here so the next-start pip-path
+        upgrade detector has its data.
+        """
+        # Read the PREVIOUS last_seen_version BEFORE we overwrite it
+        # with the current run's version — the classifier needs the
+        # delta to detect a pip-path upgrade. After classification, set
+        # to current so the NEXT start sees this run's version as
+        # "previous".
+        last_seen = (self._stats_store.get_meta("last_seen_version")
+                     if self._stats_store._conn is not None else None)
+        if self._stats_store._conn is not None:
+            self._stats_store.set_meta("last_seen_version", __version__)
+
+        if self._coordinator_mode:
+            return
+
+        from pathlib import Path
+        stats_dir = Path(self.config.statistics.db_directory)
+        shutdown_marker = read_shutdown_marker(stats_dir)
+        upgrade_marker = read_upgrade_marker(stats_dir)
+
+        body, notify_type = classify_startup(
+            current_version=__version__,
+            shutdown_marker=shutdown_marker,
+            upgrade_marker=upgrade_marker,
+            last_seen_version=last_seen,
+        )
+
+        # Cancel any pending lifecycle rows from the previous instance —
+        # they're superseded by the new classification (Restarted folds
+        # the previous "Stopped", Recovered folds the previous "Stopped",
+        # etc.). Keeps the user from seeing ghost messages on the next
+        # successful delivery.
+        if self._stats_store._conn is not None:
+            for row in self._stats_store.find_pending_by_category("lifecycle"):
+                self._stats_store.cancel_notification(row[0], "superseded")
+
+        # Slice 4 bonus: when this start is "Recovered" (reason was
+        # sequence_complete), fold the previous instance's pending
+        # shutdown headline + summary into ONE richer message. Saves the
+        # user from seeing 3 messages (headline + summary + recovered)
+        # for what's really a single power-outage round trip.
+        if (shutdown_marker
+                and shutdown_marker.get("reason") == REASON_SEQUENCE_COMPLETE
+                and self._stats_store._conn is not None):
+            import time as _time
+            try:
+                marker_shutdown_at = int(shutdown_marker.get("shutdown_at", 0))
+            except (TypeError, ValueError):
+                marker_shutdown_at = 0
+            downtime = max(0, int(_time.time()) - marker_shutdown_at)
+            coalesced_body = coalesce_recovered_with_prev_shutdown(
+                self._stats_store,
+                downtime_secs=downtime,
+                # Bound the coalesce to the current outage so unrelated
+                # older pending shutdown rows aren't cancelled (Cubic P2).
+                shutdown_at=marker_shutdown_at or None,
+            )
+            if coalesced_body:
+                body = coalesced_body
+
+        # Markers consumed — drop them now so a crash on the next line
+        # doesn't replay this classification on the start after that.
+        delete_shutdown_marker(stats_dir)
+        delete_upgrade_marker(stats_dir)
+
+        self._send_notification(body, notify_type, category="lifecycle")
 
     def _log_enabled_features(self):
         """Log which features are enabled."""
@@ -322,47 +467,43 @@ class UPSGroupMonitor(
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             print(f"{timestamp} {tz_name} - {prefixed}")
 
-        # During shutdown, also send log messages as notifications (non-blocking)
-        if self._shutdown_flag_path.exists():
-            discord_safe_message = message.replace('`', '\\`')
-            self._send_notification(
-                f"ℹ️ **Shutdown Detail:** {discord_safe_message}",
-                self.config.NOTIFY_INFO
-            )
-
     def _send_notification(self, body: str, notify_type: str = "info",
-                           blocking: bool = False):
-        """Send a notification via the notification worker.
+                           blocking: bool = False,
+                           category: str = "general"):
+        """Queue a notification via the persistent notification worker.
 
-        IMPORTANT: During shutdown sequences, notifications are ALWAYS non-blocking.
-        This ensures that network failures (common during power outages) do not
-        delay the critical shutdown process. The blocking parameter is only
-        honored for non-shutdown scenarios like --test-notifications.
+        v5.2 change: notifications are inserted as ``pending`` rows in
+        the per-UPS stats DB before delivery is attempted. The worker
+        thread reads/writes through the DB, so messages survive process
+        death and prolonged endpoint outages — see ``notifications.py``
+        for the full architecture.
 
         Args:
-            body: Notification body text
-            notify_type: One of 'info', 'success', 'warning', 'failure'
-            blocking: If True AND not during shutdown, wait for send completion.
-                      Ignored during shutdown to prevent delays.
+            body: Notification body text.
+            notify_type: One of 'info', 'success', 'warning', 'failure'.
+            blocking: Back-compat shim. The v5.2 queue is always
+                asynchronous (delivery happens on the worker thread).
+                The flag is accepted for API stability but ignored.
+            category: Coarse classification used by Slice 4 coalescing
+                and per-category queries. Common values: ``lifecycle``,
+                ``power_event``, ``voltage``, ``shutdown``,
+                ``shutdown_summary``, ``general`` (default).
         """
+        del blocking  # see docstring
         if not self._notification_worker:
             return
 
-        # Prefix notification body with UPS name in multi-UPS mode
+        # Prefix notification body with UPS name in multi-UPS mode.
         prefixed_body = f"{self._log_prefix}{body}" if self._log_prefix else body
 
         # Escape @ symbols to prevent Discord mentions (e.g., UPS@192.168.1.1)
         escaped_body = prefixed_body.replace("@", "@\u200B")  # Zero-width space after @
 
-        # CRITICAL: During shutdown, NEVER block on notifications
-        # Network is likely unreliable during power outages
-        is_shutdown = self._shutdown_flag_path.exists()
-        actual_blocking = blocking and not is_shutdown
-
         self._notification_worker.send(
             body=escaped_body,
             notify_type=notify_type,
-            blocking=actual_blocking
+            category=category,
+            store=self._stats_store,
         )
 
     def _log_power_event(self, event: str, details: str,
@@ -491,7 +632,17 @@ class UPSGroupMonitor(
             )
 
         if notification:
-            self._send_notification(*notification)
+            # Sub-typed categories for the Slice 4 brief-outage coalescer:
+            # the worker pairs on_battery + on_line by exact category match
+            # so it doesn't have to grep the user-visible body strings
+            # (which can change wording without anyone updating the
+            # coalescer). Other power events stay on the generic category.
+            event_to_category = {
+                "ON_BATTERY": "power_event_on_battery",
+                "POWER_RESTORED": "power_event_on_line",
+            }
+            category = event_to_category.get(event, "power_event")
+            self._send_notification(*notification, category=category)
 
     def _check_dependencies(self):
         """Check for required and optional dependencies."""
@@ -628,13 +779,14 @@ class UPSGroupMonitor(
     def _execute_shutdown_sequence(self):
         """Execute the controlled shutdown sequence."""
         self._shutdown_flag_path.touch()
+        sequence_start = time.monotonic()
 
-        self._log_message("🚨 ========== INITIATING EMERGENCY SHUTDOWN SEQUENCE ==========")
+        self._log_message("🚨 INITIATING EMERGENCY SHUTDOWN SEQUENCE")
 
         if self.config.behavior.dry_run:
             self._log_message("🧪 *** DRY-RUN MODE: No actual shutdown will occur ***")
 
-        if not self.config.behavior.dry_run:
+        if self.config.local_shutdown.wall and not self.config.behavior.dry_run:
             run_command([
                 "wall",
                 "🚨 CRITICAL: Executing emergency UPS shutdown sequence NOW!"
@@ -663,35 +815,62 @@ class UPSGroupMonitor(
 
         # In coordinator mode, notify the coordinator instead of doing local shutdown
         if self._coordinator_mode:
-            self._log_message("✅ ========== GROUP SHUTDOWN SEQUENCE COMPLETE ==========")
+            self._log_message("✅ GROUP SHUTDOWN SEQUENCE COMPLETE")
             if self._shutdown_callback:
                 group = self.config.ups_groups[0] if self.config.ups_groups else None
                 self._shutdown_callback(group)
             return
 
+        elapsed = int(time.monotonic() - sequence_start)
         if self.config.local_shutdown.enabled:
             self._log_message("🔌 Shutting down local server NOW")
-            self._log_message("✅ ========== SHUTDOWN SEQUENCE COMPLETE ==========")
+            self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE")
 
             if self.config.behavior.dry_run:
                 self._log_message(f"🧪 [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
                 self._log_message("🧪 [DRY-RUN] Shutdown sequence completed successfully (no actual shutdown)")
                 self._shutdown_flag_path.unlink(missing_ok=True)
             else:
-                # Send final notification (non-blocking - fire and forget)
+                # Single-shot summary notification covering the whole sequence;
+                # the per-phase chatter that used to mirror every log line is
+                # gone in v5.2 (journalctl is the forensic record).
                 self._send_notification(
-                    "🛑 **Shutdown Sequence Complete**\nShutting down local server NOW.",
-                    self.config.NOTIFY_FAILURE
+                    f"✅ **Shutdown Sequence Complete** (took {elapsed}s)\n"
+                    f"Powering down local server NOW.",
+                    self.config.NOTIFY_FAILURE,
+                    category="shutdown_summary",
                 )
-                # Give notification time to send
-                time.sleep(5)
+                # Give the persistent worker a chance to drain before the
+                # halt cuts power. Returns as soon as pending hits 0,
+                # rather than always waiting the full 5s. Whatever doesn't
+                # drain stays in SQLite as 'pending' and ships on the
+                # next start (the lossless guarantee).
+                if self._notification_worker:
+                    self._notification_worker.flush(timeout=5)
+
+                # Slice 3: tag this shutdown as power-loss-triggered so
+                # the next start can emit "📊 Recovered" and (with Slice
+                # 4 coalescing) fold this run's "Shutdown sequence
+                # complete" notification into one richer message.
+                from pathlib import Path
+                write_shutdown_marker(
+                    Path(self.config.statistics.db_directory),
+                    version=__version__,
+                    reason=REASON_SEQUENCE_COMPLETE,
+                )
 
                 cmd_parts = self.config.local_shutdown.command.split()
                 if self.config.local_shutdown.message:
                     cmd_parts.append(self.config.local_shutdown.message)
                 run_command(cmd_parts)
         else:
-            self._log_message("✅ ========== SHUTDOWN SEQUENCE COMPLETE (local shutdown disabled) ==========")
+            self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE (local shutdown disabled)")
+            self._send_notification(
+                f"✅ **Shutdown Sequence Complete** (took {elapsed}s)\n"
+                f"Local shutdown is disabled — system stays up.",
+                self.config.NOTIFY_INFO,
+                category="shutdown_summary",
+            )
             self._shutdown_flag_path.unlink(missing_ok=True)
 
             # Exit if --exit-after-shutdown was specified
@@ -711,11 +890,12 @@ class UPSGroupMonitor(
             f"🚨 **EMERGENCY SHUTDOWN INITIATED!**\n"
             f"Reason: {reason}\n"
             "Executing shutdown tasks (VMs, Containers, Remote Servers).",
-            self.config.NOTIFY_FAILURE
+            self.config.NOTIFY_FAILURE,
+            category="shutdown",
         )
 
         self._log_message(f"🚨 CRITICAL: Triggering immediate shutdown. Reason: {reason}")
-        if not self.config.behavior.dry_run:
+        if self.config.local_shutdown.wall and not self.config.behavior.dry_run:
             run_command([
                 "wall",
                 f"🚨 CRITICAL: UPS battery critical! Immediate shutdown initiated! Reason: {reason}"
@@ -725,8 +905,14 @@ class UPSGroupMonitor(
 
     def _cleanup_and_exit(self, signum: int, frame):
         """Handle clean exit on signals."""
+        from pathlib import Path
+        stats_dir = Path(self.config.statistics.db_directory)
+
         if self._shutdown_flag_path.exists():
             if self._notification_worker:
+                # Mid-shutdown signal: still try to drain any in-flight
+                # rows; whatever's left persists for the next start.
+                self._notification_worker.flush(timeout=5)
                 self._notification_worker.stop()
             self._stop_stats()
             sys.exit(0)
@@ -738,12 +924,33 @@ class UPSGroupMonitor(
         # Send notification (non-blocking - fire and forget)
         self._send_notification(
             "🛑 **Eneru Service Stopped**\nMonitoring is now inactive.",
-            self.config.NOTIFY_WARNING
+            self.config.NOTIFY_WARNING,
+            category="lifecycle",
         )
 
         if self._notification_worker:
+            # Closes the SIGTERM race that produced the v5.1 "Stopping
+            # notification worker with 1 message(s) pending" warning:
+            # we now WAIT for the worker to actually deliver the
+            # 'Stopped' notification before joining its thread.
+            # Returns as soon as pending hits 0; bounded at 5s so a
+            # systemctl stop doesn't hang on an unreachable endpoint.
+            self._notification_worker.flush(timeout=5)
             self._notification_worker.stop()
         self._stop_stats()
+
+        # Slice 3: drop the shutdown marker so the next start can
+        # classify this exit (signal → "🔄 Restarted" if it comes back
+        # within RESTART_DOWNTIME_THRESHOLD_SECS, else cold "Started").
+        # Don't downgrade an existing sequence_complete marker — that
+        # would mask a power-loss shutdown when systemd's stop signal
+        # arrives during the shutdown sequence (Cubic P2).
+        existing = read_shutdown_marker(stats_dir)
+        if not (existing
+                and existing.get("reason") == REASON_SEQUENCE_COMPLETE):
+            write_shutdown_marker(
+                stats_dir, version=__version__, reason=REASON_SIGNAL,
+            )
 
         self._shutdown_flag_path.unlink(missing_ok=True)
         sys.exit(0)
@@ -1015,7 +1222,8 @@ class UPSGroupMonitor(
                             "🚨 **FAILSAFE (FSB) TRIGGERED!**\n"
                             "Connection to UPS lost or data stale while system was running On Battery.\n"
                             "Assuming critical failure. Executing immediate shutdown.",
-                            self.config.NOTIFY_FAILURE
+                            self.config.NOTIFY_FAILURE,
+                            category="shutdown",
                         )
                         self._execute_shutdown_sequence()
 
@@ -1063,7 +1271,8 @@ class UPSGroupMonitor(
                         f"{self.state.connection_flap_count} times "
                         f"(recovered within grace period each time). "
                         f"Check your UPS network connection or NUT server configuration.",
-                        self.config.NOTIFY_WARNING
+                        self.config.NOTIFY_WARNING,
+                        category="health",
                     )
                     self.state.connection_flap_count = 0
                     self.state.connection_first_flap_time = 0.0

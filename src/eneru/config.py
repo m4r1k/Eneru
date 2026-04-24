@@ -114,6 +114,31 @@ class NotificationsConfig:
     # the response to a real sustained event. 0 = immediate (legacy).
     voltage_hysteresis_seconds: int = 30
 
+    # ---- v5.2 persistent-queue knobs ----
+    # Days to keep ``sent`` and ``cancelled`` rows around for forensic
+    # inspection via sqlite3. ``pending`` rows are NEVER pruned by TTL.
+    retention_days: int = 7
+    # Per-message attempt cap. 0 (default, unlimited) means a stuck
+    # message keeps retrying with exponential backoff until it succeeds
+    # or hits ``max_age_days``. Apprise's success/fail signal is a bool
+    # — we can't tell "bad URL" from "internet down" — so giving up on
+    # attempts alone risks dropping legitimate messages during a long
+    # outage. Set this only if you want a poison-message kill switch.
+    max_attempts: int = 0
+    # Pending notifications older than this become ``cancelled``
+    # (reason: ``too_old``). 30 d covers a month-long absence; longer
+    # than that the message is probably stale. Set 0 to disable.
+    max_age_days: int = 30
+    # Backlog cap. When pending exceeds this, the oldest are cancelled
+    # with reason ``backlog_overflow``. 10000 is well above normal use
+    # but bounds DB growth on runaway-event days.
+    max_pending: int = 10000
+    # Exponential backoff ceiling, in seconds. The per-message wait
+    # doubles on each failure (starting at ``retry_interval``) up to
+    # this cap. 5 min keeps reconnection quick once the endpoint
+    # returns without hammering the network during a long outage.
+    retry_backoff_max: int = 300
+
 
 # Power events whose notifications cannot be suppressed via
 # `notifications.suppress`. Allowing a user to silence these would
@@ -230,6 +255,12 @@ class LocalShutdownConfig:
     message: str = "UPS battery critical - emergency shutdown"
     drain_on_local_shutdown: bool = False  # Drain all groups before local shutdown
     trigger_on: str = "any"  # "any" or "none" — when to trigger local shutdown in multi-UPS
+    # Whether to broadcast shutdown warnings via wall(1) to every logged-in
+    # tty. Off by default since v5.2 — the `wall` blast was a holdover from
+    # the v2 "ups-monitor" days when the shell was the only notification
+    # channel. Apprise covers the modern path; opt in here if you still want
+    # tty broadcasts on top.
+    wall: bool = False
 
 
 @dataclass
@@ -622,6 +653,12 @@ class ConfigLoader:
         # Defaults match NotificationsConfig dataclass.
         notif_suppress: List[str] = []
         notif_voltage_hysteresis = 30
+        # v5.2 persistent-queue defaults.
+        notif_retention_days = 7
+        notif_max_attempts = 0
+        notif_max_age_days = 30
+        notif_max_pending = 10000
+        notif_retry_backoff_max = 300
 
         if 'notifications' in data:
             notif_data = data['notifications']
@@ -632,6 +669,36 @@ class ConfigLoader:
             notif_suppress = notif_data.get('suppress', notif_suppress)
             notif_voltage_hysteresis = notif_data.get(
                 'voltage_hysteresis_seconds', notif_voltage_hysteresis,
+            )
+            # Coerce numeric YAML values to int defensively (Cubic P2).
+            # Strings like "7" parse cleanly; garbage raises ValueError
+            # which would otherwise surface as a TypeError deep inside
+            # the worker's backoff math at runtime, far from the source.
+            def _as_int(key, default):
+                v = notif_data.get(key, default)
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    print(
+                        f"⚠️ Notifications config: {key}={v!r} not numeric; "
+                        f"using default {default}"
+                    )
+                    return default
+
+            notif_retention_days = _as_int(
+                'retention_days', notif_retention_days,
+            )
+            notif_max_attempts = _as_int(
+                'max_attempts', notif_max_attempts,
+            )
+            notif_max_age_days = _as_int(
+                'max_age_days', notif_max_age_days,
+            )
+            notif_max_pending = _as_int(
+                'max_pending', notif_max_pending,
+            )
+            notif_retry_backoff_max = _as_int(
+                'retry_backoff_max', notif_retry_backoff_max,
             )
 
             if 'urls' in notif_data:
@@ -667,6 +734,11 @@ class ConfigLoader:
             retry_interval=notif_retry_interval,
             suppress=notif_suppress,
             voltage_hysteresis_seconds=notif_voltage_hysteresis,
+            retention_days=notif_retention_days,
+            max_attempts=notif_max_attempts,
+            max_age_days=notif_max_age_days,
+            max_pending=notif_max_pending,
+            retry_backoff_max=notif_retry_backoff_max,
         )
 
     @classmethod
@@ -706,6 +778,7 @@ class ConfigLoader:
                 message=local_data.get('message', 'UPS battery critical - emergency shutdown'),
                 drain_on_local_shutdown=local_data.get('drain_on_local_shutdown', False),
                 trigger_on=local_data.get('trigger_on', 'any'),
+                wall=local_data.get('wall', False),
             )
 
         # Parse global triggers (used as defaults for per-UPS triggers)

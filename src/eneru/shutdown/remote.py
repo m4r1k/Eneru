@@ -304,7 +304,8 @@ class RemoteShutdownMixin:
         self._send_notification(
             f"🌐 **Remote Shutdown Starting:** {display_name}\n"
             f"Host: {server.host}",
-            self.config.NOTIFY_INFO
+            self.config.NOTIFY_INFO,
+            category="shutdown",
         )
 
         # Execute pre-shutdown commands first
@@ -330,11 +331,12 @@ class RemoteShutdownMixin:
 
         if success:
             self._log_message(f"  ✅ {display_name} shutdown command sent successfully")
-            self._send_notification(
-                f"✅ **Remote Shutdown Sent:** {display_name}\n"
-                f"Server is shutting down.",
-                self.config.NOTIFY_SUCCESS
-            )
+            # Per-server success used to fire a notification too; dropped in
+            # v5.2 — the "Starting" notification is the per-server signal,
+            # the aggregate "Sequence Complete" rolls up the result, and
+            # journalctl carries the full trace. Failures still notify
+            # because they're the only thing the user actually needs to act
+            # on individually.
         else:
             self._log_message(
                 f"  ❌ WARNING: Failed to execute shutdown command on {display_name}: {error_msg}"
@@ -342,5 +344,6 @@ class RemoteShutdownMixin:
             self._send_notification(
                 f"❌ **Remote Shutdown Failed:** {display_name}\n"
                 f"Error: {error_msg}",
-                self.config.NOTIFY_FAILURE
+                self.config.NOTIFY_FAILURE,
+                category="shutdown",
             )

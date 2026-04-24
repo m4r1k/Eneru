@@ -20,6 +20,17 @@ from eneru.logger import UPSLogger
 from eneru.notifications import APPRISE_AVAILABLE, NotificationWorker
 from eneru.monitor import UPSGroupMonitor
 from eneru.redundancy import RedundancyGroupEvaluator, RedundancyGroupExecutor
+from eneru.stats import StatsStore
+from eneru.lifecycle import (
+    REASON_SEQUENCE_COMPLETE,
+    REASON_SIGNAL,
+    classify_startup,
+    delete_shutdown_marker,
+    delete_upgrade_marker,
+    read_shutdown_marker,
+    read_upgrade_marker,
+    write_shutdown_marker,
+)
 from eneru.utils import run_command
 
 
@@ -96,6 +107,74 @@ class MultiUPSCoordinator:
 
         if self.config.behavior.dry_run:
             self._log("🧪 *** RUNNING IN DRY-RUN MODE - NO ACTUAL SHUTDOWN WILL OCCUR ***")
+
+        # Slice 3: emit ONE classified lifecycle notification at the
+        # coordinator level (the per-monitor _emit_lifecycle_startup
+        # is suppressed in coordinator_mode so we don't get N copies).
+        # Markers + classification ALWAYS run; the SEND only fires when
+        # a notification worker is configured. Otherwise the markers
+        # would leak across configurations (P2 finding from review).
+        stats_dir = Path(self.config.statistics.db_directory)
+        shutdown_marker = read_shutdown_marker(stats_dir)
+        upgrade_marker = read_upgrade_marker(stats_dir)
+
+        # Pip-path upgrade detection in coord mode: peek at the first
+        # group's stats DB for meta.last_seen_version. Without this the
+        # coordinator passes None and a pip user upgrading via
+        # `pip install -U eneru` between runs gets "Restarted" instead
+        # of "📦 Upgraded vX → vY" (caught in pre-push review).
+        last_seen = self._read_last_seen_version_from_first_group(stats_dir)
+
+        body, notify_type = classify_startup(
+            current_version=__version__,
+            shutdown_marker=shutdown_marker,
+            upgrade_marker=upgrade_marker,
+            last_seen_version=last_seen,
+        )
+        if self._notification_worker:
+            self._notification_worker.send(
+                body=body, notify_type=notify_type, category="lifecycle",
+            )
+        # Always consume the markers so the next start doesn't replay
+        # this classification. Safe whether or not the SEND happened —
+        # the per-monitor lifecycle pass updates last_seen_version on
+        # every store from inside its _emit_lifecycle_startup_notification
+        # (which still runs in coordinator mode for the meta side).
+        delete_shutdown_marker(stats_dir)
+        delete_upgrade_marker(stats_dir)
+
+    def _read_last_seen_version_from_first_group(self, stats_dir):
+        """Read meta.last_seen_version from the first group's stats DB
+        (read-only). Returns ``None`` if the DB doesn't exist yet (first
+        ever start) or the row is missing.
+
+        Coordinator startup runs BEFORE any monitor opens its DB write
+        connection, so we use StatsStore.open_readonly to avoid stepping
+        on the writer. Any exception here is swallowed — the worst case
+        is the classifier degrades to "no pip-path upgrade detected"."""
+        if not self.config.ups_groups:
+            return None
+        first = self.config.ups_groups[0]
+        sanitized = first.ups.name.replace("@", "-").replace(":", "-").replace("/", "-")
+        db_path = stats_dir / f"{sanitized}.db"
+        try:
+            conn = StatsStore.open_readonly(db_path)
+        except Exception:
+            return None
+        if conn is None:
+            return None
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key='last_seen_version'"
+            ).fetchone()
+            return str(row[0]) if row and row[0] else None
+        except Exception:
+            return None
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def _start_monitors(self):
         """Create and start one UPSGroupMonitor thread per group."""
@@ -186,9 +265,19 @@ class MultiUPSCoordinator:
             label = group.ups.label
             self._log(f"❌ Monitor thread for {label} crashed: {e}")
             if self._notification_worker:
+                # Pin to the monitor's store ONLY if it actually opened
+                # (the crash may have happened before _initialize_notifications
+                # got that far). Otherwise pass None so the worker can
+                # fall back to another registered store or the pre-store
+                # buffer (Cubic P2).
+                store = getattr(monitor, "_stats_store", None)
+                if store is not None and getattr(store, "_conn", None) is None:
+                    store = None
                 self._notification_worker.send(
                     f"❌ **Monitor Crashed:** {label}\nError: {e}",
                     "failure",
+                    category="lifecycle",
+                    store=store,
                 )
 
     def _on_group_shutdown(self, group):
@@ -247,8 +336,24 @@ class MultiUPSCoordinator:
                     self._notification_worker.send(
                         "🛑 **Shutdown Sequence Complete**\nShutting down local server NOW.",
                         "failure",
+                        category="shutdown_summary",
                     )
-                time.sleep(5)
+                    # Drain in flight before halt; lossless guarantee on
+                    # what doesn't make it.
+                    self._notification_worker.flush(timeout=5)
+                else:
+                    time.sleep(5)
+                # Slice 3: tag this shutdown as power-loss-triggered so
+                # the next start can emit "📊 Recovered" and the Slice 4
+                # bonus folds the prev shutdown into a richer message.
+                # (Single-UPS path already does this in monitor.py;
+                # coordinator mode was missing it — caught in pre-push
+                # review.)
+                write_shutdown_marker(
+                    Path(self.config.statistics.db_directory),
+                    version=__version__,
+                    reason=REASON_SEQUENCE_COMPLETE,
+                )
                 cmd_parts = self.config.local_shutdown.command.split()
                 if self.config.local_shutdown.message:
                     cmd_parts.append(self.config.local_shutdown.message)
@@ -326,6 +431,7 @@ class MultiUPSCoordinator:
             self._notification_worker.send(
                 "🛑 **Eneru Service Stopped**\nMonitoring is now inactive.",
                 "warning",
+                category="lifecycle",
             )
 
         self._stop_event.set()
@@ -337,7 +443,31 @@ class MultiUPSCoordinator:
             thread.join(timeout=5)
 
         if self._notification_worker:
+            # Same SIGTERM-race fix as in monitor.py:_cleanup_and_exit:
+            # drain the queue before joining the worker thread so the
+            # final 'Service Stopped' notification actually ships.
+            self._notification_worker.flush(timeout=5)
             self._notification_worker.stop()
+
+        # Slice 3: tag this exit so the next start can emit "🔄 Restarted"
+        # if it comes back within RESTART_DOWNTIME_THRESHOLD_SECS, else
+        # "🚀 Started (last seen Nh ago)". Coordinator mode was missing
+        # this — caught in pre-push review.
+        # BUT: don't downgrade an existing sequence_complete marker
+        # (Cubic P2). If a power-loss shutdown sequence already wrote
+        # it, the SIGTERM handler that fires when systemd shuts the
+        # service down should preserve "we shut ourselves down for a
+        # reason" so the next start emits "📊 Recovered" rather than
+        # "🔄 Restarted".
+        stats_dir = Path(self.config.statistics.db_directory)
+        existing = read_shutdown_marker(stats_dir)
+        if not (existing
+                and existing.get("reason") == REASON_SEQUENCE_COMPLETE):
+            write_shutdown_marker(
+                stats_dir,
+                version=__version__,
+                reason=REASON_SIGNAL,
+            )
 
         self._global_shutdown_flag.unlink(missing_ok=True)
         sys.exit(0)

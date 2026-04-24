@@ -1126,6 +1126,38 @@ class TestQueryEventsForDisplay:
         # Most recent 3 events.
         assert len(lines) == 3
 
+    @pytest.mark.unit
+    def test_event_line_includes_full_date(self, tmp_path):
+        """Rows must include YYYY-MM-DD prefix so multi-day events are
+        distinguishable in the TUI events panel (regression: TODO #1)."""
+        from datetime import datetime
+        from eneru.tui import query_events_for_display
+        config = _events_config(tmp_path)
+        # Pin a timestamp; assert the rendered prefix matches local-time
+        # YYYY-MM-DD HH:MM:SS for the same instant.
+        ts = 1_700_000_000  # 2023-11-14 22:13:20 UTC, varies by local tz
+        expected_prefix = datetime.fromtimestamp(ts).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        _seed_events(config, config.ups_groups[0],
+                     [(ts, "ON_BATTERY", "Battery: 90%")])
+        lines = query_events_for_display(config)
+        assert len(lines) == 1
+        assert lines[0].startswith(expected_prefix), (
+            f"expected line to start with {expected_prefix!r}, got {lines[0]!r}"
+        )
+
+    @pytest.mark.unit
+    def test_event_line_uses_placeholder_for_bad_timestamp(self, tmp_path):
+        """Malformed timestamps render as a same-width placeholder so the
+        column alignment in the events panel doesn't shift."""
+        from eneru.tui import _format_event_line
+        line = _format_event_line(
+            ts="not-a-number", label="UPS@h", event_type="X",
+            detail="", multi_ups=False,
+        )
+        assert line.startswith("????-??-?? ??:??:??")
+
 
 class TestRunOnceEventsOnly:
 

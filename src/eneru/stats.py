@@ -43,9 +43,9 @@ SAMPLE_FIELDS: Tuple[str, ...] = (
 )
 
 # Bump and add a migration block in StatsStore._init_schema whenever the
-# samples / agg_5min / agg_hourly / events / meta schema gains a column
-# or table. See src/eneru/CLAUDE.md "Stats schema evolution".
-SCHEMA_VERSION = 3
+# samples / agg_5min / agg_hourly / events / meta / notifications schema
+# gains a column or table. See src/eneru/CLAUDE.md "Stats schema evolution".
+SCHEMA_VERSION = 4
 
 # Bucket sizes for aggregation tiers.
 BUCKET_5MIN = 5 * 60
@@ -125,6 +125,18 @@ class StatsStore:
         self._buffer: deque = deque(maxlen=buffer_maxlen)
         self._buffer_lock = threading.Lock()
         self._conn: Optional[sqlite3.Connection] = None
+        # v5.2: serialize ALL _conn access across threads — the
+        # notification-worker thread polls pending rows while the main
+        # thread inserts + caps the queue, while the StatsWriter thread
+        # runs flush/aggregate/purge every 10 s / 5 min, while the TUI
+        # may call query_events / query_range concurrently. Python
+        # 3.13's stricter sqlite3 binding raises "SystemError: error
+        # return without exception set" when concurrent execute()s
+        # share a connection (CPython issue #118172). WAL underneath
+        # already serializes writes; this lock keeps the Python
+        # wrapper consistent. The lock is acquired by every public
+        # method that touches self._conn AFTER open() returns.
+        self._db_lock = threading.Lock()
         self._logger = logger
         # Rate-limit error logging (per error message text).
         self._last_error_log: Dict[str, float] = {}
@@ -248,6 +260,24 @@ class StatsStore:
                     key TEXT PRIMARY KEY,
                     value TEXT
                 );
+
+                -- v4: persistent notification queue. The worker reads/writes
+                -- through this table so messages survive process death and
+                -- prolonged endpoint outages. Pending rows are NEVER pruned
+                -- by retention TTL — only sent/cancelled rows are.
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts INTEGER NOT NULL,
+                    body TEXT NOT NULL,
+                    notify_type TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    sent_at INTEGER,
+                    cancel_reason TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_notifications_status_ts
+                    ON notifications(status, ts);
             """)
             self._migrate_schema()
             self._conn.execute(
@@ -316,6 +346,26 @@ class StatsStore:
             self._safe_alter("events",
                              "notification_sent INTEGER DEFAULT 1")
 
+        if current < 4:
+            # v3 -> v4: persistent notification queue. New table + index;
+            # no ALTERs to existing tables. Idempotent via CREATE IF NOT
+            # EXISTS so a partially-migrated DB heals on next open.
+            self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts INTEGER NOT NULL,
+                    body TEXT NOT NULL,
+                    notify_type TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    sent_at INTEGER,
+                    cancel_reason TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_notifications_status_ts
+                    ON notifications(status, ts);
+            """)
+
     def _safe_alter(self, table: str, column_def: str) -> None:
         """Idempotent ``ALTER TABLE ... ADD COLUMN``; ignores duplicates."""
         try:
@@ -362,7 +412,7 @@ class StatsStore:
             batch: List[Tuple] = list(self._buffer)
             self._buffer.clear()
         try:
-            with self._conn:
+            with self._db_lock, self._conn:
                 placeholders = ", ".join("?" for _ in SAMPLE_FIELDS)
                 self._conn.executemany(
                     f"INSERT INTO samples ({', '.join(SAMPLE_FIELDS)}) "
@@ -382,7 +432,7 @@ class StatsStore:
         if self._conn is None:
             return (0, 0)
         try:
-            with self._conn:
+            with self._db_lock, self._conn:
                 inserted_5 = self._conn.execute(f"""
                     INSERT OR REPLACE INTO agg_5min (
                         ts,
@@ -450,7 +500,7 @@ class StatsStore:
         cutoff_5min = now - self.retention_5min_days * 86400
         cutoff_hourly = now - self.retention_hourly_days * 86400
         try:
-            with self._conn:
+            with self._db_lock, self._conn:
                 deleted_raw = self._conn.execute(
                     "DELETE FROM samples WHERE ts < ?", (cutoff_raw,),
                 ).rowcount
@@ -492,7 +542,7 @@ class StatsStore:
             return
         ts = int(ts if ts is not None else time.time())
         try:
-            with self._conn:
+            with self._db_lock, self._conn:
                 self._conn.execute(
                     "INSERT INTO events (ts, event_type, detail, "
                     "notification_sent) VALUES (?, ?, ?, ?)",
@@ -507,15 +557,287 @@ class StatsStore:
         if self._conn is None:
             return []
         try:
-            cur = self._conn.execute(
-                "SELECT ts, event_type, detail FROM events "
-                "WHERE ts BETWEEN ? AND ? ORDER BY ts ASC",
-                (int(start_ts), int(end_ts)),
-            )
-            return cur.fetchall()
+            with self._db_lock:
+                cur = self._conn.execute(
+                    "SELECT ts, event_type, detail FROM events "
+                    "WHERE ts BETWEEN ? AND ? ORDER BY ts ASC",
+                    (int(start_ts), int(end_ts)),
+                )
+                return cur.fetchall()
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: query_events failed: {e}")
             return []
+
+    # ----- notification queue (v4+) -----
+
+    def enqueue_notification(self, body: str, notify_type: str,
+                             category: str,
+                             ts: Optional[int] = None) -> Optional[int]:
+        """Persist a pending notification. Returns the new row id, or
+        ``None`` if the store isn't open (caller should fall back).
+
+        Safe to call from any thread (serialized via ``_db_lock``).
+        """
+        if self._conn is None:
+            return None
+        ts = int(ts if ts is not None else time.time())
+        try:
+            with self._db_lock, self._conn:
+                cur = self._conn.execute(
+                    "INSERT INTO notifications "
+                    "(ts, body, notify_type, category) "
+                    "VALUES (?, ?, ?, ?)",
+                    (ts, str(body), str(notify_type), str(category)),
+                )
+                return int(cur.lastrowid)
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: enqueue_notification failed: {e}")
+            return None
+
+    def next_pending_notifications(self,
+                                   limit: int = 10,
+                                   offset: int = 0) -> List[Tuple]:
+        """Return up to ``limit`` oldest pending rows starting at
+        ``offset``, as ``(ts, id, body, notify_type, attempts, category)``
+        tuples. Order: ts ASC then id ASC for deterministic FIFO across
+        same-ts ties.
+
+        ``offset`` lets the worker paginate when the head of the queue
+        is occupied by backoff-delayed rows, so newer due rows aren't
+        starved (CR P1).
+        """
+        if self._conn is None:
+            return []
+        try:
+            with self._db_lock:
+                cur = self._conn.execute(
+                    "SELECT ts, id, body, notify_type, attempts, category "
+                    "FROM notifications WHERE status='pending' "
+                    "ORDER BY ts ASC, id ASC LIMIT ? OFFSET ?",
+                    (int(limit), int(offset)),
+                )
+                return cur.fetchall()
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(
+                f"stats: next_pending_notifications failed: {e}"
+            )
+            return []
+
+    def find_pending_by_category(self, category: str,
+                                 since_ts: Optional[int] = None
+                                 ) -> List[Tuple]:
+        """Return pending rows with the given category as
+        ``(id, ts, body, notify_type)`` tuples. Used by the worker's
+        coalescing pass (Slice 4): scan for an open on-battery / on-line
+        pair to fold into one summary."""
+        if self._conn is None:
+            return []
+        try:
+            with self._db_lock:
+                if since_ts is None:
+                    cur = self._conn.execute(
+                        "SELECT id, ts, body, notify_type FROM notifications "
+                        "WHERE status='pending' AND category=? "
+                        "ORDER BY ts ASC",
+                        (str(category),),
+                    )
+                else:
+                    cur = self._conn.execute(
+                        "SELECT id, ts, body, notify_type FROM notifications "
+                        "WHERE status='pending' AND category=? AND ts>=? "
+                        "ORDER BY ts ASC",
+                        (str(category), int(since_ts)),
+                    )
+                return cur.fetchall()
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(
+                f"stats: find_pending_by_category failed: {e}"
+            )
+            return []
+
+    def mark_notification_sent(self, notification_id: int,
+                               sent_at: Optional[int] = None) -> None:
+        """Mark a notification as delivered."""
+        if self._conn is None:
+            return
+        sent_at = int(sent_at if sent_at is not None else time.time())
+        try:
+            with self._db_lock, self._conn:
+                self._conn.execute(
+                    "UPDATE notifications SET status='sent', sent_at=? "
+                    "WHERE id=?",
+                    (sent_at, int(notification_id)),
+                )
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(
+                f"stats: mark_notification_sent failed: {e}"
+            )
+
+    def mark_notification_attempt(self, notification_id: int) -> None:
+        """Increment a notification's attempt counter (it stays pending
+        — the worker will retry on the next loop iteration)."""
+        if self._conn is None:
+            return
+        try:
+            with self._db_lock, self._conn:
+                self._conn.execute(
+                    "UPDATE notifications SET attempts=attempts+1 "
+                    "WHERE id=?",
+                    (int(notification_id),),
+                )
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(
+                f"stats: mark_notification_attempt failed: {e}"
+            )
+
+    def cancel_notification(self, notification_id: int,
+                            reason: str) -> None:
+        """Mark a notification as cancelled (won't retry, eligible for
+        TTL pruning). Reason is one of ``max_attempts``, ``too_old``,
+        ``backlog_overflow``, ``coalesced``, ``superseded``."""
+        if self._conn is None:
+            return
+        try:
+            with self._db_lock, self._conn:
+                self._conn.execute(
+                    "UPDATE notifications SET status='cancelled', "
+                    "cancel_reason=? WHERE id=?",
+                    (str(reason), int(notification_id)),
+                )
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(
+                f"stats: cancel_notification failed: {e}"
+            )
+
+    def pending_notification_count(self) -> int:
+        """Return the number of pending rows in this store. Used by
+        ``flush()`` to know when the queue has drained."""
+        if self._conn is None:
+            return 0
+        try:
+            with self._db_lock:
+                cur = self._conn.execute(
+                    "SELECT COUNT(*) FROM notifications WHERE status='pending'"
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(
+                f"stats: pending_notification_count failed: {e}"
+            )
+            return 0
+
+    def cap_pending_notifications(self, max_pending: int) -> int:
+        """Enforce the backlog cap. If pending count exceeds
+        ``max_pending``, cancel the oldest rows down to the cap with
+        ``cancel_reason='backlog_overflow'``. Returns number cancelled.
+
+        Pass 0 / negative to disable (no cap)."""
+        if self._conn is None or max_pending <= 0:
+            return 0
+        try:
+            with self._db_lock, self._conn:
+                cur = self._conn.execute(
+                    "SELECT COUNT(*) FROM notifications "
+                    "WHERE status='pending'"
+                )
+                row = cur.fetchone()
+                pending = int(row[0]) if row else 0
+                excess = pending - int(max_pending)
+                if excess <= 0:
+                    return 0
+                # Cancel the `excess` oldest pending rows.
+                self._conn.execute(
+                    "UPDATE notifications SET status='cancelled', "
+                    "cancel_reason='backlog_overflow' "
+                    "WHERE id IN ("
+                    "  SELECT id FROM notifications WHERE status='pending' "
+                    "  ORDER BY ts ASC, id ASC LIMIT ?"
+                    ")",
+                    (int(excess),),
+                )
+                return excess
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(
+                f"stats: cap_pending_notifications failed: {e}"
+            )
+            return 0
+
+    def prune_old_notifications(self, retention_days: int,
+                                max_age_days: int = 0) -> Tuple[int, int]:
+        """Two-step cleanup:
+
+        1. ``DELETE`` rows in (``sent``, ``cancelled``) older than
+           ``retention_days``. The sent log isn't an audit log; that's
+           ``events``. Default 7d keeps the recent flush history for
+           debugging without unbounded growth.
+        2. ``UPDATE`` pending rows older than ``max_age_days`` to
+           ``cancelled`` with ``cancel_reason='too_old'``. Skipped when
+           ``max_age_days <= 0`` (pending lives forever — the panic-attack
+           guarantee). Default 30d means a month-long sabbatical still
+           delivers; longer than that is probably stale anyway.
+
+        Returns ``(deleted, expired)`` for logging."""
+        if self._conn is None:
+            return (0, 0)
+        cutoff_sent = int(time.time()) - max(1, int(retention_days)) * 86400
+        deleted = 0
+        expired = 0
+        try:
+            with self._db_lock, self._conn:
+                cur = self._conn.execute(
+                    "DELETE FROM notifications "
+                    "WHERE status IN ('sent','cancelled') AND ts < ?",
+                    (cutoff_sent,),
+                )
+                deleted = cur.rowcount or 0
+                if max_age_days > 0:
+                    cutoff_pending = (
+                        int(time.time()) - int(max_age_days) * 86400
+                    )
+                    cur = self._conn.execute(
+                        "UPDATE notifications SET status='cancelled', "
+                        "cancel_reason='too_old' "
+                        "WHERE status='pending' AND ts < ?",
+                        (cutoff_pending,),
+                    )
+                    expired = cur.rowcount or 0
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(
+                f"stats: prune_old_notifications failed: {e}"
+            )
+        return (deleted, expired)
+
+    # ----- generic meta key/value store -----
+
+    def get_meta(self, key: str) -> Optional[str]:
+        """Read a value from the ``meta`` table. Used by Slice 3 to
+        track ``last_seen_version`` for the pip-path lifecycle classifier."""
+        if self._conn is None:
+            return None
+        try:
+            with self._db_lock:
+                cur = self._conn.execute(
+                    "SELECT value FROM meta WHERE key=?", (str(key),),
+                )
+                row = cur.fetchone()
+                return str(row[0]) if row else None
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: get_meta failed: {e}")
+            return None
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Write a value to the ``meta`` table (insert-or-replace)."""
+        if self._conn is None:
+            return
+        try:
+            with self._db_lock, self._conn:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                    (str(key), str(value)),
+                )
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: set_meta failed: {e}")
 
     # ----- metric query API -----
 
@@ -542,24 +864,25 @@ class StatsStore:
 
         tier = prefer_tier or self._pick_tier(start_ts, end_ts)
         try:
-            if tier == "samples":
-                column = metric
-                cur = self._conn.execute(
-                    f"SELECT ts, {column} FROM samples "
-                    f"WHERE ts BETWEEN ? AND ? AND {column} IS NOT NULL "
-                    "ORDER BY ts ASC",
-                    (int(start_ts), int(end_ts)),
-                )
-            else:
-                table = "agg_5min" if tier == "agg_5min" else "agg_hourly"
-                column = self._agg_column_for(metric)
-                cur = self._conn.execute(
-                    f"SELECT ts, {column} FROM {table} "
-                    f"WHERE ts BETWEEN ? AND ? AND {column} IS NOT NULL "
-                    "ORDER BY ts ASC",
-                    (int(start_ts), int(end_ts)),
-                )
-            return [(int(r[0]), float(r[1])) for r in cur.fetchall()]
+            with self._db_lock:
+                if tier == "samples":
+                    column = metric
+                    cur = self._conn.execute(
+                        f"SELECT ts, {column} FROM samples "
+                        f"WHERE ts BETWEEN ? AND ? AND {column} IS NOT NULL "
+                        "ORDER BY ts ASC",
+                        (int(start_ts), int(end_ts)),
+                    )
+                else:
+                    table = "agg_5min" if tier == "agg_5min" else "agg_hourly"
+                    column = self._agg_column_for(metric)
+                    cur = self._conn.execute(
+                        f"SELECT ts, {column} FROM {table} "
+                        f"WHERE ts BETWEEN ? AND ? AND {column} IS NOT NULL "
+                        "ORDER BY ts ASC",
+                        (int(start_ts), int(end_ts)),
+                    )
+                return [(int(r[0]), float(r[1])) for r in cur.fetchall()]
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: query_range failed: {e}")
             return []

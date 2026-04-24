@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.2.0] - 2026-04-24
+
+Notifications get a rewrite. v5.1's were stateless and noisy: a `systemctl restart` emitted two unrelated events, a shutdown sequence emitted ~22 mid-flight "Shutdown Detail" lines that mirrored the log, and a power outage that took the internet down meant nothing was ever delivered. v5.2 makes them persistent, classified, and coalesced. See `git log v5.1.2..v5.2.0` for per-commit detail.
+
+### Added
+- **Persistent SQLite-backed notification queue.** Each notification is a `pending` row in the per-UPS stats DB. The worker thread reads and writes through SQLite, so messages survive process death, network outages, and reboots; pending rows ship in age order once the endpoint is reachable. Per-message exponential backoff (capped at `retry_backoff_max`, default 5 min) so the worker doesn't hammer an unreachable endpoint while it's down.
+- **Stateful lifecycle classifier.** Replaces the unconditional "🚀 Started" with one of: `📦 Upgraded vX → vY`, `📊 Recovered` (resumed after a power-loss-triggered shutdown), `🔄 Restarted` (graceful exit, downtime under 30 s), `🚀 Restarted (fatal)`, `🚀 Started (last seen Nh ago)`, `🚀 Started (after crash)`, or plain `🚀 Started`. Uses an on-disk shutdown marker plus `meta.last_seen_version` in the stats DB.
+- **Brief-outage coalescing.** A pending `ON_BATTERY` + `POWER_RESTORED` pair from the same outage gets folded into one `📊 Brief Power Outage: Ns on battery` summary before delivery. Same for the post-power-loss recovery: a `Recovered` notification absorbs the previous instance's pending shutdown headline + summary into one message that includes the trigger reason and the downtime.
+- **Outage-survival config knobs:** `notifications.retention_days` (default 7, applies to sent/cancelled only; pending is never pruned by TTL), `max_attempts` (default 0 = unlimited; Apprise's bool can't distinguish "bad URL" from "internet down"), `max_age_days` (default 30, the only cap on pending), `max_pending` (default 10000, backlog overflow), `retry_backoff_max` (default 300, 5 min). Sized for a long weekend with the internet down.
+- **`flush(timeout=5)` drain on shutdown.** Wired into every shutdown path (signal + sequence-complete, single-UPS + coordinator). Closes the v5.1 "1 message pending" SIGTERM race; whatever doesn't drain stays in SQLite for the next start.
+- **TUI events panel: full date.** Rows render `YYYY-MM-DD HH:MM:SS` so multi-day events are distinguishable.
+
+### Changed
+- **Shutdown notifications: 22 → 2.** Dropped the per-`_log_message` auto-mirror. The channel now carries the headline (`🚨 EMERGENCY SHUTDOWN INITIATED!` with reason) and a single `✅ Shutdown Sequence Complete` summary at the end. The summary now also fires when `local_shutdown.enabled=false`. Per-step detail stays in journalctl.
+- **`wall(1)` opt-in.** Defaults to off via `local_shutdown.wall: false`. Holdover from the v2 `ups-monitor` era when the shell was the only channel; Apprise covers the modern path.
+- **Schema v3 → v4.** New `notifications` table + index; append-only migration heals partial state via `CREATE TABLE IF NOT EXISTS`. See `src/eneru/CLAUDE.md` "Stats schema evolution".
+- **`_send_notification` API.** Adds a `category` keyword (default `general`); used by the coalescer and per-category queries. The `blocking` parameter is now a back-compat shim because the v5.2 queue is always asynchronous.
+- **Banner formatting cleanup.** Dropped the `========== BANNER ==========` padding from `monitor.py` and `redundancy.py`. The ALL CAPS body stays (grep-friendly).
+
+### Removed
+- `get_retry_count()` / `get_queue_size()` on `NotificationWorker`, replaced by `get_pending_count()`.
+- `time.sleep(5)` at the local-shutdown gate, replaced by `flush(timeout=5)` which returns as soon as pending hits 0.
+- Per-server "Remote Shutdown Sent" success notifications, covered by the aggregate summary; failures still notify.
+
+### Migration notes
+- **deb/rpm upgrades:** postinstall now drops `/var/lib/eneru/.upgrade_marker.json` before `systemctl restart`, so the next start emits a single `📦 Upgraded` notification. Pip users get the same effect via the `meta.last_seen_version` comparison.
+- **Wall broadcasts:** if you relied on the v5.1 default of "wall fires on every shutdown", set `local_shutdown.wall: true` explicitly.
+- **Stats DB:** schema bumps from v3 to v4 on first start. Idempotent and append-only; existing rows are preserved.
+
+---
+
 ## [5.1.2] - 2026-04-23
 
 Bug-fix release for issue #4: voltage warning thresholds were misleading on narrow-firmware UPSes (US 120V APC defaults, EU managed units). Drop-in upgrade for the common wide-firmware case. Sites with narrow firmware get a one-time startup warning and a documented migration tip. See `git log v5.1.1..v5.1.2` for per-commit detail.
@@ -667,6 +698,36 @@ During power outages, network connectivity is often unreliable. The previous blo
 ---
 
 ## Version Comparison
+
+### v5.2 vs v5.1
+
+| Feature | v5.1 | v5.2 |
+|---------|------|------|
+| Notification queue | In-memory FIFO; messages dropped on shutdown | Persistent SQLite-backed; lossless across restarts and prolonged outages |
+| Lifecycle messaging | Always `🚀 Started` + `🛑 Stopped` (2 unrelated events per restart) | Stateful classifier: `Started` / `Restarted` / `Recovered` / `Upgraded` |
+| Power-loss recovery | Stop + Start (2 messages, no context) | Single `📊 Recovered` message folding the trigger reason + downtime |
+| Brief power outages | 2 separate messages (on_battery + on_line) | Coalesced into 1 `📊 Brief Power Outage` summary if both still pending |
+| Shutdown noise | ~22 mid-flight `ℹ️ Shutdown Detail` lines per sequence | 2 messages: headline + summary; journalctl carries the rest |
+| `wall(1)` broadcasts | Always-on (legacy from v2 ups-monitor era) | Opt-in via `local_shutdown.wall: false` |
+| Long-outage delivery | Best-effort retries; can drop on shutdown | Per-message exponential backoff capped at 5min, default 30-day max age |
+| Schema version | v3 (raw NUT + agg + events.notification_sent) | v4 (notifications table) |
+| TUI events panel | `HH:MM:SS` only | Full `YYYY-MM-DD HH:MM:SS` (multi-day rows distinguishable) |
+| Test count | 615 | 871 (+1 new E2E for panic-attack coalescing) |
+
+### v5.1 vs v5.0
+
+| Feature | v5.0 | v5.1 |
+|---------|------|------|
+| Redundancy groups | Not available | Quorum-based via `min_healthy`; supports A+B PSU pairs and dual-feed racks |
+| UPS health model | Implicit (per-poll status) | `HEALTHY` / `DEGRADED` / `CRITICAL` / `UNKNOWN` with configurable mapping |
+| Stats persistence | Not available | Per-UPS SQLite DB with 13 raw NUT metrics + Eneru-derived; tier-aware retention (24h raw / 30d 5-min / 5y hourly) |
+| TUI graphs | Not available | Braille time-series for any tracked metric, blended live (state-file → SQLite) |
+| TUI events panel | Log-tail parsing only | SQLite events table with arrow-key scroll (5.1.1) |
+| Voltage warning thresholds | Hardcoded `±10% / EN 50160 envelope` | Per-UPS-group `voltage_sensitivity` preset: `tight` / `normal` / `loose` (5.1.2) |
+| Schema version | N/A | v3 (raw NUT + agg tiers + events.notification_sent audit trail) |
+| Module decomposition | Single `monitor.py` (~1900 lines) | Split into `shutdown/` (4 mixins) + `health/` (2 mixins); `monitor.py` ~830 lines |
+| E2E test scenarios | 18 (single + multi-UPS) | 33 (+ stats, redundancy, voltage-autodetect groups) |
+| Test count | 300 | 615 |
 
 ### v5.0 vs v4.11
 
