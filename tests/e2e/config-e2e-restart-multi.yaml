@@ -1,0 +1,78 @@
+# Eneru E2E test config — v5.2.1 single-restart-notification (multi-UPS).
+#
+# Same contract as config-e2e-restart.yaml but routes through
+# MultiUPSCoordinator instead of single-UPS UPSGroupMonitor. The fix
+# in v5.2.1 covers both paths: _handle_signal defers the stop, and
+# _cancel_prev_pending_lifecycle_rows sweeps each per-UPS store on
+# the next coordinator startup. Without the second half, multi-UPS
+# users would still see two notifications on every restart.
+#
+# Notifications point at TEST-NET-1 (RFC 5737) so every Apprise call
+# fails fast and rows stay 'pending' long enough for the test to
+# inspect them.
+
+ups:
+  - name: "UPS1@localhost:3493"
+    display_name: "E2E Restart UPS1"
+    check_interval: 1
+    is_local: true
+    triggers:
+      low_battery_threshold: 5
+      critical_runtime_threshold: 1
+      depletion:
+        window: 300
+        critical_rate: 1000.0
+        grace_period: 300
+      extended_time:
+        enabled: false
+
+  - name: "UPS2@localhost:3493"
+    display_name: "E2E Restart UPS2"
+    check_interval: 1
+    triggers:
+      low_battery_threshold: 5
+      critical_runtime_threshold: 1
+      depletion:
+        window: 300
+        critical_rate: 1000.0
+        grace_period: 300
+      extended_time:
+        enabled: false
+
+triggers:
+  low_battery_threshold: 5
+  critical_runtime_threshold: 1
+  depletion:
+    window: 300
+    critical_rate: 1000.0
+    grace_period: 300
+  extended_time:
+    enabled: false
+
+statistics:
+  db_directory: "/tmp/eneru-e2e-restart-multi"
+  retention:
+    raw_hours: 24
+    agg_5min_days: 30
+    agg_hourly_days: 1825
+
+behavior:
+  dry_run: true
+
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-restart-multi-state"
+  battery_history_file: "/tmp/eneru-e2e-restart-multi-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-restart-multi-shutdown-flag"
+
+notifications:
+  enabled: true
+  urls:
+    - "json://192.0.2.1/notify"
+  timeout: 1
+  retry_interval: 1
+  retry_backoff_max: 5
+  max_attempts: 0
+
+local_shutdown:
+  enabled: false

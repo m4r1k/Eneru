@@ -310,7 +310,12 @@ Global (one block for the whole daemon). Notifications are dispatched via Appris
 | `title` | `null` | Optional title prefix for notifications |
 | `avatar_url` | `null` | Avatar URL for supported services (Discord, Slack, Mattermost, Guilded, Zulip) |
 | `timeout` | `10` | Notification delivery timeout in seconds |
-| `retry_interval` | `5` | Seconds between retry attempts for failed notifications |
+| `retry_interval` | `5` | Initial wait between retry attempts for a failed notification. Per-message exponential backoff doubles this on each failure up to `retry_backoff_max` |
+| `retry_backoff_max` | `300` | Ceiling on the per-message exponential backoff, in seconds (5 min). Keeps reconnection quick once the endpoint returns without hammering the network during a long outage |
+| `max_attempts` | `0` | Per-message attempt cap. `0` = unlimited (default). Apprise's success/fail signal is a bool — Eneru can't tell "bad URL" from "internet down", so capping attempts risks dropping legitimate messages during a long outage. Set this only as a poison-message kill switch |
+| `max_age_days` | `30` | Pending notifications older than this become `cancelled` with reason `too_old`. The only TTL on `pending` rows; `0` disables it. Sized for "long weekend with the internet down" |
+| `max_pending` | `10000` | Backlog cap on pending rows. When pending exceeds this, the oldest are cancelled with reason `backlog_overflow`. Bounds DB growth on runaway-event days |
+| `retention_days` | `7` | Days to keep `sent` and `cancelled` rows around for forensic inspection via `sqlite3`. `pending` rows are NEVER pruned by TTL — only `max_age_days` ages them out |
 | `voltage_hysteresis_seconds` | `30` | Defer voltage `BROWNOUT` / `OVER_VOLTAGE` notifications until the condition has held this long. State log row is always immediate; only notification dispatch is deferred. `0` = legacy immediate behaviour. Severe deviations (>±15%) bypass the dwell |
 | `suppress` | `[]` | Per-event mute. Logs always record the event; only the notification is muted. Safety-critical events (`OVER_VOLTAGE_DETECTED`, `BROWNOUT_DETECTED`, `OVERLOAD_ACTIVE`, `BYPASS_MODE_ACTIVE`, `ON_BATTERY`, `CONNECTION_LOST`, any `SHUTDOWN_*`) are validator-rejected. Suppressible: `POWER_RESTORED`, `VOLTAGE_NORMALIZED`, `AVR_BOOST_ACTIVE`, `AVR_TRIM_ACTIVE`, `AVR_INACTIVE`, `BYPASS_MODE_INACTIVE`, `OVERLOAD_RESOLVED`, `CONNECTION_RESTORED`, `VOLTAGE_AUTODETECT_MISMATCH`, `VOLTAGE_FLAP_SUPPRESSED` |
 

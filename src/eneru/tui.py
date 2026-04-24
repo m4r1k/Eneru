@@ -296,6 +296,35 @@ def parse_log_events(log_path: str, max_events: int = 8) -> List[str]:
         return []
 
 
+def _sanitize_event_detail(detail: str) -> str:
+    """Strip markdown formatting and collapse newlines so the detail
+    fits on a single row of the events panel.
+
+    The body strings written to ``events.detail`` come from the same
+    text that goes to Apprise (Discord / Slack render ``**bold**`` and
+    multi-line bodies natively). The TUI's curses surface can't:
+
+    - Markdown bold ``**...**`` shows as literal asterisks in the
+      panel — distracting and ugly.
+    - An embedded ``\\n`` mid-string causes ``curses.addstr`` to advance
+      to a new row before the gold background fill completes, leaving
+      cells unpainted and exposing the underlying terminal default
+      colors. Looks like artifacts / "broken colors" on the row.
+
+    Sanitization is per-display only — the events table keeps the
+    original body so notifications still render correctly on the
+    Apprise side.
+    """
+    if not detail:
+        return ""
+    cleaned = detail.replace("**", "")
+    # Collapse newlines (and surrounding indentation) into a single
+    # visual separator so the line stays intact.
+    parts = [p.strip() for p in cleaned.split("\n")]
+    parts = [p for p in parts if p]
+    return " · ".join(parts)
+
+
 def _format_event_line(ts: int, label: str, event_type: str,
                        detail: str, multi_ups: bool) -> str:
     """Format one event row from the SQLite events table for display."""
@@ -304,8 +333,9 @@ def _format_event_line(ts: int, label: str, event_type: str,
     except (TypeError, ValueError, OSError):
         time_str = "????-??-?? ??:??:??"
     prefix = f"[{label}] " if multi_ups else ""
-    if detail:
-        return f"{time_str}  {prefix}{event_type}: {detail}"
+    cleaned_detail = _sanitize_event_detail(detail)
+    if cleaned_detail:
+        return f"{time_str}  {prefix}{event_type}: {cleaned_detail}"
     return f"{time_str}  {prefix}{event_type}"
 
 

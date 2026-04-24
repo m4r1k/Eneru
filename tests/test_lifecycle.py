@@ -331,6 +331,123 @@ class TestClassifyStartup:
 
 
 # ==============================================================================
+# v5.2.1: defensive old-version fallback chain in classify_startup
+# ==============================================================================
+
+class TestUpgradeOldVersionFallback:
+    """The RPM postinstall path used to land with old_version='unknown'
+    (RPM passes nothing in $2 and the v5.2.0 default was the literal
+    string 'unknown'). v5.2.1 fixes the source via preinstall.sh and
+    adds a defensive fallback chain in classify_startup so a marker
+    that still arrives with 'unknown'/'?'/empty doesn't render as
+    'vunknown' on screen."""
+
+    @pytest.mark.unit
+    def test_unknown_old_version_falls_back_to_shutdown_marker(self):
+        """Marker says 'unknown'; shutdown_marker.version is the next
+        most authoritative source (graceful exit always populates it)."""
+        body, _ = classify_startup(
+            current_version="5.2.1",
+            shutdown_marker={"shutdown_at": 1, "version": "5.2.0",
+                             "reason": "signal"},
+            upgrade_marker={"old_version": "unknown",
+                            "new_version": "5.2.1"},
+            last_seen_version="5.1.2",
+            now_ts=100,
+        )
+        assert "vunknown" not in body
+        assert "v5.2.0 → v5.2.1" in body
+
+    @pytest.mark.unit
+    def test_question_mark_old_version_falls_back_to_shutdown_marker(self):
+        body, _ = classify_startup(
+            current_version="5.2.1",
+            shutdown_marker={"shutdown_at": 1, "version": "5.2.0",
+                             "reason": "signal"},
+            upgrade_marker={"old_version": "?", "new_version": "5.2.1"},
+            last_seen_version=None,
+            now_ts=100,
+        )
+        assert "v?" not in body
+        assert "v5.2.0" in body
+
+    @pytest.mark.unit
+    def test_empty_old_version_falls_back_to_shutdown_marker(self):
+        body, _ = classify_startup(
+            current_version="5.2.1",
+            shutdown_marker={"shutdown_at": 1, "version": "5.2.0",
+                             "reason": "signal"},
+            upgrade_marker={"old_version": "", "new_version": "5.2.1"},
+            last_seen_version=None,
+            now_ts=100,
+        )
+        assert "v5.2.0" in body
+
+    @pytest.mark.unit
+    def test_falls_back_to_last_seen_when_no_shutdown_marker(self):
+        """No shutdown_marker (e.g., upgrade landed before the daemon
+        could write it on a prior run); meta.last_seen_version is the
+        last resort before the literal '?'."""
+        body, _ = classify_startup(
+            current_version="5.2.1",
+            shutdown_marker=None,
+            upgrade_marker={"old_version": "unknown",
+                            "new_version": "5.2.1"},
+            last_seen_version="5.1.2",
+            now_ts=100,
+        )
+        assert "vunknown" not in body
+        assert "v5.1.2 → v5.2.1" in body
+
+    @pytest.mark.unit
+    def test_renders_question_mark_only_when_every_source_is_missing(self):
+        """The original behaviour for the truly-no-info case. Should be
+        very rare in practice — preinstall + shutdown marker + stats DB
+        all absent means a fresh-on-fresh package install with no daemon
+        run in between, which doesn't trigger the upgrade branch
+        anyway. Belt-and-suspenders."""
+        body, _ = classify_startup(
+            current_version="5.2.1",
+            shutdown_marker=None,
+            upgrade_marker={"old_version": "unknown"},
+            last_seen_version=None,
+            now_ts=100,
+        )
+        assert "v? → v5.2.1" in body
+
+    @pytest.mark.unit
+    def test_explicit_old_version_wins_over_shutdown_marker(self):
+        """Sanity check: when preinstall succeeded and the marker has a
+        real old_version, that's authoritative — don't override it with
+        a possibly-stale shutdown_marker.version."""
+        body, _ = classify_startup(
+            current_version="5.2.1",
+            shutdown_marker={"shutdown_at": 1, "version": "5.0.0",
+                             "reason": "signal"},
+            upgrade_marker={"old_version": "5.2.0",
+                            "new_version": "5.2.1"},
+            last_seen_version="5.1.2",
+            now_ts=100,
+        )
+        assert "v5.2.0 → v5.2.1" in body
+        assert "v5.0.0" not in body  # shutdown marker NOT used
+
+    @pytest.mark.unit
+    def test_unknown_case_insensitive(self):
+        body, _ = classify_startup(
+            current_version="5.2.1",
+            shutdown_marker={"shutdown_at": 1, "version": "5.2.0",
+                             "reason": "signal"},
+            upgrade_marker={"old_version": "UNKNOWN",
+                            "new_version": "5.2.1"},
+            last_seen_version=None,
+            now_ts=100,
+        )
+        assert "vUNKNOWN" not in body
+        assert "v5.2.0" in body
+
+
+# ==============================================================================
 # Slice 4: coalesce Recovered with previous shutdown headline
 # ==============================================================================
 

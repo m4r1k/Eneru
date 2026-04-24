@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.2.1] - 2026-04-24
+
+Bug-fix release for two v5.2.0 regressions. Drop-in upgrade. See
+`git log v5.2.0..v5.2.1` for per-commit detail.
+
+### Fixed
+- **Two notifications on every `systemctl restart` / package upgrade**
+  instead of the v5.2-promised single `🔄 Restarted` / `📦 Upgraded`.
+  At SIGTERM the old daemon now picks the cheapest correct path based
+  on systemd intent (`systemctl show -p Job eneru.service`):
+  `Job=stop` → ship eagerly (instant); `Job=restart` / unknown →
+  enqueue + schedule a transient `systemd-run` timer to deliver ~15 s
+  later, cancelled by the next daemon's classifier if a replacement
+  comes up. Containers / K8s / foreground `eneru run` (no systemd) →
+  always eager. New module `deferred_delivery.py` + hidden CLI
+  subcommand `eneru _deliver-stop`.
+- **`📦 Upgraded vunknown → v5.2.0` on RPM.** New `preinstall.sh`
+  captures the outgoing version via `rpm -q eneru` before files unpack
+  (RPM doesn't pass it in `$2` the way DEB does). Defensive fallback
+  in `lifecycle.classify_startup` covers paths that bypass scriptlets.
+
+### Documentation
+- **`docs/notifications.md`** caught up with the v5.0 / 5.1 / 5.2
+  architecture: SQLite-backed queue, exponential backoff, new config
+  knobs, lifecycle classifier states, brief-power-outage / recovery
+  coalescing. Comparison table extended to three columns (v4.6 / v4.7+ /
+  v5.2+).
+
+### Migration notes
+None.
+
+---
+
 ## [5.2.0] - 2026-04-24
 
 Notifications get a rewrite. v5.1's were stateless and noisy: a `systemctl restart` emitted two unrelated events, a shutdown sequence emitted ~22 mid-flight "Shutdown Detail" lines that mirrored the log, and a power outage that took the internet down meant nothing was ever delivered. v5.2 makes them persistent, classified, and coalesced. See `git log v5.1.2..v5.2.0` for per-commit detail.

@@ -5,6 +5,7 @@ Monitors UPS status via NUT and triggers configurable shutdown sequences.
 https://github.com/m4r1k/Eneru
 """
 
+import sqlite3
 import sys
 import os
 import time
@@ -20,6 +21,7 @@ from eneru.state import MonitorState
 from eneru.logger import UPSLogger
 from eneru.notifications import NotificationWorker, APPRISE_AVAILABLE
 from eneru.stats import StatsStore, StatsWriter
+from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
 from eneru.lifecycle import (
     EVENT_TYPE_DAEMON_START,
     REASON_FATAL,
@@ -309,6 +311,29 @@ class UPSGroupMonitor(
                 "persist across restarts."
             )
 
+        # v5.2.1: cancel any pending lifecycle row left by the previous
+        # instance BEFORE the worker can deliver it. The supersede block
+        # in _emit_lifecycle_startup_notification (lines ~405-407) is
+        # the canonical location, but it runs AFTER worker.start() +
+        # register_store() — opening a delivery-race window where the
+        # worker could ship the deferred 'Service Stopped' from the
+        # prior daemon before the classifier has a chance to cancel it
+        # (Cubic P2). Doing the cancel here too is idempotent: by the
+        # time the lifecycle classifier runs, there's nothing left.
+        # Best-effort: a transient sqlite error here just means the
+        # late cancel still has work to do — same outcome as v5.2.0
+        # in that worst case.
+        if self._stats_store._conn is not None:
+            try:
+                for row in self._stats_store.find_pending_by_category(
+                        "lifecycle"):
+                    self._stats_store.cancel_notification(
+                        row[0], "superseded")
+            except (sqlite3.Error, OSError) as e:
+                self._log_message(
+                    f"⚠️ WARNING: pre-worker lifecycle sweep failed: {e}"
+                )
+
         if self._notification_worker is not None:
             # Coordinator mode: register our store with the shared worker.
             if self._stats_store._conn is not None:
@@ -512,7 +537,7 @@ class UPSGroupMonitor(
         """
         del blocking  # see docstring
         if not self._notification_worker:
-            return
+            return None
 
         # Prefix notification body with UPS name in multi-UPS mode.
         prefixed_body = f"{self._log_prefix}{body}" if self._log_prefix else body
@@ -520,7 +545,7 @@ class UPSGroupMonitor(
         # Escape @ symbols to prevent Discord mentions (e.g., UPS@192.168.1.1)
         escaped_body = prefixed_body.replace("@", "@\u200B")  # Zero-width space after @
 
-        self._notification_worker.send(
+        return self._notification_worker.send(
             body=escaped_body,
             notify_type=notify_type,
             category=category,
@@ -976,22 +1001,81 @@ class UPSGroupMonitor(
         except Exception:
             pass
 
-        # Send notification (non-blocking - fire and forget)
-        self._send_notification(
-            "🛑 **Eneru Service Stopped**\nMonitoring is now inactive.",
-            self.config.NOTIFY_WARNING,
-            category="lifecycle",
-        )
+        # v5.2.1: postinstall.sh drops the upgrade marker BEFORE invoking
+        # `systemctl restart`, so the marker is on disk by the time
+        # SIGTERM lands here on a deb/rpm upgrade. The next daemon will
+        # emit a single "📦 Upgraded vX → vY" message that supersedes
+        # this stop, so suppress the stop entirely — saves a write and
+        # avoids the prior-instance "Stopped" leaking through.
+        upgrade_in_progress = read_upgrade_marker(stats_dir) is not None
 
+        # Drain anything ALREADY in the queue (emergency-shutdown summary,
+        # voltage events, etc.) BEFORE enqueueing the lifecycle stop —
+        # so the worker doesn't pick up our deferred-stop row and ship
+        # it eagerly, defeating the deferred-delivery mechanism below.
+        # After this drain + stop, the worker is gone; the row we
+        # enqueue stays `pending` in SQLite and can be cancelled by
+        # either the next daemon's classifier (within the
+        # `schedule_deferred_stop_or_eager_send` window) or delivered
+        # by the systemd-run timer if no replacement comes up.
+        body = "🛑 **Eneru Service Stopped**\nMonitoring is now inactive."
+        notify_type = self.config.NOTIFY_WARNING
+
+        # Order matters: flush + stop FIRST, then enqueue. If we enqueued
+        # before stop(), the worker could pick the row up on its next
+        # iteration and ship it eagerly — defeating the deferred-delivery
+        # mechanism. After stop(), the worker thread is dead but
+        # `_send_notification` still writes the row to SQLite (the
+        # enqueue is a synchronous DB insert; only delivery requires the
+        # worker thread).
         if self._notification_worker:
-            # Closes the SIGTERM race that produced the v5.1 "Stopping
-            # notification worker with 1 message(s) pending" warning:
-            # we now WAIT for the worker to actually deliver the
-            # 'Stopped' notification before joining its thread.
-            # Returns as soon as pending hits 0; bounded at 5s so a
-            # systemctl stop doesn't hang on an unreachable endpoint.
             self._notification_worker.flush(timeout=5)
             self._notification_worker.stop()
+
+        notif_id = None
+        if not upgrade_in_progress:
+            notif_id = self._send_notification(
+                body, notify_type, category="lifecycle",
+            )
+
+        # Schedule deferred delivery via systemd-run (or fall back to
+        # eager Apprise send if systemd-run is unavailable). The timer
+        # fires ~15 s after our exit; if the new daemon's classifier
+        # cancels the row before then (single-UPS:
+        # `_emit_lifecycle_startup_notification`; multi-UPS:
+        # `_cancel_prev_pending_lifecycle_rows`), the timer is a no-op
+        # and the user sees a single Restarted/Upgraded/Recovered. If
+        # no replacement starts (true `systemctl stop`), the timer
+        # delivers the stop and the user sees a single Stopped.
+        if not upgrade_in_progress:
+            if notif_id is not None and self._stats_store._conn is not None:
+                # Normal path: row was enqueued in SQLite, hand off to
+                # the deferred-delivery scheduler.
+                schedule_deferred_stop_or_eager_send(
+                    notification_id=notif_id,
+                    db_path=Path(self._stats_db_path),
+                    config_path=getattr(self.config, "config_path", None),
+                    body=body,
+                    notify_type=notify_type,
+                    worker=self._notification_worker,
+                    log_fn=self._log_message,
+                )
+            elif self._notification_worker is not None:
+                # CodeRabbit P1: stats DB open() failed (per the warning
+                # logged in _initialize_notifications), so notif_id is
+                # None and the row never landed in SQLite. Without this
+                # branch the lifecycle stop would be silently dropped on
+                # every graceful exit. Ship eagerly via Apprise so the
+                # user still gets a notification (loses restart-
+                # coalescing in this degraded case, but the alternative
+                # is no notification at all).
+                try:
+                    self._notification_worker._send_via_apprise(
+                        body, notify_type,
+                    )
+                except Exception:
+                    pass  # best-effort; nothing more we can do here
+
         self._stop_stats()
 
         # Slice 3: drop the shutdown marker so the next start can

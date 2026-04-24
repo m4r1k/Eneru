@@ -6,6 +6,7 @@ owns the shared resources (logger, notification worker) plus local-shutdown
 arbitration with defense-in-depth (in-memory lock + filesystem flag).
 """
 
+import sqlite3
 import sys
 import time
 import signal
@@ -19,6 +20,7 @@ from eneru.config import Config
 from eneru.logger import UPSLogger
 from eneru.notifications import APPRISE_AVAILABLE, NotificationWorker
 from eneru.monitor import UPSGroupMonitor
+from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
 from eneru.redundancy import RedundancyGroupEvaluator, RedundancyGroupExecutor
 from eneru.stats import StatsStore
 from eneru.lifecycle import (
@@ -131,6 +133,22 @@ class MultiUPSCoordinator:
             upgrade_marker=upgrade_marker,
             last_seen_version=last_seen,
         )
+        # v5.2.1: sweep each per-UPS store for any pending lifecycle row
+        # left over from the previous instance (the deferred 'Service
+        # Stopped' from _handle_signal) and cancel it BEFORE the new
+        # lifecycle send. The single-UPS path does this inside
+        # _emit_lifecycle_startup_notification (monitor.py) but that
+        # function early-returns in coordinator mode without reaching
+        # the cancel block, so without this sweep multi-UPS users still
+        # see two notifications on every restart/upgrade. Order matters:
+        # the new lifecycle send below goes to the worker's in-memory
+        # buffer (no stores are registered yet at this point in startup);
+        # the per-UPS monitors register their stores in _start_monitors,
+        # which drains the buffer into them as new pending rows. So the
+        # cancel-then-send order here is safe — the cancel only sees
+        # rows already on disk from the previous process.
+        self._cancel_prev_pending_lifecycle_rows(stats_dir)
+
         if self._notification_worker:
             self._notification_worker.send(
                 body=body, notify_type=notify_type, category="lifecycle",
@@ -142,6 +160,50 @@ class MultiUPSCoordinator:
         # (which still runs in coordinator mode for the meta side).
         delete_shutdown_marker(stats_dir)
         delete_upgrade_marker(stats_dir)
+
+    def _cancel_prev_pending_lifecycle_rows(self, stats_dir: Path) -> None:
+        """Cancel any pending lifecycle row left in each per-UPS store
+        from the previous process instance. Mirrors the cancel block in
+        ``UPSGroupMonitor._emit_lifecycle_startup_notification`` so the
+        coordinator path produces exactly one lifecycle notification per
+        restart/upgrade — same contract as single-UPS mode.
+
+        Best-effort by design: any sqlite or filesystem error during the
+        sweep is swallowed (a transient failure must not break startup;
+        the worst case is the user sees a stop + start pair on this one
+        restart, which is the v5.2.0 bug — not worse than the prior
+        state). Stores that don't exist yet (first-ever start) are
+        silently skipped.
+        """
+        for group in self.config.ups_groups:
+            sanitized = (group.ups.name
+                         .replace("@", "-")
+                         .replace(":", "-")
+                         .replace("/", "-"))
+            db_path = stats_dir / f"{sanitized}.db"
+            if not db_path.exists():
+                continue
+            store = StatsStore(db_path)
+            try:
+                store.open()
+                for row in store.find_pending_by_category("lifecycle"):
+                    store.cancel_notification(row[0], "superseded")
+            except (sqlite3.Error, OSError) as e:
+                # Visible-failure (CodeRabbit + Cubic P2): a silent
+                # except: pass made the duplicate-lifecycle symptom
+                # opaque if SQLite or the filesystem misbehaved during
+                # the sweep. One log line keeps it best-effort while
+                # giving the operator a thread to pull on.
+                self._log(
+                    f"⚠️ Lifecycle sweep skipped for {db_path.name}: {e}"
+                )
+            finally:
+                try:
+                    store.close()
+                except (sqlite3.Error, OSError) as e:
+                    self._log(
+                        f"⚠️ Failed to close stats DB {db_path.name}: {e}"
+                    )
 
     def _read_last_seen_version_from_first_group(self, stats_dir):
         """Read meta.last_seen_version from the first group's stats DB
@@ -427,13 +489,6 @@ class MultiUPSCoordinator:
         """Handle SIGTERM/SIGINT for clean shutdown."""
         self._log("🛑 Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
 
-        if self._notification_worker:
-            self._notification_worker.send(
-                "🛑 **Eneru Service Stopped**\nMonitoring is now inactive.",
-                "warning",
-                category="lifecycle",
-            )
-
         self._stop_event.set()
 
         # Wait briefly for monitor + evaluator threads to finish
@@ -442,12 +497,66 @@ class MultiUPSCoordinator:
         for thread in self._evaluator_threads:
             thread.join(timeout=5)
 
-        if self._notification_worker:
-            # Same SIGTERM-race fix as in monitor.py:_cleanup_and_exit:
-            # drain the queue before joining the worker thread so the
-            # final 'Service Stopped' notification actually ships.
+        # v5.2.1: see UPSGroupMonitor._cleanup_and_exit for the full
+        # rationale. Drain pending non-lifecycle rows first, then enqueue
+        # the speculative lifecycle stop and stop the worker, then hand
+        # off to the systemd-run timer (or eager fallback) for delivery.
+        # Skip the enqueue entirely when an upgrade is in flight — the
+        # next daemon's "📦 Upgraded" classification covers both ends.
+        stats_dir = Path(self.config.statistics.db_directory)
+        upgrade_in_progress = read_upgrade_marker(stats_dir) is not None
+
+        body = "🛑 **Eneru Service Stopped**\nMonitoring is now inactive."
+        notify_type = "warning"
+
+        # Order matters: flush + stop the worker FIRST, then enqueue —
+        # see UPSGroupMonitor._cleanup_and_exit for the rationale.
+        # Capturing first_store BEFORE stop() because stop() doesn't
+        # actually clear the registered stores list, but doing it here
+        # is symmetric with how we'll use it for the deferred handoff.
+        first_store = None
+        if self._notification_worker is not None:
+            with self._notification_worker._stores_lock:
+                first_store = (self._notification_worker._stores[0]
+                               if self._notification_worker._stores else None)
             self._notification_worker.flush(timeout=5)
             self._notification_worker.stop()
+
+        notif_id = None
+        if self._notification_worker and not upgrade_in_progress:
+            notif_id = self._notification_worker.send(
+                body=body,
+                notify_type=notify_type,
+                category="lifecycle",
+            )
+
+        # Schedule deferred delivery against the FIRST registered store
+        # (which is what worker.send() above wrote to). The systemd-run
+        # timer fires ~15 s after our exit; if a new coordinator's
+        # `_cancel_prev_pending_lifecycle_rows` cancels the row first,
+        # the timer is a no-op and the user sees a single Restarted.
+        if not upgrade_in_progress:
+            if notif_id is not None and first_store is not None:
+                schedule_deferred_stop_or_eager_send(
+                    notification_id=notif_id,
+                    db_path=first_store.db_path,
+                    config_path=getattr(self.config, "config_path", None),
+                    body=body,
+                    notify_type=notify_type,
+                    worker=self._notification_worker,
+                    log_fn=self._log,
+                )
+            elif self._notification_worker is not None:
+                # CodeRabbit P1 (mirrored from monitor.py): no store
+                # registered means worker.send() returned None and the
+                # row never landed in SQLite. Ship eagerly via Apprise
+                # so the lifecycle stop isn't silently lost.
+                try:
+                    self._notification_worker._send_via_apprise(
+                        body, notify_type,
+                    )
+                except Exception:
+                    pass
 
         # Slice 3: tag this exit so the next start can emit "🔄 Restarted"
         # if it comes back within RESTART_DOWNTIME_THRESHOLD_SECS, else
@@ -459,7 +568,6 @@ class MultiUPSCoordinator:
         # service down should preserve "we shut ourselves down for a
         # reason" so the next start emits "📊 Recovered" rather than
         # "🔄 Restarted".
-        stats_dir = Path(self.config.statistics.db_directory)
         existing = read_shutdown_marker(stats_dir)
         if not (existing
                 and existing.get("reason") == REASON_SEQUENCE_COMPLETE):

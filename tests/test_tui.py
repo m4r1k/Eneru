@@ -1159,6 +1159,86 @@ class TestQueryEventsForDisplay:
         assert line.startswith("????-??-?? ??:??:??")
 
 
+class TestSanitizeEventDetail:
+    """v5.2.1: lifecycle bodies stored in events.detail include
+    `**markdown bold**` and embedded `\\n` (the same body that goes to
+    Apprise where Discord/Slack render them natively). The TUI's curses
+    panel can't, so the sanitizer flattens to one line and strips the
+    asterisks. See screenshots in PR #35 for the broken-render case."""
+
+    @pytest.mark.unit
+    def test_strips_markdown_bold_markers(self):
+        from eneru.tui import _sanitize_event_detail
+        out = _sanitize_event_detail("📦 **Eneru Upgraded** v5.2.0 → v5.2.1")
+        assert "**" not in out
+        assert "📦 Eneru Upgraded v5.2.0 → v5.2.1" == out
+
+    @pytest.mark.unit
+    def test_collapses_embedded_newline(self):
+        """Embedded `\\n` mid-string used to make `curses.addstr` jump to
+        a new row before the gold background fill completed, leaving
+        cells unpainted (the 'broken colors' visible on the
+        'Service is back online' continuation row)."""
+        from eneru.tui import _sanitize_event_detail
+        out = _sanitize_event_detail(
+            "📦 **Eneru Upgraded** v5.2.0 → v5.2.1\n"
+            "Service is back online with the new version."
+        )
+        assert "\n" not in out
+        assert "**" not in out
+        assert "📦 Eneru Upgraded v5.2.0 → v5.2.1" in out
+        assert "Service is back online with the new version." in out
+        # Multi-line bodies join with " · " for visual separation.
+        assert " · " in out
+
+    @pytest.mark.unit
+    def test_collapses_multiple_newlines(self):
+        from eneru.tui import _sanitize_event_detail
+        out = _sanitize_event_detail("a\nb\nc")
+        assert out == "a · b · c"
+
+    @pytest.mark.unit
+    def test_strips_indentation_on_continuation_lines(self):
+        """A continuation line indented for Apprise readability shouldn't
+        leave a leading-space artifact in the joined one-liner."""
+        from eneru.tui import _sanitize_event_detail
+        out = _sanitize_event_detail("first\n   indented")
+        assert out == "first · indented"
+
+    @pytest.mark.unit
+    def test_drops_empty_continuation_lines(self):
+        from eneru.tui import _sanitize_event_detail
+        out = _sanitize_event_detail("a\n\n\nb")
+        assert out == "a · b"
+
+    @pytest.mark.unit
+    def test_passthrough_when_already_clean(self):
+        from eneru.tui import _sanitize_event_detail
+        assert _sanitize_event_detail("plain text 85%") == "plain text 85%"
+
+    @pytest.mark.unit
+    def test_empty_input(self):
+        from eneru.tui import _sanitize_event_detail
+        assert _sanitize_event_detail("") == ""
+        assert _sanitize_event_detail(None) == ""
+
+    @pytest.mark.unit
+    def test_format_event_line_renders_sanitized_detail(self):
+        """End-to-end: the rendered event line never contains `**` or
+        embedded `\\n` for any of the v5.2 lifecycle bodies."""
+        from eneru.tui import _format_event_line
+        line = _format_event_line(
+            ts=1700000000, label="UPS@h", event_type="DAEMON_UPGRADED",
+            detail=("📦 **Eneru Upgraded** v5.2.0 → v5.2.1\n"
+                    "Service is back online with the new version."),
+            multi_ups=False,
+        )
+        assert "\n" not in line
+        assert "**" not in line
+        assert "DAEMON_UPGRADED:" in line
+        assert "Service is back online" in line
+
+
 class TestRunOnceEventsOnly:
 
     @pytest.mark.unit

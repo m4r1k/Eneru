@@ -1,0 +1,59 @@
+# Eneru E2E test config — v5.2.1 single-restart-notification.
+#
+# Notifications are enabled but pointed at an unreachable Apprise URL
+# (RFC 5737 TEST-NET-1) so every Apprise call returns False and rows
+# stay 'pending' in SQLite long enough for the test to inspect them.
+#
+# The contract being tested:
+#  1. SIGTERM enqueues the "Service Stopped" lifecycle row AFTER
+#     flush() — so it lands in SQLite as 'pending', NOT delivered.
+#  2. The next daemon's classify_startup runs cancel_notification on
+#     pending lifecycle rows ('superseded') before emitting the new
+#     "🔄 Restarted (downtime: Ns)" notification.
+#  3. Net result: one pending lifecycle row at any time, never two.
+#
+# Stats and logging paths are isolated per-test to avoid bleed-over
+# from the panic-attack coalescing test (config-e2e-coalesce.yaml).
+
+ups:
+  name: "TestUPS@localhost:3493"
+  display_name: "E2E Restart UPS"
+  check_interval: 1
+
+triggers:
+  low_battery_threshold: 5
+  critical_runtime_threshold: 1
+  depletion:
+    window: 300
+    critical_rate: 1000.0
+    grace_period: 300
+  extended_time:
+    enabled: false
+
+statistics:
+  db_directory: "/tmp/eneru-e2e-restart"
+  retention:
+    raw_hours: 24
+    agg_5min_days: 30
+    agg_hourly_days: 1825
+
+behavior:
+  dry_run: true
+
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-restart-state"
+  battery_history_file: "/tmp/eneru-e2e-restart-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-restart-shutdown-flag"
+
+notifications:
+  enabled: true
+  urls:
+    - "json://192.0.2.1/notify"
+  timeout: 1
+  retry_interval: 1
+  retry_backoff_max: 5
+  max_attempts: 0
+
+local_shutdown:
+  enabled: false

@@ -713,6 +713,81 @@ class TestEventsTableMirroring:
         assert "stopped by signal" in stops[0].args[1]
 
     @pytest.mark.unit
+    def test_cleanup_and_exit_skips_stop_notification_on_upgrade(self, tmp_path):
+        """v5.2.1: when postinstall.sh has dropped the upgrade marker
+        before invoking systemctl restart, the SIGTERM that lands here
+        comes from the upgrade. The next daemon will emit a single
+        '📦 Upgraded' message that supersedes the stop, so the stop
+        notification must NOT be enqueued."""
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        marker = {"old_version": "5.2.0", "new_version": "5.2.1"}
+        with patch("eneru.monitor.read_upgrade_marker", return_value=marker), \
+             patch("eneru.monitor.read_shutdown_marker", return_value=None), \
+             patch("eneru.monitor.write_shutdown_marker"), \
+             pytest.raises(SystemExit):
+            monitor._cleanup_and_exit(15, None)
+        # The worker's send() is what _send_notification routes through;
+        # zero send calls means no lifecycle stop was enqueued.
+        send_calls = [c for c in monitor._notification_worker.send.call_args_list
+                      if c.kwargs.get("category") == "lifecycle"
+                      or (len(c.args) >= 3 and c.args[2] == "lifecycle")]
+        assert send_calls == [], (
+            "Expected no lifecycle send when upgrade marker present; "
+            f"got: {monitor._notification_worker.send.call_args_list}"
+        )
+
+    @pytest.mark.unit
+    def test_cleanup_and_exit_enqueues_stop_after_flush_and_stop(self, tmp_path):
+        """v5.2.1: when no upgrade is in flight, the stop notification
+        is enqueued AFTER the worker is drained AND stopped. This way
+        the row stays `pending` in SQLite (the worker thread is dead,
+        can't deliver eagerly) and is either cancelled by the next
+        daemon's classifier (single Restarted) or delivered by the
+        systemd-run timer scheduled below (single Stopped)."""
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        with patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.read_shutdown_marker", return_value=None), \
+             patch("eneru.monitor.write_shutdown_marker"), \
+             patch("eneru.monitor.schedule_deferred_stop_or_eager_send") as sched, \
+             pytest.raises(SystemExit):
+            monitor._cleanup_and_exit(15, None)
+        # Walk method_calls in order; flush + stop must BOTH precede send
+        # so the worker thread is dead before we enqueue the row.
+        names = [c[0] for c in monitor._notification_worker.method_calls]
+        assert "flush" in names
+        assert "stop" in names
+        assert "send" in names
+        assert names.index("flush") < names.index("send"), (
+            f"flush must happen before send; got order: {names}"
+        )
+        assert names.index("stop") < names.index("send"), (
+            f"stop must happen before send; got order: {names}"
+        )
+        # Schedule helper must be called with the lifecycle send's id.
+        sched.assert_called_once()
+        kwargs = sched.call_args.kwargs
+        assert kwargs["body"].startswith("🛑")
+        assert kwargs["notify_type"] == monitor.config.NOTIFY_WARNING
+
+    @pytest.mark.unit
+    def test_cleanup_and_exit_skips_schedule_on_upgrade(self, tmp_path):
+        """v5.2.1: with an upgrade marker on disk, the lifecycle stop is
+        suppressed entirely — no notification enqueued, no systemd-run
+        timer scheduled. The next daemon's '📦 Upgraded' covers both."""
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        marker = {"old_version": "5.2.0", "new_version": "5.2.1"}
+        with patch("eneru.monitor.read_upgrade_marker", return_value=marker), \
+             patch("eneru.monitor.read_shutdown_marker", return_value=None), \
+             patch("eneru.monitor.write_shutdown_marker"), \
+             patch("eneru.monitor.schedule_deferred_stop_or_eager_send") as sched, \
+             pytest.raises(SystemExit):
+            monitor._cleanup_and_exit(15, None)
+        sched.assert_not_called()
+
+    @pytest.mark.unit
     def test_emit_lifecycle_skips_event_for_fresh_start(self, tmp_path):
         """First-ever start (no marker, no last_seen) classifies as
         DAEMON_START — _start_stats already inserts that row, so the
@@ -739,12 +814,16 @@ class TestEventsTableMirroring:
         """sequence_complete shutdown marker → DAEMON_RECOVERED in the
         events table, mirroring the user's '📊 Recovered' notification."""
         from eneru.lifecycle import REASON_SEQUENCE_COMPLETE
+        from eneru.version import __version__
         monitor = make_monitor(tmp_path)
         monitor._stats_store = MagicMock()
         monitor._stats_store._conn = object()
-        monitor._stats_store.get_meta.return_value = "5.2.0"
+        # Use the current __version__ on both sides so the classifier
+        # picks RECOVERED rather than the (pip-path) UPGRADED branch
+        # that fires when last_seen_version != current_version.
+        monitor._stats_store.get_meta.return_value = __version__
         monitor._stats_store.find_pending_by_category.return_value = []
-        marker = {"shutdown_at": 1000, "version": "5.2.0",
+        marker = {"shutdown_at": 1000, "version": __version__,
                   "reason": REASON_SEQUENCE_COMPLETE}
         with patch("eneru.monitor.read_shutdown_marker", return_value=marker), \
              patch("eneru.monitor.read_upgrade_marker", return_value=None), \

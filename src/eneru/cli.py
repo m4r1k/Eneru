@@ -340,6 +340,32 @@ def _cmd_completion(args):
     sys.stdout.write(text)
 
 
+def _cmd_deliver_stop(args):
+    """v5.2.1 internal subcommand — invoked by the systemd-run timer
+    scheduled at the previous daemon's exit. Idempotent:
+
+    - If the lifecycle 'Service Stopped' row was already cancelled by
+      the next daemon's classifier (`status='cancelled'`,
+      `cancel_reason='superseded'`), we exit silently — the user gets
+      a single Restarted/Upgraded/Recovered notification.
+    - If the row is still `pending` (no replacement daemon came up),
+      we deliver via Apprise and mark the row `sent` — the user gets
+      a single Stopped notification.
+
+    The subcommand name is prefixed with `_` to mark it as internal;
+    it's intentionally absent from the `--help` listing.
+    """
+    from pathlib import Path
+    from eneru.deferred_delivery import deliver_pending_stop
+
+    config = _load_config(args)
+    sys.exit(deliver_pending_stop(
+        notification_id=int(args.notification_id),
+        db_path=Path(args.db_path),
+        config=config,
+    ))
+
+
 def _cmd_monitor(args):
     """Launch the TUI dashboard."""
     config = _load_config(args)
@@ -438,6 +464,17 @@ def main():
     comp_parser.add_argument("shell", choices=["bash", "zsh", "fish"],
                              help="Shell to emit completion for")
     comp_parser.set_defaults(func=_cmd_completion)
+
+    # --- _deliver-stop (internal, v5.2.1) ---
+    # Hidden from the --help listing on purpose: this is invoked by a
+    # systemd-run transient timer scheduled by the previous daemon's
+    # _cleanup_and_exit / _handle_signal, never by users directly.
+    ds_parser = subparsers.add_parser("_deliver-stop", help=argparse.SUPPRESS)
+    ds_parser.add_argument("--notification-id", required=True, type=int)
+    ds_parser.add_argument("--db-path", required=True)
+    ds_parser.add_argument("-c", "--config", required=True,
+                           help="Path to configuration file")
+    ds_parser.set_defaults(func=_cmd_deliver_stop)
 
     args = parser.parse_args()
 
