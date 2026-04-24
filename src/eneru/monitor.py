@@ -976,22 +976,36 @@ class UPSGroupMonitor(
         except Exception:
             pass
 
-        # Send notification (non-blocking - fire and forget)
-        self._send_notification(
-            "🛑 **Eneru Service Stopped**\nMonitoring is now inactive.",
-            self.config.NOTIFY_WARNING,
-            category="lifecycle",
-        )
+        # v5.2.1: postinstall.sh drops the upgrade marker BEFORE invoking
+        # `systemctl restart`, so the marker is on disk by the time
+        # SIGTERM lands here on a deb/rpm upgrade. The next daemon will
+        # emit a single "📦 Upgraded vX → vY" message that supersedes
+        # this stop, so suppress the stop entirely — saves a write and
+        # avoids the prior-instance "Stopped" leaking through if the
+        # next daemon's classifier runs while the row is still pending.
+        upgrade_in_progress = read_upgrade_marker(stats_dir) is not None
 
+        # Drain anything ALREADY in the queue (emergency-shutdown summary,
+        # voltage events, etc.) BEFORE enqueueing the lifecycle stop. The
+        # order matters: the lifecycle stop is speculative — if a new
+        # daemon comes back within the restart-downtime threshold, its
+        # classifier emits Restarted/Upgraded/Recovered and cancels the
+        # pending stop via cancel_notification. By enqueueing AFTER the
+        # flush, we guarantee the row stays `pending` in SQLite (the
+        # worker is stopped, can't deliver) and is therefore cancellable.
+        # If the daemon never comes back, the next daemon to start
+        # (whenever that is) will cancel or supersede the pending row.
         if self._notification_worker:
-            # Closes the SIGTERM race that produced the v5.1 "Stopping
-            # notification worker with 1 message(s) pending" warning:
-            # we now WAIT for the worker to actually deliver the
-            # 'Stopped' notification before joining its thread.
-            # Returns as soon as pending hits 0; bounded at 5s so a
-            # systemctl stop doesn't hang on an unreachable endpoint.
             self._notification_worker.flush(timeout=5)
             self._notification_worker.stop()
+
+        if not upgrade_in_progress:
+            self._send_notification(
+                "🛑 **Eneru Service Stopped**\nMonitoring is now inactive.",
+                self.config.NOTIFY_WARNING,
+                category="lifecycle",
+            )
+
         self._stop_stats()
 
         # Slice 3: drop the shutdown marker so the next start can

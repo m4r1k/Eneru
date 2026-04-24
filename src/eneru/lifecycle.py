@@ -125,6 +125,38 @@ def delete_upgrade_marker(directory: Path) -> None:
         pass
 
 
+def _resolve_old_version(*, upgrade_marker: Optional[dict],
+                         shutdown_marker: Optional[dict],
+                         last_seen_version: Optional[str]) -> str:
+    """Resolve the previous-version string for an Upgraded notification.
+
+    Primary source is ``upgrade_marker.old_version``, populated by
+    ``packaging/scripts/preinstall.sh`` via ``rpm -q eneru`` /
+    ``dpkg-query -W eneru`` BEFORE the new package files unpack.
+
+    The fallback chain handles edge cases where preinstall didn't fire
+    (manual ``rpm -ivh --force``, partial install, container-build paths
+    that bypass scriptlets) and the marker landed with the literal
+    ``"unknown"`` sentinel from ``postinstall.sh``'s pre-5.2.1 default:
+
+    1. ``upgrade_marker.old_version`` (if not ``unknown``/``?``/empty)
+    2. ``shutdown_marker.version`` (always populated on graceful exit)
+    3. ``last_seen_version`` (``meta.last_seen_version`` in the stats DB)
+    4. literal ``"?"`` — only if every source is missing
+    """
+    candidates = []
+    if upgrade_marker:
+        candidates.append(upgrade_marker.get("old_version"))
+    if shutdown_marker:
+        candidates.append(shutdown_marker.get("version"))
+    candidates.append(last_seen_version)
+    for raw in candidates:
+        candidate = str(raw or "").strip()
+        if candidate and candidate.lower() not in ("unknown", "?"):
+            return candidate
+    return "?"
+
+
 def classify_startup(*, current_version: str,
                      shutdown_marker: Optional[dict],
                      upgrade_marker: Optional[dict],
@@ -150,7 +182,11 @@ def classify_startup(*, current_version: str,
 
     # 1) Postinstall-set marker: deb/rpm upgrade. Authoritative.
     if upgrade_marker:
-        old = str(upgrade_marker.get("old_version", "?"))
+        old = _resolve_old_version(
+            upgrade_marker=upgrade_marker,
+            shutdown_marker=shutdown_marker,
+            last_seen_version=last_seen_version,
+        )
         new = str(upgrade_marker.get("new_version", current_version))
         return (
             f"📦 **Eneru Upgraded** v{old} → v{new}\n"

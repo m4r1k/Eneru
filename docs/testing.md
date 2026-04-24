@@ -195,11 +195,11 @@ The E2E tests use scenario files to simulate different UPS states:
 
 ### E2E test cases
 
-The E2E workflow (`.github/workflows/e2e.yml`) runs 33 tests on every push and PR.
+The E2E workflow (`.github/workflows/e2e.yml`) runs 36 tests on every push and PR.
 Tests are partitioned into five parallel matrix jobs (`E2E CLI`,
 `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy`, `E2E Stats`) so the
 total wall-clock is bounded by the slowest group rather than the sum of
-all 33 tests. v5.1.2 split the previous `Redundancy and Stats` group
+all 36 tests. v5.1.2 split the previous `Redundancy and Stats` group
 in two so the heaviest job no longer gates the matrix on its own.
 
 | Test | Group | Description |
@@ -237,6 +237,9 @@ in two so the heaviest job no longer gates the matrix on its own.
 | **Test 31** | Stats | `eneru monitor --once --events-only` reads from the SQLite events table — verified by injecting a known event row into the DB and asserting the line surfaces in the output |
 | **Test 32** | Stats | Voltage auto-detect re-snaps NUT mis-reported nominal — scenario `us-grid-misreport.dev` reports `input.voltage.nominal=230V` while actual `input.voltage=120V`; daemon detects the mismatch, logs `auto-detect re-snap`, records a `VOLTAGE_AUTODETECT_MISMATCH` event with `notification_sent=0`, and confirms `meta.schema_version=3` |
 | **Test 33** | UPS Single | Issue #4: voltage_sensitivity preset prevents Chris's false-alarm flood — scenario `us-grid-hot.dev` (120V/106/127, input 122.4V) does NOT fire `OVER_VOLTAGE_DETECTED` on default `normal` (warnings 108/132), startup log says `sensitivity=normal`, the migration warning surfaces for the narrow-firmware UPS, and `us-grid-brownout.dev` at 107V still fires `BROWNOUT_DETECTED` |
+| **Test 34** | Stats | v5.2 panic-attack coalescing: `ON_BATTERY` + `POWER_RESTORED` rows pointed at TEST-NET-1 stay pending; the worker folds them into one `📊 Brief Power Outage` summary with the originals cancelled with `cancel_reason='coalesced'` |
+| **Test 35** | Stats | v5.2.1 single-restart-notification (single-UPS): SIGTERM enqueues `🛑 Service Stopped` AFTER `flush()` so it lands as `pending`; the next daemon's classifier cancels it with `cancel_reason='superseded'` and emits a single `🔄 Restarted` row — proves one notification per restart, never two |
+| **Test 36** | UPS Multi | v5.2.1 single-restart-notification (multi-UPS coordinator): same contract as Test 35 but exercises `MultiUPSCoordinator._cancel_prev_pending_lifecycle_rows` which sweeps each per-UPS store on the next coordinator startup |
 
 ### Running E2E tests locally
 

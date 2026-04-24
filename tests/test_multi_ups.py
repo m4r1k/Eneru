@@ -1366,6 +1366,144 @@ class TestCoordinatorHandleSignal:
         for thread in threads:
             thread.join.assert_called_once_with(timeout=5)
 
+    @pytest.mark.unit
+    def test_handle_signal_enqueues_stop_after_flush(self, tmp_path):
+        """v5.2.1: stop notification is enqueued AFTER flush+stop on the
+        worker, mirroring UPSGroupMonitor._cleanup_and_exit. The row
+        stays `pending` in SQLite for the next coordinator's startup
+        sweep to cancel — same contract as single-UPS mode."""
+        import signal as _signal
+
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        coord._notification_worker = MagicMock()
+        coord._threads = []
+
+        with patch("eneru.multi_ups.read_upgrade_marker", return_value=None), \
+             patch("eneru.multi_ups.read_shutdown_marker", return_value=None), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.sys.exit"):
+            coord._handle_signal(_signal.SIGTERM, None)
+
+        names = [c[0] for c in coord._notification_worker.method_calls]
+        assert "flush" in names
+        assert "stop" in names
+        assert "send" in names
+        assert names.index("flush") < names.index("send"), (
+            f"flush must happen before send; got order: {names}"
+        )
+        assert names.index("stop") < names.index("send"), (
+            f"stop must happen before send; got order: {names}"
+        )
+
+    @pytest.mark.unit
+    def test_handle_signal_skips_stop_notification_on_upgrade(self, tmp_path):
+        """v5.2.1: when an upgrade marker is on disk (postinstall.sh
+        dropped it before systemctl restart), the coordinator skips the
+        lifecycle stop entirely — the next daemon's '📦 Upgraded' message
+        will cover this transition."""
+        import signal as _signal
+
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        coord._notification_worker = MagicMock()
+        coord._threads = []
+
+        marker = {"old_version": "5.2.0", "new_version": "5.2.1"}
+        with patch("eneru.multi_ups.read_upgrade_marker", return_value=marker), \
+             patch("eneru.multi_ups.read_shutdown_marker", return_value=None), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.sys.exit"):
+            coord._handle_signal(_signal.SIGTERM, None)
+
+        send_calls = coord._notification_worker.send.call_args_list
+        assert send_calls == [], (
+            "Expected no lifecycle send when upgrade marker present; "
+            f"got: {send_calls}"
+        )
+        # flush + stop still happen (drains any non-lifecycle rows
+        # like a sequence-complete summary that landed mid-shutdown).
+        coord._notification_worker.flush.assert_called_once()
+        coord._notification_worker.stop.assert_called_once()
+
+    @pytest.mark.unit
+    def test_initialize_cancels_prev_pending_lifecycle_rows(self, tmp_path):
+        """v5.2.1: coordinator startup sweeps each per-UPS store and
+        cancels any pending lifecycle row from the previous instance
+        (the deferred 'Service Stopped' from _handle_signal). Without
+        this, multi-UPS users still see two notifications on every
+        restart — the single-UPS path does this inside
+        UPSGroupMonitor._emit_lifecycle_startup_notification but that
+        function early-returns in coordinator mode."""
+        from eneru.stats import StatsStore
+
+        config = _coord_config(tmp_path)
+        # Point statistics at tmp_path so we can pre-populate a real
+        # SQLite store with a pending lifecycle row, then verify the
+        # coordinator's sweep cancels it.
+        config.statistics.db_directory = str(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+
+        # Sanitize the same way the coordinator does to find the DB.
+        ups_name = config.ups_groups[0].ups.name
+        sanitized = (ups_name.replace("@", "-")
+                     .replace(":", "-").replace("/", "-"))
+        db_path = tmp_path / f"{sanitized}.db"
+
+        # Pre-populate: create a store, insert a pending lifecycle row.
+        store = StatsStore(db_path)
+        store.open()
+        try:
+            row_id = store.enqueue_notification(
+                body="🛑 Eneru Service Stopped\nMonitoring is now inactive.",
+                notify_type="warning",
+                category="lifecycle",
+                ts=1000,
+            )
+            assert row_id is not None
+            pending_before = store.find_pending_by_category("lifecycle")
+            assert len(pending_before) == 1, (
+                f"Expected 1 pending row, got {pending_before}"
+            )
+        finally:
+            store.close()
+
+        # Run the sweep.
+        coord._cancel_prev_pending_lifecycle_rows(tmp_path)
+
+        # Verify the row is now cancelled with reason='superseded'.
+        store = StatsStore(db_path)
+        store.open()
+        try:
+            pending_after = store.find_pending_by_category("lifecycle")
+            assert pending_after == [], (
+                "Expected zero pending lifecycle rows after sweep; "
+                f"got: {pending_after}"
+            )
+            # Confirm the cancel_reason is 'superseded' specifically.
+            row = store._conn.execute(
+                "SELECT status, cancel_reason FROM notifications "
+                "WHERE id = ?", (row_id,)
+            ).fetchone()
+            assert row == ("cancelled", "superseded")
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_cancel_prev_pending_lifecycle_rows_skips_missing_db(self, tmp_path):
+        """First-ever start has no per-UPS DB on disk yet; the sweep
+        must silently skip and not raise."""
+        config = _coord_config(tmp_path)
+        config.statistics.db_directory = str(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        # No DB created; nothing to sweep. Should be a no-op.
+        coord._cancel_prev_pending_lifecycle_rows(tmp_path)
+        # If we got here, the no-op succeeded.
+
 
 # ==============================================================================
 # COORDINATOR LOG FALLBACK

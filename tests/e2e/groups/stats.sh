@@ -445,5 +445,109 @@ echo ""
 echo "=== Test 34 PASSED: panic-attack coalescing verified ==="
 )
 
+
+# ======================================================================
+# Test 35: v5.2.1 single-restart-notification
+#
+# Contract: a `systemctl restart eneru` (i.e. SIGTERM → start) produces
+# exactly ONE pending lifecycle row at any time, never two. The old
+# daemon enqueues "Service Stopped" AFTER flush() so the row stays
+# pending; the new daemon's classify_startup runs cancel_notification on
+# pending lifecycle rows ('superseded') before emitting the new
+# "Restarted" message. Reproduces the v5.2.0 bug from TODO.md.
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 35: single-restart-notification (v5.2.1)"
+
+echo "=== Test 35: v5.2.1 single-restart-notification ==="
+
+# Clean slate.
+rm -rf /tmp/eneru-e2e-restart /tmp/eneru-e2e-restart-*
+mkdir -p /tmp/eneru-e2e-restart
+rm -f /tmp/eneru-e2e-restart-shutdown-flag
+
+# Start from on-line so the daemon doesn't try to trigger anything
+# unrelated while we're testing the lifecycle path.
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+sleep 3
+
+# --- First run: clean start, then SIGTERM. ---
+eneru run --config $E2E_DIR/config-e2e-restart.yaml > /tmp/test35-run1.log 2>&1 &
+ENERU_PID=$!
+sleep 5  # _initialize finishes, lifecycle classifier emits DAEMON_START
+kill -TERM $ENERU_PID 2>/dev/null || true
+wait $ENERU_PID 2>/dev/null || true
+
+DB=$(find /tmp/eneru-e2e-restart -maxdepth 1 -name '*.db' 2>/dev/null | head -1)
+if [ -z "$DB" ]; then
+  echo "FAIL: no SQLite stats DB created at /tmp/eneru-e2e-restart/"
+  cat /tmp/test35-run1.log
+  exit 1
+fi
+
+# After first SIGTERM: exactly one pending lifecycle row containing
+# "Service Stopped" (the unreachable Apprise endpoint guarantees the
+# worker can't deliver it within flush(timeout=5), so it stays pending).
+pending_stop=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM notifications \
+   WHERE category='lifecycle' AND status='pending' \
+     AND body LIKE '%Service Stopped%';")
+if [ "$pending_stop" != "1" ]; then
+  echo "FAIL (35a): expected 1 pending lifecycle 'Service Stopped' row, got $pending_stop"
+  echo "--- ALL notifications rows: ---"
+  sqlite3 "$DB" "SELECT id, ts, category, status, cancel_reason, substr(body,1,80) FROM notifications ORDER BY id;"
+  echo "--- /tmp/test35-run1.log: ---"
+  cat /tmp/test35-run1.log
+  exit 1
+fi
+echo "PASS (35a): old daemon left exactly 1 pending lifecycle 'Service Stopped' row"
+
+# --- Second run: same config, simulating `systemctl restart`. ---
+eneru run --config $E2E_DIR/config-e2e-restart.yaml > /tmp/test35-run2.log 2>&1 &
+ENERU_PID=$!
+sleep 6  # _initialize → classify_startup → cancel pending + send Restarted
+
+# Stop cleanly so the test environment isn't left with a runaway daemon.
+kill -TERM $ENERU_PID 2>/dev/null || true
+wait $ENERU_PID 2>/dev/null || true
+
+# After the second daemon's classify_startup fires:
+#   - The first run's "Service Stopped" row is now status='cancelled'
+#     with cancel_reason='superseded' (set by _emit_lifecycle_startup_
+#     notification BEFORE the new lifecycle row is enqueued).
+#   - A new lifecycle row containing "Restarted" is in the table.
+superseded=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM notifications \
+   WHERE category='lifecycle' AND status='cancelled' \
+     AND cancel_reason='superseded' \
+     AND body LIKE '%Service Stopped%';")
+if [ "$superseded" != "1" ]; then
+  echo "FAIL (35b): expected 1 cancelled (superseded) 'Service Stopped' row, got $superseded"
+  echo "--- ALL notifications rows: ---"
+  sqlite3 "$DB" "SELECT id, ts, category, status, cancel_reason, substr(body,1,80) FROM notifications ORDER BY id;"
+  echo "--- /tmp/test35-run2.log: ---"
+  cat /tmp/test35-run2.log
+  exit 1
+fi
+echo "PASS (35b): prior 'Service Stopped' row is cancelled with reason='superseded'"
+
+restarted=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM notifications \
+   WHERE category='lifecycle' \
+     AND body LIKE '%Restarted%';")
+if [ "$restarted" -lt "1" ]; then
+  echo "FAIL (35c): expected at least 1 'Restarted' row, got $restarted"
+  echo "--- ALL notifications rows: ---"
+  sqlite3 "$DB" "SELECT id, ts, category, status, cancel_reason, substr(body,1,80) FROM notifications ORDER BY id;"
+  cat /tmp/test35-run2.log
+  exit 1
+fi
+echo "PASS (35c): new daemon emitted a 'Restarted' lifecycle row"
+
+echo ""
+echo "=== Test 35 PASSED: single notification per restart verified ==="
+)
+
 echo ""
 echo "=== Group 'stats' completed successfully ==="

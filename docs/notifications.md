@@ -17,8 +17,18 @@ notifications:
   # Timeout for notification delivery (seconds)
   timeout: 10
 
-  # Seconds between retry attempts for failed notifications (default: 5)
+  # Initial retry wait for failed sends. Doubles on each failure up to
+  # retry_backoff_max (see below). Default: 5
   retry_interval: 5
+
+  # v5.2 persistent-queue knobs. Defaults are sized for "long weekend
+  # with the internet down" — the queue survives process death and
+  # prolonged outages, then drains once the endpoint returns.
+  retention_days: 7         # keep sent/cancelled rows for forensics
+  max_attempts: 0           # 0 = unlimited (default, see below)
+  max_age_days: 30          # only TTL on pending rows
+  max_pending: 10000        # backlog overflow cap
+  retry_backoff_max: 300    # 5-min ceiling on the exponential backoff
 
   # Notification service URLs
   urls:
@@ -26,6 +36,11 @@ notifications:
     - "slack://token_a/token_b/token_c/#channel"
     - "telegram://bot_token/chat_id"
 ```
+
+`max_attempts` defaults to `0` (unlimited) on purpose: Apprise's
+success/fail signal is a single bool — Eneru cannot tell "bad URL" from
+"internet down". Capping attempts risks dropping legitimate messages
+during a long outage. Use this only as a poison-message kill switch.
 
 ---
 
@@ -117,146 +132,157 @@ eneru validate --config /etc/ups-monitor/config.yaml
 
 ## Persistent retry architecture
 
-Network connectivity is often temporarily down during power outages. Eneru uses a non-blocking persistent retry system: the main thread queues notifications instantly and continues with shutdown operations, while a worker thread retries failed sends until they succeed. A FIFO queue preserves message order.
+Network connectivity is often temporarily down during power outages, and the daemon process itself may stop and restart mid-incident (`systemctl restart`, package upgrade, host reboot). Eneru's notification queue is **SQLite-backed and lossless across process death**: the main thread inserts a `pending` row in the per-UPS stats DB and returns immediately; a worker thread reads pending rows and ships them via Apprise; failed sends stay `pending` and retry with **per-message exponential backoff** (starts at `retry_interval`, doubles up to `retry_backoff_max`).
 
-All notifications are delivered as long as the network recovers before the system shuts down.
+If the daemon dies while rows are still pending, the next start picks them up and continues delivery — nothing is lost in process memory. Only `pending` rows are subject to a TTL (`max_age_days`, default 30 days); `sent` and `cancelled` rows are kept for `retention_days` (default 7) for forensic inspection via `sqlite3`.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                ENERU NOTIFICATION ARCHITECTURE.                             │
+│                  ENERU v5.2 NOTIFICATION ARCHITECTURE                       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│   MAIN THREAD (Critical Path)          WORKER THREAD (Persistent Retry)     │
-│   ═══════════════════════════          ════════════════════════════════     │
+│   MAIN THREAD (Critical Path)         WORKER THREAD (Persistent Retry)      │
+│   ═══════════════════════════         ═════════════════════════════════     │
 │                                                                             │
 │   ┌─────────────────────┐                                                   │
-│   │ Shutdown Triggered  │                                                   │
+│   │  Event happens      │                                                   │
+│   │  (power, lifecycle) │                                                   │
 │   └──────────┬──────────┘                                                   │
 │              │                                                              │
 │              ▼                                                              │
-│   ┌─────────────────────┐         ┌─────────────────────┐                   │
-│   │ Queue Notification  │────────▶│  Notification Queue │                   │
-│   │ (non-blocking)      │         │  ┌───┬───┬───┬───┐  │                   │
-│   └──────────┬──────────┘         │  │ 1 │ 2 │ 3 │...│  │  FIFO Order       │
-│              │                    │  └───┴───┴───┴───┘  │                   │
-│              │ continues          └──────────┬──────────┘                   │
-│              │ immediately                   │                              │
-│              ▼                               ▼                              │
-│   ┌─────────────────────┐         ┌─────────────────────┐                   │
-│   │ Stop VMs            │         │ Attempt Send        │                   │
-│   └──────────┬──────────┘         └──────────┬──────────┘                   │
-│              │                               │                              │
-│              ▼                               ▼                              │
-│   ┌─────────────────────┐              ┌─────────┐                          │
-│   │ Stop Containers     │              │ Success?│                          │
-│   └──────────┬──────────┘              └────┬────┘                          │
-│              │                         YES/ \NO                             │
-│              ▼                            /   \                             │
-│   ┌─────────────────────┐         ┌─────┐     ┌──────────────┐              │
-│   │ Unmount Filesystems │         │ ACK │     │ Wait & Retry │              │
-│   └──────────┬──────────┘         │ ──▶ │     │ (5s default) │              │
-│              │                    │Next │     └──────┬───────┘              │
-│              ▼                    │ Msg │            │                      │
-│   ┌─────────────────────┐         └─────┘            │                      │
-│   │ Shutdown Remote     │                            ▼                      │
-│   │ Servers             │                   ┌────────────────┐              │
-│   └──────────┬──────────┘                   │ Network back?  │──▶ Retry     │
-│              │                              └────────────────┘              │
+│   ┌─────────────────────┐         ┌──────────────────────────────┐          │
+│   │ Insert pending row  │────────▶│   Per-UPS SQLite stats DB    │          │
+│   │ (non-blocking)      │         │   notifications table:       │          │
+│   └──────────┬──────────┘         │   id │ ts │ body │ status   │          │
+│              │                    │   ──┴────┴──────┴──────────  │          │
+│              │ continues          │   pending → sent / cancelled │          │
+│              │ immediately        └──────────┬───────────────────┘          │
+│              ▼                               │                              │
+│   ┌─────────────────────┐                    ▼                              │
+│   │ Stop VMs            │         ┌──────────────────────────────┐          │
+│   └──────────┬──────────┘         │ Read oldest `pending` row    │          │
+│              ▼                    │ Try Apprise send             │          │
+│   ┌─────────────────────┐         └──────────┬───────────────────┘          │
+│   │ Stop Containers     │                    │                              │
+│   └──────────┬──────────┘               YES ┌┴┐ NO                          │
+│              ▼                              │ │                             │
+│   ┌─────────────────────┐         ┌─────────┘ └──────────┐                  │
+│   │ Unmount Filesystems │         │ Mark `sent`           │ Increment       │
+│   └──────────┬──────────┘         │ Move to next pending  │ attempts        │
+│              ▼                    │                       │ Wait `interval` │
+│   ┌─────────────────────┐         └───────────────────────┘ × 2^N           │
+│   │ Shutdown Remote     │                                  (cap = 300s)     │
+│   │ Servers             │                                                   │
+│   └──────────┬──────────┘                                                   │
 │              ▼                                                              │
-│   ┌─────────────────────┐         ┌─────────────────────┐                   │
-│   │ 5-Second Grace      │         │    KEY BENEFITS     │                   │
-│   │ (retry window)      │         ├─────────────────────┤                   │
-│   └──────────┬──────────┘         │ ✓ Zero blocking     │                   │
-│              │                    │ ✓ Persistent retry  │                   │
-│              ▼                    │ ✓ FIFO ordering     │                   │
-│   ┌─────────────────────┐         │ ✓ No message loss*  │                   │
-│   │ shutdown -h now     │         │ ✓ Graceful stop     │                   │
-│   └─────────────────────┘         └─────────────────────┘                   │
-│                                   * until process exit                      │
+│   ┌─────────────────────┐         ┌──────────────────────────────┐          │
+│   │ flush(timeout=5)    │         │       KEY GUARANTEES          │         │
+│   │ wait for pending=0  │         ├──────────────────────────────┤          │
+│   │ OR 5s, whichever    │         │ ✓ Survives process death     │          │
+│   │ comes first         │         │ ✓ Survives long outages      │          │
+│   └──────────┬──────────┘         │ ✓ FIFO within UPS            │          │
+│              ▼                    │ ✓ Per-message backoff        │          │
+│   ┌─────────────────────┐         │ ✓ No flush burns the CPU on  │          │
+│   │ shutdown -h now     │         │   an unreachable endpoint    │          │
+│   └─────────────────────┘         └──────────────────────────────┘          │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Configuration
+### Comparison with prior architectures
 
-```yaml
-notifications:
-  # ... other settings ...
+| Scenario | Fire-and-Forget (v4.6) | Persistent Retry (v4.7+) | Stateful, Lossless (v5.2+) |
+|----------|------------------------|--------------------------|-----------------------------|
+| 30-second network blip | Notifications lost | Retried and delivered | Retried and delivered |
+| Router reboot during outage | Notifications lost | Retried and delivered | Retried and delivered |
+| Transient DNS failure | Notifications lost | Retried and delivered | Retried and delivered |
+| Daemon crashes mid-outage | Messages lost at exit | Messages lost at exit | Pending rows survive in SQLite; next start resumes |
+| `systemctl restart` mid-outage | Messages lost at exit | Messages lost at exit | Resumed transparently |
+| Multi-day internet outage | All retries hammer the network | Same | Per-message exponential backoff, capped at `retry_backoff_max` (default 5 min) |
+| `systemctl restart` (no event) | Stop + Start (2 unrelated messages) | Stop + Start (2 unrelated messages) | Single `🔄 Restarted (downtime: Ns)` (classifier cancels the pending stop) |
+| Package upgrade (deb/rpm) | Stop + Start (2 messages, no version) | Stop + Start (2 messages, no version) | Single `📦 Upgraded vX → vY` (postinstall marker + classifier) |
+| Power-loss recovery | Stop + Start (2 messages, no context) | Stop + Start (2 messages, no context) | Single `📊 Recovered` (folds the prior shutdown headline + downtime + reason) |
+| Brief power blip | 2 messages (`Power Lost` + `Power Restored`) | Same | Coalesced into 1 `📊 Brief Power Outage: Ns on battery` summary |
+| Backlog growth on runaway events | Unbounded queue (OOM risk) | Unbounded queue (OOM risk) | Bounded by `max_pending` (default 10000); oldest cancelled with `backlog_overflow` |
+| Stale pending TTL | N/A (no queue) | N/A (memory-only) | `max_age_days` (default 30) ages out pending rows as `too_old` |
 
-  # Seconds between retry attempts (default: 5)
-  retry_interval: 5
-```
+### Shutdown drain: `flush(timeout=5)`
 
-### Comparison with fire-and-forget
-
-| Scenario | Fire-and-Forget (v4.6) | Persistent Retry (v4.7+) |
-|----------|------------------------|--------------------------|
-| 30-second network blip | Notifications lost | Retried and delivered |
-| Router reboot during outage | Notifications lost | Retried and delivered |
-| Transient DNS failure | Notifications lost | Retried and delivered |
-| Network down until shutdown | Messages dropped at exit | Same (logs in journalctl) |
-| Multiple services configured | All fail simultaneously | Apprise retries to all |
-
-### The 5-second grace period
-
-After all shutdown operations complete, Eneru waits 5 seconds before issuing `shutdown -h now`. This gives queued notifications a window to send if the network is available.
-
-```
-Timeline (worst case - network down):
-─────────────────────────────────────────────────────────────────
-0s     │ Shutdown triggered, notification queued (instant)
-0.1s   │ VMs stopping...
-15s    │ VMs stopped, containers stopping...
-30s    │ Containers stopped, filesystems synced...
-45s    │ Remote servers notified...
-50s    │ All critical operations complete
-50-55s │ Grace period (notifications attempted)
-55s    │ shutdown -h now executed
-─────────────────────────────────────────────────────────────────
-        Total: ~55 seconds (network issues added 0 seconds delay)
-```
+When the daemon is exiting (signal, sequence-complete, or `systemctl stop`), the worker is given up to 5 seconds to drain any pending rows before the process exits. The call returns as soon as `pending` hits 0, so a fast network adds zero latency. Whatever doesn't drain stays in SQLite — the next start replays it, so the only real failure mode is "endpoint still unreachable when the system finally powers off", which Eneru flags in `journalctl` rather than dropping silently.
 
 ### 30-second power blip
 
 During a brief power blip, power may return within seconds, well before any shutdown triggers fire. But the public Internet often stays unreachable for several minutes while local network equipment reboots (router, modem, switches, WiFi APs).
 
-Notifications queue instantly and the worker retries every `retry_interval` seconds. Once the network is back, all messages are delivered in order.
+Notifications insert as `pending` immediately and the worker retries with exponential backoff. Once the network is back, queued messages drain in age order. With v5.2, an `ON_BATTERY` + `POWER_RESTORED` pair from the same outage that's still pending when delivery resumes is **coalesced into one `📊 Brief Power Outage: Ns on battery` summary** rather than shipping as two separate messages.
 
 ```
 Timeline (brief power blip, network slow to recover):
 ─────────────────────────────────────────────────────────────────
-0s     │ Power lost, "Power Lost" notification queued
-5s     │ Retry #1 - network down
-10s    │ Retry #2 - still failing
-15s    │ Retry #3 - still failing
-20s    │ Retry #4 - still failing
-28s    │ Power restored, "Power Restored" notification queued
-35s    │ Retry #5 - still failing (switches coming up)
-40s    | Retry #6 - still failing (router booting)
-45s    │ Retry #7 - still failing (WiFi AP booting)
-50s    │ Retry #8 - still failing (ISP modem syncing)
+0s     │ Power lost, ON_BATTERY row inserted (pending)
+5s     │ Worker retry #1 — network down (attempts=1, wait=5s)
+10s    │ Worker retry #2 — still failing  (attempts=2, wait=10s)
+20s    │ Worker retry #3 — still failing  (attempts=3, wait=20s)
+28s    │ Power restored, POWER_RESTORED row inserted (pending)
+40s    │ Worker retry #4 — still failing  (attempts=4, wait=40s)
 60s    │ Network is back!
-60s    │ Retry #9 - SUCCESS! ✓ "Power Lost" delivered
-60s    │ ✓ "Power Restored" delivered (next in queue)
+60s    │ Coalescer folds ON_BATTERY + POWER_RESTORED into one row
+60s    │ ✓ "📊 Brief Power Outage: 28s on battery" delivered
 ─────────────────────────────────────────────────────────────────
-        Both notifications delivered despite 60-second network outage
+       1 message delivered (instead of 2) despite a 60-second outage
 ```
+
+---
+
+## Lifecycle notifications
+
+v5.2 replaces the unconditional `🚀 Started` / `🛑 Stopped` pair with a **stateful classifier** that picks one of seven messages based on two on-disk markers and the previous-version metadata in the stats DB. The result is exactly one notification per lifecycle transition rather than one per process start.
+
+| Classification | Trigger | Driven by |
+|----------------|---------|-----------|
+| `📦 Eneru Upgraded vX → vY` | deb/rpm package upgrade | `.upgrade_marker.json` written by `packaging/scripts/postinstall.sh`; old version captured by `preinstall.sh` (`rpm -q eneru` / `dpkg-query`) |
+| `📦 Eneru Upgraded vX → vY` (pip path) | `pip install --upgrade eneru` followed by restart | `meta.last_seen_version` in the stats DB differs from current `__version__` |
+| `📊 Eneru Recovered` | Daemon coming back after a power-loss-triggered shutdown | `.shutdown_state.json` with `reason: sequence_complete`; folds the prior shutdown headline + summary into one richer message |
+| `🔄 Eneru Restarted (downtime: Ns)` | `systemctl restart eneru` within 30 seconds | `.shutdown_state.json` with `reason: signal` and downtime under 30 s |
+| `🚀 Eneru Restarted` (fatal) | Daemon came back after a crash that wrote a `fatal` marker | `.shutdown_state.json` with `reason: fatal` |
+| `🚀 Eneru Started (last seen Nh ago)` | Daemon started after a long graceful gap | `.shutdown_state.json` present with downtime ≥ 30 s |
+| `🚀 Eneru Started (after crash)` | Daemon came back without ever writing a marker | No shutdown marker but `meta.last_seen_version` is set |
+| `🚀 Eneru vX Started` | First-ever start | No markers, no `last_seen_version` |
+
+The mechanism that delivers "exactly one message" is **cancel-on-startup**: when the new daemon comes up and classifies (e.g.) as `Restarted`, it cancels any `pending` row in the `lifecycle` category that the previous instance enqueued. The `🛑 Service Stopped` row stays `pending` (the prior daemon's worker exits before delivering it) so the new daemon can supersede it cleanly. If the daemon truly never comes back, the pending stop is delivered by whichever daemon eventually starts; if nothing starts within `max_age_days`, the row ages out as `too_old`.
+
+---
+
+## Coalescing
+
+Two related events that reach the queue close together get folded into one richer message before delivery, so the user sees the *story* rather than the individual signals.
+
+**Brief power outage.** When a `POWER_RESTORED` notification is being enqueued and an `ON_BATTERY` notification from the same outage is still `pending` (i.e. the network was down during the outage and only came back after recovery), both rows are cancelled with reason `coalesced` and replaced by a single `📊 Brief Power Outage: Ns on battery` summary. If either row already shipped, no fold-in happens — the user still gets two messages, which is the right behaviour because the first one already left the building.
+
+**Power-loss recovery fold-in.** When the daemon classifies a startup as `📊 Recovered` (sequence_complete shutdown marker on disk), it absorbs the prior instance's pending shutdown *headline* (the `🚨 EMERGENCY SHUTDOWN INITIATED!` line) and the pending shutdown *summary* (`✅ Shutdown Sequence Complete`) into one message that carries the trigger reason and the total downtime. The fold is bounded to the current outage (`shutdown_at - 60 s` floor) so an unrelated older pending shutdown row from a previous outage isn't accidentally cancelled.
 
 ---
 
 ## Notification events
 
-Eneru sends notifications for these events:
-
-| Event | Description |
-|-------|-------------|
-| Service Start | Eneru daemon started |
-| Service Stop | Eneru daemon stopped (graceful) |
-| Power Lost | UPS switched to battery |
-| Power Restored | UPS back on line power |
-| Shutdown Triggered | Emergency shutdown initiated |
-| Voltage Events | Brownout, over-voltage, AVR activation |
-| Battery Anomaly | Charge dropped >20% while on line power (recalibration, aging, hardware fault). Must persist across 3 polls to filter jitter from APC, CyberPower, and Ubiquiti UniFi UPS units |
-| Overload | UPS load threshold exceeded |
+| Event | `event_type` (stats DB) | Category | Notes |
+|-------|-------------------------|----------|-------|
+| Power lost | `ON_BATTERY` | `power_event` | Coalescible with `POWER_RESTORED` if both pending |
+| Power restored | `POWER_RESTORED` | `power_event` | Suppressible via `notifications.suppress` |
+| Brief power outage (coalesced) | `BRIEF_POWER_OUTAGE` | `power_event` | v5.2 — replaces an `ON_BATTERY` + `POWER_RESTORED` pair |
+| Emergency shutdown initiated | `EMERGENCY_SHUTDOWN_INITIATED` | `shutdown` | Safety-critical (cannot be suppressed) |
+| Shutdown sequence complete | `SHUTDOWN_SEQUENCE_COMPLETE` | `shutdown_summary` | One per shutdown |
+| Voltage: brownout / over-voltage | `BROWNOUT_DETECTED` / `OVER_VOLTAGE_DETECTED` | `voltage` | Hysteresis-debounced; severe deviations bypass the dwell |
+| Voltage normalized | `VOLTAGE_NORMALIZED` | `voltage` | Suppressible |
+| AVR boost / trim / inactive | `AVR_BOOST_ACTIVE` / `AVR_TRIM_ACTIVE` / `AVR_INACTIVE` | `voltage` | All three suppressible |
+| Bypass active / inactive | `BYPASS_MODE_ACTIVE` / `BYPASS_MODE_INACTIVE` | `voltage` | Active is safety-critical |
+| Overload active / resolved | `OVERLOAD_ACTIVE` / `OVERLOAD_RESOLVED` | `voltage` | Active is safety-critical |
+| Connection lost / restored | `CONNECTION_LOST` / `CONNECTION_RESTORED` | `general` | Restored is suppressible |
+| Battery anomaly | `BATTERY_ANOMALY_DETECTED` | `general` | Charge dropped > 20% while on line power; sustained-reading filter (3 polls) for APC / CyberPower / UniFi firmware jitter |
+| Lifecycle: started / restarted / recovered / upgraded | `DAEMON_START` / `DAEMON_RESTARTED` / `DAEMON_RECOVERED` / `DAEMON_UPGRADED` | `lifecycle` | One per lifecycle transition (see "Lifecycle notifications") |
+| Lifecycle: restarted after fatal | `DAEMON_RESTARTED_AFTER_FATAL` | `lifecycle` | |
+| Lifecycle: started after crash | `DAEMON_AFTER_CRASH` | `lifecycle` | Marker-less restart with prior `last_seen_version` |
+| Lifecycle: stopped | `DAEMON_STOP` | `lifecycle` | Pending row gets superseded if a new daemon comes up within the restart window |
 
 ---
 

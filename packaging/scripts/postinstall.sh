@@ -52,9 +52,22 @@ if [ "$is_upgrade" = true ]; then
         # daemon's own __version__ at read time. Best-effort: a write
         # failure just means the user gets the legacy classification.
         # Marker is consumed (deleted) by the daemon on the next start.
-        OLD_VERSION="${2:-unknown}"      # DEB: $2 = previous version
-        # RPM passes "$1 = 2" on upgrade with no version string; we leave
-        # OLD_VERSION as "unknown" in that case rather than guessing.
+        # v5.2.1: preinstall.sh queries `rpm -q eneru` / `dpkg-query`
+        # BEFORE the new files unpack and stashes the outgoing version
+        # in /run/eneru/.old-version. Prefer that — RPM's postinstall
+        # gets nothing useful in $2 (DEB does), so without preinstall the
+        # default below would render as "vunknown" in the notification.
+        if [ -r /run/eneru/.old-version ]; then
+            OLD_VERSION=$(cat /run/eneru/.old-version 2>/dev/null || echo "")
+            rm -f /run/eneru/.old-version
+        fi
+        if [ -z "$OLD_VERSION" ]; then
+            # DEB postinst still gets the previous version in $2; if that's
+            # also missing (manual rpm -ivh --force, partial install, etc.)
+            # the daemon's classifier falls back to shutdown_marker.version
+            # / meta.last_seen_version, see lifecycle._resolve_old_version.
+            OLD_VERSION="${2:-unknown}"
+        fi
         # Resolve the stats directory the daemon will actually use.
         # Defaults to /var/lib/eneru but is overridable via
         # statistics.db_directory in /etc/ups-monitor/config.yaml
@@ -74,8 +87,14 @@ PY
 )
         MARKER_PATH="${STATS_DIR}/.upgrade_marker.json"
         mkdir -p "${STATS_DIR}" 2>/dev/null || true
-        printf '{"old_version":"%s"}\n' "${OLD_VERSION}" \
-            > "${MARKER_PATH}" 2>/dev/null || true
+        # JSON-encode via python3 so a version with shell-special or
+        # JSON-special chars (quotes, backslashes) can't produce a
+        # malformed marker. rpm/dpkg version policies don't permit "
+        # in practice, but the daemon's read_upgrade_marker degrades
+        # gracefully on JSONDecodeError to the _resolve_old_version
+        # fallback chain regardless.
+        python3 -c 'import json,sys; print(json.dumps({"old_version": sys.argv[1]}))' \
+            "${OLD_VERSION}" > "${MARKER_PATH}" 2>/dev/null || true
 
         echo "Restarting Eneru service..."
         systemctl restart eneru.service

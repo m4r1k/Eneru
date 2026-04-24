@@ -131,6 +131,22 @@ class MultiUPSCoordinator:
             upgrade_marker=upgrade_marker,
             last_seen_version=last_seen,
         )
+        # v5.2.1: sweep each per-UPS store for any pending lifecycle row
+        # left over from the previous instance (the deferred 'Service
+        # Stopped' from _handle_signal) and cancel it BEFORE the new
+        # lifecycle send. The single-UPS path does this inside
+        # _emit_lifecycle_startup_notification (monitor.py) but that
+        # function early-returns in coordinator mode without reaching
+        # the cancel block, so without this sweep multi-UPS users still
+        # see two notifications on every restart/upgrade. Order matters:
+        # the new lifecycle send below goes to the worker's in-memory
+        # buffer (no stores are registered yet at this point in startup);
+        # the per-UPS monitors register their stores in _start_monitors,
+        # which drains the buffer into them as new pending rows. So the
+        # cancel-then-send order here is safe — the cancel only sees
+        # rows already on disk from the previous process.
+        self._cancel_prev_pending_lifecycle_rows(stats_dir)
+
         if self._notification_worker:
             self._notification_worker.send(
                 body=body, notify_type=notify_type, category="lifecycle",
@@ -142,6 +158,41 @@ class MultiUPSCoordinator:
         # (which still runs in coordinator mode for the meta side).
         delete_shutdown_marker(stats_dir)
         delete_upgrade_marker(stats_dir)
+
+    def _cancel_prev_pending_lifecycle_rows(self, stats_dir: Path) -> None:
+        """Cancel any pending lifecycle row left in each per-UPS store
+        from the previous process instance. Mirrors the cancel block in
+        ``UPSGroupMonitor._emit_lifecycle_startup_notification`` so the
+        coordinator path produces exactly one lifecycle notification per
+        restart/upgrade — same contract as single-UPS mode.
+
+        Best-effort by design: any sqlite or filesystem error during the
+        sweep is swallowed (a transient failure must not break startup;
+        the worst case is the user sees a stop + start pair on this one
+        restart, which is the v5.2.0 bug — not worse than the prior
+        state). Stores that don't exist yet (first-ever start) are
+        silently skipped.
+        """
+        for group in self.config.ups_groups:
+            sanitized = (group.ups.name
+                         .replace("@", "-")
+                         .replace(":", "-")
+                         .replace("/", "-"))
+            db_path = stats_dir / f"{sanitized}.db"
+            if not db_path.exists():
+                continue
+            store = StatsStore(db_path)
+            try:
+                store.open()
+                for row in store.find_pending_by_category("lifecycle"):
+                    store.cancel_notification(row[0], "superseded")
+            except Exception:
+                pass
+            finally:
+                try:
+                    store.close()
+                except Exception:
+                    pass
 
     def _read_last_seen_version_from_first_group(self, stats_dir):
         """Read meta.last_seen_version from the first group's stats DB
@@ -427,13 +478,6 @@ class MultiUPSCoordinator:
         """Handle SIGTERM/SIGINT for clean shutdown."""
         self._log("🛑 Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
 
-        if self._notification_worker:
-            self._notification_worker.send(
-                "🛑 **Eneru Service Stopped**\nMonitoring is now inactive.",
-                "warning",
-                category="lifecycle",
-            )
-
         self._stop_event.set()
 
         # Wait briefly for monitor + evaluator threads to finish
@@ -442,12 +486,26 @@ class MultiUPSCoordinator:
         for thread in self._evaluator_threads:
             thread.join(timeout=5)
 
+        # v5.2.1: see UPSGroupMonitor._cleanup_and_exit for the rationale.
+        # The lifecycle stop notification is enqueued AFTER the worker is
+        # drained and stopped, so the row stays `pending` in SQLite for
+        # the next daemon's classifier to cancel via cancel_notification
+        # (single message per restart/upgrade/reinstall transition).
+        # Skip the enqueue entirely when an upgrade is in flight — the
+        # next daemon's "📦 Upgraded" classification supersedes it.
+        stats_dir = Path(self.config.statistics.db_directory)
+        upgrade_in_progress = read_upgrade_marker(stats_dir) is not None
+
         if self._notification_worker:
-            # Same SIGTERM-race fix as in monitor.py:_cleanup_and_exit:
-            # drain the queue before joining the worker thread so the
-            # final 'Service Stopped' notification actually ships.
             self._notification_worker.flush(timeout=5)
             self._notification_worker.stop()
+
+        if self._notification_worker and not upgrade_in_progress:
+            self._notification_worker.send(
+                "🛑 **Eneru Service Stopped**\nMonitoring is now inactive.",
+                "warning",
+                category="lifecycle",
+            )
 
         # Slice 3: tag this exit so the next start can emit "🔄 Restarted"
         # if it comes back within RESTART_DOWNTIME_THRESHOLD_SECS, else
@@ -459,7 +517,6 @@ class MultiUPSCoordinator:
         # service down should preserve "we shut ourselves down for a
         # reason" so the next start emits "📊 Recovered" rather than
         # "🔄 Restarted".
-        stats_dir = Path(self.config.statistics.db_directory)
         existing = read_shutdown_marker(stats_dir)
         if not (existing
                 and existing.get("reason") == REASON_SEQUENCE_COMPLETE):
