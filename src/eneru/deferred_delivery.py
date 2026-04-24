@@ -43,6 +43,7 @@ import os
 import subprocess
 import sys
 import sqlite3
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -110,12 +111,21 @@ def _detect_systemd_stop_intent() -> bool:
     restart). When True, the OLD daemon ships the lifecycle stop
     notification eagerly because no replacement is coming.
 
-    Implementation: queries ``systemctl show -p Job eneru.service``.
-    The output is one of ``Job=`` (no job queued — usually a crash
-    or kill) or ``Job=N:type`` where ``type`` is ``stop`` /
-    ``restart`` / ``start`` / ``reload`` / etc. systemd queues the
-    job BEFORE sending SIGTERM, so by the time we read this we
-    should see the pending action.
+    Implementation: queries ``systemctl list-jobs --no-legend``,
+    NOT ``systemctl show -p Job``. The latter returns only the job
+    DBus path / numeric id (``Job=12345``) — it does NOT carry the
+    job's TYPE, so an earlier rc parsed ``Job=N:type`` and always
+    saw False (which silently regressed every `systemctl stop` to
+    the 15-second defensive timer; caught in PR #35 review).
+
+    ``list-jobs`` output (with ``--no-legend`` suppressing header
+    and footer) is one line per active job:
+
+        12345 eneru.service stop running
+
+    Columns: JobID, Unit, Type, State. We match by exact unit name
+    and treat the third field as the job type. ``LANG=C`` ensures
+    the column header isn't translated on non-English locales.
 
     Returns False on any uncertainty (query failed, systemd not
     available, racing the queue, unexpected output) — the caller
@@ -123,22 +133,23 @@ def _detect_systemd_stop_intent() -> bool:
     """
     try:
         result = subprocess.run(
-            ["systemctl", "show", "-p", "Job", "eneru.service"],
+            ["systemctl", "list-jobs", "--no-legend"],
             capture_output=True, timeout=2, check=False,
+            env={**os.environ, "LANG": "C", "LC_ALL": "C"},
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return False
     if result.returncode != 0:
         return False
-    line = result.stdout.decode("utf-8", errors="replace").strip()
-    # Format: "Job=" or "Job=N:type"
-    if "=" not in line:
-        return False
-    value = line.split("=", 1)[1].strip()
-    if not value or ":" not in value:
-        return False  # no job queued, or unexpected format
-    job_type = value.split(":", 1)[1].strip().lower()
-    return job_type == "stop"
+    output = result.stdout.decode("utf-8", errors="replace")
+    for line in output.splitlines():
+        parts = line.split()
+        # Expect at least: JobID Unit Type State
+        if len(parts) < 4:
+            continue
+        if parts[1] == "eneru.service":
+            return parts[2].lower() == "stop"
+    return False
 
 
 def schedule_deferred_stop_or_eager_send(
@@ -328,6 +339,7 @@ def deliver_pending_stop(
     store = StatsStore(db_path)
     try:
         store.open()
+        # Read the body so we know what to ship if we win the claim.
         row = store._conn.execute(
             "SELECT body, notify_type, status FROM notifications "
             "WHERE id = ?",
@@ -337,7 +349,27 @@ def deliver_pending_stop(
             return 0  # row purged
         body, notify_type, status = row
         if status != "pending":
-            return 0  # superseded or already sent — skip
+            return 0  # already cancelled (superseded) or already sent
+
+        # ATOMIC CLAIM (CodeRabbit P1): the previous version did a
+        # SELECT pending → send → mark_sent sequence with no claim
+        # step. If the next daemon's classifier cancelled the row
+        # between the SELECT and the send, we'd ship the stale stop
+        # AND mark_notification_sent would overwrite the row's
+        # `cancelled` status back to `sent` — reopening the
+        # duplicate-lifecycle race the v5.2.1 fix exists to close.
+        # Claim by transitioning pending→sent in a single statement;
+        # only proceed with delivery if we actually won the row.
+        with store._db_lock:
+            cur = store._conn.execute(
+                "UPDATE notifications SET status='sent', sent_at=?, "
+                "attempts=attempts+1 WHERE id=? AND status='pending'",
+                (int(time.time()), notification_id),
+            )
+            store._conn.commit()
+            won = cur.rowcount > 0
+        if not won:
+            return 0  # raced with the classifier; let it win
 
         worker = NotificationWorker(config)
         # start() initializes the Apprise instance from config.urls
@@ -345,11 +377,34 @@ def deliver_pending_stop(
         # which we don't strictly need here, but the cost is
         # negligible for a one-shot delivery.
         if not worker.start():
-            return 0  # apprise unavailable / no urls / etc.
+            # apprise unavailable / no urls — revert the claim so a
+            # future start can retry instead of leaving a row marked
+            # `sent` with no actual delivery.
+            try:
+                with store._db_lock:
+                    store._conn.execute(
+                        "UPDATE notifications SET status='pending', "
+                        "sent_at=NULL WHERE id=?",
+                        (notification_id,),
+                    )
+                    store._conn.commit()
+            except sqlite3.Error:
+                pass
+            return 0
         try:
-            success = worker._send_via_apprise(body, notify_type)
-            if success:
-                store.mark_notification_sent(notification_id)
+            if not worker._send_via_apprise(body, notify_type):
+                # Apprise rejected — revert claim to give the next
+                # daemon a chance to retry.
+                try:
+                    with store._db_lock:
+                        store._conn.execute(
+                            "UPDATE notifications SET status='pending', "
+                            "sent_at=NULL WHERE id=?",
+                            (notification_id,),
+                        )
+                        store._conn.commit()
+                except sqlite3.Error:
+                    pass
         finally:
             worker.stop()
     except (sqlite3.Error, OSError):

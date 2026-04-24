@@ -73,34 +73,72 @@ class TestRunningUnderSystemd:
 # ==============================================================================
 
 class TestDetectSystemdStopIntent:
+    """v5.2.1 fix: parse `systemctl list-jobs --no-legend`, not
+    `systemctl show -p Job` (which only carries the job ID, not the
+    type — an earlier rc shipped that wrong format and silently
+    regressed every `systemctl stop` to the 15-second timer)."""
 
     @pytest.mark.unit
     def test_returns_true_for_stop_job(self):
-        result = MagicMock(returncode=0, stdout=b"Job=42:stop\n")
+        result = MagicMock(
+            returncode=0,
+            stdout=b"12345 eneru.service stop running\n",
+        )
         with patch("eneru.deferred_delivery.subprocess.run",
                    return_value=result):
             assert _detect_systemd_stop_intent() is True
 
     @pytest.mark.unit
     def test_returns_false_for_restart_job(self):
-        result = MagicMock(returncode=0, stdout=b"Job=42:restart\n")
+        result = MagicMock(
+            returncode=0,
+            stdout=b"12345 eneru.service restart running\n",
+        )
         with patch("eneru.deferred_delivery.subprocess.run",
                    return_value=result):
             assert _detect_systemd_stop_intent() is False
 
     @pytest.mark.unit
     def test_returns_false_for_start_job(self):
-        result = MagicMock(returncode=0, stdout=b"Job=42:start\n")
+        result = MagicMock(
+            returncode=0,
+            stdout=b"12345 eneru.service start running\n",
+        )
         with patch("eneru.deferred_delivery.subprocess.run",
                    return_value=result):
             assert _detect_systemd_stop_intent() is False
 
     @pytest.mark.unit
     def test_returns_false_for_no_job_queued(self):
-        result = MagicMock(returncode=0, stdout=b"Job=\n")
+        result = MagicMock(returncode=0, stdout=b"")
         with patch("eneru.deferred_delivery.subprocess.run",
                    return_value=result):
             assert _detect_systemd_stop_intent() is False
+
+    @pytest.mark.unit
+    def test_returns_false_for_unrelated_unit(self):
+        """A stop job for a DIFFERENT unit shouldn't trigger our
+        eager-send path."""
+        result = MagicMock(
+            returncode=0,
+            stdout=b"12345 some-other.service stop running\n",
+        )
+        with patch("eneru.deferred_delivery.subprocess.run",
+                   return_value=result):
+            assert _detect_systemd_stop_intent() is False
+
+    @pytest.mark.unit
+    def test_handles_multiple_jobs_picks_eneru(self):
+        """Multiple jobs queued — find ours by unit name match."""
+        result = MagicMock(
+            returncode=0,
+            stdout=(b"100 nut-server.service start running\n"
+                    b"101 eneru.service stop waiting\n"
+                    b"102 docker.service reload running\n"),
+        )
+        with patch("eneru.deferred_delivery.subprocess.run",
+                   return_value=result):
+            assert _detect_systemd_stop_intent() is True
 
     @pytest.mark.unit
     def test_returns_false_when_systemctl_missing(self):
@@ -124,10 +162,30 @@ class TestDetectSystemdStopIntent:
 
     @pytest.mark.unit
     def test_case_insensitive_on_job_type(self):
-        result = MagicMock(returncode=0, stdout=b"Job=42:STOP\n")
+        result = MagicMock(
+            returncode=0,
+            stdout=b"12345 eneru.service STOP running\n",
+        )
         with patch("eneru.deferred_delivery.subprocess.run",
                    return_value=result):
             assert _detect_systemd_stop_intent() is True
+
+    @pytest.mark.unit
+    def test_invocation_forces_lang_c(self):
+        """Localized environments could translate the column header,
+        breaking the parser. We force LANG=C / LC_ALL=C in the
+        subprocess env."""
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["env"] = kwargs.get("env", {})
+            return MagicMock(returncode=0, stdout=b"")
+
+        with patch("eneru.deferred_delivery.subprocess.run",
+                   side_effect=fake_run):
+            _detect_systemd_stop_intent()
+        assert captured["env"].get("LANG") == "C"
+        assert captured["env"].get("LC_ALL") == "C"
 
 
 # ==============================================================================
@@ -557,3 +615,92 @@ class TestDeliverPendingStop:
             notification_id=999, db_path=db_path, config=cfg,
         )
         assert rc == 0
+
+    @pytest.mark.unit
+    def test_atomic_claim_does_not_overwrite_cancelled_row(self, tmp_path):
+        """v5.2.1 (CodeRabbit P1): if the next daemon's classifier
+        cancels the row between our SELECT and our send, the prior
+        implementation would still ship and then mark_notification_sent
+        would overwrite the `cancelled` status back to `sent` —
+        reopening the duplicate-lifecycle race. The atomic UPDATE
+        ... WHERE status='pending' claim closes that window: an
+        already-cancelled row simply isn't claimed and the timer
+        exits without delivering."""
+        db_path = tmp_path / "ups.db"
+        # Pre-create a CANCELLED row to simulate the race outcome.
+        store = StatsStore(db_path)
+        store.open()
+        try:
+            row_id = store.enqueue_notification(
+                body="🛑 Stopped", notify_type="warning",
+                category="lifecycle", ts=1000,
+            )
+            store.cancel_notification(row_id, "superseded")
+        finally:
+            store.close()
+
+        cfg = self._make_config()
+        with patch("eneru.notifications.NotificationWorker") as Worker:
+            worker = Worker.return_value
+            worker.start.return_value = True
+            worker._send_via_apprise.return_value = True
+            rc = deliver_pending_stop(
+                notification_id=row_id, db_path=db_path, config=cfg,
+            )
+        assert rc == 0
+        # Apprise must NOT have been called — the row was already
+        # cancelled when we ran.
+        worker._send_via_apprise.assert_not_called()
+        # Row must still be cancelled (not overwritten back to sent).
+        store = StatsStore(db_path)
+        store.open()
+        try:
+            row = store._conn.execute(
+                "SELECT status, cancel_reason FROM notifications "
+                "WHERE id = ?", (row_id,),
+            ).fetchone()
+        finally:
+            store.close()
+        assert row == ("cancelled", "superseded"), (
+            f"Cancelled row was overwritten by mark_sent: {row}"
+        )
+
+    @pytest.mark.unit
+    def test_reverts_claim_on_apprise_failure(self, tmp_path):
+        """If Apprise rejects the send (network down, bad URL), the
+        atomic claim should be reverted so a future start can retry
+        — otherwise the row sits as `sent` despite never being
+        delivered, and the user gets nothing."""
+        db_path = tmp_path / "ups.db"
+        store = StatsStore(db_path)
+        store.open()
+        try:
+            row_id = store.enqueue_notification(
+                body="🛑 Stopped", notify_type="warning",
+                category="lifecycle", ts=1000,
+            )
+        finally:
+            store.close()
+
+        cfg = self._make_config()
+        with patch("eneru.notifications.NotificationWorker") as Worker:
+            worker = Worker.return_value
+            worker.start.return_value = True
+            worker._send_via_apprise.return_value = False
+            rc = deliver_pending_stop(
+                notification_id=row_id, db_path=db_path, config=cfg,
+            )
+        assert rc == 0
+        # Row should be back to pending so the next start can retry.
+        store = StatsStore(db_path)
+        store.open()
+        try:
+            row = store._conn.execute(
+                "SELECT status FROM notifications WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+        finally:
+            store.close()
+        assert row[0] == "pending", (
+            f"Failed Apprise send should leave row pending; got: {row}"
+        )

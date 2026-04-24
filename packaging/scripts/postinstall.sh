@@ -57,6 +57,11 @@ if [ "$is_upgrade" = true ]; then
         # in /run/eneru/.old-version. Prefer that — RPM's postinstall
         # gets nothing useful in $2 (DEB does), so without preinstall the
         # default below would render as "vunknown" in the notification.
+        # Initialize explicitly so an environment-inherited OLD_VERSION
+        # (theoretically possible under manual rpm/dpkg invocations)
+        # can't slip past the empty-check below and render as a bogus
+        # version in the upgrade marker. (CodeRabbit P2 from PR #35.)
+        OLD_VERSION=""
         if [ -r /run/eneru/.old-version ]; then
             OLD_VERSION=$(cat /run/eneru/.old-version 2>/dev/null || echo "")
             rm -f /run/eneru/.old-version

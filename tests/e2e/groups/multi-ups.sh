@@ -439,8 +439,14 @@ rm -rf /tmp/eneru-e2e-restart-multi /tmp/eneru-e2e-restart-multi-*
 mkdir -p /tmp/eneru-e2e-restart-multi
 rm -f /tmp/eneru-e2e-restart-multi-shutdown-flag
 
-# Start from on-line.
+# Start from on-line on BOTH UPSes. Earlier tests in this group mutate
+# apply-UPS1.dev / apply-UPS2.dev (the per-UPS dummy-driver state files
+# the multi-UPS scenarios use); without resetting them here Test 36
+# inherits whatever state the previous test left, becoming order-
+# dependent. (CodeRabbit P1 from PR #35 review.)
 cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
+cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply-UPS1.dev"
+cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply-UPS2.dev"
 sleep 3
 
 # --- First run: coordinator startup, then SIGTERM. ---
@@ -450,9 +456,11 @@ sleep 6  # coordinator init + per-UPS monitors register stores + drain memory bu
 kill -TERM $ENERU_PID 2>/dev/null || true
 wait $ENERU_PID 2>/dev/null || true
 
-# At least one per-UPS store should have a pending 'Service Stopped'
-# row from the coordinator's _handle_signal (the send goes through the
-# worker's first registered store).
+# Exactly one per-UPS store should have a pending 'Service Stopped'
+# row (the coordinator's _handle_signal sends ONE notification through
+# the worker's first registered store; we should NOT see duplicates).
+# Cubic P2 from PR #35 review: -lt 1 also passes if the coordinator
+# accidentally creates duplicates across stores; tighten to == 1.
 DBS=$(find /tmp/eneru-e2e-restart-multi -maxdepth 1 -name '*.db' 2>/dev/null)
 if [ -z "$DBS" ]; then
   echo "FAIL: no SQLite stats DB created at /tmp/eneru-e2e-restart-multi/"
@@ -468,8 +476,8 @@ for db in $DBS; do
        AND body LIKE '%Service Stopped%';" 2>/dev/null || echo 0)
   total_pending_stop=$((total_pending_stop + c))
 done
-if [ "$total_pending_stop" -lt "1" ]; then
-  echo "FAIL (36a): expected at least 1 pending 'Service Stopped' row across stores, got $total_pending_stop"
+if [ "$total_pending_stop" != "1" ]; then
+  echo "FAIL (36a): expected exactly 1 pending 'Service Stopped' row across stores, got $total_pending_stop"
   for db in $DBS; do
     echo "--- $db: ---"
     sqlite3 "$db" "SELECT id, ts, category, status, cancel_reason, substr(body,1,80) FROM notifications ORDER BY id;"
@@ -477,7 +485,7 @@ if [ "$total_pending_stop" -lt "1" ]; then
   cat /tmp/test36-run1.log
   exit 1
 fi
-echo "PASS (36a): coordinator left $total_pending_stop pending 'Service Stopped' row(s)"
+echo "PASS (36a): coordinator left exactly 1 pending 'Service Stopped' row"
 
 # --- Second run: same config, simulating restart. ---
 eneru run --config "$E2E_DIR/config-e2e-restart-multi.yaml" > /tmp/test36-run2.log 2>&1 &
@@ -486,7 +494,7 @@ sleep 7  # coordinator startup → _cancel_prev_pending_lifecycle_rows → new l
 kill -TERM $ENERU_PID 2>/dev/null || true
 wait $ENERU_PID 2>/dev/null || true
 
-# After the second coordinator's startup sweep, every prior 'Service
+# After the second coordinator's startup sweep, the prior 'Service
 # Stopped' row should be status='cancelled' with cancel_reason='superseded'.
 total_superseded=0
 for db in $DBS; do
@@ -497,8 +505,8 @@ for db in $DBS; do
        AND body LIKE '%Service Stopped%';" 2>/dev/null || echo 0)
   total_superseded=$((total_superseded + c))
 done
-if [ "$total_superseded" -lt "$total_pending_stop" ]; then
-  echo "FAIL (36b): expected >= $total_pending_stop superseded rows, got $total_superseded"
+if [ "$total_superseded" != "$total_pending_stop" ]; then
+  echo "FAIL (36b): expected $total_pending_stop superseded rows, got $total_superseded"
   for db in $DBS; do
     echo "--- $db: ---"
     sqlite3 "$db" "SELECT id, ts, category, status, cancel_reason, substr(body,1,80) FROM notifications ORDER BY id;"
@@ -506,7 +514,30 @@ if [ "$total_superseded" -lt "$total_pending_stop" ]; then
   cat /tmp/test36-run2.log
   exit 1
 fi
-echo "PASS (36b): $total_superseded prior 'Service Stopped' row(s) cancelled with reason='superseded'"
+echo "PASS (36b): prior 'Service Stopped' row cancelled with reason='superseded'"
+
+# Also verify the new daemon emitted a Restarted lifecycle row — without
+# this assertion, a regression where the supersede happens but the
+# replacement notification never fires would still pass. (Cubic P2 from
+# PR #35 review.)
+total_restarted=0
+for db in $DBS; do
+  c=$(sqlite3 "$db" \
+    "SELECT COUNT(*) FROM notifications \
+     WHERE category='lifecycle' \
+       AND body LIKE '%Restarted%';" 2>/dev/null || echo 0)
+  total_restarted=$((total_restarted + c))
+done
+if [ "$total_restarted" -lt "1" ]; then
+  echo "FAIL (36c): expected at least 1 Restarted lifecycle row, got $total_restarted"
+  for db in $DBS; do
+    echo "--- $db: ---"
+    sqlite3 "$db" "SELECT id, ts, category, status, cancel_reason, substr(body,1,80) FROM notifications ORDER BY id;"
+  done
+  cat /tmp/test36-run2.log
+  exit 1
+fi
+echo "PASS (36c): new daemon emitted $total_restarted Restarted row(s)"
 
 echo ""
 echo "=== Test 36 PASSED: coordinator single-notification on restart verified ==="

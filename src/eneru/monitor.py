@@ -1047,16 +1047,34 @@ class UPSGroupMonitor(
         # and the user sees a single Restarted/Upgraded/Recovered. If
         # no replacement starts (true `systemctl stop`), the timer
         # delivers the stop and the user sees a single Stopped.
-        if notif_id is not None and self._stats_store._conn is not None:
-            schedule_deferred_stop_or_eager_send(
-                notification_id=notif_id,
-                db_path=Path(self._stats_db_path),
-                config_path=getattr(self.config, "config_path", None),
-                body=body,
-                notify_type=notify_type,
-                worker=self._notification_worker,
-                log_fn=self._log_message,
-            )
+        if not upgrade_in_progress:
+            if notif_id is not None and self._stats_store._conn is not None:
+                # Normal path: row was enqueued in SQLite, hand off to
+                # the deferred-delivery scheduler.
+                schedule_deferred_stop_or_eager_send(
+                    notification_id=notif_id,
+                    db_path=Path(self._stats_db_path),
+                    config_path=getattr(self.config, "config_path", None),
+                    body=body,
+                    notify_type=notify_type,
+                    worker=self._notification_worker,
+                    log_fn=self._log_message,
+                )
+            elif self._notification_worker is not None:
+                # CodeRabbit P1: stats DB open() failed (per the warning
+                # logged in _initialize_notifications), so notif_id is
+                # None and the row never landed in SQLite. Without this
+                # branch the lifecycle stop would be silently dropped on
+                # every graceful exit. Ship eagerly via Apprise so the
+                # user still gets a notification (loses restart-
+                # coalescing in this degraded case, but the alternative
+                # is no notification at all).
+                try:
+                    self._notification_worker._send_via_apprise(
+                        body, notify_type,
+                    )
+                except Exception:
+                    pass  # best-effort; nothing more we can do here
 
         self._stop_stats()
 

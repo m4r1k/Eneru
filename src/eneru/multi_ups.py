@@ -535,16 +535,28 @@ class MultiUPSCoordinator:
         # timer fires ~15 s after our exit; if a new coordinator's
         # `_cancel_prev_pending_lifecycle_rows` cancels the row first,
         # the timer is a no-op and the user sees a single Restarted.
-        if notif_id is not None and first_store is not None:
-            schedule_deferred_stop_or_eager_send(
-                notification_id=notif_id,
-                db_path=first_store.db_path,
-                config_path=getattr(self.config, "config_path", None),
-                body=body,
-                notify_type=notify_type,
-                worker=self._notification_worker,
-                log_fn=self._log,
-            )
+        if not upgrade_in_progress:
+            if notif_id is not None and first_store is not None:
+                schedule_deferred_stop_or_eager_send(
+                    notification_id=notif_id,
+                    db_path=first_store.db_path,
+                    config_path=getattr(self.config, "config_path", None),
+                    body=body,
+                    notify_type=notify_type,
+                    worker=self._notification_worker,
+                    log_fn=self._log,
+                )
+            elif self._notification_worker is not None:
+                # CodeRabbit P1 (mirrored from monitor.py): no store
+                # registered means worker.send() returned None and the
+                # row never landed in SQLite. Ship eagerly via Apprise
+                # so the lifecycle stop isn't silently lost.
+                try:
+                    self._notification_worker._send_via_apprise(
+                        body, notify_type,
+                    )
+                except Exception:
+                    pass
 
         # Slice 3: tag this exit so the next start can emit "🔄 Restarted"
         # if it comes back within RESTART_DOWNTIME_THRESHOLD_SECS, else

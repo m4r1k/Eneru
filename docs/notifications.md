@@ -274,18 +274,18 @@ Two related events that reach the queue close together get folded into one riche
 
 | Event | `event_type` (stats DB) | Category | Notes |
 |-------|-------------------------|----------|-------|
-| Power lost | `ON_BATTERY` | `power_event` | Coalescible with `POWER_RESTORED` if both pending |
-| Power restored | `POWER_RESTORED` | `power_event` | Suppressible via `notifications.suppress` |
-| Brief power outage (coalesced) | `BRIEF_POWER_OUTAGE` | `power_event` | v5.2 — replaces an `ON_BATTERY` + `POWER_RESTORED` pair |
+| Power lost | `ON_BATTERY` | `power_event_on_battery` | Sub-typed category lets the coalescer pair it with `power_event_on_line` by exact match |
+| Power restored | `POWER_RESTORED` | `power_event_on_line` | Suppressible via `notifications.suppress` |
+| Brief power outage (coalesced) | `BRIEF_POWER_OUTAGE` | `power_event` | v5.2 summary row that replaces an `ON_BATTERY` + `POWER_RESTORED` pair |
+| Connection lost / restored | `CONNECTION_LOST` / `CONNECTION_RESTORED` | `power_event` | Restored is suppressible |
 | Emergency shutdown initiated | `EMERGENCY_SHUTDOWN_INITIATED` | `shutdown` | Safety-critical (cannot be suppressed) |
 | Shutdown sequence complete | `SHUTDOWN_SEQUENCE_COMPLETE` | `shutdown_summary` | One per shutdown |
-| Voltage: brownout / over-voltage | `BROWNOUT_DETECTED` / `OVER_VOLTAGE_DETECTED` | `voltage` | Hysteresis-debounced; severe deviations bypass the dwell |
-| Voltage normalized | `VOLTAGE_NORMALIZED` | `voltage` | Suppressible |
-| AVR boost / trim / inactive | `AVR_BOOST_ACTIVE` / `AVR_TRIM_ACTIVE` / `AVR_INACTIVE` | `voltage` | All three suppressible |
-| Bypass active / inactive | `BYPASS_MODE_ACTIVE` / `BYPASS_MODE_INACTIVE` | `voltage` | Active is safety-critical |
-| Overload active / resolved | `OVERLOAD_ACTIVE` / `OVERLOAD_RESOLVED` | `voltage` | Active is safety-critical |
-| Connection lost / restored | `CONNECTION_LOST` / `CONNECTION_RESTORED` | `general` | Restored is suppressible |
-| Battery anomaly | `BATTERY_ANOMALY_DETECTED` | `general` | Charge dropped > 20% while on line power; sustained-reading filter (3 polls) for APC / CyberPower / UniFi firmware jitter |
+| Voltage: brownout / over-voltage | `BROWNOUT_DETECTED` / `OVER_VOLTAGE_DETECTED` | `power_event` | Hysteresis-debounced; severe deviations bypass the dwell |
+| Voltage normalized | `VOLTAGE_NORMALIZED` | `power_event` | Suppressible |
+| AVR boost / trim / inactive | `AVR_BOOST_ACTIVE` / `AVR_TRIM_ACTIVE` / `AVR_INACTIVE` | `power_event` | All three suppressible |
+| Bypass active / inactive | `BYPASS_MODE_ACTIVE` / `BYPASS_MODE_INACTIVE` | `power_event` | Active is safety-critical |
+| Overload active / resolved | `OVERLOAD_ACTIVE` / `OVERLOAD_RESOLVED` | `power_event` | Active is safety-critical |
+| Battery anomaly | `BATTERY_ANOMALY_DETECTED` | `health` | Charge dropped > 20% while on line power; sustained-reading filter (3 polls) for APC / CyberPower / UniFi firmware jitter |
 | Lifecycle: started / restarted / recovered / upgraded | `DAEMON_START` / `DAEMON_RESTARTED` / `DAEMON_RECOVERED` / `DAEMON_UPGRADED` | `lifecycle` | One per lifecycle transition (see "Lifecycle notifications") |
 | Lifecycle: restarted after fatal | `DAEMON_RESTARTED_AFTER_FATAL` | `lifecycle` | |
 | Lifecycle: started after crash | `DAEMON_AFTER_CRASH` | `lifecycle` | Marker-less restart with prior `last_seen_version` |
