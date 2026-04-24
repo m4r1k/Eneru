@@ -71,6 +71,76 @@ def _eneru_invocation_args() -> Optional[list]:
     return [sys.executable, "-m", "eneru"]
 
 
+# ============================================================================
+# systemd intent detection — keep the defer-then-ship complexity OPT-IN.
+#
+# ROADMAP NOTE (K8s / Docker support):
+# The whole defer+timer dance only makes sense when there's a service
+# manager that will or won't restart us — i.e., systemd. In container
+# contexts (Docker, K8s pods) the container runtime decides the
+# replacement at a different layer (RestartPolicy / ReplicaSet), there
+# is no "Job=restart" concept the daemon can introspect, and there's no
+# `systemd-run` to schedule a deferred timer against. So the right
+# behavior in container contexts is plain **eager send** — ship the
+# stop notification synchronously and exit, same as v5.2.0 did
+# unconditionally. When K8s / Docker support lands, this module's two
+# entry points (`schedule_deferred_stop_or_eager_send` and
+# `deliver_pending_stop`) can stay as-is — the systemd-specific paths
+# are gated by `_running_under_systemd()` below, so non-systemd
+# environments naturally take the eager path with no code changes.
+# Anything more sophisticated for K8s (e.g., a sidecar that delivers
+# the row when the pod terminates) is a future-release concern, not
+# a v5.2.1 one.
+# ============================================================================
+
+def _running_under_systemd() -> bool:
+    """True iff this process is being managed by systemd as a unit.
+
+    Checked via the ``INVOCATION_ID`` env var that systemd sets for
+    every service it launches. False in containers/K8s pods (no
+    systemd), under foreground manual invocation (``eneru run``
+    from a shell), and under most CI test environments.
+    """
+    return bool(os.environ.get("INVOCATION_ID"))
+
+
+def _detect_systemd_stop_intent() -> bool:
+    """True iff systemd is in the middle of a ``stop`` job for
+    ``eneru.service`` (user ran ``systemctl stop eneru``, NOT a
+    restart). When True, the OLD daemon ships the lifecycle stop
+    notification eagerly because no replacement is coming.
+
+    Implementation: queries ``systemctl show -p Job eneru.service``.
+    The output is one of ``Job=`` (no job queued — usually a crash
+    or kill) or ``Job=N:type`` where ``type`` is ``stop`` /
+    ``restart`` / ``start`` / ``reload`` / etc. systemd queues the
+    job BEFORE sending SIGTERM, so by the time we read this we
+    should see the pending action.
+
+    Returns False on any uncertainty (query failed, systemd not
+    available, racing the queue, unexpected output) — the caller
+    falls through to the defensive systemd-run timer in that case.
+    """
+    try:
+        result = subprocess.run(
+            ["systemctl", "show", "-p", "Job", "eneru.service"],
+            capture_output=True, timeout=2, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    if result.returncode != 0:
+        return False
+    line = result.stdout.decode("utf-8", errors="replace").strip()
+    # Format: "Job=" or "Job=N:type"
+    if "=" not in line:
+        return False
+    value = line.split("=", 1)[1].strip()
+    if not value or ":" not in value:
+        return False  # no job queued, or unexpected format
+    job_type = value.split(":", 1)[1].strip().lower()
+    return job_type == "stop"
+
+
 def schedule_deferred_stop_or_eager_send(
     *,
     notification_id: int,
@@ -93,6 +163,43 @@ def schedule_deferred_stop_or_eager_send(
     ``log_fn`` is called with one short status line so the operator
     can see in the log which path was taken.
     """
+    # v5.2.1: short-circuit to eager send in two cases — both produce
+    # an INSTANT 🛑 Stopped notification with no 15-second wait.
+    #
+    # 1. Not running under systemd (containers, K8s pods, manual
+    #    `eneru run` from a shell, CI tests). The defer-then-ship
+    #    mechanism only makes sense when there's a service manager
+    #    that will or won't restart us. See the ROADMAP NOTE above.
+    if not _running_under_systemd():
+        log_fn(
+            "📤 Not running under systemd — shipping stop notification "
+            "eagerly via Apprise"
+        )
+        _eager_send(
+            notification_id=notification_id, db_path=db_path,
+            body=body, notify_type=notify_type,
+            worker=worker, log_fn=log_fn,
+        )
+        return
+
+    # 2. systemd has queued a `stop` job for eneru.service — i.e. user
+    #    ran `systemctl stop eneru` (NOT a restart). No replacement is
+    #    coming, so the deferred-then-ship dance is pure latency: ship
+    #    eagerly. For Job=restart / Job=start (and unknown / no job),
+    #    fall through to the timer path so the cancel-on-startup
+    #    mechanism gets a chance to win.
+    if _detect_systemd_stop_intent():
+        log_fn(
+            "📤 systemctl stop detected — shipping stop notification "
+            "eagerly (no replacement daemon coming)"
+        )
+        _eager_send(
+            notification_id=notification_id, db_path=db_path,
+            body=body, notify_type=notify_type,
+            worker=worker, log_fn=log_fn,
+        )
+        return
+
     if config_path:
         invocation = _eneru_invocation_args()
         cmd = [

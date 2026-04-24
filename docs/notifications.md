@@ -249,13 +249,14 @@ v5.2 replaces the unconditional `🚀 Started` / `🛑 Stopped` pair with a **st
 | `🚀 Eneru Started (after crash)` | Daemon came back without ever writing a marker | No shutdown marker but `meta.last_seen_version` is set |
 | `🚀 Eneru vX Started` | First-ever start | No markers, no `last_seen_version` |
 
-The mechanism that delivers "exactly one message" combines **cancel-on-startup** with a **systemd-run deferred-delivery timer**:
+The mechanism that delivers "exactly one message" picks the cheapest correct path based on systemd intent:
 
-1. On `SIGTERM`, the old daemon enqueues `🛑 Service Stopped` as a `pending` row, stops its worker (so it can't deliver eagerly), and schedules a transient `systemd-run` timer that re-invokes `eneru _deliver-stop` ~15 s later. The timer lives **outside** `eneru.service`'s cgroup, so it survives our exit and doesn't gate the systemd restart cycle.
-2. If the new daemon comes up first (`systemctl restart`, package upgrade, recovery), its classifier cancels every `pending` lifecycle row with `cancel_reason='superseded'` BEFORE the deferred timer fires. Single message: `🔄 Restarted` / `📦 Upgraded` / `📊 Recovered`.
-3. If no replacement comes up (true `systemctl stop`), the timer fires, sees the row still `pending`, and ships it via Apprise. Single message: `🛑 Service Stopped`.
+1. **`systemctl stop eneru`** (systemd `Job=stop` queued): the old daemon ships `🛑 Service Stopped` synchronously via Apprise and exits. Single message, instant — no waiting around.
+2. **`systemctl restart eneru` / package upgrade**: the old daemon enqueues `🛑 Service Stopped` as a `pending` row, stops its worker, and schedules a transient `systemd-run` timer that re-invokes `eneru _deliver-stop` ~15 s later. The timer lives **outside** `eneru.service`'s cgroup so it survives our exit and doesn't gate the systemd restart cycle. The new daemon's classifier cancels the pending row with `cancel_reason='superseded'` before the timer fires → single `🔄 Restarted` / `📦 Upgraded` / `📊 Recovered`. (Package-upgrade also short-circuits via the upgrade marker in the old daemon's `_cleanup_and_exit`, skipping the enqueue entirely.)
+3. **Crash, kill, manual SIGTERM (no systemd job queued)**: defensive — same systemd-run timer as case 2. If a replacement comes up within 15 s the row is cancelled; otherwise the timer ships.
+4. **Not under systemd** (Docker, K8s, foreground `eneru run`): the defer-then-ship dance only makes sense when there's a service manager that will or won't restart us. The old daemon ships eagerly via Apprise, identical to case 1. Single message, instant.
 
-Fallback: if `systemd-run` isn't available (non-systemd containers, sandboxed builds), the old daemon ships the stop synchronously via Apprise instead. This loses the restart-coalescing benefit on those hosts but guarantees the user always sees a notification.
+The systemd intent is detected by querying `systemctl show -p Job eneru.service` at SIGTERM time — systemd has the job queued before it sends the signal, so by the time we read this we see whether it's a stop, a restart, or nothing (crash/kill).
 
 ---
 

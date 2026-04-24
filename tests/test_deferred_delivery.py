@@ -9,8 +9,10 @@ import pytest
 
 from eneru.deferred_delivery import (
     DEFAULT_DEFER_SECS,
+    _detect_systemd_stop_intent,
     _eager_send,
     _eneru_invocation_args,
+    _running_under_systemd,
     deliver_pending_stop,
     schedule_deferred_stop_or_eager_send,
 )
@@ -43,10 +45,107 @@ class TestEneruInvocationArgs:
 
 
 # ==============================================================================
+# _running_under_systemd
+# ==============================================================================
+
+class TestRunningUnderSystemd:
+
+    @pytest.mark.unit
+    def test_true_when_invocation_id_set(self):
+        with patch.dict("os.environ", {"INVOCATION_ID": "abc123"}, clear=False):
+            assert _running_under_systemd() is True
+
+    @pytest.mark.unit
+    def test_false_when_invocation_id_unset(self):
+        env = {k: v for k, v in __import__("os").environ.items()
+               if k != "INVOCATION_ID"}
+        with patch.dict("os.environ", env, clear=True):
+            assert _running_under_systemd() is False
+
+    @pytest.mark.unit
+    def test_false_when_invocation_id_empty(self):
+        with patch.dict("os.environ", {"INVOCATION_ID": ""}, clear=False):
+            assert _running_under_systemd() is False
+
+
+# ==============================================================================
+# _detect_systemd_stop_intent
+# ==============================================================================
+
+class TestDetectSystemdStopIntent:
+
+    @pytest.mark.unit
+    def test_returns_true_for_stop_job(self):
+        result = MagicMock(returncode=0, stdout=b"Job=42:stop\n")
+        with patch("eneru.deferred_delivery.subprocess.run",
+                   return_value=result):
+            assert _detect_systemd_stop_intent() is True
+
+    @pytest.mark.unit
+    def test_returns_false_for_restart_job(self):
+        result = MagicMock(returncode=0, stdout=b"Job=42:restart\n")
+        with patch("eneru.deferred_delivery.subprocess.run",
+                   return_value=result):
+            assert _detect_systemd_stop_intent() is False
+
+    @pytest.mark.unit
+    def test_returns_false_for_start_job(self):
+        result = MagicMock(returncode=0, stdout=b"Job=42:start\n")
+        with patch("eneru.deferred_delivery.subprocess.run",
+                   return_value=result):
+            assert _detect_systemd_stop_intent() is False
+
+    @pytest.mark.unit
+    def test_returns_false_for_no_job_queued(self):
+        result = MagicMock(returncode=0, stdout=b"Job=\n")
+        with patch("eneru.deferred_delivery.subprocess.run",
+                   return_value=result):
+            assert _detect_systemd_stop_intent() is False
+
+    @pytest.mark.unit
+    def test_returns_false_when_systemctl_missing(self):
+        with patch("eneru.deferred_delivery.subprocess.run",
+                   side_effect=FileNotFoundError):
+            assert _detect_systemd_stop_intent() is False
+
+    @pytest.mark.unit
+    def test_returns_false_when_query_times_out(self):
+        with patch("eneru.deferred_delivery.subprocess.run",
+                   side_effect=subprocess.TimeoutExpired(
+                       cmd="systemctl", timeout=2)):
+            assert _detect_systemd_stop_intent() is False
+
+    @pytest.mark.unit
+    def test_returns_false_on_nonzero_exit(self):
+        result = MagicMock(returncode=1, stdout=b"")
+        with patch("eneru.deferred_delivery.subprocess.run",
+                   return_value=result):
+            assert _detect_systemd_stop_intent() is False
+
+    @pytest.mark.unit
+    def test_case_insensitive_on_job_type(self):
+        result = MagicMock(returncode=0, stdout=b"Job=42:STOP\n")
+        with patch("eneru.deferred_delivery.subprocess.run",
+                   return_value=result):
+            assert _detect_systemd_stop_intent() is True
+
+
+# ==============================================================================
 # schedule_deferred_stop_or_eager_send
 # ==============================================================================
 
 class TestScheduleDeferred:
+
+    @pytest.fixture(autouse=True)
+    def _under_systemd_no_stop_intent(self):
+        """All TestScheduleDeferred tests assume the timer-scheduling
+        path: under systemd AND not a `systemctl stop` (which is the
+        v5.2.1 instant-eager short-circuit). Tests that exercise the
+        short-circuit paths live in TestScheduleShortCircuits below."""
+        with patch.dict("os.environ", {"INVOCATION_ID": "test-invocation"}), \
+             patch("eneru.deferred_delivery._detect_systemd_stop_intent",
+                   return_value=False):
+            yield
 
     def _stub_run_success(self, cmd, **kwargs):
         result = MagicMock()
@@ -206,6 +305,73 @@ class TestScheduleDeferred:
             )
         run.assert_not_called()
         worker._send_via_apprise.assert_called_once()
+
+
+# ==============================================================================
+# v5.2.1 short-circuit paths in schedule_deferred_stop_or_eager_send
+# ==============================================================================
+
+class TestScheduleShortCircuits:
+    """The instant-eager paths added in v5.2.1 to drop the 15-second
+    notification latency on `systemctl stop` and in non-systemd
+    contexts (containers, K8s, manual `eneru run`)."""
+
+    @pytest.mark.unit
+    def test_short_circuit_when_not_under_systemd(self, tmp_path):
+        """No INVOCATION_ID env var → eager send, no systemd-run call,
+        no Job query. This is the K8s / Docker / foreground path."""
+        log = MagicMock()
+        worker = MagicMock()
+        worker._send_via_apprise.return_value = True
+        # Drop INVOCATION_ID from env to simulate non-systemd context.
+        env = {k: v for k, v in __import__("os").environ.items()
+               if k != "INVOCATION_ID"}
+        with patch.dict("os.environ", env, clear=True), \
+             patch("eneru.deferred_delivery.subprocess.run") as run, \
+             patch("eneru.stats.StatsStore.open"), \
+             patch("eneru.stats.StatsStore.mark_notification_sent"), \
+             patch("eneru.stats.StatsStore.close"):
+            schedule_deferred_stop_or_eager_send(
+                notification_id=1,
+                db_path=tmp_path / "ups.db",
+                config_path="/etc/cfg.yaml",
+                body="🛑 stop", notify_type="warning",
+                worker=worker, log_fn=log,
+            )
+        run.assert_not_called()
+        worker._send_via_apprise.assert_called_once_with("🛑 stop", "warning")
+        assert any("Not running under systemd" in c.args[0]
+                   for c in log.call_args_list)
+
+    @pytest.mark.unit
+    def test_short_circuit_on_systemctl_stop_intent(self, tmp_path):
+        """systemd Job=stop detected → eager send, no systemd-run timer.
+        This is the instant-Stopped UX win for `systemctl stop eneru`."""
+        log = MagicMock()
+        worker = MagicMock()
+        worker._send_via_apprise.return_value = True
+        with patch.dict("os.environ",
+                        {"INVOCATION_ID": "test-invocation"}), \
+             patch("eneru.deferred_delivery._detect_systemd_stop_intent",
+                   return_value=True), \
+             patch("eneru.deferred_delivery.subprocess.run") as run, \
+             patch("eneru.stats.StatsStore.open"), \
+             patch("eneru.stats.StatsStore.mark_notification_sent"), \
+             patch("eneru.stats.StatsStore.close"):
+            schedule_deferred_stop_or_eager_send(
+                notification_id=1,
+                db_path=tmp_path / "ups.db",
+                config_path="/etc/cfg.yaml",
+                body="🛑 stop", notify_type="warning",
+                worker=worker, log_fn=log,
+            )
+        # subprocess.run is mocked but _detect_systemd_stop_intent
+        # is also mocked, so subprocess.run shouldn't have been
+        # called (the systemd-run path is what would call it).
+        run.assert_not_called()
+        worker._send_via_apprise.assert_called_once_with("🛑 stop", "warning")
+        assert any("systemctl stop detected" in c.args[0]
+                   for c in log.call_args_list)
 
 
 # ==============================================================================

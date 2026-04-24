@@ -15,11 +15,14 @@ Bug-fix release for two v5.2.0 regressions. Drop-in upgrade. See
 ### Fixed
 - **Two notifications on every `systemctl restart` / package upgrade**
   instead of the v5.2-promised single `🔄 Restarted` / `📦 Upgraded`.
-  Old daemon defers the `🛑 Stopped` row and schedules a transient
-  `systemd-run` timer to deliver it ~15 s later. If a new daemon comes
-  up first, its classifier cancels the row → single message; if not
-  (true stop), the timer ships it → single `🛑 Stopped`. New module
-  `deferred_delivery.py` + hidden CLI subcommand `eneru _deliver-stop`.
+  At SIGTERM the old daemon now picks the cheapest correct path based
+  on systemd intent (`systemctl show -p Job eneru.service`):
+  `Job=stop` → ship eagerly (instant); `Job=restart` / unknown →
+  enqueue + schedule a transient `systemd-run` timer to deliver ~15 s
+  later, cancelled by the next daemon's classifier if a replacement
+  comes up. Containers / K8s / foreground `eneru run` (no systemd) →
+  always eager. New module `deferred_delivery.py` + hidden CLI
+  subcommand `eneru _deliver-stop`.
 - **`📦 Upgraded vunknown → v5.2.0` on RPM.** New `preinstall.sh`
   captures the outgoing version via `rpm -q eneru` before files unpack
   (RPM doesn't pass it in `$2` the way DEB does). Defensive fallback
