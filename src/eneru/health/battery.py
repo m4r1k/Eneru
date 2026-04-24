@@ -163,5 +163,6 @@ class BatteryMonitorMixin:
                 f"Charge dropped from {anomaly_prev:.0f}% to {current_charge:.0f}% "
                 f"({anomaly_drop:.0f}% drop in {anomaly_elapsed:.0f}s) while on line power.\n"
                 f"Possible causes: firmware recalibration, battery aging, or hardware issue.",
-                self.config.NOTIFY_WARNING
+                self.config.NOTIFY_WARNING,
+                category="health",
             )

@@ -83,11 +83,12 @@ class NotificationWorker:
         # before any store was registered. Drained on the first
         # ``register_store`` call.
         self._memory_buffer: List[Tuple[str, str, str, int]] = []
-        # Per-message backoff state: notification_id → next_attempt_monotonic.
-        # Cleared on success / cancellation. Keyed by row id, which is
-        # globally unique across stores at the worker layer because we
-        # tag each entry with its (store, id) tuple in _process_one.
-        self._backoff: Dict[Tuple[int, int], float] = {}
+        # Per-message backoff state: (str(store.db_path), row_id) →
+        # next_attempt_monotonic. Cleared on success / cancellation. We
+        # key on the db_path STRING (not id(store)) so re-creation of a
+        # StatsStore object at the same memory address can't bleed
+        # backoff state across instances.
+        self._backoff: Dict[Tuple[str, int], float] = {}
         # Track last prune time so we don't run DELETE on every iteration.
         self._last_prune_monotonic = 0.0
         # Used during stop() to surface the pending count to a "messages
@@ -174,6 +175,12 @@ class NotificationWorker:
         if buffered:
             for body, notify_type, category, ts in buffered:
                 store.enqueue_notification(body, notify_type, category, ts=ts)
+            # Apply backlog cap after the drain too (P2 follow-up to the
+            # in-memory cap): if the buffer grew large before the store
+            # registered, the persisted side now needs the same trim.
+            cap = self.config.notifications.max_pending
+            if cap > 0:
+                store.cap_pending_notifications(cap)
             self._wakeup_event.set()
 
     # ----- producer side -----
@@ -217,6 +224,7 @@ class NotificationWorker:
                 self._memory_buffer.append(
                     (body, notify_type, category, ts)
                 )
+                self._trim_memory_buffer()
                 self._wakeup_event.set()
                 return None
 
@@ -231,6 +239,26 @@ class NotificationWorker:
             target_store.cap_pending_notifications(max_pending)
         self._wakeup_event.set()
         return notification_id
+
+    def _trim_memory_buffer(self) -> None:
+        """Drop oldest in-memory pending notifications when the buffer
+        overflows ``max_pending``. Without this, a misconfigured daemon
+        (notifications.enabled=true but every store fails to open) would
+        accumulate every send forever and OOM. Called from inside
+        ``send()`` after appending, so the just-added row stays."""
+        cap = self.config.notifications.max_pending
+        if cap <= 0 or len(self._memory_buffer) <= cap:
+            return
+        excess = len(self._memory_buffer) - cap
+        del self._memory_buffer[:excess]
+        if not getattr(self, "_buffer_overflow_warned", False):
+            print(
+                f"⚠️ Notification memory buffer exceeded {cap} entries — "
+                "oldest dropped. Stats DB unreachable? Check "
+                f"{self.config.statistics.db_directory if hasattr(self.config, 'statistics') else '/var/lib/eneru'} "
+                "is writable."
+            )
+            self._buffer_overflow_warned = True
 
     # ----- consumer side -----
 
@@ -339,15 +367,19 @@ class NotificationWorker:
         from datetime import datetime
         from eneru.utils import format_seconds
 
-        # Pair each on_battery with the next on_line whose ts is later.
-        # Both lists are sorted by ts ASC from the store query.
+        # Pair each on_battery with the next on_line whose ts is >= this
+        # on_battery's ts. Both lists are sorted by ts ASC from the
+        # store query. Equal-ts pairs ARE valid (NUT polls at 1s
+        # granularity; a same-second cycle is reachable in tests and
+        # high-poll-rate setups), so this is strict-less-than.
         coalesced = 0
         line_idx = 0
         for ob_id, ob_ts, _, _ in on_batt_rows:
-            # Advance the on_line cursor past anything older than this
-            # on_battery (those come from a previous outage and either
-            # already shipped or will pair with an older on_battery).
-            while line_idx < len(on_line_rows) and on_line_rows[line_idx][1] <= ob_ts:
+            # Advance the on_line cursor past anything strictly older
+            # than this on_battery (those come from a previous outage
+            # and either already shipped or will pair with an older
+            # on_battery).
+            while line_idx < len(on_line_rows) and on_line_rows[line_idx][1] < ob_ts:
                 line_idx += 1
             if line_idx >= len(on_line_rows):
                 break
@@ -387,7 +419,7 @@ class NotificationWorker:
         for store in stores_snapshot:
             rows = store.next_pending_notifications(limit=10)
             for ts, row_id, body, notify_type, attempts, _category in rows:
-                key = (id(store), int(row_id))
+                key = (str(store.db_path), int(row_id))
                 next_attempt = self._backoff.get(key, 0.0)
                 if now_mono < next_attempt:
                     continue
@@ -406,7 +438,7 @@ class NotificationWorker:
         increments attempts and applies exponential backoff on failure.
         Cancels on max_attempts overrun (when configured)."""
         success = self._send_via_apprise(body, notify_type)
-        key = (id(store), row_id)
+        key = (str(store.db_path), row_id)
 
         if success:
             store.mark_notification_sent(row_id)

@@ -125,6 +125,14 @@ class StatsStore:
         self._buffer: deque = deque(maxlen=buffer_maxlen)
         self._buffer_lock = threading.Lock()
         self._conn: Optional[sqlite3.Connection] = None
+        # v5.2: serialize ALL _conn access. The notification worker
+        # thread polls pending rows while the main thread inserts +
+        # caps the queue from inside _send_notification — Python 3.13's
+        # stricter sqlite3 binding raises "SystemError: error return
+        # without exception set" when both happen on the same connection
+        # without external mutex. The WAL underneath already serializes
+        # writes; this lock just keeps the Python wrapper happy.
+        self._db_lock = threading.Lock()
         self._logger = logger
         # Rate-limit error logging (per error message text).
         self._last_error_log: Dict[str, float] = {}
@@ -530,7 +538,7 @@ class StatsStore:
             return
         ts = int(ts if ts is not None else time.time())
         try:
-            with self._conn:
+            with self._db_lock, self._conn:
                 self._conn.execute(
                     "INSERT INTO events (ts, event_type, detail, "
                     "notification_sent) VALUES (?, ?, ?, ?)",
@@ -563,13 +571,13 @@ class StatsStore:
         """Persist a pending notification. Returns the new row id, or
         ``None`` if the store isn't open (caller should fall back).
 
-        Safe to call from any thread.
+        Safe to call from any thread (serialized via ``_db_lock``).
         """
         if self._conn is None:
             return None
         ts = int(ts if ts is not None else time.time())
         try:
-            with self._conn:
+            with self._db_lock, self._conn:
                 cur = self._conn.execute(
                     "INSERT INTO notifications "
                     "(ts, body, notify_type, category) "
@@ -590,13 +598,14 @@ class StatsStore:
         if self._conn is None:
             return []
         try:
-            cur = self._conn.execute(
-                "SELECT ts, id, body, notify_type, attempts, category "
-                "FROM notifications WHERE status='pending' "
-                "ORDER BY ts ASC, id ASC LIMIT ?",
-                (int(limit),),
-            )
-            return cur.fetchall()
+            with self._db_lock:
+                cur = self._conn.execute(
+                    "SELECT ts, id, body, notify_type, attempts, category "
+                    "FROM notifications WHERE status='pending' "
+                    "ORDER BY ts ASC, id ASC LIMIT ?",
+                    (int(limit),),
+                )
+                return cur.fetchall()
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(
                 f"stats: next_pending_notifications failed: {e}"
@@ -613,21 +622,22 @@ class StatsStore:
         if self._conn is None:
             return []
         try:
-            if since_ts is None:
-                cur = self._conn.execute(
-                    "SELECT id, ts, body, notify_type FROM notifications "
-                    "WHERE status='pending' AND category=? "
-                    "ORDER BY ts ASC",
-                    (str(category),),
-                )
-            else:
-                cur = self._conn.execute(
-                    "SELECT id, ts, body, notify_type FROM notifications "
-                    "WHERE status='pending' AND category=? AND ts>=? "
-                    "ORDER BY ts ASC",
-                    (str(category), int(since_ts)),
-                )
-            return cur.fetchall()
+            with self._db_lock:
+                if since_ts is None:
+                    cur = self._conn.execute(
+                        "SELECT id, ts, body, notify_type FROM notifications "
+                        "WHERE status='pending' AND category=? "
+                        "ORDER BY ts ASC",
+                        (str(category),),
+                    )
+                else:
+                    cur = self._conn.execute(
+                        "SELECT id, ts, body, notify_type FROM notifications "
+                        "WHERE status='pending' AND category=? AND ts>=? "
+                        "ORDER BY ts ASC",
+                        (str(category), int(since_ts)),
+                    )
+                return cur.fetchall()
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(
                 f"stats: find_pending_by_category failed: {e}"
@@ -641,7 +651,7 @@ class StatsStore:
             return
         sent_at = int(sent_at if sent_at is not None else time.time())
         try:
-            with self._conn:
+            with self._db_lock, self._conn:
                 self._conn.execute(
                     "UPDATE notifications SET status='sent', sent_at=? "
                     "WHERE id=?",
@@ -658,7 +668,7 @@ class StatsStore:
         if self._conn is None:
             return
         try:
-            with self._conn:
+            with self._db_lock, self._conn:
                 self._conn.execute(
                     "UPDATE notifications SET attempts=attempts+1 "
                     "WHERE id=?",
@@ -677,7 +687,7 @@ class StatsStore:
         if self._conn is None:
             return
         try:
-            with self._conn:
+            with self._db_lock, self._conn:
                 self._conn.execute(
                     "UPDATE notifications SET status='cancelled', "
                     "cancel_reason=? WHERE id=?",
@@ -694,11 +704,12 @@ class StatsStore:
         if self._conn is None:
             return 0
         try:
-            cur = self._conn.execute(
-                "SELECT COUNT(*) FROM notifications WHERE status='pending'"
-            )
-            row = cur.fetchone()
-            return int(row[0]) if row else 0
+            with self._db_lock:
+                cur = self._conn.execute(
+                    "SELECT COUNT(*) FROM notifications WHERE status='pending'"
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(
                 f"stats: pending_notification_count failed: {e}"
@@ -714,7 +725,7 @@ class StatsStore:
         if self._conn is None or max_pending <= 0:
             return 0
         try:
-            with self._conn:
+            with self._db_lock, self._conn:
                 cur = self._conn.execute(
                     "SELECT COUNT(*) FROM notifications "
                     "WHERE status='pending'"
@@ -762,7 +773,7 @@ class StatsStore:
         deleted = 0
         expired = 0
         try:
-            with self._conn:
+            with self._db_lock, self._conn:
                 cur = self._conn.execute(
                     "DELETE FROM notifications "
                     "WHERE status IN ('sent','cancelled') AND ts < ?",
@@ -794,11 +805,12 @@ class StatsStore:
         if self._conn is None:
             return None
         try:
-            cur = self._conn.execute(
-                "SELECT value FROM meta WHERE key=?", (str(key),),
-            )
-            row = cur.fetchone()
-            return str(row[0]) if row else None
+            with self._db_lock:
+                cur = self._conn.execute(
+                    "SELECT value FROM meta WHERE key=?", (str(key),),
+                )
+                row = cur.fetchone()
+                return str(row[0]) if row else None
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: get_meta failed: {e}")
             return None
@@ -808,7 +820,7 @@ class StatsStore:
         if self._conn is None:
             return
         try:
-            with self._conn:
+            with self._db_lock, self._conn:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
                     (str(key), str(value)),

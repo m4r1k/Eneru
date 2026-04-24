@@ -304,7 +304,8 @@ class RemoteShutdownMixin:
         self._send_notification(
             f"🌐 **Remote Shutdown Starting:** {display_name}\n"
             f"Host: {server.host}",
-            self.config.NOTIFY_INFO
+            self.config.NOTIFY_INFO,
+            category="shutdown",
         )
 
         # Execute pre-shutdown commands first
@@ -343,5 +344,6 @@ class RemoteShutdownMixin:
             self._send_notification(
                 f"❌ **Remote Shutdown Failed:** {display_name}\n"
                 f"Error: {error_msg}",
-                self.config.NOTIFY_FAILURE
+                self.config.NOTIFY_FAILURE,
+                category="shutdown",
             )

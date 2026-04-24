@@ -387,10 +387,14 @@ if [ -z "$DB" ]; then
   exit 1
 fi
 
-# Originals: 2 rows cancelled with reason='coalesced'.
+# Originals: 2 rows cancelled with reason='coalesced'. Production tags
+# the originals with sub-typed categories (power_event_on_battery /
+# power_event_on_line) so the coalescer can pair them by exact match
+# instead of grepping body text — see the ddbd886 hotfix.
 coalesced=$(sqlite3 "$DB" \
   "SELECT COUNT(*) FROM notifications \
-   WHERE category='power_event' AND status='cancelled' \
+   WHERE category IN ('power_event_on_battery','power_event_on_line') \
+     AND status='cancelled' \
      AND cancel_reason='coalesced';")
 if [ "$coalesced" -ne 2 ]; then
   echo "FAIL: expected 2 cancelled (coalesced) power_event rows, got $coalesced"

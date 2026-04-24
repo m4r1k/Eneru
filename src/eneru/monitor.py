@@ -1209,7 +1209,8 @@ class UPSGroupMonitor(
                             "🚨 **FAILSAFE (FSB) TRIGGERED!**\n"
                             "Connection to UPS lost or data stale while system was running On Battery.\n"
                             "Assuming critical failure. Executing immediate shutdown.",
-                            self.config.NOTIFY_FAILURE
+                            self.config.NOTIFY_FAILURE,
+                            category="shutdown",
                         )
                         self._execute_shutdown_sequence()
 
@@ -1257,7 +1258,8 @@ class UPSGroupMonitor(
                         f"{self.state.connection_flap_count} times "
                         f"(recovered within grace period each time). "
                         f"Check your UPS network connection or NUT server configuration.",
-                        self.config.NOTIFY_WARNING
+                        self.config.NOTIFY_WARNING,
+                        category="health",
                     )
                     self.state.connection_flap_count = 0
                     self.state.connection_first_flap_time = 0.0

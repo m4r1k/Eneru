@@ -142,7 +142,13 @@ class RedundancyGroupExecutor(
             print(prefixed)
 
     def _send_notification(self, body: str, notify_type: str = "info",
-                           blocking: bool = False):
+                           blocking: bool = False,
+                           category: str = "general"):
+        # ``category`` is a v5.2 addition (Slice 4 coalescer hook + per-
+        # category queries); not pinned to a specific store here because
+        # the redundancy executor doesn't own one — the worker falls
+        # back to the first registered store, which in coordinator mode
+        # is the first per-UPS monitor's DB.
         if not self._notification_worker:
             return
         prefixed = f"{self._log_prefix}{body}" if self._log_prefix else body
@@ -152,7 +158,8 @@ class RedundancyGroupExecutor(
         # Redundancy-group shutdowns are always "during shutdown" by definition,
         # so notifications are non-blocking to avoid network-stall delays.
         self._notification_worker.send(
-            body=escaped, notify_type=notify_type, blocking=False,
+            body=escaped, notify_type=notify_type, category=category,
+            blocking=False,
         )
 
     def _log_power_event(self, event: str, details: str):
@@ -186,6 +193,7 @@ class RedundancyGroupExecutor(
             f"Reason: {reason}\n"
             f"Sources: {', '.join(self._group.ups_sources) or '(none)'}",
             "failure",
+            category="shutdown",
         )
 
         if self.config.behavior.dry_run:
