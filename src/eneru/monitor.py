@@ -723,9 +723,13 @@ class UPSGroupMonitor(
                     self.config.NOTIFY_FAILURE,
                     category="shutdown_summary",
                 )
-                # Give notification time to send. Slice 5 replaces this with
-                # NotificationWorker.flush(timeout=5).
-                time.sleep(5)
+                # Give the persistent worker a chance to drain before the
+                # halt cuts power. Returns as soon as pending hits 0,
+                # rather than always waiting the full 5s. Whatever doesn't
+                # drain stays in SQLite as 'pending' and ships on the
+                # next start (the lossless guarantee).
+                if self._notification_worker:
+                    self._notification_worker.flush(timeout=5)
 
                 cmd_parts = self.config.local_shutdown.command.split()
                 if self.config.local_shutdown.message:
@@ -775,6 +779,9 @@ class UPSGroupMonitor(
         """Handle clean exit on signals."""
         if self._shutdown_flag_path.exists():
             if self._notification_worker:
+                # Mid-shutdown signal: still try to drain any in-flight
+                # rows; whatever's left persists for the next start.
+                self._notification_worker.flush(timeout=5)
                 self._notification_worker.stop()
             self._stop_stats()
             sys.exit(0)
@@ -791,6 +798,13 @@ class UPSGroupMonitor(
         )
 
         if self._notification_worker:
+            # Closes the SIGTERM race that produced the v5.1 "Stopping
+            # notification worker with 1 message(s) pending" warning:
+            # we now WAIT for the worker to actually deliver the
+            # 'Stopped' notification before joining its thread.
+            # Returns as soon as pending hits 0; bounded at 5s so a
+            # systemctl stop doesn't hang on an unreachable endpoint.
+            self._notification_worker.flush(timeout=5)
             self._notification_worker.stop()
         self._stop_stats()
 

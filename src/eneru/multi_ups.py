@@ -253,7 +253,11 @@ class MultiUPSCoordinator:
                         "failure",
                         category="shutdown_summary",
                     )
-                time.sleep(5)
+                    # Drain in flight before halt; lossless guarantee on
+                    # what doesn't make it.
+                    self._notification_worker.flush(timeout=5)
+                else:
+                    time.sleep(5)
                 cmd_parts = self.config.local_shutdown.command.split()
                 if self.config.local_shutdown.message:
                     cmd_parts.append(self.config.local_shutdown.message)
@@ -343,6 +347,10 @@ class MultiUPSCoordinator:
             thread.join(timeout=5)
 
         if self._notification_worker:
+            # Same SIGTERM-race fix as in monitor.py:_cleanup_and_exit:
+            # drain the queue before joining the worker thread so the
+            # final 'Service Stopped' notification actually ships.
+            self._notification_worker.flush(timeout=5)
             self._notification_worker.stop()
 
         self._global_shutdown_flag.unlink(missing_ok=True)
