@@ -364,6 +364,372 @@ class TestSchemaMigration:
         finally:
             s.close()
 
+    @staticmethod
+    def _build_v3_db(path: Path) -> None:
+        """Synthesize a v3-shaped DB (v5.1.x) — no notifications table."""
+        c = sqlite3.connect(str(path), isolation_level=None)
+        c.execute("PRAGMA journal_mode = WAL")
+        c.execute(
+            "CREATE TABLE samples (ts INTEGER NOT NULL, status TEXT, "
+            "battery_charge REAL, battery_runtime REAL, ups_load REAL, "
+            "input_voltage REAL, output_voltage REAL, depletion_rate REAL, "
+            "time_on_battery INTEGER, connection_state TEXT, "
+            "battery_voltage REAL, ups_temperature REAL, "
+            "input_frequency REAL, output_frequency REAL)"
+        )
+        for table in ("agg_5min", "agg_hourly"):
+            c.execute(
+                f"CREATE TABLE {table} (ts INTEGER PRIMARY KEY, "
+                "battery_charge_avg REAL, samples_count INTEGER)"
+            )
+        c.execute(
+            "CREATE TABLE events (ts INTEGER NOT NULL, "
+            "event_type TEXT NOT NULL, detail TEXT, "
+            "notification_sent INTEGER DEFAULT 1)"
+        )
+        c.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        c.execute(
+            "INSERT INTO meta(key,value) VALUES (?, ?)",
+            ("schema_version", "3"),
+        )
+        # Seed an event row to prove preservation across migration.
+        c.execute(
+            "INSERT INTO events(ts, event_type, detail) "
+            "VALUES (?, ?, ?)", (2000, "ON_BATTERY", "v3 row"),
+        )
+        c.close()
+
+    @pytest.mark.unit
+    def test_v3_db_migrates_to_v4_creates_notifications_table(self, tmp_path):
+        # v4: new notifications table for the persistent queue.
+        path = tmp_path / "v3.db"
+        self._build_v3_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            tables = {
+                r[0] for r in s._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            assert "notifications" in tables
+            cols = {
+                r[1] for r in s._conn.execute(
+                    "PRAGMA table_info(notifications)"
+                )
+            }
+            assert {"id", "ts", "body", "notify_type", "category",
+                    "status", "attempts", "sent_at", "cancel_reason"} <= cols
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v3_to_v4_migration_bumps_meta_to_4(self, tmp_path):
+        path = tmp_path / "v3.db"
+        self._build_v3_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            sv = s._conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            assert int(sv[0]) == SCHEMA_VERSION  # currently 4
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v3_events_preserved_after_v4_migration(self, tmp_path):
+        path = tmp_path / "v3.db"
+        self._build_v3_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            row = s._conn.execute(
+                "SELECT ts, event_type, detail FROM events"
+            ).fetchone()
+            assert row == (2000, "ON_BATTERY", "v3 row")
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v4_migration_idempotent(self, tmp_path):
+        path = tmp_path / "v3.db"
+        self._build_v3_db(path)
+        # Open + close + reopen + reopen must all succeed; a partially-
+        # migrated DB heals via CREATE TABLE IF NOT EXISTS.
+        StatsStore(path).open()
+        StatsStore(path).open()
+        s = StatsStore(path)
+        s.open()
+        try:
+            tables = {
+                r[0] for r in s._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            assert "notifications" in tables
+        finally:
+            s.close()
+
+
+class TestNotificationQueue:
+    """v4: persistent notification queue CRUD + TTL/cap/age rules."""
+
+    def _open(self, tmp_path):
+        s = StatsStore(tmp_path / "n.db")
+        s.open()
+        return s
+
+    @pytest.mark.unit
+    def test_enqueue_returns_monotonic_id(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            id1 = s.enqueue_notification("first", "info", "lifecycle")
+            id2 = s.enqueue_notification("second", "info", "lifecycle")
+            assert id1 is not None and id2 is not None
+            assert id2 > id1
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_next_pending_returns_oldest_first(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            s.enqueue_notification("older", "info", "lifecycle", ts=1000)
+            s.enqueue_notification("newer", "info", "lifecycle", ts=2000)
+            rows = s.next_pending_notifications(limit=10)
+            assert [r[0] for r in rows] == [1000, 2000]
+            assert rows[0][2] == "older"
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_mark_sent_removes_row_from_pending(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            id1 = s.enqueue_notification("x", "info", "lifecycle")
+            s.mark_notification_sent(id1, sent_at=12345)
+            assert s.pending_notification_count() == 0
+            row = s._conn.execute(
+                "SELECT status, sent_at FROM notifications WHERE id=?",
+                (id1,),
+            ).fetchone()
+            assert row == ("sent", 12345)
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_mark_attempt_keeps_row_pending_and_counts(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            id1 = s.enqueue_notification("x", "info", "lifecycle")
+            s.mark_notification_attempt(id1)
+            s.mark_notification_attempt(id1)
+            row = s._conn.execute(
+                "SELECT status, attempts FROM notifications WHERE id=?",
+                (id1,),
+            ).fetchone()
+            assert row == ("pending", 2)
+            assert s.pending_notification_count() == 1
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_cancel_marks_with_reason(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            id1 = s.enqueue_notification("x", "info", "lifecycle")
+            s.cancel_notification(id1, "max_attempts")
+            row = s._conn.execute(
+                "SELECT status, cancel_reason FROM notifications WHERE id=?",
+                (id1,),
+            ).fetchone()
+            assert row == ("cancelled", "max_attempts")
+            assert s.pending_notification_count() == 0
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_pending_count_excludes_sent_and_cancelled(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            id1 = s.enqueue_notification("a", "info", "x")
+            id2 = s.enqueue_notification("b", "info", "x")
+            s.enqueue_notification("c", "info", "x")  # stays pending
+            s.mark_notification_sent(id1)
+            s.cancel_notification(id2, "too_old")
+            assert s.pending_notification_count() == 1
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_cap_pending_cancels_oldest_excess(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            for i in range(5):
+                s.enqueue_notification(f"m{i}", "info", "x", ts=1000 + i)
+            cancelled = s.cap_pending_notifications(max_pending=2)
+            assert cancelled == 3
+            assert s.pending_notification_count() == 2
+            # The remaining pending rows must be the two NEWEST.
+            rows = s.next_pending_notifications(limit=10)
+            assert [r[2] for r in rows] == ["m3", "m4"]
+            # Cancelled rows carry the overflow reason.
+            cur = s._conn.execute(
+                "SELECT body, cancel_reason FROM notifications "
+                "WHERE status='cancelled' ORDER BY ts ASC"
+            )
+            cancelled_rows = cur.fetchall()
+            assert [r[0] for r in cancelled_rows] == ["m0", "m1", "m2"]
+            assert all(r[1] == "backlog_overflow" for r in cancelled_rows)
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_cap_pending_zero_or_negative_disables_cap(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            for i in range(5):
+                s.enqueue_notification(f"m{i}", "info", "x")
+            assert s.cap_pending_notifications(max_pending=0) == 0
+            assert s.cap_pending_notifications(max_pending=-1) == 0
+            assert s.pending_notification_count() == 5
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_prune_deletes_sent_older_than_retention(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            now = int(time.time())
+            old = s.enqueue_notification("old", "info", "x",
+                                         ts=now - 10 * 86400)
+            recent = s.enqueue_notification("recent", "info", "x",
+                                            ts=now - 1 * 86400)
+            s.mark_notification_sent(old, sent_at=now - 10 * 86400)
+            s.mark_notification_sent(recent, sent_at=now - 1 * 86400)
+            deleted, expired = s.prune_old_notifications(
+                retention_days=7, max_age_days=0,
+            )
+            assert deleted == 1
+            assert expired == 0
+            ids = {r[0] for r in s._conn.execute(
+                "SELECT id FROM notifications"
+            )}
+            assert ids == {recent}
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_prune_keeps_pending_within_max_age(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            now = int(time.time())
+            id1 = s.enqueue_notification("recent", "info", "x",
+                                         ts=now - 5 * 86400)
+            deleted, expired = s.prune_old_notifications(
+                retention_days=7, max_age_days=30,
+            )
+            assert deleted == 0
+            assert expired == 0
+            assert s.pending_notification_count() == 1
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_prune_cancels_pending_beyond_max_age(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            now = int(time.time())
+            ancient = s.enqueue_notification("ancient", "info", "x",
+                                             ts=now - 60 * 86400)
+            recent = s.enqueue_notification("recent", "info", "x",
+                                            ts=now - 5 * 86400)
+            deleted, expired = s.prune_old_notifications(
+                retention_days=7, max_age_days=30,
+            )
+            assert deleted == 0
+            assert expired == 1
+            row = s._conn.execute(
+                "SELECT status, cancel_reason FROM notifications "
+                "WHERE id=?", (ancient,),
+            ).fetchone()
+            assert row == ("cancelled", "too_old")
+            # Recent pending row untouched.
+            row2 = s._conn.execute(
+                "SELECT status FROM notifications WHERE id=?",
+                (recent,),
+            ).fetchone()
+            assert row2 == ("pending",)
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_prune_max_age_zero_means_pending_lives_forever(self, tmp_path):
+        """The panic-attack guarantee — pending rows never get dropped
+        by TTL when max_age_days <= 0. Only successful delivery (or an
+        explicit cancel) removes them."""
+        s = self._open(tmp_path)
+        try:
+            now = int(time.time())
+            s.enqueue_notification("ancient", "info", "x",
+                                   ts=now - 365 * 86400)
+            deleted, expired = s.prune_old_notifications(
+                retention_days=7, max_age_days=0,
+            )
+            assert (deleted, expired) == (0, 0)
+            assert s.pending_notification_count() == 1
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_find_pending_by_category_filters(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            s.enqueue_notification("ob", "info", "power_event", ts=1000)
+            s.enqueue_notification("ol", "info", "power_event", ts=1100)
+            s.enqueue_notification("up", "info", "lifecycle", ts=1050)
+            rows = s.find_pending_by_category("power_event")
+            assert [r[2] for r in rows] == ["ob", "ol"]
+            rows = s.find_pending_by_category("power_event", since_ts=1050)
+            assert [r[2] for r in rows] == ["ol"]
+        finally:
+            s.close()
+
+
+class TestMetaKV:
+    """Generic meta key/value store helpers (for last_seen_version etc)."""
+
+    @pytest.mark.unit
+    def test_get_meta_missing_key_returns_none(self, tmp_path):
+        s = StatsStore(tmp_path / "m.db")
+        s.open()
+        try:
+            assert s.get_meta("nonexistent") is None
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_set_get_meta_round_trip(self, tmp_path):
+        s = StatsStore(tmp_path / "m.db")
+        s.open()
+        try:
+            s.set_meta("last_seen_version", "5.1.2")
+            assert s.get_meta("last_seen_version") == "5.1.2"
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_set_meta_overwrites_existing_value(self, tmp_path):
+        s = StatsStore(tmp_path / "m.db")
+        s.open()
+        try:
+            s.set_meta("last_seen_version", "5.1.2")
+            s.set_meta("last_seen_version", "5.2.0")
+            assert s.get_meta("last_seen_version") == "5.2.0"
+        finally:
+            s.close()
+
 
 class TestLogEventNotificationSent:
     """B4: log_event records the notification_sent flag (v3+)."""

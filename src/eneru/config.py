@@ -114,6 +114,31 @@ class NotificationsConfig:
     # the response to a real sustained event. 0 = immediate (legacy).
     voltage_hysteresis_seconds: int = 30
 
+    # ---- v5.2 persistent-queue knobs ----
+    # Days to keep ``sent`` and ``cancelled`` rows around for forensic
+    # inspection via sqlite3. ``pending`` rows are NEVER pruned by TTL.
+    retention_days: int = 7
+    # Per-message attempt cap. 0 (default, unlimited) means a stuck
+    # message keeps retrying with exponential backoff until it succeeds
+    # or hits ``max_age_days``. Apprise's success/fail signal is a bool
+    # — we can't tell "bad URL" from "internet down" — so giving up on
+    # attempts alone risks dropping legitimate messages during a long
+    # outage. Set this only if you want a poison-message kill switch.
+    max_attempts: int = 0
+    # Pending notifications older than this become ``cancelled``
+    # (reason: ``too_old``). 30 d covers a month-long absence; longer
+    # than that the message is probably stale. Set 0 to disable.
+    max_age_days: int = 30
+    # Backlog cap. When pending exceeds this, the oldest are cancelled
+    # with reason ``backlog_overflow``. 10000 is well above normal use
+    # but bounds DB growth on runaway-event days.
+    max_pending: int = 10000
+    # Exponential backoff ceiling, in seconds. The per-message wait
+    # doubles on each failure (starting at ``retry_interval``) up to
+    # this cap. 5 min keeps reconnection quick once the endpoint
+    # returns without hammering the network during a long outage.
+    retry_backoff_max: int = 300
+
 
 # Power events whose notifications cannot be suppressed via
 # `notifications.suppress`. Allowing a user to silence these would
@@ -628,6 +653,12 @@ class ConfigLoader:
         # Defaults match NotificationsConfig dataclass.
         notif_suppress: List[str] = []
         notif_voltage_hysteresis = 30
+        # v5.2 persistent-queue defaults.
+        notif_retention_days = 7
+        notif_max_attempts = 0
+        notif_max_age_days = 30
+        notif_max_pending = 10000
+        notif_retry_backoff_max = 300
 
         if 'notifications' in data:
             notif_data = data['notifications']
@@ -638,6 +669,21 @@ class ConfigLoader:
             notif_suppress = notif_data.get('suppress', notif_suppress)
             notif_voltage_hysteresis = notif_data.get(
                 'voltage_hysteresis_seconds', notif_voltage_hysteresis,
+            )
+            notif_retention_days = notif_data.get(
+                'retention_days', notif_retention_days,
+            )
+            notif_max_attempts = notif_data.get(
+                'max_attempts', notif_max_attempts,
+            )
+            notif_max_age_days = notif_data.get(
+                'max_age_days', notif_max_age_days,
+            )
+            notif_max_pending = notif_data.get(
+                'max_pending', notif_max_pending,
+            )
+            notif_retry_backoff_max = notif_data.get(
+                'retry_backoff_max', notif_retry_backoff_max,
             )
 
             if 'urls' in notif_data:
@@ -673,6 +719,11 @@ class ConfigLoader:
             retry_interval=notif_retry_interval,
             suppress=notif_suppress,
             voltage_hysteresis_seconds=notif_voltage_hysteresis,
+            retention_days=notif_retention_days,
+            max_attempts=notif_max_attempts,
+            max_age_days=notif_max_age_days,
+            max_pending=notif_max_pending,
+            retry_backoff_max=notif_retry_backoff_max,
         )
 
     @classmethod
