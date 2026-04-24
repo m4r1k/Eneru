@@ -13,19 +13,17 @@ Bug-fix release for two v5.2.0 regressions. Drop-in upgrade. See
 `git log v5.2.0..v5.2.1` for per-commit detail.
 
 ### Fixed
-- **Two notifications on every `systemctl restart` and package upgrade**
-  instead of the v5.2-promised single `🔄 Restarted` / `📦 Upgraded`. The
-  synchronous `flush(timeout=5)` shipped the `🛑 Service Stopped` before
-  the next daemon's classifier could supersede it. Stop is now enqueued
-  *after* the worker drains so the row stays `pending` in SQLite for the
-  next daemon to cancel. Mirror fix in `MultiUPSCoordinator._handle_signal`,
-  plus a new coordinator-startup sweep for the multi-UPS path.
-- **`📦 Upgraded vunknown → v5.2.0` on RPM upgrade.** New `preinstall.sh`
-  captures the outgoing version via `rpm -q eneru` (or `dpkg-query -W
-  eneru`) before the new files unpack — RPM doesn't pass it in `$2` the
-  way DEB does. Defensive fallback chain in `lifecycle.classify_startup`
-  (`shutdown_marker.version` → `meta.last_seen_version` → `?`) covers
-  manual `rpm -ivh --force` and other paths that bypass scriptlets.
+- **Two notifications on every `systemctl restart` / package upgrade**
+  instead of the v5.2-promised single `🔄 Restarted` / `📦 Upgraded`.
+  Old daemon defers the `🛑 Stopped` row and schedules a transient
+  `systemd-run` timer to deliver it ~15 s later. If a new daemon comes
+  up first, its classifier cancels the row → single message; if not
+  (true stop), the timer ships it → single `🛑 Stopped`. New module
+  `deferred_delivery.py` + hidden CLI subcommand `eneru _deliver-stop`.
+- **`📦 Upgraded vunknown → v5.2.0` on RPM.** New `preinstall.sh`
+  captures the outgoing version via `rpm -q eneru` before files unpack
+  (RPM doesn't pass it in `$2` the way DEB does). Defensive fallback
+  in `lifecycle.classify_startup` covers paths that bypass scriptlets.
 
 ### Documentation
 - **`docs/notifications.md`** caught up with the v5.0 / 5.1 / 5.2

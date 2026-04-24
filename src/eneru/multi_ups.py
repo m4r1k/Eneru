@@ -20,6 +20,7 @@ from eneru.config import Config
 from eneru.logger import UPSLogger
 from eneru.notifications import APPRISE_AVAILABLE, NotificationWorker
 from eneru.monitor import UPSGroupMonitor
+from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
 from eneru.redundancy import RedundancyGroupEvaluator, RedundancyGroupExecutor
 from eneru.stats import StatsStore
 from eneru.lifecycle import (
@@ -496,25 +497,53 @@ class MultiUPSCoordinator:
         for thread in self._evaluator_threads:
             thread.join(timeout=5)
 
-        # v5.2.1: see UPSGroupMonitor._cleanup_and_exit for the rationale.
-        # The lifecycle stop notification is enqueued AFTER the worker is
-        # drained and stopped, so the row stays `pending` in SQLite for
-        # the next daemon's classifier to cancel via cancel_notification
-        # (single message per restart/upgrade/reinstall transition).
+        # v5.2.1: see UPSGroupMonitor._cleanup_and_exit for the full
+        # rationale. Drain pending non-lifecycle rows first, then enqueue
+        # the speculative lifecycle stop and stop the worker, then hand
+        # off to the systemd-run timer (or eager fallback) for delivery.
         # Skip the enqueue entirely when an upgrade is in flight — the
-        # next daemon's "📦 Upgraded" classification supersedes it.
+        # next daemon's "📦 Upgraded" classification covers both ends.
         stats_dir = Path(self.config.statistics.db_directory)
         upgrade_in_progress = read_upgrade_marker(stats_dir) is not None
 
-        if self._notification_worker:
+        body = "🛑 **Eneru Service Stopped**\nMonitoring is now inactive."
+        notify_type = "warning"
+
+        # Order matters: flush + stop the worker FIRST, then enqueue —
+        # see UPSGroupMonitor._cleanup_and_exit for the rationale.
+        # Capturing first_store BEFORE stop() because stop() doesn't
+        # actually clear the registered stores list, but doing it here
+        # is symmetric with how we'll use it for the deferred handoff.
+        first_store = None
+        if self._notification_worker is not None:
+            with self._notification_worker._stores_lock:
+                first_store = (self._notification_worker._stores[0]
+                               if self._notification_worker._stores else None)
             self._notification_worker.flush(timeout=5)
             self._notification_worker.stop()
 
+        notif_id = None
         if self._notification_worker and not upgrade_in_progress:
-            self._notification_worker.send(
-                "🛑 **Eneru Service Stopped**\nMonitoring is now inactive.",
-                "warning",
+            notif_id = self._notification_worker.send(
+                body=body,
+                notify_type=notify_type,
                 category="lifecycle",
+            )
+
+        # Schedule deferred delivery against the FIRST registered store
+        # (which is what worker.send() above wrote to). The systemd-run
+        # timer fires ~15 s after our exit; if a new coordinator's
+        # `_cancel_prev_pending_lifecycle_rows` cancels the row first,
+        # the timer is a no-op and the user sees a single Restarted.
+        if notif_id is not None and first_store is not None:
+            schedule_deferred_stop_or_eager_send(
+                notification_id=notif_id,
+                db_path=first_store.db_path,
+                config_path=getattr(self.config, "config_path", None),
+                body=body,
+                notify_type=notify_type,
+                worker=self._notification_worker,
+                log_fn=self._log,
             )
 
         # Slice 3: tag this exit so the next start can emit "🔄 Restarted"

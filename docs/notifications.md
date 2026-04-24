@@ -249,7 +249,13 @@ v5.2 replaces the unconditional `🚀 Started` / `🛑 Stopped` pair with a **st
 | `🚀 Eneru Started (after crash)` | Daemon came back without ever writing a marker | No shutdown marker but `meta.last_seen_version` is set |
 | `🚀 Eneru vX Started` | First-ever start | No markers, no `last_seen_version` |
 
-The mechanism that delivers "exactly one message" is **cancel-on-startup**: when the new daemon comes up and classifies (e.g.) as `Restarted`, it cancels any `pending` row in the `lifecycle` category that the previous instance enqueued. The `🛑 Service Stopped` row stays `pending` (the prior daemon's worker exits before delivering it) so the new daemon can supersede it cleanly. If the daemon doesn't come back immediately, the pending stop is delivered by whichever daemon eventually starts (typically systemd's `Restart=always`); if no daemon starts within `max_age_days`, the row ages out as `too_old` and is never delivered.
+The mechanism that delivers "exactly one message" combines **cancel-on-startup** with a **systemd-run deferred-delivery timer**:
+
+1. On `SIGTERM`, the old daemon enqueues `🛑 Service Stopped` as a `pending` row, stops its worker (so it can't deliver eagerly), and schedules a transient `systemd-run` timer that re-invokes `eneru _deliver-stop` ~15 s later. The timer lives **outside** `eneru.service`'s cgroup, so it survives our exit and doesn't gate the systemd restart cycle.
+2. If the new daemon comes up first (`systemctl restart`, package upgrade, recovery), its classifier cancels every `pending` lifecycle row with `cancel_reason='superseded'` BEFORE the deferred timer fires. Single message: `🔄 Restarted` / `📦 Upgraded` / `📊 Recovered`.
+3. If no replacement comes up (true `systemctl stop`), the timer fires, sees the row still `pending`, and ships it via Apprise. Single message: `🛑 Service Stopped`.
+
+Fallback: if `systemd-run` isn't available (non-systemd containers, sandboxed builds), the old daemon ships the stop synchronously via Apprise instead. This loses the restart-coalescing benefit on those hosts but guarantees the user always sees a notification.
 
 ---
 

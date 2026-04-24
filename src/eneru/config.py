@@ -345,6 +345,11 @@ class Config:
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     local_shutdown: LocalShutdownConfig = field(default_factory=LocalShutdownConfig)
     statistics: StatsConfig = field(default_factory=StatsConfig)
+    # v5.2.1: source path of the YAML this Config was loaded from.
+    # Used by deferred_delivery to spawn a systemd-run timer that
+    # re-loads the same config out-of-process. None when the Config
+    # was constructed in-memory (tests, programmatic usage).
+    config_path: Optional[str] = None
 
     # Notification types mapped to colors/severity
     NOTIFY_FAILURE: str = "failure"
@@ -452,6 +457,9 @@ class ConfigLoader:
 
         # Parse configuration sections
         config = cls._parse_config(data)
+        # v5.2.1: stash the source path so deferred_delivery can spawn
+        # a systemd-run timer that re-loads the same YAML out-of-process.
+        config.config_path = str(path)
         print(f"Configuration loaded from: {path}")
         return config
 

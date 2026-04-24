@@ -21,6 +21,7 @@ from eneru.state import MonitorState
 from eneru.logger import UPSLogger
 from eneru.notifications import NotificationWorker, APPRISE_AVAILABLE
 from eneru.stats import StatsStore, StatsWriter
+from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
 from eneru.lifecycle import (
     EVENT_TYPE_DAEMON_START,
     REASON_FATAL,
@@ -536,7 +537,7 @@ class UPSGroupMonitor(
         """
         del blocking  # see docstring
         if not self._notification_worker:
-            return
+            return None
 
         # Prefix notification body with UPS name in multi-UPS mode.
         prefixed_body = f"{self._log_prefix}{body}" if self._log_prefix else body
@@ -544,7 +545,7 @@ class UPSGroupMonitor(
         # Escape @ symbols to prevent Discord mentions (e.g., UPS@192.168.1.1)
         escaped_body = prefixed_body.replace("@", "@\u200B")  # Zero-width space after @
 
-        self._notification_worker.send(
+        return self._notification_worker.send(
             body=escaped_body,
             notify_type=notify_type,
             category=category,
@@ -1005,29 +1006,56 @@ class UPSGroupMonitor(
         # SIGTERM lands here on a deb/rpm upgrade. The next daemon will
         # emit a single "📦 Upgraded vX → vY" message that supersedes
         # this stop, so suppress the stop entirely — saves a write and
-        # avoids the prior-instance "Stopped" leaking through if the
-        # next daemon's classifier runs while the row is still pending.
+        # avoids the prior-instance "Stopped" leaking through.
         upgrade_in_progress = read_upgrade_marker(stats_dir) is not None
 
         # Drain anything ALREADY in the queue (emergency-shutdown summary,
-        # voltage events, etc.) BEFORE enqueueing the lifecycle stop. The
-        # order matters: the lifecycle stop is speculative — if a new
-        # daemon comes back within the restart-downtime threshold, its
-        # classifier emits Restarted/Upgraded/Recovered and cancels the
-        # pending stop via cancel_notification. By enqueueing AFTER the
-        # flush, we guarantee the row stays `pending` in SQLite (the
-        # worker is stopped, can't deliver) and is therefore cancellable.
-        # If the daemon never comes back, the next daemon to start
-        # (whenever that is) will cancel or supersede the pending row.
+        # voltage events, etc.) BEFORE enqueueing the lifecycle stop —
+        # so the worker doesn't pick up our deferred-stop row and ship
+        # it eagerly, defeating the deferred-delivery mechanism below.
+        # After this drain + stop, the worker is gone; the row we
+        # enqueue stays `pending` in SQLite and can be cancelled by
+        # either the next daemon's classifier (within the
+        # `schedule_deferred_stop_or_eager_send` window) or delivered
+        # by the systemd-run timer if no replacement comes up.
+        body = "🛑 **Eneru Service Stopped**\nMonitoring is now inactive."
+        notify_type = self.config.NOTIFY_WARNING
+
+        # Order matters: flush + stop FIRST, then enqueue. If we enqueued
+        # before stop(), the worker could pick the row up on its next
+        # iteration and ship it eagerly — defeating the deferred-delivery
+        # mechanism. After stop(), the worker thread is dead but
+        # `_send_notification` still writes the row to SQLite (the
+        # enqueue is a synchronous DB insert; only delivery requires the
+        # worker thread).
         if self._notification_worker:
             self._notification_worker.flush(timeout=5)
             self._notification_worker.stop()
 
+        notif_id = None
         if not upgrade_in_progress:
-            self._send_notification(
-                "🛑 **Eneru Service Stopped**\nMonitoring is now inactive.",
-                self.config.NOTIFY_WARNING,
-                category="lifecycle",
+            notif_id = self._send_notification(
+                body, notify_type, category="lifecycle",
+            )
+
+        # Schedule deferred delivery via systemd-run (or fall back to
+        # eager Apprise send if systemd-run is unavailable). The timer
+        # fires ~15 s after our exit; if the new daemon's classifier
+        # cancels the row before then (single-UPS:
+        # `_emit_lifecycle_startup_notification`; multi-UPS:
+        # `_cancel_prev_pending_lifecycle_rows`), the timer is a no-op
+        # and the user sees a single Restarted/Upgraded/Recovered. If
+        # no replacement starts (true `systemctl stop`), the timer
+        # delivers the stop and the user sees a single Stopped.
+        if notif_id is not None and self._stats_store._conn is not None:
+            schedule_deferred_stop_or_eager_send(
+                notification_id=notif_id,
+                db_path=Path(self._stats_db_path),
+                config_path=getattr(self.config, "config_path", None),
+                body=body,
+                notify_type=notify_type,
+                worker=self._notification_worker,
+                log_fn=self._log_message,
             )
 
         self._stop_stats()

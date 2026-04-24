@@ -1334,11 +1334,16 @@ class TestCoordinatorHandleSignal:
         coord = MultiUPSCoordinator(config)
         coord._log = lambda msg: None
         coord._notification_worker = MagicMock()
+        # Empty store list so the v5.2.1 deferred-delivery branch is a
+        # no-op (no first_store to schedule against).
+        coord._notification_worker._stores = []
+        coord._notification_worker._stores_lock = threading.RLock()
         coord._threads = []
 
         Path(config.logging.shutdown_flag_file).touch()
 
-        with patch("eneru.multi_ups.sys.exit") as mock_exit:
+        with patch("eneru.multi_ups.schedule_deferred_stop_or_eager_send"), \
+             patch("eneru.multi_ups.sys.exit") as mock_exit:
             coord._handle_signal(_signal.SIGTERM, None)
 
         coord._notification_worker.send.assert_called_once()
@@ -1367,22 +1372,25 @@ class TestCoordinatorHandleSignal:
             thread.join.assert_called_once_with(timeout=5)
 
     @pytest.mark.unit
-    def test_handle_signal_enqueues_stop_after_flush(self, tmp_path):
-        """v5.2.1: stop notification is enqueued AFTER flush+stop on the
-        worker, mirroring UPSGroupMonitor._cleanup_and_exit. The row
-        stays `pending` in SQLite for the next coordinator's startup
-        sweep to cancel — same contract as single-UPS mode."""
+    def test_handle_signal_enqueues_stop_after_flush_and_stop(self, tmp_path):
+        """v5.2.1: coordinator enqueues the stop AFTER flush+stop on the
+        worker so the row stays `pending` in SQLite, then schedules a
+        systemd-run timer (or eager-fallback) to deliver it ~15s later
+        unless the next daemon's classifier supersedes it first."""
         import signal as _signal
 
         config = _coord_config(tmp_path)
         coord = MultiUPSCoordinator(config)
         coord._log = lambda msg: None
         coord._notification_worker = MagicMock()
+        coord._notification_worker._stores = []
+        coord._notification_worker._stores_lock = threading.RLock()
         coord._threads = []
 
         with patch("eneru.multi_ups.read_upgrade_marker", return_value=None), \
              patch("eneru.multi_ups.read_shutdown_marker", return_value=None), \
              patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.schedule_deferred_stop_or_eager_send"), \
              patch("eneru.multi_ups.sys.exit"):
             coord._handle_signal(_signal.SIGTERM, None)
 
@@ -1401,20 +1409,23 @@ class TestCoordinatorHandleSignal:
     def test_handle_signal_skips_stop_notification_on_upgrade(self, tmp_path):
         """v5.2.1: when an upgrade marker is on disk (postinstall.sh
         dropped it before systemctl restart), the coordinator skips the
-        lifecycle stop entirely — the next daemon's '📦 Upgraded' message
-        will cover this transition."""
+        lifecycle stop entirely AND the deferred-delivery scheduler —
+        the next daemon's '📦 Upgraded' message covers the transition."""
         import signal as _signal
 
         config = _coord_config(tmp_path)
         coord = MultiUPSCoordinator(config)
         coord._log = lambda msg: None
         coord._notification_worker = MagicMock()
+        coord._notification_worker._stores = []
+        coord._notification_worker._stores_lock = threading.RLock()
         coord._threads = []
 
         marker = {"old_version": "5.2.0", "new_version": "5.2.1"}
         with patch("eneru.multi_ups.read_upgrade_marker", return_value=marker), \
              patch("eneru.multi_ups.read_shutdown_marker", return_value=None), \
              patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.schedule_deferred_stop_or_eager_send") as sched, \
              patch("eneru.multi_ups.sys.exit"):
             coord._handle_signal(_signal.SIGTERM, None)
 
@@ -1423,6 +1434,7 @@ class TestCoordinatorHandleSignal:
             "Expected no lifecycle send when upgrade marker present; "
             f"got: {send_calls}"
         )
+        sched.assert_not_called()
         # flush + stop still happen (drains any non-lifecycle rows
         # like a sequence-complete summary that landed mid-shutdown).
         coord._notification_worker.flush.assert_called_once()

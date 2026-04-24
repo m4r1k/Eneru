@@ -176,6 +176,13 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/deferred_delivery.py
+    dst: /opt/ups-monitor/eneru/deferred_delivery.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   # eneru.shutdown subpackage (mixin per shutdown phase)
   - src: src/eneru/shutdown/__init__.py
     dst: /opt/ups-monitor/eneru/shutdown/__init__.py
