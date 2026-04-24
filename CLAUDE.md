@@ -214,10 +214,17 @@ This repo deliberately keeps individual files small (`monitor.py` is now ~830 li
 ```
 1. Pull latest main:   git checkout main && git pull --ff-only origin main
 2. Create feature branch from the up-to-date main
-3. Develop, commit, push
-4. Open PR against main
-5. CI checks must pass (all 11)
-6. Merge via GitHub (branch auto-deletes)
+3. Develop, commit, push the first logical chunk
+4. Open the PR against main *as soon as you have something pushable* — CI
+   does NOT fire on pushes to a feature branch until a PR exists. Mark it
+   draft if it's WIP
+5. Continue iterating: each subsequent push to the branch triggers one CI
+   run on top of the cumulative diff. Push in logical chunks (one per
+   slice / logical unit of work) — NOT one commit per push (CI flood,
+   AI-reviewer quota burn) and NOT "20 commits → finally open PR" (single
+   huge CI run, hard to bisect when something breaks)
+6. CI checks must pass (all 11) before merge
+7. Merge via GitHub (branch auto-deletes)
 ```
 
 **Always pull `main` before creating a feature branch.** Branching from a stale local `main` forces a rebase later and risks landing PRs against an obsolete base.
