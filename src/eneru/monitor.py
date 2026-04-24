@@ -622,7 +622,7 @@ class UPSGroupMonitor(
         self._shutdown_flag_path.touch()
         sequence_start = time.monotonic()
 
-        self._log_message("🚨 Initiating emergency shutdown sequence")
+        self._log_message("🚨 INITIATING EMERGENCY SHUTDOWN SEQUENCE")
 
         if self.config.behavior.dry_run:
             self._log_message("🧪 *** DRY-RUN MODE: No actual shutdown will occur ***")
@@ -656,7 +656,7 @@ class UPSGroupMonitor(
 
         # In coordinator mode, notify the coordinator instead of doing local shutdown
         if self._coordinator_mode:
-            self._log_message("✅ Group shutdown sequence complete")
+            self._log_message("✅ GROUP SHUTDOWN SEQUENCE COMPLETE")
             if self._shutdown_callback:
                 group = self.config.ups_groups[0] if self.config.ups_groups else None
                 self._shutdown_callback(group)
@@ -665,7 +665,7 @@ class UPSGroupMonitor(
         elapsed = int(time.monotonic() - sequence_start)
         if self.config.local_shutdown.enabled:
             self._log_message("🔌 Shutting down local server NOW")
-            self._log_message("✅ Shutdown sequence complete")
+            self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE")
 
             if self.config.behavior.dry_run:
                 self._log_message(f"🧪 [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
@@ -689,7 +689,7 @@ class UPSGroupMonitor(
                     cmd_parts.append(self.config.local_shutdown.message)
                 run_command(cmd_parts)
         else:
-            self._log_message("✅ Shutdown sequence complete (local shutdown disabled)")
+            self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE (local shutdown disabled)")
             self._send_notification(
                 f"✅ **Shutdown Sequence Complete** (took {elapsed}s)\n"
                 f"Local shutdown is disabled — system stays up.",
