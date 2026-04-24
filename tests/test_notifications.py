@@ -530,24 +530,28 @@ class TestBacklogCap:
             max_attempts=0,
         )
         worker = NotificationWorker(config)
-        try:
-            worker.start()
-            worker.register_store(registered_store)
-            for i in range(5):
-                worker.send(f"msg-{i}", "info", "lifecycle")
-            # Cap kicks in synchronously inside send().
-            assert registered_store.pending_notification_count() <= 2
-            cancelled = registered_store._conn.execute(
-                "SELECT body, cancel_reason FROM notifications "
-                "WHERE status='cancelled' ORDER BY id ASC"
-            ).fetchall()
-            cancel_bodies = [c[0] for c in cancelled]
-            cancel_reasons = {c[1] for c in cancelled}
-            # Older messages cancelled, newest kept.
-            assert "msg-0" in cancel_bodies
-            assert "backlog_overflow" in cancel_reasons
-        finally:
-            worker.stop()
+        worker.start()
+        worker.register_store(registered_store)
+        # Stop the worker thread BEFORE issuing the sends — otherwise the
+        # worker thread races send()'s cap_pending UPDATE on the same
+        # SQLite connection and Python 3.13 raises SystemError. send()
+        # remains usable after stop() (it still INSERTs pending rows and
+        # cap_pending runs synchronously inside send()) — there's just
+        # no thread reading them. That's exactly what this test wants.
+        worker.stop()
+        for i in range(5):
+            worker.send(f"msg-{i}", "info", "lifecycle")
+        # Cap kicks in synchronously inside send().
+        assert registered_store.pending_notification_count() <= 2
+        cancelled = registered_store._conn.execute(
+            "SELECT body, cancel_reason FROM notifications "
+            "WHERE status='cancelled' ORDER BY id ASC"
+        ).fetchall()
+        cancel_bodies = [c[0] for c in cancelled]
+        cancel_reasons = {c[1] for c in cancelled}
+        # Older messages cancelled, newest kept.
+        assert "msg-0" in cancel_bodies
+        assert "backlog_overflow" in cancel_reasons
 
 
 # ==============================================================================
