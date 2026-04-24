@@ -555,6 +555,86 @@ class TestBacklogCap:
 
 
 # ==============================================================================
+# Slice 4: brief-outage coalescing (panic-attack)
+# ==============================================================================
+
+class TestPowerEventCoalescing:
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_pair_collapses_into_brief_outage_summary(
+        self, mock_apprise, notification_config, registered_store,
+    ):
+        """When ON_BATTERY + POWER_RESTORED are both pending in the
+        store (network down for the duration of a short outage), the
+        coalescer replaces them with a single 'Brief Power Outage'
+        summary BEFORE the worker tries delivery."""
+        # Apprise unreachable so nothing ships and we can observe the
+        # final pending state.
+        _patch_apprise(mock_apprise, succeed=False)
+        worker = NotificationWorker(notification_config)
+        worker.start()
+        worker.register_store(registered_store)
+        # Stop the worker thread before mutating; we'll exercise
+        # _coalesce_pending_outages directly to avoid the same race
+        # the cap test had on Python 3.13.
+        worker.stop()
+
+        # Simulate the on_battery → on_line pair with realistic bodies.
+        registered_store.enqueue_notification(
+            body="⚡ **Event:** ON_BATTERY\nDetails: Battery 80%, Runtime 600s",
+            notify_type="failure", category="power_event", ts=1000,
+        )
+        registered_store.enqueue_notification(
+            body="⚡ **Event:** POWER_RESTORED\nDetails: outage 60s",
+            notify_type="success", category="power_event", ts=1060,
+        )
+        coalesced = worker._coalesce_pending_outages(registered_store)
+        assert coalesced == 1
+
+        # Originals cancelled; one new summary remains pending.
+        cancelled = registered_store._conn.execute(
+            "SELECT body, cancel_reason FROM notifications "
+            "WHERE status='cancelled' ORDER BY id ASC"
+        ).fetchall()
+        assert len(cancelled) == 2
+        assert all(c[1] == "coalesced" for c in cancelled)
+
+        pending = registered_store._conn.execute(
+            "SELECT body FROM notifications WHERE status='pending'"
+        ).fetchall()
+        assert len(pending) == 1
+        body = pending[0][0]
+        assert "Brief Power Outage" in body
+        # Includes duration + the time-of-day window.
+        assert "1m" in body or "60s" in body
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_unpaired_on_battery_alone_is_left_alone(
+        self, mock_apprise, notification_config, registered_store,
+    ):
+        """Without a matching POWER_RESTORED, the lone ON_BATTERY stays
+        pending — coalescing only kicks in for matched pairs (otherwise
+        we'd hide an in-progress outage from the user)."""
+        _patch_apprise(mock_apprise, succeed=False)
+        worker = NotificationWorker(notification_config)
+        worker.start()
+        worker.register_store(registered_store)
+        worker.stop()
+
+        registered_store.enqueue_notification(
+            body="⚡ **Event:** ON_BATTERY\nDetails: Battery 80%",
+            notify_type="failure", category="power_event", ts=1000,
+        )
+        coalesced = worker._coalesce_pending_outages(registered_store)
+        assert coalesced == 0
+        assert registered_store.pending_notification_count() == 1
+
+
+# ==============================================================================
 # Config defaults (regression-style)
 # ==============================================================================
 

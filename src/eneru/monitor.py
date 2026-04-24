@@ -25,6 +25,7 @@ from eneru.lifecycle import (
     REASON_SEQUENCE_COMPLETE,
     REASON_SIGNAL,
     classify_startup,
+    coalesce_recovered_with_prev_shutdown,
     delete_shutdown_marker,
     delete_upgrade_marker,
     read_shutdown_marker,
@@ -383,6 +384,23 @@ class UPSGroupMonitor(
         if self._stats_store._conn is not None:
             for row in self._stats_store.find_pending_by_category("lifecycle"):
                 self._stats_store.cancel_notification(row[0], "superseded")
+
+        # Slice 4 bonus: when this start is "Recovered" (reason was
+        # sequence_complete), fold the previous instance's pending
+        # shutdown headline + summary into ONE richer message. Saves the
+        # user from seeing 3 messages (headline + summary + recovered)
+        # for what's really a single power-outage round trip.
+        if (shutdown_marker
+                and shutdown_marker.get("reason") == REASON_SEQUENCE_COMPLETE
+                and self._stats_store._conn is not None):
+            import time as _time
+            downtime = max(0, int(_time.time())
+                           - int(shutdown_marker.get("shutdown_at", 0)))
+            coalesced_body = coalesce_recovered_with_prev_shutdown(
+                self._stats_store, downtime_secs=downtime,
+            )
+            if coalesced_body:
+                body = coalesced_body
 
         # Markers consumed — drop them now so a crash on the next line
         # doesn't replay this classification on the start after that.

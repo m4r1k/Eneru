@@ -1,4 +1,4 @@
-"""Stateful lifecycle classifier for v5.2 startup notifications.
+"""Stateful lifecycle classifier + coalescing helpers for v5.2.
 
 Today's startup is stateless: every ``_initialize()`` emits a generic
 "🚀 Started" notification regardless of how the previous instance
@@ -228,3 +228,81 @@ def classify_startup(*, current_version: str,
         "Monitoring active.",
         "info",
     )
+
+
+# ==============================================================================
+# Coalescing helpers (Slice 4 — fold related notifications into one)
+# ==============================================================================
+
+def _extract_reason_from_body(body: str) -> Optional[str]:
+    """Best-effort: pull the ``Reason: ...`` line out of an emergency
+    shutdown headline body. Returns ``None`` when the convention isn't
+    matched."""
+    for line in str(body).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Reason: "):
+            return stripped[len("Reason: "):]
+    return None
+
+
+def coalesce_recovered_with_prev_shutdown(
+    store, *, downtime_secs: int, now_ts: Optional[int] = None,
+) -> Optional[str]:
+    """Fold the previous instance's pending shutdown headline + summary
+    into a single richer "Recovered" body that mentions when the
+    shutdown was triggered, what the trigger reason was, and the
+    downtime.
+
+    Cancels the prev-instance shutdown rows with
+    ``cancel_reason='coalesced'`` so the worker doesn't deliver them
+    redundantly. Returns the new body string, or ``None`` if there's
+    nothing to fold (caller falls back to the classifier's default).
+
+    The coalescing only fires when classification is "Recovered"
+    (sequence_complete) — see ``UPSGroupMonitor._emit_lifecycle_startup_notification``.
+    """
+    now = int(now_ts if now_ts is not None else time.time())
+
+    shutdown_rows = store.find_pending_by_category("shutdown") or []
+    summary_rows = store.find_pending_by_category("shutdown_summary") or []
+    if not shutdown_rows and not summary_rows:
+        return None
+
+    # Prefer the headline row for richer context (it carries the
+    # reason). Fall back to summary if no headline survived.
+    if shutdown_rows:
+        head = shutdown_rows[-1]  # most recent pending shutdown headline
+        head_id, head_ts, head_body, _ = head
+        reason = _extract_reason_from_body(head_body) or "power loss"
+        from datetime import datetime
+        shutdown_str = datetime.fromtimestamp(head_ts).strftime("%H:%M:%S")
+        recovered_str = datetime.fromtimestamp(now).strftime("%H:%M:%S")
+        body = (
+            f"📊 **Eneru Recovered**\n"
+            f"Power outage triggered shutdown at {shutdown_str} "
+            f"({reason}); recovered at {recovered_str} after "
+            f"{format_seconds(downtime_secs)} downtime."
+        )
+        store.cancel_notification(head_id, "coalesced")
+        # Older shutdown rows from the same outage also get folded.
+        for row in shutdown_rows[:-1]:
+            store.cancel_notification(row[0], "coalesced")
+        for row in summary_rows:
+            store.cancel_notification(row[0], "coalesced")
+        return body
+
+    # Only summary rows are pending (the headline already shipped).
+    head = summary_rows[-1]
+    head_id, head_ts, _, _ = head
+    from datetime import datetime
+    shutdown_str = datetime.fromtimestamp(head_ts).strftime("%H:%M:%S")
+    recovered_str = datetime.fromtimestamp(now).strftime("%H:%M:%S")
+    body = (
+        f"📊 **Eneru Recovered**\n"
+        f"Shutdown completed at {shutdown_str}; recovered at "
+        f"{recovered_str} after {format_seconds(downtime_secs)} downtime."
+    )
+    for row in summary_rows:
+        store.cancel_notification(row[0], "coalesced")
+    return body
+

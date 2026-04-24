@@ -338,5 +338,84 @@ echo ""
 echo "=== Test 32 PASSED: voltage auto-detect verified ==="
 )
 
+# ======================================================================
+# Test 34: v5.2 panic-attack coalescing (Slice 4)
+#
+# Cycle ON_BATTERY → POWER_RESTORED with notifications pointed at an
+# unreachable Apprise endpoint (RFC 5737 TEST-NET-1). Both rows stay
+# 'pending' in SQLite, the worker's coalescer folds them into one
+# "Brief Power Outage" summary, and the originals get cancel_reason=
+# 'coalesced'. This is the only direct E2E coverage of the slice 4
+# coalescer; per-rule unit tests carry the rest.
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 34: panic-attack coalescing"
+
+echo "=== Test 34: panic-attack notification coalescing ==="
+
+# Clean slate.
+rm -rf /tmp/eneru-e2e-coalesce /tmp/eneru-e2e-coalesce-*
+mkdir -p /tmp/eneru-e2e-coalesce
+rm -f /tmp/eneru-e2e-coalesce-shutdown-flag
+
+# Start from on-line.
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+sleep 3
+
+# Run eneru in the background — we drive the NUT scenario from the
+# foreground while the worker thread cycles through events.
+eneru run --config $E2E_DIR/config-e2e-coalesce.yaml > /tmp/test34.log 2>&1 &
+ENERU_PID=$!
+sleep 5  # let _initialize finish + register store + reach steady state
+
+# Trigger the outage.
+cp $E2E_DIR/scenarios/on-battery.dev $E2E_DIR/scenarios/apply.dev
+sleep 5  # ON_BATTERY event fires + lands in DB pending
+# Restore power.
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+sleep 5  # POWER_RESTORED fires + worker iteration runs the coalescer
+
+# Stop eneru cleanly (SIGTERM → _cleanup_and_exit → flush(5)).
+kill -TERM $ENERU_PID 2>/dev/null || true
+wait $ENERU_PID 2>/dev/null || true
+
+DB=$(ls /tmp/eneru-e2e-coalesce/*.db 2>/dev/null | head -1)
+if [ -z "$DB" ]; then
+  echo "FAIL: no SQLite stats DB created at /tmp/eneru-e2e-coalesce/"
+  cat /tmp/test34.log
+  exit 1
+fi
+
+# Originals: 2 rows cancelled with reason='coalesced'.
+coalesced=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM notifications \
+   WHERE category='power_event' AND status='cancelled' \
+     AND cancel_reason='coalesced';")
+if [ "$coalesced" -ne 2 ]; then
+  echo "FAIL: expected 2 cancelled (coalesced) power_event rows, got $coalesced"
+  sqlite3 "$DB" "SELECT id, ts, status, cancel_reason, body FROM notifications WHERE category='power_event' ORDER BY id;"
+  cat /tmp/test34.log
+  exit 1
+fi
+echo "PASS (34a): 2 power_event rows cancelled with reason='coalesced'"
+
+# Summary: 1 pending row whose body says "Brief Power Outage".
+summary=$(sqlite3 "$DB" \
+  "SELECT body FROM notifications \
+   WHERE category='power_event' AND status='pending' \
+     AND body LIKE '%Brief Power Outage%';")
+if [ -z "$summary" ]; then
+  echo "FAIL: no pending 'Brief Power Outage' summary row found"
+  sqlite3 "$DB" "SELECT id, ts, status, cancel_reason, body FROM notifications WHERE category='power_event' ORDER BY id;"
+  cat /tmp/test34.log
+  exit 1
+fi
+echo "PASS (34b): coalesced summary row present and pending"
+
+echo ""
+echo "=== Test 34 PASSED: panic-attack coalescing verified ==="
+)
+
 echo ""
 echo "=== Group 'stats' completed successfully ==="

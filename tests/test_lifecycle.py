@@ -25,12 +25,14 @@ from eneru.lifecycle import (
     SHUTDOWN_MARKER_NAME,
     UPGRADE_MARKER_NAME,
     classify_startup,
+    coalesce_recovered_with_prev_shutdown,
     delete_shutdown_marker,
     delete_upgrade_marker,
     read_shutdown_marker,
     read_upgrade_marker,
     write_shutdown_marker,
 )
+from eneru.stats import StatsStore
 
 
 # ==============================================================================
@@ -269,3 +271,111 @@ class TestClassifyStartup:
         assert "📦" in body and "Upgraded" in body
         assert "5.1.2" in body and "5.2.0" in body
         assert ntype == "success"
+
+
+# ==============================================================================
+# Slice 4: coalesce Recovered with previous shutdown headline
+# ==============================================================================
+
+class TestCoalesceRecoveredWithPrevShutdown:
+
+    def _store(self, tmp_path):
+        s = StatsStore(tmp_path / "n.db")
+        s.open()
+        return s
+
+    @pytest.mark.unit
+    def test_no_pending_returns_none(self, tmp_path):
+        s = self._store(tmp_path)
+        try:
+            assert coalesce_recovered_with_prev_shutdown(
+                s, downtime_secs=60, now_ts=2000,
+            ) is None
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_with_headline_includes_reason_and_times(self, tmp_path):
+        """When the previous instance's pending shutdown headline carries
+        a Reason: line, the coalesced body lifts that reason verbatim."""
+        s = self._store(tmp_path)
+        try:
+            head_id = s.enqueue_notification(
+                body=("🚨 **EMERGENCY SHUTDOWN INITIATED!**\n"
+                      "Reason: Battery charge 14% below threshold 20%\n"
+                      "Executing shutdown tasks."),
+                notify_type="failure",
+                category="shutdown",
+                ts=1000,
+            )
+            body = coalesce_recovered_with_prev_shutdown(
+                s, downtime_secs=3600, now_ts=4600,
+            )
+            assert body is not None
+            assert "📊" in body and "Recovered" in body
+            assert "Battery charge 14% below threshold 20%" in body
+            # The headline row should now be cancelled with reason coalesced.
+            row = s._conn.execute(
+                "SELECT status, cancel_reason FROM notifications "
+                "WHERE id=?", (head_id,),
+            ).fetchone()
+            assert row == ("cancelled", "coalesced")
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_with_summary_only_includes_times(self, tmp_path):
+        """When only the shutdown_summary is pending (the headline
+        already shipped), coalesce on the summary alone — no Reason
+        line available, but still folds into one Recovered message."""
+        s = self._store(tmp_path)
+        try:
+            sum_id = s.enqueue_notification(
+                body="✅ **Shutdown Sequence Complete** (took 12s)\nPowering down.",
+                notify_type="failure",
+                category="shutdown_summary",
+                ts=1000,
+            )
+            body = coalesce_recovered_with_prev_shutdown(
+                s, downtime_secs=120, now_ts=1120,
+            )
+            assert body is not None
+            assert "Recovered" in body
+            row = s._conn.execute(
+                "SELECT status, cancel_reason FROM notifications "
+                "WHERE id=?", (sum_id,),
+            ).fetchone()
+            assert row == ("cancelled", "coalesced")
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_headline_takes_priority_over_summary_when_both_pending(self, tmp_path):
+        """If both the shutdown headline AND its summary are pending,
+        the coalesced body is built from the headline (which carries
+        the Reason) and the summary is also cancelled."""
+        s = self._store(tmp_path)
+        try:
+            head_id = s.enqueue_notification(
+                body=("🚨 **EMERGENCY SHUTDOWN INITIATED!**\n"
+                      "Reason: Runtime 30s below threshold 60s\n"
+                      "Executing."),
+                notify_type="failure", category="shutdown", ts=1000,
+            )
+            sum_id = s.enqueue_notification(
+                body="✅ **Shutdown Sequence Complete** (took 8s)",
+                notify_type="failure", category="shutdown_summary", ts=1010,
+            )
+            body = coalesce_recovered_with_prev_shutdown(
+                s, downtime_secs=300, now_ts=1310,
+            )
+            assert body is not None
+            assert "Runtime 30s below threshold 60s" in body
+            for nid in (head_id, sum_id):
+                row = s._conn.execute(
+                    "SELECT status, cancel_reason FROM notifications "
+                    "WHERE id=?", (nid,),
+                ).fetchone()
+                assert row == ("cancelled", "coalesced")
+        finally:
+            s.close()

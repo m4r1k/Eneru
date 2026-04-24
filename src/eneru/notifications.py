@@ -278,13 +278,25 @@ class NotificationWorker:
                 pass
 
     def _drain_once(self) -> None:
-        """One pass: look at the oldest pending across all stores, try
-        to deliver it, then continue while there's more to do.
+        """One pass: coalesce, then look at the oldest pending across all
+        stores, try to deliver it, then continue while there's more to do.
 
         Bounded by the stop event so a long backlog can't block shutdown
         indefinitely (and ``flush()`` still polls until empty up to its
         own timeout).
         """
+        # Slice 4: fold same-outage on_battery + on_line pairs into a
+        # single "Brief outage" summary BEFORE delivery so the user sees
+        # one message instead of two when the network was down for the
+        # duration of a short blip.
+        with self._stores_lock:
+            stores_snapshot = list(self._stores)
+        for store in stores_snapshot:
+            try:
+                self._coalesce_pending_outages(store)
+            except Exception:
+                pass  # coalescing must never block delivery
+
         max_iters = 1000  # Defensive — large bursts must still drain.
         for _ in range(max_iters):
             if self._stop_event.is_set():
@@ -299,6 +311,55 @@ class NotificationWorker:
                 store=store, row_id=row_id, body=body,
                 notify_type=notify_type, attempts=attempts,
             )
+
+    def _coalesce_pending_outages(self, store) -> int:
+        """Pair pending ON_BATTERY + POWER_RESTORED rows into a single
+        "Brief outage" summary. Returns count of pairs coalesced.
+
+        The match is body-substring based — both events come through
+        ``_log_power_event`` and the body always carries the event name
+        in ``"⚡ **Event:** <NAME>\\n..."`` form. Cheap to scan; runs
+        once per worker iteration.
+
+        Both rows must still be ``pending`` for coalescing to apply.
+        Once one of the pair has shipped (the network was up at one end
+        but not the other), they go out separately.
+        """
+        rows = store.find_pending_by_category("power_event") or []
+        coalesced = 0
+        from datetime import datetime
+        from eneru.utils import format_seconds
+
+        on_battery = None
+        for row_id, ts, body, notify_type in rows:
+            body_str = str(body)
+            if "ON_BATTERY" in body_str:
+                # If we'd already seen one without finding its restore,
+                # keep the latest (the most recent outage start).
+                on_battery = (row_id, ts, body_str, notify_type)
+                continue
+            if on_battery and "POWER_RESTORED" in body_str:
+                ob_id, ob_ts, _, _ = on_battery
+                duration = max(0, ts - ob_ts)
+                start_str = datetime.fromtimestamp(ob_ts).strftime("%H:%M:%S")
+                end_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+                summary_body = (
+                    f"📊 **Brief Power Outage**\n"
+                    f"On battery for {format_seconds(duration)} "
+                    f"({start_str} → {end_str})."
+                )
+                # Use the end timestamp so the summary sorts AFTER any
+                # other unrelated pending power events from before the
+                # outage.
+                store.enqueue_notification(
+                    body=summary_body, notify_type="info",
+                    category="power_event", ts=ts,
+                )
+                store.cancel_notification(ob_id, "coalesced")
+                store.cancel_notification(row_id, "coalesced")
+                coalesced += 1
+                on_battery = None
+        return coalesced
 
     def _next_due_candidate(self) -> Optional[Tuple]:
         """Return the oldest pending row across all registered stores
