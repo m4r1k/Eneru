@@ -690,3 +690,104 @@ class TestConfigDefaults:
         assert c.max_age_days == 30
         assert c.max_pending == 10000
         assert c.retry_backoff_max == 300
+
+
+# ==============================================================================
+# v5.2.1 coverage gaps — error / fallback paths in notifications.py
+# ==============================================================================
+
+class TestErrorPaths:
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_memory_buffer_overflow_drops_oldest_and_warns(
+        self, mock_apprise, capsys,
+    ):
+        """When sends arrive before any store registers and the buffer
+        exceeds max_pending, the oldest get dropped and a one-shot
+        warning prints. Without this cap a misconfigured daemon could
+        OOM (CR P1 — already addressed; this test pins the behaviour)."""
+        _patch_apprise(mock_apprise, succeed=True)
+        config = Config()
+        config.notifications = NotificationsConfig(
+            enabled=True, urls=["discord://x"], title="t", timeout=5,
+            max_pending=3,  # tiny cap to force overflow fast
+        )
+        worker = NotificationWorker(config)
+        worker.start()
+        try:
+            # 5 sends with no store registered → all go to buffer; cap
+            # at 3 means 2 oldest get dropped.
+            for i in range(5):
+                worker.send(f"msg-{i}", "info", "lifecycle")
+            assert len(worker._memory_buffer) == 3
+            # Newest survive; the 2 oldest were trimmed.
+            bodies = [t[0] for t in worker._memory_buffer]
+            assert bodies == ["msg-2", "msg-3", "msg-4"]
+            # One-shot warning lands on stdout.
+            captured = capsys.readouterr()
+            assert "memory buffer exceeded" in captured.out
+            # Subsequent overflows don't re-warn (one-shot).
+            for i in range(5, 10):
+                worker.send(f"msg-{i}", "info", "lifecycle")
+            captured2 = capsys.readouterr()
+            assert "memory buffer exceeded" not in captured2.out
+        finally:
+            worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_register_store_rebuffers_on_persistence_failure(
+        self, mock_apprise, notification_config,
+    ):
+        """If a buffered row fails to persist on register_store (the
+        store returns None for any reason), the row goes back into the
+        memory buffer rather than getting silently dropped (CR P1)."""
+        _patch_apprise(mock_apprise, succeed=True)
+        worker = NotificationWorker(notification_config)
+        worker.start()
+        try:
+            worker.send("buffered-1", "info", "lifecycle")
+            worker.send("buffered-2", "info", "lifecycle")
+            assert len(worker._memory_buffer) == 2
+            # Stub store: enqueue_notification returns None (simulated
+            # transient SQLite error). pending_notification_count
+            # returns 0 so worker.stop()'s drain check doesn't trip on
+            # the MagicMock's default truthy value.
+            failing_store = MagicMock()
+            failing_store.enqueue_notification.return_value = None
+            failing_store.cap_pending_notifications.return_value = 0
+            failing_store.pending_notification_count.return_value = 0
+            worker.register_store(failing_store)
+            # Both rows went back into the buffer because persistence
+            # never succeeded.
+            assert len(worker._memory_buffer) == 2
+            bodies = [t[0] for t in worker._memory_buffer]
+            assert "buffered-1" in bodies and "buffered-2" in bodies
+        finally:
+            worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_flush_returns_false_when_buffer_nonempty_no_store(
+        self, mock_apprise, notification_config,
+    ):
+        """flush() must include the in-memory buffer in its drain check
+        — without that, a shutdown that fires before any store
+        registered would return True immediately and drop the buffered
+        message (CR P1)."""
+        _patch_apprise(mock_apprise, succeed=True)
+        worker = NotificationWorker(notification_config)
+        worker.start()
+        try:
+            worker.send("never-persisted", "info", "lifecycle")
+            # No store registered; the row sits in memory.
+            assert len(worker._memory_buffer) == 1
+            # flush should report "not drained" because the buffer is
+            # not empty even though no store has any pending.
+            assert worker.flush(timeout=0.2) is False
+        finally:
+            worker.stop()

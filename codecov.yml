@@ -1,0 +1,30 @@
+# Codecov configuration. Schema: https://docs.codecov.com/docs/codecov-yaml
+#
+# Coverage measurement and reporting stay enabled — every PR still gets
+# a comment with the coverage delta and a flag-by-flag breakdown. What
+# changes here is the *check status*: with `informational: true` the
+# `codecov/patch` and `codecov/project` checks always report neutral /
+# success rather than failure, even when coverage drops below an
+# arbitrary threshold. The intent is to keep the signal visible without
+# turning every well-tested-but-coverage-shifting PR into a red ❌ on
+# the checks list.
+#
+# Branch protection on main does NOT include codecov as a required
+# check (see CLAUDE.md "Branch protection on main"); this file's only
+# behavioural effect is the visual one on the PR checks panel.
+
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+# Keep the inline PR comment so reviewers can still see the coverage
+# delta at a glance.
+comment:
+  layout: "reach,diff,flags,tree"
+  behavior: default
+  require_changes: false

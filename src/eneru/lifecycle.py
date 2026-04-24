@@ -238,6 +238,71 @@ def classify_startup(*, current_version: str,
 
 
 # ==============================================================================
+# Event-type classifier (mirrors classify_startup; for the events table)
+# ==============================================================================
+
+# Event-type strings written to the stats events table by
+# UPSGroupMonitor._emit_lifecycle_startup_notification. New types here
+# do NOT need a schema bump — events.event_type is TEXT (see
+# src/eneru/CLAUDE.md "Stats schema evolution"). Names follow the
+# UPPER_SNAKE convention used by _log_power_event.
+EVENT_TYPE_DAEMON_UPGRADED = "DAEMON_UPGRADED"
+EVENT_TYPE_DAEMON_RECOVERED = "DAEMON_RECOVERED"
+EVENT_TYPE_DAEMON_RESTARTED = "DAEMON_RESTARTED"
+EVENT_TYPE_DAEMON_RESTARTED_AFTER_FATAL = "DAEMON_RESTARTED_AFTER_FATAL"
+EVENT_TYPE_DAEMON_AFTER_CRASH = "DAEMON_AFTER_CRASH"
+EVENT_TYPE_DAEMON_START = "DAEMON_START"
+
+
+def classify_event_type(*, current_version: str,
+                        shutdown_marker: Optional[dict],
+                        upgrade_marker: Optional[dict],
+                        last_seen_version: Optional[str],
+                        now_ts: Optional[int] = None,
+                        ) -> str:
+    """Return the event_type string for the stats events table that
+    matches what :func:`classify_startup` would have classified the
+    startup as. Same priority order; lifted out so the events table
+    can carry the same lifecycle-state taxonomy the user sees in the
+    notification body.
+
+    Note: a brand-new daemon (no marker, no last_seen) classifies as
+    ``DAEMON_START``, which the existing ``_start_stats`` already logs.
+    Caller can detect that case (``last_seen_version is None and not
+    shutdown_marker and not upgrade_marker``) and skip the duplicate
+    insert.
+    """
+    now = int(now_ts if now_ts is not None else time.time())
+
+    if upgrade_marker:
+        return EVENT_TYPE_DAEMON_UPGRADED
+    if (last_seen_version and last_seen_version != current_version
+            and not shutdown_marker):
+        return EVENT_TYPE_DAEMON_UPGRADED
+
+    if shutdown_marker:
+        if last_seen_version and last_seen_version != current_version:
+            return EVENT_TYPE_DAEMON_UPGRADED
+        try:
+            shutdown_at = int(shutdown_marker.get("shutdown_at", now))
+        except (TypeError, ValueError):
+            shutdown_at = now
+        downtime = max(0, now - shutdown_at)
+        reason = str(shutdown_marker.get("reason", REASON_SIGNAL))
+        if reason == REASON_SEQUENCE_COMPLETE:
+            return EVENT_TYPE_DAEMON_RECOVERED
+        if reason == REASON_FATAL:
+            return EVENT_TYPE_DAEMON_RESTARTED_AFTER_FATAL
+        if downtime < RESTART_DOWNTIME_THRESHOLD_SECS:
+            return EVENT_TYPE_DAEMON_RESTARTED
+        return EVENT_TYPE_DAEMON_START
+
+    if last_seen_version:
+        return EVENT_TYPE_DAEMON_AFTER_CRASH
+    return EVENT_TYPE_DAEMON_START
+
+
+# ==============================================================================
 # Coalescing helpers (Slice 4 — fold related notifications into one)
 # ==============================================================================
 
