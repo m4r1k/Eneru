@@ -300,9 +300,9 @@ def _format_event_line(ts: int, label: str, event_type: str,
                        detail: str, multi_ups: bool) -> str:
     """Format one event row from the SQLite events table for display."""
     try:
-        time_str = datetime.fromtimestamp(int(ts)).strftime("%H:%M:%S")
+        time_str = datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M:%S")
     except (TypeError, ValueError, OSError):
-        time_str = "??:??:??"
+        time_str = "????-??-?? ??:??:??"
     prefix = f"[{label}] " if multi_ups else ""
     if detail:
         return f"{time_str}  {prefix}{event_type}: {detail}"
