@@ -9,62 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [5.2.1] - 2026-04-24
 
-Bug-fix release for two regressions reported within an hour of v5.2.0
-shipping. RPM users reinstalling or upgrading saw two notifications
-(`🛑 Service Stopped` + `📦 Upgraded vunknown → v5.2.0`) where v5.2's
-design called for a single `📦 Upgraded vX → vY` message. The `vunknown`
-came from RPM not passing the previous version to postinstall; the
-duplicate fired because the synchronous `flush(timeout=5)` shipped the
-stop notification before the new daemon could supersede it. The same
-race produced two messages on every plain `systemctl restart` too. Drop-in
-upgrade. See `git log v5.2.0..v5.2.1` for per-commit detail.
+Bug-fix release for two v5.2.0 regressions. Drop-in upgrade. See
+`git log v5.2.0..v5.2.1` for per-commit detail.
 
 ### Fixed
-- **Duplicate stop+start notifications on `systemctl restart` and package
-  upgrade.** `_cleanup_and_exit` now enqueues `🛑 Service Stopped` AFTER
-  the worker is drained and stopped, so the row stays `pending` in
-  SQLite. The next daemon's lifecycle classifier cancels the pending row
-  with `cancel_reason='superseded'` before emitting `🔄 Restarted` /
-  `📦 Upgraded` / `📊 Recovered` — exactly one notification per lifecycle
-  transition. Same fix in `MultiUPSCoordinator._handle_signal`. The
-  coordinator path also gets a new `_cancel_prev_pending_lifecycle_rows`
-  sweep at startup that opens each per-UPS store briefly and cancels
-  any pending lifecycle row from the previous instance — without that
-  sweep multi-UPS users would still see two notifications because
-  coordinator startup early-returns from the per-monitor cancel block.
-- **Stop notification suppressed entirely during deb/rpm upgrade.** The
-  upgrade marker is on disk by the time SIGTERM lands (postinstall drops
-  it before `systemctl restart`), so the old daemon now reads it and
-  skips the lifecycle stop write — saves a queue write + cancel
-  round-trip on every package upgrade.
-- **`📦 Upgraded vunknown → v5.2.1` on RPM.** RPM's postinstall gets
-  nothing useful in `$2`; v5.2.0's `${2:-unknown}` default rendered as
-  `vunknown`. New `packaging/scripts/preinstall.sh` queries `rpm -q
-  eneru` (or `dpkg-query -W eneru`) BEFORE the new package files unpack
-  and stashes the outgoing version in `/run/eneru/.old-version`;
-  `postinstall.sh` reads that and drops it into the upgrade marker.
-- **Defensive fallback in the lifecycle classifier.** If the upgrade
-  marker still arrives with `unknown` / `?` / empty `old_version` (manual
-  `rpm -ivh --force`, container-build edge case, partial install),
-  `lifecycle.classify_startup` now falls back to
-  `shutdown_marker.version` (always populated on graceful exit), then to
-  `meta.last_seen_version` from the stats DB, before rendering literal
-  `?`. The user never sees `vunknown` again regardless of how the marker
-  was populated.
+- **Two notifications on every `systemctl restart` and package upgrade**
+  instead of the v5.2-promised single `🔄 Restarted` / `📦 Upgraded`. The
+  synchronous `flush(timeout=5)` shipped the `🛑 Service Stopped` before
+  the next daemon's classifier could supersede it. Stop is now enqueued
+  *after* the worker drains so the row stays `pending` in SQLite for the
+  next daemon to cancel. Mirror fix in `MultiUPSCoordinator._handle_signal`,
+  plus a new coordinator-startup sweep for the multi-UPS path.
+- **`📦 Upgraded vunknown → v5.2.0` on RPM upgrade.** New `preinstall.sh`
+  captures the outgoing version via `rpm -q eneru` (or `dpkg-query -W
+  eneru`) before the new files unpack — RPM doesn't pass it in `$2` the
+  way DEB does. Defensive fallback chain in `lifecycle.classify_startup`
+  (`shutdown_marker.version` → `meta.last_seen_version` → `?`) covers
+  manual `rpm -ivh --force` and other paths that bypass scriptlets.
 
 ### Documentation
-- **`docs/notifications.md`** caught up with v5.0 / 5.1 / 5.2: SQLite-
-  backed persistent queue (replaces the v4.7 in-memory FIFO description),
-  per-message exponential backoff, the new config knobs (`retention_days`,
-  `max_attempts`, `max_age_days`, `max_pending`, `retry_backoff_max`),
-  the v5.2 lifecycle classifier states with the markers that drive each,
-  the brief-power-outage and recovery coalescing semantics. The
-  comparison table now spans `Fire-and-Forget (v4.6)` vs `Persistent
-  Retry (v4.7+)` vs `Stateful, Lossless Notifications (v5.2+)`.
+- **`docs/notifications.md`** caught up with the v5.0 / 5.1 / 5.2
+  architecture: SQLite-backed queue, exponential backoff, new config
+  knobs, lifecycle classifier states, brief-power-outage / recovery
+  coalescing. Comparison table extended to three columns (v4.6 / v4.7+ /
+  v5.2+).
 
 ### Migration notes
-None. Drop-in upgrade. Existing `notifications.*` config continues to
-work unchanged.
+None.
 
 ---
 
