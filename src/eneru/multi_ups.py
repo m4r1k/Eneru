@@ -186,9 +186,13 @@ class MultiUPSCoordinator:
             label = group.ups.label
             self._log(f"❌ Monitor thread for {label} crashed: {e}")
             if self._notification_worker:
+                # The monitor's _stats_store is opened by _initialize_notifications,
+                # so it's safe to pin the destination here.
                 self._notification_worker.send(
                     f"❌ **Monitor Crashed:** {label}\nError: {e}",
                     "failure",
+                    category="lifecycle",
+                    store=getattr(monitor, "_stats_store", None),
                 )
 
     def _on_group_shutdown(self, group):
@@ -247,6 +251,7 @@ class MultiUPSCoordinator:
                     self._notification_worker.send(
                         "🛑 **Shutdown Sequence Complete**\nShutting down local server NOW.",
                         "failure",
+                        category="shutdown_summary",
                     )
                 time.sleep(5)
                 cmd_parts = self.config.local_shutdown.command.split()
@@ -326,6 +331,7 @@ class MultiUPSCoordinator:
             self._notification_worker.send(
                 "🛑 **Eneru Service Stopped**\nMonitoring is now inactive.",
                 "warning",
+                category="lifecycle",
             )
 
         self._stop_event.set()

@@ -129,14 +129,20 @@ class UPSGroupMonitor(
         self._stats_writer: Optional[StatsWriter] = None
 
     def _start_stats(self):
-        """Open the per-UPS stats DB and start the background writer.
+        """Open the per-UPS stats DB (if not already open) and start the
+        background writer.
 
-        SQLite errors are isolated -- a failure here logs once and the
-        daemon continues to run without stats persistence.
+        v5.2: ``_initialize_notifications`` opens the store earlier so
+        the notification worker can persist messages from the very first
+        notification. We keep the open() call here for the
+        ``notifications.enabled=False`` path where _initialize_notifications
+        skips the open. SQLite errors are isolated — a failure here
+        logs once and the daemon continues without stats persistence.
         """
         try:
-            self._stats_store._logger = self.logger
-            self._stats_store.open()
+            if self._stats_store._conn is None:
+                self._stats_store._logger = self.logger
+                self._stats_store.open()
         except Exception as e:
             self._log_message(
                 f"⚠️ WARNING: stats store open failed at {self._stats_db_path}: {e}. "
@@ -236,7 +242,8 @@ class UPSGroupMonitor(
         self._log_message(f"🚀 Eneru v{__version__} starting - monitoring {self.config.ups.name}")
         self._send_notification(
             f"🚀 **Eneru v{__version__} Started**\nMonitoring {self.config.ups.name}",
-            self.config.NOTIFY_INFO
+            self.config.NOTIFY_INFO,
+            category="lifecycle",
         )
 
         if self.config.behavior.dry_run:
@@ -248,9 +255,36 @@ class UPSGroupMonitor(
         self._start_stats()
 
     def _initialize_notifications(self):
-        """Initialize the notification worker."""
-        # In coordinator mode, the notification worker is shared and pre-initialized
+        """Initialize the notification worker.
+
+        v5.2 wires the worker to the per-UPS stats DB so notifications
+        can be persisted and replayed across restarts. The store is
+        opened early (here) — earlier than ``_start_stats()`` — because
+        the very first notification (the lifecycle "Started" / "Recovered"
+        message) fires before stats opens by the legacy ordering, and
+        we want it persisted too.
+
+        In coordinator mode the worker is created externally and shared;
+        we still open + register our store so the shared worker can pick
+        up our pending rows on the next iteration.
+        """
+        # Open the per-UPS stats store now (idempotent; _start_stats
+        # will skip the open() call if it sees us already opened it).
+        try:
+            if self._stats_store._conn is None:
+                self._stats_store._logger = self.logger
+                self._stats_store.open()
+        except Exception as e:
+            self._log_message(
+                f"⚠️ WARNING: stats store open failed at "
+                f"{self._stats_db_path}: {e}. Notifications will not "
+                "persist across restarts."
+            )
+
         if self._notification_worker is not None:
+            # Coordinator mode: register our store with the shared worker.
+            if self._stats_store._conn is not None:
+                self._notification_worker.register_store(self._stats_store)
             return
 
         if not self.config.notifications.enabled:
@@ -265,6 +299,8 @@ class UPSGroupMonitor(
 
         self._notification_worker = NotificationWorker(self.config)
         if self._notification_worker.start():
+            if self._stats_store._conn is not None:
+                self._notification_worker.register_store(self._stats_store)
             service_count = self._notification_worker.get_service_count()
             self._log_message(f"📢 Notifications: enabled ({service_count} service(s))")
         else:
@@ -323,38 +359,42 @@ class UPSGroupMonitor(
             print(f"{timestamp} {tz_name} - {prefixed}")
 
     def _send_notification(self, body: str, notify_type: str = "info",
-                           blocking: bool = False):
-        """Send a notification via the notification worker.
+                           blocking: bool = False,
+                           category: str = "general"):
+        """Queue a notification via the persistent notification worker.
 
-        IMPORTANT: During shutdown sequences, notifications are ALWAYS non-blocking.
-        This ensures that network failures (common during power outages) do not
-        delay the critical shutdown process. The blocking parameter is only
-        honored for non-shutdown scenarios like --test-notifications.
+        v5.2 change: notifications are inserted as ``pending`` rows in
+        the per-UPS stats DB before delivery is attempted. The worker
+        thread reads/writes through the DB, so messages survive process
+        death and prolonged endpoint outages — see ``notifications.py``
+        for the full architecture.
 
         Args:
-            body: Notification body text
-            notify_type: One of 'info', 'success', 'warning', 'failure'
-            blocking: If True AND not during shutdown, wait for send completion.
-                      Ignored during shutdown to prevent delays.
+            body: Notification body text.
+            notify_type: One of 'info', 'success', 'warning', 'failure'.
+            blocking: Back-compat shim. The v5.2 queue is always
+                asynchronous (delivery happens on the worker thread).
+                The flag is accepted for API stability but ignored.
+            category: Coarse classification used by Slice 4 coalescing
+                and per-category queries. Common values: ``lifecycle``,
+                ``power_event``, ``voltage``, ``shutdown``,
+                ``shutdown_summary``, ``general`` (default).
         """
+        del blocking  # see docstring
         if not self._notification_worker:
             return
 
-        # Prefix notification body with UPS name in multi-UPS mode
+        # Prefix notification body with UPS name in multi-UPS mode.
         prefixed_body = f"{self._log_prefix}{body}" if self._log_prefix else body
 
         # Escape @ symbols to prevent Discord mentions (e.g., UPS@192.168.1.1)
         escaped_body = prefixed_body.replace("@", "@\u200B")  # Zero-width space after @
 
-        # CRITICAL: During shutdown, NEVER block on notifications
-        # Network is likely unreliable during power outages
-        is_shutdown = self._shutdown_flag_path.exists()
-        actual_blocking = blocking and not is_shutdown
-
         self._notification_worker.send(
             body=escaped_body,
             notify_type=notify_type,
-            blocking=actual_blocking
+            category=category,
+            store=self._stats_store,
         )
 
     def _log_power_event(self, event: str, details: str,
@@ -483,7 +523,9 @@ class UPSGroupMonitor(
             )
 
         if notification:
-            self._send_notification(*notification)
+            self._send_notification(
+                *notification, category="power_event",
+            )
 
     def _check_dependencies(self):
         """Check for required and optional dependencies."""
@@ -678,7 +720,8 @@ class UPSGroupMonitor(
                 self._send_notification(
                     f"✅ **Shutdown Sequence Complete** (took {elapsed}s)\n"
                     f"Powering down local server NOW.",
-                    self.config.NOTIFY_FAILURE
+                    self.config.NOTIFY_FAILURE,
+                    category="shutdown_summary",
                 )
                 # Give notification time to send. Slice 5 replaces this with
                 # NotificationWorker.flush(timeout=5).
@@ -693,7 +736,8 @@ class UPSGroupMonitor(
             self._send_notification(
                 f"✅ **Shutdown Sequence Complete** (took {elapsed}s)\n"
                 f"Local shutdown is disabled — system stays up.",
-                self.config.NOTIFY_INFO
+                self.config.NOTIFY_INFO,
+                category="shutdown_summary",
             )
             self._shutdown_flag_path.unlink(missing_ok=True)
 
@@ -714,7 +758,8 @@ class UPSGroupMonitor(
             f"🚨 **EMERGENCY SHUTDOWN INITIATED!**\n"
             f"Reason: {reason}\n"
             "Executing shutdown tasks (VMs, Containers, Remote Servers).",
-            self.config.NOTIFY_FAILURE
+            self.config.NOTIFY_FAILURE,
+            category="shutdown",
         )
 
         self._log_message(f"🚨 CRITICAL: Triggering immediate shutdown. Reason: {reason}")
@@ -741,7 +786,8 @@ class UPSGroupMonitor(
         # Send notification (non-blocking - fire and forget)
         self._send_notification(
             "🛑 **Eneru Service Stopped**\nMonitoring is now inactive.",
-            self.config.NOTIFY_WARNING
+            self.config.NOTIFY_WARNING,
+            category="lifecycle",
         )
 
         if self._notification_worker:
