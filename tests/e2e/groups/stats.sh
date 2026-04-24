@@ -318,13 +318,17 @@ if ! echo "$rows" | grep -q "VOLTAGE_AUTODETECT_MISMATCH|0"; then
 fi
 echo "PASS (32c): events table records mismatch with notification_sent=0"
 
-# Schema version must be 3 after rc7-class daemon's first start.
+# Schema version must match SCHEMA_VERSION in src/eneru/stats.py — the
+# value bumps on each migration (3 in v5.1.x, 4 in v5.2.0). Read the
+# expected value from the package itself rather than hard-coding so this
+# assertion doesn't keep breaking on every schema change.
+expected_ver=$(python3 -c "from eneru.stats import SCHEMA_VERSION; print(SCHEMA_VERSION)")
 ver=$(sqlite3 "$DB" "SELECT value FROM meta WHERE key='schema_version';")
-if [ "$ver" != "3" ]; then
-  echo "FAIL: expected schema_version=3, got '$ver'"
+if [ "$ver" != "$expected_ver" ]; then
+  echo "FAIL: expected schema_version=$expected_ver, got '$ver'"
   exit 1
 fi
-echo "PASS (32d): meta.schema_version=3"
+echo "PASS (32d): meta.schema_version=$ver"
 
 # Restore for downstream tests
 cp $E2E_DIR/scenarios/online-charging.dev \

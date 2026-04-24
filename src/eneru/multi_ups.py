@@ -20,6 +20,16 @@ from eneru.logger import UPSLogger
 from eneru.notifications import APPRISE_AVAILABLE, NotificationWorker
 from eneru.monitor import UPSGroupMonitor
 from eneru.redundancy import RedundancyGroupEvaluator, RedundancyGroupExecutor
+from eneru.lifecycle import (
+    REASON_SEQUENCE_COMPLETE,
+    REASON_SIGNAL,
+    classify_startup,
+    delete_shutdown_marker,
+    delete_upgrade_marker,
+    read_shutdown_marker,
+    read_upgrade_marker,
+    write_shutdown_marker,
+)
 from eneru.utils import run_command
 
 
@@ -96,6 +106,33 @@ class MultiUPSCoordinator:
 
         if self.config.behavior.dry_run:
             self._log("🧪 *** RUNNING IN DRY-RUN MODE - NO ACTUAL SHUTDOWN WILL OCCUR ***")
+
+        # Slice 3: emit ONE classified lifecycle notification at the
+        # coordinator level (the per-monitor _emit_lifecycle_startup
+        # is suppressed in coordinator_mode so we don't get N copies).
+        # Marker file ops only need a directory; meta.last_seen_version
+        # update is deferred to the per-monitor startup which has a
+        # store handle.
+        if self._notification_worker:
+            stats_dir = Path(self.config.statistics.db_directory)
+            shutdown_marker = read_shutdown_marker(stats_dir)
+            upgrade_marker = read_upgrade_marker(stats_dir)
+            body, notify_type = classify_startup(
+                current_version=__version__,
+                shutdown_marker=shutdown_marker,
+                upgrade_marker=upgrade_marker,
+                # In coordinator mode the meta lookup defers to the
+                # per-monitor lifecycle pass, which still runs (the
+                # _coordinator_mode skip there is only for the SEND).
+                # Pass None so the classifier doesn't attempt a pip-path
+                # version comparison without the data.
+                last_seen_version=None,
+            )
+            self._notification_worker.send(
+                body=body, notify_type=notify_type, category="lifecycle",
+            )
+            delete_shutdown_marker(stats_dir)
+            delete_upgrade_marker(stats_dir)
 
     def _start_monitors(self):
         """Create and start one UPSGroupMonitor thread per group."""

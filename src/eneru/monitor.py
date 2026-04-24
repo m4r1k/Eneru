@@ -20,6 +20,17 @@ from eneru.state import MonitorState
 from eneru.logger import UPSLogger
 from eneru.notifications import NotificationWorker, APPRISE_AVAILABLE
 from eneru.stats import StatsStore, StatsWriter
+from eneru.lifecycle import (
+    REASON_FATAL,
+    REASON_SEQUENCE_COMPLETE,
+    REASON_SIGNAL,
+    classify_startup,
+    delete_shutdown_marker,
+    delete_upgrade_marker,
+    read_shutdown_marker,
+    read_upgrade_marker,
+    write_shutdown_marker,
+)
 from eneru.utils import run_command, command_exists, is_numeric, format_seconds
 from eneru.shutdown.vms import VMShutdownMixin
 from eneru.shutdown.containers import ContainerShutdownMixin
@@ -208,8 +219,21 @@ class UPSGroupMonitor(
             self._log_message(f"❌ FATAL ERROR: {e}")
             self._send_notification(
                 f"❌ **FATAL ERROR**\nError: {e}",
-                self.config.NOTIFY_FAILURE
+                self.config.NOTIFY_FAILURE,
+                category="lifecycle",
             )
+            # Slice 3: tag this exit so the next start emits
+            # "🚀 Restarted (last instance exited fatally)" rather than
+            # a generic Started.
+            try:
+                from pathlib import Path
+                write_shutdown_marker(
+                    Path(self.config.statistics.db_directory),
+                    version=__version__, reason=REASON_FATAL,
+                )
+            except Exception:
+                # Marker write must never mask the original FATAL.
+                pass
             raise
 
     def _initialize(self):
@@ -240,11 +264,12 @@ class UPSGroupMonitor(
         self._check_dependencies()
 
         self._log_message(f"🚀 Eneru v{__version__} starting - monitoring {self.config.ups.name}")
-        self._send_notification(
-            f"🚀 **Eneru v{__version__} Started**\nMonitoring {self.config.ups.name}",
-            self.config.NOTIFY_INFO,
-            category="lifecycle",
-        )
+        # Always invoke — the helper updates meta.last_seen_version for
+        # next-start upgrade detection. The actual SEND is suppressed in
+        # coordinator mode because the coordinator emits ONE classified
+        # lifecycle notification at the multi_ups level (per-monitor
+        # sends would be N copies of the same event).
+        self._emit_lifecycle_startup_notification()
 
         if self.config.behavior.dry_run:
             self._log_message("🧪 *** RUNNING IN DRY-RUN MODE - NO ACTUAL SHUTDOWN WILL OCCUR ***")
@@ -306,6 +331,65 @@ class UPSGroupMonitor(
         else:
             self._log_message("⚠️ WARNING: Failed to initialize notifications")
             self.config.notifications.enabled = False
+
+    def _emit_lifecycle_startup_notification(self):
+        """Update lifecycle meta + (single-UPS only) emit the classified
+        startup notification.
+
+        Replaces the v5.1 unconditional ``🚀 Started`` so the user sees:
+        - ``📦 Upgraded vX → vY`` after a deb/rpm upgrade
+        - ``📊 Recovered`` after a power-loss-triggered shutdown
+        - ``🔄 Restarted`` after a quick `systemctl restart`
+        - ``🚀 Started (after crash)`` if the previous instance died
+          without writing its marker
+        - ``🚀 Started`` on a fresh install
+
+        In coordinator mode the coordinator emits the single classified
+        notification at the multi_ups level (firing per monitor would be
+        N copies of the same event); we still update
+        ``meta.last_seen_version`` here so the next-start pip-path
+        upgrade detector has its data.
+        """
+        # Read the PREVIOUS last_seen_version BEFORE we overwrite it
+        # with the current run's version — the classifier needs the
+        # delta to detect a pip-path upgrade. After classification, set
+        # to current so the NEXT start sees this run's version as
+        # "previous".
+        last_seen = (self._stats_store.get_meta("last_seen_version")
+                     if self._stats_store._conn is not None else None)
+        if self._stats_store._conn is not None:
+            self._stats_store.set_meta("last_seen_version", __version__)
+
+        if self._coordinator_mode:
+            return
+
+        from pathlib import Path
+        stats_dir = Path(self.config.statistics.db_directory)
+        shutdown_marker = read_shutdown_marker(stats_dir)
+        upgrade_marker = read_upgrade_marker(stats_dir)
+
+        body, notify_type = classify_startup(
+            current_version=__version__,
+            shutdown_marker=shutdown_marker,
+            upgrade_marker=upgrade_marker,
+            last_seen_version=last_seen,
+        )
+
+        # Cancel any pending lifecycle rows from the previous instance —
+        # they're superseded by the new classification (Restarted folds
+        # the previous "Stopped", Recovered folds the previous "Stopped",
+        # etc.). Keeps the user from seeing ghost messages on the next
+        # successful delivery.
+        if self._stats_store._conn is not None:
+            for row in self._stats_store.find_pending_by_category("lifecycle"):
+                self._stats_store.cancel_notification(row[0], "superseded")
+
+        # Markers consumed — drop them now so a crash on the next line
+        # doesn't replay this classification on the start after that.
+        delete_shutdown_marker(stats_dir)
+        delete_upgrade_marker(stats_dir)
+
+        self._send_notification(body, notify_type, category="lifecycle")
 
     def _log_enabled_features(self):
         """Log which features are enabled."""
@@ -731,6 +815,17 @@ class UPSGroupMonitor(
                 if self._notification_worker:
                     self._notification_worker.flush(timeout=5)
 
+                # Slice 3: tag this shutdown as power-loss-triggered so
+                # the next start can emit "📊 Recovered" and (with Slice
+                # 4 coalescing) fold this run's "Shutdown sequence
+                # complete" notification into one richer message.
+                from pathlib import Path
+                write_shutdown_marker(
+                    Path(self.config.statistics.db_directory),
+                    version=__version__,
+                    reason=REASON_SEQUENCE_COMPLETE,
+                )
+
                 cmd_parts = self.config.local_shutdown.command.split()
                 if self.config.local_shutdown.message:
                     cmd_parts.append(self.config.local_shutdown.message)
@@ -777,6 +872,9 @@ class UPSGroupMonitor(
 
     def _cleanup_and_exit(self, signum: int, frame):
         """Handle clean exit on signals."""
+        from pathlib import Path
+        stats_dir = Path(self.config.statistics.db_directory)
+
         if self._shutdown_flag_path.exists():
             if self._notification_worker:
                 # Mid-shutdown signal: still try to drain any in-flight
@@ -807,6 +905,13 @@ class UPSGroupMonitor(
             self._notification_worker.flush(timeout=5)
             self._notification_worker.stop()
         self._stop_stats()
+
+        # Slice 3: drop the shutdown marker so the next start can
+        # classify this exit (signal → "🔄 Restarted" if it comes back
+        # within RESTART_DOWNTIME_THRESHOLD_SECS, else cold "Started").
+        write_shutdown_marker(
+            stats_dir, version=__version__, reason=REASON_SIGNAL,
+        )
 
         self._shutdown_flag_path.unlink(missing_ok=True)
         sys.exit(0)
