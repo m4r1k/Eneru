@@ -230,6 +230,12 @@ class LocalShutdownConfig:
     message: str = "UPS battery critical - emergency shutdown"
     drain_on_local_shutdown: bool = False  # Drain all groups before local shutdown
     trigger_on: str = "any"  # "any" or "none" — when to trigger local shutdown in multi-UPS
+    # Whether to broadcast shutdown warnings via wall(1) to every logged-in
+    # tty. Off by default since v5.2 — the `wall` blast was a holdover from
+    # the v2 "ups-monitor" days when the shell was the only notification
+    # channel. Apprise covers the modern path; opt in here if you still want
+    # tty broadcasts on top.
+    wall: bool = False
 
 
 @dataclass
@@ -706,6 +712,7 @@ class ConfigLoader:
                 message=local_data.get('message', 'UPS battery critical - emergency shutdown'),
                 drain_on_local_shutdown=local_data.get('drain_on_local_shutdown', False),
                 trigger_on=local_data.get('trigger_on', 'any'),
+                wall=local_data.get('wall', False),
             )
 
         # Parse global triggers (used as defaults for per-UPS triggers)

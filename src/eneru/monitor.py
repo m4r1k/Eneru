@@ -322,14 +322,6 @@ class UPSGroupMonitor(
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             print(f"{timestamp} {tz_name} - {prefixed}")
 
-        # During shutdown, also send log messages as notifications (non-blocking)
-        if self._shutdown_flag_path.exists():
-            discord_safe_message = message.replace('`', '\\`')
-            self._send_notification(
-                f"ℹ️ **Shutdown Detail:** {discord_safe_message}",
-                self.config.NOTIFY_INFO
-            )
-
     def _send_notification(self, body: str, notify_type: str = "info",
                            blocking: bool = False):
         """Send a notification via the notification worker.
@@ -628,13 +620,14 @@ class UPSGroupMonitor(
     def _execute_shutdown_sequence(self):
         """Execute the controlled shutdown sequence."""
         self._shutdown_flag_path.touch()
+        sequence_start = time.monotonic()
 
-        self._log_message("🚨 ========== INITIATING EMERGENCY SHUTDOWN SEQUENCE ==========")
+        self._log_message("🚨 Initiating emergency shutdown sequence")
 
         if self.config.behavior.dry_run:
             self._log_message("🧪 *** DRY-RUN MODE: No actual shutdown will occur ***")
 
-        if not self.config.behavior.dry_run:
+        if self.config.local_shutdown.wall and not self.config.behavior.dry_run:
             run_command([
                 "wall",
                 "🚨 CRITICAL: Executing emergency UPS shutdown sequence NOW!"
@@ -663,27 +656,32 @@ class UPSGroupMonitor(
 
         # In coordinator mode, notify the coordinator instead of doing local shutdown
         if self._coordinator_mode:
-            self._log_message("✅ ========== GROUP SHUTDOWN SEQUENCE COMPLETE ==========")
+            self._log_message("✅ Group shutdown sequence complete")
             if self._shutdown_callback:
                 group = self.config.ups_groups[0] if self.config.ups_groups else None
                 self._shutdown_callback(group)
             return
 
+        elapsed = int(time.monotonic() - sequence_start)
         if self.config.local_shutdown.enabled:
             self._log_message("🔌 Shutting down local server NOW")
-            self._log_message("✅ ========== SHUTDOWN SEQUENCE COMPLETE ==========")
+            self._log_message("✅ Shutdown sequence complete")
 
             if self.config.behavior.dry_run:
                 self._log_message(f"🧪 [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
                 self._log_message("🧪 [DRY-RUN] Shutdown sequence completed successfully (no actual shutdown)")
                 self._shutdown_flag_path.unlink(missing_ok=True)
             else:
-                # Send final notification (non-blocking - fire and forget)
+                # Single-shot summary notification covering the whole sequence;
+                # the per-phase chatter that used to mirror every log line is
+                # gone in v5.2 (journalctl is the forensic record).
                 self._send_notification(
-                    "🛑 **Shutdown Sequence Complete**\nShutting down local server NOW.",
+                    f"✅ **Shutdown Sequence Complete** (took {elapsed}s)\n"
+                    f"Powering down local server NOW.",
                     self.config.NOTIFY_FAILURE
                 )
-                # Give notification time to send
+                # Give notification time to send. Slice 5 replaces this with
+                # NotificationWorker.flush(timeout=5).
                 time.sleep(5)
 
                 cmd_parts = self.config.local_shutdown.command.split()
@@ -691,7 +689,12 @@ class UPSGroupMonitor(
                     cmd_parts.append(self.config.local_shutdown.message)
                 run_command(cmd_parts)
         else:
-            self._log_message("✅ ========== SHUTDOWN SEQUENCE COMPLETE (local shutdown disabled) ==========")
+            self._log_message("✅ Shutdown sequence complete (local shutdown disabled)")
+            self._send_notification(
+                f"✅ **Shutdown Sequence Complete** (took {elapsed}s)\n"
+                f"Local shutdown is disabled — system stays up.",
+                self.config.NOTIFY_INFO
+            )
             self._shutdown_flag_path.unlink(missing_ok=True)
 
             # Exit if --exit-after-shutdown was specified
@@ -715,7 +718,7 @@ class UPSGroupMonitor(
         )
 
         self._log_message(f"🚨 CRITICAL: Triggering immediate shutdown. Reason: {reason}")
-        if not self.config.behavior.dry_run:
+        if self.config.local_shutdown.wall and not self.config.behavior.dry_run:
             run_command([
                 "wall",
                 f"🚨 CRITICAL: UPS battery critical! Immediate shutdown initiated! Reason: {reason}"

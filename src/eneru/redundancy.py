@@ -178,7 +178,7 @@ class RedundancyGroupExecutor(
             self._shutdown_flag_path.touch()
 
         self._log_message(
-            f"🚨 ========== REDUNDANCY GROUP SHUTDOWN: {self._group.name} =========="
+            f"🚨 Redundancy group shutdown: {self._group.name}"
         )
         self._log_message(f"   Reason: {reason}")
         self._send_notification(
@@ -199,8 +199,7 @@ class RedundancyGroupExecutor(
                 self._unmount_filesystems()
             self._shutdown_remote_servers()
             self._log_message(
-                f"✅ ========== REDUNDANCY GROUP SHUTDOWN COMPLETE: "
-                f"{self._group.name} =========="
+                f"✅ Redundancy group shutdown complete: {self._group.name}"
             )
             # is_local quorum-loss must also fire the local poweroff.
             # Without this, the executor stops local services and remote

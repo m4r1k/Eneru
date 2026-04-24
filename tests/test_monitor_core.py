@@ -489,9 +489,14 @@ class TestNotifications:
         with patch.object(monitor, "_execute_shutdown_sequence"):
             monitor._trigger_immediate_shutdown("Battery critical")
 
-        # Notification worker should have been called (possibly multiple times
-        # for the shutdown notification + log forwarding)
-        assert monitor._notification_worker.send.call_count >= 1
+        # Exactly one notification: the headline. Log lines are NOT mirrored
+        # as notifications anymore (v5.2 — see TestNotificationPolicyV52).
+        assert monitor._notification_worker.send.call_count == 1
+        body = monitor._notification_worker.send.call_args.kwargs.get(
+            "body"
+        ) or monitor._notification_worker.send.call_args.args[0]
+        assert "EMERGENCY SHUTDOWN INITIATED" in body
+        assert "Battery critical" in body
 
     @pytest.mark.unit
     def test_power_restored_logs_event(self, tmp_path):
@@ -525,6 +530,109 @@ class TestNotifications:
 
         log_calls = [str(c) for c in monitor.logger.log.call_args_list]
         assert not any("POWER_RESTORED" in c for c in log_calls)
+
+
+# ==============================================================================
+# v5.2 NOTIFICATION POLICY (Slice 1: noise cleanup + wall opt-in)
+# ==============================================================================
+
+class TestNotificationPolicyV52:
+    """v5.2 changes: log lines no longer mirror to notifications during
+    shutdown, wall(1) is opt-in instead of always-on, and the sequence
+    completion notification fires in both the local-shutdown-enabled
+    and the local-shutdown-disabled paths."""
+
+    @pytest.mark.unit
+    def test_log_message_during_shutdown_does_not_mirror_to_notification(self, tmp_path):
+        """The "ℹ️ Shutdown Detail:" auto-mirror that wrapped every
+        _log_message during shutdown is gone. journalctl is the forensic
+        record now."""
+        monitor = make_monitor(tmp_path)
+        monitor._shutdown_flag_path.touch()
+
+        monitor._log_message("VMs: stopping libvirt-qemu-1234")
+        monitor._log_message("Containers: docker stop nginx")
+
+        # No notifications should have been queued solely because shutdown
+        # was in progress.
+        assert monitor._notification_worker.send.call_count == 0
+
+    @pytest.mark.unit
+    def test_wall_disabled_by_default(self, tmp_path):
+        """LocalShutdownConfig.wall defaults False; neither wall call
+        site fires the shell broadcast."""
+        monitor = make_monitor(tmp_path)
+        # Stub out the phases so the sequence runs without I/O.
+        monitor._shutdown_vms = lambda: None
+        monitor._shutdown_containers = lambda: None
+        monitor._sync_filesystems = lambda: None
+        monitor._unmount_filesystems = lambda: None
+        monitor._shutdown_remote_servers = lambda: None
+        # dry_run is False for this test — we want the wall path to be
+        # otherwise reachable so the *only* thing suppressing it is the
+        # config flag.
+        monitor.config.behavior.dry_run = False
+        monitor.config.local_shutdown.enabled = False  # don't actually halt
+
+        with patch("eneru.monitor.run_command") as run_cmd:
+            monitor._execute_shutdown_sequence()
+
+        wall_calls = [c for c in run_cmd.call_args_list
+                      if c.args and c.args[0] and c.args[0][0] == "wall"]
+        assert wall_calls == [], (
+            f"wall(1) should not be invoked when local_shutdown.wall=False; "
+            f"got {wall_calls}"
+        )
+
+    @pytest.mark.unit
+    def test_wall_enabled_invokes_wall_command(self, tmp_path):
+        """When the user opts in via local_shutdown.wall=True, the
+        shell broadcast fires from the sequence entry point."""
+        monitor = make_monitor(tmp_path)
+        monitor._shutdown_vms = lambda: None
+        monitor._shutdown_containers = lambda: None
+        monitor._sync_filesystems = lambda: None
+        monitor._unmount_filesystems = lambda: None
+        monitor._shutdown_remote_servers = lambda: None
+        monitor.config.behavior.dry_run = False
+        monitor.config.local_shutdown.enabled = False
+        monitor.config.local_shutdown.wall = True
+
+        with patch("eneru.monitor.run_command") as run_cmd:
+            monitor._execute_shutdown_sequence()
+
+        wall_calls = [c for c in run_cmd.call_args_list
+                      if c.args and c.args[0] and c.args[0][0] == "wall"]
+        assert len(wall_calls) == 1, (
+            f"expected one wall(1) broadcast at sequence start, got "
+            f"{len(wall_calls)}: {wall_calls}"
+        )
+
+    @pytest.mark.unit
+    def test_summary_notification_fires_when_local_shutdown_disabled(self, tmp_path):
+        """The "✅ Shutdown Sequence Complete" summary used to fire only
+        when local_shutdown.enabled=true (because the system was about
+        to halt and the user needed a goodbye). The disabled path
+        finished silently. v5.2 always summarises so users running Eneru
+        as a remote-resource orchestrator get the same closure."""
+        monitor = make_monitor(tmp_path)
+        monitor._shutdown_vms = lambda: None
+        monitor._shutdown_containers = lambda: None
+        monitor._sync_filesystems = lambda: None
+        monitor._unmount_filesystems = lambda: None
+        monitor._shutdown_remote_servers = lambda: None
+        monitor.config.local_shutdown.enabled = False
+
+        monitor._execute_shutdown_sequence()
+
+        bodies = []
+        for c in monitor._notification_worker.send.call_args_list:
+            body = c.kwargs.get("body") or (c.args[0] if c.args else "")
+            bodies.append(body)
+        summaries = [b for b in bodies if "Shutdown Sequence Complete" in b]
+        assert len(summaries) == 1, (
+            f"expected exactly one summary notification, got bodies={bodies}"
+        )
 
 
 # ==============================================================================

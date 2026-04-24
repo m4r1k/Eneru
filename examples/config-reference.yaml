@@ -384,6 +384,11 @@ local_shutdown:
   # "any" = any group's shutdown triggers local shutdown (default)
   # "none" = Eneru host never shuts itself down (recommended for multi-UPS)
   trigger_on: "any"
+  # Broadcast a wall(1) warning to every logged-in tty when a shutdown is
+  # triggered. Off by default since v5.2 — Apprise covers the modern
+  # notification path. Flip to true if you still want the tty blast on top
+  # (legacy from the v2 ups-monitor era when shell was the only channel).
+  wall: false
 
 # ==============================================================================
 # STATISTICS (always-on per-UPS SQLite store)

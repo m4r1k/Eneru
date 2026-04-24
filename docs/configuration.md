@@ -160,6 +160,7 @@ local_shutdown:
   message: "UPS battery critical - emergency shutdown"
   drain_on_local_shutdown: false     # multi-UPS: drain all groups before local shutdown
   trigger_on: "any"                  # multi-UPS: "any" or "none"
+  wall: false                        # broadcast shutdown via wall(1) to every tty (off since v5.2)
 ```
 
 ---
@@ -465,6 +466,7 @@ Global.
 | `message` | `UPS battery critical - emergency shutdown` | Optional message for `shutdown -h` |
 | `drain_on_local_shutdown` | `false` | Multi-UPS only. When the local UPS goes critical, also shut down every other group's resources before powering off the host. `false` (default) = only the local group's resources are touched |
 | `trigger_on` | `any` | Multi-UPS only. `any` = any group's shutdown triggers local shutdown (default). `none` = local shutdown is opt-in per group; useful when the host is on its own dedicated UPS that never participates in cascades |
+| `wall` | `false` | Broadcast shutdown warnings to every logged-in tty via `wall(1)`. Off by default since v5.2 — Apprise covers the modern path. Flip to `true` if you still want the tty blast on top (legacy from the v2 ups-monitor era) |
 
 ### Redundancy groups section
 
