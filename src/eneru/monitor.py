@@ -5,6 +5,7 @@ Monitors UPS status via NUT and triggers configurable shutdown sequences.
 https://github.com/m4r1k/Eneru
 """
 
+import sqlite3
 import sys
 import os
 import time
@@ -308,6 +309,29 @@ class UPSGroupMonitor(
                 f"{self._stats_db_path}: {e}. Notifications will not "
                 "persist across restarts."
             )
+
+        # v5.2.1: cancel any pending lifecycle row left by the previous
+        # instance BEFORE the worker can deliver it. The supersede block
+        # in _emit_lifecycle_startup_notification (lines ~405-407) is
+        # the canonical location, but it runs AFTER worker.start() +
+        # register_store() — opening a delivery-race window where the
+        # worker could ship the deferred 'Service Stopped' from the
+        # prior daemon before the classifier has a chance to cancel it
+        # (Cubic P2). Doing the cancel here too is idempotent: by the
+        # time the lifecycle classifier runs, there's nothing left.
+        # Best-effort: a transient sqlite error here just means the
+        # late cancel still has work to do — same outcome as v5.2.0
+        # in that worst case.
+        if self._stats_store._conn is not None:
+            try:
+                for row in self._stats_store.find_pending_by_category(
+                        "lifecycle"):
+                    self._stats_store.cancel_notification(
+                        row[0], "superseded")
+            except (sqlite3.Error, OSError) as e:
+                self._log_message(
+                    f"⚠️ WARNING: pre-worker lifecycle sweep failed: {e}"
+                )
 
         if self._notification_worker is not None:
             # Coordinator mode: register our store with the shared worker.

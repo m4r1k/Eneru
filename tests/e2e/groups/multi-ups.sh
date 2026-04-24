@@ -440,11 +440,11 @@ mkdir -p /tmp/eneru-e2e-restart-multi
 rm -f /tmp/eneru-e2e-restart-multi-shutdown-flag
 
 # Start from on-line.
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
 sleep 3
 
 # --- First run: coordinator startup, then SIGTERM. ---
-eneru run --config $E2E_DIR/config-e2e-restart-multi.yaml > /tmp/test36-run1.log 2>&1 &
+eneru run --config "$E2E_DIR/config-e2e-restart-multi.yaml" > /tmp/test36-run1.log 2>&1 &
 ENERU_PID=$!
 sleep 6  # coordinator init + per-UPS monitors register stores + drain memory buffer
 kill -TERM $ENERU_PID 2>/dev/null || true
@@ -480,7 +480,7 @@ fi
 echo "PASS (36a): coordinator left $total_pending_stop pending 'Service Stopped' row(s)"
 
 # --- Second run: same config, simulating restart. ---
-eneru run --config $E2E_DIR/config-e2e-restart-multi.yaml > /tmp/test36-run2.log 2>&1 &
+eneru run --config "$E2E_DIR/config-e2e-restart-multi.yaml" > /tmp/test36-run2.log 2>&1 &
 ENERU_PID=$!
 sleep 7  # coordinator startup → _cancel_prev_pending_lifecycle_rows → new lifecycle send
 kill -TERM $ENERU_PID 2>/dev/null || true

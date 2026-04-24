@@ -6,6 +6,7 @@ owns the shared resources (logger, notification worker) plus local-shutdown
 arbitration with defense-in-depth (in-memory lock + filesystem flag).
 """
 
+import sqlite3
 import sys
 import time
 import signal
@@ -186,13 +187,22 @@ class MultiUPSCoordinator:
                 store.open()
                 for row in store.find_pending_by_category("lifecycle"):
                     store.cancel_notification(row[0], "superseded")
-            except Exception:
-                pass
+            except (sqlite3.Error, OSError) as e:
+                # Visible-failure (CodeRabbit + Cubic P2): a silent
+                # except: pass made the duplicate-lifecycle symptom
+                # opaque if SQLite or the filesystem misbehaved during
+                # the sweep. One log line keeps it best-effort while
+                # giving the operator a thread to pull on.
+                self._log(
+                    f"⚠️ Lifecycle sweep skipped for {db_path.name}: {e}"
+                )
             finally:
                 try:
                     store.close()
-                except Exception:
-                    pass
+                except (sqlite3.Error, OSError) as e:
+                    self._log(
+                        f"⚠️ Failed to close stats DB {db_path.name}: {e}"
+                    )
 
     def _read_last_seen_version_from_first_group(self, stats_dir):
         """Read meta.last_seen_version from the first group's stats DB

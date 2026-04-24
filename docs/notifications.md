@@ -236,7 +236,7 @@ Timeline (brief power blip, network slow to recover):
 
 ## Lifecycle notifications
 
-v5.2 replaces the unconditional `🚀 Started` / `🛑 Stopped` pair with a **stateful classifier** that picks one of seven messages based on two on-disk markers and the previous-version metadata in the stats DB. The result is exactly one notification per lifecycle transition rather than one per process start.
+v5.2 replaces the unconditional `🚀 Started` / `🛑 Stopped` pair with a **stateful classifier** that picks one of eight messages based on two on-disk markers and the previous-version metadata in the stats DB. The result is exactly one notification per lifecycle transition rather than one per process start.
 
 | Classification | Trigger | Driven by |
 |----------------|---------|-----------|
@@ -249,7 +249,7 @@ v5.2 replaces the unconditional `🚀 Started` / `🛑 Stopped` pair with a **st
 | `🚀 Eneru Started (after crash)` | Daemon came back without ever writing a marker | No shutdown marker but `meta.last_seen_version` is set |
 | `🚀 Eneru vX Started` | First-ever start | No markers, no `last_seen_version` |
 
-The mechanism that delivers "exactly one message" is **cancel-on-startup**: when the new daemon comes up and classifies (e.g.) as `Restarted`, it cancels any `pending` row in the `lifecycle` category that the previous instance enqueued. The `🛑 Service Stopped` row stays `pending` (the prior daemon's worker exits before delivering it) so the new daemon can supersede it cleanly. If the daemon truly never comes back, the pending stop is delivered by whichever daemon eventually starts; if nothing starts within `max_age_days`, the row ages out as `too_old`.
+The mechanism that delivers "exactly one message" is **cancel-on-startup**: when the new daemon comes up and classifies (e.g.) as `Restarted`, it cancels any `pending` row in the `lifecycle` category that the previous instance enqueued. The `🛑 Service Stopped` row stays `pending` (the prior daemon's worker exits before delivering it) so the new daemon can supersede it cleanly. If the daemon doesn't come back immediately, the pending stop is delivered by whichever daemon eventually starts (typically systemd's `Restart=always`); if no daemon starts within `max_age_days`, the row ages out as `too_old` and is never delivered.
 
 ---
 

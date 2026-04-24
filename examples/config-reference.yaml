@@ -101,6 +101,45 @@ notifications:
   # Timeout for notification delivery (seconds)
   timeout: 10
 
+  # ----- v5.2 persistent-queue knobs --------------------------------
+  # The notification queue is SQLite-backed (per-UPS stats DB) so
+  # messages survive process death and prolonged endpoint outages.
+  # Defaults are sized for "long weekend with the internet down".
+  # See docs/notifications.md "Persistent retry architecture" for the
+  # full architecture (cancel-on-startup, per-message backoff, etc.).
+
+  # Initial wait between retry attempts for a failed send. Per-message
+  # exponential backoff doubles this on each failure up to
+  # retry_backoff_max. Default 5s.
+  retry_interval: 5
+
+  # Ceiling on the per-message exponential backoff, in seconds. Keeps
+  # reconnection quick once the endpoint returns without hammering the
+  # network during a multi-hour outage. Default 300s (5 min).
+  retry_backoff_max: 300
+
+  # Per-message attempt cap. 0 = unlimited (default). Apprise's
+  # success/fail signal is a single bool — we can't tell "bad URL"
+  # from "internet down" — so capping attempts risks dropping
+  # legitimate messages during a long outage. Set this only as a
+  # poison-message kill switch.
+  max_attempts: 0
+
+  # Pending notifications older than this become 'cancelled' with
+  # reason='too_old'. The only TTL on pending rows; 0 disables it.
+  # Default 30 days.
+  max_age_days: 30
+
+  # Backlog cap on pending rows. When pending exceeds this, the
+  # oldest are cancelled with reason='backlog_overflow'. Bounds DB
+  # growth on runaway-event days. Default 10000.
+  max_pending: 10000
+
+  # Days to keep 'sent' and 'cancelled' rows around for forensic
+  # inspection via sqlite3. Pending rows are NEVER pruned by TTL —
+  # only max_age_days ages them out. Default 7 days.
+  retention_days: 7
+
   # ----- Issue #27: alert noise tuning ------------------------------
   # Defer voltage notifications until the condition has held for this
   # many seconds. The state log line is *always* written immediately

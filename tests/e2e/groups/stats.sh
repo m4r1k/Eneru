@@ -469,11 +469,11 @@ rm -f /tmp/eneru-e2e-restart-shutdown-flag
 
 # Start from on-line so the daemon doesn't try to trigger anything
 # unrelated while we're testing the lifecycle path.
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
 sleep 3
 
 # --- First run: clean start, then SIGTERM. ---
-eneru run --config $E2E_DIR/config-e2e-restart.yaml > /tmp/test35-run1.log 2>&1 &
+eneru run --config "$E2E_DIR/config-e2e-restart.yaml" > /tmp/test35-run1.log 2>&1 &
 ENERU_PID=$!
 sleep 5  # _initialize finishes, lifecycle classifier emits DAEMON_START
 kill -TERM $ENERU_PID 2>/dev/null || true
@@ -504,7 +504,7 @@ fi
 echo "PASS (35a): old daemon left exactly 1 pending lifecycle 'Service Stopped' row"
 
 # --- Second run: same config, simulating `systemctl restart`. ---
-eneru run --config $E2E_DIR/config-e2e-restart.yaml > /tmp/test35-run2.log 2>&1 &
+eneru run --config "$E2E_DIR/config-e2e-restart.yaml" > /tmp/test35-run2.log 2>&1 &
 ENERU_PID=$!
 sleep 6  # _initialize → classify_startup → cancel pending + send Restarted
 
