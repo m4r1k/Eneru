@@ -370,19 +370,38 @@ ENERU_PID=$!
 sleep 5  # let _initialize finish + register store + reach steady state
 
 # Trigger the outage.
-cp $E2E_DIR/scenarios/on-battery.dev $E2E_DIR/scenarios/apply.dev
+cp "$E2E_DIR/scenarios/on-battery.dev" "$E2E_DIR/scenarios/apply.dev"
 sleep 5  # ON_BATTERY event fires + lands in DB pending
 # Restore power.
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-sleep 5  # POWER_RESTORED fires + worker iteration runs the coalescer
+cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
+sleep 2  # POWER_RESTORED fires + lands in DB
+
+# Poll for the coalesced state instead of a fixed sleep — we don't
+# want to race the worker thread's iteration cadence (it's blocked
+# attempting Apprise calls to TEST-NET-1, but with timeout=1 in the
+# config it cycles every second). 20 s ceiling; well below the SIGTERM
+# kill path's flush(timeout=5) so we never starve that.
+DB_DIR=/tmp/eneru-e2e-coalesce
+for i in $(seq 1 20); do
+  DB_PROBE=$(find "$DB_DIR" -maxdepth 1 -name '*.db' 2>/dev/null | head -1)
+  if [ -n "$DB_PROBE" ]; then
+    c=$(sqlite3 "$DB_PROBE" \
+      "SELECT COUNT(*) FROM notifications \
+       WHERE category IN ('power_event_on_battery','power_event_on_line') \
+         AND status='cancelled' AND cancel_reason='coalesced';" \
+      2>/dev/null || echo 0)
+    [ "$c" = "2" ] && break
+  fi
+  sleep 1
+done
 
 # Stop eneru cleanly (SIGTERM → _cleanup_and_exit → flush(5)).
 kill -TERM $ENERU_PID 2>/dev/null || true
 wait $ENERU_PID 2>/dev/null || true
 
-DB=$(ls /tmp/eneru-e2e-coalesce/*.db 2>/dev/null | head -1)
+DB=$(find "$DB_DIR" -maxdepth 1 -name '*.db' 2>/dev/null | head -1)
 if [ -z "$DB" ]; then
-  echo "FAIL: no SQLite stats DB created at /tmp/eneru-e2e-coalesce/"
+  echo "FAIL: no SQLite stats DB created at $DB_DIR/"
   cat /tmp/test34.log
   exit 1
 fi
@@ -398,7 +417,12 @@ coalesced=$(sqlite3 "$DB" \
      AND cancel_reason='coalesced';")
 if [ "$coalesced" -ne 2 ]; then
   echo "FAIL: expected 2 cancelled (coalesced) power_event rows, got $coalesced"
-  sqlite3 "$DB" "SELECT id, ts, status, cancel_reason, body FROM notifications WHERE category='power_event' ORDER BY id;"
+  # Dump ALL notification rows so a category-naming regression is visible
+  # (was hiding a real issue earlier when the filter was still scoped to
+  # category='power_event').
+  echo "--- ALL notifications rows: ---"
+  sqlite3 "$DB" "SELECT id, ts, category, status, cancel_reason, substr(body,1,80) FROM notifications ORDER BY id;"
+  echo "--- /tmp/test34.log: ---"
   cat /tmp/test34.log
   exit 1
 fi
@@ -411,7 +435,7 @@ summary=$(sqlite3 "$DB" \
      AND body LIKE '%Brief Power Outage%';")
 if [ -z "$summary" ]; then
   echo "FAIL: no pending 'Brief Power Outage' summary row found"
-  sqlite3 "$DB" "SELECT id, ts, status, cancel_reason, body FROM notifications WHERE category='power_event' ORDER BY id;"
+  sqlite3 "$DB" "SELECT id, ts, category, status, cancel_reason, substr(body,1,80) FROM notifications ORDER BY id;"
   cat /tmp/test34.log
   exit 1
 fi

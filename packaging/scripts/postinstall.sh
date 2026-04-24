@@ -52,11 +52,27 @@ if [ "$is_upgrade" = true ]; then
         # daemon's own __version__ at read time. Best-effort: a write
         # failure just means the user gets the legacy classification.
         # Marker is consumed (deleted) by the daemon on the next start.
-        STATS_DIR="/var/lib/eneru"
-        MARKER_PATH="${STATS_DIR}/.upgrade_marker.json"
         OLD_VERSION="${2:-unknown}"      # DEB: $2 = previous version
         # RPM passes "$1 = 2" on upgrade with no version string; we leave
         # OLD_VERSION as "unknown" in that case rather than guessing.
+        # Resolve the stats directory the daemon will actually use.
+        # Defaults to /var/lib/eneru but is overridable via
+        # statistics.db_directory in /etc/ups-monitor/config.yaml
+        # (Cubic P2: previously hardcoded). Fall back to /var/lib/eneru
+        # if the config can't be parsed.
+        STATS_DIR=$(python3 - <<'PY' 2>/dev/null || echo "/var/lib/eneru"
+import sys
+try:
+    import yaml
+    with open("/etc/ups-monitor/config.yaml") as f:
+        data = yaml.safe_load(f) or {}
+    stats = data.get("statistics") or {}
+    print((stats.get("db_directory") or "/var/lib/eneru").strip())
+except Exception:
+    print("/var/lib/eneru")
+PY
+)
+        MARKER_PATH="${STATS_DIR}/.upgrade_marker.json"
         mkdir -p "${STATS_DIR}" 2>/dev/null || true
         printf '{"old_version":"%s"}\n' "${OLD_VERSION}" \
             > "${MARKER_PATH}" 2>/dev/null || true

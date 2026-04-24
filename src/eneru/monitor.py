@@ -394,10 +394,17 @@ class UPSGroupMonitor(
                 and shutdown_marker.get("reason") == REASON_SEQUENCE_COMPLETE
                 and self._stats_store._conn is not None):
             import time as _time
-            downtime = max(0, int(_time.time())
-                           - int(shutdown_marker.get("shutdown_at", 0)))
+            try:
+                marker_shutdown_at = int(shutdown_marker.get("shutdown_at", 0))
+            except (TypeError, ValueError):
+                marker_shutdown_at = 0
+            downtime = max(0, int(_time.time()) - marker_shutdown_at)
             coalesced_body = coalesce_recovered_with_prev_shutdown(
-                self._stats_store, downtime_secs=downtime,
+                self._stats_store,
+                downtime_secs=downtime,
+                # Bound the coalesce to the current outage so unrelated
+                # older pending shutdown rows aren't cancelled (Cubic P2).
+                shutdown_at=marker_shutdown_at or None,
             )
             if coalesced_body:
                 body = coalesced_body
@@ -935,9 +942,15 @@ class UPSGroupMonitor(
         # Slice 3: drop the shutdown marker so the next start can
         # classify this exit (signal → "🔄 Restarted" if it comes back
         # within RESTART_DOWNTIME_THRESHOLD_SECS, else cold "Started").
-        write_shutdown_marker(
-            stats_dir, version=__version__, reason=REASON_SIGNAL,
-        )
+        # Don't downgrade an existing sequence_complete marker — that
+        # would mask a power-loss shutdown when systemd's stop signal
+        # arrives during the shutdown sequence (Cubic P2).
+        existing = read_shutdown_marker(stats_dir)
+        if not (existing
+                and existing.get("reason") == REASON_SEQUENCE_COMPLETE):
+            write_shutdown_marker(
+                stats_dir, version=__version__, reason=REASON_SIGNAL,
+            )
 
         self._shutdown_flag_path.unlink(missing_ok=True)
         sys.exit(0)

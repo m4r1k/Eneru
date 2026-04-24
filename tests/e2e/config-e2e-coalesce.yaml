@@ -49,6 +49,11 @@ notifications:
     # guaranteed-unreachable per RFC 5737 — every call fails, every
     # row stays pending, the coalescer gets to do its job.
     - "json://192.0.2.1/notify"
+  # 1 s Apprise timeout so the worker doesn't sit blocked on the
+  # unreachable TEST-NET-1 host for 10 s × N pending; we need it to
+  # cycle back to the coalesce pass quickly (the on_line arrives ~4 s
+  # after on_battery in the scenario).
+  timeout: 1
   retry_interval: 1
   retry_backoff_max: 5
   max_attempts: 0

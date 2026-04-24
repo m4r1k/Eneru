@@ -160,6 +160,13 @@ class NotificationWorker:
         becomes the default for sends that don't pin a store (e.g. the
         coordinator-level lifecycle notifications fired before any
         per-UPS thread comes up).
+
+        The in-memory buffer is drained AFTER the store is appended.
+        Each ``enqueue_notification`` is checked for success; rows that
+        fail to persist (transient SQLite error) get re-buffered so the
+        next ``register_store`` call (or a worker retry) can try again.
+        Without this, a transient sqlite failure during the drain would
+        permanently drop coordinator-startup notifications (CR P1).
         """
         if store is None:
             return
@@ -167,21 +174,34 @@ class NotificationWorker:
             if store in self._stores:
                 return
             self._stores.append(store)
-            # Drain the memory buffer to this store. Nothing in the
-            # buffer means single-UPS or coordinator+monitors raced
-            # in our favour; either way it's a no-op.
-            buffered = self._memory_buffer
+            # Snapshot the buffer; do NOT clear it yet — we only clear
+            # entries that successfully persist below.
+            buffered = list(self._memory_buffer)
             self._memory_buffer = []
-        if buffered:
-            for body, notify_type, category, ts in buffered:
-                store.enqueue_notification(body, notify_type, category, ts=ts)
-            # Apply backlog cap after the drain too (P2 follow-up to the
-            # in-memory cap): if the buffer grew large before the store
-            # registered, the persisted side now needs the same trim.
-            cap = self.config.notifications.max_pending
-            if cap > 0:
-                store.cap_pending_notifications(cap)
-            self._wakeup_event.set()
+        if not buffered:
+            return
+        leftovers: List[Tuple[str, str, str, int]] = []
+        for body, notify_type, category, ts in buffered:
+            row_id = store.enqueue_notification(
+                body, notify_type, category, ts=ts,
+            )
+            if row_id is None:
+                # enqueue returned None → store wasn't open or SQLite
+                # raised; keep the row buffered so a future register
+                # gets a chance.
+                leftovers.append((body, notify_type, category, ts))
+        if leftovers:
+            with self._stores_lock:
+                # Prepend so age order is preserved against any new
+                # sends that arrived while we were draining.
+                self._memory_buffer = leftovers + self._memory_buffer
+        # Apply backlog cap after the drain (P2 follow-up to the
+        # in-memory cap): if the buffer grew large before the store
+        # registered, the persisted side now needs the same trim.
+        cap = self.config.notifications.max_pending
+        if cap > 0:
+            store.cap_pending_notifications(cap)
+        self._wakeup_event.set()
 
     # ----- producer side -----
 
@@ -263,14 +283,20 @@ class NotificationWorker:
     # ----- consumer side -----
 
     def flush(self, timeout: float) -> bool:
-        """Block until every registered store's pending count reaches 0,
-        or until ``timeout`` seconds elapse.
+        """Block until every registered store's pending count reaches 0
+        AND the in-memory pre-store buffer is empty, or until ``timeout``
+        seconds elapse.
 
         Returns ``True`` if drained cleanly, ``False`` on timeout. Used
         from the shutdown path (Slice 5) to give in-flight notifications
         their best chance of being sent before the process exits.
         Whatever doesn't drain stays as ``pending`` rows in SQLite and
         flushes on the next start.
+
+        The drain check includes ``_memory_buffer`` (CR P1): if shutdown
+        fires before any store registers, the final lifecycle / shutdown
+        message can still be sitting in memory, and ``flush`` would
+        otherwise return ``True`` immediately and ``stop`` would drop it.
         """
         deadline = time.monotonic() + max(0.0, float(timeout))
         # Wake the worker so it doesn't sit on its 1 s poll if there's
@@ -278,10 +304,11 @@ class NotificationWorker:
         self._wakeup_event.set()
         while True:
             with self._stores_lock:
+                buffered = len(self._memory_buffer)
                 pending = sum(
                     s.pending_notification_count() for s in self._stores
                 )
-            if pending == 0:
+            if pending == 0 and buffered == 0:
                 return True
             if time.monotonic() >= deadline:
                 return False
@@ -306,29 +333,31 @@ class NotificationWorker:
                 pass
 
     def _drain_once(self) -> None:
-        """One pass: coalesce, then look at the oldest pending across all
-        stores, try to deliver it, then continue while there's more to do.
+        """Drain pending rows: coalesce on every iteration, then deliver
+        the oldest due candidate. Repeats until nothing is due (or the
+        stop event fires).
 
-        Bounded by the stop event so a long backlog can't block shutdown
-        indefinitely (and ``flush()`` still polls until empty up to its
-        own timeout).
+        The coalesce pass runs INSIDE the inner loop because a single
+        Apprise call can block for seconds on an unreachable endpoint;
+        an on_battery + on_line pair that arrives during that block must
+        still get folded into a single "Brief outage" before either
+        half is wasted on a separate send. Coalesce is cheap (one
+        SELECT + at most one INSERT/UPDATE per pair); running it per
+        iteration keeps the merge window tight.
         """
-        # Slice 4: fold same-outage on_battery + on_line pairs into a
-        # single "Brief outage" summary BEFORE delivery so the user sees
-        # one message instead of two when the network was down for the
-        # duration of a short blip.
         with self._stores_lock:
             stores_snapshot = list(self._stores)
-        for store in stores_snapshot:
-            try:
-                self._coalesce_pending_outages(store)
-            except Exception:
-                pass  # coalescing must never block delivery
 
         max_iters = 1000  # Defensive — large bursts must still drain.
         for _ in range(max_iters):
             if self._stop_event.is_set():
                 return
+
+            for store in stores_snapshot:
+                try:
+                    self._coalesce_pending_outages(store)
+                except Exception:
+                    pass  # coalescing must never block delivery
 
             candidate = self._next_due_candidate()
             if candidate is None:
@@ -396,10 +425,16 @@ class NotificationWorker:
             # other unrelated pending power events from before the
             # outage. Keep the generic category so a downstream "where
             # are my power events?" query still finds it.
-            store.enqueue_notification(
+            new_id = store.enqueue_notification(
                 body=summary_body, notify_type="info",
                 category="power_event", ts=ol_ts,
             )
+            # Only cancel the originals if the summary actually persisted
+            # (Cubic P1). Otherwise we'd silently drop the outage
+            # notifications on a transient SQLite error.
+            if new_id is None:
+                line_idx += 1
+                continue
             store.cancel_notification(ob_id, "coalesced")
             store.cancel_notification(ol_id, "coalesced")
             line_idx += 1
@@ -410,15 +445,23 @@ class NotificationWorker:
         """Return the oldest pending row across all registered stores
         whose backoff window has elapsed, or ``None`` if nothing is due.
 
+        Scans up to ``max_pending`` pending rows per store in a single
+        SELECT so a head-of-queue cluster of backed-off rows can't
+        starve newer due rows (CR P1). The previous ``limit=10`` made
+        row 11+ invisible until the head drained, which never happened
+        when the head was a poison message with ``max_attempts=0``.
+
         Returned tuple: ``(store, ts, id, body, notify_type, attempts)``.
         """
         now_mono = time.monotonic()
         best: Optional[Tuple] = None
+        scan_cap = max(50,
+                       int(self.config.notifications.max_pending or 10000))
         with self._stores_lock:
             stores_snapshot = list(self._stores)
         for store in stores_snapshot:
-            rows = store.next_pending_notifications(limit=10)
-            for ts, row_id, body, notify_type, attempts, _category in rows:
+            rows = store.next_pending_notifications(limit=scan_cap)
+            for ts, row_id, body, notify_type, attempts, _cat in rows:
                 key = (str(store.db_path), int(row_id))
                 next_attempt = self._backoff.get(key, 0.0)
                 if now_mono < next_attempt:

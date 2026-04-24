@@ -265,13 +265,19 @@ class MultiUPSCoordinator:
             label = group.ups.label
             self._log(f"❌ Monitor thread for {label} crashed: {e}")
             if self._notification_worker:
-                # The monitor's _stats_store is opened by _initialize_notifications,
-                # so it's safe to pin the destination here.
+                # Pin to the monitor's store ONLY if it actually opened
+                # (the crash may have happened before _initialize_notifications
+                # got that far). Otherwise pass None so the worker can
+                # fall back to another registered store or the pre-store
+                # buffer (Cubic P2).
+                store = getattr(monitor, "_stats_store", None)
+                if store is not None and getattr(store, "_conn", None) is None:
+                    store = None
                 self._notification_worker.send(
                     f"❌ **Monitor Crashed:** {label}\nError: {e}",
                     "failure",
                     category="lifecycle",
-                    store=getattr(monitor, "_stats_store", None),
+                    store=store,
                 )
 
     def _on_group_shutdown(self, group):
@@ -447,11 +453,21 @@ class MultiUPSCoordinator:
         # if it comes back within RESTART_DOWNTIME_THRESHOLD_SECS, else
         # "🚀 Started (last seen Nh ago)". Coordinator mode was missing
         # this — caught in pre-push review.
-        write_shutdown_marker(
-            Path(self.config.statistics.db_directory),
-            version=__version__,
-            reason=REASON_SIGNAL,
-        )
+        # BUT: don't downgrade an existing sequence_complete marker
+        # (Cubic P2). If a power-loss shutdown sequence already wrote
+        # it, the SIGTERM handler that fires when systemd shuts the
+        # service down should preserve "we shut ourselves down for a
+        # reason" so the next start emits "📊 Recovered" rather than
+        # "🔄 Restarted".
+        stats_dir = Path(self.config.statistics.db_directory)
+        existing = read_shutdown_marker(stats_dir)
+        if not (existing
+                and existing.get("reason") == REASON_SEQUENCE_COMPLETE):
+            write_shutdown_marker(
+                stats_dir,
+                version=__version__,
+                reason=REASON_SIGNAL,
+            )
 
         self._global_shutdown_flag.unlink(missing_ok=True)
         sys.exit(0)

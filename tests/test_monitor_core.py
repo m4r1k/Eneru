@@ -543,18 +543,28 @@ class TestNotificationPolicyV52:
     and the local-shutdown-disabled paths."""
 
     @pytest.mark.unit
-    def test_log_message_during_shutdown_does_not_mirror_to_notification(self, tmp_path):
-        """The "ℹ️ Shutdown Detail:" auto-mirror that wrapped every
-        _log_message during shutdown is gone. journalctl is the forensic
-        record now."""
+    def test_log_message_during_shutdown_does_not_auto_mirror(self, tmp_path):
+        """Regression guard for the v5.1 ``_log_message`` auto-mirror
+        block (lines 325-331 before its v5.2 removal): every log line
+        emitted during shutdown got wrapped as
+        ``ℹ️ **Shutdown Detail:** <line>`` and pushed through
+        ``_send_notification``, which produced ~22 notifications per
+        shutdown sequence. v5.2 deletes the block; this test fires
+        ``_log_message`` with the shutdown flag set and asserts the
+        notification worker was never called.
+
+        If a future change re-introduces any path from ``_log_message``
+        to ``_notification_worker.send``, this test fails — which is
+        exactly what we want.
+        """
         monitor = make_monitor(tmp_path)
         monitor._shutdown_flag_path.touch()
 
         monitor._log_message("VMs: stopping libvirt-qemu-1234")
         monitor._log_message("Containers: docker stop nginx")
 
-        # No notifications should have been queued solely because shutdown
-        # was in progress.
+        # journalctl carries the per-step trace; the notification
+        # channel must stay silent for these.
         assert monitor._notification_worker.send.call_count == 0
 
     @pytest.mark.unit

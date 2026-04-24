@@ -125,13 +125,17 @@ class StatsStore:
         self._buffer: deque = deque(maxlen=buffer_maxlen)
         self._buffer_lock = threading.Lock()
         self._conn: Optional[sqlite3.Connection] = None
-        # v5.2: serialize ALL _conn access. The notification worker
-        # thread polls pending rows while the main thread inserts +
-        # caps the queue from inside _send_notification — Python 3.13's
-        # stricter sqlite3 binding raises "SystemError: error return
-        # without exception set" when both happen on the same connection
-        # without external mutex. The WAL underneath already serializes
-        # writes; this lock just keeps the Python wrapper happy.
+        # v5.2: serialize ALL _conn access across threads — the
+        # notification-worker thread polls pending rows while the main
+        # thread inserts + caps the queue, while the StatsWriter thread
+        # runs flush/aggregate/purge every 10 s / 5 min, while the TUI
+        # may call query_events / query_range concurrently. Python
+        # 3.13's stricter sqlite3 binding raises "SystemError: error
+        # return without exception set" when concurrent execute()s
+        # share a connection (CPython issue #118172). WAL underneath
+        # already serializes writes; this lock keeps the Python
+        # wrapper consistent. The lock is acquired by every public
+        # method that touches self._conn AFTER open() returns.
         self._db_lock = threading.Lock()
         self._logger = logger
         # Rate-limit error logging (per error message text).
@@ -408,7 +412,7 @@ class StatsStore:
             batch: List[Tuple] = list(self._buffer)
             self._buffer.clear()
         try:
-            with self._conn:
+            with self._db_lock, self._conn:
                 placeholders = ", ".join("?" for _ in SAMPLE_FIELDS)
                 self._conn.executemany(
                     f"INSERT INTO samples ({', '.join(SAMPLE_FIELDS)}) "
@@ -428,7 +432,7 @@ class StatsStore:
         if self._conn is None:
             return (0, 0)
         try:
-            with self._conn:
+            with self._db_lock, self._conn:
                 inserted_5 = self._conn.execute(f"""
                     INSERT OR REPLACE INTO agg_5min (
                         ts,
@@ -496,7 +500,7 @@ class StatsStore:
         cutoff_5min = now - self.retention_5min_days * 86400
         cutoff_hourly = now - self.retention_hourly_days * 86400
         try:
-            with self._conn:
+            with self._db_lock, self._conn:
                 deleted_raw = self._conn.execute(
                     "DELETE FROM samples WHERE ts < ?", (cutoff_raw,),
                 ).rowcount
@@ -553,12 +557,13 @@ class StatsStore:
         if self._conn is None:
             return []
         try:
-            cur = self._conn.execute(
-                "SELECT ts, event_type, detail FROM events "
-                "WHERE ts BETWEEN ? AND ? ORDER BY ts ASC",
-                (int(start_ts), int(end_ts)),
-            )
-            return cur.fetchall()
+            with self._db_lock:
+                cur = self._conn.execute(
+                    "SELECT ts, event_type, detail FROM events "
+                    "WHERE ts BETWEEN ? AND ? ORDER BY ts ASC",
+                    (int(start_ts), int(end_ts)),
+                )
+                return cur.fetchall()
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: query_events failed: {e}")
             return []
@@ -590,10 +595,16 @@ class StatsStore:
             return None
 
     def next_pending_notifications(self,
-                                   limit: int = 10) -> List[Tuple]:
-        """Return up to ``limit`` oldest pending rows as
-        ``(ts, id, body, notify_type, attempts, category)`` tuples.
-        Order: ts ASC then id ASC for deterministic FIFO across same-ts ties.
+                                   limit: int = 10,
+                                   offset: int = 0) -> List[Tuple]:
+        """Return up to ``limit`` oldest pending rows starting at
+        ``offset``, as ``(ts, id, body, notify_type, attempts, category)``
+        tuples. Order: ts ASC then id ASC for deterministic FIFO across
+        same-ts ties.
+
+        ``offset`` lets the worker paginate when the head of the queue
+        is occupied by backoff-delayed rows, so newer due rows aren't
+        starved (CR P1).
         """
         if self._conn is None:
             return []
@@ -602,8 +613,8 @@ class StatsStore:
                 cur = self._conn.execute(
                     "SELECT ts, id, body, notify_type, attempts, category "
                     "FROM notifications WHERE status='pending' "
-                    "ORDER BY ts ASC, id ASC LIMIT ?",
-                    (int(limit),),
+                    "ORDER BY ts ASC, id ASC LIMIT ? OFFSET ?",
+                    (int(limit), int(offset)),
                 )
                 return cur.fetchall()
         except (sqlite3.Error, OSError) as e:
@@ -853,24 +864,25 @@ class StatsStore:
 
         tier = prefer_tier or self._pick_tier(start_ts, end_ts)
         try:
-            if tier == "samples":
-                column = metric
-                cur = self._conn.execute(
-                    f"SELECT ts, {column} FROM samples "
-                    f"WHERE ts BETWEEN ? AND ? AND {column} IS NOT NULL "
-                    "ORDER BY ts ASC",
-                    (int(start_ts), int(end_ts)),
-                )
-            else:
-                table = "agg_5min" if tier == "agg_5min" else "agg_hourly"
-                column = self._agg_column_for(metric)
-                cur = self._conn.execute(
-                    f"SELECT ts, {column} FROM {table} "
-                    f"WHERE ts BETWEEN ? AND ? AND {column} IS NOT NULL "
-                    "ORDER BY ts ASC",
-                    (int(start_ts), int(end_ts)),
-                )
-            return [(int(r[0]), float(r[1])) for r in cur.fetchall()]
+            with self._db_lock:
+                if tier == "samples":
+                    column = metric
+                    cur = self._conn.execute(
+                        f"SELECT ts, {column} FROM samples "
+                        f"WHERE ts BETWEEN ? AND ? AND {column} IS NOT NULL "
+                        "ORDER BY ts ASC",
+                        (int(start_ts), int(end_ts)),
+                    )
+                else:
+                    table = "agg_5min" if tier == "agg_5min" else "agg_hourly"
+                    column = self._agg_column_for(metric)
+                    cur = self._conn.execute(
+                        f"SELECT ts, {column} FROM {table} "
+                        f"WHERE ts BETWEEN ? AND ? AND {column} IS NOT NULL "
+                        "ORDER BY ts ASC",
+                        (int(start_ts), int(end_ts)),
+                    )
+                return [(int(r[0]), float(r[1])) for r in cur.fetchall()]
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: query_range failed: {e}")
             return []

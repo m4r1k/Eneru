@@ -670,19 +670,34 @@ class ConfigLoader:
             notif_voltage_hysteresis = notif_data.get(
                 'voltage_hysteresis_seconds', notif_voltage_hysteresis,
             )
-            notif_retention_days = notif_data.get(
+            # Coerce numeric YAML values to int defensively (Cubic P2).
+            # Strings like "7" parse cleanly; garbage raises ValueError
+            # which would otherwise surface as a TypeError deep inside
+            # the worker's backoff math at runtime, far from the source.
+            def _as_int(key, default):
+                v = notif_data.get(key, default)
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    print(
+                        f"⚠️ Notifications config: {key}={v!r} not numeric; "
+                        f"using default {default}"
+                    )
+                    return default
+
+            notif_retention_days = _as_int(
                 'retention_days', notif_retention_days,
             )
-            notif_max_attempts = notif_data.get(
+            notif_max_attempts = _as_int(
                 'max_attempts', notif_max_attempts,
             )
-            notif_max_age_days = notif_data.get(
+            notif_max_age_days = _as_int(
                 'max_age_days', notif_max_age_days,
             )
-            notif_max_pending = notif_data.get(
+            notif_max_pending = _as_int(
                 'max_pending', notif_max_pending,
             )
-            notif_retry_backoff_max = notif_data.get(
+            notif_retry_backoff_max = _as_int(
                 'retry_backoff_max', notif_retry_backoff_max,
             )
 

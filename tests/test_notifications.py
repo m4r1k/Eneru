@@ -74,6 +74,22 @@ def _wait_until(predicate, timeout=2.0, poll=0.02):
     return False
 
 
+def _peek(store, sql, params=()):
+    """Test helper: read from the store under its ``_db_lock`` to avoid
+    racing the worker thread on Python 3.13 sqlite3 (which raises
+    ``SystemError: error return without exception set`` when concurrent
+    execute()s share a connection without external mutex). Cubic P1.
+    """
+    with store._db_lock:
+        return store._conn.execute(sql, params).fetchone()
+
+
+def _peek_all(store, sql, params=()):
+    """Test helper: like ``_peek`` but returns ``fetchall()``."""
+    with store._db_lock:
+        return store._conn.execute(sql, params).fetchall()
+
+
 # ==============================================================================
 # Worker lifecycle
 # ==============================================================================
@@ -187,10 +203,11 @@ class TestSendPersistence:
             worker.stop()
             row_id = worker.send("persisted", "info", "lifecycle")
             assert row_id is not None
-            row = registered_store._conn.execute(
+            row = _peek(
+                registered_store,
                 "SELECT body, notify_type, category, status FROM notifications "
-                "WHERE id=?", (row_id,)
-            ).fetchone()
+                "WHERE id=?", (row_id,),
+            )
             assert row == ("persisted", "info", "lifecycle", "pending")
         finally:
             worker.stop()
@@ -265,15 +282,17 @@ class TestRetryAndBackoff:
             worker.send("retry-me", "info", "lifecycle")
             # Wait long enough for at least one attempt.
             assert _wait_until(
-                lambda: registered_store._conn.execute(
+                lambda: _peek(
+                    registered_store,
                     "SELECT attempts FROM notifications "
-                    "WHERE body='retry-me'"
-                ).fetchone()[0] >= 1
+                    "WHERE body='retry-me'",
+                )[0] >= 1
             )
-            row = registered_store._conn.execute(
+            row = _peek(
+                registered_store,
                 "SELECT status, attempts FROM notifications "
-                "WHERE body='retry-me'"
-            ).fetchone()
+                "WHERE body='retry-me'",
+            )
             assert row[0] == "pending"
             assert row[1] >= 1
         finally:
@@ -303,14 +322,16 @@ class TestRetryAndBackoff:
             worker.register_store(registered_store)
             worker.send("poison", "info", "lifecycle")
             assert _wait_until(
-                lambda: registered_store._conn.execute(
-                    "SELECT status FROM notifications WHERE body='poison'"
-                ).fetchone()[0] == "cancelled"
+                lambda: _peek(
+                    registered_store,
+                    "SELECT status FROM notifications WHERE body='poison'",
+                )[0] == "cancelled"
             )
-            row = registered_store._conn.execute(
+            row = _peek(
+                registered_store,
                 "SELECT status, attempts, cancel_reason "
-                "FROM notifications WHERE body='poison'"
-            ).fetchone()
+                "FROM notifications WHERE body='poison'",
+            )
             assert row[0] == "cancelled"
             assert row[1] == 3
             assert row[2] == "max_attempts"
@@ -342,15 +363,17 @@ class TestRetryAndBackoff:
             worker.register_store(registered_store)
             worker.send("forever", "info", "lifecycle")
             assert _wait_until(
-                lambda: registered_store._conn.execute(
+                lambda: _peek(
+                    registered_store,
                     "SELECT attempts FROM notifications "
-                    "WHERE body='forever'"
-                ).fetchone()[0] >= 5
+                    "WHERE body='forever'",
+                )[0] >= 5
             )
-            row = registered_store._conn.execute(
+            row = _peek(
+                registered_store,
                 "SELECT status, cancel_reason FROM notifications "
-                "WHERE body='forever'"
-            ).fetchone()
+                "WHERE body='forever'",
+            )
             assert row[0] == "pending"
             assert row[1] is None
         finally:
@@ -386,10 +409,11 @@ class TestRetryAndBackoff:
             assert _wait_until(
                 lambda: registered_store.pending_notification_count() == 0
             )
-            row = registered_store._conn.execute(
+            row = _peek(
+                registered_store,
                 "SELECT status, attempts FROM notifications "
-                "WHERE body='eventually'"
-            ).fetchone()
+                "WHERE body='eventually'",
+            )
             assert row[0] == "sent"
             assert row[1] >= 3
 
@@ -423,10 +447,12 @@ class TestRetryAndBackoff:
         worker.stop()
         elapsed = time.monotonic() - t0
         assert elapsed < 3.0
-        # Row stayed pending for the next start.
-        row = registered_store._conn.execute(
-            "SELECT status FROM notifications WHERE body='stays-pending'"
-        ).fetchone()
+        # Row stayed pending for the next start. Worker is stopped now,
+        # but use the lock helper anyway for consistency.
+        row = _peek(
+            registered_store,
+            "SELECT status FROM notifications WHERE body='stays-pending'",
+        )
         assert row[0] == "pending"
 
 
@@ -543,10 +569,11 @@ class TestBacklogCap:
             worker.send(f"msg-{i}", "info", "lifecycle")
         # Cap kicks in synchronously inside send().
         assert registered_store.pending_notification_count() <= 2
-        cancelled = registered_store._conn.execute(
+        cancelled = _peek_all(
+            registered_store,
             "SELECT body, cancel_reason FROM notifications "
-            "WHERE status='cancelled' ORDER BY id ASC"
-        ).fetchall()
+            "WHERE status='cancelled' ORDER BY id ASC",
+        )
         cancel_bodies = [c[0] for c in cancelled]
         cancel_reasons = {c[1] for c in cancelled}
         # Older messages cancelled, newest kept.
@@ -599,16 +626,18 @@ class TestPowerEventCoalescing:
         assert coalesced == 1
 
         # Originals cancelled; one new summary remains pending.
-        cancelled = registered_store._conn.execute(
+        cancelled = _peek_all(
+            registered_store,
             "SELECT body, cancel_reason FROM notifications "
-            "WHERE status='cancelled' ORDER BY id ASC"
-        ).fetchall()
+            "WHERE status='cancelled' ORDER BY id ASC",
+        )
         assert len(cancelled) == 2
         assert all(c[1] == "coalesced" for c in cancelled)
 
-        pending = registered_store._conn.execute(
-            "SELECT body FROM notifications WHERE status='pending'"
-        ).fetchall()
+        pending = _peek_all(
+            registered_store,
+            "SELECT body FROM notifications WHERE status='pending'",
+        )
         assert len(pending) == 1
         body = pending[0][0]
         assert "Brief Power Outage" in body

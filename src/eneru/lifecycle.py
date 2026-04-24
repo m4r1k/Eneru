@@ -172,7 +172,14 @@ def classify_startup(*, current_version: str,
         )
 
     if shutdown_marker:
-        downtime = max(0, now - int(shutdown_marker.get("shutdown_at", now)))
+        # Marker is on-disk JSON written by an older daemon — defend
+        # against malformed values (string in shutdown_at, missing
+        # keys, etc.) that would otherwise raise and break startup.
+        try:
+            shutdown_at = int(shutdown_marker.get("shutdown_at", now))
+        except (TypeError, ValueError):
+            shutdown_at = now
+        downtime = max(0, now - shutdown_at)
         prev_version = str(shutdown_marker.get("version", current_version))
         reason = str(shutdown_marker.get("reason", REASON_SIGNAL))
 
@@ -247,6 +254,7 @@ def _extract_reason_from_body(body: str) -> Optional[str]:
 
 def coalesce_recovered_with_prev_shutdown(
     store, *, downtime_secs: int, now_ts: Optional[int] = None,
+    shutdown_at: Optional[int] = None,
 ) -> Optional[str]:
     """Fold the previous instance's pending shutdown headline + summary
     into a single richer "Recovered" body that mentions when the
@@ -260,11 +268,23 @@ def coalesce_recovered_with_prev_shutdown(
 
     The coalescing only fires when classification is "Recovered"
     (sequence_complete) — see ``UPSGroupMonitor._emit_lifecycle_startup_notification``.
+
+    ``shutdown_at`` (Cubic P2) bounds which pending rows count as "from
+    this outage". Without it, an unrelated older pending shutdown
+    notification (e.g. from a previous outage that never delivered)
+    would also get cancelled. Defaults to "no bound" for back-compat
+    but the monitor caller passes ``shutdown_marker.shutdown_at - 60``
+    so anything from before this outage is left alone.
     """
     now = int(now_ts if now_ts is not None else time.time())
+    floor_ts = int(shutdown_at) - 60 if shutdown_at is not None else None
 
-    shutdown_rows = store.find_pending_by_category("shutdown") or []
-    summary_rows = store.find_pending_by_category("shutdown_summary") or []
+    shutdown_rows = store.find_pending_by_category(
+        "shutdown", since_ts=floor_ts,
+    ) or []
+    summary_rows = store.find_pending_by_category(
+        "shutdown_summary", since_ts=floor_ts,
+    ) or []
     if not shutdown_rows and not summary_rows:
         return None
 
