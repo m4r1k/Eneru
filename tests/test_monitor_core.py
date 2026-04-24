@@ -646,6 +646,120 @@ class TestNotificationPolicyV52:
 
 
 # ==============================================================================
+# v5.2.1 events-table mirroring (Slice 3 + Slice 4 follow-up)
+#
+# These tests verify the lifecycle / shutdown notifications now ALSO
+# land in the stats events table, so the TUI's `--events-only` view
+# carries the same taxonomy the user sees on Apprise. A real install
+# was missing rows like EMERGENCY_SHUTDOWN_INITIATED / DAEMON_RECOVERED
+# between an ON_BATTERY and the next DAEMON_START — they're now mirrored
+# via _stats_store.log_event at the relevant call sites.
+# ==============================================================================
+
+class TestEventsTableMirroring:
+
+    @pytest.mark.unit
+    def test_trigger_immediate_shutdown_logs_emergency_event(self, tmp_path):
+        """_trigger_immediate_shutdown writes EMERGENCY_SHUTDOWN_INITIATED
+        with the trigger reason as the detail."""
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        with patch.object(monitor, "_execute_shutdown_sequence"):
+            monitor._trigger_immediate_shutdown(
+                "Battery charge 14% below threshold 20%"
+            )
+        log_calls = monitor._stats_store.log_event.call_args_list
+        emergency = [c for c in log_calls
+                     if c.args and c.args[0] == "EMERGENCY_SHUTDOWN_INITIATED"]
+        assert len(emergency) == 1
+        # The reason string is preserved verbatim as the detail.
+        assert "Battery charge 14% below threshold 20%" in emergency[0].args[1]
+
+    @pytest.mark.unit
+    def test_execute_shutdown_sequence_logs_complete_event(self, tmp_path):
+        """_execute_shutdown_sequence writes SHUTDOWN_SEQUENCE_COMPLETE
+        with elapsed time, in BOTH the local-shutdown-enabled and
+        -disabled paths (Slice 1 fixed the disabled path; this test
+        guards the events-table mirror lands the same way)."""
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        monitor._shutdown_vms = lambda: None
+        monitor._shutdown_containers = lambda: None
+        monitor._sync_filesystems = lambda: None
+        monitor._unmount_filesystems = lambda: None
+        monitor._shutdown_remote_servers = lambda: None
+        monitor.config.local_shutdown.enabled = False
+
+        monitor._execute_shutdown_sequence()
+
+        log_calls = monitor._stats_store.log_event.call_args_list
+        completes = [c for c in log_calls
+                     if c.args and c.args[0] == "SHUTDOWN_SEQUENCE_COMPLETE"]
+        assert len(completes) == 1
+        assert "elapsed:" in completes[0].args[1]
+
+    @pytest.mark.unit
+    def test_cleanup_and_exit_logs_daemon_stop(self, tmp_path):
+        """_cleanup_and_exit writes DAEMON_STOP so the events table has
+        a symmetric on/off pair against _start_stats's DAEMON_START."""
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        with pytest.raises(SystemExit):
+            monitor._cleanup_and_exit(15, None)
+        log_calls = monitor._stats_store.log_event.call_args_list
+        stops = [c for c in log_calls
+                 if c.args and c.args[0] == "DAEMON_STOP"]
+        assert len(stops) == 1
+        assert "stopped by signal" in stops[0].args[1]
+
+    @pytest.mark.unit
+    def test_emit_lifecycle_skips_event_for_fresh_start(self, tmp_path):
+        """First-ever start (no marker, no last_seen) classifies as
+        DAEMON_START — _start_stats already inserts that row, so the
+        lifecycle classifier MUST NOT insert a duplicate."""
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        # Mock no markers + no last_seen.
+        monitor._stats_store._conn = object()  # truthy
+        monitor._stats_store.get_meta.return_value = None
+        monitor._stats_store.find_pending_by_category.return_value = []
+        with patch("eneru.monitor.read_shutdown_marker", return_value=None), \
+             patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("eneru.monitor.delete_upgrade_marker"):
+            monitor._emit_lifecycle_startup_notification()
+        # No log_event call from the lifecycle classifier — fresh start
+        # is the one case where it stays silent (DAEMON_START is the
+        # _start_stats responsibility).
+        log_event_calls = monitor._stats_store.log_event.call_args_list
+        assert log_event_calls == []
+
+    @pytest.mark.unit
+    def test_emit_lifecycle_logs_recovered_after_sequence_complete(self, tmp_path):
+        """sequence_complete shutdown marker → DAEMON_RECOVERED in the
+        events table, mirroring the user's '📊 Recovered' notification."""
+        from eneru.lifecycle import REASON_SEQUENCE_COMPLETE
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        monitor._stats_store._conn = object()
+        monitor._stats_store.get_meta.return_value = "5.2.0"
+        monitor._stats_store.find_pending_by_category.return_value = []
+        marker = {"shutdown_at": 1000, "version": "5.2.0",
+                  "reason": REASON_SEQUENCE_COMPLETE}
+        with patch("eneru.monitor.read_shutdown_marker", return_value=marker), \
+             patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("eneru.monitor.delete_upgrade_marker"), \
+             patch("eneru.monitor.coalesce_recovered_with_prev_shutdown",
+                   return_value=None):
+            monitor._emit_lifecycle_startup_notification()
+        log_calls = monitor._stats_store.log_event.call_args_list
+        recovered = [c for c in log_calls
+                     if c.args and c.args[0] == "DAEMON_RECOVERED"]
+        assert len(recovered) == 1
+
+
+# ==============================================================================
 # CONNECTION GRACE PERIOD STATE MACHINE
 # ==============================================================================
 

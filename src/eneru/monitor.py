@@ -21,9 +21,11 @@ from eneru.logger import UPSLogger
 from eneru.notifications import NotificationWorker, APPRISE_AVAILABLE
 from eneru.stats import StatsStore, StatsWriter
 from eneru.lifecycle import (
+    EVENT_TYPE_DAEMON_START,
     REASON_FATAL,
     REASON_SEQUENCE_COMPLETE,
     REASON_SIGNAL,
+    classify_event_type,
     classify_startup,
     coalesce_recovered_with_prev_shutdown,
     delete_shutdown_marker,
@@ -375,6 +377,25 @@ class UPSGroupMonitor(
             upgrade_marker=upgrade_marker,
             last_seen_version=last_seen,
         )
+
+        # Mirror the classification into the stats events table so the
+        # TUI's --events-only view (and any sqlite3 / Grafana query)
+        # carries the same lifecycle taxonomy as the user-facing
+        # notification. _start_stats already inserts a DAEMON_START on
+        # every boot, so we only insert here when the classification is
+        # something more informative than "fresh start".
+        event_type = classify_event_type(
+            current_version=__version__,
+            shutdown_marker=shutdown_marker,
+            upgrade_marker=upgrade_marker,
+            last_seen_version=last_seen,
+        )
+        if (event_type != EVENT_TYPE_DAEMON_START
+                and self._stats_store._conn is not None):
+            try:
+                self._stats_store.log_event(event_type, body)
+            except Exception:
+                pass  # never mask a startup notification on a stats hiccup
 
         # Cancel any pending lifecycle rows from the previous instance —
         # they're superseded by the new classification (Restarted folds
@@ -822,6 +843,18 @@ class UPSGroupMonitor(
             return
 
         elapsed = int(time.monotonic() - sequence_start)
+
+        # Mirror the sequence completion into the events table (regardless
+        # of local_shutdown.enabled) so the TUI's --events-only view
+        # carries the elapsed-time row between EMERGENCY_SHUTDOWN_INITIATED
+        # and the next start's DAEMON_RECOVERED.
+        try:
+            self._stats_store.log_event(
+                "SHUTDOWN_SEQUENCE_COMPLETE", f"elapsed: {elapsed}s",
+            )
+        except Exception:
+            pass
+
         if self.config.local_shutdown.enabled:
             self._log_message("🔌 Shutting down local server NOW")
             self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE")
@@ -894,6 +927,16 @@ class UPSGroupMonitor(
             category="shutdown",
         )
 
+        # Mirror to the events table so the TUI's --events-only view
+        # carries the shutdown trigger between the ON_BATTERY row and
+        # the eventual DAEMON_RECOVERED row on the next start.
+        try:
+            self._stats_store.log_event(
+                "EMERGENCY_SHUTDOWN_INITIATED", reason,
+            )
+        except Exception:
+            pass  # stats hiccup must not block the safety-critical path
+
         self._log_message(f"🚨 CRITICAL: Triggering immediate shutdown. Reason: {reason}")
         if self.config.local_shutdown.wall and not self.config.behavior.dry_run:
             run_command([
@@ -920,6 +963,18 @@ class UPSGroupMonitor(
         self._shutdown_flag_path.touch()
 
         self._log_message("🛑 Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
+
+        # Mirror to the events table so the TUI's --events-only view
+        # shows when the daemon was last cleanly stopped (it already
+        # logs DAEMON_START on every boot; pairing it with DAEMON_STOP
+        # makes the on-off audit trail symmetric).
+        try:
+            self._stats_store.log_event(
+                "DAEMON_STOP",
+                f"Eneru v{__version__} stopped by signal (SIGTERM/SIGINT)",
+            )
+        except Exception:
+            pass
 
         # Send notification (non-blocking - fire and forget)
         self._send_notification(

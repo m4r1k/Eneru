@@ -18,12 +18,19 @@ import time
 import pytest
 
 from eneru.lifecycle import (
+    EVENT_TYPE_DAEMON_AFTER_CRASH,
+    EVENT_TYPE_DAEMON_RECOVERED,
+    EVENT_TYPE_DAEMON_RESTARTED,
+    EVENT_TYPE_DAEMON_RESTARTED_AFTER_FATAL,
+    EVENT_TYPE_DAEMON_START,
+    EVENT_TYPE_DAEMON_UPGRADED,
     REASON_FATAL,
     REASON_SEQUENCE_COMPLETE,
     REASON_SIGNAL,
     RESTART_DOWNTIME_THRESHOLD_SECS,
     SHUTDOWN_MARKER_NAME,
     UPGRADE_MARKER_NAME,
+    classify_event_type,
     classify_startup,
     coalesce_recovered_with_prev_shutdown,
     delete_shutdown_marker,
@@ -89,6 +96,56 @@ class TestShutdownMarker:
         after = int(time.time())
         marker = read_shutdown_marker(tmp_path)
         assert before <= marker["shutdown_at"] <= after
+
+
+class TestMarkerIOErrorPaths:
+    """v5.2.1 coverage gaps: the marker-file helpers swallow OSError
+    so a read-only filesystem or permission issue degrades to "no
+    marker found" rather than crashing the daemon."""
+
+    @pytest.mark.unit
+    def test_write_shutdown_marker_swallows_oserror(self, tmp_path, monkeypatch):
+        """A failed mkdir / write_text doesn't raise — the next start
+        just classifies as 'after crash' instead of having the marker
+        context. Best-effort by design."""
+        from pathlib import Path
+
+        def fail_mkdir(*a, **kw):
+            raise PermissionError("read-only filesystem")
+        monkeypatch.setattr(Path, "mkdir", fail_mkdir)
+        # Must not raise.
+        write_shutdown_marker(tmp_path, version="5.2.0")
+
+    @pytest.mark.unit
+    def test_read_shutdown_marker_swallows_oserror(self, tmp_path, monkeypatch):
+        """A read failure (corrupted disk, permissions) returns None
+        rather than raising into the startup path."""
+        from pathlib import Path
+        # Pre-create the marker so .exists() returns True, then make
+        # the read fail.
+        write_shutdown_marker(tmp_path, version="5.2.0")
+        original_read = Path.read_text
+
+        def fail_read(self, *a, **kw):
+            if self.name == SHUTDOWN_MARKER_NAME:
+                raise OSError("disk read error")
+            return original_read(self, *a, **kw)
+        monkeypatch.setattr(Path, "read_text", fail_read)
+        assert read_shutdown_marker(tmp_path) is None
+
+    @pytest.mark.unit
+    def test_delete_marker_swallows_oserror(self, tmp_path, monkeypatch):
+        """delete_*_marker must be idempotent AND survive permission
+        errors so a misconfigured stats_dir doesn't crash startup."""
+        from pathlib import Path
+        write_shutdown_marker(tmp_path, version="5.2.0")
+
+        def fail_unlink(self, *a, **kw):
+            raise OSError("permission denied")
+        monkeypatch.setattr(Path, "unlink", fail_unlink)
+        # Must not raise.
+        delete_shutdown_marker(tmp_path)
+        delete_upgrade_marker(tmp_path)
 
 
 class TestUpgradeMarker:
@@ -276,6 +333,101 @@ class TestClassifyStartup:
 # ==============================================================================
 # Slice 4: coalesce Recovered with previous shutdown headline
 # ==============================================================================
+
+class TestClassifyEventType:
+    """Mirrors TestClassifyStartup; verifies that the events-table tag
+    matches the priority order classify_startup uses for the user-
+    facing notification body. New event_type strings here do NOT need
+    a schema bump (events.event_type is TEXT)."""
+
+    @pytest.mark.unit
+    def test_upgrade_marker_emits_upgraded(self):
+        assert classify_event_type(
+            current_version="5.2.0",
+            shutdown_marker={"shutdown_at": 1, "version": "5.1.2",
+                             "reason": REASON_SIGNAL},
+            upgrade_marker={"old_version": "5.1.2"},
+            last_seen_version="5.1.2",
+            now_ts=100,
+        ) == EVENT_TYPE_DAEMON_UPGRADED
+
+    @pytest.mark.unit
+    def test_pip_path_upgrade_emits_upgraded(self):
+        assert classify_event_type(
+            current_version="5.2.0",
+            shutdown_marker=None,
+            upgrade_marker=None,
+            last_seen_version="5.1.2",
+            now_ts=100,
+        ) == EVENT_TYPE_DAEMON_UPGRADED
+
+    @pytest.mark.unit
+    def test_sequence_complete_emits_recovered(self):
+        assert classify_event_type(
+            current_version="5.2.0",
+            shutdown_marker={"shutdown_at": 1000, "version": "5.2.0",
+                             "reason": REASON_SEQUENCE_COMPLETE},
+            upgrade_marker=None,
+            last_seen_version="5.2.0",
+            now_ts=23000,
+        ) == EVENT_TYPE_DAEMON_RECOVERED
+
+    @pytest.mark.unit
+    def test_fatal_emits_restarted_after_fatal(self):
+        assert classify_event_type(
+            current_version="5.2.0",
+            shutdown_marker={"shutdown_at": 100, "version": "5.2.0",
+                             "reason": REASON_FATAL},
+            upgrade_marker=None,
+            last_seen_version="5.2.0",
+            now_ts=200,
+        ) == EVENT_TYPE_DAEMON_RESTARTED_AFTER_FATAL
+
+    @pytest.mark.unit
+    def test_signal_recent_emits_restarted(self):
+        assert classify_event_type(
+            current_version="5.2.0",
+            shutdown_marker={"shutdown_at": 100, "version": "5.2.0",
+                             "reason": REASON_SIGNAL},
+            upgrade_marker=None,
+            last_seen_version="5.2.0",
+            now_ts=100 + RESTART_DOWNTIME_THRESHOLD_SECS - 1,
+        ) == EVENT_TYPE_DAEMON_RESTARTED
+
+    @pytest.mark.unit
+    def test_signal_old_emits_start(self):
+        # Old downtime past the restart threshold reads as a fresh
+        # start; _start_stats already inserts DAEMON_START so the
+        # caller is expected to skip the duplicate.
+        assert classify_event_type(
+            current_version="5.2.0",
+            shutdown_marker={"shutdown_at": 100, "version": "5.2.0",
+                             "reason": REASON_SIGNAL},
+            upgrade_marker=None,
+            last_seen_version="5.2.0",
+            now_ts=100 + RESTART_DOWNTIME_THRESHOLD_SECS + 60,
+        ) == EVENT_TYPE_DAEMON_START
+
+    @pytest.mark.unit
+    def test_no_marker_with_last_seen_emits_after_crash(self):
+        assert classify_event_type(
+            current_version="5.2.0",
+            shutdown_marker=None,
+            upgrade_marker=None,
+            last_seen_version="5.2.0",
+            now_ts=100,
+        ) == EVENT_TYPE_DAEMON_AFTER_CRASH
+
+    @pytest.mark.unit
+    def test_no_marker_no_last_seen_emits_start(self):
+        assert classify_event_type(
+            current_version="5.2.0",
+            shutdown_marker=None,
+            upgrade_marker=None,
+            last_seen_version=None,
+            now_ts=100,
+        ) == EVENT_TYPE_DAEMON_START
+
 
 class TestCoalesceRecoveredWithPrevShutdown:
 
