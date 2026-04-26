@@ -1,351 +1,268 @@
 # Notifications
 
-Eneru uses [Apprise](https://github.com/caronc/apprise) to send notifications to 100+ services: Discord, Slack, Telegram, ntfy, Pushover, Email, and others.
+Eneru sends notifications through [Apprise](https://github.com/caronc/apprise), so one config format covers Discord, Slack, Telegram, ntfy, Pushover, email, Matrix, Gotify, Home Assistant, and many more services.
 
----
+Notifications are not on the shutdown critical path. Eneru queues the message and continues shutting things down.
 
-## Configuration
+## Basic config
 
 ```yaml
 notifications:
-  # Optional title for notifications
-  title: "⚡ Homelab UPS"
-
-  # Avatar/icon URL (supported by Discord, Slack, and others)
+  title: "Homelab UPS"
   avatar_url: "https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-avatar.png"
-
-  # Timeout for notification delivery (seconds)
   timeout: 10
-
-  # Initial retry wait for failed sends. Doubles on each failure up to
-  # retry_backoff_max (see below). Default: 5
-  retry_interval: 5
-
-  # v5.2 persistent-queue knobs. Defaults are sized for "long weekend
-  # with the internet down" — the queue survives process death and
-  # prolonged outages, then drains once the endpoint returns.
-  retention_days: 7         # keep sent/cancelled rows for forensics
-  max_attempts: 0           # 0 = unlimited (default, see below)
-  max_age_days: 30          # only TTL on pending rows
-  max_pending: 10000        # backlog overflow cap
-  retry_backoff_max: 300    # 5-min ceiling on the exponential backoff
-
-  # Notification service URLs
   urls:
     - "discord://webhook_id/webhook_token"
-    - "slack://token_a/token_b/token_c/#channel"
-    - "telegram://bot_token/chat_id"
+    - "ntfy://ntfy.sh/my-ups-topic"
 ```
 
-`max_attempts` defaults to `0` (unlimited) on purpose: Apprise's
-success/fail signal is a single bool — Eneru cannot tell "bad URL" from
-"internet down". Capping attempts risks dropping legitimate messages
-during a long outage. Use this only as a poison-message kill switch.
+If `urls` is empty, notifications are disabled.
 
----
+## Test delivery
 
-## Popular services
+Package install:
+
+```bash
+sudo eneru test-notifications --config /etc/ups-monitor/config.yaml
+```
+
+PyPI install:
+
+```bash
+eneru test-notifications --config /etc/ups-monitor/config.yaml
+```
+
+Also run validation. It catches missing Apprise support and malformed config values:
+
+```bash
+sudo eneru validate --config /etc/ups-monitor/config.yaml
+```
+
+## Common service URLs
 
 ### Discord
 
-1. In your Discord server, go to **Server Settings → Integrations → Webhooks**
-2. Click **New Webhook** and copy the webhook URL
-3. Extract the ID and token from the URL:
-   ```
-   https://discord.com/api/webhooks/1234567890/abcdefghijk...
-                                    └─ ID ─┘   └─ Token ─┘
-   ```
-4. Add to config:
-   ```yaml
-   urls:
-     - "discord://1234567890/abcdefghijk..."
-   ```
+Create a webhook in Discord under Server Settings, Integrations, Webhooks. Convert the webhook URL:
+
+```text
+https://discord.com/api/webhooks/1234567890/abcdefghijklmnopqrstuvwxyz
+                                 webhook id / webhook token
+```
+
+```yaml
+notifications:
+  urls:
+    - "discord://1234567890/abcdefghijklmnopqrstuvwxyz"
+```
 
 ### Slack
 
-1. Create a Slack app at [api.slack.com/apps](https://api.slack.com/apps)
-2. Add **Incoming Webhooks** feature
-3. Create a webhook for your channel
-4. Use the webhook URL format:
-   ```yaml
-   urls:
-     - "slack://TokenA/TokenB/TokenC/#channel"
-   ```
+Create an incoming webhook in a Slack app and use the token components from the webhook URL.
+
+```yaml
+notifications:
+  urls:
+    - "slack://TokenA/TokenB/TokenC/#channel"
+```
 
 ### Telegram
 
-1. Create a bot via [@BotFather](https://t.me/botfather) and get the token
-2. Get your chat ID by messaging the bot and checking:
-   ```
-   https://api.telegram.org/bot<TOKEN>/getUpdates
-   ```
-3. Add to config:
-   ```yaml
-   urls:
-     - "telegram://bot_token/chat_id"
-   ```
+Create a bot with BotFather, message it once, then get your chat ID with `getUpdates`.
+
+```yaml
+notifications:
+  urls:
+    - "telegram://bot_token/chat_id"
+```
 
 ### ntfy
 
-[ntfy](https://ntfy.sh/) is a simple pub-sub notification service:
-
 ```yaml
-urls:
-  - "ntfy://ntfy.sh/your-topic-name"
-  # Or self-hosted:
-  - "ntfy://your-server.com/your-topic"
+notifications:
+  urls:
+    - "ntfy://ntfy.sh/my-topic"
+    - "ntfy://user:password@ntfy.example.com/my-topic"
 ```
 
 ### Pushover
 
 ```yaml
-urls:
-  - "pover://user_key@app_token"
+notifications:
+  urls:
+    - "pover://user_key@app_token"
 ```
 
-### Email (SMTP)
-
-```yaml
-urls:
-  - "mailto://user:password@smtp.gmail.com:587?to=recipient@example.com"
-```
-
-### More services
-
-Apprise supports 100+ notification services. See the [Apprise Wiki](https://github.com/caronc/apprise/wiki) for the complete list and URL formats.
-
----
-
-## Testing notifications
-
-Test notifications before relying on them during a power event:
-
-```bash
-# Send a test notification
-eneru test-notifications --config /etc/ups-monitor/config.yaml
-
-# Validate configuration
-eneru validate --config /etc/ups-monitor/config.yaml
-```
-
----
-
-## Persistent retry architecture
-
-Network connectivity is often temporarily down during power outages, and the daemon process itself may stop and restart mid-incident (`systemctl restart`, package upgrade, host reboot). Eneru's notification queue is **SQLite-backed and lossless across process death**: the main thread inserts a `pending` row in the per-UPS stats DB and returns immediately; a worker thread reads pending rows and ships them via Apprise; failed sends stay `pending` and retry with **per-message exponential backoff** (starts at `retry_interval`, doubles up to `retry_backoff_max`).
-
-If the daemon dies while rows are still pending, the next start picks them up and continues delivery — nothing is lost in process memory. Only `pending` rows are subject to a TTL (`max_age_days`, default 30 days); `sent` and `cancelled` rows are kept for `retention_days` (default 7) for forensic inspection via `sqlite3`.
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                  ENERU v5.2 NOTIFICATION ARCHITECTURE                       │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│   MAIN THREAD (Critical Path)         WORKER THREAD (Persistent Retry)      │
-│   ═══════════════════════════         ═════════════════════════════════     │
-│                                                                             │
-│   ┌─────────────────────┐                                                   │
-│   │  Event happens      │                                                   │
-│   │  (power, lifecycle) │                                                   │
-│   └──────────┬──────────┘                                                   │
-│              │                                                              │
-│              ▼                                                              │
-│   ┌─────────────────────┐         ┌──────────────────────────────┐          │
-│   │ Insert pending row  │────────▶│   Per-UPS SQLite stats DB    │          │
-│   │ (non-blocking)      │         │   notifications table:       │          │
-│   └──────────┬──────────┘         │   id │ ts │ body │ status   │          │
-│              │                    │   ──┴────┴──────┴──────────  │          │
-│              │ continues          │   pending → sent / cancelled │          │
-│              │ immediately        └──────────┬───────────────────┘          │
-│              ▼                               │                              │
-│   ┌─────────────────────┐                    ▼                              │
-│   │ Stop VMs            │         ┌──────────────────────────────┐          │
-│   └──────────┬──────────┘         │ Read oldest `pending` row    │          │
-│              ▼                    │ Try Apprise send             │          │
-│   ┌─────────────────────┐         └──────────┬───────────────────┘          │
-│   │ Stop Containers     │                    │                              │
-│   └──────────┬──────────┘               YES ┌┴┐ NO                          │
-│              ▼                              │ │                             │
-│   ┌─────────────────────┐         ┌─────────┘ └──────────┐                  │
-│   │ Unmount Filesystems │         │ Mark `sent`           │ Increment       │
-│   └──────────┬──────────┘         │ Move to next pending  │ attempts        │
-│              ▼                    │                       │ Wait `interval` │
-│   ┌─────────────────────┐         └───────────────────────┘ × 2^N           │
-│   │ Shutdown Remote     │                                  (cap = 300s)     │
-│   │ Servers             │                                                   │
-│   └──────────┬──────────┘                                                   │
-│              ▼                                                              │
-│   ┌─────────────────────┐         ┌──────────────────────────────┐          │
-│   │ flush(timeout=5)    │         │       KEY GUARANTEES          │         │
-│   │ wait for pending=0  │         ├──────────────────────────────┤          │
-│   │ OR 5s, whichever    │         │ ✓ Survives process death     │          │
-│   │ comes first         │         │ ✓ Survives long outages      │          │
-│   └──────────┬──────────┘         │ ✓ FIFO within UPS            │          │
-│              ▼                    │ ✓ Per-message backoff        │          │
-│   ┌─────────────────────┐         │ ✓ No flush burns the CPU on  │          │
-│   │ shutdown -h now     │         │   an unreachable endpoint    │          │
-│   └─────────────────────┘         └──────────────────────────────┘          │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Comparison with prior architectures
-
-| Scenario | Fire-and-Forget (v4.6) | Persistent Retry (v4.7+) | Stateful, Lossless (v5.2+) |
-|----------|------------------------|--------------------------|-----------------------------|
-| 30-second network blip | Notifications lost | Retried and delivered | Retried and delivered |
-| Router reboot during outage | Notifications lost | Retried and delivered | Retried and delivered |
-| Transient DNS failure | Notifications lost | Retried and delivered | Retried and delivered |
-| Daemon crashes mid-outage | Messages lost at exit | Messages lost at exit | Pending rows survive in SQLite; next start resumes |
-| `systemctl restart` mid-outage | Messages lost at exit | Messages lost at exit | Resumed transparently |
-| Multi-day internet outage | All retries hammer the network | Same | Per-message exponential backoff, capped at `retry_backoff_max` (default 5 min) |
-| `systemctl restart` (no event) | Stop + Start (2 unrelated messages) | Stop + Start (2 unrelated messages) | Single `🔄 Restarted (downtime: Ns)` (classifier cancels the pending stop) |
-| Package upgrade (deb/rpm) | Stop + Start (2 messages, no version) | Stop + Start (2 messages, no version) | Single `📦 Upgraded vX → vY` (postinstall marker + classifier) |
-| Power-loss recovery | Stop + Start (2 messages, no context) | Stop + Start (2 messages, no context) | Single `📊 Recovered` (folds the prior shutdown headline + downtime + reason) |
-| Brief power blip | 2 messages (`Power Lost` + `Power Restored`) | Same | Coalesced into 1 `📊 Brief Power Outage: Ns on battery` summary |
-| Backlog growth on runaway events | Unbounded queue (OOM risk) | Unbounded queue (OOM risk) | Bounded by `max_pending` (default 10000); oldest cancelled with `backlog_overflow` |
-| Stale pending TTL | N/A (no queue) | N/A (memory-only) | `max_age_days` (default 30) ages out pending rows as `too_old` |
-
-### Shutdown drain: `flush(timeout=5)`
-
-When the daemon is exiting (signal, sequence-complete, or `systemctl stop`), the worker is given up to 5 seconds to drain any pending rows before the process exits. The call returns as soon as `pending` hits 0, so a fast network adds zero latency. Whatever doesn't drain stays in SQLite — the next start replays it, so the only real failure mode is "endpoint still unreachable when the system finally powers off", which Eneru flags in `journalctl` rather than dropping silently.
-
-### 30-second power blip
-
-During a brief power blip, power may return within seconds, well before any shutdown triggers fire. But the public Internet often stays unreachable for several minutes while local network equipment reboots (router, modem, switches, WiFi APs).
-
-Notifications insert as `pending` immediately and the worker retries with exponential backoff. Once the network is back, queued messages drain in age order. With v5.2, an `ON_BATTERY` + `POWER_RESTORED` pair from the same outage that's still pending when delivery resumes is **coalesced into one `📊 Brief Power Outage: Ns on battery` summary** rather than shipping as two separate messages.
-
-```
-Timeline (brief power blip, network slow to recover):
-─────────────────────────────────────────────────────────────────
-0s     │ Power lost, ON_BATTERY row inserted (pending)
-5s     │ Worker retry #1 — network down (attempts=1, wait=5s)
-10s    │ Worker retry #2 — still failing  (attempts=2, wait=10s)
-20s    │ Worker retry #3 — still failing  (attempts=3, wait=20s)
-28s    │ Power restored, POWER_RESTORED row inserted (pending)
-40s    │ Worker retry #4 — still failing  (attempts=4, wait=40s)
-60s    │ Network is back!
-60s    │ Coalescer folds ON_BATTERY + POWER_RESTORED into one row
-60s    │ ✓ "📊 Brief Power Outage: 28s on battery" delivered
-─────────────────────────────────────────────────────────────────
-       1 message delivered (instead of 2) despite a 60-second outage
-```
-
----
-
-## Lifecycle notifications
-
-v5.2 replaces the unconditional `🚀 Started` / `🛑 Stopped` pair with a **stateful classifier** that picks one of eight messages based on two on-disk markers and the previous-version metadata in the stats DB. The result is exactly one notification per lifecycle transition rather than one per process start.
-
-| Classification | Trigger | Driven by |
-|----------------|---------|-----------|
-| `📦 Eneru Upgraded vX → vY` | deb/rpm package upgrade | `.upgrade_marker.json` written by `packaging/scripts/postinstall.sh`; old version captured by `preinstall.sh` (`rpm -q eneru` / `dpkg-query`) |
-| `📦 Eneru Upgraded vX → vY` (pip path) | `pip install --upgrade eneru` followed by restart | `meta.last_seen_version` in the stats DB differs from current `__version__` |
-| `📊 Eneru Recovered` | Daemon coming back after a power-loss-triggered shutdown | `.shutdown_state.json` with `reason: sequence_complete`; folds the prior shutdown headline + summary into one richer message |
-| `🔄 Eneru Restarted (downtime: Ns)` | `systemctl restart eneru` within 30 seconds | `.shutdown_state.json` with `reason: signal` and downtime under 30 s |
-| `🚀 Eneru Restarted` (fatal) | Daemon came back after a crash that wrote a `fatal` marker | `.shutdown_state.json` with `reason: fatal` |
-| `🚀 Eneru Started (last seen Nh ago)` | Daemon started after a long graceful gap | `.shutdown_state.json` present with downtime ≥ 30 s |
-| `🚀 Eneru Started (after crash)` | Daemon came back without ever writing a marker | No shutdown marker but `meta.last_seen_version` is set |
-| `🚀 Eneru vX Started` | First-ever start | No markers, no `last_seen_version` |
-
-The mechanism that delivers "exactly one message" picks the cheapest correct path based on systemd intent:
-
-1. **`systemctl stop eneru`** (systemd `Job=stop` queued): the old daemon ships `🛑 Service Stopped` synchronously via Apprise and exits. Single message, instant — no waiting around.
-2. **`systemctl restart eneru` / package upgrade**: the old daemon enqueues `🛑 Service Stopped` as a `pending` row, stops its worker, and schedules a transient `systemd-run` timer that re-invokes `eneru _deliver-stop` ~15 s later. The timer lives **outside** `eneru.service`'s cgroup so it survives our exit and doesn't gate the systemd restart cycle. The new daemon's classifier cancels the pending row with `cancel_reason='superseded'` before the timer fires → single `🔄 Restarted` / `📦 Upgraded` / `📊 Recovered`. (Package-upgrade also short-circuits via the upgrade marker in the old daemon's `_cleanup_and_exit`, skipping the enqueue entirely.)
-3. **Crash, kill, manual SIGTERM (no systemd job queued)**: defensive — same systemd-run timer as case 2. If a replacement comes up within 15 s the row is cancelled; otherwise the timer ships.
-4. **Not under systemd** (Docker, K8s, foreground `eneru run`): the defer-then-ship dance only makes sense when there's a service manager that will or won't restart us. The old daemon ships eagerly via Apprise, identical to case 1. Single message, instant.
-
-The systemd intent is detected by querying `systemctl show -p Job eneru.service` at SIGTERM time — systemd has the job queued before it sends the signal, so by the time we read this we see whether it's a stop, a restart, or nothing (crash/kill).
-
----
-
-## Coalescing
-
-Two related events that reach the queue close together get folded into one richer message before delivery, so the user sees the *story* rather than the individual signals.
-
-**Brief power outage.** When a `POWER_RESTORED` notification is being enqueued and an `ON_BATTERY` notification from the same outage is still `pending` (i.e. the network was down during the outage and only came back after recovery), both rows are cancelled with reason `coalesced` and replaced by a single `📊 Brief Power Outage: Ns on battery` summary. If either row already shipped, no fold-in happens — the user still gets two messages, which is the right behaviour because the first one already left the building.
-
-**Power-loss recovery fold-in.** When the daemon classifies a startup as `📊 Recovered` (sequence_complete shutdown marker on disk), it absorbs the prior instance's pending shutdown *headline* (the `🚨 EMERGENCY SHUTDOWN INITIATED!` line) and the pending shutdown *summary* (`✅ Shutdown Sequence Complete`) into one message that carries the trigger reason and the total downtime. The fold is bounded to the current outage (`shutdown_at - 60 s` floor) so an unrelated older pending shutdown row from a previous outage isn't accidentally cancelled.
-
----
-
-## Notification events
-
-| Event | `event_type` (stats DB) | Category | Notes |
-|-------|-------------------------|----------|-------|
-| Power lost | `ON_BATTERY` | `power_event_on_battery` | Sub-typed category lets the coalescer pair it with `power_event_on_line` by exact match |
-| Power restored | `POWER_RESTORED` | `power_event_on_line` | Suppressible via `notifications.suppress` |
-| Brief power outage (coalesced) | `BRIEF_POWER_OUTAGE` | `power_event` | v5.2 summary row that replaces an `ON_BATTERY` + `POWER_RESTORED` pair |
-| Connection lost / restored | `CONNECTION_LOST` / `CONNECTION_RESTORED` | `power_event` | Restored is suppressible |
-| Emergency shutdown initiated | `EMERGENCY_SHUTDOWN_INITIATED` | `shutdown` | Safety-critical (cannot be suppressed) |
-| Shutdown sequence complete | `SHUTDOWN_SEQUENCE_COMPLETE` | `shutdown_summary` | One per shutdown |
-| Voltage: brownout / over-voltage | `BROWNOUT_DETECTED` / `OVER_VOLTAGE_DETECTED` | `power_event` | Hysteresis-debounced; severe deviations bypass the dwell |
-| Voltage normalized | `VOLTAGE_NORMALIZED` | `power_event` | Suppressible |
-| AVR boost / trim / inactive | `AVR_BOOST_ACTIVE` / `AVR_TRIM_ACTIVE` / `AVR_INACTIVE` | `power_event` | All three suppressible |
-| Bypass active / inactive | `BYPASS_MODE_ACTIVE` / `BYPASS_MODE_INACTIVE` | `power_event` | Active is safety-critical |
-| Overload active / resolved | `OVERLOAD_ACTIVE` / `OVERLOAD_RESOLVED` | `power_event` | Active is safety-critical |
-| Battery anomaly | `BATTERY_ANOMALY_DETECTED` | `health` | Charge dropped > 20% while on line power; sustained-reading filter (3 polls) for APC / CyberPower / UniFi firmware jitter |
-| Lifecycle: started / restarted / recovered / upgraded | `DAEMON_START` / `DAEMON_RESTARTED` / `DAEMON_RECOVERED` / `DAEMON_UPGRADED` | `lifecycle` | One per lifecycle transition (see "Lifecycle notifications") |
-| Lifecycle: restarted after fatal | `DAEMON_RESTARTED_AFTER_FATAL` | `lifecycle` | |
-| Lifecycle: started after crash | `DAEMON_AFTER_CRASH` | `lifecycle` | Marker-less restart with prior `last_seen_version` |
-| Lifecycle: stopped | `DAEMON_STOP` | `lifecycle` | Pending row gets superseded if a new daemon comes up within the restart window |
-
----
-
-## Tuning alert noise
-
-Issue [#27](https://github.com/m4r1k/Eneru/issues/27) reported "a lot
-of email" from chatty UPS firmware on a US 120V grid. Eneru ships
-two knobs to tune notification volume — both designed so a
-misconfiguration cannot silence a real safety-critical event.
-
-### `voltage_hysteresis_seconds` — debounce transient flaps
+### Email
 
 ```yaml
 notifications:
-  voltage_hysteresis_seconds: 30   # default; 0 = legacy immediate
+  urls:
+    - "mailto://user:password@smtp.example.com:587?to=admin@example.com"
 ```
 
-When `voltage_state` transitions to HIGH or LOW, the
-`OVER_VOLTAGE_DETECTED` / `BROWNOUT_DETECTED` log line and SQLite
-event row are written **immediately** (operational record is
-sacred). The notification dispatch is held for
-`voltage_hysteresis_seconds`. If the condition reverts inside the
-window, no notification fires and a `VOLTAGE_FLAP_SUPPRESSED` event
-is recorded for visibility:
+Apprise documents the full URL catalog in its [service wiki](https://github.com/caronc/apprise/wiki).
 
-```bash
-sqlite3 /var/lib/eneru/<UPS>.db \
-  "SELECT ts, event_type, detail FROM events
-   WHERE event_type='VOLTAGE_FLAP_SUPPRESSED'
-   ORDER BY ts DESC LIMIT 10;"
+## Persistent retry
+
+Eneru stores pending notifications in the per-UPS SQLite database. If the network is down, the worker retries with exponential backoff. If Eneru restarts before delivery, the next process resumes the queue.
+
+```text
+ENERU NOTIFICATION PATH
+
+ +----------------------+      insert pending       +----------------------+
+ | Main monitor thread  +-------------------------->| Per-UPS SQLite DB    |
+ | power/lifecycle      |                           | notifications table  |
+ | event occurs         |                           | status = pending     |
+ +----------+-----------+                           +----------+-----------+
+            |                                                  ^
+            | continue safety work                             |
+            v                                                  | update row
+ +----------+-----------+                                      |
+ | Shutdown sequence    |                           +----------+-----------+
+ | VMs, containers, SSH |                           | Worker thread       |
+ | filesystems, local   |                           | oldest due row      |
+ | poweroff             |                           | Apprise delivery    |
+ +----------------------+                           +----------+-----------+
+                                                               |
+                                                +--------------+--------------+
+                                                |                             |
+                                                v                             v
+                                      +---------+----------+       +----------+---------+
+                                      | success            |       | failure            |
+                                      | mark sent          |       | attempts += 1      |
+                                      +--------------------+       | schedule backoff   |
+                                                                   +--------------------+
 ```
 
-If the condition persists past the dwell, the notification fires
-with a `Persisted Ns.` annotation so you can see it was held.
+```yaml
+notifications:
+  retry_interval: 5
+  retry_backoff_max: 300
+  max_attempts: 0
+  max_age_days: 30
+  max_pending: 10000
+  retention_days: 7
+```
 
-**Severity bypass (rc9, 5.1.0).** Non-severe voltage warnings (up
-to and including ±15% from nominal) go through the dwell as
-described above. **Severe deviations** (greater than ±15% from
-nominal) bypass the dwell entirely and notify immediately, with a
-`(severe, X.X% below/above nominal)` tag and an
-`Approaching UPS battery-switch threshold` callout when NUT
-exposes the UPS's transfer points. The reasoning:
-- Non-severe events are usually flap from neighbour appliances
-  cycling — the 30s filter is the right call. Note that with
-  narrow UPS transfer points the warning thresholds may be tighter
-  than ±10%, so the "non-severe" band can fire at less than 10%
-  deviation; the dwell still applies.
-- Severe deviations indicate real grid trouble (utility fault,
-  generator instability, site wiring issue) — the operator wants
-  to know immediately, not 30s later.
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `retry_interval` | `5` | First retry delay in seconds |
+| `retry_backoff_max` | `300` | Maximum delay after exponential backoff |
+| `max_attempts` | `0` | Attempt cap. `0` means unlimited until age/backlog policy cancels the row |
+| `max_age_days` | `30` | Pending rows older than this are cancelled as `too_old` |
+| `max_pending` | `10000` | Pending backlog cap. Oldest rows are cancelled as `backlog_overflow` |
+| `retention_days` | `7` | Sent and cancelled row retention |
 
-The bypass threshold (15%) is hard-coded — there's deliberately no
-config knob for it, same reasoning as the warning thresholds: a
-misconfiguration there would mask real over-voltage events.
+`max_attempts` defaults to unlimited because Apprise returns one boolean for success or failure. Eneru cannot reliably tell a bad URL from a temporary internet outage.
 
-### `notifications.suppress` — mute specific event types
+### Notification architecture history
+
+| Scenario | Fire-and-forget (v4.6) | Memory retry (v4.7+) | SQLite queue (v5.2+) |
+|----------|------------------------|----------------------|----------------------|
+| Short network blip | Message could be lost | Retried while process stayed alive | Retried until delivered |
+| Router reboot during outage | Message could be lost | Retried while process stayed alive | Retried after network returns |
+| Daemon restart mid-outage | In-memory message lost | In-memory message lost | Pending row survives restart |
+| Host powers off before delivery | Message lost | Message lost | Row remains for next boot if disk survives |
+| Multi-day endpoint outage | No queue | Repeated retries in memory | Per-message backoff capped by `retry_backoff_max` |
+| Brief power outage with delayed internet | Separate messages or losses | Separate messages if delivered | Pending `ON_BATTERY` + `POWER_RESTORED` can coalesce |
+| `systemctl restart eneru` | Stop/start noise | Stop/start noise | Single restart notification when classified |
+| Package upgrade | Stop/start noise | Stop/start noise | Single upgraded notification when classified |
+| Backlog growth | Not applicable | Process memory growth | Bounded by `max_pending` |
+| Stale pending messages | Not applicable | Lost on process exit | Aged out by `max_age_days` |
+
+The v5.2 queue is intentionally boring: SQLite row first, network later. Shutdown code should not block on Discord, email, DNS, or a phone push service during a power event.
+
+### Retry timeline
+
+The retry timer is per message. A failed send does not block newer shutdown work, and it does not spin in a tight loop while the network is down. The first attempt is due immediately because a newly inserted row has no backoff entry. After a failure, `retry_interval * 2^(attempts-1)` is used, capped by `retry_backoff_max`.
+
+| Time | Worker action | Row state |
+|------|---------------|-----------|
+| 0s | Event inserts notification | `pending`, `attempts=0`; worker is woken |
+| Immediately or next 1s worker tick | First delivery attempt fails | `attempts=1`, next attempt in 5s by default |
+| About 5s later | Second attempt fails | `attempts=2`, next attempt in 10s |
+| About 10s later | Third attempt fails | `attempts=3`, next attempt in 20s |
+| About 20s later | Fourth attempt fails | Backoff continues, capped by `retry_backoff_max` |
+| Network returns | Next due attempt succeeds | Row becomes `sent` |
+| `max_age_days` reached and prune runs | Message is too old | Row becomes `cancelled`, reason `too_old` |
+
+## Coalescing
+
+Eneru folds related pending events before delivery when doing so gives the operator a clearer message.
+
+| Pattern | Result |
+|---------|--------|
+| Power lost and restored while both messages are still pending | One brief-outage summary |
+| Shutdown summary pending when the daemon starts after power recovery | One recovery notification with downtime and reason |
+| Stop message pending and a new daemon starts quickly | One restarted, upgraded, or recovered notification |
+
+Already-delivered messages are not rewritten.
+
+### Brief outage coalescing timeline
+
+This is the common "power came back fast, internet came back slowly" case. Coalescing only happens if both rows are still `pending` when the worker sees them; already-sent rows are left alone.
+
+| Time | Event | Notification result |
+|------|-------|---------------------|
+| 0s | UPS goes on battery | `ON_BATTERY` row is inserted as pending |
+| 5s | Worker tries delivery | Network is still down, so the row remains pending |
+| 28s | Power returns | `POWER_RESTORED` row is inserted as pending |
+| Later worker pass | Network or endpoint is usable again | Worker sees both rows still pending |
+| Same pass | Coalescer runs before delivery | Original rows are cancelled as `coalesced` and a summary row is inserted |
+| Same or next pass | Summary row is due | One brief-outage notification is delivered |
+
+## Lifecycle notifications
+
+Eneru classifies daemon starts instead of blindly sending "stopped" and "started" every time.
+
+| Event | How Eneru recognizes it |
+|-------|-------------------------|
+| Package upgrade | Package marker from install scripts or a stored version change |
+| Restart | Previous shutdown marker with short downtime |
+| Recovery after UPS-triggered shutdown | Shutdown-state marker with sequence-complete reason |
+| Crash recovery | Missing or fatal shutdown marker |
+| First start | No previous lifecycle metadata |
+
+The goal is one useful lifecycle message per transition.
+
+### Restart classification timeline
+
+This is the systemd restart path. The deferred timer delay is `DEFAULT_DEFER_SECS = 15` in `src/eneru/deferred_delivery.py`; plain `systemctl stop` and non-systemd foreground runs send the stop notification eagerly instead.
+
+| Time | Event | Notification behavior |
+|------|-------|-----------------------|
+| 0s | Old daemon exits under systemd restart or unknown intent | Stop row is queued and a 15s `systemd-run` delivery timer is scheduled |
+| Before 15s | Replacement daemon starts | Startup classifier reads the previous shutdown marker |
+| Before 15s | Classifier recognizes restart, upgrade, or recovery | Pending stop row is cancelled as `superseded` |
+| Before 15s | Replacement notification is queued | A single restarted, upgraded, or recovered message is sent |
+| 15s | No replacement cancelled the original row | Deferred delivery timer fires and the stopped message is sent |
+
+## Alert noise tuning
+
+### Voltage hysteresis
+
+```yaml
+notifications:
+  voltage_hysteresis_seconds: 30
+```
+
+Voltage events are logged immediately. The notification waits until the condition has persisted for the configured number of seconds. If voltage returns to normal before the dwell expires, Eneru records `VOLTAGE_FLAP_SUPPRESSED` and sends no alert.
+
+Severe deviations beyond +/- 15% of nominal bypass the dwell and notify immediately.
+
+### Voltage hysteresis timeline
+
+The default dwell is 30 seconds. The log and `events` table are immediate; only notification delivery waits.
+
+| Time | Voltage state | Notification behavior |
+|------|---------------|-----------------------|
+| 0s | Input crosses warning threshold | Log and SQLite event are written immediately |
+| 10s | Voltage returns to normal | No notification is sent; `VOLTAGE_FLAP_SUPPRESSED` is recorded |
+| 0s | Input crosses warning threshold again | New dwell window starts |
+| 30s | Still outside threshold | Notification is sent with a persisted-duration note |
+| Any time | Severe deviation exceeds +/- 15% nominal | Notification bypasses dwell and sends immediately |
+
+### Suppression list
 
 ```yaml
 notifications:
@@ -355,80 +272,57 @@ notifications:
     - AVR_INACTIVE
 ```
 
-Mutes notifications for the listed event types. The events still
-land in the log file and the SQLite `events` table — only the
-notification dispatch is gated. The events table records
-`notification_sent=0` for muted events so you can audit later:
+Suppression mutes notifications only. The log and SQLite `events` table still record the event with `notification_sent=0`.
+
+Allowed event names:
+
+| Event |
+|-------|
+| `POWER_RESTORED` |
+| `VOLTAGE_NORMALIZED` |
+| `AVR_BOOST_ACTIVE` |
+| `AVR_TRIM_ACTIVE` |
+| `AVR_INACTIVE` |
+| `BYPASS_MODE_INACTIVE` |
+| `OVERLOAD_RESOLVED` |
+| `CONNECTION_RESTORED` |
+| `VOLTAGE_AUTODETECT_MISMATCH` |
+| `VOLTAGE_FLAP_SUPPRESSED` |
+
+Safety-critical events cannot be suppressed. Validation rejects them:
+
+| Blocked event |
+|---------------|
+| `OVER_VOLTAGE_DETECTED` |
+| `BROWNOUT_DETECTED` |
+| `OVERLOAD_ACTIVE` |
+| `BYPASS_MODE_ACTIVE` |
+| `ON_BATTERY` |
+| `CONNECTION_LOST` |
+| Any event starting with `SHUTDOWN_` |
+
+## Inspect notification history
+
+Each UPS database contains notification rows. The exact file name is the sanitized UPS label.
 
 ```bash
-sqlite3 /var/lib/eneru/<UPS>.db \
-  "SELECT event_type, COUNT(*) FROM events
-   WHERE notification_sent = 0
-   GROUP BY event_type;"
+sqlite3 /var/lib/eneru/UPS-192-168-1-100.db \
+  "SELECT ts, status, attempts, cancel_reason, title FROM notifications ORDER BY ts DESC LIMIT 20;"
 ```
 
-**Suppressible event names** (any combination is accepted; case-
-insensitive):
+Muted events are in the `events` table:
 
-- `POWER_RESTORED`
-- `VOLTAGE_NORMALIZED`
-- `AVR_BOOST_ACTIVE`, `AVR_TRIM_ACTIVE`, `AVR_INACTIVE`
-- `BYPASS_MODE_INACTIVE`
-- `OVERLOAD_RESOLVED`
-- `CONNECTION_RESTORED`
-- `VOLTAGE_AUTODETECT_MISMATCH`
-- `VOLTAGE_FLAP_SUPPRESSED`
-
-### Safety-critical blocklist
-
-The following event names **cannot** appear in
-`notifications.suppress`. The config validator rejects them with a
-clear error pointing at `voltage_hysteresis_seconds` for
-flap-debounce:
-
-- `OVER_VOLTAGE_DETECTED`
-- `BROWNOUT_DETECTED`
-- `OVERLOAD_ACTIVE`
-- `BYPASS_MODE_ACTIVE`
-- `ON_BATTERY`
-- `CONNECTION_LOST`
-- Anything starting with `SHUTDOWN_`
-
-These exist to alert you to potential hardware damage or imminent
-service loss; silencing them defeats the safety contract. If you're
-seeing frequent over-voltage warnings on a US grid, the right fix
-is the auto-detect re-snap (see
-[Triggers → Voltage thresholds](triggers.md#voltage-thresholds-preset-driven-raw-thresholds-not-user-configurable)),
-not muting the alert.
-
----
+```bash
+sqlite3 /var/lib/eneru/UPS-192-168-1-100.db \
+  "SELECT event_type, COUNT(*) FROM events WHERE notification_sent = 0 GROUP BY event_type;"
+```
 
 ## Troubleshooting
 
-### Notifications not arriving
-
-Test Apprise directly:
-
-```bash
-python3 -c "
-import apprise
-ap = apprise.Apprise()
-ap.add('discord://webhook_id/webhook_token')
-result = ap.notify(body='Test from Apprise', title='Test')
-print('Success' if result else 'Failed')
-"
-```
-
-Check that the URL format matches the service. Each service has its own format documented in the [Apprise Wiki](https://github.com/caronc/apprise/wiki).
-
-Verify the server can reach the notification service:
-
-```bash
-curl -I https://discord.com
-```
-
-Notification errors are logged to `/var/log/ups-monitor.log`.
-
-### Rate limiting
-
-Some services (especially Discord) have rate limits. If you're testing frequently, you may hit these limits. In production, power events are infrequent enough that this shouldn't be an issue.
+| Symptom | Check |
+|---------|-------|
+| Test command says Apprise is missing | Install the native package with notification dependencies, or use `eneru[notifications]` for PyPI |
+| URL rejected | Compare the URL against the Apprise wiki for that service |
+| Test sends but production events do not arrive | Check `notifications.suppress`, service rate limits, and outbound HTTPS/DNS |
+| Messages arrive late | Check network recovery during outages and pending rows in SQLite |
+| Duplicate lifecycle messages | Check whether multiple Eneru instances are running against the same config |
