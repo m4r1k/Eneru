@@ -207,6 +207,8 @@ In single-UPS mode this is `ups:`. In multi-UPS mode each list entry accepts the
 
 The grace period never weakens failsafe behavior. If Eneru loses UPS visibility while the UPS is on battery, shutdown starts immediately.
 
+See [Troubleshooting](troubleshooting.md#intermittent-nut-drops) for tuning guidance on flaky NUT servers and the flap-counter behavior.
+
 ## Triggers
 
 | Key | Default | Description |
@@ -220,7 +222,7 @@ The grace period never weakens failsafe behavior. If Eneru loses UPS visibility 
 | `extended_time.threshold` | `900` | Seconds on battery before extended-time shutdown |
 | `voltage_sensitivity` | `normal` | Voltage warning preset: `tight`, `normal`, or `loose` |
 
-See [Shutdown triggers](triggers.md) for decision order and voltage threshold details.
+See [Shutdown triggers](triggers.md) for decision order, voltage threshold details, and common UPS transfer points by vendor.
 
 ## Notifications
 

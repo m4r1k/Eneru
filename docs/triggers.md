@@ -186,7 +186,11 @@ Eneru reads `input.voltage.nominal`, snaps it to a standard grid voltage when po
 
 | Nominal | tight | normal | loose |
 |--------:|------:|-------:|------:|
+| 100 V | 95.0 / 105.0 | 90.0 / 110.0 | 85.0 / 115.0 |
 | 120 V | 114.0 / 126.0 | 108.0 / 132.0 | 102.0 / 138.0 |
+| 127 V | 120.7 / 133.4 | 114.3 / 139.7 | 108.0 / 146.1 |
+| 208 V | 197.6 / 218.4 | 187.2 / 228.8 | 176.8 / 239.2 |
+| 220 V | 209.0 / 231.0 | 198.0 / 242.0 | 187.0 / 253.0 |
 | 230 V | 218.5 / 241.5 | 207.0 / 253.0 | 195.5 / 264.5 |
 | 240 V | 228.0 / 252.0 | 216.0 / 264.0 | 204.0 / 276.0 |
 
@@ -199,6 +203,19 @@ upsc UPS@192.168.1.100 input.voltage.nominal input.transfer.low input.transfer.h
 ```
 
 Transfer points are the UPS firmware's battery-switch thresholds. Eneru includes them in logs and notifications for context, but the warning band comes from `voltage_sensitivity`.
+
+### Common UPS transfer points
+
+These are typical vendor defaults. Always confirm against your own unit with the `upsc` command above. Managed UPSes are often retuned by the operator, and firmware revisions vary.
+
+| UPS family | Grid | Transfer points (low / high) | Notes |
+|------------|------|------------------------------|-------|
+| APC Smart-UPS SUA / SMT / SMC | US 120 V  | ~106 / ~127 V                          | Eneru `normal` warns at 108 / 132 V before the UPS switches. `tight` (114 / 126 V) fires inside the firmware band, which is too aggressive. |
+| APC Smart-UPS (default-wide)  | EU 230 V  | 170 / 280 V                            | Wide factory band. `normal` (207 / 253 V) gives plenty of warning before the UPS switches. |
+| APC SMX / Symmetra (managed)  | EU 230 V  | operator-tightened, often ~207 / ~253  | Use `tight` (218.5 / 241.5 V) for an early signal when the UPS itself is tightened. |
+| Eaton 5P / 9PX                | EU 230 V  | typically narrow defaults              | `tight` is reasonable; `normal` still warns before the UPS acts. |
+| CyberPower CP1500             | US 120 V  | ~95 / ~140 V (wide)                    | `normal` (108 / 132 V) warns well before the UPS switches; `loose` matches the firmware band. |
+| Tripp Lite SMART series       | EU 230 V  | typically narrow                       | `tight` matches the firmware band; `normal` adds warning headroom. |
 
 ### Voltage auto-detect timeline
 

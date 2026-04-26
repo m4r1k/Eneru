@@ -153,7 +153,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 36 numb
 | 36 | UPS Multi | Multi-UPS coordinator applies the same single-restart-notification contract across per-UPS stores |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
 
-This coverage gives confidence that code quality is not only measured by isolated Python assertions. Each commit that enters the protected workflow must also prove that Eneru can talk to real NUT sockets, run against Dockerized SSH targets, write and query SQLite, render monitor output, validate production-shaped configs, and execute shutdown orchestration without depending on local developer state.
+Every commit on the protected workflow has to prove the daemon works against real services, not just isolated Python assertions: real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.
 
 ## Run E2E locally
 

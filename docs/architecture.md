@@ -139,7 +139,7 @@ Single-UPS mode runs one `UPSGroupMonitor`. Multi-UPS mode creates one monitor p
                     +------------------------+
 ```
 
-The important rule is ownership. Only the group marked `is_local: true` can manage local resources such as VMs, containers, and filesystems. Remote servers can belong to any UPS group, but validation prevents duplicate ownership.
+Only the group marked `is_local: true` can manage local resources such as VMs, containers, and filesystems. Remote servers can belong to any UPS group, but validation prevents duplicate ownership.
 
 Read [`src/eneru/multi_ups.py`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/multi_ups.py) for coordinator lifecycle, monitor thread management, local shutdown locking, and signal handling.
 
@@ -196,7 +196,7 @@ Notifications are deliberately asynchronous. The monitor inserts a row into SQLi
  +-------------------+                         +------------------------+
 ```
 
-This solves a real outage problem: when power is unstable, the network path to Discord, email, ntfy, or a phone push provider is often unstable too. Eneru should not delay VM shutdown because a notification endpoint is down.
+When power is unstable, the network is usually unstable too. Discord, email, ntfy, and phone push services can all be unreachable while shutdown is in progress. Eneru should not block VM shutdown because a notification endpoint is down.
 
 Key files:
 
@@ -238,7 +238,7 @@ Read [`src/eneru/stats.py`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/s
 
 ## Configuration as a safety boundary
 
-Config parsing is not just YAML loading. It encodes safety rules:
+Config loading enforces a set of safety rules at parse time:
 
 - Raw voltage warning thresholds are not user-configurable; users choose bounded presets.
 - Safety-critical notification events cannot be suppressed.
@@ -273,7 +273,7 @@ Eneru is a system daemon first. The native package path and the PyPI path intent
 | deb/rpm | `/opt/ups-monitor/eneru.py` wrapper, systemd service, config under `/etc/ups-monitor/`, command exposed as `eneru` |
 | PyPI | Python package entry point, user-managed service or foreground process |
 
-This is why packaging tests check installed files and import layout. The deb/rpm build enumerates package contents explicitly in `nfpm.yaml`, so adding a new module under `src/eneru/` requires a matching package entry.
+Packaging tests check installed files and import layout because the deb/rpm build enumerates package contents explicitly in `nfpm.yaml`. Adding a new module under `src/eneru/` requires a matching package entry.
 
 Read [`packaging/eneru-wrapper.py`](https://github.com/m4r1k/Eneru/blob/main/packaging/eneru-wrapper.py), [`packaging/eneru.service`](https://github.com/m4r1k/Eneru/blob/main/packaging/eneru.service), [`nfpm.yaml`](https://github.com/m4r1k/Eneru/blob/main/nfpm.yaml), and [`tests/test_packaging.py`](https://github.com/m4r1k/Eneru/blob/main/tests/test_packaging.py).
 

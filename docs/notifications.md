@@ -213,17 +213,20 @@ This is the common "power came back fast, internet came back slowly" case. Coale
 
 ## Lifecycle notifications
 
-Eneru classifies daemon starts instead of blindly sending "stopped" and "started" every time.
+Eneru classifies daemon starts instead of blindly sending "stopped" and "started" every time. The classifier picks one of eight messages based on the on-disk shutdown marker and the previous-version metadata in the stats DB. Logic lives in `src/eneru/lifecycle.py`.
 
-| Event | How Eneru recognizes it |
-|-------|-------------------------|
-| Package upgrade | Package marker from install scripts or a stored version change |
-| Restart | Previous shutdown marker with short downtime |
-| Recovery after UPS-triggered shutdown | Shutdown-state marker with sequence-complete reason |
-| Crash recovery | Missing or fatal shutdown marker |
-| First start | No previous lifecycle metadata |
+| Notification | When it fires | How Eneru recognizes it |
+|--------------|---------------|-------------------------|
+| `📦 Eneru Upgraded vX → vY` | deb/rpm package upgrade | `.upgrade_marker.json` written by `packaging/scripts/postinstall.sh`; old version captured by `preinstall.sh` |
+| `📦 Eneru Upgraded vX → vY` (pip path) | `pip install --upgrade eneru` followed by restart | `meta.last_seen_version` in the stats DB differs from the current `__version__` |
+| `📊 Eneru Recovered` | Daemon back after a power-loss-triggered shutdown | Shutdown marker with `reason: sequence_complete`. Folds the prior shutdown headline and summary into one richer message |
+| `🔄 Eneru Restarted (downtime: Ns)` | `systemctl restart eneru` within 30 seconds | Shutdown marker with `reason: signal` and downtime under 30 s |
+| `🚀 Eneru Restarted` (after fatal exit) | Daemon back after a crash that wrote a `fatal` marker | Shutdown marker with `reason: fatal` |
+| `🚀 Eneru Started (last seen Nh ago)` | Daemon started after a long graceful gap | Shutdown marker present with downtime ≥ 30 s |
+| `🚀 Eneru vX Started (after crash)` | Daemon back without ever writing a marker | No shutdown marker but `meta.last_seen_version` is set |
+| `🚀 Eneru vX Started` | First-ever start | No markers and no `last_seen_version` |
 
-The goal is one useful lifecycle message per transition.
+The goal is one useful lifecycle message per transition. The `📊 Recovered` path also absorbs the prior instance's pending `🚨 EMERGENCY SHUTDOWN INITIATED!` and `✅ Shutdown Sequence Complete` rows so an outage produces a single combined message rather than three.
 
 ### Restart classification timeline
 
