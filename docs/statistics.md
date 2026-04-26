@@ -1,249 +1,187 @@
 # Statistics
 
-Eneru records every UPS poll into a per-UPS SQLite database. The TUI
-graph view reads from it and you can run `sqlite3` (or DataGrip /
-Grafana / a script) for offline analysis. The store is on by default
-with no opt-in flag. The hot path is in-memory only; a background
-thread does the disk writes.
+Eneru writes UPS history to SQLite. The TUI graphs, event panel, notification retry queue, and offline troubleshooting all use the same per-UPS database files.
 
-## Architecture
+Statistics are always enabled. If the database cannot be opened or written, Eneru logs the problem and keeps monitoring.
 
-```
-poll cycle (1 Hz)        StatsWriter thread (~10 s)        SQLite store
-─────────────────        ────────────────────────         ──────────────
-buffer_sample()  ─────►  flush() executemany()  ────►    samples table
-                         aggregate() every 5 min ───►    agg_5min table
-                         purge() every 5 min     ───►    agg_hourly table
-log_event()      ──────────────── direct INSERT ───►    events table
-```
-
-- The poll cycle calls `buffer_sample()`, a constant-time append to an
-  in-memory deque. No I/O on the hot path.
-- A background `StatsWriter` thread drains the deque to SQLite every
-  10s with a single `executemany` transaction.
-- Every 5 min the writer rolls samples into 5-minute buckets, then
-  5-minute buckets into hourly buckets, and applies retention.
-- SQLite errors are caught, logged once with rate-limit, and swallowed.
-  Stats can never crash the monitor.
-
-## Schema
-
-The `samples` table carries 13 metrics per row: 10 raw NUT vars (per
-spec 2.12) plus 3 Eneru-derived state fields. The 4 columns flagged
-"v2" were added in v5.1.0-rc6 and arrive automatically on existing
-databases via additive `ALTER TABLE` migration -- see
-[Schema versioning](#schema-versioning) below.
-
-```sql
-samples (
-    ts INTEGER NOT NULL,             -- epoch seconds
-    status TEXT,                     -- e.g. "OL CHRG", "OB DISCHRG"
-    battery_charge REAL,             -- %
-    battery_runtime REAL,            -- seconds
-    ups_load REAL,                   -- %
-    input_voltage REAL,              -- V
-    output_voltage REAL,             -- V
-    depletion_rate REAL,             -- %/min       (Eneru-derived)
-    time_on_battery INTEGER,         -- seconds since OB start (Eneru-derived)
-    connection_state TEXT,           -- OK / GRACE_PERIOD / FAILED  (Eneru-derived)
-    battery_voltage REAL,            -- V           (v2)
-    ups_temperature REAL,            -- °C          (v2)
-    input_frequency REAL,            -- Hz          (v2)
-    output_frequency REAL            -- Hz          (v2)
-)
-
-agg_5min, agg_hourly (
-    ts INTEGER PRIMARY KEY,          -- bucket start, epoch seconds
-    battery_charge_avg REAL,
-    battery_charge_min REAL,
-    battery_charge_max REAL,
-    battery_runtime_avg REAL,
-    ups_load_avg REAL,
-    ups_load_max REAL,
-    input_voltage_avg REAL,
-    input_voltage_min REAL,
-    input_voltage_max REAL,
-    samples_count INTEGER,
-    output_voltage_avg REAL,         -- (v2 -- closes the long-standing gap)
-    battery_voltage_avg REAL,        -- (v2)
-    ups_temperature_avg REAL,        -- (v2)
-    ups_temperature_min REAL,        -- (v2)
-    ups_temperature_max REAL,        -- (v2)
-    input_frequency_avg REAL,        -- (v2)
-    output_frequency_avg REAL        -- (v2)
-)
-
-events (
-    ts INTEGER NOT NULL,             -- epoch seconds
-    event_type TEXT NOT NULL,        -- ON_BATTERY, POWER_RESTORED, ...
-    detail TEXT,
-    notification_sent INTEGER DEFAULT 1   -- (v3) 1=delivered, 0=muted
-)
-
-meta (
-    key TEXT PRIMARY KEY,
-    value TEXT                       -- e.g. schema_version=3
-)
-```
-
-### `events.notification_sent` (v3)
-
-Added in v5.1.0-rc7 alongside the [issue #27](https://github.com/m4r1k/Eneru/issues/27)
-notification suppression work. Records whether the daemon dispatched
-a notification for an event:
-
-- `1` (default for backfilled rows from v2 DBs) — event was logged
-  AND a notification was dispatched.
-- `0` — event was logged but the notification was muted, either
-  because it was in `notifications.suppress`, the voltage
-  hysteresis dwell hadn't elapsed, or the event is in the always-
-  silent set (`VOLTAGE_NORMALIZED`, `AVR_INACTIVE`,
-  `VOLTAGE_FLAP_SUPPRESSED`, `VOLTAGE_AUTODETECT_MISMATCH`).
-
-Audit query:
-
-```bash
-sqlite3 /var/lib/eneru/<UPS>.db \
-  "SELECT event_type, COUNT(*) FROM events
-   WHERE notification_sent = 0
-   GROUP BY event_type
-   ORDER BY 2 DESC;"
-```
-
-### New event types in v3
-
-| Event | When |
-|-------|------|
-| `VOLTAGE_AUTODETECT_MISMATCH` | NUT's `input.voltage.nominal` disagreed with the observed `input.voltage` median by > 25V at startup. The `detail` carries `nut={N}V, observed median={M}V, re-snapped to {S}V`. |
-| `VOLTAGE_FLAP_SUPPRESSED` | A voltage state transition (NORMAL→HIGH/LOW) reverted within `notifications.voltage_hysteresis_seconds`. The `detail` carries `state={LOW|HIGH} duration=Ns peak={V}V`. |
-
-The 3 Eneru-derived columns (`depletion_rate`, `time_on_battery`,
-`connection_state`) intentionally have no `*_avg` companion in the agg
-tables: they're state-shaped, not signal-shaped, so an average over a
-5-minute bucket is meaningless. The TUI graph panel only offers the 9
-signal-shaped metrics in its `<G>` cycle.
-
-## Schema versioning
-
-`meta.schema_version` records the schema generation. New deployments
-land at the current version (currently `2`). Daemons upgraded from an
-older version run idempotent `ALTER TABLE ADD COLUMN` migrations on
-first start; existing rows are preserved with `NULL` for the new
-columns until the next sample. The migration is wrapped in try/except
-so a duplicate-column error is benign and `meta.schema_version` is
-bumped *after* the migrations succeed -- a crash mid-migration is
-replayed safely on next start.
-
-When a future feature adds new columns or tables, follow the pattern
-documented in `src/eneru/CLAUDE.md` ("Stats schema evolution"):
-
-```bash
-sqlite3 /var/lib/eneru/UPS-host-3493.db \
-  "SELECT key, value FROM meta WHERE key='schema_version';"
-```
-
-## Configuration
+## Storage path
 
 ```yaml
 statistics:
-  # Directory holding one .db per UPS, named after the sanitized UPS name.
   db_directory: "/var/lib/eneru"
   retention:
-    raw_hours: 24                    # raw samples retained 1 day
-    agg_5min_days: 30                # 5-min aggregations retained 30 days
-    agg_hourly_days: 1825            # hourly aggregations retained 5 years
+    raw_hours: 24
+    agg_5min_days: 30
+    agg_hourly_days: 1825
 ```
 
-Retention windows are independent per tier. Samples older than
-`raw_hours` are deleted from `samples`; their aggregations live on in
-`agg_5min` / `agg_hourly` until those tiers' own windows expire.
+The package creates `/var/lib/eneru`. PyPI installs create it on first daemon start if permissions allow.
 
-The deb / rpm package creates `/var/lib/eneru` on install (mode 0755,
-owner root). Pip installs create the directory on first start.
+Each UPS gets its own `.db` file named from the sanitized UPS label.
 
-## Storage on small devices (Raspberry Pi / SD card)
+## Write path
 
-Per-UPS database, steady state at 1 Hz polling (v2 schema, 13 metrics):
+```text
+UPS poll loop
+    |
+    v
+append sample to in-memory buffer
+    |
+    v
+StatsWriter flushes every ~10 seconds
+    |
+    v
+SQLite samples table
+    |
+    v
+5-minute and hourly aggregates
+```
 
-- Raw samples: ~135 bytes × 86,400 polls/day ≈ 11.7 MB/day. Older
-  samples are aggregated and deleted after 24 h.
-- 5-min aggregations: ~135 bytes × 288 buckets/day × 30 days ≈ 1.1 MB.
-- Hourly aggregations: ~135 bytes × 24 buckets/day × 5 years ≈ 5.5 MB.
-- Events table: a few hundred bytes per power event, normally negligible.
+Polls do not wait on SQLite writes. The writer batches rows in the background. Event rows are inserted directly, but failures are isolated from the safety-critical monitor path.
 
-Steady-state footprint per UPS ≈ 17 MB (24 h raw + 30 d 5-min + 5 y
-hourly). For a 4-UPS site that's ~70 MB. Still trivial on the
-smallest SD cards.
+### Stats write timeline
 
-Disk I/O profile per UPS: one `executemany` transaction every 10s,
-batching 10 inserts. That is roughly equivalent to a busy systemd
-journald write. Meaningful on an SD card, but not enough to wear it
-out faster than journald already does.
+These intervals come from `StatsWriter` defaults in `src/eneru/stats.py`: `flush_interval=10.0` and `maintenance_interval=300.0`.
 
-If your device has slow or wear-sensitive storage, relocate the
-databases to an attached SSD or USB stick:
+| Time | Action | Result |
+|------|--------|--------|
+| Every poll | Monitor appends sample to memory | No SQLite work runs on the hot path |
+| About every 10s | Writer flushes buffered samples | One batched SQLite transaction persists recent samples |
+| Every 300s | Writer aggregates raw rows | `agg_5min` receives new buckets |
+| Every 300s | Writer rolls 5-minute buckets | `agg_hourly` receives hourly buckets |
+| Every 300s | Retention runs | Old raw and aggregate rows are purged by tier |
+| Any SQLite failure | Error is logged and rate-limited | Monitoring continues without stats persistence |
+
+## Tables
+
+| Table | Purpose |
+|-------|---------|
+| `samples` | Raw poll samples, typically 1 Hz |
+| `agg_5min` | Five-minute aggregate buckets |
+| `agg_hourly` | Hourly aggregate buckets |
+| `events` | Power, health, lifecycle, and shutdown events |
+| `notifications` | Persistent notification queue and delivery history |
+| `meta` | Schema version and lifecycle metadata |
+
+The main sample metrics include status, battery charge, runtime, load, input/output voltage, battery voltage, temperature, frequency, depletion rate, time on battery, and connection state.
+
+## Retention
+
+| Tier | Default retention | Use |
+|------|-------------------|-----|
+| Raw samples | 24 hours | Detailed incident review |
+| Five-minute aggregates | 30 days | Recent trends |
+| Hourly aggregates | 5 years | Long-term battery and load history |
+
+Raw rows are deleted after they have been aggregated. Aggregates have their own retention windows.
+
+## Disk usage
+
+At a 1-second poll interval, expect roughly 15 to 20 MB per UPS at the default retention settings, plus small growth from events and notification rows.
+
+For SD-card systems, the write pattern is a small transaction about every 10 seconds per UPS. That is usually less write pressure than normal system logging, but you can move the database to better storage:
 
 ```yaml
 statistics:
   db_directory: "/mnt/ssd/eneru-stats"
 ```
 
-The directory must be writable by the user the daemon runs as (root
-for deb/rpm installs).
+Make sure the daemon user can write there.
 
-## Inspecting a database
+## Inspect data
+
+List databases:
 
 ```bash
-# Schema + table sizes
-sqlite3 /var/lib/eneru/UPS-host-3493.db ".schema"
-sqlite3 /var/lib/eneru/UPS-host-3493.db ".tables"
-sqlite3 /var/lib/eneru/UPS-host-3493.db "SELECT COUNT(*) FROM samples"
-
-# Last-hour battery charge trend
-sqlite3 /var/lib/eneru/UPS-host-3493.db <<'SQL'
-.mode column
-.headers on
-SELECT datetime(ts, 'unixepoch') AS time, battery_charge, ups_load, status
-FROM samples
-WHERE ts > strftime('%s', 'now', '-1 hour')
-ORDER BY ts ASC;
-SQL
-
-# Recent power events
-sqlite3 /var/lib/eneru/UPS-host-3493.db \
-    "SELECT datetime(ts, 'unixepoch'), event_type, detail FROM events ORDER BY ts DESC LIMIT 20"
+sudo ls -lh /var/lib/eneru/
 ```
+
+Show tables:
+
+```bash
+sqlite3 /var/lib/eneru/UPS-192-168-1-100.db ".tables"
+```
+
+Recent samples:
+
+```bash
+sqlite3 /var/lib/eneru/UPS-192-168-1-100.db <<'SQL'
+.headers on
+.mode column
+SELECT datetime(ts, 'unixepoch') AS time,
+       status,
+       battery_charge,
+       battery_runtime,
+       ups_load,
+       input_voltage
+FROM samples
+ORDER BY ts DESC
+LIMIT 20;
+SQL
+```
+
+Recent events:
+
+```bash
+sqlite3 /var/lib/eneru/UPS-192-168-1-100.db \
+  "SELECT datetime(ts, 'unixepoch'), event_type, detail FROM events ORDER BY ts DESC LIMIT 20;"
+```
+
+Muted events:
+
+```bash
+sqlite3 /var/lib/eneru/UPS-192-168-1-100.db \
+  "SELECT event_type, COUNT(*) FROM events WHERE notification_sent = 0 GROUP BY event_type;"
+```
+
+Pending notifications:
+
+```bash
+sqlite3 /var/lib/eneru/UPS-192-168-1-100.db \
+  "SELECT id, attempts, next_attempt_at, title FROM notifications WHERE status='pending';"
+```
+
+## TUI graphs
+
+`eneru monitor` reads the stats database read-only. Graphs select the smallest table that covers the requested time range:
+
+| Window | Table | Resolution |
+|--------|-------|------------|
+| Up to 24 hours | `samples` | Per poll |
+| Up to 30 days | `agg_5min` | Five-minute buckets |
+| More than 30 days | `agg_hourly` | Hourly buckets |
+
+See [Monitor and graphs](tui-graphs.md) for TUI usage.
 
 ## Backup
 
-Each `.db` is a self-contained SQLite file. Use `.backup` for an
-online hot backup that does not block the writer:
+SQLite supports online backup without stopping Eneru:
 
 ```bash
-sqlite3 /var/lib/eneru/UPS-host-3493.db ".backup '/srv/backups/UPS-host-3493.db'"
+sqlite3 /var/lib/eneru/UPS-192-168-1-100.db \
+  ".backup '/srv/backups/UPS-192-168-1-100.db'"
 ```
 
-## Failure isolation
+## Schema migrations
 
-If `/var/lib/eneru` becomes read-only, runs out of space, or the
-SQLite file gets corrupted, the daemon logs one warning and keeps
-polling without stats persistence. You will see lines like:
+Eneru stores the schema version in `meta.schema_version`. New releases migrate existing databases with additive `ALTER TABLE` statements and preserve old rows.
 
+Check the version:
+
+```bash
+sqlite3 /var/lib/eneru/UPS-192-168-1-100.db \
+  "SELECT key, value FROM meta WHERE key='schema_version';"
 ```
-⚠️ WARNING: stats store open failed at /var/lib/eneru/UPS-host.db: ...
-```
 
-or
+Migrations are designed to be replay-safe. If a daemon crashes mid-migration, the next start retries before bumping the schema version.
 
-```
+## Failure behavior
+
+Stats failures do not stop monitoring or shutdown. You may see logs like:
+
+```text
+stats store open failed at /var/lib/eneru/UPS.db: ...
 stats: flush failed: disk I/O error
 ```
 
-Restart the daemon after fixing the underlying storage problem. The
-daemon will reopen the database (or create a fresh one) and continue.
-
-## See also
-
-- [Configuration reference](configuration.md). Full `statistics:` field
-  reference.
-- [Troubleshooting](troubleshooting.md). Disk-related failure modes.
+Fix the storage problem, then restart Eneru so it can reopen the database.
