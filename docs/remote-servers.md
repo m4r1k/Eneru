@@ -1,14 +1,26 @@
-# Remote server setup
+# Remote servers
 
-Eneru can shut down remote servers via SSH during a power event: NAS devices (Synology, QNAP, TrueNAS), additional servers sharing the same UPS, network equipment with SSH access, or any system that needs coordinated shutdown.
+Eneru can shut down other systems over SSH before the local host powers off. Use this for NAS devices, hypervisors, Docker hosts, storage nodes, and network equipment that must leave cleanly during an outage.
 
----
-
-## Configuration
+## Minimal remote server
 
 ```yaml
 remote_servers:
-  # Proxmox hypervisor - stop VMs/CTs before shutdown
+  - name: "NAS"
+    enabled: true
+    host: "192.168.1.50"
+    user: "admin"
+    shutdown_command: "sudo -i synoshutdown -s"
+```
+
+Eneru connects as `admin@192.168.1.50` and runs the final shutdown command.
+
+## Pre-shutdown actions
+
+Run cleanup commands before the final shutdown:
+
+```yaml
+remote_servers:
   - name: "Proxmox Host"
     enabled: true
     host: "192.168.1.60"
@@ -21,287 +33,191 @@ remote_servers:
         timeout: 60
       - action: "sync"
     shutdown_command: "shutdown -h now"
-
-  # NAS - shutdown LAST since other servers mount its storage
-  - name: "Synology NAS"
-    enabled: true
-    host: "192.168.1.50"
-    user: "admin"
-    parallel: false  # Shutdown after all parallel servers
-    shutdown_command: "sudo -i synoshutdown -s"
-    ssh_options:
-      - "-o StrictHostKeyChecking=no"
 ```
 
-### Configuration options
+Pre-shutdown commands are best effort. Eneru logs failures and continues to the final shutdown command.
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `name` | (required) | Display name for logging |
-| `enabled` | `false` | Enable this server |
-| `host` | (required) | Hostname or IP address |
-| `user` | (required) | SSH username |
-| `connect_timeout` | `10` | SSH connection timeout in seconds |
-| `command_timeout` | `30` | Default timeout for commands in seconds |
-| `shutdown_command` | `sudo shutdown -h now` | Final shutdown command |
-| `ssh_options` | `[]` | Additional SSH options |
-| `pre_shutdown_commands` | `[]` | Commands to run before shutdown |
-| `parallel` | `true` | Shutdown concurrently with other parallel servers |
+| Action | What it does |
+|--------|--------------|
+| `stop_containers` | Stop all Docker or Podman containers |
+| `stop_vms` | Stop libvirt/KVM VMs through `virsh` |
+| `stop_proxmox_vms` | Stop Proxmox QEMU VMs through `qm` |
+| `stop_proxmox_cts` | Stop Proxmox LXC containers through `pct` |
+| `stop_xcpng_vms` | Stop XCP-ng or XenServer VMs |
+| `stop_esxi_vms` | Stop VMware ESXi VMs |
+| `stop_compose` | Stop a compose stack. Requires `path` |
+| `sync` | Flush remote filesystems |
 
----
-
-## Pre-shutdown commands
-
-Eneru can run a sequence of commands on remote servers before the final shutdown command.
-
-### Predefined actions
-
-| Action | Description |
-|--------|-------------|
-| `stop_containers` | Stop all Docker/Podman containers |
-| `stop_vms` | Gracefully shutdown libvirt/KVM VMs (then force-destroy remaining) |
-| `stop_proxmox_vms` | Gracefully shutdown Proxmox QEMU VMs, then force-stop remaining (runs via `sudo`) |
-| `stop_proxmox_cts` | Gracefully shutdown Proxmox LXC containers, then force-stop remaining (runs via `sudo`) |
-| `stop_xcpng_vms` | Gracefully shutdown XCP-ng/XenServer VMs (then force-shutdown remaining) |
-| `stop_esxi_vms` | Gracefully shutdown VMware ESXi VMs (then force-off remaining) |
-| `stop_compose` | Stop a compose stack (requires `path` parameter) |
-| `sync` | Sync filesystems before shutdown |
-
-### Example: Proxmox server
+Custom commands are also allowed:
 
 ```yaml
-- name: "Proxmox Host"
-  enabled: true
-  host: "192.168.1.60"
-  user: "root"
-  pre_shutdown_commands:
-    - action: "stop_proxmox_vms"
-      timeout: 180  # Give VMs 3 minutes for graceful shutdown
-    - action: "stop_proxmox_cts"
-      timeout: 60
-    - action: "sync"
-  shutdown_command: "shutdown -h now"
+pre_shutdown_commands:
+  - action: "stop_compose"
+    path: "/opt/app/docker-compose.yml"
+    timeout: 120
+  - command: "systemctl stop my-critical-service"
+    timeout: 30
+  - action: "sync"
 ```
 
-### Example: Docker server with custom commands
+## Ordering
 
-```yaml
-- name: "Docker Server"
-  enabled: true
-  host: "192.168.1.70"
-  user: "root"
-  command_timeout: 30  # Default timeout for commands
-  pre_shutdown_commands:
-    - action: "stop_compose"
-      path: "/opt/myapp/docker-compose.yml"
-      timeout: 120
-    - action: "stop_containers"
-      timeout: 60
-    - command: "systemctl stop my-critical-service"  # Custom command
-      timeout: 30
-    - action: "sync"
-  shutdown_command: "shutdown -h now"
-```
-
-### Error handling
-
-Pre-shutdown commands are **best-effort**:
-
-- Errors are logged but don't prevent the shutdown sequence from continuing
-- Timeouts are logged with a warning, then the next command runs
-- The final shutdown command always runs (unless SSH connection fails entirely)
-
----
-
-## Shutdown ordering
-
-By default, all enabled remote servers shut down concurrently using threads, so one slow or unreachable server does not block others.
-
-### Multi-phase shutdown with `shutdown_order`
-
-Use `shutdown_order` to define phases when servers have dependencies. Servers with the same `shutdown_order` run in parallel; different orders run sequentially (ascending). A server alone in its order effectively runs sequentially.
+Use `shutdown_order` for dependencies. Servers with the same order run in parallel. Lower orders run first.
 
 ```yaml
 remote_servers:
-  # Phase 1: Compute servers shutdown in parallel
   - name: "App Server 1"
     enabled: true
     host: "192.168.1.10"
     user: "root"
     shutdown_order: 1
-    shutdown_command: "shutdown -h now"
 
   - name: "App Server 2"
     enabled: true
     host: "192.168.1.11"
     user: "root"
     shutdown_order: 1
-    shutdown_command: "shutdown -h now"
 
-  # Phase 2: Storage shuts down alone (after compute releases NFS mounts)
   - name: "NAS"
     enabled: true
     host: "192.168.1.50"
     user: "admin"
     shutdown_order: 2
     shutdown_command: "sudo -i synoshutdown -s"
-
-  # Phase 3: Network infrastructure shuts down last
-  - name: "Router"
-    enabled: true
-    host: "192.168.1.254"
-    user: "admin"
-    shutdown_order: 3
-    shutdown_command: "shutdown -h now"
-
-  - name: "Switch"
-    enabled: true
-    host: "192.168.1.253"
-    user: "admin"
-    shutdown_order: 3
-    shutdown_command: "shutdown -h now"
 ```
 
-`shutdown_order` must be a positive integer (>= 1). Gaps are allowed (e.g., 1, 5, 10) — only relative order matters.
+This shuts down both app servers first, then the NAS.
 
-### Legacy `parallel` flag
+### Remote phase timeline
 
-For simple two-group setups, the `parallel` flag still works:
+| Time | Phase | What happens |
+|------|-------|--------------|
+| 0s | Shutdown sequence reaches remote servers | Eneru groups enabled servers by `shutdown_order` |
+| 0s | Phase 1 starts | App Server 1 and App Server 2 run in parallel |
+| During phase 1 | Per-server pre-shutdown | Each server uses its own `pre_shutdown_commands` list, with each command bounded by its configured timeout |
+| During phase 1 | Final shutdown command | Each server runs `shutdown_command`, bounded by `command_timeout` |
+| Phase deadline reached or all threads finish | Join window closes | Eneru moves on when all phase-1 threads finish or the phase deadline expires |
+| Next | Phase 2 starts | NAS runs after clients have released storage |
+| Phase 2 done | Remote phase complete | Shutdown sequence continues to remaining local steps |
 
-```yaml
-remote_servers:
-  - name: "App Server"
-    enabled: true
-    host: "192.168.1.10"
-    user: "root"
-    shutdown_command: "shutdown -h now"
-    # parallel: true is the default
-
-  - name: "NAS"
-    enabled: true
-    host: "192.168.1.50"
-    user: "admin"
-    parallel: false  # Shuts down before the parallel batch
-    shutdown_command: "sudo -i synoshutdown -s"
-```
-
-### Behavior summary
+The legacy `parallel` flag still exists for old configs:
 
 | Config | Behavior |
 |--------|----------|
-| No `shutdown_order`, no `parallel` | Default: runs in the parallel batch |
-| No `shutdown_order`, `parallel: true` | Runs in the parallel batch |
-| No `shutdown_order`, `parallel: false` | Runs sequentially before the parallel batch |
-| `shutdown_order: N` (no `parallel`) | Grouped with other order-N servers, all in parallel |
-| `shutdown_order` + `parallel: true` or `false` | **Hard validation error** — pick one model |
+| No `shutdown_order`, no `parallel` | Default parallel batch |
+| `parallel: true` | Default parallel batch |
+| `parallel: false` | Sequential phase before the default parallel batch |
+| `shutdown_order: N` | Explicit phase. Same N runs in parallel |
+| Both `shutdown_order` and `parallel` | Validation error |
 
-!!! warning "shutdown_order and parallel are mutually exclusive"
-    Setting both `shutdown_order` and `parallel` on the same server is rejected at config load time. Use `shutdown_order` for multi-phase ordering, or `parallel` for the legacy two-group behavior — never both.
+Do not use `parallel: false` to make a NAS run last. Use `shutdown_order` for that.
 
-!!! tip "Use `eneru validate` to preview"
-    Run `eneru validate --config your-config.yaml` to see the shutdown sequence tree, including remote server phases.
+## Safety margin
 
-### Tuning `shutdown_safety_margin`
+```yaml
+remote_servers:
+  - name: "Storage"
+    shutdown_safety_margin: 120
+```
 
-Each remote server has a `shutdown_safety_margin` (seconds, default `60`) added on top of `pre_shutdown_commands + command_timeout + connect_timeout` when waiting for its parallel-shutdown thread to finish. The margin covers SSH session setup, OS scheduling jitter, and the brief window between the remote shutdown command starting and SSH closing the channel.
+Eneru waits for remote shutdown threads using the command timeouts plus `shutdown_safety_margin`. The default is 60 seconds. Raise it for slow storage servers or battery-backed RAID. Lower it for fast, stateless VMs. Set `0` to use only explicit command timeouts.
 
-| When to tune | Suggested value |
-|--------------|-----------------|
-| Servers with battery-backed RAID, large write-back caches, or known slow shutdown paths | Raise (e.g. `120`–`300`) |
-| Fast VMs or stateless containers where shutdown completes immediately | Lower (e.g. `10`–`30`) |
-| Opt out of the buffer entirely (use only the explicit timeouts) | `0` |
+### Safety-margin timeline
 
-The phase-wide join window uses the **maximum** `shutdown_safety_margin` across the servers in that phase, so tuning one slow server up does not penalise the others' actual execution time — it only extends the worst-case wait before Eneru moves to the next phase.
+| Step | Timeout contribution |
+|------|----------------------|
+| SSH connection budget in phase calculation | `connect_timeout` is added once per server budget |
+| Each pre-shutdown command | Command-specific `timeout`, or `command_timeout` when no per-command timeout is set |
+| Final shutdown command | `command_timeout` |
+| OS and SSH close delay | `shutdown_safety_margin` |
+| Phase deadline | Worst-case server budget in that phase |
 
----
+One slow server can extend the phase deadline, but it does not make other servers run sequentially. Servers in the same phase still start together. Individual SSH command execution also gets a 30-second subprocess buffer in `_run_remote_command`; the phase deadline calculation uses the configured command timeouts plus `connect_timeout` and `shutdown_safety_margin`.
 
 ## SSH key setup
 
-Passwordless SSH keys are required for unattended operation.
-
-### 1. Generate SSH key
-
-As root on the Eneru server (since Eneru runs as root):
+Eneru normally runs as root, so create and test the key as root on the Eneru host.
 
 ```bash
-sudo su
-ssh-keygen -t ed25519 -f ~/.ssh/id_ups_shutdown -C "ups-monitor@$(hostname)"
+sudo install -d -m 700 /root/.ssh
+sudo ssh-keygen -t ed25519 -f /root/.ssh/id_ups_shutdown -C "ups-monitor@$(hostname)"
+sudo ssh-copy-id -i /root/.ssh/id_ups_shutdown.pub user@remote-server
+sudo ssh -i /root/.ssh/id_ups_shutdown user@remote-server "echo OK"
 ```
 
-Press Enter for no passphrase (required for unattended operation).
+Leave the key without a passphrase. A passphrase-protected key cannot be used unattended during a power event.
 
-### 2. Copy key to remote server
+If you use a non-default key, add SSH options:
+
+```yaml
+ssh_options:
+  - "-i"
+  - "/root/.ssh/id_ups_shutdown"
+```
+
+## Host-key verification
+
+Accept host keys deliberately before relying on shutdown:
 
 ```bash
-ssh-copy-id -i ~/.ssh/id_ups_shutdown.pub user@remote-server
+sudo ssh user@remote-server "echo OK"
 ```
 
-### 3. Test connection
-
-```bash
-# Should connect without password prompt
-sudo ssh -i ~/.ssh/id_ups_shutdown user@remote-server "echo OK"
-```
-
----
+Do not leave `StrictHostKeyChecking=no` in production. If a host key changes unexpectedly, SSH should fail closed instead of sending shutdown commands to an untrusted host.
 
 ## Passwordless sudo
 
-The shutdown command requires root privileges. Configure passwordless sudo for the specific command:
+The SSH user needs passwordless access to the exact commands Eneru runs.
 
-### Standard linux
-
-On the remote server:
+### Standard Linux
 
 ```bash
-echo "username ALL=(ALL) NOPASSWD: /sbin/shutdown" | sudo tee /etc/sudoers.d/ups_shutdown
+echo "username ALL=(ALL) NOPASSWD: /sbin/shutdown, /usr/bin/systemctl, /bin/sync" \
+  | sudo tee /etc/sudoers.d/ups_shutdown
 sudo chmod 0440 /etc/sudoers.d/ups_shutdown
+sudo visudo -c
 ```
 
 ### Synology DSM
 
 ```bash
-echo "username ALL=(ALL) NOPASSWD: /usr/syno/sbin/synoshutdown -s" | sudo tee /etc/sudoers.d/ups_shutdown
+echo "username ALL=(ALL) NOPASSWD: /usr/syno/sbin/synoshutdown -s" \
+  | sudo tee /etc/sudoers.d/ups_shutdown
 sudo chmod 0440 /etc/sudoers.d/ups_shutdown
 ```
 
-!!! warning "Synology note"
-    Synology DSM resets `/etc/sudoers.d/` on updates. You may need to re-apply this after DSM updates, or use a scheduled task to maintain it.
-
-### QNAP QTS
-
-```bash
-echo "username ALL=(ALL) NOPASSWD: /sbin/poweroff" | sudo tee /etc/sudoers.d/ups_shutdown
-sudo chmod 0440 /etc/sudoers.d/ups_shutdown
-```
+DSM updates can reset sudoers changes. Re-check after DSM upgrades.
 
 ### Proxmox VE
 
-`stop_proxmox_vms` and `stop_proxmox_cts` invoke `qm` and `pct`, which require root regardless of PVE-level ACLs (`vm.audit` + `vm.powermgmt` are not sufficient). Required only if the SSH user is non-root — root logins work unchanged.
+`qm` and `pct` need root. If the SSH user is not root:
 
 ```bash
-echo "username ALL=(ALL) NOPASSWD: /usr/sbin/qm, /usr/sbin/pct" | sudo tee /etc/sudoers.d/ups_proxmox
+echo "username ALL=(ALL) NOPASSWD: /usr/sbin/qm, /usr/sbin/pct, /sbin/shutdown" \
+  | sudo tee /etc/sudoers.d/ups_proxmox
 sudo chmod 0440 /etc/sudoers.d/ups_proxmox
+sudo visudo -c
 ```
-
-If you also want the same user to run the final `shutdown -h now`, add `/sbin/shutdown` to the same NOPASSWD line.
 
 ### TrueNAS SCALE
 
-TrueNAS rebuilds `/etc/sudoers` from the middleware database on boot, so do not edit `/etc/sudoers.d/` by hand. Instead:
+Use the Web UI. Go to Credentials, Local Users, edit the SSH user, and allow the exact sudo command you plan to run. For current SCALE releases, use:
 
-1. Go to **Credentials → Local Users**, edit the SSH user
-2. In **Allowed sudo commands**, add the full path: `/usr/bin/midclt`
-3. Tick **Allow all sudo commands with no password** *or* leave it unchecked and the user will use the explicit allowed-commands list above
-4. Use the SCALE shutdown form from the table below (`sudo /usr/bin/midclt call system.shutdown "ups_event"` for 25.04+)
+```text
+/usr/bin/midclt call system.shutdown "ups_event"
+```
 
-### TrueNAS CORE
+### TrueNAS CORE and FreeBSD appliances
 
-CORE is FreeBSD; the orchestrated `shutdown -p now` runs the rc.d teardown sequence cleanly. Configure sudo via **Accounts → Users → Edit → Permit Sudo** in the WebUI; do not hand-edit sudoers.
+Use the platform's user or sudo configuration UI where available. The shutdown command is usually:
 
----
+```text
+sudo shutdown -p now
+```
 
 ## Common shutdown commands
+
+These commands match the previously documented, validated shutdown forms. Keep platform-specific forms unless you have tested an alternative on that device.
 
 | System | Command | Notes |
 |--------|---------|-------|
@@ -312,101 +228,34 @@ CORE is FreeBSD; the orchestrated `shutdown -p now` runs the rc.d teardown seque
 | TrueNAS CORE | `sudo shutdown -p now` | `-p` cuts power on FreeBSD; `-h` only halts |
 | TrueNAS SCALE (>= 25.04) | `sudo /usr/bin/midclt call system.shutdown "ups_event"` | Vendor-recommended; orchestrates app/VM teardown. `reason` arg required since Fangtooth |
 | TrueNAS SCALE (< 25.04) | `sudo /usr/bin/midclt call system.shutdown` | Same as above without the mandatory reason arg |
-| VMware ESXi 7.x/8.x | `esxcli system shutdown poweroff --reason="UPS power event"` | No `sudo` on ESXi (SSH login is root). Reason logged to vmkernel.log |
-| Proxmox VE | `sudo shutdown -h now` | Stop guests first via `stop_proxmox_vms` / `stop_proxmox_cts` pre-shutdown actions |
+| VMware ESXi 7.x/8.x | `esxcli system shutdown poweroff --reason="UPS power event"` | No `sudo` on ESXi when SSH login is root. Reason is logged to vmkernel.log |
+| Proxmox VE | `sudo shutdown -h now` | Stop guests first with `stop_proxmox_vms` and `stop_proxmox_cts` pre-shutdown actions |
 | pfSense / OPNsense | `sudo /sbin/shutdown -p now` | FreeBSD `-p` for ACPI power-off |
 
----
+## Safe test checklist
 
-## Testing remote shutdown
-
-!!! danger "This will actually shut down the server!"
-    Only run this when you're prepared for the server to go offline.
+Run these before relying on remote shutdown:
 
 ```bash
-# Test the full command as root
+sudo ssh user@remote-server "echo OK"
+sudo ssh user@remote-server "sudo -n true && echo sudo OK"
+sudo eneru validate --config /etc/ups-monitor/config.yaml
+sudo eneru run --dry-run --config /etc/ups-monitor/config.yaml
+```
+
+Only test the final shutdown command when you are prepared for the remote server to power off:
+
+```bash
 sudo ssh user@remote-server "sudo shutdown -h now"
 ```
 
-For a safer test, use a command that doesn't shut down:
-
-```bash
-# Verify SSH and sudo work
-sudo ssh user@remote-server "sudo whoami"
-# Should output: root
-```
-
----
-
-## Security considerations
-
-### Host key verification
-
-The example config includes `-o StrictHostKeyChecking=no` for initial setup. For production:
-
-1. **Manually accept host keys once:**
-   ```bash
-   sudo ssh user@remote-server
-   # Type 'yes' when prompted for host key
-   ```
-
-2. **Remove StrictHostKeyChecking from config:**
-   ```yaml
-   ssh_options: []  # or remove the line entirely
-   ```
-
-If a server's host key changes unexpectedly (potential MITM attack), the connection will fail rather than proceeding silently.
-
-### Limiting sudo access
-
-The sudoers rules above grant access only to the specific shutdown command.
-
-### SSH key security
-
-- Store keys in `/root/.ssh/` with permissions `600`
-- Use a dedicated key (`id_ups_shutdown`) rather than the default key
-- The key has no passphrase (required for unattended operation), so protect access to the Eneru server
-
----
-
 ## Troubleshooting
 
-### Connection timeout
-
-```
-ERROR: SSH connection to 192.168.178.229 timed out
-```
-
-- Verify network connectivity: `ping 192.168.178.229`
-- Check SSH service is running on remote server
-- Verify firewall allows SSH (port 22)
-- Increase `connect_timeout` if network is slow
-
-### Permission denied
-
-```
-ERROR: Permission denied (publickey,password)
-```
-
-- Verify SSH key is copied: `ssh-copy-id -i ~/.ssh/id_ups_shutdown.pub user@host`
-- Check key permissions: `ls -la ~/.ssh/id_ups_shutdown` (should be 600)
-- Ensure you're running as root: `sudo ssh ...`
-
-### Sudo password required
-
-```
-sudo: a password is required
-```
-
-- Verify sudoers rule is in place on remote server
-- Check rule syntax: `sudo visudo -c`
-- Ensure the command in sudoers matches exactly what Eneru runs
-
-### Command not found
-
-```
-synoshutdown: command not found
-```
-
-- Use full path in shutdown command: `/usr/syno/sbin/synoshutdown`
-- Or use `sudo -i` to get a login shell with full PATH
+| Symptom | Check |
+|---------|-------|
+| `Permission denied (publickey,password)` | Copy the key for the same user Eneru uses, and test as root from the Eneru host |
+| SSH timeout | Network path, firewall, SSH service, `connect_timeout` |
+| `sudo: a password is required` | Add or fix the sudoers rule. Use `sudo -n` in tests |
+| `command not found` | Use full command paths or a login shell where the platform requires one |
+| NAS shuts down too early | Use `shutdown_order` instead of legacy `parallel: false` |
+| Host key verification fails | Re-check the host identity before accepting the new key |

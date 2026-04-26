@@ -1,198 +1,148 @@
 # Getting started
 
+This page gets one UPS monitoring safely. Add VMs, containers, remote servers, and multi-UPS policy after the basic loop works.
+
 ## Prerequisites
 
-Before installing Eneru, you need:
+- Linux with Python 3.9 or newer.
+- A working NUT server that answers `upsc` for your UPS.
+- Root access on the Eneru host. Shutdown, filesystem, VM, and container actions need host privileges.
+- SSH client access if Eneru will shut down remote servers.
 
-- **Python 3.9 or higher**
-- **NUT (Network UPS Tools) client** - Your UPS must already be configured with NUT
-- **SSH client** - For remote server shutdown (optional)
-- **Root privileges** - Required for system shutdown operations
-
-!!! note "Eneru monitors NUT, it doesn't replace it"
-    Eneru connects to an existing NUT server to read UPS status. You need a working NUT installation with your UPS already configured before using Eneru.
-
----
-
-## Package installation (recommended)
-
-Native `.deb` and `.rpm` packages are available.
-
-### Option 1: APT/DNF repository (recommended)
-
-Add the repository to get automatic updates:
-
-=== "Debian/Ubuntu"
-
-    ```bash
-    # Import GPG key
-    curl -fsSL https://m4r1k.github.io/Eneru/KEY.gpg | sudo gpg --dearmor -o /usr/share/keyrings/eneru.gpg
-
-    # Add repository
-    echo "deb [arch=all signed-by=/usr/share/keyrings/eneru.gpg] https://m4r1k.github.io/Eneru/deb stable main" | sudo tee /etc/apt/sources.list.d/eneru.list
-
-    # Install
-    sudo apt update
-    sudo apt install eneru
-    ```
-
-=== "RHEL/Fedora"
-
-    ```bash
-    # RHEL 8/9: Enable EPEL first (required for apprise dependency)
-    sudo dnf install -y epel-release
-
-    # Add repository
-    sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
-
-    # Install
-    sudo dnf install eneru
-    ```
-
-### Option 2: PyPI (pip)
-
-Install from PyPI:
+Check NUT first:
 
 ```bash
-pip install eneru
-
-# With notification support (recommended)
-pip install eneru[notifications]
+upsc -l 192.168.1.100
+upsc UPS@192.168.1.100
 ```
 
-!!! note "System packages still recommended for production"
-    The pip installation doesn't include the systemd service file. For production deployments, use the native packages which set up the service automatically.
+If those commands fail, fix NUT before installing Eneru.
 
-After pip install, you'll need to:
+## Install
 
-1. Create the config directory: `sudo mkdir -p /etc/ups-monitor`
-2. Create a config file: `sudo nano /etc/ups-monitor/config.yaml`
-3. Run manually or set up your own service: `eneru run --config /etc/ups-monitor/config.yaml`
-
-### Option 3: Direct download from GitHub releases
-
-Download the latest package from [GitHub Releases](https://github.com/m4r1k/Eneru/releases):
-
-=== "Debian/Ubuntu"
-
-    ```bash
-    sudo dpkg -i eneru_*.deb
-    sudo apt install -f  # Install dependencies if needed
-    ```
-
-=== "RHEL/Fedora"
-
-    ```bash
-    # RHEL 8/9: Enable EPEL first (required for apprise dependency)
-    sudo dnf install -y epel-release
-
-    sudo dnf install ./eneru-*.noarch.rpm
-    ```
-
----
-
-## After installation
-
-The package installs but does **not** auto-enable or auto-start the service. You must complete configuration first:
+### Debian or Ubuntu package
 
 ```bash
-# 1. Edit configuration
-sudo nano /etc/ups-monitor/config.yaml
+curl -fsSL https://m4r1k.github.io/Eneru/KEY.gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/eneru.gpg
 
-# 2. Validate configuration
-eneru validate --config /etc/ups-monitor/config.yaml
+echo "deb [arch=all signed-by=/usr/share/keyrings/eneru.gpg] https://m4r1k.github.io/Eneru/deb stable main" \
+  | sudo tee /etc/apt/sources.list.d/eneru.list
 
-# 3. Enable and start the service
-sudo systemctl enable eneru.service
-sudo systemctl start eneru.service
+sudo apt update
+sudo apt install eneru
 ```
 
----
+### RHEL or Fedora package
 
-## Minimal configuration
+```bash
+sudo dnf install -y epel-release
+sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
+sudo dnf install eneru
+```
 
-The simplest working configuration:
+### PyPI
+
+```bash
+python3 -m venv ~/.venv/eneru
+source ~/.venv/eneru/bin/activate
+pip install "eneru[notifications]"
+```
+
+The PyPI install is useful for development or user-managed services. Native packages are recommended for production because they install the wrapper, config directory, systemd unit, shell completions, and package-managed dependencies.
+
+## Create the first config
+
+Edit `/etc/ups-monitor/config.yaml`:
 
 ```yaml
-# /etc/ups-monitor/config.yaml
-
-# UPS connection (required)
 ups:
   name: "UPS@192.168.1.100"
 
-# Shutdown triggers
 triggers:
   low_battery_threshold: 20
   critical_runtime_threshold: 600
 
-# Enable local shutdown
 local_shutdown:
   enabled: true
 ```
 
-This will:
+This connects to `UPS` on `192.168.1.100`, starts shutdown at 20% battery or 10 minutes estimated runtime, and powers off the local host with `shutdown -h now`.
 
-- Connect to NUT server at `192.168.1.100` and monitor the UPS named `UPS`
-- Trigger shutdown when battery drops below 20% or runtime below 10 minutes
-- Execute `shutdown -h now` on the local system
+## Validate
 
-For full configuration options, see [Configuration](configuration.md).
-
----
-
-## Verify installation
-
-After starting the service, verify it's working:
+Package install:
 
 ```bash
-# Check service status
-sudo systemctl status eneru.service
-
-# View logs
-sudo journalctl -u eneru.service -f
-
-# Check current UPS state
-cat /var/run/ups-monitor.state
+sudo eneru validate --config /etc/ups-monitor/config.yaml
 ```
 
----
+PyPI install:
 
-## Upgrading
+```bash
+eneru validate --config /etc/ups-monitor/config.yaml
+```
 
-When upgrading via APT/DNF, your configuration file is preserved. The package manager will not overwrite `/etc/ups-monitor/config.yaml`.
+Validation prints the UPS groups, enabled resources, remote shutdown phases, notification status, and configuration errors. Do not start the service until validation passes.
 
-If new configuration options are added in a release, check the [Changelog](changelog.md) for details on new features.
+## Test in dry-run mode
 
----
+Dry-run logs every action but does not stop VMs, containers, remote servers, filesystems, or the host.
 
-## Uninstalling
+Package install:
 
-=== "Debian/Ubuntu"
+```bash
+sudo eneru run --dry-run --config /etc/ups-monitor/config.yaml
+```
 
-    ```bash
-    sudo apt remove eneru
-    # To also remove configuration:
-    sudo apt purge eneru
-    ```
+PyPI install:
 
-=== "RHEL/Fedora"
+```bash
+eneru run --dry-run --config /etc/ups-monitor/config.yaml
+```
 
-    ```bash
-    sudo dnf remove eneru
-    ```
+Use a real power event only when you can recover the machine locally. For early tests, lower `extended_time.threshold` in the config and keep `behavior.dry_run: true`.
 
-=== "pip"
+## Start the service
 
-    ```bash
-    pip uninstall eneru
-    ```
+The package does not enable the service automatically. Enable it only after validation and dry-run testing.
 
-Configuration files in `/etc/ups-monitor/` may be preserved after uninstall. Remove them manually if desired.
+```bash
+sudo systemctl enable --now eneru.service
+sudo systemctl status eneru.service
+sudo journalctl -u eneru.service -f
+```
 
----
+The packaged service runs the same command through systemd:
 
-## Next steps
+```bash
+sudo eneru run --config /etc/ups-monitor/config.yaml
+```
 
-- [Configuration](configuration.md) - Full configuration reference
-- [Shutdown triggers](triggers.md) - How shutdown decisions work
-- [Notifications](notifications.md) - Set up Discord, Slack, Telegram, and more
+## Watch status
+
+Use the TUI on a terminal session:
+
+```bash
+sudo eneru monitor --config /etc/ups-monitor/config.yaml
+```
+
+For scripts or SSH sessions that should not open curses:
+
+```bash
+sudo eneru monitor --once --config /etc/ups-monitor/config.yaml
+sudo eneru monitor --once --events-only --config /etc/ups-monitor/config.yaml
+```
+
+## Add features one at a time
+
+Do not add every feature at once. Add one section, validate, run dry-run, then move on.
+
+| Next step | Page |
+|-----------|------|
+| Full config keys and defaults | [Configuration reference](configuration.md) |
+| Battery, runtime, depletion, and voltage policy | [Shutdown triggers](triggers.md) |
+| Discord, Slack, Telegram, ntfy, email | [Notifications](notifications.md) |
+| NAS, Proxmox, ESXi, XCP-ng, Docker hosts | [Remote servers](remote-servers.md) |
+| Multiple independent UPSes | [Configuration reference](configuration.md#multi-ups-example) |
+| Dual-PSU A+B power | [Redundancy groups](redundancy-groups.md) |

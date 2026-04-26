@@ -1,439 +1,264 @@
 # Troubleshooting
 
-Common issues and how to resolve them.
+Start with the logs and validation output. Most Eneru failures are configuration, NUT connectivity, SSH permissions, or stale shutdown flags from testing.
 
----
+## Quick checks
 
-## Service management
-
-### Basic commands
+Package install:
 
 ```bash
-# Start/stop/restart
-sudo systemctl start eneru.service
-sudo systemctl stop eneru.service
-sudo systemctl restart eneru.service
-
-# Check status
+sudo eneru validate --config /etc/ups-monitor/config.yaml
 sudo systemctl status eneru.service
-
-# View logs (follow mode)
-sudo journalctl -u eneru.service -f
-
-# View recent logs
 sudo journalctl -u eneru.service -e
-
-# View log file directly
-sudo tail -f /var/log/ups-monitor.log
 ```
 
----
-
-## Service won't start
-
-### Check for errors
-
-```bash
-journalctl -u eneru.service -e
-```
-
-### Validate Python version
-
-Eneru requires Python 3.9 or higher:
-
-```bash
-python3 --version
-```
-
-If your version is older, you'll need to upgrade Python or use a distribution with a newer version.
-
-### Check dependencies
-
-```bash
-python3 -c "import yaml; print('PyYAML OK')"
-python3 -c "import apprise; print('Apprise OK')"
-```
-
-If either fails, install the missing dependency:
-
-```bash
-# Debian/Ubuntu
-sudo apt install python3-yaml apprise
-
-# RHEL/Fedora
-sudo dnf install python3-pyyaml apprise
-```
-
-### Validate package syntax
-
-```bash
-# For installed package
-python3 -c "import eneru; print('OK')"
-
-# For development (from repository root)
-python3 -m py_compile src/eneru/*.py
-```
-
-If this produces errors, the package may be corrupted. Reinstall it.
-
-### Pip install shows UNKNOWN-0.0.0 (Ubuntu 22.04)
-
-Ubuntu 22.04 ships pip 22.0.2, which has a regression with `pyproject.toml` dynamic version metadata. Running `pip install eneru` produces an `UNKNOWN-0.0.0` package and the `eneru` command is not available.
-
-Fix by upgrading pip first:
-
-```bash
-pip install --upgrade pip
-pip install eneru
-```
-
-Or use a virtualenv, which typically includes a newer pip:
-
-```bash
-python3 -m venv ~/.venv/eneru
-source ~/.venv/eneru/bin/activate
-pip install eneru
-```
-
-This does not affect `.deb` package installation, which works on Ubuntu 22.04 without issues.
-
-### Validate configuration
+PyPI install:
 
 ```bash
 eneru validate --config /etc/ups-monitor/config.yaml
+eneru run --dry-run --config /etc/ups-monitor/config.yaml
 ```
 
-This checks for YAML syntax errors, invalid configuration values, and multi-UPS ownership rules.
+Check the current state file:
 
----
+```bash
+sudo cat /var/run/ups-monitor.state
+```
+
+## Service will not start
+
+| Check | Command |
+|-------|---------|
+| Last service errors | `sudo journalctl -u eneru.service -e` |
+| Unit definition | `systemctl cat eneru.service` |
+| Package entry point | `sudo eneru version` |
+| Config validity | `sudo eneru validate --config /etc/ups-monitor/config.yaml` |
+| Python version | `python3 --version` |
+
+The packaged systemd unit runs:
+
+```bash
+sudo eneru run --config /etc/ups-monitor/config.yaml
+```
+
+If the wrapper is missing or import errors mention `eneru`, reinstall the native package. Do not try to repair a native package install with system `pip`.
 
 ## Cannot connect to UPS
 
-### Test NUT connection
+Test NUT directly from the Eneru host:
 
 ```bash
-upsc UPS@192.168.178.11
+upsc -l 192.168.1.100
+upsc UPS@192.168.1.100
 ```
 
-This should display all UPS variables. If it fails:
+If this fails, Eneru cannot monitor the UPS. Check these in order:
 
-1. Check that the NUT server is running:
-   ```bash
-   systemctl status nut-server
-   ```
+| Area | What to verify |
+|------|----------------|
+| UPS name | `upsc -l <host>` must list the same name used in `ups.name` |
+| NUT listener | `upsd` listens on the network interface, usually port 3493 |
+| Firewall | TCP 3493 is reachable from the Eneru host |
+| NUT users | Remote access is allowed where your NUT setup requires users |
+| Driver health | NUT driver logs on the UPS server show fresh data |
 
-2. Verify network connectivity:
-   ```bash
-   ping 192.168.178.11
-   ```
-
-3. Check that the NUT server allows remote connections.
-   On the NUT server, verify `/etc/nut/upsd.conf` has:
-   ```
-   LISTEN 0.0.0.0 3493
-   ```
-   And `/etc/nut/upsd.users` has appropriate user configuration.
-
-4. Check the firewall. NUT uses port 3493 by default.
-
-### Verify UPS name
-
-The UPS name in your config must match exactly what NUT reports:
+On the NUT server, common checks are:
 
 ```bash
-upsc -l 192.168.178.11
+systemctl status nut-server
+systemctl status nut-driver
+journalctl -u nut-driver -e
 ```
 
-This lists all UPS names on that server.
+## Intermittent NUT drops
 
-### Flaky NUT server (intermittent connection drops)
-
-Some UPS devices with integrated NUT servers can be intermittently unreachable, causing notification storms. Eneru has a connection loss grace period that suppresses notifications during brief outages:
+Some networked UPSes and embedded NUT servers flap briefly. Use the connection-loss grace period to avoid alerts for short drops while the UPS is on line power:
 
 ```yaml
 ups:
   connection_loss_grace_period:
-    enabled: true    # Suppress transient connection failures
-    duration: 60     # Wait 60s before sending CONNECTION_LOST notification
-    flap_threshold: 5  # Warn after 5 recoveries within 24h
+    enabled: true
+    duration: 60
+    flap_threshold: 5
 ```
 
-If your NUT server flaps frequently, check:
+This does not delay failsafe shutdown. If Eneru loses connection while the UPS is on battery, it shuts down immediately.
 
-1. Network stability between Eneru and the NUT server
-2. NUT server logs for driver or USB errors (`journalctl -u nut-driver`)
-3. UPS firmware updates from the manufacturer
+If flaps continue, check network stability, UPS firmware, and NUT driver logs.
 
-See [Connection loss grace period](configuration.md#connection-loss-grace-period) for details.
+### Connection grace timeline
 
----
+This is grounded in `monitor.py`: connection grace runs only when Eneru is not on battery. Stale data must first reach `max_stale_data_tolerance` attempts, which defaults to 3. A failed poll path waits 5 seconds before the next loop iteration.
 
-## Notifications not working
+| Time | State | Eneru behavior |
+|------|-------|----------------|
+| First stale poll | `stale_data_count=1/3` | Logs a stale-data warning, no grace timer yet |
+| Third stale poll by default | Tolerance reached | Enters `GRACE_PERIOD` and starts the 60s default grace timer |
+| Before 60s expires | Connection recovers | Logs quiet recovery, sends no `CONNECTION_LOST` notification |
+| Recovery within grace repeats | Flap counter increments | After 5 recoveries within the 24h flap window, sends unstable-NUT warning |
+| 60s grace expires | Still disconnected | Sends `CONNECTION_LOST` and marks connection `FAILED` |
+| Any time previous UPS status was `OB` | Connection or stale-data failure | Bypasses grace and starts failsafe shutdown immediately |
 
-### Test built-in command
+## Notifications do not arrive
+
+Run the built-in test:
 
 ```bash
-sudo python3 /opt/ups-monitor/eneru.py --test-notifications
+sudo eneru test-notifications --config /etc/ups-monitor/config.yaml
 ```
 
-### Test Apprise directly
+Then check:
+
+| Cause | Fix |
+|-------|-----|
+| Apprise missing | Install package notification dependencies or use `eneru[notifications]` for PyPI |
+| Bad URL format | Compare with the Apprise service wiki |
+| Outbound network blocked | Test DNS and HTTPS from the Eneru host |
+| Rate limiting | Wait and retry with fewer test sends |
+| Event muted | Check `notifications.suppress` |
+
+Notification rows are stored in SQLite. Pending rows indicate delivery has not succeeded yet:
 
 ```bash
-python3 -c "
-import apprise
-ap = apprise.Apprise()
-ap.add('discord://webhook_id/webhook_token')
-result = ap.notify(body='Test from Apprise', title='Test')
-print('Success' if result else 'Failed')
-"
+sqlite3 /var/lib/eneru/UPS-192-168-1-100.db \
+  "SELECT id, status, attempts, cancel_reason, title FROM notifications ORDER BY id DESC LIMIT 20;"
 ```
-
-### Common issues
-
-1. Wrong URL format. Each service has a specific format; check the [Apprise Wiki](https://github.com/caronc/apprise/wiki).
-
-2. Network issues. Can the server reach the notification service?
-   ```bash
-   curl -I https://discord.com
-   ```
-
-3. Rate limiting. If testing frequently, you may hit service rate limits.
-
-4. Firewall blocking outbound. Ensure HTTPS (443) is allowed outbound.
-
----
 
 ## Remote shutdown fails
 
-See also: [Remote servers](remote-servers.md#troubleshooting)
-
-### Test SSH connection
+Test SSH as root on the Eneru host:
 
 ```bash
-# As root (Eneru runs as root)
 sudo ssh user@remote-server "echo OK"
+sudo ssh user@remote-server "sudo -n true && echo sudo OK"
 ```
 
-### Test sudo access
+| Error | Meaning |
+|-------|---------|
+| `Permission denied (publickey,password)` | The key is missing, wrong, unreadable, or installed for a different user |
+| `sudo: a password is required` | Passwordless sudo is not configured for the command Eneru runs |
+| `command not found` | Use a full path or platform-specific shutdown command |
+| Timeout | Firewall, host down, SSH service down, or too-low `connect_timeout` |
+| Host key changed | Verify the remote host before accepting the new key |
 
-```bash
-sudo ssh user@remote-server "sudo -n true && echo 'sudo OK'"
-```
+See [Remote servers](remote-servers.md) for sudoers examples and platform-specific shutdown commands.
 
-If this prompts for a password, the sudoers rule is not configured correctly.
+## Safe dry-run test
 
-### Check SSH key permissions
-
-```bash
-ls -la ~/.ssh/id_*
-```
-
-Keys should be mode 600 (readable only by owner).
-
----
-
-## Dry-run mode for testing
-
-Test the full shutdown sequence without actually shutting anything down:
-
-### Option 1: Config file
+Use dry-run before any real shutdown test:
 
 ```yaml
 behavior:
   dry_run: true
 ```
 
-### Option 2: Command line
+or override from the command line:
 
 ```bash
-sudo python3 /opt/ups-monitor/eneru.py --dry-run
+sudo eneru run --dry-run --config /etc/ups-monitor/config.yaml
 ```
 
-In dry-run mode, all actions are logged with `[DRY-RUN]` prefix but not executed.
+During dry-run, Eneru logs every action with a dry-run marker and skips the actual VM, container, remote, filesystem, and local shutdown commands.
 
-### Simulate power failure
+For a controlled test:
 
-1. Enable dry-run mode
-2. Optionally lower `extended_time.threshold` to trigger faster
-3. Unplug UPS input power (or use NUT's test commands if available)
-4. Watch logs for the shutdown sequence
-5. Verify notifications arrive
+1. Enable dry-run.
+2. Lower `triggers.extended_time.threshold` temporarily.
+3. Start Eneru in the foreground.
+4. Simulate or create a short on-battery condition.
+5. Watch the planned shutdown order in the logs.
+6. Restore the production thresholds.
 
-```bash
-# Watch logs during test
-sudo journalctl -u eneru.service -f
-```
+## Clear stale shutdown flags
 
----
+Eneru writes shutdown flag files so an interrupted process does not run the same sequence repeatedly. After a killed dry-run test, a flag can remain.
 
-## Clear shutdown state
-
-If a shutdown sequence is interrupted (e.g., you restored power mid-sequence during dry-run testing), clear the state file:
+Single UPS flag:
 
 ```bash
 sudo rm -f /var/run/ups-shutdown-scheduled
 ```
 
-This allows Eneru to trigger a new shutdown sequence if needed.
-
----
-
-## Check current UPS state
-
-View what Eneru sees from the UPS:
+Redundancy group flags:
 
 ```bash
-cat /var/run/ups-monitor.state
+sudo rm -f /var/run/ups-shutdown-redundancy-*
 ```
 
-This shows the current battery percentage, runtime, status, and other metrics.
+Remove flags only after confirming no real shutdown is in progress.
 
----
+## Graphs or events are empty
 
-## Example log output
-
-### Normal operation (service startup)
-
-```
-Dec 29 17:13:10 nuc.local python3[3366019]: Configuration loaded from: /etc/ups-monitor/config.yaml
-Dec 29 17:13:10 nuc.local python3[3366019]: 2025-12-29 17:13:10 CET - 📢 Notifications: enabled (1 service(s))
-Dec 29 17:13:10 nuc.local python3[3366019]: 2025-12-29 17:13:10 CET - 🐳 Container runtime detected: docker
-Dec 29 17:13:10 nuc.local python3[3366019]: 2025-12-29 17:13:10 CET - 🚀 Eneru v4.3 starting - monitoring UPS@192.168.178.11
-Dec 29 17:13:10 nuc.local python3[3366019]: 2025-12-29 17:13:10 CET - 📋 Enabled features: VMs, Containers (docker), FS Sync, Unmount (3 mounts), Remote (1 servers), Local Shutdown
-Dec 29 17:13:10 nuc.local python3[3366019]: 2025-12-29 17:13:10 CET - ⏳ Checking initial connection to UPS@192.168.178.11...
-Dec 29 17:13:10 nuc.local python3[3366019]: 2025-12-29 17:13:10 CET - ✅ Initial connection successful.
-Dec 29 17:13:10 nuc.local python3[3366019]: 2025-12-29 17:13:10 CET - 📊 Voltage Monitoring Active. Nominal: 230.0V. Low Warning: 175.0V. High Warning: 275.0V.
-```
-
-### Power failure event
-
-```
-Dec 22 22:19:07 nuc.local python3[1274572]: 2025-12-22 22:19:07 CET - 🔄 Status changed: OL CHRG -> OB DISCHRG (Battery: 100%, Runtime: 28m 9s, Load: 29%)
-Dec 22 22:19:07 nuc.local python3[1274572]: 2025-12-22 22:19:07 CET - ⚡ POWER EVENT: ON_BATTERY - Battery: 100%, Runtime: 1689 seconds, Load: 29%
-Dec 22 22:19:10 nuc.local python3[1274572]: 2025-12-22 22:19:10 CET - 🔋 On battery: 100% (28m 5s), Load: 28%, Depletion: 0.0%/min, Time on battery: 3s
-Dec 22 22:19:40 nuc.local python3[1274572]: 2025-12-22 22:19:40 CET - 🔋 On battery: 97% (19m 35s), Load: 23%, Depletion: 5.45%/min, Time on battery: 33s
-Dec 22 22:20:10 nuc.local python3[1274572]: 2025-12-22 22:20:10 CET - 🔋 On battery: 96% (19m 5s), Load: 27%, Depletion: 3.81%/min, Time on battery: 1m 3s
-Dec 22 22:20:45 nuc.local python3[1274572]: 2025-12-22 22:20:45 CET - 🔋 On battery: 93% (18m 31s), Load: 26%, Depletion: 4.29%/min, Time on battery: 1m 38s
-Dec 22 22:21:15 nuc.local python3[1274572]: 2025-12-22 22:21:15 CET - 🔋 On battery: 93% (18m 1s), Load: 23%, Depletion: 3.28%/min, Time on battery: 2m 8s
-```
-
-### Power restored
-
-```
-Dec 22 22:21:17 nuc.local python3[1274572]: 2025-12-22 22:21:17 CET - 🔄 Status changed: OB DISCHRG -> OL CHRG (Battery: 65%, Runtime: 17m 59s, Load: 18%)
-Dec 22 22:21:17 nuc.local python3[1274572]: 2025-12-22 22:21:17 CET - ⚡ POWER EVENT: POWER_RESTORED - Battery: 65% (Status: OL CHRG), Input: 237.6V, Outage duration: 2m 10s
-```
-
----
-
-## Known limitations
-
-### Single UPS only
-
-Eneru monitors one UPS per instance. For multiple UPS units, run multiple instances with different config files:
+The stats writer flushes every few seconds. For a fresh start, wait at least 10 seconds and check the database:
 
 ```bash
-sudo python3 /opt/ups-monitor/eneru.py --config /etc/ups-monitor/ups1.yaml
-sudo python3 /opt/ups-monitor/eneru.py --config /etc/ups-monitor/ups2.yaml
+sudo ls -lh /var/lib/eneru/
+sqlite3 /var/lib/eneru/UPS-192-168-1-100.db "SELECT COUNT(*) FROM samples;"
+sqlite3 /var/lib/eneru/UPS-192-168-1-100.db "SELECT COUNT(*) FROM events;"
 ```
 
-### UPS compatibility
+If the DB is missing, check `statistics.db_directory` and permissions.
 
-Eneru works with any UPS supported by NUT. However, some UPS models may:
+## Redundancy group does not fire
 
-- Report inaccurate runtime estimates
-- Have delayed battery percentage updates
-- Not support all status flags
+Check these in order:
 
-The multi-trigger system compensates for these issues.
+| Check | Explanation |
+|-------|-------------|
+| Quorum still holds | With `min_healthy: 1`, one healthy member keeps a two-UPS group online |
+| DEGRADED counts healthy | Default `degraded_counts_as: healthy` means on-battery warning state may still satisfy quorum |
+| Advisory trigger missing | Per-UPS thresholds may not have crossed yet |
+| Unknown policy | Default `unknown_counts_as: critical`; custom policy may be more tolerant |
+| Stale flag | `/var/run/ups-shutdown-redundancy-*` may remain after killed tests |
+| Wrong source name | `ups_sources` must exactly match `ups[].name` |
 
-### Battery anomaly detection and firmware jitter
-
-Eneru watches for unexpected battery charge drops (>20% within 120 seconds) while the UPS is on line power. If the charge suddenly falls without the UPS ever going on battery, something is wrong: a firmware recalibration, battery aging, or a hardware problem.
-
-However, some UPS models (APC, CyberPower, and Ubiquiti UniFi UPS are known offenders) briefly report a bogus charge value right after switching from battery (OB) back to line power (OL). A UPS sitting at 100% charge might report 50% for a second or two after power is restored, then go right back to the correct value.
-
-To avoid false alarms, Eneru requires the anomalous reading to persist across 3 consecutive polls before firing a warning. If the charge bounces back before that, the reading is discarded as jitter.
-
-In practice:
-
-- If the charge stays low across multiple polls, it is a real anomaly and Eneru fires the warning
-- If the charge recovers within 1-2 polls, Eneru treats it as transient jitter and ignores it
-
-If you see repeated false `Battery Anomaly Detected` warnings, check your UPS firmware version. Some firmware updates improve charge reporting accuracy during power transitions.
-
----
-
-## Why isn't my redundancy-group server shutting down?
-
-A server lives under a [redundancy group](redundancy-groups.md), one
-UPS clearly failed, but Eneru did nothing. Walk through the list:
-
-**1. The group's quorum has not been lost yet.**
-
-By default `min_healthy: 1` means any single healthy member keeps the
-group up. Check the logs:
-
-```
-🛡️ Redundancy group 'rack-1' evaluator started (2 sources, min_healthy=1)
-```
-
-Then watch for either of these on every tick (~1 s):
-
-- No log line: quorum is healthy and steady.
-- `🚨 Redundancy group 'rack-1' quorum LOST`: the group dropped
-  below `min_healthy`. The next log line is
-  `🚨 ========== REDUNDANCY GROUP SHUTDOWN: rack-1 ==========`.
-
-If quorum is not lost but you expected it to be, `min_healthy` is set
-higher than you intended, or one UPS member is still being counted as
-healthy. Recheck `degraded_counts_as` / `unknown_counts_as` for the
-policies you actually want.
-
-**2. The member UPS is DEGRADED, not CRITICAL.**
-
-A UPS that is on battery but has not yet hit any per-UPS trigger
-condition (low battery, low runtime, depletion, extended time, FSD)
-is `DEGRADED`, not `CRITICAL`. With `degraded_counts_as: healthy`
-(default), a degraded UPS still contributes to `healthy_count`.
-
-For strict behaviour, set `degraded_counts_as: critical`.
-
-**3. The advisory trigger never fired.**
-
-If a per-UPS trigger should have fired but did not, check the member
-monitor's log for `Trigger condition met (advisory, redundancy
-group): ...`. If the line is missing, the per-UPS thresholds (e.g.
-`triggers.low_battery_threshold`) have not been crossed yet. Adjust
-them per [Shutdown triggers](triggers.md#triggers-in-redundancy-groups).
-
-**4. The redundancy executor's flag file is sticky.**
-
-The redundancy shutdown is gated by
-`/var/run/ups-shutdown-redundancy-{sanitized-group-name}` for
-idempotency. If a previous run created the flag and was killed before
-clearing it, the executor will skip subsequent shutdowns. Clean it up:
+Run validation to catch source and ownership errors:
 
 ```bash
-sudo rm /var/run/ups-shutdown-redundancy-*
+sudo eneru validate --config /etc/ups-monitor/config.yaml
 ```
 
-This is normal after a manual `kill -9` of Eneru. SIGTERM and SIGINT
-clear the flag automatically.
+## Battery anomaly warnings
 
-**5. The redundancy group references the wrong UPS names.**
+Eneru warns when battery charge drops sharply while the UPS is on line power. This can mean battery wear, firmware recalibration, or bad telemetry.
 
-The names in `ups_sources` must match the `name:` field in the
-top-level `ups:` section exactly (including `@host:port` suffix). Run
-`eneru validate --config <path>`. Unknown references show up as
-`ERROR: Redundancy group 'X' references unknown UPS name(s): ...`.
+Some APC, CyberPower, and Ubiquiti units briefly report a bogus charge after returning from battery. Eneru requires the anomalous reading to persist across multiple polls before alerting, which filters most one- or two-poll jitter.
 
----
+If anomaly warnings repeat:
+
+- Check UPS firmware and NUT driver versions.
+- Compare `battery.charge` manually with `upsc`.
+- Run a controlled self-test if your UPS supports it.
+- Plan battery replacement if the charge drop persists.
+
+### Battery anomaly timeline
+
+This behavior comes from `src/eneru/health/battery.py`: the drop must be greater than 20 percentage points, occur within 120 seconds while on line power, and persist across 3 consecutive polls.
+
+| Poll | Reading | Eneru behavior |
+|------|---------|----------------|
+| Previous OL poll | Battery 100% | Baseline is stored |
+| Current OL poll | Battery 70% | Drop is greater than 20 points within 120s, so anomaly is marked pending |
+| Next poll | Battery still around 70% | Pending count increments, no alert yet |
+| Third confirming poll | Battery still low | Alert fires if the drop is still greater than 20 points |
+| Any confirming poll | Battery recovers by more than 10 points from pending low value | Pending anomaly is discarded as transient firmware jitter |
+
+## Known limits
+
+| Limit | Detail |
+|-------|--------|
+| UPS support comes from NUT | If NUT cannot read the UPS reliably, Eneru cannot fix that |
+| Runtime estimates can be wrong | Keep depletion and extended-time triggers enabled |
+| Remote shutdown needs trust | SSH keys and passwordless sudo are required for unattended operation |
+| Local resources need local ownership | In multi-UPS mode, only `is_local: true` can own VMs, containers, and filesystems |
 
 ## Getting help
 
-If you're still stuck:
+Open a GitHub issue with:
 
-1. Check the logs. Most issues are visible there.
-2. Enable dry-run mode to test safely.
-3. Open a [GitHub issue](https://github.com/m4r1k/Eneru/issues) with logs and config (redact sensitive data).
+- Eneru version.
+- Install method, package or PyPI.
+- Redacted `config.yaml`.
+- `eneru validate` output.
+- Relevant `journalctl -u eneru.service` lines.
+- NUT output from `upsc <ups@host>`.

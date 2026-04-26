@@ -1,5 +1,5 @@
 site_name: Eneru
-site_description: Intelligent UPS Monitoring & Shutdown Orchestration for NUT
+site_description: UPS monitoring and shutdown orchestration for NUT
 site_url: https://eneru.readthedocs.io/
 repo_url: https://github.com/m4r1k/Eneru
 repo_name: m4r1k/Eneru
@@ -30,19 +30,24 @@ theme:
     repo: fontawesome/brands/github
 
 nav:
-  - Home: index.md
-  - Getting Started: getting-started.md
-  - Configuration: configuration.md
-  - Redundancy Groups: redundancy-groups.md
-  - Statistics: statistics.md
-  - TUI Graphs: tui-graphs.md
-  - Shutdown Triggers: triggers.md
-  - Notifications: notifications.md
-  - Remote Servers: remote-servers.md
-  - Testing: testing.md
-  - Troubleshooting: troubleshooting.md
-  - Roadmap: roadmap.md
-  - Changelog: changelog.md
+  - Overview:
+      - Home: index.md
+      - Getting started: getting-started.md
+      - Architecture: architecture.md
+  - Configuration:
+      - Configuration reference: configuration.md
+      - Shutdown triggers: triggers.md
+      - Redundancy groups: redundancy-groups.md
+      - Notifications: notifications.md
+      - Remote servers: remote-servers.md
+  - Operations:
+      - Monitor and graphs: tui-graphs.md
+      - Statistics: statistics.md
+      - Troubleshooting: troubleshooting.md
+  - Project:
+      - Testing: testing.md
+      - Roadmap: roadmap.md
+      - Changelog: changelog.md
 
 markdown_extensions:
   - tables
