@@ -100,6 +100,7 @@ class UPSGroupMonitor(
     def __init__(self, config: Config, exit_after_shutdown: bool = False,
                  coordinator_mode: bool = False,
                  shutdown_callback=None,
+                 power_restored_callback=None,
                  stop_event: Optional[threading.Event] = None,
                  log_prefix: str = "",
                  notification_worker: Optional[NotificationWorker] = None,
@@ -111,6 +112,11 @@ class UPSGroupMonitor(
         self.logger: Optional[UPSLogger] = logger
         self._coordinator_mode = coordinator_mode
         self._shutdown_callback = shutdown_callback
+        # Coordinator-supplied hook fired on the OB/FSD->OL transition so
+        # the coordinator can re-arm its own _local_shutdown_initiated
+        # lock + global flag (the per-monitor flag we clear locally is
+        # suffixed and lives separately). Bug #4 / 5.2.2.
+        self._power_restored_callback = power_restored_callback
         self._stop_event = stop_event or threading.Event()
         self._log_prefix = log_prefix
         # When True, per-UPS triggers (T1-T4, FSD, FAILSAFE) become advisory:
@@ -939,6 +945,15 @@ class UPSGroupMonitor(
     def _trigger_immediate_shutdown(self, reason: str):
         """Trigger an immediate shutdown if not already in progress."""
         if self._shutdown_flag_path.exists():
+            # Surface gated re-triggers (bug #4). The early return used
+            # to be silent, which made correlating "trigger conditions
+            # met but nothing fired" with the stuck flag much harder
+            # than it should have been.
+            self._log_message(
+                f"⚠️ Shutdown trigger fired ({reason}) but a previous "
+                f"shutdown sequence is already in progress "
+                f"({self._shutdown_flag_path}). Ignoring re-trigger."
+            )
             return
 
         self._shutdown_flag_path.touch()
@@ -1224,6 +1239,31 @@ class UPSGroupMonitor(
             self.state.on_battery_start_time = 0
             self.state.extended_time_logged = False
             self.state.battery_history.clear()
+
+            # Re-arm the shutdown trigger (bug #4). The flag file is
+            # _trigger_immediate_shutdown's re-entry guard; the
+            # local_shutdown.enabled=true real-mode path doesn't clear
+            # it (it implicitly trusts the OS reboot is about to take
+            # the daemon down). On a healthy production install systemd
+            # reaps us within seconds and this never matters, but on
+            # edge installs (custom shutdown command, container/sandbox,
+            # dummy UPS test rig) the host stays up and the second
+            # outage's trigger silently no-ops. Clearing the flag here
+            # means: "power came back, daemon is still alive ⇒ the
+            # previous attempt did not actually halt the host ⇒ re-arm".
+            self._shutdown_flag_path.unlink(missing_ok=True)
+            # Coordinator hook: in multi-UPS mode the per-monitor flag
+            # above is suffixed; the coordinator owns a separate
+            # unsuffixed flag + an in-memory _local_shutdown_initiated
+            # lock that would otherwise still gate the next trigger.
+            # The callback resets both. None for single-UPS / standalone.
+            if self._power_restored_callback is not None:
+                try:
+                    self._power_restored_callback()
+                except Exception as exc:  # defensive: never raise into the loop
+                    self._log_message(
+                        f"⚠️ power_restored_callback raised: {exc}"
+                    )
 
             # Power restored on a redundancy-group member: drop any advisory
             # trigger so the group evaluator sees this UPS as healthy again.

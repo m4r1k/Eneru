@@ -265,6 +265,7 @@ class MultiUPSCoordinator:
                 exit_after_shutdown=self._exit_after_shutdown,
                 coordinator_mode=True,
                 shutdown_callback=self._on_group_shutdown,
+                power_restored_callback=self._clear_local_shutdown_state,
                 stop_event=self._stop_event,
                 log_prefix=prefix,
                 notification_worker=self._notification_worker,
@@ -364,6 +365,25 @@ class MultiUPSCoordinator:
             # Non-local group shutdown completed, exit if requested
             self._log(f"🛑 Group {label} shutdown complete. Exiting (--exit-after-shutdown).")
             self._stop_event.set()
+
+    def _clear_local_shutdown_state(self):
+        """Re-arm coordinator-level shutdown state on POWER_RESTORED.
+
+        Mirrors UPSGroupMonitor._handle_on_line's per-group flag unlink
+        for the coordinator-owned state. Invoked via the per-monitor
+        ``power_restored_callback`` hook on the OB/FSD->OL transition.
+
+        Without this, the in-memory ``_local_shutdown_initiated`` lock
+        + the unsuffixed ``_global_shutdown_flag`` would persist after
+        a no-op or sandboxed local shutdown, blocking the next outage's
+        trigger across all UPS groups (multi-UPS path of bug #4).
+
+        Idempotent: safe to call repeatedly when no shutdown was in
+        flight, or when this group is the second OL transition in a row.
+        """
+        with self._local_shutdown_lock:
+            self._local_shutdown_initiated = False
+        self._global_shutdown_flag.unlink(missing_ok=True)
 
     def _handle_local_shutdown(self, triggered_by: str):
         """Execute local shutdown with defense-in-depth protection."""
