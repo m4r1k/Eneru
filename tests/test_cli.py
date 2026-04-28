@@ -164,7 +164,32 @@ class TestCLIMonitorFlags:
                 assert "--full-history" in err
                 assert "--once" in err
                 assert "error:" in err
+                # 5.2.2 (CodeRabbit): the prefix must reflect the
+                # invocation -- "eneru tui:" when invoked as `tui`,
+                # "eneru monitor:" when invoked as `monitor`. The
+                # earlier hardcoded "eneru tui:" lied for monitor users.
+                assert "eneru tui:" in err
                 mock_run_tui.assert_not_called()
+
+    @pytest.mark.unit
+    def test_full_history_rejection_uses_invoked_subcommand_prefix(
+        self, tmp_path, capsys
+    ):
+        """5.2.2 (CodeRabbit): same rejection via the ``monitor`` alias
+        must say "eneru monitor:" -- not "eneru tui:". The error prefix
+        is composed from the actual subcommand the user typed."""
+        config_file = self._minimal_config(tmp_path)
+        with patch("eneru.tui.run_tui"):
+            with patch.object(sys, "argv", ["eneru", "monitor",
+                                            "-c", str(config_file),
+                                            "--full-history"]):
+                with pytest.raises(SystemExit):
+                    main()
+            err = capsys.readouterr().err
+            assert "eneru monitor:" in err, (
+                f"expected 'eneru monitor:' prefix, got: {err!r}"
+            )
+            assert "eneru tui:" not in err
 
     @pytest.mark.unit
     def test_full_history_with_once_accepted(self, tmp_path):

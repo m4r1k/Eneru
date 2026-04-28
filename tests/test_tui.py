@@ -1238,6 +1238,35 @@ class TestQueryEventsForDisplay:
         assert "ancient" in full[0]
         assert "recent" in full[1]
 
+    @pytest.mark.unit
+    def test_max_events_none_disables_cap(self, tmp_path):
+        """5.2.2 (CodeRabbit P1): ``max_events=None`` returns every
+        matching row -- the ``--full-history`` promise. Pre-fix the
+        cap was hardcoded at 500 in the events-only path so installs
+        with longer event histories silently lost the older rows."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        # Seed 600 priority events -- comfortably above the old 500 cap.
+        _seed_events(config, config.ups_groups[0], [
+            (now - 600 + i, "DAEMON_START", f"row-{i}")
+            for i in range(600)
+        ])
+        # Default cap (EVENTS_MAX_ROWS_MORE=500) drops the oldest 100.
+        capped = query_events_for_display(config, time_range_seconds=None)
+        assert len(capped) == 500
+        # max_events=None must surface every row.
+        full = query_events_for_display(
+            config, time_range_seconds=None, max_events=None,
+        )
+        assert len(full) == 600, (
+            f"max_events=None must disable the cap; got {len(full)} rows"
+        )
+        # Ordering preserved (ascending by timestamp).
+        assert "row-0" in full[0]
+        assert "row-599" in full[-1]
+
 
 class TestRobustBounds:
     """``_robust_bounds`` keeps a single 0V outlier from squashing the
@@ -1278,6 +1307,27 @@ class TestRobustBounds:
         lo, hi = _robust_bounds(values)
         assert 220.0 < lo < 230.0
         assert 230.0 < hi < 240.0
+
+    @pytest.mark.unit
+    def test_n_equals_20_excludes_extremes_both_sides(self):
+        """Boundary test (CodeRabbit P1): for n=20 the helper must
+        actually clip the top sample, not return it. The earlier
+        ``int(n * 0.95)`` formulation produced sorted_vals[19] (the
+        max itself), silently no-op'ing the helper at small n.
+        """
+        from eneru.tui import _robust_bounds
+        # 18 samples at 230V plus one extreme on each side. Expected:
+        # clip BOTH extremes -- lo and hi should both be 230.0.
+        values = [0.0] + [230.0] * 18 + [999.0]
+        lo, hi = _robust_bounds(values)
+        assert lo == 230.0, (
+            f"n=20 must clip the bottom outlier (was: {lo}); regression "
+            "of the percentile off-by-one"
+        )
+        assert hi == 230.0, (
+            f"n=20 must clip the top outlier (was: {hi}); the earlier "
+            "int(n*0.95) returned sorted[19]=999, silently no-op'ing"
+        )
 
 
 class TestSanitizeEventDetail:
@@ -1399,6 +1449,64 @@ class TestRunOnceEventsOnly:
         run_once(config, events_only=True)
         out = capsys.readouterr().out
         assert "(no events)" in out
+
+    @pytest.mark.unit
+    def test_snapshot_path_honours_verbose_flag(self, tmp_path, capsys):
+        """5.2.2 (cubic.dev / CodeRabbit P1): the non-events-only branch
+        of run_once also reads events for its tail block. Pre-fix it
+        used the default ``priority_only=True`` and silently ignored
+        ``--verbose``, so chatter never surfaced even when the user
+        explicitly asked for it."""
+        from eneru.tui import run_once
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 60, "VOLTAGE_FLAP_SUPPRESSED", "low-prio chatter"),
+            (now - 30, "DAEMON_START", "high-prio"),
+        ])
+        # Default snapshot path: chatter hidden.
+        run_once(config, events_only=False)
+        out_default = capsys.readouterr().out
+        assert "DAEMON_START" in out_default
+        assert "VOLTAGE_FLAP_SUPPRESSED" not in out_default
+        # --verbose: chatter must surface.
+        run_once(config, events_only=False, verbose=True)
+        out_verbose = capsys.readouterr().out
+        assert "DAEMON_START" in out_verbose
+        assert "VOLTAGE_FLAP_SUPPRESSED" in out_verbose, (
+            "snapshot path must honour --verbose; pre-5.2.2 the events "
+            "tail in the snapshot block silently ignored the flag"
+        )
+
+    @pytest.mark.unit
+    def test_snapshot_path_honours_full_history_flag(self, tmp_path, capsys):
+        """5.2.2 (CodeRabbit P1): same as verbose -- the non-events-only
+        branch ignored ``--full-history`` and stayed bound to the
+        ``--time`` window. Older events were silently dropped from the
+        tail block even when the user asked for the full picture."""
+        from eneru.tui import run_once
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        old_ts = now - 90 * 86400  # well outside any --time choice
+        _seed_events(config, config.ups_groups[0], [
+            (old_ts, "DAEMON_START", "ancient"),
+            (now - 60, "DAEMON_START", "recent"),
+        ])
+        # Default snapshot path with default 24h window: only recent.
+        run_once(config, events_only=False)
+        out_default = capsys.readouterr().out
+        assert "recent" in out_default
+        assert "ancient" not in out_default
+        # --full-history: ancient also surfaces.
+        run_once(config, events_only=False, full_history=True)
+        out_full = capsys.readouterr().out
+        assert "recent" in out_full
+        assert "ancient" in out_full, (
+            "snapshot path must honour --full-history; pre-5.2.2 it "
+            "stayed bound to the --time window"
+        )
 
 
 class TestDisplayWidthAndTruncate:

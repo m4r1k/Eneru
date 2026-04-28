@@ -226,7 +226,7 @@ fi
 NOW=$(date +%s)
 sqlite3 "$DB" "INSERT INTO events (ts, event_type, detail) VALUES ($NOW, 'TEST31_MARKER', 'e2e injected');"
 
-eneru monitor --once --events-only --verbose --time 1h --config $E2E_DIR/config-e2e-stats.yaml 2>&1 | tee /tmp/test31.log
+eneru monitor --once --events-only --verbose --time 1h --config "$E2E_DIR/config-e2e-stats.yaml" 2>&1 | tee /tmp/test31.log
 
 if ! grep -q "TEST31_MARKER: e2e injected" /tmp/test31.log; then
   echo "FAIL: injected event not surfaced by --events-only --verbose"
@@ -239,12 +239,13 @@ echo "PASS: events panel reads from SQLite"
 # These piggyback on the seeded DB (no extra container churn). Assert:
 #   1. Default (no --verbose) hides TEST31_MARKER but shows DAEMON_START.
 #   2. --verbose surfaces TEST31_MARKER again.
-#   3. --full-history requires --once -- without it the CLI must reject.
+#   3. --full-history requires --once -- without it the CLI must reject
+#      with exit code 2 (argparse-style), not just any non-zero.
 
 echo ""
 echo "  --- 5.2.2 events filter checks ---"
 
-eneru monitor --once --events-only --time 1h --config $E2E_DIR/config-e2e-stats.yaml > /tmp/test31-priority.log 2>&1
+eneru monitor --once --events-only --time 1h --config "$E2E_DIR/config-e2e-stats.yaml" > /tmp/test31-priority.log 2>&1
 if grep -q "TEST31_MARKER" /tmp/test31-priority.log; then
   echo "FAIL: priority-only default leaked TEST31_MARKER"
   cat /tmp/test31-priority.log
@@ -258,9 +259,21 @@ fi
 echo "  PASS: priority-only filter hides chatter, keeps DAEMON_START"
 
 # --full-history with --once is fine; --full-history without --once must
-# reject. We capture stderr because argparse-style errors land there.
-if eneru monitor --events-only --full-history --config $E2E_DIR/config-e2e-stats.yaml > /tmp/test31-fhfail.log 2>&1; then
-  echo "FAIL: --full-history without --once should have rejected"
+# reject. Capture the actual exit code and assert it's exactly 2 (the
+# code argparse uses for argument rejection); accepting "any non-zero"
+# would mask a regression that turned the rejection into a generic
+# crash with exit 1.
+set +e
+eneru monitor --events-only --full-history --config "$E2E_DIR/config-e2e-stats.yaml" > /tmp/test31-fhfail.log 2>&1
+RC=$?
+set -e
+if [ "$RC" -eq 0 ]; then
+  echo "FAIL: --full-history without --once should have rejected (got exit 0)"
+  cat /tmp/test31-fhfail.log
+  exit 1
+fi
+if [ "$RC" -ne 2 ]; then
+  echo "FAIL: --full-history rejection should exit 2 (argparse convention), got $RC"
   cat /tmp/test31-fhfail.log
   exit 1
 fi
@@ -269,7 +282,7 @@ if ! grep -q "full-history" /tmp/test31-fhfail.log; then
   cat /tmp/test31-fhfail.log
   exit 1
 fi
-echo "  PASS: --full-history without --once rejects"
+echo "  PASS: --full-history without --once rejects with exit 2"
 )
 
 # ======================================================================

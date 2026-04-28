@@ -286,8 +286,14 @@ def parse_state_file(path: Path) -> Optional[Dict[str, str]]:
         return None
 
 
-def parse_log_events(log_path: str, max_events: int = 8) -> List[str]:
-    """Read recent power events from the log file tail (fallback path)."""
+def parse_log_events(log_path: str,
+                     max_events: Optional[int] = 8) -> List[str]:
+    """Read recent power events from the log file tail (fallback path).
+
+    ``max_events=None`` returns every matching event in the file, no
+    cap. Used when the CLI passes ``--full-history`` and the SQLite
+    DB isn't present so we fall back to the log tail.
+    """
     INCLUDE = (
         "POWER EVENT", "Status changed", "SHUTDOWN", "shutdown",
         "CRITICAL", "FSD", "flap", "Flap", "On battery",
@@ -310,7 +316,7 @@ def parse_log_events(log_path: str, max_events: int = 8) -> List[str]:
                 continue
             if any(inc in line for inc in INCLUDE):
                 events.append(line)
-                if len(events) >= max_events:
+                if max_events is not None and len(events) >= max_events:
                     break
         events.reverse()
         return events
@@ -365,7 +371,7 @@ def query_events_for_display(
     config: Config,
     time_range_seconds: Optional[int] = None,
     *,
-    max_events: int = EVENTS_MAX_ROWS_MORE,
+    max_events: Optional[int] = EVENTS_MAX_ROWS_MORE,
     priority_only: bool = True,
 ) -> List[str]:
     """Pull events from each UPS's SQLite store, sorted by timestamp.
@@ -380,6 +386,11 @@ def query_events_for_display(
     :data:`PRIORITY_EVENTS` so the panel surfaces daemon and power
     transitions instead of being crowded out by per-condition chatter.
     Pass ``False`` (CLI ``--verbose`` / TUI ``<V>``) to include all rows.
+
+    ``max_events=None`` disables the row cap entirely. Used by the CLI
+    ``--full-history`` path so that "from the beginning" actually means
+    every row in the events table -- a finite cap of 500 silently
+    dropped older events on long-running installs.
     """
     end = int(time.time())
     start = 0 if time_range_seconds is None else end - max(60, int(time_range_seconds))
@@ -414,7 +425,8 @@ def query_events_for_display(
         return []  # signal "no DB" so callers can fall back
 
     rows.sort(key=lambda r: r[0])
-    rows = rows[-max_events:]
+    if max_events is not None:
+        rows = rows[-max_events:]
     return [_format_event_line(ts, label, etype, detail, multi_ups)
             for ts, label, etype, detail in rows]
 
@@ -854,6 +866,13 @@ def _robust_bounds(values: List[float]) -> Tuple[float, float]:
     outlier (e.g. a stray 0V from a NUT poll race) from squashing the
     plotted band into a single row at the top of the chart.
 
+    Symmetric drop-count formulation: clip ``int(n * 0.05)`` samples
+    from each end of the sorted series. For ``n = 20`` that's one
+    sample per side -- ``lo = sorted[1]``, ``hi = sorted[18]`` --
+    cleanly excluding both extremes. The earlier ``int(n * 0.95)``
+    formulation produced ``sorted[19]`` (the actual max) and silently
+    no-op'd the helper at small n.
+
     When the percentile bounds collapse (every sample inside the 5..95
     band is identical), the caller's pad-around-flat logic handles the
     ``hi == lo`` case -- we deliberately do *not* fall back to
@@ -871,8 +890,9 @@ def _robust_bounds(values: List[float]) -> Tuple[float, float]:
     if n < 20:
         return min(values), max(values)
     sorted_vals = sorted(values)
-    lo = sorted_vals[int(n * 0.05)]
-    hi = sorted_vals[min(n - 1, int(n * 0.95))]
+    drop = int(n * 0.05)  # number of samples to clip from each end
+    lo = sorted_vals[drop]
+    hi = sorted_vals[n - 1 - drop]
     return lo, hi
 
 
@@ -1247,18 +1267,21 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
     :data:`PRIORITY_EVENTS` defaults. ``full_history=True`` ignores the
     ``time_range`` window and queries the events table from epoch.
     """
+    # When --full-history is set, the cap is removed entirely (None) so
+    # "from the beginning" means every row, not "the most recent 500".
+    # Otherwise the events-only window caps at 50 to keep stdout sane;
+    # the snapshot path uses a smaller 10-row tail.
+    events_cap = None if full_history else 50
+
     if events_only:
-        if full_history:
-            window = None
-        else:
-            window = TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
+        window = None if full_history else TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
         events = query_events_for_display(
-            config, window, max_events=500 if full_history else 50,
+            config, window, max_events=events_cap,
             priority_only=not verbose,
         )
         if not events:
             events = parse_log_events(config.logging.file or "",
-                                      max_events=500 if full_history else 50)
+                                      max_events=events_cap)
         if events:
             for line in events:
                 print(line)
@@ -1304,10 +1327,19 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
         if i < group_count - 1:
             print()
 
-    seconds = TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
-    events = query_events_for_display(config, seconds, max_events=10)
+    # Snapshot path: same flag semantics as the events-only branch
+    # above. --full-history widens the time window AND the row cap;
+    # --verbose drops the priority filter so low-priority chatter can
+    # surface here too. Pre-fix this section silently ignored both.
+    snapshot_window = None if full_history else TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
+    snapshot_cap = None if full_history else 10
+    events = query_events_for_display(
+        config, snapshot_window, max_events=snapshot_cap,
+        priority_only=not verbose,
+    )
     if not events:
-        events = parse_log_events(config.logging.file or "", max_events=10)
+        events = parse_log_events(config.logging.file or "",
+                                  max_events=snapshot_cap)
     if events:
         print()
         print("Recent Events:")

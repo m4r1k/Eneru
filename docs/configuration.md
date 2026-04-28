@@ -442,5 +442,5 @@ Example package commands:
 sudo eneru validate --config /etc/ups-monitor/config.yaml
 sudo eneru run --dry-run --config /etc/ups-monitor/config.yaml
 sudo eneru monitor --once --events-only --config /etc/ups-monitor/config.yaml
-sudo eneru monitor --once --events-only --verbose --full-history --config /etc/ups-monitor/config.yaml
+sudo /opt/ups-monitor/eneru.py monitor --once --events-only --verbose --full-history --config /etc/ups-monitor/config.yaml
 ```

@@ -376,8 +376,16 @@ def _cmd_monitor(args):
     # mimic its ``error: ...`` stderr format so log scrapers keep
     # working.
     if getattr(args, "full_history", False) and not args.once:
+        # Compose the prefix from the actual invocation so users running
+        # ``eneru monitor`` don't get an "eneru tui: ..." message and
+        # vice versa. ``args.command`` is set by argparse via the
+        # subparsers' ``dest="command"``; fall back to ``argv[1]`` if
+        # that's somehow missing (defensive: monitor / tui are aliases).
+        sub = getattr(args, "command", None) or (
+            sys.argv[1] if len(sys.argv) > 1 else "monitor"
+        )
         sys.stderr.write(
-            "eneru tui: error: --full-history requires --once "
+            f"eneru {sub}: error: --full-history requires --once "
             "(interactive TUI is real-time)\n"
         )
         sys.exit(2)
