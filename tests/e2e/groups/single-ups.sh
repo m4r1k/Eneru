@@ -382,5 +382,184 @@ fi
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
 )
 
+# ======================================================================
+# Test 34: Shutdown re-arm on POWER_RESTORED (5.2.2 / bug #4)
+#
+# The shutdown sequence creates a flag file as a re-entry guard. In the
+# local_shutdown.enabled=true real-mode path the daemon doesn't clear
+# it, because it expects the OS reboot to take it down within seconds.
+# On a healthy production install systemd reaps it before this matters,
+# but on edge installs (custom shutdown command, sandboxed env, dummy
+# UPS test rig) the host stays up and the second outage's trigger
+# silently no-ops. _handle_on_line now clears the flag on OB->OL.
+#
+# We exercise this with local_shutdown.enabled=true + dry_run=false +
+# shutdown_command=/bin/true so the daemon "shuts down" the host
+# (no-op) but keeps polling. Any regression here would silently drop
+# the second EMERGENCY_SHUTDOWN_INITIATED row.
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 34: Shutdown re-arm on POWER_RESTORED (bug #4)"
+echo "=== Test 34: re-arm after POWER_RESTORED ==="
+
+REARM_DIR=/tmp/eneru-e2e-rearm
+rm -rf $REARM_DIR
+mkdir -p $REARM_DIR
+
+# Inline config: local shutdown "enabled" but the command is a no-op,
+# so the daemon issues "shutdown" and keeps running. The flag file
+# would persist forever pre-5.2.2, blocking the second trigger.
+cat > $REARM_DIR/config.yaml <<EOF
+ups:
+  name: "TestUPS@localhost:3493"
+  check_interval: 1
+  max_stale_data_tolerance: 3
+triggers:
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+  depletion:
+    grace_period: 5
+  extended_time:
+    enabled: false
+behavior:
+  dry_run: false
+logging:
+  file: null
+  state_file: $REARM_DIR/state
+  battery_history_file: $REARM_DIR/history
+  shutdown_flag_file: $REARM_DIR/shutdown-flag
+statistics:
+  db_directory: $REARM_DIR
+notifications:
+  enabled: false
+virtual_machines:
+  enabled: false
+containers:
+  enabled: false
+filesystems:
+  sync_enabled: false
+  unmount:
+    enabled: false
+local_shutdown:
+  enabled: true
+  command: "/bin/true e2e-rearm-noop"
+  wall: false
+EOF
+
+# Pin the assumptions this test makes about the scenario contents.
+# If a future scenario tweak nudges low-battery.dev's battery.charge
+# above the trigger threshold (or online-charging.dev away from OL),
+# the scenarios silently stop driving the OB/OL transitions and this
+# test would still "pass" without exercising the re-arm path. Fail
+# loud instead. Scenario format is plain ``key: value`` lines; battery
+# charge can be a float like ``14`` or ``14.0``.
+LB_CHARGE=$(awk '/^battery\.charge:/{gsub(/[^0-9.]/, "", $2); print $2; exit}' "$E2E_DIR/scenarios/low-battery.dev")
+OL_STATUS=$(awk -F': ' '/^ups\.status:/{print $2; exit}' "$E2E_DIR/scenarios/online-charging.dev")
+LB_CHARGE_INT=${LB_CHARGE%.*}
+if [ -z "$LB_CHARGE_INT" ] || [ "$LB_CHARGE_INT" -ge 20 ]; then
+  echo "FAIL (setup): low-battery.dev battery.charge=${LB_CHARGE:-?} expected < 20"
+  exit 1
+fi
+if ! echo "$OL_STATUS" | grep -q "OL"; then
+  echo "FAIL (setup): online-charging.dev ups.status='${OL_STATUS:-?}' expected to contain OL"
+  exit 1
+fi
+
+# Start with healthy mains so the daemon enters the loop in OL.
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+sleep 3
+
+# Daemon in background. NO --exit-after-shutdown; we want it to stay
+# alive across all three transitions.
+PYTHONUNBUFFERED=1 eneru run --config "$REARM_DIR/config.yaml" > "$REARM_DIR/daemon.log" 2>&1 &
+DAEMON_PID=$!
+# Single-quoted trap so $DAEMON_PID resolves at trap-fire time, not
+# trap-set time. Functionally equivalent here (DAEMON_PID is already
+# set when this line runs and never changes), but matches shell-best-
+# practice and silences ShellCheck.
+trap 'kill $DAEMON_PID 2>/dev/null || true' EXIT
+
+# Let the daemon initialise + observe OL.
+sleep 3
+
+# (1) First outage: low battery -> trigger fires, flag created, no-op
+#     "shutdown" command runs, daemon keeps polling.
+echo "  step 1: low-battery -> first trigger"
+cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply.dev
+
+# Wait for the first EMERGENCY_SHUTDOWN_INITIATED to land in SQLite.
+DB=$REARM_DIR/default.db
+for i in {1..20}; do
+  if [ -f "$DB" ]; then
+    COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM events WHERE event_type='EMERGENCY_SHUTDOWN_INITIATED'" 2>/dev/null || echo 0)
+    if [ "$COUNT" -ge 1 ]; then
+      echo "  first trigger logged after ${i}s"
+      break
+    fi
+  fi
+  sleep 1
+done
+if [ "${COUNT:-0}" -lt 1 ]; then
+  echo "FAIL: first EMERGENCY_SHUTDOWN_INITIATED never recorded"
+  tail -40 "$REARM_DIR/daemon.log"
+  exit 1
+fi
+
+# (2) Power restored: daemon must see OL again and clear the flag.
+echo "  step 2: online-charging -> POWER_RESTORED clears flag"
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+
+# Wait until POWER_RESTORED lands AND the flag file is gone.
+for i in {1..20}; do
+  PR_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM events WHERE event_type='POWER_RESTORED'" 2>/dev/null || echo 0)
+  if [ "$PR_COUNT" -ge 1 ] && [ ! -f "$REARM_DIR/shutdown-flag" ]; then
+    echo "  POWER_RESTORED logged + flag cleared after ${i}s"
+    break
+  fi
+  sleep 1
+done
+if [ "${PR_COUNT:-0}" -lt 1 ]; then
+  echo "FAIL: POWER_RESTORED never recorded"
+  tail -40 "$REARM_DIR/daemon.log"
+  exit 1
+fi
+if [ -f "$REARM_DIR/shutdown-flag" ]; then
+  echo "FAIL: flag still present after POWER_RESTORED -- re-arm broken (bug #4 regression)"
+  tail -40 "$REARM_DIR/daemon.log"
+  exit 1
+fi
+
+# (3) Second outage: trigger MUST fire again. Pre-5.2.2 the flag
+#     persisted and this no-op'd silently.
+echo "  step 3: low-battery again -> second trigger (re-arm proof)"
+cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply.dev
+
+for i in {1..20}; do
+  COUNT2=$(sqlite3 "$DB" "SELECT COUNT(*) FROM events WHERE event_type='EMERGENCY_SHUTDOWN_INITIATED'" 2>/dev/null || echo 1)
+  if [ "$COUNT2" -ge 2 ]; then
+    echo "  second trigger logged after ${i}s"
+    break
+  fi
+  sleep 1
+done
+if [ "${COUNT2:-0}" -lt 2 ]; then
+  echo "FAIL: second EMERGENCY_SHUTDOWN_INITIATED never recorded -- re-arm broken (bug #4 regression)"
+  echo "events table:"
+  sqlite3 "$DB" "SELECT ts, event_type, detail FROM events ORDER BY ts" || true
+  tail -60 "$REARM_DIR/daemon.log"
+  exit 1
+fi
+
+# Stop the daemon cleanly.
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+trap - EXIT
+
+# Restore baseline so any downstream tests start fresh.
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+echo "PASS: bug #4 re-arm; OB->OL->OB produced 2 EMERGENCY_SHUTDOWN_INITIATED rows"
+)
+
 echo ""
 echo "=== Group 'single-ups' completed successfully ==="

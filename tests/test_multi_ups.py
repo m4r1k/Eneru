@@ -376,6 +376,78 @@ class TestMultiUPSCoordinator:
         coord._handle_local_shutdown("UPS2")
         assert len(shutdown_count) == 1
 
+    @pytest.mark.unit
+    def test_clear_local_shutdown_state_resets_lock_and_flag(self, tmp_path):
+        """5.2.2 (bug #4 / multi-UPS): _clear_local_shutdown_state resets
+        BOTH the in-memory ``_local_shutdown_initiated`` lock and the
+        unsuffixed ``_global_shutdown_flag`` so the next outage on any
+        group can re-trigger. Without this, the per-monitor unlink in
+        ``_handle_on_line`` re-arms only the suffixed per-group flag --
+        the second OB still hits the coordinator's stuck lock."""
+        flag_path = tmp_path / "global-shutdown-flag"
+        config = self._make_config(
+            [UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True)],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(flag_path),
+            ),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+        )
+        coord = MultiUPSCoordinator(config)
+
+        # Simulate a prior shutdown sequence having set both pieces.
+        coord._local_shutdown_initiated = True
+        flag_path.touch()
+        assert flag_path.exists()
+
+        coord._clear_local_shutdown_state()
+
+        assert coord._local_shutdown_initiated is False, (
+            "in-memory lock must be reset on POWER_RESTORED so the next "
+            "OB re-triggers (bug #4 multi-UPS path)"
+        )
+        assert not flag_path.exists(), (
+            "global flag must be cleared on POWER_RESTORED"
+        )
+
+    @pytest.mark.unit
+    def test_clear_local_shutdown_state_idempotent(self, tmp_path):
+        """Safe to call when nothing was in flight (steady-state OL or
+        repeated OL transitions)."""
+        flag_path = tmp_path / "global-shutdown-flag"
+        config = self._make_config(
+            [UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True)],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(flag_path),
+            ),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+        )
+        coord = MultiUPSCoordinator(config)
+        # Nothing set, no flag file.
+        coord._clear_local_shutdown_state()  # must not raise
+        coord._clear_local_shutdown_state()  # idempotent
+        assert coord._local_shutdown_initiated is False
+        assert not flag_path.exists()
+
+    @pytest.mark.unit
+    def test_coordinator_passes_power_restored_callback_to_monitors(self):
+        """The coordinator MUST wire its ``_clear_local_shutdown_state``
+        into each monitor as ``power_restored_callback`` -- otherwise
+        the OB/FSD->OL transition can clear the per-group flag but the
+        coordinator's own flag/lock stay set (multi-UPS bug #4)."""
+        import inspect
+        from eneru import multi_ups as mu_mod
+
+        src = inspect.getsource(mu_mod.MultiUPSCoordinator._start_monitors)
+        assert "power_restored_callback=self._clear_local_shutdown_state" in src, (
+            "coordinator must pass power_restored_callback to UPSGroupMonitor; "
+            "without it, multi-UPS deployments still hit bug #4 even after "
+            "the per-group _handle_on_line clears its suffixed flag."
+        )
+
 
 # ==============================================================================
 # UPS MONITOR COORDINATOR MODE

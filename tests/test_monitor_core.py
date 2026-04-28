@@ -324,6 +324,158 @@ class TestFSDFlag:
 
         assert call_count == 1
 
+    @pytest.mark.unit
+    def test_trigger_immediate_shutdown_logs_when_gated(self, tmp_path):
+        """5.2.2 (bug #4): when the flag-file gate blocks a re-trigger,
+        a warning must surface so operators can correlate it. Pre-5.2.2
+        the second call returned silently, which made debugging the
+        ckrevel reproduction much harder than it had to be.
+        """
+        monitor = make_monitor(tmp_path)
+
+        with patch.object(monitor, "_execute_shutdown_sequence"):
+            monitor._trigger_immediate_shutdown("First")
+
+        with patch.object(monitor, "_log_message") as mock_log:
+            with patch.object(monitor, "_execute_shutdown_sequence") as mock_exec:
+                monitor._trigger_immediate_shutdown("Second")
+                # Must not run the sequence again (still no-op).
+                mock_exec.assert_not_called()
+            # Must log a warning that mentions the reason and the flag path.
+            assert mock_log.call_count >= 1
+            warning_calls = [
+                call.args[0] for call in mock_log.call_args_list
+                if call.args and "previous shutdown sequence" in call.args[0]
+            ]
+            assert warning_calls, (
+                f"expected a 'previous shutdown sequence' warning; "
+                f"got: {[c.args for c in mock_log.call_args_list]}"
+            )
+            assert "Second" in warning_calls[0]
+            assert str(monitor._shutdown_flag_path) in warning_calls[0]
+
+
+# ==============================================================================
+# Shutdown re-arm on POWER_RESTORED (5.2.2 / bug #4)
+# ==============================================================================
+
+class TestShutdownReArmOnPowerRestored:
+    """When the OS reboot fails to take down the daemon (custom shutdown
+    command, sandboxed environment, dummy-UPS test rig), the previous
+    shutdown sequence's flag file persists and silently blocks the next
+    trigger. _handle_on_line clears the flag on OB->OL so the daemon
+    re-arms.
+    """
+
+    @pytest.mark.unit
+    def test_power_restored_unlinks_shutdown_flag(self, tmp_path):
+        """OB -> OL transition must remove the shutdown flag file."""
+        monitor = make_monitor(tmp_path)
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.on_battery_start_time = int(time.time()) - 30
+        # Simulate a previous trigger leaving the flag behind.
+        monitor._shutdown_flag_path.touch()
+        assert monitor._shutdown_flag_path.exists()
+
+        ups_data = {
+            "ups.status": "OL CHRG",
+            "battery.charge": "85",
+            "input.voltage": "230.0",
+        }
+        monitor._handle_on_line(ups_data)
+
+        assert not monitor._shutdown_flag_path.exists(), (
+            "POWER_RESTORED must clear the shutdown flag so the next OB "
+            "transition can re-trigger; pre-5.2.2 the flag persisted "
+            "and the second trigger silently no-op'd (bug #4)."
+        )
+
+    @pytest.mark.unit
+    def test_power_restored_no_flag_is_safe(self, tmp_path):
+        """Clearing a non-existent flag must not raise (missing_ok=True)."""
+        monitor = make_monitor(tmp_path)
+        monitor.state.previous_status = "OB"
+        monitor.state.on_battery_start_time = int(time.time()) - 5
+        assert not monitor._shutdown_flag_path.exists()
+
+        ups_data = {
+            "ups.status": "OL",
+            "battery.charge": "100",
+            "input.voltage": "230.0",
+        }
+        # No exception, no flag.
+        monitor._handle_on_line(ups_data)
+        assert not monitor._shutdown_flag_path.exists()
+
+    @pytest.mark.unit
+    def test_no_unlink_when_already_on_line(self, tmp_path):
+        """OL -> OL (no transition) must NOT touch the shutdown flag.
+
+        If a shutdown sequence is genuinely in flight while the daemon
+        is still on line (extremely unusual but possible during dry-run
+        or coordinator-mode chains), removing the flag could let a
+        concurrent re-trigger fire. Only the OB/FSD -> OL transition
+        is expected to clear the flag.
+        """
+        monitor = make_monitor(tmp_path)
+        monitor.state.previous_status = "OL CHRG"
+        # Pre-existing flag (someone or something put it there).
+        monitor._shutdown_flag_path.touch()
+
+        ups_data = {
+            "ups.status": "OL CHRG",
+            "battery.charge": "100",
+            "input.voltage": "230.0",
+        }
+        monitor._handle_on_line(ups_data)
+
+        assert monitor._shutdown_flag_path.exists(), (
+            "Steady-state OL polls must not clear the shutdown flag; "
+            "the unlink is gated on the OB/FSD -> OL transition."
+        )
+
+    @pytest.mark.unit
+    def test_full_outage_recovery_rearms_trigger(self, tmp_path):
+        """End-to-end: OB triggers shutdown -> flag set; OL clears flag;
+        second OB triggers shutdown again. Mirrors the bug #4 reproducer
+        exactly (with the shutdown sequence mocked so the test doesn't
+        actually call out to real shutdown code).
+        """
+        monitor = make_monitor(tmp_path)
+
+        # First OB: trigger fires, flag is set.
+        monitor.state.previous_status = ""
+        ob_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "5",   # below default low_battery_threshold
+            "battery.runtime": "30",
+            "ups.load": "30",
+        }
+        with patch.object(monitor, "_execute_shutdown_sequence") as mock_exec:
+            monitor._handle_on_battery(ob_data)
+        assert mock_exec.called, "first OB must trigger shutdown"
+        assert monitor._shutdown_flag_path.exists()
+        monitor.state.previous_status = "OB DISCHRG"
+
+        # OL: power restored, flag cleared.
+        ol_data = {
+            "ups.status": "OL CHRG",
+            "battery.charge": "100",
+            "input.voltage": "230.0",
+        }
+        monitor._handle_on_line(ol_data)
+        assert not monitor._shutdown_flag_path.exists()
+        monitor.state.previous_status = "OL CHRG"
+
+        # Second OB: trigger must fire again (re-arm worked).
+        with patch.object(monitor, "_execute_shutdown_sequence") as mock_exec2:
+            monitor._handle_on_battery(ob_data)
+        assert mock_exec2.called, (
+            "second OB after OL must re-trigger shutdown; if this fails "
+            "the bug #4 regression is back."
+        )
+        assert monitor._shutdown_flag_path.exists()
+
 
 # ==============================================================================
 # FAILSAFE (Connection Lost While On Battery)

@@ -187,6 +187,15 @@ sudo rm -f /var/run/ups-shutdown-redundancy-*
 
 Remove flags only after confirming no real shutdown is in progress.
 
+If you see this warning in the logs:
+
+```
+⚠️ Shutdown trigger fired (...) but a previous shutdown sequence is already
+   in progress (/var/run/ups-shutdown-scheduled). Ignoring re-trigger.
+```
+
+it means a prior shutdown sequence ran but the host did not actually halt (custom shutdown command was a no-op, sandbox/container intercepted it, or the daemon was running outside systemd's reach). Since 5.2.2 the daemon clears the flag automatically when `POWER_RESTORED` fires, so the next outage re-arms cleanly. The warning surfaces only on the unusual path where a trigger fires *while* a previous sequence is still considered in flight; clearing the flag manually as above is safe once you have confirmed no real shutdown is running.
+
 ## Graphs or events are empty
 
 The stats writer flushes every few seconds. For a fresh start, wait at least 10 seconds and check the database:
