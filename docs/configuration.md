@@ -430,9 +430,11 @@ Common flags:
 | `run` | `--exit-after-shutdown` | Exit after a shutdown sequence finishes |
 | `monitor` | `--once` | Print one status snapshot |
 | `monitor` | `--interval` | TUI refresh interval |
-| `monitor` | `--graph {charge,load,voltage,runtime}` | Render a graph with `--once` |
-| `monitor` | `--time {1h,6h,24h,7d,30d}` | Graph or event window |
+| `monitor` | `--graph {charge,load,voltage,runtime}` | Initial graph metric (interactive: cycle with `<G>`) |
+| `monitor` | `--time {1h,6h,24h,7d,30d}` | Initial graph / event window (interactive seeds the cycle, still toggle with `<T>`) |
 | `monitor` | `--events-only` | Print recent events only |
+| `monitor` | `--verbose`, `-v` | Show low-priority events too (default: priority only); `<V>` toggles in-session |
+| `monitor` | `--full-history` | Ignore `--time`, query events from the beginning (`--once` only) |
 
 Example package commands:
 
@@ -440,4 +442,5 @@ Example package commands:
 sudo eneru validate --config /etc/ups-monitor/config.yaml
 sudo eneru run --dry-run --config /etc/ups-monitor/config.yaml
 sudo eneru monitor --once --events-only --config /etc/ups-monitor/config.yaml
+sudo /opt/ups-monitor/eneru.py monitor --once --events-only --verbose --full-history --config /etc/ups-monitor/config.yaml
 ```

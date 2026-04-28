@@ -37,8 +37,30 @@ TIME_RANGE_SECONDS = {
 # table is one row per power event, not per poll, so even years of
 # history stay tiny) and lets the operator scroll through with the
 # arrow keys.
-EVENTS_MAX_ROWS_NORMAL = 8
+EVENTS_MAX_ROWS_NORMAL = 20
 EVENTS_MAX_ROWS_MORE = 500
+
+# Default-visible event types. The events table accumulates a mix of
+# load-bearing milestones (daemon lifecycle, shutdown triggers, power
+# transitions) and chatter that's useful when debugging but noisy
+# day-to-day (per-condition voltage warnings, suppressed flaps, etc.).
+# The TUI ships filtered to the milestones; ``--verbose`` (CLI) and the
+# ``<V>`` key (interactive) widen the filter to include everything.
+PRIORITY_EVENTS = frozenset({
+    "DAEMON_START",
+    "DAEMON_STOP",
+    "DAEMON_RESTARTED",
+    "DAEMON_UPGRADED",
+    "DAEMON_RECOVERED",
+    "EMERGENCY_SHUTDOWN_INITIATED",
+    "SHUTDOWN_SEQUENCE_COMPLETE",
+    "POWER_RESTORED",
+    "ON_BATTERY",
+    "VOLTAGE_LOW",
+    "VOLTAGE_HIGH",
+    "CONNECTION_LOST",
+    "CONNECTION_RESTORED",
+})
 
 # Map graph modes to (column, unit_suffix, y_min, y_max, value_formatter).
 # value_formatter takes a float and returns the user-facing display
@@ -264,8 +286,14 @@ def parse_state_file(path: Path) -> Optional[Dict[str, str]]:
         return None
 
 
-def parse_log_events(log_path: str, max_events: int = 8) -> List[str]:
-    """Read recent power events from the log file tail (fallback path)."""
+def parse_log_events(log_path: str,
+                     max_events: Optional[int] = 8) -> List[str]:
+    """Read recent power events from the log file tail (fallback path).
+
+    ``max_events=None`` returns every matching event in the file, no
+    cap. Used when the CLI passes ``--full-history`` and the SQLite
+    DB isn't present so we fall back to the log tail.
+    """
     INCLUDE = (
         "POWER EVENT", "Status changed", "SHUTDOWN", "shutdown",
         "CRITICAL", "FSD", "flap", "Flap", "On battery",
@@ -288,7 +316,7 @@ def parse_log_events(log_path: str, max_events: int = 8) -> List[str]:
                 continue
             if any(inc in line for inc in INCLUDE):
                 events.append(line)
-                if len(events) >= max_events:
+                if max_events is not None and len(events) >= max_events:
                     break
         events.reverse()
         return events
@@ -343,7 +371,8 @@ def query_events_for_display(
     config: Config,
     time_range_seconds: Optional[int] = None,
     *,
-    max_events: int = EVENTS_MAX_ROWS_MORE,
+    max_events: Optional[int] = EVENTS_MAX_ROWS_MORE,
+    priority_only: bool = True,
 ) -> List[str]:
     """Pull events from each UPS's SQLite store, sorted by timestamp.
 
@@ -352,6 +381,16 @@ def query_events_for_display(
     formatted display strings ready to drop into the TUI events panel.
     Returns an empty list when no per-UPS DB exists -- callers should
     fall back to ``parse_log_events`` in that case.
+
+    ``priority_only=True`` (default) limits the result to event types in
+    :data:`PRIORITY_EVENTS` so the panel surfaces daemon and power
+    transitions instead of being crowded out by per-condition chatter.
+    Pass ``False`` (CLI ``--verbose`` / TUI ``<V>``) to include all rows.
+
+    ``max_events=None`` disables the row cap entirely. Used by the CLI
+    ``--full-history`` path so that "from the beginning" actually means
+    every row in the events table -- a finite cap of 500 silently
+    dropped older events on long-running installs.
     """
     end = int(time.time())
     start = 0 if time_range_seconds is None else end - max(60, int(time_range_seconds))
@@ -373,6 +412,8 @@ def query_events_for_display(
             finally:
                 store._conn = None
             for ts, etype, detail in events:
+                if priority_only and etype not in PRIORITY_EVENTS:
+                    continue
                 rows.append((int(ts), group.ups.label, etype, detail or ""))
         finally:
             try:
@@ -384,7 +425,8 @@ def query_events_for_display(
         return []  # signal "no DB" so callers can fall back
 
     rows.sort(key=lambda r: r[0])
-    rows = rows[-max_events:]
+    if max_events is not None:
+        rows = rows[-max_events:]
     return [_format_event_line(ts, label, etype, detail, multi_ups)
             for ts, label, etype, detail in rows]
 
@@ -713,7 +755,7 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
                        events: List[str], show_more: bool,
                        *, graph_mode: str = "off", time_range: str = "1h",
                        ups_index: int = 0, ups_total: int = 1,
-                       scroll_offset: int = 0):
+                       scroll_offset: int = 0, verbose: bool = False):
     """Render the logs panel with yellow/gold background, edge to edge.
 
     The bottom-row key hints reflect the *current* graph mode, time
@@ -782,6 +824,10 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
     x = 2
     ups_descr = (f"UPS: {ups_index + 1}/{ups_total}" if ups_total > 1
                  else "UPS")
+    # Hint order: most useful keys first so narrow terminals (which drop
+    # tail hints via the width check below) keep the actionable cycles
+    # visible. <V> is shorter than "Verbose: ..." would imply -- "Verb"
+    # keeps a 120-col terminal showing every hint.
     hints = (
         ("<Q>", "Quit"),
         ("<R>", "Refresh"),
@@ -790,6 +836,7 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
         ("<G>", f"Graph: {graph_mode}"),
         ("<T>", f"Time: {time_range}"),
         ("<U>", ups_descr),
+        ("<V>", f"Verb: {'on' if verbose else 'off'}"),
     )
     for label, descr in hints:
         if x + len(label) + len(descr) + 6 > width:
@@ -811,6 +858,42 @@ def cycle(values: tuple, current: str) -> str:
     except ValueError:
         return values[0]
     return values[(idx + 1) % len(values)]
+
+
+def _robust_bounds(values: List[float]) -> Tuple[float, float]:
+    """5th/95th percentile of ``values``, with a min(values)/max(values)
+    fallback for short series. Used by the graph panel to keep a single
+    outlier (e.g. a stray 0V from a NUT poll race) from squashing the
+    plotted band into a single row at the top of the chart.
+
+    Symmetric drop-count formulation: clip ``int(n * 0.05)`` samples
+    from each end of the sorted series. For ``n = 20`` that's one
+    sample per side -- ``lo = sorted[1]``, ``hi = sorted[18]`` --
+    cleanly excluding both extremes. The earlier ``int(n * 0.95)``
+    formulation produced ``sorted[19]`` (the actual max) and silently
+    no-op'd the helper at small n.
+
+    When the percentile bounds collapse (every sample inside the 5..95
+    band is identical), the caller's pad-around-flat logic handles the
+    ``hi == lo`` case -- we deliberately do *not* fall back to
+    min/max here, because that would re-introduce the very outlier the
+    helper exists to clip.
+
+    At ``n < 40`` only one outlier can be clipped per side; with two or
+    more bottom-side outliers in a 20-sample series, one survives into
+    the bound. Acceptable for our use case (the writer-side filter at
+    ``stats._to_input_voltage`` has already dropped most phantom zeros).
+    """
+    if not values:
+        return 0.0, 0.0  # caller guards but defensive: don't raise on min([])
+    n = len(values)
+    if n < 20:
+        return min(values), max(values)
+    sorted_vals = sorted(values)
+    drop = int(n * 0.05)  # number of samples to clip from each end
+    lo = sorted_vals[drop]
+    hi = sorted_vals[n - 1 - drop]
+    return lo, hi
 
 
 def render_graph_panel(stdscr, y_start: int, y_end: int, width: int,
@@ -859,8 +942,19 @@ def render_graph_panel(stdscr, y_start: int, y_end: int, width: int,
     # the actual range, not "0-235".
     obs_min = min(values)
     obs_max = max(values)
-    y_min = cfg_y_min if cfg_y_min is not None else obs_min
-    y_max = cfg_y_max if cfg_y_max is not None else obs_max
+    if cfg_y_min is None or cfg_y_max is None:
+        # Unbounded metric (voltage / runtime). A single outlier -- e.g.
+        # a phantom 0V sample left over from before the on-line zero
+        # filter -- would otherwise drag obs_min to 0 and squash the
+        # meaningful band into one row at the top of the chart. Use the
+        # 5th/95th percentile when there's enough data to compute one;
+        # outliers still plot (clipped) at the band edges thanks to the
+        # norm-clamp in BrailleGraph.plot.
+        scale_min, scale_max = _robust_bounds(values)
+    else:
+        scale_min, scale_max = obs_min, obs_max
+    y_min = cfg_y_min if cfg_y_min is not None else scale_min
+    y_max = cfg_y_max if cfg_y_max is not None else scale_max
     if y_max <= y_min:  # single sample or flat line
         pad = max(abs(y_min) * 0.05, 1.0)
         y_min -= pad
@@ -921,8 +1015,22 @@ def render_graph_panel(stdscr, y_start: int, y_end: int, width: int,
         safe_addstr(stdscr, y_end - 1, 0, footer, gray_attr)
 
 
-def run_tui(config: Config, interval: int = 5):
-    """Run the curses TUI dashboard."""
+def run_tui(config: Config, interval: int = 5, *,
+            initial_graph: Optional[str] = None,
+            initial_time_range: str = "1h",
+            initial_ups_index: int = 0,
+            verbose: bool = False):
+    """Run the curses TUI dashboard.
+
+    Optional kwargs let the CLI pre-seed the cycle state so flags like
+    ``--graph voltage --time 7d`` open the dashboard already showing the
+    requested view, instead of starting on the default (graph off) and
+    forcing the operator to press <G>/<T> to get there.
+
+    ``verbose=True`` opens the events panel showing all event types
+    (matching ``--verbose`` on the CLI). The ``<V>`` key toggles this
+    in-session.
+    """
     def _main(stdscr):
         init_colors()
         curses.curs_set(0)
@@ -936,9 +1044,16 @@ def run_tui(config: Config, interval: int = 5):
         stdscr.keypad(True)
 
         show_more = False
-        graph_mode = "off"           # G key cycles through GRAPH_MODES
-        time_range = "1h"            # T key cycles through TIME_RANGES
-        ups_index = 0                # U key cycles which UPS the graph shows
+        graph_mode = (
+            initial_graph if initial_graph in GRAPH_MODES else "off"
+        )
+        time_range = (
+            initial_time_range if initial_time_range in TIME_RANGES else "1h"
+        )
+        ups_index = max(
+            0, min(int(initial_ups_index or 0), max(0, len(config.ups_groups) - 1))
+        )
+        events_verbose = bool(verbose)
         events_scroll = 0            # ↑/↓ scrolls events panel; 0 = bottom
 
         while True:
@@ -1000,6 +1115,7 @@ def run_tui(config: Config, interval: int = 5):
             )
             log_events = query_events_for_display(
                 config, max_events=events_cap,
+                priority_only=not events_verbose,
             )
             if not log_events:
                 log_events = parse_log_events(
@@ -1029,7 +1145,8 @@ def run_tui(config: Config, interval: int = 5):
                               time_range=time_range,
                               ups_index=ups_index,
                               ups_total=len(config.ups_groups) or 1,
-                              scroll_offset=events_scroll)
+                              scroll_offset=events_scroll,
+                              verbose=events_verbose)
 
             # Move cursor to bottom-right to avoid visual artifacts
             try:
@@ -1048,6 +1165,9 @@ def run_tui(config: Config, interval: int = 5):
                 continue
             elif key in (ord('m'), ord('M')):
                 show_more = not show_more
+            elif key in (ord('v'), ord('V')):
+                events_verbose = not events_verbose
+                events_scroll = 0  # reset so the new (longer/shorter) list anchors at bottom
             elif key in (ord('g'), ord('G')):
                 graph_mode = cycle(GRAPH_MODES, graph_mode)
             elif key in (ord('t'), ord('T')):
@@ -1135,18 +1255,33 @@ def render_graph_text(
 
 
 def run_once(config: Config, *, graph_metric: Optional[str] = None,
-             time_range: str = "1h", events_only: bool = False):
+             time_range: str = "1h", events_only: bool = False,
+             verbose: bool = False, full_history: bool = False):
     """Print a status snapshot to stdout and exit.
 
     With ``events_only=True`` the status / resource summary and graph
     block are skipped -- only the events list (from SQLite if available,
     otherwise the log tail) is printed. Useful for scripts and CI.
+
+    ``verbose=True`` includes low-priority chatter alongside the
+    :data:`PRIORITY_EVENTS` defaults. ``full_history=True`` ignores the
+    ``time_range`` window and queries the events table from epoch.
     """
+    # When --full-history is set, the cap is removed entirely (None) so
+    # "from the beginning" means every row, not "the most recent 500".
+    # Otherwise the events-only window caps at 50 to keep stdout sane;
+    # the snapshot path uses a smaller 10-row tail.
+    events_cap = None if full_history else 50
+
     if events_only:
-        seconds = TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
-        events = query_events_for_display(config, seconds, max_events=50)
+        window = None if full_history else TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
+        events = query_events_for_display(
+            config, window, max_events=events_cap,
+            priority_only=not verbose,
+        )
         if not events:
-            events = parse_log_events(config.logging.file or "", max_events=50)
+            events = parse_log_events(config.logging.file or "",
+                                      max_events=events_cap)
         if events:
             for line in events:
                 print(line)
@@ -1192,10 +1327,19 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
         if i < group_count - 1:
             print()
 
-    seconds = TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
-    events = query_events_for_display(config, seconds, max_events=10)
+    # Snapshot path: same flag semantics as the events-only branch
+    # above. --full-history widens the time window AND the row cap;
+    # --verbose drops the priority filter so low-priority chatter can
+    # surface here too. Pre-fix this section silently ignored both.
+    snapshot_window = None if full_history else TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
+    snapshot_cap = None if full_history else 10
+    events = query_events_for_display(
+        config, snapshot_window, max_events=snapshot_cap,
+        priority_only=not verbose,
+    )
     if not events:
-        events = parse_log_events(config.logging.file or "", max_events=10)
+        events = parse_log_events(config.logging.file or "",
+                                  max_events=snapshot_cap)
     if events:
         print()
         print("Recent Events:")

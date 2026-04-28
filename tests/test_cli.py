@@ -86,7 +86,8 @@ class TestCLITuiAlias:
         # Sanity: must include the monitor-specific options, not just
         # the universal --help / --config.
         assert {"--once", "--interval", "--graph", "--time",
-                "--events-only"}.issubset(opts_seen["tui"])
+                "--events-only", "--verbose", "--full-history"}.issubset(
+            opts_seen["tui"])
 
 
 class TestCLICompletion:
@@ -127,6 +128,99 @@ class TestCLICompletion:
                 main()
             # argparse exits 2 on invalid choice.
             assert exc_info.value.code == 2
+
+
+class TestCLIMonitorFlags:
+    """Test the new --verbose / --full-history flags on monitor/tui."""
+
+    def _minimal_config(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n  name: 'TestUPS@localhost'\n"
+            "behavior:\n  dry_run: true\n"
+        )
+        return config_file
+
+    @pytest.mark.unit
+    def test_full_history_requires_once(self, tmp_path, capsys):
+        """``--full-history`` without ``--once`` must reject loudly with
+        argparse-style ``exit 2`` + ``error: ...`` on stderr. Live TUI
+        is real-time by definition; silently dropping the flag would
+        mask user error.
+        """
+        config_file = self._minimal_config(tmp_path)
+        # Patch run_tui at its source module (cli imports it locally) so
+        # if the reject regresses the curses entry point can't actually
+        # try to start.
+        with patch("eneru.tui.run_tui") as mock_run_tui:
+            with patch.object(sys, "argv", ["eneru", "tui",
+                                            "-c", str(config_file),
+                                            "--full-history"]):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+                # argparse uses exit 2 for argument-rejection. Match it.
+                assert exc_info.value.code == 2
+                err = capsys.readouterr().err
+                assert "--full-history" in err
+                assert "--once" in err
+                assert "error:" in err
+                # 5.2.2 (CodeRabbit): the prefix must reflect the
+                # invocation -- "eneru tui:" when invoked as `tui`,
+                # "eneru monitor:" when invoked as `monitor`. The
+                # earlier hardcoded "eneru tui:" lied for monitor users.
+                assert "eneru tui:" in err
+                mock_run_tui.assert_not_called()
+
+    @pytest.mark.unit
+    def test_full_history_rejection_uses_invoked_subcommand_prefix(
+        self, tmp_path, capsys
+    ):
+        """5.2.2 (CodeRabbit): same rejection via the ``monitor`` alias
+        must say "eneru monitor:" -- not "eneru tui:". The error prefix
+        is composed from the actual subcommand the user typed."""
+        config_file = self._minimal_config(tmp_path)
+        with patch("eneru.tui.run_tui"):
+            with patch.object(sys, "argv", ["eneru", "monitor",
+                                            "-c", str(config_file),
+                                            "--full-history"]):
+                with pytest.raises(SystemExit):
+                    main()
+            err = capsys.readouterr().err
+            assert "eneru monitor:" in err, (
+                f"expected 'eneru monitor:' prefix, got: {err!r}"
+            )
+            assert "eneru tui:" not in err
+
+    @pytest.mark.unit
+    def test_full_history_with_once_accepted(self, tmp_path):
+        """The same flag with ``--once`` reaches run_once with
+        full_history=True."""
+        from eneru.tui import run_once
+        with patch("eneru.tui.run_once", wraps=run_once) as mock_once:
+            config_file = self._minimal_config(tmp_path)
+            with patch.object(sys, "argv", ["eneru", "tui",
+                                            "-c", str(config_file),
+                                            "--once", "--events-only",
+                                            "--full-history"]):
+                main()
+            mock_once.assert_called_once()
+            kwargs = mock_once.call_args.kwargs
+            assert kwargs.get("full_history") is True
+            assert kwargs.get("events_only") is True
+
+    @pytest.mark.unit
+    def test_verbose_short_form_accepted(self, tmp_path):
+        """``-v`` is the short form of ``--verbose`` and reaches
+        run_once with verbose=True."""
+        from eneru.tui import run_once
+        with patch("eneru.tui.run_once", wraps=run_once) as mock_once:
+            config_file = self._minimal_config(tmp_path)
+            with patch.object(sys, "argv", ["eneru", "tui",
+                                            "-c", str(config_file),
+                                            "--once", "--events-only", "-v"]):
+                main()
+            mock_once.assert_called_once()
+            assert mock_once.call_args.kwargs.get("verbose") is True
 
 
 class TestCLIValidateConfig:
