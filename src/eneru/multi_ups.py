@@ -380,10 +380,19 @@ class MultiUPSCoordinator:
 
         Idempotent: safe to call repeatedly when no shutdown was in
         flight, or when this group is the second OL transition in a row.
+
+        The boolean reset AND the file unlink BOTH live inside the lock
+        so the two halves of "shutdown is no longer in flight" stay
+        atomic with respect to ``_handle_local_shutdown``. Without
+        this, an interleaving where (A) we cleared the bool, (B) a
+        concurrent ON_BATTERY thread re-took the lock and re-touched
+        the flag, then (C) we unlinked it would leave the coordinator
+        believing a sequence is in flight while the on-disk evidence
+        is gone -- a state worse than the one we set out to fix.
         """
         with self._local_shutdown_lock:
             self._local_shutdown_initiated = False
-        self._global_shutdown_flag.unlink(missing_ok=True)
+            self._global_shutdown_flag.unlink(missing_ok=True)
 
     def _handle_local_shutdown(self, triggered_by: str):
         """Execute local shutdown with defense-in-depth protection."""

@@ -454,8 +454,8 @@ EOF
 # test would still "pass" without exercising the re-arm path. Fail
 # loud instead. Scenario format is plain ``key: value`` lines; battery
 # charge can be a float like ``14`` or ``14.0``.
-LB_CHARGE=$(awk '/^battery\.charge:/{gsub(/[^0-9.]/, "", $2); print $2; exit}' $E2E_DIR/scenarios/low-battery.dev)
-OL_STATUS=$(awk -F': ' '/^ups\.status:/{print $2; exit}' $E2E_DIR/scenarios/online-charging.dev)
+LB_CHARGE=$(awk '/^battery\.charge:/{gsub(/[^0-9.]/, "", $2); print $2; exit}' "$E2E_DIR/scenarios/low-battery.dev")
+OL_STATUS=$(awk -F': ' '/^ups\.status:/{print $2; exit}' "$E2E_DIR/scenarios/online-charging.dev")
 LB_CHARGE_INT=${LB_CHARGE%.*}
 if [ -z "$LB_CHARGE_INT" ] || [ "$LB_CHARGE_INT" -ge 20 ]; then
   echo "FAIL (setup): low-battery.dev battery.charge=${LB_CHARGE:-?} expected < 20"
@@ -472,9 +472,13 @@ sleep 3
 
 # Daemon in background. NO --exit-after-shutdown; we want it to stay
 # alive across all three transitions.
-PYTHONUNBUFFERED=1 eneru run --config $REARM_DIR/config.yaml > $REARM_DIR/daemon.log 2>&1 &
+PYTHONUNBUFFERED=1 eneru run --config "$REARM_DIR/config.yaml" > "$REARM_DIR/daemon.log" 2>&1 &
 DAEMON_PID=$!
-trap "kill $DAEMON_PID 2>/dev/null || true" EXIT
+# Single-quoted trap so $DAEMON_PID resolves at trap-fire time, not
+# trap-set time. Functionally equivalent here (DAEMON_PID is already
+# set when this line runs and never changes), but matches shell-best-
+# practice and silences ShellCheck.
+trap 'kill $DAEMON_PID 2>/dev/null || true' EXIT
 
 # Let the daemon initialise + observe OL.
 sleep 3
@@ -498,7 +502,7 @@ for i in {1..20}; do
 done
 if [ "${COUNT:-0}" -lt 1 ]; then
   echo "FAIL: first EMERGENCY_SHUTDOWN_INITIATED never recorded"
-  tail -40 $REARM_DIR/daemon.log
+  tail -40 "$REARM_DIR/daemon.log"
   exit 1
 fi
 
@@ -517,12 +521,12 @@ for i in {1..20}; do
 done
 if [ "${PR_COUNT:-0}" -lt 1 ]; then
   echo "FAIL: POWER_RESTORED never recorded"
-  tail -40 $REARM_DIR/daemon.log
+  tail -40 "$REARM_DIR/daemon.log"
   exit 1
 fi
 if [ -f "$REARM_DIR/shutdown-flag" ]; then
   echo "FAIL: flag still present after POWER_RESTORED -- re-arm broken (bug #4 regression)"
-  tail -40 $REARM_DIR/daemon.log
+  tail -40 "$REARM_DIR/daemon.log"
   exit 1
 fi
 
@@ -543,13 +547,13 @@ if [ "${COUNT2:-0}" -lt 2 ]; then
   echo "FAIL: second EMERGENCY_SHUTDOWN_INITIATED never recorded -- re-arm broken (bug #4 regression)"
   echo "events table:"
   sqlite3 "$DB" "SELECT ts, event_type, detail FROM events ORDER BY ts" || true
-  tail -60 $REARM_DIR/daemon.log
+  tail -60 "$REARM_DIR/daemon.log"
   exit 1
 fi
 
 # Stop the daemon cleanly.
-kill $DAEMON_PID 2>/dev/null || true
-wait $DAEMON_PID 2>/dev/null || true
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
 trap - EXIT
 
 # Restore baseline so any downstream tests start fresh.
