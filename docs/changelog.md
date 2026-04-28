@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **`eneru tui --graph voltage` was silently ignored in interactive mode.**
+  The CLI flag now seeds the initial graph metric (and `--time` seeds the
+  initial window) even without `--once`. Pressing `<G>` / `<T>` still cycles
+  from there.
+- **A single phantom 0V sample squashed the voltage band into a one-pixel
+  strip at the top of the graph.** Two layers of fix: the writer drops
+  on-line `input.voltage <= 0` rows at sample time (with `ups.status` in
+  context, so real outages — `OB` / `FSD` — still record a legitimate dip
+  to 0V), and the graph panel auto-scales unbounded metrics from the
+  5th/95th percentile so any leftover outliers don't dictate the band.
+
+### Added
+- **`--verbose` / `-v` flag** on `eneru tui` (live + `--once`): widens the
+  events filter to include low-priority chatter alongside the priority
+  defaults. The live TUI also gains a `<V>` keybind to toggle in-session.
+- **`--full-history` flag** for `eneru tui --once`: ignore the `--time`
+  window and query the events table from the beginning. Rejects with
+  ``error: --full-history requires --once`` (exit 2) if combined with the
+  live TUI.
+
+### Changed
+- **Events panel now defaults to priority-only** in both live TUI and
+  `eneru tui --once --events-only`. Daemon lifecycle, shutdown triggers,
+  and power transitions surface; per-condition chatter
+  (`VOLTAGE_FLAP_SUPPRESSED`, etc.) is hidden. Migration: scripts that
+  grep the `--once --events-only` output for low-priority event types
+  must add `--verbose`.
+- Live TUI events panel default cap raised from 8 to 20 rows so a few
+  voltage transitions don't push the daemon-level history off-screen.
+
+---
+
 ## [5.2.1] - 2026-04-24
 
 Bug-fix release for two v5.2.0 regressions. Drop-in upgrade. See

@@ -1086,11 +1086,15 @@ class TestQueryEventsForDisplay:
         config = _events_config(tmp_path,
                                 ups_names=("UPS1@h", "UPS2@h"))
         now = int(_time.time())
+        # priority_only=False — this test exercises sort/interleave for
+        # arbitrary event types, not the priority filter itself.
         _seed_events(config, config.ups_groups[0],
                      [(now - 100, "A", ""), (now - 20, "C", "")])
         _seed_events(config, config.ups_groups[1],
                      [(now - 60, "B", "")])
-        lines = query_events_for_display(config, time_range_seconds=3600)
+        lines = query_events_for_display(
+            config, time_range_seconds=3600, priority_only=False,
+        )
         # Order: A (UPS1), B (UPS2), C (UPS1)
         assert "[UPS1@h] A" in lines[0]
         assert "[UPS2@h] B" in lines[1]
@@ -1106,8 +1110,11 @@ class TestQueryEventsForDisplay:
             (now - 7200, "OLD", "two hours ago"),
             (now - 60, "RECENT", "one minute ago"),
         ])
-        # 1-hour window -> only RECENT included.
-        lines = query_events_for_display(config, time_range_seconds=3600)
+        # 1-hour window -> only RECENT included. priority_only=False so
+        # the test stays focused on the time window, not on the type filter.
+        lines = query_events_for_display(
+            config, time_range_seconds=3600, priority_only=False,
+        )
         assert len(lines) == 1
         assert "RECENT" in lines[0]
 
@@ -1120,8 +1127,10 @@ class TestQueryEventsForDisplay:
         _seed_events(config, config.ups_groups[0], [
             (now - i, f"EVT{i}", "") for i in range(1, 11)
         ])
+        # priority_only=False — testing the row cap, not the type filter.
         lines = query_events_for_display(
             config, time_range_seconds=3600, max_events=3,
+            priority_only=False,
         )
         # Most recent 3 events.
         assert len(lines) == 3
@@ -1157,6 +1166,118 @@ class TestQueryEventsForDisplay:
             detail="", multi_ups=False,
         )
         assert line.startswith("????-??-?? ??:??:??")
+
+    @pytest.mark.unit
+    def test_priority_only_default_filters_chatter(self, tmp_path):
+        """Default ``priority_only=True`` keeps the panel focused on
+        daemon-lifecycle and power transitions even when the events
+        table is full of low-priority chatter."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        events = []
+        # 30 chatter rows that should be filtered.
+        for i in range(30):
+            events.append(
+                (now - 100 + i, "VOLTAGE_FLAP_SUPPRESSED", f"flap {i}")
+            )
+        # 2 priority rows that must survive the filter.
+        events.append((now - 50, "DAEMON_START", "v1"))
+        events.append((now - 5, "POWER_RESTORED", "Outage 12s"))
+        _seed_events(config, config.ups_groups[0], events)
+        lines = query_events_for_display(
+            config, time_range_seconds=3600, max_events=8,
+        )
+        # Both priority rows present, no VOLTAGE_FLAP_SUPPRESSED lines.
+        assert any("DAEMON_START" in line for line in lines)
+        assert any("POWER_RESTORED" in line for line in lines)
+        assert all("VOLTAGE_FLAP_SUPPRESSED" not in line for line in lines)
+
+    @pytest.mark.unit
+    def test_verbose_includes_low_priority(self, tmp_path):
+        """``priority_only=False`` (set by ``--verbose`` / ``<V>``)
+        widens the filter to all event types."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 100, "VOLTAGE_FLAP_SUPPRESSED", "flap"),
+            (now - 50, "DAEMON_START", "v1"),
+        ])
+        lines = query_events_for_display(
+            config, time_range_seconds=3600, priority_only=False,
+        )
+        assert len(lines) == 2
+        assert any("VOLTAGE_FLAP_SUPPRESSED" in line for line in lines)
+        assert any("DAEMON_START" in line for line in lines)
+
+    @pytest.mark.unit
+    def test_full_history_ignores_time_window(self, tmp_path):
+        """Calling with ``time_range_seconds=None`` (the wire-level
+        equivalent of ``--full-history``) returns events older than any
+        finite window would surface."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        # Far older than any --time choice (largest is 30d).
+        old_ts = now - 90 * 86400
+        _seed_events(config, config.ups_groups[0], [
+            (old_ts, "DAEMON_START", "ancient"),
+            (now - 60, "DAEMON_START", "recent"),
+        ])
+        # 24h window misses the ancient one.
+        windowed = query_events_for_display(config, time_range_seconds=86400)
+        assert len(windowed) == 1
+        assert "recent" in windowed[0]
+        # No window -> ancient included.
+        full = query_events_for_display(config, time_range_seconds=None)
+        assert len(full) == 2
+        assert "ancient" in full[0]
+        assert "recent" in full[1]
+
+
+class TestRobustBounds:
+    """``_robust_bounds`` keeps a single 0V outlier from squashing the
+    voltage band into a one-row strip at the top of the chart."""
+
+    @pytest.mark.unit
+    def test_short_series_falls_back_to_min_max(self):
+        from eneru.tui import _robust_bounds
+        # < 20 samples -> percentile math is meaningless; use min/max.
+        assert _robust_bounds([1.0, 2.0, 3.0]) == (1.0, 3.0)
+
+    @pytest.mark.unit
+    def test_single_outlier_clipped_from_bounds(self):
+        """A single 0V dot among 99 normal voltage samples must not
+        drag the lower bound down to zero. The 5th-percentile bound
+        should stay close to the band of normal values."""
+        from eneru.tui import _robust_bounds
+        values = [230.0] * 99 + [0.0]
+        lo, hi = _robust_bounds(values)
+        assert lo > 200.0, f"expected lo > 200V, got {lo}"
+        assert hi == 230.0
+
+    @pytest.mark.unit
+    def test_constant_series_falls_back_to_min_max(self):
+        """When every sample is the same, percentiles collapse and the
+        helper falls back to min/max so the renderer can still pad."""
+        from eneru.tui import _robust_bounds
+        assert _robust_bounds([42.0] * 50) == (42.0, 42.0)
+
+    @pytest.mark.unit
+    def test_normal_voltage_band_preserved(self):
+        """Realistic 230V ± 5V series: percentile bounds stay tight to
+        the meaningful range."""
+        from eneru.tui import _robust_bounds
+        import random
+        random.seed(0)
+        values = [230.0 + random.uniform(-5, 5) for _ in range(200)]
+        lo, hi = _robust_bounds(values)
+        assert 220.0 < lo < 230.0
+        assert 230.0 < hi < 240.0
 
 
 class TestSanitizeEventDetail:

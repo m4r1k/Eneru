@@ -882,6 +882,94 @@ class TestBufferSample:
 
 
 # ===========================================================================
+# Voltage contextual filter (v5.2.2: drop on-line phantom 0V samples)
+# ===========================================================================
+
+class TestInputVoltageContextualFilter:
+    """``_to_input_voltage`` drops 0V (or negative) input.voltage readings
+    only when ups.status indicates the mains is supposed to be present.
+    On battery / FSD, 0V is a real measurement and must survive.
+    """
+
+    @pytest.mark.unit
+    def test_zero_voltage_on_line_dropped(self):
+        from eneru.stats import _to_input_voltage
+        assert _to_input_voltage("0", ups_status="OL") is None
+        assert _to_input_voltage("0.0", ups_status="OL CHRG") is None
+        assert _to_input_voltage(0, ups_status="OL") is None
+
+    @pytest.mark.unit
+    def test_zero_voltage_on_battery_kept(self):
+        # Real outage: input is 0V, output held by inverter. Must persist
+        # so the graph + aggregates show the dip.
+        from eneru.stats import _to_input_voltage
+        assert _to_input_voltage("0", ups_status="OB DISCHRG") == 0.0
+        assert _to_input_voltage("0.0", ups_status="OB") == 0.0
+        assert _to_input_voltage("0", ups_status="OB LB") == 0.0
+
+    @pytest.mark.unit
+    def test_zero_voltage_on_fsd_kept(self):
+        # Forced-shutdown state: mains is gone, 0V is the truth.
+        from eneru.stats import _to_input_voltage
+        assert _to_input_voltage("0", ups_status="OB FSD") == 0.0
+        assert _to_input_voltage("0", ups_status="FSD") == 0.0
+
+    @pytest.mark.unit
+    def test_normal_voltage_passes_through(self):
+        from eneru.stats import _to_input_voltage
+        assert _to_input_voltage("230.5", ups_status="OL") == 230.5
+        assert _to_input_voltage("120.0", ups_status="OL CHRG") == 120.0
+        assert _to_input_voltage("100", ups_status="OB") == 100.0
+
+    @pytest.mark.unit
+    def test_empty_and_non_numeric_return_none(self):
+        from eneru.stats import _to_input_voltage
+        assert _to_input_voltage("", ups_status="OL") is None
+        assert _to_input_voltage(None, ups_status="OL") is None
+        assert _to_input_voltage("abc", ups_status="OL") is None
+
+    @pytest.mark.unit
+    def test_negative_voltage_on_line_dropped(self):
+        # Some buggy drivers report -1.0 to signal "no reading". Treat
+        # the same as 0 -- a sensor signal, not a real measurement.
+        from eneru.stats import _to_input_voltage
+        assert _to_input_voltage("-1.0", ups_status="OL") is None
+
+    @pytest.mark.unit
+    def test_sample_roundtrip_filters_on_line_zero(self, store):
+        """End-to-end: buffer_sample with status=OL + input.voltage=0
+        results in a NULL input_voltage row in SQLite."""
+        store.buffer_sample({
+            "ups.status": "OL CHRG",
+            "battery.charge": "100",
+            "input.voltage": "0",
+            "output.voltage": "230.0",
+        })
+        store.flush()
+        row = store._conn.execute(
+            "SELECT input_voltage FROM samples"
+        ).fetchone()
+        assert row[0] is None
+
+    @pytest.mark.unit
+    def test_sample_roundtrip_keeps_on_battery_zero(self, store):
+        """End-to-end: buffer_sample with status=OB + input.voltage=0
+        keeps the 0.0 in SQLite (real outage signal)."""
+        store.buffer_sample({
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "85",
+            "input.voltage": "0",
+            "output.voltage": "230.0",
+        })
+        store.flush()
+        row = store._conn.execute(
+            "SELECT input_voltage, status FROM samples"
+        ).fetchone()
+        assert row[0] == 0.0
+        assert row[1] == "OB DISCHRG"
+
+
+# ===========================================================================
 # flush + aggregate + purge
 # ===========================================================================
 

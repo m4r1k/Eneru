@@ -67,6 +67,31 @@ def _to_int(value) -> Optional[int]:
     return int(f) if f is not None else None
 
 
+def _to_input_voltage(value, *, ups_status: str) -> Optional[float]:
+    """Sanitize ``input.voltage`` against on-line phantom zeros.
+
+    A reading of 0 V is meaningful when the UPS is on battery (mains is
+    actually gone, the inverter holds the output). On line, 0 V is a
+    sensor glitch or poll race against a NUT driver mid-transition --
+    keeping it pollutes the graph and drags the AVG/MIN aggregates. Drop
+    only the latter case; outage history stays intact.
+
+    The "is OB present" predicate matches the convention used by
+    ``_handle_on_battery`` in ``monitor.py`` -- ``OL OB`` (a transient
+    mid-transition status) is treated as "on battery", so its 0 V is
+    kept. ``BOOST`` / ``TRIM`` / ``BYPASS`` etc. are AVR/bypass states
+    *of* the on-line condition; they're excluded from the drop set
+    below by the explicit ``"OL" in status`` check.
+    """
+    f = _to_float(value)
+    if f is None:
+        return None
+    status = ups_status or ""
+    if f <= 0.0 and "OL" in status and "OB" not in status and "FSD" not in status:
+        return None
+    return f
+
+
 def _sample_from_ups_data(
     ups_data: Dict[str, str],
     *,
@@ -81,13 +106,14 @@ def _sample_from_ups_data(
     ``executemany`` works against any schema version reached via
     additive migrations.
     """
+    status = ups_data.get("ups.status", "")
     return (
         int(ts if ts is not None else time.time()),
-        ups_data.get("ups.status", ""),
+        status,
         _to_float(ups_data.get("battery.charge")),
         _to_float(ups_data.get("battery.runtime")),
         _to_float(ups_data.get("ups.load")),
-        _to_float(ups_data.get("input.voltage")),
+        _to_input_voltage(ups_data.get("input.voltage"), ups_status=status),
         _to_float(ups_data.get("output.voltage")),
         float(depletion_rate or 0.0),
         int(time_on_battery or 0),
