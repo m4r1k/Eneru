@@ -1055,7 +1055,7 @@ class TestQueryEventsForDisplay:
             (now - 60, "ON_BATTERY", "Battery: 85%"),
             (now - 30, "POWER_RESTORED", "Outage 30s"),
         ])
-        lines = query_events_for_display(config, time_range_seconds=3600)
+        lines = query_events_for_display(config)
         assert len(lines) == 2
         # Single-UPS configs do not prefix with [LABEL].
         assert "[" not in lines[0]
@@ -1073,7 +1073,7 @@ class TestQueryEventsForDisplay:
                      [(now - 60, "ON_BATTERY", "ups1")])
         _seed_events(config, config.ups_groups[1],
                      [(now - 30, "ON_BATTERY", "ups2")])
-        lines = query_events_for_display(config, time_range_seconds=3600)
+        lines = query_events_for_display(config)
         assert len(lines) == 2
         # Sorted by ts ascending, prefixed with [label].
         assert "[UPS1@host1] ON_BATTERY: ups1" in lines[0]
@@ -1092,31 +1092,11 @@ class TestQueryEventsForDisplay:
                      [(now - 100, "A", ""), (now - 20, "C", "")])
         _seed_events(config, config.ups_groups[1],
                      [(now - 60, "B", "")])
-        lines = query_events_for_display(
-            config, time_range_seconds=3600, priority_only=False,
-        )
+        lines = query_events_for_display(config, priority_only=False)
         # Order: A (UPS1), B (UPS2), C (UPS1)
         assert "[UPS1@h] A" in lines[0]
         assert "[UPS2@h] B" in lines[1]
         assert "[UPS1@h] C" in lines[2]
-
-    @pytest.mark.unit
-    def test_outside_time_window_excluded(self, tmp_path):
-        from eneru.tui import query_events_for_display
-        import time as _time
-        config = _events_config(tmp_path)
-        now = int(_time.time())
-        _seed_events(config, config.ups_groups[0], [
-            (now - 7200, "OLD", "two hours ago"),
-            (now - 60, "RECENT", "one minute ago"),
-        ])
-        # 1-hour window -> only RECENT included. priority_only=False so
-        # the test stays focused on the time window, not on the type filter.
-        lines = query_events_for_display(
-            config, time_range_seconds=3600, priority_only=False,
-        )
-        assert len(lines) == 1
-        assert "RECENT" in lines[0]
 
     @pytest.mark.unit
     def test_max_events_caps_results(self, tmp_path):
@@ -1129,8 +1109,7 @@ class TestQueryEventsForDisplay:
         ])
         # priority_only=False — testing the row cap, not the type filter.
         lines = query_events_for_display(
-            config, time_range_seconds=3600, max_events=3,
-            priority_only=False,
+            config, max_events=3, priority_only=False,
         )
         # Most recent 3 events.
         assert len(lines) == 3
@@ -1186,9 +1165,7 @@ class TestQueryEventsForDisplay:
         events.append((now - 50, "DAEMON_START", "v1"))
         events.append((now - 5, "POWER_RESTORED", "Outage 12s"))
         _seed_events(config, config.ups_groups[0], events)
-        lines = query_events_for_display(
-            config, time_range_seconds=3600, max_events=8,
-        )
+        lines = query_events_for_display(config, max_events=8)
         # Both priority rows present, no VOLTAGE_FLAP_SUPPRESSED lines.
         assert any("DAEMON_START" in line for line in lines)
         assert any("POWER_RESTORED" in line for line in lines)
@@ -1206,66 +1183,97 @@ class TestQueryEventsForDisplay:
             (now - 100, "VOLTAGE_FLAP_SUPPRESSED", "flap"),
             (now - 50, "DAEMON_START", "v1"),
         ])
-        lines = query_events_for_display(
-            config, time_range_seconds=3600, priority_only=False,
-        )
+        lines = query_events_for_display(config, priority_only=False)
         assert len(lines) == 2
         assert any("VOLTAGE_FLAP_SUPPRESSED" in line for line in lines)
         assert any("DAEMON_START" in line for line in lines)
 
     @pytest.mark.unit
-    def test_full_history_ignores_time_window(self, tmp_path):
-        """Calling with ``time_range_seconds=None`` (the wire-level
-        equivalent of ``--full-history``) returns events older than any
-        finite window would surface."""
-        from eneru.tui import query_events_for_display
-        import time as _time
-        config = _events_config(tmp_path)
-        now = int(_time.time())
-        # Far older than any --time choice (largest is 30d).
-        old_ts = now - 90 * 86400
-        _seed_events(config, config.ups_groups[0], [
-            (old_ts, "DAEMON_START", "ancient"),
-            (now - 60, "DAEMON_START", "recent"),
-        ])
-        # 24h window misses the ancient one.
-        windowed = query_events_for_display(config, time_range_seconds=86400)
-        assert len(windowed) == 1
-        assert "recent" in windowed[0]
-        # No window -> ancient included.
-        full = query_events_for_display(config, time_range_seconds=None)
-        assert len(full) == 2
-        assert "ancient" in full[0]
-        assert "recent" in full[1]
-
-    @pytest.mark.unit
     def test_max_events_none_disables_cap(self, tmp_path):
-        """5.2.2 (CodeRabbit P1): ``max_events=None`` returns every
-        matching row -- the ``--full-history`` promise. Pre-fix the
-        cap was hardcoded at 500 in the events-only path so installs
-        with longer event histories silently lost the older rows."""
+        """``max_events=None`` returns every priority row in the events
+        table -- the ``--length 0`` promise. The default cap of 30
+        would otherwise silently drop older rows on long-running installs.
+        """
         from eneru.tui import query_events_for_display
         import time as _time
         config = _events_config(tmp_path)
         now = int(_time.time())
-        # Seed 600 priority events -- comfortably above the old 500 cap.
+        # Seed 600 priority events -- comfortably above the new default cap of 30.
         _seed_events(config, config.ups_groups[0], [
             (now - 600 + i, "DAEMON_START", f"row-{i}")
             for i in range(600)
         ])
-        # Default cap (EVENTS_MAX_ROWS_MORE=500) drops the oldest 100.
-        capped = query_events_for_display(config, time_range_seconds=None)
-        assert len(capped) == 500
+        # Default cap (EVENTS_MAX_ROWS_NORMAL=30) drops the oldest 570.
+        capped = query_events_for_display(config)
+        assert len(capped) == 30
         # max_events=None must surface every row.
-        full = query_events_for_display(
-            config, time_range_seconds=None, max_events=None,
-        )
+        full = query_events_for_display(config, max_events=None)
         assert len(full) == 600, (
             f"max_events=None must disable the cap; got {len(full)} rows"
         )
         # Ordering preserved (ascending by timestamp).
         assert "row-0" in full[0]
         assert "row-599" in full[-1]
+
+    @pytest.mark.unit
+    def test_tiered_trim_preserves_power_events(self, tmp_path):
+        """5.2.2 (real bug surfaced by maintainer's data): when the cap
+        triggers, POWER_EVENTS must always survive even when the most-
+        recent rows are all daemon-lifecycle. Pre-fix, 65 daemon rows
+        could push 5 power-event rows off-screen at cap=20 since both
+        tiers were treated as one undifferentiated 'priority' set.
+        """
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        # Mirror the maintainer's actual data shape: a sea of recent
+        # DAEMON_RESTARTED + a handful of older ON_BATTERY / POWER_RESTORED.
+        events = []
+        for i in range(60):
+            events.append((now - 60 + i, "DAEMON_RESTARTED", f"daemon-{i}"))
+        events.append((now - 86400 * 5, "ON_BATTERY", "real outage"))
+        events.append((now - 86400 * 5 + 600, "POWER_RESTORED", "outage 10m"))
+        events.append((now - 86400 * 7, "EMERGENCY_SHUTDOWN_INITIATED", "low batt"))
+        _seed_events(config, config.ups_groups[0], events)
+
+        lines = query_events_for_display(config, max_events=20)
+        # All 3 power-event rows MUST survive the cap.
+        assert any("ON_BATTERY: real outage" in l for l in lines), (
+            f"ON_BATTERY pushed off by daemon noise -- tiered trim regressed. "
+            f"Got: {lines}"
+        )
+        assert any("POWER_RESTORED: outage 10m" in l for l in lines)
+        assert any("EMERGENCY_SHUTDOWN_INITIATED" in l for l in lines)
+        # Result respects the cap.
+        assert len(lines) == 20
+        # Remaining 17 slots are most-recent daemon rows.
+        daemon_lines = [l for l in lines if "DAEMON_RESTARTED" in l]
+        assert len(daemon_lines) == 17
+
+    @pytest.mark.unit
+    def test_tiered_trim_pathological_more_power_than_cap(self, tmp_path):
+        """Edge case: more power events than the cap. Take the most
+        recent N -- still better than evicting them in favor of daemon
+        events."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        events = [
+            (now - 1000 + i, "ON_BATTERY", f"outage-{i}") for i in range(50)
+        ]
+        events += [
+            (now - 100 + i, "DAEMON_RESTARTED", f"daemon-{i}") for i in range(5)
+        ]
+        _seed_events(config, config.ups_groups[0], events)
+
+        lines = query_events_for_display(config, max_events=10)
+        # 10 most-recent ON_BATTERY rows; daemon entirely evicted.
+        assert len(lines) == 10
+        assert all("ON_BATTERY" in l for l in lines)
+        assert any("outage-49" in l for l in lines)  # latest power event
+        assert any("outage-40" in l for l in lines)  # 10th-latest
 
 
 class TestRobustBounds:
@@ -1480,33 +1488,61 @@ class TestRunOnceEventsOnly:
         )
 
     @pytest.mark.unit
-    def test_snapshot_path_honours_full_history_flag(self, tmp_path, capsys):
-        """5.2.2 (CodeRabbit P1): same as verbose -- the non-events-only
-        branch ignored ``--full-history`` and stayed bound to the
-        ``--time`` window. Older events were silently dropped from the
-        tail block even when the user asked for the full picture."""
+    def test_snapshot_path_no_time_window_for_events(self, tmp_path, capsys):
+        """5.2.2: events have no time window -- ``--time`` only affects
+        graphs. The snapshot tail must surface old DAEMON rows even
+        though they fall outside any ``--time`` choice."""
         from eneru.tui import run_once
         import time as _time
         config = _events_config(tmp_path)
         now = int(_time.time())
-        old_ts = now - 90 * 86400  # well outside any --time choice
+        old_ts = now - 90 * 86400  # 3 months ago
         _seed_events(config, config.ups_groups[0], [
             (old_ts, "DAEMON_START", "ancient"),
             (now - 60, "DAEMON_START", "recent"),
         ])
-        # Default snapshot path with default 24h window: only recent.
         run_once(config, events_only=False)
-        out_default = capsys.readouterr().out
-        assert "recent" in out_default
-        assert "ancient" not in out_default
-        # --full-history: ancient also surfaces.
-        run_once(config, events_only=False, full_history=True)
-        out_full = capsys.readouterr().out
-        assert "recent" in out_full
-        assert "ancient" in out_full, (
-            "snapshot path must honour --full-history; pre-5.2.2 it "
-            "stayed bound to the --time window"
+        out = capsys.readouterr().out
+        # Both surface even though "ancient" is well outside any --time:
+        # the snapshot tail caps at 10 rows but applies no time filter.
+        assert "recent" in out
+        assert "ancient" in out, (
+            "snapshot path must show events regardless of --time; events "
+            "have no time window in 5.2.2+"
         )
+
+    @pytest.mark.unit
+    def test_events_only_length_caps_output(self, tmp_path, capsys):
+        """``--length N`` (events_only=True path) caps output to N rows."""
+        from eneru.tui import run_once
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 100 + i, "DAEMON_START", f"row-{i}") for i in range(50)
+        ])
+        run_once(config, events_only=True, length=5)
+        out = capsys.readouterr().out
+        # Should see exactly 5 lines -- the most-recent 5 DAEMON_START rows.
+        lines = [l for l in out.splitlines() if "DAEMON_START" in l]
+        assert len(lines) == 5
+        assert "row-49" in lines[-1]
+        assert "row-45" in lines[0]
+
+    @pytest.mark.unit
+    def test_events_only_length_zero_means_no_cap(self, tmp_path, capsys):
+        """``--length 0`` returns every priority row."""
+        from eneru.tui import run_once
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 100 + i, "DAEMON_START", f"row-{i}") for i in range(40)
+        ])
+        run_once(config, events_only=True, length=0)
+        out = capsys.readouterr().out
+        lines = [l for l in out.splitlines() if "DAEMON_START" in l]
+        assert len(lines) == 40, f"length=0 must show all rows; got {len(lines)}"
 
 
 class TestDisplayWidthAndTruncate:

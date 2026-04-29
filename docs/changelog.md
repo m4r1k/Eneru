@@ -9,50 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [5.2.2] - 2026-04-28
 
-TUI usability fixes plus one safety-critical re-arm fix on the shutdown
-state machine. Drop-in upgrade.
+Bug-fix release. Drop-in upgrade.
 
 ### Fixed
-- **Shutdown trigger never re-armed after `POWER_RESTORED`** when the
-  local-shutdown command failed to actually halt the host (custom
-  no-op command, sandboxed environment, dummy-UPS test rig — bug #4).
-  Subsequent on-battery transitions silently no-op'd at the flag-file
-  gate. The handler now clears the flag on the OB/FSD → OL transition,
-  and `MultiUPSCoordinator` resets its in-memory lock + global flag in
-  the same hook so multi-UPS deployments re-arm too. Gated re-triggers
-  also log a warning so the no-op is no longer silent.
-- **`eneru tui --graph voltage` silently ignored in interactive mode.**
-  The CLI flag now seeds the initial graph metric, and `--time` seeds
-  the initial window; `<G>` / `<T>` cycle from there.
-- **A single phantom 0 V sample squashed the voltage band into a
-  one-pixel strip at the top of the graph.** Writer drops on-line
-  `input.voltage <= 0` rows at sample time (real outages — `OB`/`FSD`
-  — still record the legitimate dip to 0 V); graph panel auto-scales
-  unbounded metrics from the 5th/95th percentile so any leftover
-  outliers don't dictate the band.
+- Shutdown trigger never re-armed after `POWER_RESTORED` when the
+  local-shutdown command didn't actually halt the host (bug #4).
+  Single-UPS and multi-UPS coordinator paths both fixed. Gated
+  re-triggers now log a warning instead of returning silently.
+- `eneru tui --graph voltage` silently ignored in interactive mode.
+- Phantom 0 V samples squashed the voltage graph into a one-row strip
+  at the top. Writer drops on-line `input.voltage <= 0` (real
+  outages still record the dip); graph uses 5th/95th percentile bounds.
+- Events panel showed daemon-lifecycle chatter instead of power
+  events. Priority filter is now tiered: power events always survive
+  the cap; daemon events fill remaining slots.
+- `eneru tui --once --events-only` silently fell back to log parsing
+  because the default 1 h window was empty for sparse events. Events
+  no longer use a time window at all.
 
 ### Added
-- **`--verbose` / `-v`** on `eneru tui` (live + `--once`): widens the
-  events filter to include low-priority chatter alongside the priority
-  defaults. Live TUI gains a `<V>` keybind to toggle in-session.
-- **`--full-history`** for `eneru tui --once`: ignore the `--time`
-  window and query the events table from the beginning. Rejects with
-  `error: --full-history requires --once` (exit 2) when combined with
+- `--verbose` / `-v`: include low-priority events. `<V>` toggles in
   the live TUI.
+- `--length N`: cap events output (default 30, `0` = no cap).
 
 ### Changed
-- **Events panel defaults to priority-only** in both live TUI and
-  `eneru tui --once --events-only`. Daemon lifecycle, shutdown
-  triggers, and power transitions surface; per-condition chatter
-  is hidden. Scripts that grep `--once --events-only` for
-  low-priority event types must now pass `--verbose`.
-- Live TUI events panel default cap raised from 8 to 20 rows so a few
-  voltage transitions don't push the daemon-level history off-screen.
+- `--time` and `<T>` apply to the graph only. Use `--length` for events.
+- Events panel defaults to priority-only.
+- Live TUI events cap raised from 8 to 30 rows.
 
 ### Migration notes
-None for the package install. Scripts parsing `eneru tui --once
---events-only` output: add `--verbose` if you rely on seeing
-low-priority event types (voltage flaps, etc.).
+- Scripts grepping `--events-only` output for low-priority event
+  types: add `--verbose`.
+- Scripts using `--time` to size events: switch to `--length`.
 
 ---
 

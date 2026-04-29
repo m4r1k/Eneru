@@ -18,6 +18,21 @@ except ImportError:
     apprise = None
 
 
+def _non_negative_int(value: str) -> int:
+    """argparse type for ``--length``: int >= 0 (0 = no cap)."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"--length must be a non-negative integer, got {value!r}"
+        )
+    if n < 0:
+        raise argparse.ArgumentTypeError(
+            f"--length must be >= 0 (0 = no cap), got {n}"
+        )
+    return n
+
+
 def _load_config(args):
     """Load configuration from the --config path."""
     return ConfigLoader.load(getattr(args, 'config', None))
@@ -368,31 +383,9 @@ def _cmd_deliver_stop(args):
 
 def _cmd_monitor(args):
     """Launch the TUI dashboard."""
-    # Validate flag combinations BEFORE _load_config so the rejection
-    # isn't preceded by a "Configuration loaded from: ..." message --
-    # that ordering looked like the validate-then-fail had succeeded.
-    # argparse can't easily express "this flag requires --once" so we
-    # do it here, exit with the same code argparse would use, and
-    # mimic its ``error: ...`` stderr format so log scrapers keep
-    # working.
-    if getattr(args, "full_history", False) and not args.once:
-        # Compose the prefix from the actual invocation so users running
-        # ``eneru monitor`` don't get an "eneru tui: ..." message and
-        # vice versa. ``args.command`` is set by argparse via the
-        # subparsers' ``dest="command"``; fall back to ``argv[1]`` if
-        # that's somehow missing (defensive: monitor / tui are aliases).
-        sub = getattr(args, "command", None) or (
-            sys.argv[1] if len(sys.argv) > 1 else "monitor"
-        )
-        sys.stderr.write(
-            f"eneru {sub}: error: --full-history requires --once "
-            "(interactive TUI is real-time)\n"
-        )
-        sys.exit(2)
-
     config = _load_config(args)
 
-    from eneru.tui import run_tui, run_once
+    from eneru.tui import run_tui, run_once, EVENTS_MAX_ROWS_NORMAL
 
     if args.once:
         run_once(
@@ -401,7 +394,7 @@ def _cmd_monitor(args):
             time_range=getattr(args, "time", "1h"),
             events_only=getattr(args, "events_only", False),
             verbose=getattr(args, "verbose", False),
-            full_history=getattr(args, "full_history", False),
+            length=getattr(args, "length", EVENTS_MAX_ROWS_NORMAL),
         )
     else:
         run_tui(
@@ -465,9 +458,14 @@ def main():
                        choices=["charge", "load", "voltage", "runtime"],
                        help="Initial graph metric. With --once renders a Braille snapshot; "
                             "in interactive TUI pre-selects the metric (still cycle with <G>)")
+        # IMPORTANT: --time is GRAPH-ONLY in 5.2.2+. It must NOT be
+        # threaded into the events query. Events are sparse and a fixed
+        # window made the panel silently empty for normal homelab usage
+        # (the events panel then fell back to log parsing without the
+        # operator noticing). Use --length to size the events list.
         p.add_argument("--time", default="1h",
-                       help="Initial graph time range (1h/6h/24h/7d/30d). Applies to "
-                            "--once snapshots and to the interactive TUI's initial view")
+                       help="Graph time range (1h/6h/24h/7d/30d). Applies only to the "
+                            "graph -- the events list is independent (use --length to size it)")
         p.add_argument("--events-only", action="store_true",
                        help="With --once: print only the events list (SQLite, log-tail fallback)")
         p.add_argument("--verbose", "-v", action="store_true",
@@ -475,9 +473,11 @@ def main():
                             "(daemon lifecycle, shutdown triggers, power transitions). "
                             "Applies to both --once and the interactive TUI; toggle "
                             "in-session with <V>")
-        p.add_argument("--full-history", action="store_true",
-                       help="Ignore --time and query the events table from the beginning. "
-                            "Only valid with --once")
+        p.add_argument("--length", type=_non_negative_int, default=30,
+                       metavar="N",
+                       help="With --once: max events to print (default: 30, 0 = no cap). "
+                            "Power events are always preserved within the cap; daemon-"
+                            "lifecycle events fill remaining slots")
         p.set_defaults(func=_cmd_monitor)
 
     mon_parser = subparsers.add_parser("monitor", help="Launch real-time TUI dashboard")
