@@ -35,7 +35,9 @@ Bug-fix release. Drop-in upgrade.
 ### Changed
 - `--time` and `<T>` apply to the graph only. Use `--length` for events.
 - Events panel defaults to priority-only.
-- Live TUI events cap raised from 8 to 30 rows.
+- Live TUI events cap raised (now `min(30, visible_panel_rows)` so
+  power events stay inside the visible window on smaller terminals;
+  `<M>` still expands to 500 rows for full scrollable history).
 
 ### Migration notes
 - Scripts grepping `--events-only` output for low-priority event

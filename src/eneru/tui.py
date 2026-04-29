@@ -429,11 +429,11 @@ def query_events_for_display(
 
     ``max_events=None`` (or 0) disables the row cap entirely.
 
-    Trim is **tiered**: when capping, every row in :data:`POWER_EVENTS`
-    is preserved, then remaining slots are filled with the most-recent
-    :data:`LIFECYCLE_EVENTS` and other priority rows. Daemon noise can
-    therefore never push power events off-screen, even when the cap is
-    20 and the most recent 50 events are all daemon restarts.
+    Trim is **3-tier**: POWER_EVENTS always survive the cap; remaining
+    slots are filled first with most-recent LIFECYCLE_EVENTS, then with
+    chatter (only reachable when ``priority_only=False`` widens the
+    upstream filter). Power events are never evicted; lifecycle context
+    outranks voltage-flap chatter when the cap is hit in verbose mode.
     """
     multi_ups = config.multi_ups
     rows: List[tuple] = []  # (ts, label, event_type, detail)
@@ -470,22 +470,33 @@ def query_events_for_display(
 
     rows.sort(key=lambda r: r[0])
 
-    # Tiered trim: power events always survive the cap. ``max_events``
-    # in (None, 0) means no cap.
+    # Three-tier trim: POWER_EVENTS always survive; if room left,
+    # LIFECYCLE_EVENTS fill next; only then chatter (other rows that
+    # made it through ``priority_only=False``). This matches the
+    # priority hierarchy users care about: power transitions are
+    # never evicted, daemon-lifecycle context is preferred over
+    # voltage-flap chatter, and chatter rounds out the cap when
+    # ``--verbose`` is on. ``max_events`` in (None, 0) means no cap.
     if max_events and len(rows) > max_events:
         power = [r for r in rows if r[2] in POWER_EVENTS]
-        non_power = [r for r in rows if r[2] not in POWER_EVENTS]
+        lifecycle = [r for r in rows if r[2] in LIFECYCLE_EVENTS]
+        chatter = [r for r in rows
+                   if r[2] not in POWER_EVENTS and r[2] not in LIFECYCLE_EVENTS]
         if len(power) >= max_events:
             # Pathological: more power events than the cap. Show the
             # most-recent N -- still better than evicting them.
             kept = power[-max_events:]
         else:
             remaining = max_events - len(power)
-            kept_non_power = non_power[-remaining:]
+            # Lifecycle fills first; chatter only if room remains.
+            kept_lifecycle = lifecycle[-remaining:]
+            remaining -= len(kept_lifecycle)
+            kept_chatter = chatter[-remaining:] if remaining > 0 else []
             # Re-sort by ts so the panel never displays out-of-time-order
             # rows after the tier merge. Python's sort is stable, so
-            # equal-timestamp rows preserve insertion order (power first).
-            kept = sorted(power + kept_non_power, key=lambda r: r[0])
+            # equal-timestamp rows preserve insertion order.
+            kept = sorted(power + kept_lifecycle + kept_chatter,
+                          key=lambda r: r[0])
         rows = kept
 
     return [_format_event_line(ts, label, etype, detail, multi_ups)

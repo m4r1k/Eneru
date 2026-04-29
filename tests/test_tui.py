@@ -1239,16 +1239,16 @@ class TestQueryEventsForDisplay:
 
         lines = query_events_for_display(config, max_events=20)
         # All 3 power-event rows MUST survive the cap.
-        assert any("ON_BATTERY: real outage" in l for l in lines), (
+        assert any("ON_BATTERY: real outage" in line for line in lines), (
             f"ON_BATTERY pushed off by daemon noise -- tiered trim regressed. "
             f"Got: {lines}"
         )
-        assert any("POWER_RESTORED: outage 10m" in l for l in lines)
-        assert any("EMERGENCY_SHUTDOWN_INITIATED" in l for l in lines)
+        assert any("POWER_RESTORED: outage 10m" in line for line in lines)
+        assert any("EMERGENCY_SHUTDOWN_INITIATED" in line for line in lines)
         # Result respects the cap.
         assert len(lines) == 20
         # Remaining 17 slots are most-recent daemon rows.
-        daemon_lines = [l for l in lines if "DAEMON_RESTARTED" in l]
+        daemon_lines = [line for line in lines if "DAEMON_RESTARTED" in line]
         assert len(daemon_lines) == 17
 
     @pytest.mark.unit
@@ -1271,9 +1271,48 @@ class TestQueryEventsForDisplay:
         lines = query_events_for_display(config, max_events=10)
         # 10 most-recent ON_BATTERY rows; daemon entirely evicted.
         assert len(lines) == 10
-        assert all("ON_BATTERY" in l for l in lines)
-        assert any("outage-49" in l for l in lines)  # latest power event
-        assert any("outage-40" in l for l in lines)  # 10th-latest
+        assert all("ON_BATTERY" in line for line in lines)
+        assert any("outage-49" in line for line in lines)  # latest power event
+        assert any("outage-40" in line for line in lines)  # 10th-latest
+
+    @pytest.mark.unit
+    def test_tiered_trim_lifecycle_outranks_chatter(self, tmp_path):
+        """5.2.2 (CodeRabbit refinement): in --verbose mode (priority_only
+        =False), chatter rows reach the trim layer alongside lifecycle
+        rows. Lifecycle is more important than per-condition chatter --
+        when the cap evicts non-power rows, lifecycle should survive
+        first, then chatter fills any leftover slots."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        # 1 power event + 30 chatter rows + 4 lifecycle rows.
+        # Cap = 7. Result must be: 1 power + 4 lifecycle + 2 chatter,
+        # NOT: 1 power + 6 chatter (chatter evicting lifecycle).
+        events = [(now - 5000, "ON_BATTERY", "outage")]
+        for i in range(30):
+            events.append(
+                (now - 1000 + i, "VOLTAGE_FLAP_SUPPRESSED", f"flap-{i}")
+            )
+        for i in range(4):
+            events.append(
+                (now - 100 + i * 10, "DAEMON_RESTARTED", f"d-{i}")
+            )
+        _seed_events(config, config.ups_groups[0], events)
+
+        lines = query_events_for_display(
+            config, max_events=7, priority_only=False,
+        )
+        assert len(lines) == 7
+        assert sum("ON_BATTERY" in line for line in lines) == 1, (
+            f"power event must survive: {lines}"
+        )
+        assert sum("DAEMON_RESTARTED" in line for line in lines) == 4, (
+            f"all 4 lifecycle rows must outrank chatter; got: {lines}"
+        )
+        assert sum("VOLTAGE_FLAP_SUPPRESSED" in line for line in lines) == 2, (
+            f"chatter fills only the 2 leftover slots; got: {lines}"
+        )
 
 
 class TestRobustBounds:

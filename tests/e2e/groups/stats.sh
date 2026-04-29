@@ -264,8 +264,12 @@ echo "  PASS: priority-only filter hides chatter, keeps DAEMON_START"
 # --length 5 caps output. There's only one daemon-lifecycle event in the
 # stats DB at this point (from the daemon's own DAEMON_START), so we
 # can't easily count to 5 here -- just confirm --length runs cleanly.
-eneru monitor --once --events-only --length 5 --config "$E2E_DIR/config-e2e-stats.yaml" > /tmp/test31-length.log 2>&1
-if [ $? -ne 0 ]; then
+# Wrap the invocation in the `if` directly: under `set -e` a separate
+# `[ $? -ne 0 ]` branch would never run because the script aborts on
+# the first non-zero exit, masking any regression with no log dump.
+if ! eneru monitor --once --events-only --length 5 \
+    --config "$E2E_DIR/config-e2e-stats.yaml" \
+    > /tmp/test31-length.log 2>&1; then
   echo "FAIL: --length 5 returned non-zero"
   cat /tmp/test31-length.log
   exit 1
