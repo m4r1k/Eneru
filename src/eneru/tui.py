@@ -22,6 +22,20 @@ from eneru.stats import StatsStore
 
 # Cycle order for the G key + --graph flag.
 GRAPH_MODES = ("off", "charge", "load", "voltage", "runtime")
+
+# ----------------------------------------------------------------------
+# IMPORTANT: TIME_RANGES / TIME_RANGE_SECONDS / the --time CLI flag /
+# the <T> keystroke are GRAPH-ONLY in 5.2.2+. They scope the graph's
+# X-axis window. They must NOT be used to filter the events panel.
+#
+# Events are sparse (one row per power transition or daemon lifecycle
+# event, not per-poll), so a fixed time window made the panel silently
+# empty for normal homelab usage. The events panel queries the full
+# events table and trims by row count via --length / EVENTS_MAX_ROWS_*.
+# Don't re-couple the two -- the original 5.2.0 coupling is exactly
+# the bug that made the events panel silently fall back to log
+# parsing. See query_events_for_display + run_once for the new wiring.
+# ----------------------------------------------------------------------
 TIME_RANGES = ("1h", "6h", "24h", "7d", "30d")
 TIME_RANGE_SECONDS = {
     "1h": 3600,
@@ -37,30 +51,52 @@ TIME_RANGE_SECONDS = {
 # table is one row per power event, not per poll, so even years of
 # history stay tiny) and lets the operator scroll through with the
 # arrow keys.
-EVENTS_MAX_ROWS_NORMAL = 20
-EVENTS_MAX_ROWS_MORE = 500
+EVENTS_MAX_ROWS_NORMAL = 30  # default cap; matches CLI --length default
+EVENTS_MAX_ROWS_MORE = 500   # <M> "More logs" toggle cap
 
-# Default-visible event types. The events table accumulates a mix of
-# load-bearing milestones (daemon lifecycle, shutdown triggers, power
-# transitions) and chatter that's useful when debugging but noisy
-# day-to-day (per-condition voltage warnings, suppressed flaps, etc.).
-# The TUI ships filtered to the milestones; ``--verbose`` (CLI) and the
-# ``<V>`` key (interactive) widen the filter to include everything.
-PRIORITY_EVENTS = frozenset({
+# Two tiers of priority. The events table accumulates power transitions
+# (operator's reason for opening the panel), daemon lifecycle (useful
+# context but high-volume during testing or rapid restarts), and chatter
+# that's only relevant when debugging.
+#
+# POWER_EVENTS are *always* preserved within the row cap -- never
+# evicted by daemon noise. LIFECYCLE_EVENTS fill the remaining slots
+# with the most-recent rows. Anything outside both sets is "verbose"
+# chatter, surfaced only when ``--verbose`` / ``<V>`` is on.
+#
+# Without this tiering, a homelab user who hits a real outage 4 days
+# ago and then iterates on the daemon today sees 20 rows of
+# DAEMON_RESTARTED / DAEMON_UPGRADED in the panel and the actual
+# ON_BATTERY rows are pushed off-screen. (Bug surfaced in 5.2.2 by
+# the maintainer's own data: 65 daemon-lifecycle rows vs 5 power-event
+# rows in the events table.)
+POWER_EVENTS = frozenset({
+    "ON_BATTERY",
+    "POWER_RESTORED",
+    "EMERGENCY_SHUTDOWN_INITIATED",
+    "SHUTDOWN_SEQUENCE_COMPLETE",
+    "VOLTAGE_LOW",
+    "VOLTAGE_HIGH",
+    "BROWNOUT_DETECTED",
+    "OVER_VOLTAGE_DETECTED",
+    "OVERLOAD_DETECTED",
+    "BATTERY_LOW",
+    "FSD_DETECTED",
+    "CONNECTION_LOST",
+    "CONNECTION_RESTORED",
+})
+
+LIFECYCLE_EVENTS = frozenset({
     "DAEMON_START",
     "DAEMON_STOP",
     "DAEMON_RESTARTED",
     "DAEMON_UPGRADED",
     "DAEMON_RECOVERED",
-    "EMERGENCY_SHUTDOWN_INITIATED",
-    "SHUTDOWN_SEQUENCE_COMPLETE",
-    "POWER_RESTORED",
-    "ON_BATTERY",
-    "VOLTAGE_LOW",
-    "VOLTAGE_HIGH",
-    "CONNECTION_LOST",
-    "CONNECTION_RESTORED",
 })
+
+# Union for backwards compatibility with callers / tests that grep for
+# "is this row in the priority set" without caring about the tier split.
+PRIORITY_EVENTS = POWER_EVENTS | LIFECYCLE_EVENTS
 
 # Map graph modes to (column, unit_suffix, y_min, y_max, value_formatter).
 # value_formatter takes a float and returns the user-facing display
@@ -369,31 +405,36 @@ def _format_event_line(ts: int, label: str, event_type: str,
 
 def query_events_for_display(
     config: Config,
-    time_range_seconds: Optional[int] = None,
     *,
-    max_events: Optional[int] = EVENTS_MAX_ROWS_MORE,
+    max_events: Optional[int] = EVENTS_MAX_ROWS_NORMAL,
     priority_only: bool = True,
 ) -> List[str]:
     """Pull events from each UPS's SQLite store, sorted by timestamp.
 
-    ``time_range_seconds=None`` (default) returns everything in the
-    events table; pass an explicit window to limit by age. Returns
-    formatted display strings ready to drop into the TUI events panel.
-    Returns an empty list when no per-UPS DB exists -- callers should
-    fall back to ``parse_log_events`` in that case.
+    Always queries the full events table -- there is no time-range
+    parameter. Events are sparse compared to graph samples, and a
+    fixed time window made the panel silently empty for normal
+    homelab usage (the daemon emits maybe one or two power events per
+    week). Callers that want to *narrow* the result use ``max_events``;
+    callers that want *all* of them pass ``max_events=None``.
+
+    Returns formatted display strings ready to drop into the TUI events
+    panel. Returns an empty list when no per-UPS DB exists -- callers
+    should fall back to ``parse_log_events`` in that case.
 
     ``priority_only=True`` (default) limits the result to event types in
     :data:`PRIORITY_EVENTS` so the panel surfaces daemon and power
     transitions instead of being crowded out by per-condition chatter.
     Pass ``False`` (CLI ``--verbose`` / TUI ``<V>``) to include all rows.
 
-    ``max_events=None`` disables the row cap entirely. Used by the CLI
-    ``--full-history`` path so that "from the beginning" actually means
-    every row in the events table -- a finite cap of 500 silently
-    dropped older events on long-running installs.
+    ``max_events=None`` (or 0) disables the row cap entirely.
+
+    Trim is **3-tier**: POWER_EVENTS always survive the cap; remaining
+    slots are filled first with most-recent LIFECYCLE_EVENTS, then with
+    chatter (only reachable when ``priority_only=False`` widens the
+    upstream filter). Power events are never evicted; lifecycle context
+    outranks voltage-flap chatter when the cap is hit in verbose mode.
     """
-    end = int(time.time())
-    start = 0 if time_range_seconds is None else end - max(60, int(time_range_seconds))
     multi_ups = config.multi_ups
     rows: List[tuple] = []  # (ts, label, event_type, detail)
     any_db_seen = False
@@ -408,7 +449,10 @@ def query_events_for_display(
             store = StatsStore(db_path)
             store._conn = conn
             try:
-                events = store.query_events(start, end)
+                # Query from epoch to now -- no time window. Events are
+                # sparse (per-event, not per-poll) so the full table is
+                # tiny even after years of uptime.
+                events = store.query_events(0, int(time.time()))
             finally:
                 store._conn = None
             for ts, etype, detail in events:
@@ -425,8 +469,36 @@ def query_events_for_display(
         return []  # signal "no DB" so callers can fall back
 
     rows.sort(key=lambda r: r[0])
-    if max_events is not None:
-        rows = rows[-max_events:]
+
+    # Three-tier trim: POWER_EVENTS always survive; if room left,
+    # LIFECYCLE_EVENTS fill next; only then chatter (other rows that
+    # made it through ``priority_only=False``). This matches the
+    # priority hierarchy users care about: power transitions are
+    # never evicted, daemon-lifecycle context is preferred over
+    # voltage-flap chatter, and chatter rounds out the cap when
+    # ``--verbose`` is on. ``max_events`` in (None, 0) means no cap.
+    if max_events and len(rows) > max_events:
+        power = [r for r in rows if r[2] in POWER_EVENTS]
+        lifecycle = [r for r in rows if r[2] in LIFECYCLE_EVENTS]
+        chatter = [r for r in rows
+                   if r[2] not in POWER_EVENTS and r[2] not in LIFECYCLE_EVENTS]
+        if len(power) >= max_events:
+            # Pathological: more power events than the cap. Show the
+            # most-recent N -- still better than evicting them.
+            kept = power[-max_events:]
+        else:
+            remaining = max_events - len(power)
+            # Lifecycle fills first; chatter only if room remains.
+            kept_lifecycle = lifecycle[-remaining:]
+            remaining -= len(kept_lifecycle)
+            kept_chatter = chatter[-remaining:] if remaining > 0 else []
+            # Re-sort by ts so the panel never displays out-of-time-order
+            # rows after the tier merge. Python's sort is stable, so
+            # equal-timestamp rows preserve insertion order.
+            kept = sorted(power + kept_lifecycle + kept_chatter,
+                          key=lambda r: r[0])
+        rows = kept
+
     return [_format_event_line(ts, label, etype, detail, multi_ups)
             for ts, label, etype, detail in rows]
 
@@ -1110,9 +1182,22 @@ def run_tui(config: Config, interval: int = 5, *,
             for g in config.ups_groups:
                 groups_data.append(collect_group_data(g, config))
                 update_live_buffer(g, config)
-            events_cap = (
-                EVENTS_MAX_ROWS_MORE if show_more else EVENTS_MAX_ROWS_NORMAL
+            # Couple the data cap to the visible-rows estimate. Without
+            # this, the cap is 30 but the panel only renders ~12 rows
+            # anchored at the bottom (most-recent end of the chronological
+            # list). With tier-trim placing power events at the top of
+            # the list, the visible window shows the daemon-rich tail and
+            # power events sit off-screen until the operator scrolls up.
+            # Sizing the data cap to the panel keeps power events inside
+            # the visible window in normal mode; <M> still expands to
+            # EVENTS_MAX_ROWS_MORE (500) for full scrollable history.
+            visible_estimate = max(
+                3, logs_end - logs_start - 4  # title + footer + padding
             )
+            if show_more:
+                events_cap = EVENTS_MAX_ROWS_MORE
+            else:
+                events_cap = min(EVENTS_MAX_ROWS_NORMAL, visible_estimate)
             log_events = query_events_for_display(
                 config, max_events=events_cap,
                 priority_only=not events_verbose,
@@ -1256,27 +1341,30 @@ def render_graph_text(
 
 def run_once(config: Config, *, graph_metric: Optional[str] = None,
              time_range: str = "1h", events_only: bool = False,
-             verbose: bool = False, full_history: bool = False):
+             verbose: bool = False, length: int = EVENTS_MAX_ROWS_NORMAL):
     """Print a status snapshot to stdout and exit.
 
     With ``events_only=True`` the status / resource summary and graph
     block are skipped -- only the events list (from SQLite if available,
     otherwise the log tail) is printed. Useful for scripts and CI.
 
+    ``time_range`` is **graph-only** -- it does not affect the events
+    list. Events are sparse and a fixed window made the panel silently
+    empty for normal homelab usage.
+
     ``verbose=True`` includes low-priority chatter alongside the
-    :data:`PRIORITY_EVENTS` defaults. ``full_history=True`` ignores the
-    ``time_range`` window and queries the events table from epoch.
+    :data:`PRIORITY_EVENTS` defaults.
+
+    ``length`` caps the events list (default :data:`EVENTS_MAX_ROWS_NORMAL`,
+    set to 0 for no cap). Tiered preservation: power events always
+    survive the cap; daemon-lifecycle events fill remaining slots.
     """
-    # When --full-history is set, the cap is removed entirely (None) so
-    # "from the beginning" means every row, not "the most recent 500".
-    # Otherwise the events-only window caps at 50 to keep stdout sane;
-    # the snapshot path uses a smaller 10-row tail.
-    events_cap = None if full_history else 50
+    # length=0 means "no cap" -- pass None through to the query.
+    events_cap = None if length == 0 else length
 
     if events_only:
-        window = None if full_history else TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
         events = query_events_for_display(
-            config, window, max_events=events_cap,
+            config, max_events=events_cap,
             priority_only=not verbose,
         )
         if not events:
@@ -1328,13 +1416,15 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
             print()
 
     # Snapshot path: same flag semantics as the events-only branch
-    # above. --full-history widens the time window AND the row cap;
-    # --verbose drops the priority filter so low-priority chatter can
-    # surface here too. Pre-fix this section silently ignored both.
-    snapshot_window = None if full_history else TIME_RANGE_SECONDS.get(time_range, 24 * 3600)
-    snapshot_cap = None if full_history else 10
+    # above. --verbose drops the priority filter; --length caps the
+    # row count. The snapshot tail is a small summary under the
+    # status block -- it always caps at 10 even when --length is
+    # higher (or 0/unbounded), so an operator asking for "all events"
+    # gets that via --events-only, not via the snapshot tail
+    # drowning the status header it was designed to summarize.
+    snapshot_cap = 10 if events_cap is None else min(events_cap, 10)
     events = query_events_for_display(
-        config, snapshot_window, max_events=snapshot_cap,
+        config, max_events=snapshot_cap,
         priority_only=not verbose,
     )
     if not events:
