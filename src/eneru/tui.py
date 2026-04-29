@@ -1171,9 +1171,22 @@ def run_tui(config: Config, interval: int = 5, *,
             for g in config.ups_groups:
                 groups_data.append(collect_group_data(g, config))
                 update_live_buffer(g, config)
-            events_cap = (
-                EVENTS_MAX_ROWS_MORE if show_more else EVENTS_MAX_ROWS_NORMAL
+            # Couple the data cap to the visible-rows estimate. Without
+            # this, the cap is 30 but the panel only renders ~12 rows
+            # anchored at the bottom (most-recent end of the chronological
+            # list). With tier-trim placing power events at the top of
+            # the list, the visible window shows the daemon-rich tail and
+            # power events sit off-screen until the operator scrolls up.
+            # Sizing the data cap to the panel keeps power events inside
+            # the visible window in normal mode; <M> still expands to
+            # EVENTS_MAX_ROWS_MORE (500) for full scrollable history.
+            visible_estimate = max(
+                3, logs_end - logs_start - 4  # title + footer + padding
             )
+            if show_more:
+                events_cap = EVENTS_MAX_ROWS_MORE
+            else:
+                events_cap = min(EVENTS_MAX_ROWS_NORMAL, visible_estimate)
             log_events = query_events_for_display(
                 config, max_events=events_cap,
                 priority_only=not events_verbose,
