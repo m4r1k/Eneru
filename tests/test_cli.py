@@ -125,6 +125,20 @@ class TestCLICompletion:
         assert "_filedir" not in code
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
+    def test_completion_lists_monitor_event_flags(self, shell, capsys):
+        """Packaged completion scripts must track monitor/tui event flags."""
+        with patch.object(sys, "argv", ["eneru", "completion", shell]):
+            main()
+        out = capsys.readouterr().out
+        if shell == "fish":
+            assert "-l verbose" in out
+            assert "-l length" in out
+        else:
+            assert "--verbose" in out
+            assert "--length" in out
+
+    @pytest.mark.unit
     def test_invalid_shell_rejected(self):
         """`eneru completion ksh` must fail at argparse, not at file-read."""
         with patch.object(sys, "argv", ["eneru", "completion", "ksh"]):

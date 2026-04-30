@@ -150,6 +150,43 @@ class TestKeypadEnabled:
         )
 
 
+class TestGhosttyTerminfoFallback:
+    """Ghostty can advertise xterm-ghostty before host terminfo is installed."""
+
+    @pytest.mark.unit
+    def test_xterm_ghostty_missing_terminfo_retries_with_xterm_256color(self):
+        from eneru import tui as tui_mod
+
+        config = Config()
+        with patch.dict(os.environ, {"TERM": "xterm-ghostty"}):
+            with patch.object(tui_mod.curses, "wrapper") as wrapper:
+                wrapper.side_effect = [
+                    curses.error("setupterm: could not find terminal"),
+                    None,
+                ]
+
+                tui_mod.run_tui(config)
+
+                assert wrapper.call_count == 2
+                assert os.environ["TERM"] == "xterm-ghostty"
+
+    @pytest.mark.unit
+    def test_non_ghostty_curses_error_is_not_retried(self):
+        from eneru import tui as tui_mod
+
+        config = Config()
+        with patch.dict(os.environ, {"TERM": "ansi"}):
+            with patch.object(tui_mod.curses, "wrapper") as wrapper:
+                wrapper.side_effect = curses.error(
+                    "setupterm: could not find terminal"
+                )
+
+                with pytest.raises(curses.error):
+                    tui_mod.run_tui(config)
+
+                assert wrapper.call_count == 1
+
+
 class TestEventsScrollAutoPromote:
     """5.1.1 (CodeRabbit): scrolling toward older history while in
     normal-cap mode (8 rows) used to be a silent no-op because the

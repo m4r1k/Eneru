@@ -67,6 +67,8 @@ for sub in monitor tui
     complete -c eneru -n "__eneru_using $sub" -l graph -r -fa 'charge load voltage runtime' -d 'Metric to graph'
     complete -c eneru -n "__eneru_using $sub" -l time -r -fa '1h 6h 24h 7d 30d' -d 'Time range'
     complete -c eneru -n "__eneru_using $sub" -l events-only -d 'Print only the events list'
+    complete -c eneru -n "__eneru_using $sub" -s v -l verbose -d 'Increase event verbosity'
+    complete -c eneru -n "__eneru_using $sub" -l length -r -fa '0 10 30 60 100 500' -d 'Max events to print with --once'
 end
 
 # `completion` argument.

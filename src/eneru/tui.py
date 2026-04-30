@@ -7,6 +7,7 @@ Two-panel layout:
 """
 
 import curses
+import os
 import sys
 import time
 from collections import deque
@@ -103,13 +104,16 @@ EVENTS_VERBOSITY_POWER = 0
 EVENTS_VERBOSITY_DIAGNOSTICS = 1
 EVENTS_VERBOSITY_ALL = 2
 
+GHOSTTY_TERMS = frozenset({"ghostty", "xterm-ghostty"})
+GHOSTTY_FALLBACK_TERM = "xterm-256color"
+
 EVENT_SECTION_POWER = "Power Events"
 EVENT_SECTION_DIAGNOSTICS = "Diagnostics"
 EVENT_SECTION_LIFECYCLE = "Lifecycle"
 
 
 def _events_verbosity(value) -> int:
-    """Normalize legacy bools and count-style verbosity to 0..2."""
+    """Normalize count-style verbosity to the supported 0..2 display tiers."""
     if isinstance(value, bool):
         return (EVENTS_VERBOSITY_DIAGNOSTICS if value
                 else EVENTS_VERBOSITY_POWER)
@@ -117,6 +121,15 @@ def _events_verbosity(value) -> int:
         return max(EVENTS_VERBOSITY_POWER, min(int(value), EVENTS_VERBOSITY_ALL))
     except (TypeError, ValueError):
         return EVENTS_VERBOSITY_POWER
+
+
+def _missing_ghostty_terminfo(term: str, exc: curses.error) -> bool:
+    """Return True when curses failed only because Ghostty terminfo is absent."""
+    return (
+        term in GHOSTTY_TERMS
+        and "setupterm" in str(exc)
+        and "could not find terminal" in str(exc)
+    )
 
 
 def _event_tier(event_type: str) -> str:
@@ -1394,7 +1407,21 @@ def run_tui(config: Config, interval: int = 5, *,
             elif key == curses.KEY_END:
                 events_scroll = 0
 
-    curses.wrapper(_main)
+    try:
+        curses.wrapper(_main)
+    except curses.error as exc:
+        original_term = os.environ.get("TERM", "")
+        if not _missing_ghostty_terminfo(original_term, exc):
+            raise
+
+        os.environ["TERM"] = GHOSTTY_FALLBACK_TERM
+        try:
+            curses.wrapper(_main)
+        finally:
+            if original_term:
+                os.environ["TERM"] = original_term
+            else:
+                os.environ.pop("TERM", None)
 
 
 # ==============================================================================
