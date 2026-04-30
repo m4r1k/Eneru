@@ -588,6 +588,17 @@ def query_events_for_display(
         return [_format_event_line(ts, label, etype, detail, multi_ups)
                 for ts, label, etype, detail in rows]
 
+    # Grouped mode renders one header per non-empty tier, so a section needs
+    # at least 2 lines (1 header + 1 row) to display without an orphan header.
+    # At max_events == 1 there is no room for both, so fall back to the single
+    # most-recent row -- the tier-priority trim above already guarantees it
+    # is the highest-priority survivor (Power before Diagnostics before
+    # Lifecycle), preserving the "Power events are never evicted within the
+    # cap" docstring contract at length=1.
+    if max_events == 1:
+        return [_format_event_line(ts, label, etype, detail, multi_ups)
+                for ts, label, etype, detail in rows]
+
     grouped_lines: List[str] = []
     sections = (
         (EVENT_SECTION_POWER, lambda r: r[2] in POWER_EVENTS),
@@ -601,8 +612,10 @@ def query_events_for_display(
             continue
         if max_events:
             remaining_lines = max_events - len(grouped_lines)
-            # Headers consume live-panel rows too. Avoid rendering an orphan
-            # section header with no room for at least one event below it.
+            # Headers consume live-panel rows too. Need >= 2 (1 header +
+            # 1 row) to render this section without an orphan header.
+            # The max_events == 1 degenerate case is handled above as a
+            # fallback to the trimmed single row.
             if remaining_lines < 2:
                 break
             section_rows = section_rows[-(remaining_lines - 1):]

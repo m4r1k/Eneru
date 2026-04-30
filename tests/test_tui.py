@@ -1443,6 +1443,72 @@ class TestQueryEventsForDisplay:
         assert any("DAEMON_AFTER_CRASH" in line for line in verbose)
         assert all("DAEMON_START" not in line for line in verbose)
 
+    @pytest.mark.unit
+    def test_grouped_length_one_keeps_power_event(self, tmp_path):
+        """``max_events=1`` in grouped mode must still render the single
+        most-recent Power event. The cap is too small to fit a section
+        header *and* a row, so the header is dropped and the surviving
+        row is rendered bare -- preserving the docstring contract that
+        Power events are never evicted within the cap."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 30, "DAEMON_START", "boot"),
+            (now - 20, "ON_BATTERY", "outage"),
+            (now - 10, "DAEMON_RESTARTED", "restart"),
+        ])
+
+        out = query_events_for_display(
+            config, max_events=1, verbosity=2, grouped=True,
+        )
+        assert len(out) == 1
+        assert "ON_BATTERY" in out[0]
+        # Bare row, no section header (no room for header + row at length=1).
+        assert out[0] != "Power Events"
+
+    @pytest.mark.unit
+    def test_ungrouped_length_one_keeps_power_event(self, tmp_path):
+        """Non-grouped path at length=1 returns the single most-recent
+        Power event (regression guard alongside the grouped fallback)."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 20, "ON_BATTERY", "outage"),
+            (now - 10, "DAEMON_START", "boot"),
+        ])
+
+        out = query_events_for_display(
+            config, max_events=1, verbosity=2, grouped=False,
+        )
+        assert len(out) == 1
+        assert "ON_BATTERY" in out[0]
+
+    @pytest.mark.unit
+    def test_grouped_length_one_falls_back_to_diagnostic_when_no_power(
+            self, tmp_path):
+        """At length=1 with no Power events, the grouped fallback must
+        surface the most-recent Diagnostic survivor -- the second tier
+        in the tier-priority order (Power -> Diagnostics -> Lifecycle)."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 30, "DAEMON_START", "boot"),
+            (now - 20, "VOLTAGE_FLAP_SUPPRESSED", "flap"),
+            (now - 10, "DAEMON_RESTARTED", "restart"),
+        ])
+
+        out = query_events_for_display(
+            config, max_events=1, verbosity=2, grouped=True,
+        )
+        assert len(out) == 1
+        assert "VOLTAGE_FLAP_SUPPRESSED" in out[0]
+
 
 class TestRobustBounds:
     """``_robust_bounds`` keeps a single 0V outlier from squashing the
