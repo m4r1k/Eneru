@@ -147,8 +147,7 @@ class TestCLIMonitorFlags:
 
     @pytest.mark.unit
     def test_verbose_short_form_accepted(self, tmp_path):
-        """``-v`` is the short form of ``--verbose`` and reaches
-        run_once with verbose=True."""
+        """``-v`` adds Diagnostics and reaches run_once as verbose=1."""
         from eneru.tui import run_once
         with patch("eneru.tui.run_once", wraps=run_once) as mock_once:
             config_file = self._minimal_config(tmp_path)
@@ -157,7 +156,20 @@ class TestCLIMonitorFlags:
                                             "--once", "--events-only", "-v"]):
                 main()
             mock_once.assert_called_once()
-            assert mock_once.call_args.kwargs.get("verbose") is True
+            assert mock_once.call_args.kwargs.get("verbose") == 1
+
+    @pytest.mark.unit
+    def test_verbose_double_short_form_accepted(self, tmp_path):
+        """``-vv`` adds Lifecycle and reaches run_once as verbose=2."""
+        from eneru.tui import run_once
+        with patch("eneru.tui.run_once", wraps=run_once) as mock_once:
+            config_file = self._minimal_config(tmp_path)
+            with patch.object(sys, "argv", ["eneru", "tui",
+                                            "-c", str(config_file),
+                                            "--once", "--events-only", "-vv"]):
+                main()
+            mock_once.assert_called_once()
+            assert mock_once.call_args.kwargs.get("verbose") == 2
 
     @pytest.mark.unit
     def test_length_default_is_30(self, tmp_path):

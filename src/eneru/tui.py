@@ -54,22 +54,21 @@ TIME_RANGE_SECONDS = {
 EVENTS_MAX_ROWS_NORMAL = 30  # default cap; matches CLI --length default
 EVENTS_MAX_ROWS_MORE = 500   # <M> "More logs" toggle cap
 
-# Two tiers of priority. The events table accumulates power transitions
-# (operator's reason for opening the panel), daemon lifecycle (useful
-# context but high-volume during testing or rapid restarts), and chatter
-# that's only relevant when debugging.
+# Three display tiers. The events table accumulates power transitions
+# (operator's reason for opening the panel), diagnostics that help explain
+# electrical / UPS behavior, and daemon lifecycle rows that are useful
+# context but high-volume during testing or rapid restarts.
 #
 # POWER_EVENTS are *always* preserved within the row cap -- never
-# evicted by daemon noise. LIFECYCLE_EVENTS fill the remaining slots
-# with the most-recent rows. Anything outside both sets is "verbose"
-# chatter, surfaced only when ``--verbose`` / ``<V>`` is on.
+# evicted by daemon noise. DIAGNOSTIC_EVENTS are implicit: anything
+# outside POWER_EVENTS and LIFECYCLE_EVENTS. They surface at ``-v`` /
+# first ``<V>``. LIFECYCLE_EVENTS surface last at ``-vv`` / second
+# ``<V>``.
 #
-# Without this tiering, a homelab user who hits a real outage 4 days
-# ago and then iterates on the daemon today sees 20 rows of
-# DAEMON_RESTARTED / DAEMON_UPGRADED in the panel and the actual
-# ON_BATTERY rows are pushed off-screen. (Bug surfaced in 5.2.2 by
-# the maintainer's own data: 65 daemon-lifecycle rows vs 5 power-event
-# rows in the events table.)
+# Without this tiering, a homelab user who hits a real outage 4 days ago
+# and then iterates on the daemon today sees daemon rows instead of the
+# actual ON_BATTERY rows. (Bug surfaced in 5.2.2 by the maintainer's own
+# data: 65 daemon-lifecycle rows vs 5 power-event rows in the events table.)
 POWER_EVENTS = frozenset({
     "ON_BATTERY",
     "POWER_RESTORED",
@@ -94,9 +93,64 @@ LIFECYCLE_EVENTS = frozenset({
     "DAEMON_RECOVERED",
 })
 
-# Union for backwards compatibility with callers / tests that grep for
-# "is this row in the priority set" without caring about the tier split.
+# Union for callers / tests that grep for "is this row in the priority set"
+# without caring about the tier split.
 PRIORITY_EVENTS = POWER_EVENTS | LIFECYCLE_EVENTS
+
+EVENTS_VERBOSITY_POWER = 0
+EVENTS_VERBOSITY_DIAGNOSTICS = 1
+EVENTS_VERBOSITY_ALL = 2
+
+EVENT_SECTION_POWER = "Power Events"
+EVENT_SECTION_DIAGNOSTICS = "Diagnostics"
+EVENT_SECTION_LIFECYCLE = "Lifecycle"
+
+
+def _events_verbosity(value) -> int:
+    """Normalize legacy bools and count-style verbosity to 0..2."""
+    if isinstance(value, bool):
+        return (EVENTS_VERBOSITY_DIAGNOSTICS if value
+                else EVENTS_VERBOSITY_POWER)
+    try:
+        return max(EVENTS_VERBOSITY_POWER, min(int(value), EVENTS_VERBOSITY_ALL))
+    except (TypeError, ValueError):
+        return EVENTS_VERBOSITY_POWER
+
+
+def _event_tier(event_type: str) -> str:
+    """Return the user-facing display tier for an event type."""
+    if event_type in POWER_EVENTS:
+        return EVENT_SECTION_POWER
+    if event_type in LIFECYCLE_EVENTS:
+        return EVENT_SECTION_LIFECYCLE
+    return EVENT_SECTION_DIAGNOSTICS
+
+
+def _event_enabled(event_type: str, verbosity: int) -> bool:
+    """Return whether an event type is visible at the current verbosity."""
+    tier = _event_tier(event_type)
+    if tier == EVENT_SECTION_POWER:
+        return True
+    if tier == EVENT_SECTION_DIAGNOSTICS:
+        return verbosity >= EVENTS_VERBOSITY_DIAGNOSTICS
+    return verbosity >= EVENTS_VERBOSITY_ALL
+
+
+def _events_verbosity_label(verbosity: int) -> str:
+    """Short label for the live TUI footer."""
+    verbosity = _events_verbosity(verbosity)
+    if verbosity == EVENTS_VERBOSITY_POWER:
+        return "power"
+    if verbosity == EVENTS_VERBOSITY_DIAGNOSTICS:
+        return "+diag"
+    return "all"
+
+
+def _no_events_message(verbosity: int) -> str:
+    """Placeholder text when the enabled tiers have no rows."""
+    if _events_verbosity(verbosity) == EVENTS_VERBOSITY_POWER:
+        return "(no power events recorded)"
+    return "(no events)"
 
 # Map graph modes to (column, unit_suffix, y_min, y_max, value_formatter).
 # value_formatter takes a float and returns the user-facing display
@@ -360,6 +414,22 @@ def parse_log_events(log_path: str,
         return []
 
 
+def events_db_available(config: Config) -> bool:
+    """Return True when at least one per-UPS events DB can be opened."""
+    for group in config.ups_groups:
+        conn = StatsStore.open_readonly(stats_db_path_for(group, config))
+        if conn is None:
+            continue
+        try:
+            return True
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return False
+
+
 def _sanitize_event_detail(detail: str) -> str:
     """Strip markdown formatting and collapse newlines so the detail
     fits on a single row of the events panel.
@@ -407,7 +477,9 @@ def query_events_for_display(
     config: Config,
     *,
     max_events: Optional[int] = EVENTS_MAX_ROWS_NORMAL,
-    priority_only: bool = True,
+    verbosity: int = EVENTS_VERBOSITY_POWER,
+    priority_only: Optional[bool] = None,
+    grouped: bool = False,
 ) -> List[str]:
     """Pull events from each UPS's SQLite store, sorted by timestamp.
 
@@ -422,19 +494,22 @@ def query_events_for_display(
     panel. Returns an empty list when no per-UPS DB exists -- callers
     should fall back to ``parse_log_events`` in that case.
 
-    ``priority_only=True`` (default) limits the result to event types in
-    :data:`PRIORITY_EVENTS` so the panel surfaces daemon and power
-    transitions instead of being crowded out by per-condition chatter.
-    Pass ``False`` (CLI ``--verbose`` / TUI ``<V>``) to include all rows.
+    ``verbosity`` selects enabled tiers: ``0`` shows Power Events only,
+    ``1`` adds Diagnostics, and ``2`` adds Lifecycle. ``priority_only`` is
+    accepted as a legacy shim for tests / older internal callers.
 
     ``max_events=None`` (or 0) disables the row cap entirely.
 
     Trim is **3-tier**: POWER_EVENTS always survive the cap; remaining
-    slots are filled first with most-recent LIFECYCLE_EVENTS, then with
-    chatter (only reachable when ``priority_only=False`` widens the
-    upstream filter). Power events are never evicted; lifecycle context
-    outranks voltage-flap chatter when the cap is hit in verbose mode.
+    slots are filled first with most-recent Diagnostics, then with
+    Lifecycle. Power events are never evicted; diagnostics outrank daemon
+    lifecycle context when the cap is hit in verbose mode.
     """
+    if priority_only is not None:
+        # Legacy compatibility: the old boolean API had priority_only=False
+        # mean "show every event type".
+        verbosity = EVENTS_VERBOSITY_POWER if priority_only else EVENTS_VERBOSITY_ALL
+    verbosity = _events_verbosity(verbosity)
     multi_ups = config.multi_ups
     rows: List[tuple] = []  # (ts, label, event_type, detail)
     any_db_seen = False
@@ -456,7 +531,7 @@ def query_events_for_display(
             finally:
                 store._conn = None
             for ts, etype, detail in events:
-                if priority_only and etype not in PRIORITY_EVENTS:
+                if not _event_enabled(etype, verbosity):
                     continue
                 rows.append((int(ts), group.ups.label, etype, detail or ""))
         finally:
@@ -471,36 +546,56 @@ def query_events_for_display(
     rows.sort(key=lambda r: r[0])
 
     # Three-tier trim: POWER_EVENTS always survive; if room left,
-    # LIFECYCLE_EVENTS fill next; only then chatter (other rows that
-    # made it through ``priority_only=False``). This matches the
-    # priority hierarchy users care about: power transitions are
-    # never evicted, daemon-lifecycle context is preferred over
-    # voltage-flap chatter, and chatter rounds out the cap when
-    # ``--verbose`` is on. ``max_events`` in (None, 0) means no cap.
+    # Diagnostics fill next; only then Lifecycle. This matches the
+    # operator-facing hierarchy: power transitions are never evicted,
+    # electrical / UPS diagnostics explain what is happening, and daemon
+    # lifecycle context rounds out the cap at the highest verbosity.
+    # ``max_events`` in (None, 0) means no cap.
     if max_events and len(rows) > max_events:
         power = [r for r in rows if r[2] in POWER_EVENTS]
         lifecycle = [r for r in rows if r[2] in LIFECYCLE_EVENTS]
-        chatter = [r for r in rows
-                   if r[2] not in POWER_EVENTS and r[2] not in LIFECYCLE_EVENTS]
+        diagnostics = [
+            r for r in rows
+            if r[2] not in POWER_EVENTS and r[2] not in LIFECYCLE_EVENTS
+        ]
         if len(power) >= max_events:
             # Pathological: more power events than the cap. Show the
             # most-recent N -- still better than evicting them.
             kept = power[-max_events:]
         else:
             remaining = max_events - len(power)
-            # Lifecycle fills first; chatter only if room remains.
-            kept_lifecycle = lifecycle[-remaining:]
-            remaining -= len(kept_lifecycle)
-            kept_chatter = chatter[-remaining:] if remaining > 0 else []
+            # Diagnostics fill first; lifecycle only if room remains.
+            kept_diagnostics = diagnostics[-remaining:]
+            remaining -= len(kept_diagnostics)
+            kept_lifecycle = lifecycle[-remaining:] if remaining > 0 else []
             # Re-sort by ts so the panel never displays out-of-time-order
             # rows after the tier merge. Python's sort is stable, so
             # equal-timestamp rows preserve insertion order.
-            kept = sorted(power + kept_lifecycle + kept_chatter,
+            kept = sorted(power + kept_diagnostics + kept_lifecycle,
                           key=lambda r: r[0])
         rows = kept
 
-    return [_format_event_line(ts, label, etype, detail, multi_ups)
-            for ts, label, etype, detail in rows]
+    if not grouped:
+        return [_format_event_line(ts, label, etype, detail, multi_ups)
+                for ts, label, etype, detail in rows]
+
+    grouped_lines: List[str] = []
+    sections = (
+        (EVENT_SECTION_POWER, lambda r: r[2] in POWER_EVENTS),
+        (EVENT_SECTION_DIAGNOSTICS,
+         lambda r: r[2] not in POWER_EVENTS and r[2] not in LIFECYCLE_EVENTS),
+        (EVENT_SECTION_LIFECYCLE, lambda r: r[2] in LIFECYCLE_EVENTS),
+    )
+    for section, predicate in sections:
+        section_rows = [r for r in rows if predicate(r)]
+        if not section_rows:
+            continue
+        grouped_lines.append(section)
+        grouped_lines.extend(
+            _format_event_line(ts, label, etype, detail, multi_ups)
+            for ts, label, etype, detail in section_rows
+        )
+    return grouped_lines
 
 
 # ==============================================================================
@@ -827,7 +922,8 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
                        events: List[str], show_more: bool,
                        *, graph_mode: str = "off", time_range: str = "1h",
                        ups_index: int = 0, ups_total: int = 1,
-                       scroll_offset: int = 0, verbose: bool = False):
+                       scroll_offset: int = 0,
+                       verbosity: int = EVENTS_VERBOSITY_POWER):
     """Render the logs panel with yellow/gold background, edge to edge.
 
     The bottom-row key hints reflect the *current* graph mode, time
@@ -850,7 +946,7 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
     y += 1
 
     if not events:
-        safe_addstr(win, y, 0, "   (no recent events)", gold_attr)
+        safe_addstr(win, y, 0, f"   {_no_events_message(verbosity)}", gold_attr)
         y += 1
     else:
         footer_lines = 2
@@ -871,6 +967,11 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
         for event in display_events:
             if y >= y_end - footer_lines:
                 break
+            is_section = event in (
+                EVENT_SECTION_POWER,
+                EVENT_SECTION_DIAGNOSTICS,
+                EVENT_SECTION_LIFECYCLE,
+            )
             # Account for the right-edge gutter and the leading 3-space
             # indent. Use display-cell width (handles emoji + CJK) so
             # lines never spill past the panel edge.
@@ -885,7 +986,8 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
             # cell width than display_width predicts; without this pad,
             # any miscount leaves cells with stale or unpainted bg.
             pad_cells = max(0, width - display_width(display))
-            safe_addstr(win, y, 0, display + (" " * pad_cells), gold_attr)
+            attr = gold_bold if is_section else gold_attr
+            safe_addstr(win, y, 0, display + (" " * pad_cells), attr)
             y += 1
 
     # Key hints at the bottom of the gold panel.
@@ -908,7 +1010,7 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
         ("<G>", f"Graph: {graph_mode}"),
         ("<T>", f"Time: {time_range}"),
         ("<U>", ups_descr),
-        ("<V>", f"Verb: {'on' if verbose else 'off'}"),
+        ("<V>", f"Events: {_events_verbosity_label(verbosity)}"),
     )
     for label, descr in hints:
         if x + len(label) + len(descr) + 6 > width:
@@ -1091,7 +1193,7 @@ def run_tui(config: Config, interval: int = 5, *,
             initial_graph: Optional[str] = None,
             initial_time_range: str = "1h",
             initial_ups_index: int = 0,
-            verbose: bool = False):
+            verbose: int = EVENTS_VERBOSITY_POWER):
     """Run the curses TUI dashboard.
 
     Optional kwargs let the CLI pre-seed the cycle state so flags like
@@ -1099,8 +1201,8 @@ def run_tui(config: Config, interval: int = 5, *,
     requested view, instead of starting on the default (graph off) and
     forcing the operator to press <G>/<T> to get there.
 
-    ``verbose=True`` opens the events panel showing all event types
-    (matching ``--verbose`` on the CLI). The ``<V>`` key toggles this
+    ``verbose`` is a count-style event verbosity: 0 shows Power Events,
+    1 adds Diagnostics, and 2 adds Lifecycle. The ``<V>`` key cycles this
     in-session.
     """
     def _main(stdscr):
@@ -1125,7 +1227,7 @@ def run_tui(config: Config, interval: int = 5, *,
         ups_index = max(
             0, min(int(initial_ups_index or 0), max(0, len(config.ups_groups) - 1))
         )
-        events_verbose = bool(verbose)
+        events_verbosity = _events_verbosity(verbose)
         events_scroll = 0            # ↑/↓ scrolls events panel; 0 = bottom
 
         while True:
@@ -1200,9 +1302,10 @@ def run_tui(config: Config, interval: int = 5, *,
                 events_cap = min(EVENTS_MAX_ROWS_NORMAL, visible_estimate)
             log_events = query_events_for_display(
                 config, max_events=events_cap,
-                priority_only=not events_verbose,
+                verbosity=events_verbosity,
+                grouped=True,
             )
-            if not log_events:
+            if not log_events and not events_db_available(config):
                 log_events = parse_log_events(
                     config.logging.file or "",
                     max_events=events_cap,
@@ -1231,7 +1334,7 @@ def run_tui(config: Config, interval: int = 5, *,
                               ups_index=ups_index,
                               ups_total=len(config.ups_groups) or 1,
                               scroll_offset=events_scroll,
-                              verbose=events_verbose)
+                              verbosity=events_verbosity)
 
             # Move cursor to bottom-right to avoid visual artifacts
             try:
@@ -1251,7 +1354,9 @@ def run_tui(config: Config, interval: int = 5, *,
             elif key in (ord('m'), ord('M')):
                 show_more = not show_more
             elif key in (ord('v'), ord('V')):
-                events_verbose = not events_verbose
+                events_verbosity = (
+                    events_verbosity + 1
+                ) % (EVENTS_VERBOSITY_ALL + 1)
                 events_scroll = 0  # reset so the new (longer/shorter) list anchors at bottom
             elif key in (ord('g'), ord('G')):
                 graph_mode = cycle(GRAPH_MODES, graph_mode)
@@ -1341,7 +1446,8 @@ def render_graph_text(
 
 def run_once(config: Config, *, graph_metric: Optional[str] = None,
              time_range: str = "1h", events_only: bool = False,
-             verbose: bool = False, length: int = EVENTS_MAX_ROWS_NORMAL):
+             verbose: int = EVENTS_VERBOSITY_POWER,
+             length: int = EVENTS_MAX_ROWS_NORMAL):
     """Print a status snapshot to stdout and exit.
 
     With ``events_only=True`` the status / resource summary and graph
@@ -1352,29 +1458,30 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
     list. Events are sparse and a fixed window made the panel silently
     empty for normal homelab usage.
 
-    ``verbose=True`` includes low-priority chatter alongside the
-    :data:`PRIORITY_EVENTS` defaults.
+    ``verbose`` is a count-style event verbosity: 0 shows Power Events,
+    1 adds Diagnostics, and 2 adds Lifecycle.
 
     ``length`` caps the events list (default :data:`EVENTS_MAX_ROWS_NORMAL`,
     set to 0 for no cap). Tiered preservation: power events always
     survive the cap; daemon-lifecycle events fill remaining slots.
     """
+    verbose = _events_verbosity(verbose)
     # length=0 means "no cap" -- pass None through to the query.
     events_cap = None if length == 0 else length
 
     if events_only:
         events = query_events_for_display(
             config, max_events=events_cap,
-            priority_only=not verbose,
+            verbosity=verbose,
         )
-        if not events:
+        if not events and not events_db_available(config):
             events = parse_log_events(config.logging.file or "",
                                       max_events=events_cap)
         if events:
             for line in events:
                 print(line)
         else:
-            print("(no events)")
+            print(_no_events_message(verbose))
         return
 
     print(f"Eneru v{__version__}")
@@ -1415,19 +1522,19 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
         if i < group_count - 1:
             print()
 
-    # Snapshot path: same flag semantics as the events-only branch
-    # above. --verbose drops the priority filter; --length caps the
-    # row count. The snapshot tail is a small summary under the
-    # status block -- it always caps at 10 even when --length is
-    # higher (or 0/unbounded), so an operator asking for "all events"
-    # gets that via --events-only, not via the snapshot tail
-    # drowning the status header it was designed to summarize.
+    # Snapshot path: same flag semantics as the events-only branch above.
+    # --verbose increments enabled tiers; --length caps the row count. The
+    # snapshot tail is a small summary under the status block -- it always
+    # caps at 10 even when --length is higher (or 0/unbounded), so an
+    # operator asking for "all events" gets that via --events-only, not via
+    # the snapshot tail drowning the status header it was designed to
+    # summarize.
     snapshot_cap = 10 if events_cap is None else min(events_cap, 10)
     events = query_events_for_display(
         config, max_events=snapshot_cap,
-        priority_only=not verbose,
+        verbosity=verbose,
     )
-    if not events:
+    if not events and not events_db_available(config):
         events = parse_log_events(config.logging.file or "",
                                   max_events=snapshot_cap)
     if events:

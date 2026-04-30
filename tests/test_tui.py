@@ -1086,13 +1086,13 @@ class TestQueryEventsForDisplay:
         config = _events_config(tmp_path,
                                 ups_names=("UPS1@h", "UPS2@h"))
         now = int(_time.time())
-        # priority_only=False — this test exercises sort/interleave for
-        # arbitrary event types, not the priority filter itself.
+        # verbosity=1 — this test exercises sort/interleave for arbitrary
+        # diagnostics, not the default Power-only filter itself.
         _seed_events(config, config.ups_groups[0],
                      [(now - 100, "A", ""), (now - 20, "C", "")])
         _seed_events(config, config.ups_groups[1],
                      [(now - 60, "B", "")])
-        lines = query_events_for_display(config, priority_only=False)
+        lines = query_events_for_display(config, verbosity=1)
         # Order: A (UPS1), B (UPS2), C (UPS1)
         assert "[UPS1@h] A" in lines[0]
         assert "[UPS2@h] B" in lines[1]
@@ -1107,9 +1107,9 @@ class TestQueryEventsForDisplay:
         _seed_events(config, config.ups_groups[0], [
             (now - i, f"EVT{i}", "") for i in range(1, 11)
         ])
-        # priority_only=False — testing the row cap, not the type filter.
+        # verbosity=1 — testing the row cap, not the type filter.
         lines = query_events_for_display(
-            config, max_events=3, priority_only=False,
+            config, max_events=3, verbosity=1,
         )
         # Most recent 3 events.
         assert len(lines) == 3
@@ -1147,34 +1147,30 @@ class TestQueryEventsForDisplay:
         assert line.startswith("????-??-?? ??:??:??")
 
     @pytest.mark.unit
-    def test_priority_only_default_filters_chatter(self, tmp_path):
-        """Default ``priority_only=True`` keeps the panel focused on
-        daemon-lifecycle and power transitions even when the events
-        table is full of low-priority chatter."""
+    def test_default_filters_to_power_events(self, tmp_path):
+        """Default verbosity keeps the panel focused on power transitions."""
         from eneru.tui import query_events_for_display
         import time as _time
         config = _events_config(tmp_path)
         now = int(_time.time())
         events = []
-        # 30 chatter rows that should be filtered.
+        # 30 diagnostics rows that should be filtered.
         for i in range(30):
             events.append(
                 (now - 100 + i, "VOLTAGE_FLAP_SUPPRESSED", f"flap {i}")
             )
-        # 2 priority rows that must survive the filter.
+        # Lifecycle and Power rows; only Power should survive the default filter.
         events.append((now - 50, "DAEMON_START", "v1"))
         events.append((now - 5, "POWER_RESTORED", "Outage 12s"))
         _seed_events(config, config.ups_groups[0], events)
         lines = query_events_for_display(config, max_events=8)
-        # Both priority rows present, no VOLTAGE_FLAP_SUPPRESSED lines.
-        assert any("DAEMON_START" in line for line in lines)
+        assert all("DAEMON_START" not in line for line in lines)
         assert any("POWER_RESTORED" in line for line in lines)
         assert all("VOLTAGE_FLAP_SUPPRESSED" not in line for line in lines)
 
     @pytest.mark.unit
-    def test_verbose_includes_low_priority(self, tmp_path):
-        """``priority_only=False`` (set by ``--verbose`` / ``<V>``)
-        widens the filter to all event types."""
+    def test_verbose_includes_diagnostics_not_lifecycle(self, tmp_path):
+        """``-v`` adds Diagnostics while keeping Lifecycle hidden."""
         from eneru.tui import query_events_for_display
         import time as _time
         config = _events_config(tmp_path)
@@ -1183,8 +1179,26 @@ class TestQueryEventsForDisplay:
             (now - 100, "VOLTAGE_FLAP_SUPPRESSED", "flap"),
             (now - 50, "DAEMON_START", "v1"),
         ])
-        lines = query_events_for_display(config, priority_only=False)
-        assert len(lines) == 2
+        lines = query_events_for_display(config, verbosity=1)
+        assert len(lines) == 1
+        assert any("VOLTAGE_FLAP_SUPPRESSED" in line for line in lines)
+        assert all("DAEMON_START" not in line for line in lines)
+
+    @pytest.mark.unit
+    def test_double_verbose_includes_all_tiers(self, tmp_path):
+        """``-vv`` includes Power, Diagnostics, and Lifecycle."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 100, "VOLTAGE_FLAP_SUPPRESSED", "flap"),
+            (now - 50, "DAEMON_START", "v1"),
+            (now - 25, "ON_BATTERY", "outage"),
+        ])
+        lines = query_events_for_display(config, verbosity=2)
+        assert len(lines) == 3
+        assert any("ON_BATTERY" in line for line in lines)
         assert any("VOLTAGE_FLAP_SUPPRESSED" in line for line in lines)
         assert any("DAEMON_START" in line for line in lines)
 
@@ -1198,9 +1212,9 @@ class TestQueryEventsForDisplay:
         import time as _time
         config = _events_config(tmp_path)
         now = int(_time.time())
-        # Seed 600 priority events -- comfortably above the new default cap of 30.
+        # Seed 600 power events -- comfortably above the default cap of 30.
         _seed_events(config, config.ups_groups[0], [
-            (now - 600 + i, "DAEMON_START", f"row-{i}")
+            (now - 600 + i, "ON_BATTERY", f"row-{i}")
             for i in range(600)
         ])
         # Default cap (EVENTS_MAX_ROWS_NORMAL=30) drops the oldest 570.
@@ -1237,7 +1251,7 @@ class TestQueryEventsForDisplay:
         events.append((now - 86400 * 7, "EMERGENCY_SHUTDOWN_INITIATED", "low batt"))
         _seed_events(config, config.ups_groups[0], events)
 
-        lines = query_events_for_display(config, max_events=20)
+        lines = query_events_for_display(config, max_events=20, verbosity=2)
         # All 3 power-event rows MUST survive the cap.
         assert any("ON_BATTERY: real outage" in line for line in lines), (
             f"ON_BATTERY pushed off by daemon noise -- tiered trim regressed. "
@@ -1276,19 +1290,15 @@ class TestQueryEventsForDisplay:
         assert any("outage-40" in line for line in lines)  # 10th-latest
 
     @pytest.mark.unit
-    def test_tiered_trim_lifecycle_outranks_chatter(self, tmp_path):
-        """5.2.2 (CodeRabbit refinement): in --verbose mode (priority_only
-        =False), chatter rows reach the trim layer alongside lifecycle
-        rows. Lifecycle is more important than per-condition chatter --
-        when the cap evicts non-power rows, lifecycle should survive
-        first, then chatter fills any leftover slots."""
+    def test_tiered_trim_diagnostics_outrank_lifecycle(self, tmp_path):
+        """In -vv mode, diagnostics fill cap slots before lifecycle rows."""
         from eneru.tui import query_events_for_display
         import time as _time
         config = _events_config(tmp_path)
         now = int(_time.time())
-        # 1 power event + 30 chatter rows + 4 lifecycle rows.
-        # Cap = 7. Result must be: 1 power + 4 lifecycle + 2 chatter,
-        # NOT: 1 power + 6 chatter (chatter evicting lifecycle).
+        # 1 power event + 30 diagnostic rows + 4 lifecycle rows.
+        # Cap = 7. Result must be: 1 power + 6 diagnostics, with lifecycle
+        # evicted because it is the noisiest tier.
         events = [(now - 5000, "ON_BATTERY", "outage")]
         for i in range(30):
             events.append(
@@ -1301,18 +1311,58 @@ class TestQueryEventsForDisplay:
         _seed_events(config, config.ups_groups[0], events)
 
         lines = query_events_for_display(
-            config, max_events=7, priority_only=False,
+            config, max_events=7, verbosity=2,
         )
         assert len(lines) == 7
         assert sum("ON_BATTERY" in line for line in lines) == 1, (
             f"power event must survive: {lines}"
         )
-        assert sum("DAEMON_RESTARTED" in line for line in lines) == 4, (
-            f"all 4 lifecycle rows must outrank chatter; got: {lines}"
+        assert sum("VOLTAGE_FLAP_SUPPRESSED" in line for line in lines) == 6, (
+            f"diagnostics must fill before lifecycle; got: {lines}"
         )
-        assert sum("VOLTAGE_FLAP_SUPPRESSED" in line for line in lines) == 2, (
-            f"chatter fills only the 2 leftover slots; got: {lines}"
+        assert sum("DAEMON_RESTARTED" in line for line in lines) == 0, (
+            f"lifecycle should be evicted before diagnostics; got: {lines}"
         )
+
+    @pytest.mark.unit
+    def test_grouped_output_orders_sections_for_live_tui(self, tmp_path):
+        """Live TUI groups enabled tiers as Power, Diagnostics, Lifecycle."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 30, "DAEMON_START", "start"),
+            (now - 20, "VOLTAGE_FLAP_SUPPRESSED", "flap"),
+            (now - 10, "ON_BATTERY", "outage"),
+        ])
+
+        lines = query_events_for_display(config, verbosity=2, grouped=True)
+        assert lines[0] == "Power Events"
+        assert any("ON_BATTERY" in line for line in lines[1:])
+        assert lines.index("Diagnostics") < lines.index("Lifecycle")
+        assert any("VOLTAGE_FLAP_SUPPRESSED" in line for line in lines)
+        assert any("DAEMON_START" in line for line in lines)
+
+    @pytest.mark.unit
+    def test_crash_restart_events_are_diagnostics(self, tmp_path):
+        """Crash/restart classifiers are diagnostics, not lifecycle."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 30, "DAEMON_RESTARTED_AFTER_FATAL", "fatal"),
+            (now - 20, "DAEMON_AFTER_CRASH", "crash"),
+            (now - 10, "DAEMON_START", "start"),
+        ])
+
+        default = query_events_for_display(config)
+        verbose = query_events_for_display(config, verbosity=1)
+        assert default == []
+        assert any("DAEMON_RESTARTED_AFTER_FATAL" in line for line in verbose)
+        assert any("DAEMON_AFTER_CRASH" in line for line in verbose)
+        assert all("DAEMON_START" not in line for line in verbose)
 
 
 class TestRobustBounds:
@@ -1495,15 +1545,59 @@ class TestRunOnceEventsOnly:
         config = _events_config(tmp_path)
         run_once(config, events_only=True)
         out = capsys.readouterr().out
-        assert "(no events)" in out
+        assert "(no power events recorded)" in out
 
     @pytest.mark.unit
-    def test_snapshot_path_honours_verbose_flag(self, tmp_path, capsys):
+    def test_events_only_db_with_no_power_does_not_fallback_to_log(
+        self, tmp_path, capsys
+    ):
+        """A DB with only hidden tiers should say no power events, not parse logs."""
+        from eneru.tui import run_once
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 30, "VOLTAGE_FLAP_SUPPRESSED", "flap"),
+        ])
+        Path(config.logging.file).write_text(
+            "2026-04-20 10:00:00 - ⚡ POWER EVENT: ON_BATTERY - stale log\n"
+        )
+
+        run_once(config, events_only=True)
+        out = capsys.readouterr().out
+        assert "(no power events recorded)" in out
+        assert "stale log" not in out
+
+    @pytest.mark.unit
+    def test_events_only_flat_time_sorted_with_enabled_tiers(
+        self, tmp_path, capsys
+    ):
+        """--once output remains flat and timestamp-sorted across enabled tiers."""
+        from eneru.tui import run_once
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 30, "DAEMON_START", "start"),
+            (now - 20, "VOLTAGE_FLAP_SUPPRESSED", "flap"),
+            (now - 10, "ON_BATTERY", "outage"),
+        ])
+
+        run_once(config, events_only=True, verbose=2)
+        lines = capsys.readouterr().out.splitlines()
+        assert all(line not in ("Power Events", "Diagnostics", "Lifecycle")
+                   for line in lines)
+        assert "DAEMON_START" in lines[0]
+        assert "VOLTAGE_FLAP_SUPPRESSED" in lines[1]
+        assert "ON_BATTERY" in lines[2]
+
+    @pytest.mark.unit
+    def test_snapshot_path_honours_verbose_level(self, tmp_path, capsys):
         """5.2.2 (cubic.dev / CodeRabbit P1): the non-events-only branch
         of run_once also reads events for its tail block. Pre-fix it
         used the default ``priority_only=True`` and silently ignored
-        ``--verbose``, so chatter never surfaced even when the user
-        explicitly asked for it."""
+        ``--verbose``, so diagnostics never surfaced even when the user
+        explicitly asked for them."""
         from eneru.tui import run_once
         import time as _time
         config = _events_config(tmp_path)
@@ -1512,24 +1606,28 @@ class TestRunOnceEventsOnly:
             (now - 60, "VOLTAGE_FLAP_SUPPRESSED", "low-prio chatter"),
             (now - 30, "DAEMON_START", "high-prio"),
         ])
-        # Default snapshot path: chatter hidden.
+        # Default snapshot path: diagnostics and lifecycle hidden.
         run_once(config, events_only=False)
         out_default = capsys.readouterr().out
-        assert "DAEMON_START" in out_default
+        assert "DAEMON_START" not in out_default
         assert "VOLTAGE_FLAP_SUPPRESSED" not in out_default
-        # --verbose: chatter must surface.
-        run_once(config, events_only=False, verbose=True)
+        # -v: diagnostics surface, lifecycle remains hidden.
+        run_once(config, events_only=False, verbose=1)
         out_verbose = capsys.readouterr().out
-        assert "DAEMON_START" in out_verbose
+        assert "DAEMON_START" not in out_verbose
         assert "VOLTAGE_FLAP_SUPPRESSED" in out_verbose, (
-            "snapshot path must honour --verbose; pre-5.2.2 the events "
-            "tail in the snapshot block silently ignored the flag"
+            "snapshot path must honour -v; the events tail in the snapshot "
+            "block must include diagnostics"
         )
+        # -vv: lifecycle joins the flat, timestamp-sorted tail.
+        run_once(config, events_only=False, verbose=2)
+        out_all = capsys.readouterr().out
+        assert "DAEMON_START" in out_all
 
     @pytest.mark.unit
     def test_snapshot_path_no_time_window_for_events(self, tmp_path, capsys):
         """5.2.2: events have no time window -- ``--time`` only affects
-        graphs. The snapshot tail must surface old DAEMON rows even
+        graphs. The snapshot tail must surface old power rows even
         though they fall outside any ``--time`` choice."""
         from eneru.tui import run_once
         import time as _time
@@ -1537,8 +1635,8 @@ class TestRunOnceEventsOnly:
         now = int(_time.time())
         old_ts = now - 90 * 86400  # 3 months ago
         _seed_events(config, config.ups_groups[0], [
-            (old_ts, "DAEMON_START", "ancient"),
-            (now - 60, "DAEMON_START", "recent"),
+            (old_ts, "ON_BATTERY", "ancient"),
+            (now - 60, "POWER_RESTORED", "recent"),
         ])
         run_once(config, events_only=False)
         out = capsys.readouterr().out
@@ -1558,29 +1656,29 @@ class TestRunOnceEventsOnly:
         config = _events_config(tmp_path)
         now = int(_time.time())
         _seed_events(config, config.ups_groups[0], [
-            (now - 100 + i, "DAEMON_START", f"row-{i}") for i in range(50)
+            (now - 100 + i, "ON_BATTERY", f"row-{i}") for i in range(50)
         ])
         run_once(config, events_only=True, length=5)
         out = capsys.readouterr().out
-        # Should see exactly 5 lines -- the most-recent 5 DAEMON_START rows.
-        lines = [l for l in out.splitlines() if "DAEMON_START" in l]
+        # Should see exactly 5 lines -- the most-recent 5 ON_BATTERY rows.
+        lines = [l for l in out.splitlines() if "ON_BATTERY" in l]
         assert len(lines) == 5
         assert "row-49" in lines[-1]
         assert "row-45" in lines[0]
 
     @pytest.mark.unit
     def test_events_only_length_zero_means_no_cap(self, tmp_path, capsys):
-        """``--length 0`` returns every priority row."""
+        """``--length 0`` returns every enabled row."""
         from eneru.tui import run_once
         import time as _time
         config = _events_config(tmp_path)
         now = int(_time.time())
         _seed_events(config, config.ups_groups[0], [
-            (now - 100 + i, "DAEMON_START", f"row-{i}") for i in range(40)
+            (now - 100 + i, "ON_BATTERY", f"row-{i}") for i in range(40)
         ])
         run_once(config, events_only=True, length=0)
         out = capsys.readouterr().out
-        lines = [l for l in out.splitlines() if "DAEMON_START" in l]
+        lines = [l for l in out.splitlines() if "ON_BATTERY" in l]
         assert len(lines) == 40, f"length=0 must show all rows; got {len(lines)}"
 
 

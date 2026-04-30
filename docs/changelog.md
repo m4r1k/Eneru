@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.3.0] - Unreleased
+
+### Changed
+- Event display now uses user-facing tiers: Power Events by default,
+  Diagnostics with `-v` / `<V>`, and Lifecycle with `-vv` / a second
+  `<V>` press.
+- Live TUI events are grouped by tier; `--once` remains a flat,
+  timestamp-sorted list.
+- Event caps preserve Power first, then Diagnostics, then Lifecycle.
+
+---
+
 ## [5.2.2] - 2026-04-28
 
 Bug-fix release. Drop-in upgrade.

@@ -81,7 +81,7 @@ done
 | Redundancy runtime | Quorum evaluation, advisory triggers, idempotent group execution |
 | Health monitoring | Voltage thresholds, AVR, bypass, overload, battery anomaly filtering |
 | Notifications | Formatting, retry queue, lifecycle classification, coalescing, suppression rules |
-| Statistics and TUI | SQLite schema, aggregation, event queries, graphs, one-shot monitor output |
+| Statistics and TUI | SQLite schema, aggregation, event tier filtering, TUI grouping, graphs, one-shot monitor output |
 | Packaging | nFPM file list, package install paths, wrapper execution |
 
 ## End-to-end tests
