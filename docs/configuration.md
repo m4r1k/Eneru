@@ -433,8 +433,8 @@ Common flags:
 | `monitor` | `--graph {charge,load,voltage,runtime}` | Initial graph metric (interactive: cycle with `<G>`) |
 | `monitor` | `--time {1h,6h,24h,7d,30d}` | **Graph** time range (interactive: cycle with `<T>`). Does NOT affect the events list — events have no time window |
 | `monitor` | `--events-only` | Print recent events only |
-| `monitor` | `--verbose`, `-v` | Show low-priority events too (default: priority only); `<V>` toggles in-session |
-| `monitor` | `--length N` | With `--once`: max events to print (default 30, 0 = no cap). Power events always preserved within the cap |
+| `monitor` | `--verbose`, `-v` | Increase event verbosity: default shows Power Events, `-v` adds Diagnostics, `-vv` adds Lifecycle; `<V>` cycles in-session |
+| `monitor` | `--length N` | With `--once`: max events to print (default 30, 0 = no cap). Caps preserve Power, then Diagnostics, then Lifecycle |
 
 Example package commands:
 
@@ -442,5 +442,5 @@ Example package commands:
 sudo eneru validate --config /etc/ups-monitor/config.yaml
 sudo eneru run --dry-run --config /etc/ups-monitor/config.yaml
 sudo eneru monitor --once --events-only --config /etc/ups-monitor/config.yaml
-sudo eneru monitor --once --events-only --verbose --length 100 --config /etc/ups-monitor/config.yaml
+sudo eneru monitor --once --events-only -vv --length 100 --config /etc/ups-monitor/config.yaml
 ```

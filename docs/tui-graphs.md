@@ -94,6 +94,16 @@ The graph freshness behavior is tied to the stats writer's 10-second flush inter
 
 The Recent Events panel reads the SQLite `events` table. If no database exists yet, it falls back to the log file.
 
+Events are filtered by operator relevance:
+
+| Verbosity | CLI | Live TUI | Events shown |
+|-----------|-----|----------|--------------|
+| Default | none | initial view | Power Events only |
+| Diagnostics | `-v` / `--verbose` | press `<V>` once | Power Events and Diagnostics |
+| All | `-vv` | press `<V>` twice | Power Events, Diagnostics, and Lifecycle |
+
+The live TUI groups enabled tiers as Power Events, Diagnostics, then Lifecycle. `--once` keeps a flat timestamp-sorted list for scripts. When `--length` caps output, Power Events are kept first, Diagnostics fill next, and Lifecycle rows fill last.
+
 In multi-UPS mode, event lines include the UPS label:
 
 ```text

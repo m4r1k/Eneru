@@ -55,7 +55,9 @@ _eneru() {
                         '--interval[refresh interval in seconds]:seconds:(1 2 5 10 30 60)' \
                         "--graph[render graph for metric]:metric:($graph_choices)" \
                         "--time[time range]:range:($time_choices)" \
-                        '--events-only[print only the events list]'
+                        '--events-only[print only the events list]' \
+                        '(-v --verbose)'{-v,--verbose}'[increase event verbosity]' \
+                        '--length[max events to print with --once]:rows:(0 10 30 60 100 500)'
                     ;;
                 completion)
                     _values 'shell' $completion_shells

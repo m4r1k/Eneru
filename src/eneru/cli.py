@@ -468,16 +468,15 @@ def main():
                             "graph -- the events list is independent (use --length to size it)")
         p.add_argument("--events-only", action="store_true",
                        help="With --once: print only the events list (SQLite, log-tail fallback)")
-        p.add_argument("--verbose", "-v", action="store_true",
-                       help="Show low-priority events alongside the priority defaults "
-                            "(daemon lifecycle, shutdown triggers, power transitions). "
-                            "Applies to both --once and the interactive TUI; toggle "
-                            "in-session with <V>")
+        p.add_argument("--verbose", "-v", action="count", default=0,
+                       help="Increase event verbosity. Default shows Power Events only; "
+                            "-v adds Diagnostics; -vv adds Lifecycle. Applies to both "
+                            "--once and the interactive TUI; cycle in-session with <V>")
         p.add_argument("--length", type=_non_negative_int, default=30,
                        metavar="N",
                        help="With --once: max events to print (default: 30, 0 = no cap). "
-                            "Power events are always preserved within the cap; daemon-"
-                            "lifecycle events fill remaining slots")
+                            "Power events are always preserved within the cap; diagnostics "
+                            "fill next, lifecycle fills last")
         p.set_defaults(func=_cmd_monitor)
 
     mon_parser = subparsers.add_parser("monitor", help="Launch real-time TUI dashboard")

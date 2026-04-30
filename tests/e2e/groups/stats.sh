@@ -219,17 +219,17 @@ if [ ! -f "$DB" ]; then
   exit 1
 fi
 
-# Inject a known event row directly so we have something to assert.
-# TEST31_MARKER is not a priority event type (5.2.2+ default filter), so
-# verify with --verbose -- the test scope is "events panel reads from
-# SQLite", not "the priority filter is correct".
+# Inject known event rows directly so we have each display tier to assert.
+# TEST31_MARKER is a Diagnostic event type (anything outside the explicit
+# Power/Lifecycle sets); ON_BATTERY is Power. The daemon's own DAEMON_START
+# row covers Lifecycle when -vv is enabled.
 NOW=$(date +%s)
-sqlite3 "$DB" "INSERT INTO events (ts, event_type, detail) VALUES ($NOW, 'TEST31_MARKER', 'e2e injected');"
+sqlite3 "$DB" "INSERT INTO events (ts, event_type, detail) VALUES ($((NOW - 2)), 'TEST31_MARKER', 'e2e injected');"
+sqlite3 "$DB" "INSERT INTO events (ts, event_type, detail) VALUES ($((NOW - 1)), 'ON_BATTERY', 'e2e power');"
 
-# 5.2.2: --time is graph-only; --length sizes the events list.
-# TEST31_MARKER is not a priority event type so verify with --verbose --
-# the test scope is "events panel reads from SQLite", not the priority
-# filter itself.
+# 5.3.0: --time is graph-only; --length sizes the events list.
+# TEST31_MARKER is a Diagnostic row, so -v must surface it while the
+# default Power-only view keeps it hidden.
 eneru monitor --once --events-only --verbose --config "$E2E_DIR/config-e2e-stats.yaml" 2>&1 | tee /tmp/test31.log
 
 if ! grep -q "TEST31_MARKER: e2e injected" /tmp/test31.log; then
@@ -239,31 +239,58 @@ if ! grep -q "TEST31_MARKER: e2e injected" /tmp/test31.log; then
 fi
 echo "PASS: events panel reads from SQLite"
 
-# ----- 5.2.2: priority filter + --length -----
+# ----- 5.3.0: event tiers + --length -----
 # Assert:
-#   1. Default (no --verbose) hides TEST31_MARKER but shows DAEMON_START.
-#   2. --length 5 caps output at 5 rows.
-#   3. --length -1 is rejected (argparse type validator).
+#   1. Default (no --verbose) shows Power and hides Diagnostics/Lifecycle.
+#   2. -v shows Diagnostics but still hides Lifecycle.
+#   3. -vv shows Lifecycle.
+#   4. --length 5 caps output at 5 rows.
+#   5. --length -1 is rejected (argparse type validator).
 
 echo ""
-echo "  --- 5.2.2 events filter + length checks ---"
+echo "  --- 5.3.0 event tier + length checks ---"
 
 eneru monitor --once --events-only --config "$E2E_DIR/config-e2e-stats.yaml" > /tmp/test31-priority.log 2>&1
 if grep -q "TEST31_MARKER" /tmp/test31-priority.log; then
-  echo "FAIL: priority-only default leaked TEST31_MARKER"
+  echo "FAIL: Power-only default leaked TEST31_MARKER"
   cat /tmp/test31-priority.log
   exit 1
 fi
-if ! grep -q "DAEMON_START" /tmp/test31-priority.log; then
-  echo "FAIL: priority-only default dropped DAEMON_START"
+if grep -q "DAEMON_START" /tmp/test31-priority.log; then
+  echo "FAIL: Power-only default leaked DAEMON_START"
   cat /tmp/test31-priority.log
   exit 1
 fi
-echo "  PASS: priority-only filter hides chatter, keeps DAEMON_START"
+if ! grep -q "ON_BATTERY: e2e power" /tmp/test31-priority.log; then
+  echo "FAIL: Power-only default dropped ON_BATTERY"
+  cat /tmp/test31-priority.log
+  exit 1
+fi
+echo "  PASS: Power-only default hides Diagnostics/Lifecycle and keeps Power"
 
-# --length 5 caps output. There's only one daemon-lifecycle event in the
-# stats DB at this point (from the daemon's own DAEMON_START), so we
-# can't easily count to 5 here -- just confirm --length runs cleanly.
+eneru monitor --once --events-only -v --config "$E2E_DIR/config-e2e-stats.yaml" > /tmp/test31-diag.log 2>&1
+if ! grep -q "TEST31_MARKER: e2e injected" /tmp/test31-diag.log; then
+  echo "FAIL: -v did not surface Diagnostic TEST31_MARKER"
+  cat /tmp/test31-diag.log
+  exit 1
+fi
+if grep -q "DAEMON_START" /tmp/test31-diag.log; then
+  echo "FAIL: -v leaked Lifecycle DAEMON_START"
+  cat /tmp/test31-diag.log
+  exit 1
+fi
+echo "  PASS: -v shows Diagnostics without Lifecycle"
+
+eneru monitor --once --events-only -vv --config "$E2E_DIR/config-e2e-stats.yaml" > /tmp/test31-all.log 2>&1
+if ! grep -q "DAEMON_START" /tmp/test31-all.log; then
+  echo "FAIL: -vv did not surface Lifecycle DAEMON_START"
+  cat /tmp/test31-all.log
+  exit 1
+fi
+echo "  PASS: -vv shows Lifecycle"
+
+# --length 5 caps output. The test scope here is argparse/query plumbing;
+# tier-specific behavior is asserted above.
 # Wrap the invocation in the `if` directly: under `set -e` a separate
 # `[ $? -ne 0 ]` branch would never run because the script aborts on
 # the first non-zero exit, masking any regression with no log dump.

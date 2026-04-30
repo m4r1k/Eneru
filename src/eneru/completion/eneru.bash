@@ -17,7 +17,7 @@ _eneru() {
     local subcommands="run validate monitor tui test-notifications completion version"
     local global_opts="-h --help"
     local config_opts="-c --config"
-    local monitor_opts="--once --interval --graph --time --events-only"
+    local monitor_opts="--once --interval --graph --time --events-only -v --verbose --length"
     local run_opts="--dry-run --exit-after-shutdown"
     local graph_choices="charge load voltage runtime"
     local time_choices="1h 6h 24h 7d 30d"
@@ -50,7 +50,7 @@ _eneru() {
             COMPREPLY=( $(compgen -W "$time_choices" -- "$cur") )
             return 0
             ;;
-        --interval)
+        --interval|--length)
             # Numeric; offer common defaults but allow free input.
             COMPREPLY=( $(compgen -W "1 2 5 10 30 60" -- "$cur") )
             return 0
