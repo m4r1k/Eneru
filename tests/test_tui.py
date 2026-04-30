@@ -1728,6 +1728,24 @@ class TestRunOnceEventsOnly:
         )
 
     @pytest.mark.unit
+    def test_snapshot_path_honours_length(self, tmp_path, capsys):
+        """``--once --length N`` must size the Recent Events block too."""
+        from eneru.tui import run_once
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 100 + i, "DAEMON_START", f"row-{i}") for i in range(20)
+        ])
+
+        run_once(config, events_only=False, verbose=2, length=15)
+        out = capsys.readouterr().out
+        lines = [line for line in out.splitlines() if "DAEMON_START" in line]
+        assert len(lines) == 15
+        assert "row-5" in lines[0]
+        assert "row-19" in lines[-1]
+
+    @pytest.mark.unit
     def test_events_only_length_caps_output(self, tmp_path, capsys):
         """``--length N`` (events_only=True path) caps output to N rows."""
         from eneru.tui import run_once

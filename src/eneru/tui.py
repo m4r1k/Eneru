@@ -1553,13 +1553,8 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
             print()
 
     # Snapshot path: same flag semantics as the events-only branch above.
-    # --verbose increments enabled tiers; --length caps the row count. The
-    # snapshot tail is a small summary under the status block -- it always
-    # caps at 10 even when --length is higher (or 0/unbounded), so an
-    # operator asking for "all events" gets that via --events-only, not via
-    # the snapshot tail drowning the status header it was designed to
-    # summarize.
-    snapshot_cap = 10 if events_cap is None else min(events_cap, 10)
+    # --verbose increments enabled tiers; --length caps the row count.
+    snapshot_cap = events_cap
     events = query_events_for_display(
         config, max_events=snapshot_cap,
         verbosity=verbose,
