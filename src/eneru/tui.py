@@ -480,7 +480,6 @@ def query_events_for_display(
     *,
     max_events: Optional[int] = EVENTS_MAX_ROWS_NORMAL,
     verbosity: int = EVENTS_VERBOSITY_POWER,
-    priority_only: Optional[bool] = None,
     grouped: bool = False,
 ) -> List[str]:
     """Pull events from each UPS's SQLite store, sorted by timestamp.
@@ -497,8 +496,7 @@ def query_events_for_display(
     should fall back to ``parse_log_events`` in that case.
 
     ``verbosity`` selects enabled tiers: ``0`` shows Power Events only,
-    ``1`` adds Diagnostics, and ``2`` adds Lifecycle. ``priority_only`` is
-    accepted as a legacy shim for tests / older internal callers.
+    ``1`` adds Diagnostics, and ``2`` adds Lifecycle.
 
     ``max_events=None`` (or 0) disables the row cap entirely.
 
@@ -507,10 +505,6 @@ def query_events_for_display(
     Lifecycle. Power events are never evicted; diagnostics outrank daemon
     lifecycle context when the cap is hit in verbose mode.
     """
-    if priority_only is not None:
-        # Legacy compatibility: the old boolean API had priority_only=False
-        # mean "show every event type".
-        verbosity = EVENTS_VERBOSITY_POWER if priority_only else EVENTS_VERBOSITY_ALL
     verbosity = _events_verbosity(verbosity)
     multi_ups = config.multi_ups
     rows: List[tuple] = []  # (ts, label, event_type, detail)

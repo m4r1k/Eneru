@@ -1636,10 +1636,10 @@ class TestRunOnceEventsOnly:
     @pytest.mark.unit
     def test_snapshot_path_honours_verbose_level(self, tmp_path, capsys):
         """5.2.2 (cubic.dev / CodeRabbit P1): the non-events-only branch
-        of run_once also reads events for its tail block. Pre-fix it
-        used the default ``priority_only=True`` and silently ignored
-        ``--verbose``, so diagnostics never surfaced even when the user
-        explicitly asked for them."""
+        of run_once also reads events for its tail block. Pre-fix it used
+        the default event query and silently ignored ``--verbose``, so
+        diagnostics never surfaced even when the user explicitly asked for
+        them."""
         from eneru.tui import run_once
         import time as _time
         config = _events_config(tmp_path)
@@ -1703,7 +1703,7 @@ class TestRunOnceEventsOnly:
         run_once(config, events_only=True, length=5)
         out = capsys.readouterr().out
         # Should see exactly 5 lines -- the most-recent 5 ON_BATTERY rows.
-        lines = [l for l in out.splitlines() if "ON_BATTERY" in l]
+        lines = [line for line in out.splitlines() if "ON_BATTERY" in line]
         assert len(lines) == 5
         assert "row-49" in lines[-1]
         assert "row-45" in lines[0]
@@ -1720,7 +1720,7 @@ class TestRunOnceEventsOnly:
         ])
         run_once(config, events_only=True, length=0)
         out = capsys.readouterr().out
-        lines = [l for l in out.splitlines() if "ON_BATTERY" in l]
+        lines = [line for line in out.splitlines() if "ON_BATTERY" in line]
         assert len(lines) == 40, f"length=0 must show all rows; got {len(lines)}"
 
 

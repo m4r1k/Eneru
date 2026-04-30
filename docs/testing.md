@@ -145,7 +145,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 36 numb
 | 28 | Stats | SQLite stats DB is created with samples and daemon-start event rows |
 | 29 | Stats | Stats writer failure is non-fatal and does not crash monitoring |
 | 30 | Stats | `monitor --once --graph` renders a graph from persisted stats data |
-| 31 | Stats | `monitor --once --events-only` reads events from SQLite |
+| 31 | Stats | `monitor --once --events-only` reads SQLite events and enforces event verbosity tiers |
 | 32 | Stats | Voltage nominal auto-detect re-snaps misreported NUT nominal voltage and records a silent event |
 | 33 | UPS Single | `voltage_sensitivity` avoids 120 V hot-grid false alarms while preserving real brownout detection |
 | 34 | Stats | Pending on-battery and restored notifications coalesce into one brief-outage summary |
