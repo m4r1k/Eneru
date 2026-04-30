@@ -590,6 +590,13 @@ def query_events_for_display(
         section_rows = [r for r in rows if predicate(r)]
         if not section_rows:
             continue
+        if max_events:
+            remaining_lines = max_events - len(grouped_lines)
+            # Headers consume live-panel rows too. Avoid rendering an orphan
+            # section header with no room for at least one event below it.
+            if remaining_lines < 2:
+                break
+            section_rows = section_rows[:remaining_lines - 1]
         grouped_lines.append(section)
         grouped_lines.extend(
             _format_event_line(ts, label, etype, detail, multi_ups)
@@ -1463,7 +1470,7 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
 
     ``length`` caps the events list (default :data:`EVENTS_MAX_ROWS_NORMAL`,
     set to 0 for no cap). Tiered preservation: power events always
-    survive the cap; daemon-lifecycle events fill remaining slots.
+    survive the cap; diagnostics fill next, lifecycle fills last.
     """
     verbose = _events_verbosity(verbose)
     # length=0 means "no cap" -- pass None through to the query.

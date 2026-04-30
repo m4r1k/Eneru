@@ -1345,6 +1345,28 @@ class TestQueryEventsForDisplay:
         assert any("DAEMON_START" in line for line in lines)
 
     @pytest.mark.unit
+    def test_grouped_cap_counts_headers_and_preserves_power(self, tmp_path):
+        """Grouped live output must not add headers after the row cap."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        events = [(now - 5000, "ON_BATTERY", "outage")]
+        events.extend(
+            (now - 100 + i, "VOLTAGE_FLAP_SUPPRESSED", f"diag-{i}")
+            for i in range(20)
+        )
+        _seed_events(config, config.ups_groups[0], events)
+
+        lines = query_events_for_display(
+            config, max_events=5, verbosity=1, grouped=True,
+        )
+        assert len(lines) <= 5
+        assert lines[0] == "Power Events"
+        assert any("ON_BATTERY: outage" in line for line in lines)
+        assert lines.count("Diagnostics") == 1
+
+    @pytest.mark.unit
     def test_crash_restart_events_are_diagnostics(self, tmp_path):
         """Crash/restart classifiers are diagnostics, not lifecycle."""
         from eneru.tui import query_events_for_display

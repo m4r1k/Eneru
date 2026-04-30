@@ -224,8 +224,8 @@ fi
 # Power/Lifecycle sets); ON_BATTERY is Power. The daemon's own DAEMON_START
 # row covers Lifecycle when -vv is enabled.
 NOW=$(date +%s)
-sqlite3 "$DB" "INSERT INTO events (ts, event_type, detail) VALUES ($NOW, 'TEST31_MARKER', 'e2e injected');"
-sqlite3 "$DB" "INSERT INTO events (ts, event_type, detail) VALUES ($((NOW + 1)), 'ON_BATTERY', 'e2e power');"
+sqlite3 "$DB" "INSERT INTO events (ts, event_type, detail) VALUES ($((NOW - 2)), 'TEST31_MARKER', 'e2e injected');"
+sqlite3 "$DB" "INSERT INTO events (ts, event_type, detail) VALUES ($((NOW - 1)), 'ON_BATTERY', 'e2e power');"
 
 # 5.3.0: --time is graph-only; --length sizes the events list.
 # TEST31_MARKER is a Diagnostic row, so -v must surface it while the
