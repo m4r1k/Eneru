@@ -78,6 +78,8 @@ POWER_EVENTS = frozenset({
     "VOLTAGE_HIGH",
     "BROWNOUT_DETECTED",
     "OVER_VOLTAGE_DETECTED",
+    "BYPASS_MODE_ACTIVE",
+    "OVERLOAD_ACTIVE",
     "OVERLOAD_DETECTED",
     "BATTERY_LOW",
     "FSD_DETECTED",
@@ -596,7 +598,7 @@ def query_events_for_display(
             # section header with no room for at least one event below it.
             if remaining_lines < 2:
                 break
-            section_rows = section_rows[:remaining_lines - 1]
+            section_rows = section_rows[-(remaining_lines - 1):]
         grouped_lines.append(section)
         grouped_lines.extend(
             _format_event_line(ts, label, etype, detail, multi_ups)

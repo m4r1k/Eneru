@@ -1169,6 +1169,24 @@ class TestQueryEventsForDisplay:
         assert all("VOLTAGE_FLAP_SUPPRESSED" not in line for line in lines)
 
     @pytest.mark.unit
+    def test_safety_critical_health_events_are_power_tier(self, tmp_path):
+        """Default output includes safety-critical event names the daemon emits."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 30, "BYPASS_MODE_ACTIVE", "bypass"),
+            (now - 20, "OVERLOAD_ACTIVE", "overload"),
+            (now - 10, "BYPASS_MODE_INACTIVE", "resolved"),
+        ])
+
+        lines = query_events_for_display(config)
+        assert any("BYPASS_MODE_ACTIVE" in line for line in lines)
+        assert any("OVERLOAD_ACTIVE" in line for line in lines)
+        assert all("BYPASS_MODE_INACTIVE" not in line for line in lines)
+
+    @pytest.mark.unit
     def test_verbose_includes_diagnostics_not_lifecycle(self, tmp_path):
         """``-v`` adds Diagnostics while keeping Lifecycle hidden."""
         from eneru.tui import query_events_for_display
@@ -1365,6 +1383,8 @@ class TestQueryEventsForDisplay:
         assert lines[0] == "Power Events"
         assert any("ON_BATTERY: outage" in line for line in lines)
         assert lines.count("Diagnostics") == 1
+        assert any("diag-19" in line for line in lines)
+        assert all("diag-0" not in line for line in lines)
 
     @pytest.mark.unit
     def test_crash_restart_events_are_diagnostics(self, tmp_path):
