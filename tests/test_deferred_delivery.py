@@ -609,7 +609,11 @@ class TestDeliverPendingStop:
         and timer fire → silent no-op."""
         db_path = tmp_path / "ups.db"
         # Open store so the DB file exists, but DON'T insert a row.
-        StatsStore(db_path).open()
+        store = StatsStore(db_path)
+        try:
+            store.open()
+        finally:
+            store.close()
         cfg = self._make_config()
         rc = deliver_pending_stop(
             notification_id=999, db_path=db_path, config=cfg,
