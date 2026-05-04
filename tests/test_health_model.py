@@ -118,6 +118,43 @@ class TestAssessHealthStaleness:
         ) == UPSHealth.UNKNOWN
 
     @pytest.mark.unit
+    def test_grace_period_back_compat_no_lost_at_fresh_snapshot_is_degraded(self):
+        # Back-compat: pre-field snapshots leave ``connection_lost_time`` at
+        # 0.0. With a fresh ``last_update_time`` (age <= stale_threshold) the
+        # clamped fallback must keep the member DEGRADED rather than flipping
+        # UNKNOWN by accident.
+        snap = _snap(
+            last_update_time=NOW - 1,
+            connection_state="GRACE_PERIOD",
+            connection_lost_time=0.0,
+        )
+        assert assess_health(
+            snap,
+            None,
+            1,
+            connection_grace_enabled=True,
+            now=NOW,
+        ) == UPSHealth.DEGRADED
+
+    @pytest.mark.unit
+    def test_grace_period_back_compat_no_lost_at_past_grace_is_unknown(self):
+        # Back-compat fallback still fails safe once the snapshot is old
+        # enough that ``age - stale_threshold`` exceeds the grace window.
+        snap = _snap(
+            last_update_time=NOW - 90,
+            connection_state="GRACE_PERIOD",
+            connection_lost_time=0.0,
+        )
+        assert assess_health(
+            snap,
+            None,
+            1,
+            connection_grace_enabled=True,
+            connection_grace_duration=60,
+            now=NOW,
+        ) == UPSHealth.UNKNOWN
+
+    @pytest.mark.unit
     def test_zero_duration_grace_period_is_immediate_unknown(self):
         snap = _snap(
             last_update_time=NOW - 10,

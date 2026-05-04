@@ -33,6 +33,13 @@ class UPSHealth(str, Enum):
 # 5 polls is the documented "stale snapshot" threshold from the Phase 2 spec.
 STALE_INTERVAL_MULTIPLIER = 5
 
+# Pre-grace stale-retry budget, expressed in multiples of
+# ``max_stale_data_tolerance``. Bounds how long a member can stay DEGRADED on
+# stale data before the monitor itself escalates into connection grace; the
+# multiplier ensures we keep the member alive across a couple of full
+# stale-tolerance windows even if check_interval is small.
+STALE_RETRY_TOLERANCE_MULTIPLIER = 5
+
 
 def assess_health(
     snapshot,
@@ -107,7 +114,10 @@ def assess_health(
         grace_duration = 60
     grace_window = grace_duration if connection_grace_enabled else 0
     stale_threshold = STALE_INTERVAL_MULTIPLIER * interval
-    pre_grace_stale_window = max(stale_threshold, (tolerance * 5) + interval)
+    pre_grace_stale_window = max(
+        stale_threshold,
+        (tolerance * STALE_RETRY_TOLERANCE_MULTIPLIER) + interval,
+    )
     stale_count = getattr(snapshot, "stale_data_count", 0)
     transient_stale_retry = (
         stale_count > 0
@@ -115,7 +125,17 @@ def assess_health(
     )
     if snapshot.connection_state == "GRACE_PERIOD":
         lost_at = getattr(snapshot, "connection_lost_time", 0.0)
-        grace_age = current_time - lost_at if lost_at else age - stale_threshold
+        if lost_at:
+            grace_age = current_time - lost_at
+        else:
+            # Back-compat path: a snapshot in GRACE_PERIOD with no
+            # ``connection_lost_time`` predates that field. Approximate the
+            # in-grace duration from the snapshot's age past the stale
+            # threshold. Allowed to go negative on purpose -- a fresh
+            # GRACE_PERIOD snapshot then trivially compares below
+            # ``grace_window`` (even when grace_window == 0) and stays
+            # DEGRADED, deferring to the monitor's own grace timer.
+            grace_age = age - stale_threshold
         if grace_age >= grace_window:
             return UPSHealth.UNKNOWN
         return UPSHealth.DEGRADED

@@ -25,6 +25,9 @@ HealthSnapshot = namedtuple(
         "trigger_reason",      # human-readable reason for the advisory trigger
         # Live connection context for redundancy: lets the evaluator tell
         # "stale but still inside connection grace" from a dead monitor.
+        # ``connection_lost_time`` uses 0.0 as a dual-purpose sentinel for
+        # "never lost" and "explicitly cleared after recovery / failsafe";
+        # readers must treat both cases as "no live grace timer to consult".
         "stale_data_count",    # consecutive failed/stale polls since last success
         "connection_lost_time", # ``time.time()`` when connection grace started
     ],

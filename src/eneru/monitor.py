@@ -806,7 +806,11 @@ class UPSGroupMonitor(
 
         # Notifications are intentionally stricter than logs. One slow poll
         # is operator-visible in the journal; only sustained full-poll latency
-        # becomes an Apprise alert.
+        # becomes an Apprise alert. A single fast poll resets BOTH the streak
+        # counter and the "already notified" gate, so the threshold is
+        # "N consecutive slow polls" -- not "sustained slowness over a window".
+        # That keeps the alert tied to a clearly-degraded state rather than
+        # firing on intermittent jitter.
         if elapsed >= self._slow_nut_notify_threshold_seconds:
             self._slow_nut_poll_streak += 1
         else:
@@ -1444,6 +1448,10 @@ class UPSGroupMonitor(
                 if is_failsafe_trigger and "OB" in self.state.previous_status:
                     self.state.connection_state = "FAILED"
                     self.state.connection_lost_time = 0.0
+                    # ``stale_data_count`` is intentionally NOT reset here:
+                    # once connection_state == "FAILED", health_model short-
+                    # circuits to UNKNOWN regardless of the count, and the
+                    # next successful poll resets it (see line ~1486).
                     if self._in_redundancy_group:
                         # Advisory mode: redundancy-group evaluator owns the
                         # shutdown decision. Recording the trigger here +
