@@ -106,7 +106,7 @@ Notifications get a rewrite. v5.1's were stateless and noisy: a `systemctl resta
 ### Changed
 - **Shutdown notifications: 22 → 2.** Dropped the per-`_log_message` auto-mirror. The channel now carries the headline (`🚨 EMERGENCY SHUTDOWN INITIATED!` with reason) and a single `✅ Shutdown Sequence Complete` summary at the end. The summary now also fires when `local_shutdown.enabled=false`. Per-step detail stays in journalctl.
 - **`wall(1)` opt-in.** Defaults to off via `local_shutdown.wall: false`. Holdover from the v2 `ups-monitor` era when the shell was the only channel; Apprise covers the modern path.
-- **Schema v3 → v4.** New `notifications` table + index; append-only migration heals partial state via `CREATE TABLE IF NOT EXISTS`. See `src/eneru/CLAUDE.md` "Stats schema evolution".
+- **Schema v3 → v4.** New `notifications` table + index; append-only migration heals partial state via `CREATE TABLE IF NOT EXISTS`. See `src/eneru/AGENTS.md` "Stats schema evolution".
 - **`_send_notification` API.** Adds a `category` keyword (default `general`); used by the coalescer and per-category queries. The `blocking` parameter is now a back-compat shim because the v5.2 queue is always asynchronous.
 - **Banner formatting cleanup.** Dropped the `========== BANNER ==========` padding from `monitor.py` and `redundancy.py`. The ALL CAPS body stays (grep-friendly).
 
@@ -244,7 +244,7 @@ None.
 ### Technical details
 - New modules under `src/eneru/`: `health_model.py`, `redundancy.py`, `stats.py`, `graph.py`. All wired into `nfpm.yaml`
 - Test counts: 751 unit tests across 28 files; 32 E2E scenarios across 4 parallel matrix jobs. New coverage in `tests/test_voltage.py` (grid snap, auto-detect re-snap, notification hysteresis, severity bypass, threshold clamp), `tests/test_stats.py::TestSchemaMigration` (additive `ALTER TABLE` path), and `tests/test_packaging.py` which asserts every `src/eneru/**/*.py` is referenced by `nfpm.yaml`
-- Schema migration mechanic: `StatsStore._migrate_schema` applies append-only `ALTER TABLE` migrations gated by `_safe_alter` (idempotent). `meta.schema_version` is bumped after migrations succeed, so a crash mid-migration is replayed safely. Pattern documented in `src/eneru/CLAUDE.md` "Stats schema evolution"
+- Schema migration mechanic: `StatsStore._migrate_schema` applies append-only `ALTER TABLE` migrations gated by `_safe_alter` (idempotent). `meta.schema_version` is bumped after migrations succeed, so a crash mid-migration is replayed safely. Pattern documented in `src/eneru/AGENTS.md` "Stats schema evolution"
 - `SAFETY_CRITICAL_EVENTS` + `SUPPRESSIBLE_EVENTS` constants in `src/eneru/config.py` enumerate the notification-suppression policy
 
 ---
@@ -369,7 +369,7 @@ eneru test-notifications --config /etc/ups-monitor/config.yaml
     - `actions.py` - REMOTE_ACTIONS templates for remote pre-shutdown commands
     - `monitor.py` - UPSGroupMonitor class (core daemon logic)
     - `cli.py` - CLI argument parsing + main()
-- **Developer Documentation:** Add `CLAUDE.md` for Claude Code
+- **Developer Documentation:** Add project guidance for Claude Code
 
 ### Technical Details
 - No breaking changes to public API or configuration format

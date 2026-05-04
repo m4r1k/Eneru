@@ -280,7 +280,7 @@ def classify_startup(*, current_version: str,
 # Event-type strings written to the stats events table by
 # UPSGroupMonitor._emit_lifecycle_startup_notification. New types here
 # do NOT need a schema bump — events.event_type is TEXT (see
-# src/eneru/CLAUDE.md "Stats schema evolution"). Names follow the
+# src/eneru/AGENTS.md "Stats schema evolution"). Names follow the
 # UPPER_SNAKE convention used by _log_power_event.
 EVENT_TYPE_DAEMON_UPGRADED = "DAEMON_UPGRADED"
 EVENT_TYPE_DAEMON_RECOVERED = "DAEMON_RECOVERED"

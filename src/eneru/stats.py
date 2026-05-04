@@ -44,7 +44,7 @@ SAMPLE_FIELDS: Tuple[str, ...] = (
 
 # Bump and add a migration block in StatsStore._init_schema whenever the
 # samples / agg_5min / agg_hourly / events / meta / notifications schema
-# gains a column or table. See src/eneru/CLAUDE.md "Stats schema evolution".
+# gains a column or table. See src/eneru/AGENTS.md "Stats schema evolution".
 SCHEMA_VERSION = 4
 
 # Bucket sizes for aggregation tiers.
@@ -314,7 +314,7 @@ class StatsStore:
     def _migrate_schema(self) -> None:
         """Apply additive schema migrations keyed off ``meta.schema_version``.
 
-        See ``src/eneru/CLAUDE.md`` ("Stats schema evolution") for the
+        See ``src/eneru/AGENTS.md`` ("Stats schema evolution") for the
         full pattern. Rules:
 
         1. Migrations are append-only — never modify a previous block.

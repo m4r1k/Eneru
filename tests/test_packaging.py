@@ -46,7 +46,7 @@ class TestNfpmModuleListing:
         assert not missing, (
             f"Modules present in src/eneru/ but missing from nfpm.yaml:\n  "
             + "\n  ".join(missing)
-            + "\nAdd a `contents:` entry per the convention in src/eneru/CLAUDE.md."
+            + "\nAdd a `contents:` entry per the convention in src/eneru/AGENTS.md."
         )
 
     @pytest.mark.unit

@@ -10,7 +10,7 @@
 # the checks list.
 #
 # Branch protection on main does NOT include codecov as a required
-# check (see CLAUDE.md "Branch protection on main"); this file's only
+# check (see AGENTS.md "Branch protection on main"); this file's only
 # behavioural effect is the visual one on the PR checks panel.
 
 coverage:
