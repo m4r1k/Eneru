@@ -18,36 +18,74 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
+# Timestamped step markers. The redundancy regressions chain many
+# fixed-duration sleeps with docker-compose calls; when CI runners are slow
+# the script can be SIGTERMed mid-flight with no idea where it hung. dbg()
+# makes the boundary between phases self-diagnosing in the runner log.
+dbg() {
+  printf '+++ %s [redundancy.sh] %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" "$*"
+}
+
+dump_redundancy_nut_state() {
+  local label="$1"
+  dbg "[$label] docker compose ps nut-server:"
+  ( cd "$E2E_DIR" && docker compose ps nut-server 2>&1 ) \
+      | sed 's/^/    /' || true
+  dbg "[$label] processes inside nut-server:"
+  ( cd "$E2E_DIR" \
+      && timeout 10s docker compose exec -T nut-server sh -c \
+           'ps -ef 2>&1 | grep -E "dummy-ups|upsd" | grep -v grep || true' ) \
+      2>&1 | sed 's/^/    /' || true
+  dbg "[$label] host upsc probes:"
+  for ups in TestUPS UPS1 UPS2; do
+    printf '    upsc %s ups.status: ' "$ups"
+    timeout 5s upsc "${ups}@localhost:3493" ups.status 2>&1 || echo '<failed/timeout>'
+  done
+}
+
 wait_for_redundancy_nut() {
   for i in {1..30}; do
-    if upsc UPS1@localhost:3493 ups.status >/dev/null 2>&1 \
-       && upsc UPS2@localhost:3493 ups.status >/dev/null 2>&1; then
+    # Bound each upsc call so a wedged libupsclient read cannot eat the
+    # entire polling budget on a single iteration.
+    if timeout 5s upsc UPS1@localhost:3493 ups.status >/dev/null 2>&1 \
+       && timeout 5s upsc UPS2@localhost:3493 ups.status >/dev/null 2>&1; then
+      dbg "wait_for_redundancy_nut: ready after $i iteration(s)"
       return 0
     fi
-    echo "  Waiting for redundancy NUT sources ($i/30)..."
+    dbg "wait_for_redundancy_nut: attempt $i/30 still failing"
     sleep 1
   done
+  dbg "wait_for_redundancy_nut: gave up after 30 attempts"
   echo "FAIL: redundancy NUT sources did not recover"
   return 1
 }
 
 restart_redundancy_nut_server() {
+  dbg "restart_redundancy_nut_server: docker compose restart nut-server"
   (
     cd "$E2E_DIR"
     docker compose restart nut-server >/dev/null
   )
+  dbg "restart_redundancy_nut_server: docker compose restart returned"
   wait_for_redundancy_nut
   cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply-UPS1.dev"
   cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply-UPS2.dev"
   sleep 3
+  dbg "restart_redundancy_nut_server: settle sleep done"
 }
 
 stop_redundancy_nut_drivers() {
+  dbg "stop_redundancy_nut_drivers: pkill UPS1+UPS2 dummy-ups in container"
   (
     cd "$E2E_DIR"
-    docker compose exec -T nut-server sh -c \
+    timeout 10s docker compose exec -T nut-server sh -c \
       "pkill -f 'dummy-ups.*-a UPS1' || true; pkill -f 'dummy-ups.*-a UPS2' || true"
   )
+  dbg "stop_redundancy_nut_drivers: pkill returned, verifying drivers are gone"
+  ( cd "$E2E_DIR" \
+      && timeout 10s docker compose exec -T nut-server sh -c \
+           'ps -ef | grep -E "dummy-ups.*-a UPS[12]" | grep -v grep || echo "    (no UPS1/UPS2 driver processes)"' ) \
+      2>&1 | sed 's/^/    /' || true
 }
 
 # ======================================================================
@@ -322,51 +360,59 @@ echo "=== Regression R1: transient runtime NUT visibility loss ==="
 rm -f /tmp/eneru-e2e-redundancy-grace-shutdown-flag* \
       /tmp/ups-shutdown-redundancy-* 2>/dev/null || true
 
+dbg "R1 step 1/8: pre-test restart_redundancy_nut_server"
 restart_redundancy_nut_server
+dump_redundancy_nut_state "R1 after first restart"
 
+dbg "R1 step 2/8: launching eneru in background (timeout 48s)"
 timeout 48s eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
   > /tmp/test-r1.log 2>&1 &
 ENERU_PID=$!
 trap 'kill "$ENERU_PID" 2>/dev/null || true; restart_redundancy_nut_server >/dev/null 2>&1 || true' EXIT
 
 # Let both member monitors publish good snapshots and clear evaluator startup grace.
+dbg "R1 step 3/8: sleep 13 (let monitors publish good snapshots)"
 sleep 13
+dbg "R1 step 4/8: stop_redundancy_nut_drivers (induce visibility loss)"
 stop_redundancy_nut_drivers
 
 # Old behavior could turn the stale snapshots UNKNOWN after ~5s and fire
 # quorum loss before the 15s connection grace expired. Recover inside grace.
+dbg "R1 step 5/8: sleep 7 (stay inside the 15s connection grace)"
 sleep 7
+dbg "R1 step 6/8: restart_redundancy_nut_server (recover NUT inside grace)"
 restart_redundancy_nut_server
+dbg "R1 step 7/8: sleep 10 (let monitor observe recovery)"
 sleep 10
 
+dbg "R1 step 8/8: kill eneru and verify"
 kill "$ENERU_PID" 2>/dev/null || true
 wait "$ENERU_PID" 2>/dev/null || true
 trap - EXIT
 
-if grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test-r1.log; then
-  echo "FAIL: transient NUT loss should not fire redundancy shutdown"
-  tail -80 /tmp/test-r1.log
+r1_fail() {
+  echo "$1"
+  echo "----- /tmp/test-r1.log (full) -----"
+  cat /tmp/test-r1.log
+  echo "----- /tmp/test-r1.log end -----"
+  dump_redundancy_nut_state "R1 failure"
   exit 1
+}
+
+if grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test-r1.log; then
+  r1_fail "FAIL: transient NUT loss should not fire redundancy shutdown"
 fi
 if ! grep -q "Redundancy group 'rack-1-dual-psu' evaluator started" /tmp/test-r1.log; then
-  echo "FAIL: evaluator did not start during transient NUT-loss regression"
-  tail -80 /tmp/test-r1.log
-  exit 1
+  r1_fail "FAIL: evaluator did not start during transient NUT-loss regression"
 fi
 if ! grep -q "Grace period started" /tmp/test-r1.log; then
-  echo "FAIL: transient NUT-loss regression did not enter connection grace"
-  tail -80 /tmp/test-r1.log
-  exit 1
+  r1_fail "FAIL: transient NUT-loss regression did not enter connection grace"
 fi
 if ! grep -q "recovered during grace period" /tmp/test-r1.log; then
-  echo "FAIL: transient NUT-loss regression did not prove recovery inside grace"
-  tail -80 /tmp/test-r1.log
-  exit 1
+  r1_fail "FAIL: transient NUT-loss regression did not prove recovery inside grace"
 fi
 if grep -q "rack-1-dual-psu.* quorum LOST" /tmp/test-r1.log; then
-  echo "FAIL: transient NUT loss should not lose redundancy quorum"
-  tail -80 /tmp/test-r1.log
-  exit 1
+  r1_fail "FAIL: transient NUT loss should not lose redundancy quorum"
 fi
 echo "PASS: transient runtime NUT loss recovered inside grace without redundancy shutdown"
 )
@@ -382,43 +428,53 @@ echo "=== Regression R2: persistent runtime NUT visibility loss ==="
 rm -f /tmp/eneru-e2e-redundancy-grace-shutdown-flag* \
       /tmp/ups-shutdown-redundancy-* 2>/dev/null || true
 
+dbg "R2 step 1/8: pre-test restart_redundancy_nut_server"
 restart_redundancy_nut_server
+dump_redundancy_nut_state "R2 after first restart"
 
+dbg "R2 step 2/8: launching eneru in background (timeout 58s)"
 timeout 58s eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
   > /tmp/test-r2.log 2>&1 &
 ENERU_PID=$!
 trap 'kill "$ENERU_PID" 2>/dev/null || true; restart_redundancy_nut_server >/dev/null 2>&1 || true' EXIT
 
+dbg "R2 step 3/8: sleep 13 (let monitors publish good snapshots)"
 sleep 13
+dbg "R2 step 4/8: stop_redundancy_nut_drivers (induce visibility loss)"
 stop_redundancy_nut_drivers
 
 # Hold loss longer than connection grace. Fail-safe UNKNOWN handling must
 # still fire once the member monitors mark the connection FAILED.
+dbg "R2 step 5/8: sleep 28 (hold loss past 15s grace)"
 sleep 28
+dbg "R2 step 6/8: kill eneru"
 kill "$ENERU_PID" 2>/dev/null || true
 wait "$ENERU_PID" 2>/dev/null || true
 trap - EXIT
+dbg "R2 step 7/8: post-test restart_redundancy_nut_server (cleanup)"
 restart_redundancy_nut_server
+dbg "R2 step 8/8: verify assertions"
+
+r2_fail() {
+  echo "$1"
+  echo "----- /tmp/test-r2.log (full) -----"
+  cat /tmp/test-r2.log
+  echo "----- /tmp/test-r2.log end -----"
+  dump_redundancy_nut_state "R2 failure"
+  exit 1
+}
 
 if ! grep -q "Redundancy group 'rack-1-dual-psu' evaluator started" /tmp/test-r2.log; then
-  echo "FAIL: evaluator did not start during persistent NUT-loss regression"
-  tail -100 /tmp/test-r2.log
-  exit 1
+  r2_fail "FAIL: evaluator did not start during persistent NUT-loss regression"
 fi
 if ! grep -q "Grace period started" /tmp/test-r2.log; then
-  echo "FAIL: persistent NUT-loss regression did not enter connection grace"
-  tail -100 /tmp/test-r2.log
-  exit 1
+  r2_fail "FAIL: persistent NUT-loss regression did not enter connection grace"
 fi
 if ! grep -q "rack-1-dual-psu.* quorum LOST" /tmp/test-r2.log; then
-  echo "FAIL: persistent NUT loss should lose redundancy quorum after grace"
-  tail -100 /tmp/test-r2.log
-  exit 1
+  r2_fail "FAIL: persistent NUT loss should lose redundancy quorum after grace"
 fi
 if ! grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test-r2.log; then
-  echo "FAIL: persistent NUT loss should fire redundancy shutdown after grace"
-  tail -100 /tmp/test-r2.log
-  exit 1
+  r2_fail "FAIL: persistent NUT loss should fire redundancy shutdown after grace"
 fi
 echo "PASS: persistent runtime NUT loss fired redundancy shutdown after grace"
 )
