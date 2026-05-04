@@ -78,7 +78,7 @@ done
 | Monitor state machine | OL/OB transitions, FSD, failsafe, shutdown trigger order, dry-run behavior |
 | Shutdown mixins | VMs, containers, compose files, filesystem sync and unmounts, remote SSH phases |
 | Multi-UPS coordinator | Group routing, `is_local`, drain policy, local shutdown locking, signal handling |
-| Redundancy runtime | Quorum evaluation, advisory triggers, idempotent group execution |
+| Redundancy runtime | Quorum evaluation, advisory triggers, connection-grace handling, idempotent group execution |
 | Health monitoring | Voltage thresholds, AVR, bypass, overload, battery anomaly filtering |
 | Notifications | Formatting, retry queue, lifecycle classification, coalescing, suppression rules |
 | Statistics and TUI | SQLite schema, aggregation, event tier filtering, TUI grouping, graphs, one-shot monitor output |
@@ -104,14 +104,14 @@ The workflow is split into five parallel matrix groups:
 | CLI | Validation, bare command safety, one-shot output |
 | UPS Single | Single UPS events and shutdown paths |
 | UPS Multi | Independent UPS groups and local-drain policies |
-| Redundancy | Quorum behavior and advisory triggers |
+| Redundancy | Quorum behavior, advisory triggers, and runtime NUT-visibility regressions |
 | Stats | SQLite, graphs, events, notification coalescing |
 
 The scenario files simulate online, on-battery, low-battery, FSD, brownout, overload, hot-grid, and nominal-voltage-mismatch states.
 
 ### E2E test inventory
 
-The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 36 numbered tests plus one CLI completion smoke check.
+The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 36 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
 
 | Test | Group | What it proves |
 |------|-------|----------------|
@@ -142,6 +142,8 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 36 numb
 | 25 | Redundancy | Cross-group topology does not cascade into redundancy shutdown while quorum holds |
 | 26 | Redundancy | Redundancy members log advisory trigger mode instead of immediate local shutdown |
 | 27 | Redundancy | Separate Eneru-host UPS plus remote rack redundancy topology fires only the remote rack group |
+| R1 | Redundancy | Brief runtime loss of fresh NUT data recovers inside connection grace without redundancy shutdown |
+| R2 | Redundancy | Persistent runtime loss of fresh NUT data still fires redundancy shutdown after connection grace expires |
 | 28 | Stats | SQLite stats DB is created with samples and daemon-start event rows |
 | 29 | Stats | Stats writer failure is non-fatal and does not crash monitoring |
 | 30 | Stats | `monitor --once --graph` renders a graph from persisted stats data |

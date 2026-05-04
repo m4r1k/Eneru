@@ -281,7 +281,7 @@ Read [`packaging/eneru-wrapper.py`](https://github.com/m4r1k/Eneru/blob/main/pac
 
 If you want to dig deeper, read in this order:
 
-1. [`src/eneru/CLAUDE.md`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/CLAUDE.md) for the module map and mixin conventions.
+1. [`src/eneru/AGENTS.md`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/AGENTS.md) for the module map and mixin conventions.
 2. [`src/eneru/config.py`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/config.py) for the data model.
 3. [`src/eneru/monitor.py`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/monitor.py) for the single-UPS runtime.
 4. [`src/eneru/multi_ups.py`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/multi_ups.py) for group coordination.

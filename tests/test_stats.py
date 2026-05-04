@@ -40,6 +40,15 @@ def store(tmp_path):
     s.close()
 
 
+def open_and_close_store(path):
+    """Exercise the open lifecycle without leaking the SQLite handle."""
+    s = StatsStore(path)
+    try:
+        s.open()
+    finally:
+        s.close()
+
+
 # ===========================================================================
 # Schema + lifecycle
 # ===========================================================================
@@ -259,7 +268,7 @@ class TestSchemaMigration:
         path = tmp_path / "legacy.db"
         self._build_v1_db(path)
         # Open + close + reopen must not raise (ALTER TABLE is wrapped).
-        StatsStore(path).open()
+        open_and_close_store(path)
         s2 = StatsStore(path)
         s2.open()
         try:
@@ -354,8 +363,8 @@ class TestSchemaMigration:
         path = tmp_path / "v2.db"
         self._build_v2_db(path)
         # Open + close + reopen + reopen must all succeed.
-        StatsStore(path).open()
-        StatsStore(path).open()
+        open_and_close_store(path)
+        open_and_close_store(path)
         s = StatsStore(path)
         s.open()
         try:
@@ -457,8 +466,8 @@ class TestSchemaMigration:
         self._build_v3_db(path)
         # Open + close + reopen + reopen must all succeed; a partially-
         # migrated DB heals via CREATE TABLE IF NOT EXISTS.
-        StatsStore(path).open()
-        StatsStore(path).open()
+        open_and_close_store(path)
+        open_and_close_store(path)
         s = StatsStore(path)
         s.open()
         try:

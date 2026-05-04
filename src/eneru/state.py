@@ -23,8 +23,18 @@ HealthSnapshot = namedtuple(
         "connection_state",    # "OK" / "GRACE_PERIOD" / "FAILED"
         "trigger_active",      # advisory shutdown trigger fired (redundancy mode)
         "trigger_reason",      # human-readable reason for the advisory trigger
+        # Live connection context for redundancy: lets the evaluator tell
+        # "stale but still inside connection grace" from a dead monitor.
+        # ``connection_lost_time`` uses 0.0 as a dual-purpose sentinel for
+        # "never lost" and "explicitly cleared after recovery / failsafe";
+        # readers must treat both cases as "no live grace timer to consult".
+        "stale_data_count",    # consecutive failed/stale polls since last success
+        "connection_lost_time", # ``time.time()`` when connection grace started
     ],
 )
+# Back-compat for tests / third-party code still constructing the old
+# 10-field HealthSnapshot shape directly.
+HealthSnapshot.__new__.__defaults__ = (0, 0.0)
 
 
 @dataclass
@@ -137,4 +147,6 @@ class MonitorState:
                 connection_state=self.connection_state,
                 trigger_active=self.trigger_active,
                 trigger_reason=self.trigger_reason,
+                stale_data_count=self.stale_data_count,
+                connection_lost_time=self.connection_lost_time,
             )
