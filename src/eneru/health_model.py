@@ -153,10 +153,7 @@ def assess_health(
         in_flight_grace
         or transient_stale_retry
     )
-    if (
-        age > (STALE_INTERVAL_MULTIPLIER * interval)
-        and not transient_visibility_loss
-    ):
+    if age > stale_threshold and not transient_visibility_loss:
         return UPSHealth.UNKNOWN
 
     # 2. CRITICAL

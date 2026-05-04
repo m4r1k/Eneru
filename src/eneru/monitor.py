@@ -1374,9 +1374,12 @@ class UPSGroupMonitor(
 
         # Grace period enabled
         if self.state.connection_state == "OK":
-            # First failure: enter grace period
-            self.state.connection_state = "GRACE_PERIOD"
-            self.state.connection_lost_time = time.time()
+            # First failure: enter grace period. Hold the snapshot lock so
+            # the redundancy evaluator never observes a torn pair (e.g.
+            # GRACE_PERIOD with stale connection_lost_time).
+            with self.state._lock:
+                self.state.connection_state = "GRACE_PERIOD"
+                self.state.connection_lost_time = time.time()
             if "Data stale" in error_msg:
                 self._log_message(
                     f"⚠️ Connection to UPS {self.config.ups.name} lost "
@@ -1408,8 +1411,9 @@ class UPSGroupMonitor(
                         "(Network, Server, or Config error). Monitoring is inactive. "
                         f"(Grace period {grace_cfg.duration}s expired)"
                     )
-                self.state.connection_state = "FAILED"
-                self.state.connection_lost_time = 0.0
+                with self.state._lock:
+                    self.state.connection_state = "FAILED"
+                    self.state.connection_lost_time = 0.0
 
         # If connection_state == "FAILED": already notified, nothing to do
 
@@ -1446,8 +1450,9 @@ class UPSGroupMonitor(
                 # FAILSAFE: If connection lost while on battery, shutdown immediately
                 # This is NEVER affected by the grace period
                 if is_failsafe_trigger and "OB" in self.state.previous_status:
-                    self.state.connection_state = "FAILED"
-                    self.state.connection_lost_time = 0.0
+                    with self.state._lock:
+                        self.state.connection_state = "FAILED"
+                        self.state.connection_lost_time = 0.0
                     # ``stale_data_count`` is intentionally NOT reset here:
                     # once connection_state == "FAILED", health_model short-
                     # circuits to UNKNOWN regardless of the count, and the
@@ -1500,8 +1505,9 @@ class UPSGroupMonitor(
                     f"✅ Connection to UPS {self.config.ups.name} recovered during "
                     f"grace period ({elapsed:.0f}s elapsed). No notification sent."
                 )
-                self.state.connection_state = "OK"
-                self.state.connection_lost_time = 0.0
+                with self.state._lock:
+                    self.state.connection_state = "OK"
+                    self.state.connection_lost_time = 0.0
 
                 # Flap detection with 24h TTL
                 now = time.time()
@@ -1535,8 +1541,9 @@ class UPSGroupMonitor(
                     "CONNECTION_RESTORED",
                     f"Connection to UPS {self.config.ups.name} restored. Monitoring is active."
                 )
-                self.state.connection_state = "OK"
-                self.state.connection_lost_time = 0.0
+                with self.state._lock:
+                    self.state.connection_state = "OK"
+                    self.state.connection_lost_time = 0.0
                 self.state.connection_flap_count = 0
                 self.state.connection_first_flap_time = 0.0
                 if self._in_redundancy_group:
