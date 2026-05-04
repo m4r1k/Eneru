@@ -21,6 +21,8 @@ def _snap(**overrides):
         connection_state="OK",
         trigger_active=False,
         trigger_reason="",
+        stale_data_count=0,
+        connection_lost_time=0.0,
     )
     defaults.update(overrides)
     return HealthSnapshot(**defaults)
@@ -81,6 +83,103 @@ class TestAssessHealthStaleness:
     @pytest.mark.unit
     def test_just_past_stale_threshold_is_unknown(self):
         snap = _snap(last_update_time=NOW - 5.01)
+        assert assess_health(snap, None, 1, now=NOW) == UPSHealth.UNKNOWN
+
+    @pytest.mark.unit
+    def test_stale_snapshot_during_connection_grace_is_degraded(self):
+        snap = _snap(
+            last_update_time=NOW - 30,
+            connection_state="GRACE_PERIOD",
+            stale_data_count=3,
+            connection_lost_time=NOW - 10,
+        )
+        assert assess_health(
+            snap,
+            None,
+            1,
+            connection_grace_enabled=True,
+            now=NOW,
+        ) == UPSHealth.DEGRADED
+
+    @pytest.mark.unit
+    def test_grace_period_past_duration_is_unknown(self):
+        snap = _snap(
+            last_update_time=NOW - 90,
+            connection_state="GRACE_PERIOD",
+            stale_data_count=3,
+            connection_lost_time=NOW - 61,
+        )
+        assert assess_health(
+            snap,
+            None,
+            1,
+            connection_grace_enabled=True,
+            now=NOW,
+        ) == UPSHealth.UNKNOWN
+
+    @pytest.mark.unit
+    def test_zero_duration_grace_period_is_immediate_unknown(self):
+        snap = _snap(
+            last_update_time=NOW - 10,
+            connection_state="GRACE_PERIOD",
+            stale_data_count=3,
+            connection_lost_time=NOW,
+        )
+        assert assess_health(
+            snap,
+            None,
+            1,
+            connection_grace_enabled=True,
+            connection_grace_duration=0,
+            now=NOW,
+        ) == UPSHealth.UNKNOWN
+
+    @pytest.mark.unit
+    def test_in_flight_slow_poll_is_degraded_inside_grace(self):
+        snap = _snap(last_update_time=NOW - 30, connection_state="OK")
+        assert assess_health(
+            snap,
+            None,
+            1,
+            connection_grace_enabled=True,
+            now=NOW,
+        ) == UPSHealth.DEGRADED
+
+    @pytest.mark.unit
+    def test_in_flight_slow_poll_past_grace_is_unknown(self):
+        snap = _snap(last_update_time=NOW - 70, connection_state="OK")
+        assert assess_health(
+            snap,
+            None,
+            1,
+            connection_grace_enabled=True,
+            now=NOW,
+        ) == UPSHealth.UNKNOWN
+
+    @pytest.mark.unit
+    def test_in_flight_slow_poll_without_grace_is_unknown(self):
+        snap = _snap(last_update_time=NOW - 30, connection_state="OK")
+        assert assess_health(
+            snap,
+            None,
+            1,
+            connection_grace_enabled=False,
+            now=NOW,
+        ) == UPSHealth.UNKNOWN
+
+    @pytest.mark.unit
+    def test_transient_stale_data_after_good_poll_is_degraded(self):
+        snap = _snap(last_update_time=NOW - 10, stale_data_count=1)
+        assert assess_health(snap, None, 1, now=NOW) == UPSHealth.DEGRADED
+
+    @pytest.mark.unit
+    def test_stale_retry_past_pre_grace_window_is_unknown(self):
+        snap = _snap(last_update_time=NOW - 30, stale_data_count=1)
+        assert assess_health(snap, None, 1, now=NOW) == UPSHealth.UNKNOWN
+
+    @pytest.mark.unit
+    def test_no_observations_still_unknown_even_with_stale_count(self):
+        snap = _snap(last_update_time=0, stale_data_count=2)
         assert assess_health(snap, None, 1, now=NOW) == UPSHealth.UNKNOWN
 
     @pytest.mark.unit

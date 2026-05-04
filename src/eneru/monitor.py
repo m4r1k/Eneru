@@ -44,6 +44,11 @@ from eneru.shutdown.remote import RemoteShutdownMixin
 from eneru.health.voltage import VoltageMonitorMixin
 from eneru.health.battery import BatteryMonitorMixin
 
+SLOW_NUT_LOG_THRESHOLD_SECONDS = 2.0
+SLOW_NUT_LOG_RATE_LIMIT_SECONDS = 300.0
+SLOW_NUT_NOTIFY_THRESHOLD_SECONDS = 10.0
+SLOW_NUT_NOTIFY_CONSECUTIVE_POLLS = 3
+
 # Re-export for backwards compatibility (tests may mock these)
 try:
     import apprise
@@ -149,6 +154,13 @@ class UPSGroupMonitor(
             retention_hourly_days=config.statistics.retention.agg_hourly_days,
         )
         self._stats_writer: Optional[StatsWriter] = None
+        self._slow_nut_log_threshold_seconds = SLOW_NUT_LOG_THRESHOLD_SECONDS
+        self._slow_nut_log_rate_limit_seconds = SLOW_NUT_LOG_RATE_LIMIT_SECONDS
+        self._slow_nut_notify_threshold_seconds = SLOW_NUT_NOTIFY_THRESHOLD_SECONDS
+        self._slow_nut_notify_consecutive_polls = SLOW_NUT_NOTIFY_CONSECUTIVE_POLLS
+        self._last_slow_nut_log_time = 0.0
+        self._slow_nut_poll_streak = 0
+        self._slow_nut_poll_notified = False
 
     def _start_stats(self):
         """Open the per-UPS stats DB (if not already open) and start the
@@ -741,14 +753,14 @@ class UPSGroupMonitor(
 
     def _get_ups_var(self, var_name: str) -> Optional[str]:
         """Get a single UPS variable using upsc."""
-        exit_code, stdout, _ = run_command(["upsc", self.config.ups.name, var_name])
+        exit_code, stdout, _ = self._run_upsc([var_name], full_poll=False)
         if exit_code == 0:
             return stdout.strip()
         return None
 
     def _get_all_ups_data(self) -> Tuple[bool, Dict[str, str], str]:
         """Query all UPS data using a single upsc call."""
-        exit_code, stdout, stderr = run_command(["upsc", self.config.ups.name])
+        exit_code, stdout, stderr = self._run_upsc([], full_poll=True)
 
         if exit_code != 0:
             return False, {}, stderr
@@ -763,6 +775,60 @@ class UPSGroupMonitor(
                 ups_data[key.strip()] = value.strip()
 
         return True, ups_data, ""
+
+    def _run_upsc(self, args: List[str], *, full_poll: bool) -> Tuple[int, str, str]:
+        cmd = ["upsc", self.config.ups.name] + list(args)
+        started = time.monotonic()
+        result = run_command(cmd)
+        elapsed = time.monotonic() - started
+        self._record_upsc_latency(elapsed, cmd, full_poll=full_poll)
+        return result
+
+    def _record_upsc_latency(self, elapsed: float, cmd: List[str], *, full_poll: bool):
+        now = time.time()
+        # Logs are the first visibility tier: show slow NUT responses quickly,
+        # but rate-limit per UPS so a wedged local NUT socket does not bury
+        # the shutdown-relevant log lines.
+        if elapsed >= self._slow_nut_log_threshold_seconds:
+            if (
+                self._last_slow_nut_log_time == 0.0
+                or now - self._last_slow_nut_log_time
+                >= self._slow_nut_log_rate_limit_seconds
+            ):
+                self._log_message(
+                    f"⚠️ Slow NUT response from {self.config.ups.name}: "
+                    f"{elapsed:.1f}s for {' '.join(cmd)}"
+                )
+                self._last_slow_nut_log_time = now
+
+        if not full_poll:
+            return
+
+        # Notifications are intentionally stricter than logs. One slow poll
+        # is operator-visible in the journal; only sustained full-poll latency
+        # becomes an Apprise alert.
+        if elapsed >= self._slow_nut_notify_threshold_seconds:
+            self._slow_nut_poll_streak += 1
+        else:
+            self._slow_nut_poll_streak = 0
+            self._slow_nut_poll_notified = False
+            return
+
+        if (
+            not self._slow_nut_poll_notified
+            and self._slow_nut_poll_streak
+            >= self._slow_nut_notify_consecutive_polls
+        ):
+            self._send_notification(
+                f"⚠️ **Sustained slow NUT responses**\n"
+                f"UPS: {self.config.ups.name}\n"
+                f"Latest poll took {elapsed:.1f}s. "
+                f"Threshold: {self._slow_nut_notify_threshold_seconds:.1f}s "
+                f"for {self._slow_nut_notify_consecutive_polls} consecutive polls.",
+                self.config.NOTIFY_WARNING,
+                category="health",
+            )
+            self._slow_nut_poll_notified = True
 
     def _wait_for_initial_connection(self):
         """Wait for initial connection to NUT server."""

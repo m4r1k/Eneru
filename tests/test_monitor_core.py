@@ -148,6 +148,74 @@ class TestStatusTransitions:
         assert monitor.state.on_battery_start_time == original_start
 
 
+class TestNUTLatencyVisibility:
+    """Slow ``upsc`` calls are visible without notification spam."""
+
+    @pytest.mark.unit
+    def test_slow_upsc_logs_once_per_rate_limit_window(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._slow_nut_log_threshold_seconds = 2.0
+        monitor._slow_nut_log_rate_limit_seconds = 300.0
+
+        with patch("eneru.monitor.run_command",
+                   return_value=(0, "ups.status: OL\n", "")):
+            with patch("eneru.monitor.time.monotonic",
+                       side_effect=[0.0, 3.0, 10.0, 13.0, 400.0, 403.0]):
+                with patch("eneru.monitor.time.time",
+                           side_effect=[100.0, 110.0, 500.0]):
+                    monitor._get_all_ups_data()
+                    monitor._get_all_ups_data()
+                    monitor._get_all_ups_data()
+
+        slow_logs = [
+            c for c in monitor.logger.log.call_args_list
+            if "Slow NUT response" in str(c)
+        ]
+        assert len(slow_logs) == 2
+
+    @pytest.mark.unit
+    def test_brief_slow_poll_does_not_notify(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._slow_nut_log_threshold_seconds = 99.0
+        monitor._slow_nut_notify_threshold_seconds = 1.0
+        monitor._slow_nut_notify_consecutive_polls = 3
+
+        with patch("eneru.monitor.run_command",
+                   return_value=(0, "ups.status: OL\n", "")):
+            with patch("eneru.monitor.time.monotonic",
+                       side_effect=[0.0, 2.0, 10.0, 10.5, 20.0, 20.4]):
+                with patch("eneru.monitor.time.time",
+                           side_effect=[100.0, 101.0, 102.0]):
+                    monitor._get_all_ups_data()
+                    monitor._get_all_ups_data()
+                    monitor._get_all_ups_data()
+
+        monitor._notification_worker.send.assert_not_called()
+
+    @pytest.mark.unit
+    def test_sustained_slow_polling_notifies_once(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._slow_nut_log_threshold_seconds = 99.0
+        monitor._slow_nut_notify_threshold_seconds = 1.0
+        monitor._slow_nut_notify_consecutive_polls = 3
+
+        with patch("eneru.monitor.run_command",
+                   return_value=(0, "ups.status: OL\n", "")):
+            with patch("eneru.monitor.time.monotonic",
+                       side_effect=[0.0, 2.0, 10.0, 12.0, 20.0, 22.0,
+                                    30.0, 32.0]):
+                with patch("eneru.monitor.time.time",
+                           side_effect=[100.0, 101.0, 102.0, 103.0]):
+                    monitor._get_all_ups_data()
+                    monitor._get_all_ups_data()
+                    monitor._get_all_ups_data()
+                    monitor._get_all_ups_data()
+
+        assert monitor._notification_worker.send.call_count == 1
+        body = monitor._notification_worker.send.call_args.kwargs["body"]
+        assert "Sustained slow NUT responses" in body
+
+
 # ==============================================================================
 # SHUTDOWN TRIGGERS (T1-T4)
 # ==============================================================================

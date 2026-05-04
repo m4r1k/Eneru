@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [5.3.0] - Unreleased
 
+### Fixed
+- **Redundancy runtime NUT visibility now honors connection grace.**
+  Issue #4 exposed a path where both redundancy members could turn brief
+  stale/lost NUT data into `UNKNOWN` before the per-UPS connection grace
+  expired. That could drop `healthy_count` to 0 under the default
+  `unknown_counts_as: critical` policy and fire a redundancy shutdown
+  during a short NUT flap. Members that already had a successful poll now
+  contribute `DEGRADED` while stale/lost data is still inside connection
+  grace, and only become `UNKNOWN` after the monitor marks the connection
+  `FAILED`. A member with no successful poll after startup grace remains
+  `UNKNOWN`.
+
+### Added
+- **Slow NUT response visibility.** Slow `upsc` calls now produce
+  rate-limited per-UPS log lines. Apprise notification is stricter and
+  only fires after sustained full-poll slowness, so operators get an early
+  journal clue without alert noise from a one-off slow response.
+- **Regression coverage for issue #4.** Unit coverage now pins transient
+  stale/grace snapshots as `DEGRADED`, persistent post-grace loss as
+  `UNKNOWN`, slow-poll log rate limiting, and sustained slow-poll
+  notification behavior. The redundancy E2E group adds runtime cases for
+  brief NUT visibility loss that recovers inside grace and persistent loss
+  that still fails safe after grace.
+
 ### Changed
 - Event display now uses user-facing tiers: Power Events by default,
   Diagnostics with `-v` / `<V>`, and Lifecycle with `-vv` / a second
@@ -16,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live TUI events are grouped by tier; `--once` remains a flat,
   timestamp-sorted list.
 - Event caps preserve Power first, then Diagnostics, then Lifecycle.
+
+### Migration notes
+- No YAML changes are required. The default remains fail-safe:
+  `unknown_counts_as: critical` still triggers quorum loss after connection
+  grace expires. The change only prevents transient runtime NUT visibility
+  loss from bypassing the existing grace window.
 
 ---
 

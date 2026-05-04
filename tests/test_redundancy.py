@@ -43,6 +43,8 @@ def _snap(**overrides):
         connection_state="OK",
         trigger_active=False,
         trigger_reason="",
+        stale_data_count=0,
+        connection_lost_time=0.0,
     )
     base.update(overrides)
     return HealthSnapshot(**base)
@@ -57,6 +59,10 @@ class _FakeMonitor:
         self.config.ups = MagicMock()
         self.config.ups.name = ups_name
         self.config.ups.check_interval = check_interval
+        self.config.ups.max_stale_data_tolerance = 3
+        self.config.ups.connection_loss_grace_period = MagicMock()
+        self.config.ups.connection_loss_grace_period.enabled = True
+        self.config.ups.connection_loss_grace_period.duration = 60
         self.config.triggers = MagicMock()
         self.state = MonitorState()
         # Pre-populate the snapshot fields under the lock so .snapshot() returns
@@ -72,6 +78,8 @@ class _FakeMonitor:
             self.state.connection_state = snap.connection_state
             self.state.trigger_active = snap.trigger_active
             self.state.trigger_reason = snap.trigger_reason
+            self.state.stale_data_count = snap.stale_data_count
+            self.state.connection_lost_time = snap.connection_lost_time
 
 
 def _base_config(*, dry_run: bool = True, tmp_path: Path = None) -> Config:
@@ -201,6 +209,143 @@ class TestEvaluatorCounting:
         ev, executor = self._make_evaluator(group, monitors)
         healthy, _ = ev.evaluate_once()
         assert healthy == 1
+        executor.shutdown.assert_called_once()
+
+    @pytest.mark.unit
+    def test_transient_stale_members_count_degraded_not_unknown(self):
+        group = _redundancy_group(
+            min_healthy=1,
+            unknown_counts_as="critical",
+            degraded_counts_as="healthy",
+        )
+        old = time.time() - 10
+        monitors = {
+            "UPS-A": _FakeMonitor("UPS-A", _snap(
+                last_update_time=old,
+                stale_data_count=1,
+            )),
+            "UPS-B": _FakeMonitor("UPS-B", _snap(
+                last_update_time=old,
+                stale_data_count=2,
+            )),
+        }
+        ev, executor = self._make_evaluator(group, monitors)
+        healthy, per_ups = ev.evaluate_once()
+        assert healthy == 2
+        assert per_ups == {
+            "UPS-A": UPSHealth.DEGRADED,
+            "UPS-B": UPSHealth.DEGRADED,
+        }
+        executor.shutdown.assert_not_called()
+
+    @pytest.mark.unit
+    def test_grace_period_members_count_degraded_until_grace_expires(self):
+        group = _redundancy_group(
+            min_healthy=1,
+            unknown_counts_as="critical",
+            degraded_counts_as="healthy",
+        )
+        old = time.time() - 30
+        grace_started = time.time() - 10
+        monitors = {
+            "UPS-A": _FakeMonitor("UPS-A", _snap(
+                last_update_time=old,
+                connection_state="GRACE_PERIOD",
+                stale_data_count=3,
+                connection_lost_time=grace_started,
+            )),
+            "UPS-B": _FakeMonitor("UPS-B", _snap(
+                last_update_time=old,
+                connection_state="GRACE_PERIOD",
+                stale_data_count=3,
+                connection_lost_time=grace_started,
+            )),
+        }
+        ev, executor = self._make_evaluator(group, monitors)
+        healthy, per_ups = ev.evaluate_once()
+        assert healthy == 2
+        assert per_ups == {
+            "UPS-A": UPSHealth.DEGRADED,
+            "UPS-B": UPSHealth.DEGRADED,
+        }
+        executor.shutdown.assert_not_called()
+
+    @pytest.mark.unit
+    def test_grace_period_members_turn_unknown_after_grace_expiry(self):
+        group = _redundancy_group(
+            min_healthy=1,
+            unknown_counts_as="critical",
+            degraded_counts_as="healthy",
+        )
+        old = time.time() - 90
+        grace_started = time.time() - 61
+        monitors = {
+            "UPS-A": _FakeMonitor("UPS-A", _snap(
+                last_update_time=old,
+                connection_state="GRACE_PERIOD",
+                stale_data_count=3,
+                connection_lost_time=grace_started,
+            )),
+            "UPS-B": _FakeMonitor("UPS-B", _snap(
+                last_update_time=old,
+                connection_state="GRACE_PERIOD",
+                stale_data_count=3,
+                connection_lost_time=grace_started,
+            )),
+        }
+        ev, executor = self._make_evaluator(group, monitors)
+        healthy, per_ups = ev.evaluate_once()
+        assert healthy == 0
+        assert per_ups == {
+            "UPS-A": UPSHealth.UNKNOWN,
+            "UPS-B": UPSHealth.UNKNOWN,
+        }
+        executor.shutdown.assert_called_once()
+
+    @pytest.mark.unit
+    def test_in_flight_slow_poll_counts_degraded_inside_grace_window(self):
+        group = _redundancy_group(
+            min_healthy=1,
+            unknown_counts_as="critical",
+            degraded_counts_as="healthy",
+        )
+        old = time.time() - 30
+        monitors = {
+            "UPS-A": _FakeMonitor("UPS-A", _snap(last_update_time=old)),
+            "UPS-B": _FakeMonitor("UPS-B", _snap(last_update_time=old)),
+        }
+        ev, executor = self._make_evaluator(group, monitors)
+        healthy, per_ups = ev.evaluate_once()
+        assert healthy == 2
+        assert per_ups == {
+            "UPS-A": UPSHealth.DEGRADED,
+            "UPS-B": UPSHealth.DEGRADED,
+        }
+        executor.shutdown.assert_not_called()
+
+    @pytest.mark.unit
+    def test_failed_after_grace_still_counts_unknown_and_fires(self):
+        group = _redundancy_group(min_healthy=1, unknown_counts_as="critical")
+        old = time.time() - 30
+        monitors = {
+            "UPS-A": _FakeMonitor("UPS-A", _snap(
+                last_update_time=old,
+                connection_state="FAILED",
+                stale_data_count=3,
+            )),
+            "UPS-B": _FakeMonitor("UPS-B", _snap(
+                last_update_time=old,
+                connection_state="FAILED",
+                stale_data_count=3,
+            )),
+        }
+        ev, executor = self._make_evaluator(group, monitors)
+        healthy, per_ups = ev.evaluate_once()
+        assert healthy == 0
+        assert per_ups == {
+            "UPS-A": UPSHealth.UNKNOWN,
+            "UPS-B": UPSHealth.UNKNOWN,
+        }
         executor.shutdown.assert_called_once()
 
 

@@ -39,6 +39,9 @@ def assess_health(
     triggers=None,
     check_interval: int = 1,
     *,
+    max_stale_data_tolerance: int = 3,
+    connection_grace_enabled: bool = False,
+    connection_grace_duration: int = 60,
     now: Optional[float] = None,
 ) -> UPSHealth:
     """Classify a UPS snapshot into a :class:`UPSHealth` tier.
@@ -49,14 +52,16 @@ def assess_health(
 
     1. **UNKNOWN** -- the snapshot is unusable:
        - no successful poll has happened yet (``last_update_time == 0``); or
-       - the last poll is older than ``5 * check_interval`` seconds; or
-       - the per-UPS monitor reports ``connection_state == "FAILED"``.
+       - the per-UPS monitor reports ``connection_state == "FAILED"``; or
+       - the last poll is older than ``5 * check_interval`` seconds and
+         the monitor is not actively handling a transient stale/lost poll.
     2. **CRITICAL** -- the UPS is signalling shutdown intent:
        - the monitor's advisory ``trigger_active`` flag is set; or
        - the UPS is in ``FSD`` (Forced Shutdown Drain).
     3. **DEGRADED** -- the UPS is healthy but in a warning state:
        - on battery (``OB`` in status) without an active trigger; or
-       - connection in the loss-grace window.
+       - connection in the loss-grace window; or
+       - stale/lost NUT data is being retried after at least one good poll.
     4. **HEALTHY** -- everything looks fine.
 
     Args:
@@ -66,6 +71,14 @@ def assess_health(
             evaluation, so the evaluator trusts ``snapshot.trigger_active``.
         check_interval: The member's ``ups.check_interval`` in seconds.
             Used to compute the stale-snapshot threshold.
+        max_stale_data_tolerance: Consecutive stale polls tolerated before
+            monitor.py enters connection grace. Used only to bound the
+            pre-grace stale retry window so a dead monitor cannot stay
+            degraded forever.
+        connection_grace_enabled: Whether the member monitor is configured
+            to tolerate connection loss before marking it failed.
+        connection_grace_duration: Configured connection-loss grace duration
+            in seconds.
         now: Optional ``time.time()`` override -- only used by tests.
     """
     del triggers  # Reserved for future use.
@@ -76,9 +89,54 @@ def assess_health(
     # 1. UNKNOWN
     if snapshot.last_update_time == 0:
         return UPSHealth.UNKNOWN
-    if (current_time - snapshot.last_update_time) > (STALE_INTERVAL_MULTIPLIER * interval):
-        return UPSHealth.UNKNOWN
     if snapshot.connection_state == "FAILED":
+        return UPSHealth.UNKNOWN
+
+    # Runtime NUT visibility loss should line up with monitor.py's
+    # connection-loss grace. A member that had a good poll before the
+    # flap contributes DEGRADED while stale/lost data is still being
+    # retried; only FAILED after grace expiry becomes UNKNOWN.
+    age = current_time - snapshot.last_update_time
+    try:
+        tolerance = max(1, int(max_stale_data_tolerance))
+    except (TypeError, ValueError):
+        tolerance = 3
+    try:
+        grace_duration = max(0, int(connection_grace_duration))
+    except (TypeError, ValueError):
+        grace_duration = 60
+    grace_window = grace_duration if connection_grace_enabled else 0
+    stale_threshold = STALE_INTERVAL_MULTIPLIER * interval
+    pre_grace_stale_window = max(stale_threshold, (tolerance * 5) + interval)
+    stale_count = getattr(snapshot, "stale_data_count", 0)
+    transient_stale_retry = (
+        stale_count > 0
+        and age <= pre_grace_stale_window
+    )
+    if snapshot.connection_state == "GRACE_PERIOD":
+        lost_at = getattr(snapshot, "connection_lost_time", 0.0)
+        grace_age = current_time - lost_at if lost_at else age - stale_threshold
+        if grace_age >= grace_window:
+            return UPSHealth.UNKNOWN
+        return UPSHealth.DEGRADED
+
+    # A slow in-flight upsc call leaves the last published snapshot as OK.
+    # Give it the same bounded visibility grace as an explicit failure; a
+    # monitor that remains stale past that window is treated as UNKNOWN.
+    in_flight_grace = (
+        snapshot.connection_state == "OK"
+        and age > stale_threshold
+        and grace_window
+        and age <= stale_threshold + grace_window
+    )
+    transient_visibility_loss = (
+        in_flight_grace
+        or transient_stale_retry
+    )
+    if (
+        age > (STALE_INTERVAL_MULTIPLIER * interval)
+        and not transient_visibility_loss
+    ):
         return UPSHealth.UNKNOWN
 
     # 2. CRITICAL
@@ -90,7 +148,7 @@ def assess_health(
     # 3. DEGRADED
     if "OB" in snapshot.status:
         return UPSHealth.DEGRADED
-    if snapshot.connection_state == "GRACE_PERIOD":
+    if transient_visibility_loss:
         return UPSHealth.DEGRADED
 
     # 4. HEALTHY

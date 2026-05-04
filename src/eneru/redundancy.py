@@ -329,8 +329,19 @@ class RedundancyGroupEvaluator(threading.Thread):
             else:
                 snap = monitor.state.snapshot()
                 check_interval = monitor.config.ups.check_interval
+                max_stale_data_tolerance = (
+                    monitor.config.ups.max_stale_data_tolerance
+                )
+                grace_cfg = monitor.config.ups.connection_loss_grace_period
                 triggers = monitor.config.triggers
-                raw = assess_health(snap, triggers, check_interval)
+                raw = assess_health(
+                    snap,
+                    triggers,
+                    check_interval,
+                    max_stale_data_tolerance=max_stale_data_tolerance,
+                    connection_grace_enabled=grace_cfg.enabled,
+                    connection_grace_duration=grace_cfg.duration,
+                )
 
             per_ups[ups_name] = raw
             if self._effective_health(raw) == UPSHealth.HEALTHY:
