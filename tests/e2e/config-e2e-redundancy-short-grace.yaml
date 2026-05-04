@@ -9,7 +9,12 @@ ups:
     max_stale_data_tolerance: 2
     connection_loss_grace_period:
       enabled: true
-      duration: 15
+      # 40s gives the R1 transient-loss regression enough headroom for a
+      # full ``docker compose restart nut-server`` (10s graceful stop +
+      # entrypoint startup + driver settle) to complete inside the grace
+      # window on slow GHA runners. R2 holds the loss past this window to
+      # verify the fail-safe path. Production defaults remain unchanged.
+      duration: 40
       flap_threshold: 5
   - name: "UPS2@localhost:3493"
     display_name: "E2E UPS2"
@@ -17,7 +22,12 @@ ups:
     max_stale_data_tolerance: 2
     connection_loss_grace_period:
       enabled: true
-      duration: 15
+      # 40s gives the R1 transient-loss regression enough headroom for a
+      # full ``docker compose restart nut-server`` (10s graceful stop +
+      # entrypoint startup + driver settle) to complete inside the grace
+      # window on slow GHA runners. R2 holds the loss past this window to
+      # verify the fail-safe path. Production defaults remain unchanged.
+      duration: 40
       flap_threshold: 5
 
 triggers:

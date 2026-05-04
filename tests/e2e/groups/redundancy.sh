@@ -371,8 +371,8 @@ dbg "R1 step 1/8: pre-test restart_redundancy_nut_server"
 restart_redundancy_nut_server
 dump_redundancy_nut_state "R1 after first restart"
 
-dbg "R1 step 2/8: launching eneru in background (timeout 48s)"
-timeout 48s eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
+dbg "R1 step 2/8: launching eneru in background (timeout 90s)"
+timeout 90s eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
   > /tmp/test-r1.log 2>&1 &
 ENERU_PID=$!
 trap 'kill "$ENERU_PID" 2>/dev/null || true; restart_redundancy_nut_server >/dev/null 2>&1 || true' EXIT
@@ -384,8 +384,8 @@ dbg "R1 step 4/8: stop_redundancy_nut_drivers (induce visibility loss)"
 stop_redundancy_nut_drivers
 
 # Old behavior could turn the stale snapshots UNKNOWN after ~5s and fire
-# quorum loss before the 15s connection grace expired. Recover inside grace.
-dbg "R1 step 5/8: sleep 7 (stay inside the 15s connection grace)"
+# quorum loss before the connection grace expired. Recover inside grace.
+dbg "R1 step 5/8: sleep 7 (stay inside the 40s connection grace)"
 sleep 7
 dbg "R1 step 6/8: restart_redundancy_nut_server (recover NUT inside grace)"
 restart_redundancy_nut_server
@@ -439,8 +439,8 @@ dbg "R2 step 1/8: pre-test restart_redundancy_nut_server"
 restart_redundancy_nut_server
 dump_redundancy_nut_state "R2 after first restart"
 
-dbg "R2 step 2/8: launching eneru in background (timeout 58s)"
-timeout 58s eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
+dbg "R2 step 2/8: launching eneru in background (timeout 105s)"
+timeout 105s eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
   > /tmp/test-r2.log 2>&1 &
 ENERU_PID=$!
 trap 'kill "$ENERU_PID" 2>/dev/null || true; restart_redundancy_nut_server >/dev/null 2>&1 || true' EXIT
@@ -452,8 +452,8 @@ stop_redundancy_nut_drivers
 
 # Hold loss longer than connection grace. Fail-safe UNKNOWN handling must
 # still fire once the member monitors mark the connection FAILED.
-dbg "R2 step 5/8: sleep 28 (hold loss past 15s grace)"
-sleep 28
+dbg "R2 step 5/8: sleep 55 (hold loss past 40s grace + headroom)"
+sleep 55
 dbg "R2 step 6/8: kill eneru"
 kill "$ENERU_PID" 2>/dev/null || true
 wait "$ENERU_PID" 2>/dev/null || true
