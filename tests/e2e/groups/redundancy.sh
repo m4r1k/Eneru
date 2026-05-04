@@ -78,13 +78,20 @@ stop_redundancy_nut_drivers() {
   dbg "stop_redundancy_nut_drivers: pkill UPS1+UPS2 dummy-ups in container"
   (
     cd "$E2E_DIR"
-    timeout 10s docker compose exec -T nut-server sh -c \
-      "pkill -f 'dummy-ups.*-a UPS1' || true; pkill -f 'dummy-ups.*-a UPS2' || true"
+    # The ``[d]`` bracket trick is load-bearing: it makes the regex match the
+    # literal string "dummy-ups" inside a real driver cmdline, but NOT the
+    # pkill wrapper's own cmdline (which contains the literal characters
+    # ``[d]ummy-ups``). Without the trick, pkill kills its own ``sh -c``
+    # wrapper before it can run the second pkill, and ``docker compose exec``
+    # is left holding a half-dead exec stream that hangs until the runner
+    # SIGTERMs the whole step.
+    timeout --kill-after=5s 10s docker compose exec -T nut-server sh -c \
+      "pkill -f '[d]ummy-ups.*-a UPS1' || true; pkill -f '[d]ummy-ups.*-a UPS2' || true"
   )
   dbg "stop_redundancy_nut_drivers: pkill returned, verifying drivers are gone"
   ( cd "$E2E_DIR" \
-      && timeout 10s docker compose exec -T nut-server sh -c \
-           'ps -ef | grep -E "dummy-ups.*-a UPS[12]" | grep -v grep || echo "    (no UPS1/UPS2 driver processes)"' ) \
+      && timeout --kill-after=5s 10s docker compose exec -T nut-server sh -c \
+           'ps -ef | grep -E "[d]ummy-ups.*-a UPS[12]" || echo "    (no UPS1/UPS2 driver processes)"' ) \
       2>&1 | sed 's/^/    /' || true
 }
 
