@@ -92,3 +92,7 @@ eneru run --config /etc/ups-monitor/config.yaml
 ```
 
 Package commands in these docs use the package path where root/systemd behavior matters. PyPI examples use `eneru` when the context is developer or user-managed execution.
+
+## Support the project
+
+Eneru is free and MIT-licensed and will stay that way. If it has saved your homelab or rack from a dirty shutdown and you'd like to chip in toward UPS hardware, NUT testing, and the maintainer's coffee budget, [Buy Me a Coffee](https://buymeacoffee.com/m4r1k) — always optional, much appreciated.

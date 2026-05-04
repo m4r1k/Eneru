@@ -10,6 +10,7 @@
 <a href="https://codecov.io/gh/m4r1k/Eneru"><img src="https://img.shields.io/codecov/c/github/m4r1k/Eneru?style=for-the-badge&labelColor=090909&color=e8e8ed&label=Coverage" alt="Coverage"></a>
 <a href="https://eneru.readthedocs.io/"><img src="https://img.shields.io/badge/Docs-Read%20The%20Docs-e8e8ed?style=for-the-badge&labelColor=090909" alt="Documentation"></a>
 <a href="https://pypi.org/project/eneru/"><img src="https://img.shields.io/pypi/v/eneru?style=for-the-badge&labelColor=090909&color=e8e8ed&label=PyPI" alt="PyPI"></a>
+<a href="https://buymeacoffee.com/m4r1k"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-e8e8ed?style=for-the-badge&labelColor=090909&logo=buymeacoffee&logoColor=e8e8ed" alt="Buy Me a Coffee"></a>
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-diagram.svg" alt="Eneru Architecture" width="600">
@@ -190,6 +191,12 @@ Full documentation at [eneru.readthedocs.io](https://eneru.readthedocs.io/):
 - [Remote Servers](https://eneru.readthedocs.io/latest/remote-servers/) - SSH setup for NAS and other servers
 - [Testing](https://eneru.readthedocs.io/latest/testing/) - testing strategy and coverage
 - [Troubleshooting](https://eneru.readthedocs.io/latest/troubleshooting/) - common issues and solutions
+
+---
+
+## Support the project
+
+Eneru is free and MIT-licensed and will stay that way. If it has saved your homelab or rack from a dirty shutdown and you'd like to chip in toward UPS hardware, NUT testing, and the maintainer's coffee budget, [Buy Me a Coffee](https://buymeacoffee.com/m4r1k) — always optional, much appreciated.
 
 ---
 
