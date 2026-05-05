@@ -1,15 +1,17 @@
 """Tests for the redundancy-group evaluator and shutdown executor."""
 
+import os
 import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from eneru import (
     BehaviorConfig,
     Config,
+    ExtendedTimeConfig,
     LocalShutdownConfig,
     LoggingConfig,
     NotificationsConfig,
@@ -17,6 +19,7 @@ from eneru import (
     RedundancyGroupEvaluator,
     RedundancyGroupExecutor,
     RemoteServerConfig,
+    TriggersConfig,
     UPSConfig,
     UPSGroupConfig,
     UPSHealth,
@@ -133,6 +136,52 @@ class TestEvaluatorCounting:
         monitors = {
             "UPS-A": _FakeMonitor("UPS-A", _snap()),
             "UPS-B": _FakeMonitor("UPS-B", _snap()),
+        }
+        ev, executor = self._make_evaluator(group, monitors)
+        healthy, _ = ev.evaluate_once()
+        assert healthy == 2
+        executor.shutdown.assert_not_called()
+
+    @pytest.mark.unit
+    def test_group_specific_extended_time_trigger_drives_quorum(self):
+        """Redundancy-group triggers are evaluated at the group layer.
+
+        This avoids mutating member monitor configs, which matters when
+        one UPS participates in multiple redundancy groups with different
+        trigger thresholds.
+        """
+        group = _redundancy_group(
+            min_healthy=1,
+            triggers=TriggersConfig(
+                extended_time=ExtendedTimeConfig(enabled=True, threshold=30),
+            ),
+        )
+        monitors = {
+            "UPS-A": _FakeMonitor(
+                "UPS-A", _snap(status="OB", time_on_battery=31),
+            ),
+            "UPS-B": _FakeMonitor(
+                "UPS-B", _snap(status="OB", time_on_battery=31),
+            ),
+        }
+        ev, executor = self._make_evaluator(group, monitors)
+        healthy, _ = ev.evaluate_once()
+        assert healthy == 0
+        executor.shutdown.assert_called_once()
+
+    @pytest.mark.unit
+    def test_group_specific_thresholds_do_not_fire_while_online(self):
+        group = _redundancy_group(
+            min_healthy=1,
+            triggers=TriggersConfig(low_battery_threshold=90),
+        )
+        monitors = {
+            "UPS-A": _FakeMonitor(
+                "UPS-A", _snap(status="OL", battery_charge="50"),
+            ),
+            "UPS-B": _FakeMonitor(
+                "UPS-B", _snap(status="OL", battery_charge="50"),
+            ),
         }
         ev, executor = self._make_evaluator(group, monitors)
         healthy, _ = ev.evaluate_once()
@@ -750,6 +799,50 @@ class TestExecutorShutdown:
         ex.clear_shutdown_state()
         assert not ex._shutdown_flag_path.exists()
         assert ex._shutdown_done is False
+
+    @pytest.mark.unit
+    def test_clear_shutdown_state_refuses_running_peer_pid(self, tmp_path):
+        cfg = _base_config(dry_run=False, tmp_path=tmp_path)
+        ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
+        ex._shutdown_flag_path.write_text("pid=12345\n")
+
+        with patch.object(ex, "_pid_is_running", return_value=True):
+            with pytest.raises(RuntimeError, match="running PID 12345"):
+                ex.clear_shutdown_state(refuse_active_peer=True)
+
+        assert ex._shutdown_flag_path.exists()
+
+    @pytest.mark.unit
+    def test_clear_shutdown_state_removes_stale_peer_pid(self, tmp_path):
+        cfg = _base_config(dry_run=False, tmp_path=tmp_path)
+        ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
+        ex._shutdown_flag_path.write_text("pid=12345\n")
+
+        with patch.object(ex, "_pid_is_running", return_value=False):
+            ex.clear_shutdown_state(refuse_active_peer=True)
+
+        assert not ex._shutdown_flag_path.exists()
+
+    @pytest.mark.unit
+    def test_clear_shutdown_state_probes_flag_directory_access(self, tmp_path):
+        cfg = _base_config(dry_run=False, tmp_path=tmp_path)
+        ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
+
+        with patch("eneru.redundancy.os.open", side_effect=PermissionError("denied")):
+            with pytest.raises(PermissionError, match="denied"):
+                ex.clear_shutdown_state(refuse_active_peer=True)
+
+    @pytest.mark.unit
+    def test_atomic_flag_acquisition_allows_only_one_executor(self, tmp_path):
+        cfg = _base_config(dry_run=False, tmp_path=tmp_path)
+        group = _redundancy_group(is_local=False)
+        ex_a = RedundancyGroupExecutor(group, base_config=cfg)
+        ex_b = RedundancyGroupExecutor(group, base_config=cfg)
+
+        assert ex_a.shutdown(reason="first") is True
+        assert ex_b.shutdown(reason="second") is False
+        assert ex_b._shutdown_done is True
+        assert f"pid={os.getpid()}" in ex_a._shutdown_flag_path.read_text()
 
     @pytest.mark.unit
     def test_remote_shutdown_called_in_dry_run(self, tmp_path):

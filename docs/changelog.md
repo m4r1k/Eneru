@@ -31,6 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   startup-cleanup hook was bypassed, `/var/run` is read-only), a
   one-line `⚠️ Redundancy shutdown for '{group}' suppressed: …` warning
   now fires. Pre-5.3.0 the suppression was silent.
+- **Redundancy flags now record PID ownership.** Startup still clears stale
+  redundancy flags from dead daemon sessions, but refuses to clear a flag
+  owned by a still-running PID. That turns overlapping daemon instances or
+  unreadable `/var/run` state into an immediate fatal startup error instead
+  of weakening the shutdown re-entry guard.
+- **Unknown trigger/behavior keys are validation errors.** Typos in
+  `behavior`, top-level and per-UPS `triggers`, and
+  `redundancy_groups[*].triggers` now fail validation with a "did you mean"
+  hint where possible. Legacy compatibility sections that still work,
+  including top-level `docker:` and Discord webhook config, remain accepted.
+  Malformed YAML is also fatal for `eneru run`, instead of falling through to
+  daemon startup with defaults.
 
 ### Fixed
 - **Redundancy shutdown no longer pinned at "fired" after first event.**
@@ -39,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quorum-loss → recovered transition, so the next quorum loss fires its
   own shutdown sequence. New `quorum restored -- re-armed for next event`
   log line marks the transition. Direct fix for the symptom in issue #4.
+- **Redundancy group-specific triggers now affect quorum evaluation.**
+  The evaluator applies `redundancy_groups[*].triggers` directly to each
+  member snapshot, so group-local thresholds work without mutating per-UPS
+  monitor configs.
 - **Redundancy runtime NUT visibility now honors connection grace.**
   Issue #4 exposed a path where both redundancy members could turn brief
   stale/lost NUT data into `UNKNOWN` before the per-UPS connection grace
@@ -61,6 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notification behavior. The redundancy E2E group adds runtime cases for
   brief NUT visibility loss that recovers inside grace and persistent loss
   that still fails safe after grace.
+- **Redundancy flag hardening coverage.** Unit tests now prove two executor
+  instances cannot both acquire the same flag and that active PID-owned
+  flags are not cleared at startup. E2E Test 38 pre-creates a stale
+  redundancy flag before daemon startup and proves shutdown still fires.
 
 ### Changed
 - Event display now uses user-facing tiers: Power Events by default,

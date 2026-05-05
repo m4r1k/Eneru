@@ -18,6 +18,10 @@ except ImportError:
     apprise = None
 
 
+class ConfigValidationLoadError(Exception):
+    """Raised when raw YAML cannot be loaded for startup validation."""
+
+
 def _non_negative_int(value: str) -> int:
     """argparse type for ``--length``: int >= 0 (0 = no cap)."""
     try:
@@ -38,12 +42,53 @@ def _load_config(args):
     return ConfigLoader.load(getattr(args, 'config', None))
 
 
+def _load_raw_config_for_validation(args):
+    """Load the YAML mapping used for unknown-key validation."""
+    config_path = getattr(args, 'config', None)
+    path = Path(config_path) if config_path else None
+    if path is None:
+        for candidate in ConfigLoader.DEFAULT_CONFIG_PATHS:
+            if candidate.exists():
+                path = candidate
+                break
+    if path is None or not path.exists():
+        return None
+    try:
+        import yaml
+        with open(path, 'r') as f:
+            return yaml.safe_load(f) or {}
+    except Exception as exc:
+        raise ConfigValidationLoadError(
+            f"ERROR: Failed to parse {path} for validation: {exc}"
+        ) from exc
+
+
+def _exit_on_config_errors(config, args):
+    """Prevent daemon startup when validation reports hard errors."""
+    try:
+        raw_data = _load_raw_config_for_validation(args)
+    except ConfigValidationLoadError as exc:
+        print(exc)
+        sys.exit(1)
+    messages = ConfigLoader.validate_config(
+        config, raw_data=raw_data,
+    )
+    errors = [m for m in messages if m.startswith("ERROR:")]
+    if not errors:
+        return
+    for msg in errors:
+        print(msg)
+    sys.exit(1)
+
+
 def _cmd_run(args):
     """Start the monitoring daemon."""
     config = _load_config(args)
 
     if args.dry_run:
         config.behavior.dry_run = True
+
+    _exit_on_config_errors(config, args)
 
     if config.multi_ups or config.redundancy_groups:
         coordinator = MultiUPSCoordinator(config, exit_after_shutdown=args.exit_after_shutdown)
@@ -217,23 +262,15 @@ def _cmd_validate(args):
     else:
         print(f"    Disabled")
 
-    # Run validation checks (pass raw YAML data for top-level resource warnings).
-    # Re-parse for both single-UPS and multi-UPS configs so the top-level
-    # warnings reach single-UPS users too. ConfigLoader.load already
-    # handles missing files gracefully and warned the user; only the
-    # "file exists but YAML is malformed" branch must surface the error
-    # here so it isn't silently swallowed.
+    # Re-parse the raw YAML so validation can catch misspelled safety keys
+    # that ConfigLoader intentionally ignores while building dataclasses.
     raw_data = None
-    if args.config and Path(args.config).exists():
-        try:
-            import yaml
-            with open(args.config, 'r') as f:
-                raw_data = yaml.safe_load(f) or {}
-        except Exception as exc:
-            print()
-            print(f"  ERROR: Failed to re-parse {args.config} for top-level "
-                  f"validation: {exc}")
-            exit_code = 1
+    try:
+        raw_data = _load_raw_config_for_validation(args)
+    except ConfigValidationLoadError as exc:
+        print()
+        print(f"  {exc}")
+        exit_code = 1
     messages = ConfigLoader.validate_config(config, raw_data=raw_data)
     if messages:
         print()

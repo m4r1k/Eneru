@@ -16,6 +16,7 @@ executor idempotent; the in-memory ``_lock`` + ``_shutdown_done`` pair
 catches concurrent calls inside one process.
 """
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -169,7 +170,50 @@ class RedundancyGroupExecutor(
 
     # ----- public API -----
 
-    def clear_shutdown_state(self) -> None:
+    def _read_shutdown_flag_pid(self) -> Optional[int]:
+        """Return the PID recorded in the flag file, if it has one."""
+        try:
+            content = self._shutdown_flag_path.read_text()
+        except FileNotFoundError:
+            return None
+        for line in content.splitlines():
+            if line.startswith("pid="):
+                try:
+                    return int(line.split("=", 1)[1])
+                except ValueError:
+                    return None
+        return None
+
+    def _pid_is_running(self, pid: int) -> bool:
+        """Best-effort liveness check for a PID from the shutdown flag."""
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # A process exists but we cannot signal it. Treat as active.
+            return True
+        return True
+
+    def _verify_shutdown_flag_access(self) -> None:
+        """Prove startup can create and remove flag files in the target dir."""
+        probe = self._shutdown_flag_path.with_name(
+            f".{self._shutdown_flag_path.name}.startup-check.{os.getpid()}"
+        )
+        fd = None
+        try:
+            # Startup must fail fast if /var/run (or the configured flag
+            # directory) is not writable. Otherwise the first real quorum loss
+            # would discover that the cross-process guard cannot be acquired.
+            fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        finally:
+            if fd is not None:
+                os.close(fd)
+            probe.unlink(missing_ok=True)
+
+    def clear_shutdown_state(self, *, refuse_active_peer: bool = False) -> None:
         """Reset the in-process and on-disk re-entry guards.
 
         5.3.0 contract: the daemon owns the redundancy flag's lifecycle.
@@ -186,8 +230,17 @@ class RedundancyGroupExecutor(
         a torn pair.
         """
         with self._lock:
+            if refuse_active_peer and self._shutdown_flag_path.exists():
+                pid = self._read_shutdown_flag_pid()
+                if pid is not None and pid != os.getpid() and self._pid_is_running(pid):
+                    raise RuntimeError(
+                        f"active redundancy shutdown flag {self._shutdown_flag_path} "
+                        f"is owned by running PID {pid}"
+                    )
             self._shutdown_done = False
             self._shutdown_flag_path.unlink(missing_ok=True)
+            if refuse_active_peer:
+                self._verify_shutdown_flag_access()
 
     def shutdown(self, reason: str) -> bool:
         """Run the redundancy group's shutdown sequence (idempotent).
@@ -208,12 +261,17 @@ class RedundancyGroupExecutor(
             # TOCTOU window: two daemons (operator mistake, systemd
             # restart race, container test rig) could both see the flag
             # missing and both enter the shutdown path before either
-            # marked it. ``touch(exist_ok=False)`` collapses check +
-            # create into one ``open(O_CREAT|O_EXCL)`` syscall so the
-            # filesystem itself arbitrates. self._lock still covers
-            # intra-process atomicity for ``_shutdown_done``.
+            # marked it. ``os.open(... O_CREAT|O_EXCL)`` collapses
+            # check + create into one syscall, while the PID payload lets
+            # startup distinguish stale flags from a still-running peer.
             try:
-                self._shutdown_flag_path.touch(exist_ok=False)
+                fd = os.open(
+                    self._shutdown_flag_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o644,
+                )
+                with os.fdopen(fd, "w") as f:
+                    f.write(f"pid={os.getpid()}\ncreated_at={time.time():.3f}\n")
             except FileExistsError:
                 # 5.3.0: should never happen on a healthy install --
                 # startup cleanup unconditionally removes any stale flag.
@@ -390,10 +448,12 @@ class RedundancyGroupEvaluator(threading.Thread):
                     monitor.config.ups.max_stale_data_tolerance
                 )
                 grace_cfg = monitor.config.ups.connection_loss_grace_period
-                triggers = monitor.config.triggers
                 raw = assess_health(
                     snap,
-                    triggers,
+                    # Redundancy groups own their own trigger policy. Do not
+                    # reuse the member monitor's triggers here: the same UPS
+                    # may belong to multiple groups with different thresholds.
+                    self._group.triggers,
                     check_interval,
                     max_stale_data_tolerance=max_stale_data_tolerance,
                     connection_grace_enabled=grace_cfg.enabled,

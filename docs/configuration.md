@@ -13,6 +13,11 @@ Features are off unless their section enables them, except `local_shutdown`, `fi
 
 The tables below cover every YAML key currently parsed by `ConfigLoader`, including the legacy `docker:` and `discord:` compatibility forms. The exhaustive commented sample is [`examples/config-reference.yaml`](https://github.com/m4r1k/Eneru/blob/main/examples/config-reference.yaml). Shorter starting points are in [`examples/`](https://github.com/m4r1k/Eneru/tree/main/examples).
 
+Eneru treats unknown keys in safety-sensitive sections as validation errors.
+This catches typos such as `behavior.dry-run` or `triggers.exteneded_time`
+before the daemon starts. Legacy compatibility forms that still work, such as
+top-level `docker:` and `discord:` webhook config, remain accepted.
+
 ## Single UPS example
 
 ```yaml
@@ -391,7 +396,7 @@ See [Remote servers](remote-servers.md) for SSH keys, sudoers, predefined action
 | `degraded_counts_as` | `healthy` | Count DEGRADED members as `healthy` or `critical` |
 | `unknown_counts_as` | `critical` | Count UNKNOWN members as `critical`, `degraded`, or `healthy` |
 | `is_local` | `false` | This redundancy group powers the Eneru host. At most one local group is allowed across all groups |
-| `triggers` | inherits | Per-group trigger overrides |
+| `triggers` | inherits | Per-group trigger overrides. `depletion.window` is not supported here; set it globally or on `ups[*].triggers` |
 | Resource sections | empty | Same resource surface as a UPS group |
 
 ## File locations

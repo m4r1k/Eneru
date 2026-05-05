@@ -95,6 +95,10 @@ Each UPS member is classified on every evaluator tick.
 
 Member UPS triggers still run. In a redundancy group they do not directly run the shutdown sequence. They mark the member as advisory-critical, then the group evaluator decides whether quorum is gone.
 
+Group-level `triggers:` are also evaluated by the redundancy evaluator itself. Use them when a shared resource has a different risk budget than the member UPS defaults; the group trigger can mark that member critical for quorum without changing the UPS monitor's own config.
+
+`depletion.critical_rate` and `depletion.grace_period` can be group-local. `depletion.window` cannot: the rolling depletion rate is calculated by each UPS monitor before the redundancy evaluator sees the snapshot. Configure `depletion.window` globally or on `ups[*].triggers` instead.
+
 You will see log lines like:
 
 ```text
@@ -189,7 +193,10 @@ prevents a single quorum-loss event from firing the shutdown sequence twice. Fro
 
 - Cleared at coordinator **startup** so a stale flag from a prior daemon
   instance can't silently block the next quorum loss. **This is the
-  load-bearing guarantee**; the next two clears are optimizations.
+  load-bearing guarantee**; the next two clears are optimizations. From
+  5.3.0-rc4 onward the flag records the owning PID, and startup refuses
+  to clear it if that PID is still running. That prevents two overlapping
+  daemon instances from erasing each other's in-flight guard.
 - Cleared on **quorum recovery** so the next quorum loss can fire its own
   shutdown without waiting for a daemon restart. Look for `quorum restored
   -- re-armed for next event` in the log.
@@ -198,7 +205,9 @@ prevents a single quorum-loss event from firing the shutdown sequence twice. Fro
   disk, but the next coordinator startup re-clears it.
 
 The flag's only role is in-flight re-entry protection within a single
-quorum-loss event. It never persists across runs or across events.
+quorum-loss event. It never persists across runs or across events. If the
+flag cannot be inspected or removed at startup, Eneru treats that as fatal
+and exits rather than starting with an unreliable shutdown guard.
 
 If the daemon ever sees the flag at first call (someone touched it manually,
 `/var/run` is read-only, the startup-cleanup hook was bypassed) it logs the

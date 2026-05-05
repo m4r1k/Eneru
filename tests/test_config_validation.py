@@ -86,6 +86,85 @@ class TestConfigValidation:
             assert not any("trigger_on" in m for m in messages)
 
 
+class TestUnknownKeyValidation:
+    """Unknown safety keys are hard errors, with legacy aliases preserved."""
+
+    def _errors(self, raw_data):
+        config = ConfigLoader._parse_config(raw_data)
+        return [
+            m for m in ConfigLoader.validate_config(config, raw_data)
+            if m.startswith("ERROR:")
+        ]
+
+    @pytest.mark.unit
+    def test_behavior_dry_run_typo_is_error_with_hint(self):
+        errors = self._errors({
+            "ups": {"name": "UPS@localhost"},
+            "behavior": {"dry-run": True},
+        })
+        assert any("behavior.dry-run" in e for e in errors)
+        assert any("Did you mean 'dry_run'" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_top_level_extended_time_typo_is_error_with_hint(self):
+        errors = self._errors({
+            "ups": {"name": "UPS@localhost"},
+            "triggers": {"exteneded_time": {"enabled": True}},
+        })
+        assert any("triggers.exteneded_time" in e for e in errors)
+        assert any("Did you mean 'extended_time'" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_redundancy_group_trigger_typo_is_error(self):
+        errors = self._errors({
+            "ups": [{"name": "UPS-A"}, {"name": "UPS-B"}],
+            "redundancy_groups": [{
+                "name": "rack",
+                "ups_sources": ["UPS-A", "UPS-B"],
+                "triggers": {"critical_runtme_threshold": 1200},
+            }],
+        })
+        assert any("redundancy_groups['rack'].triggers" in e for e in errors)
+        assert any("critical_runtime_threshold" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_multi_ups_trigger_typo_is_error(self):
+        errors = self._errors({
+            "ups": [{
+                "name": "UPS-A",
+                "triggers": {"exteneded_time": {"enabled": True}},
+            }],
+        })
+        assert any("ups['UPS-A'].triggers.exteneded_time" in e for e in errors)
+        assert any("Did you mean 'extended_time'" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_redundancy_group_depletion_window_is_error(self):
+        errors = self._errors({
+            "ups": [{"name": "UPS-A"}, {"name": "UPS-B"}],
+            "redundancy_groups": [{
+                "name": "rack",
+                "ups_sources": ["UPS-A", "UPS-B"],
+                "triggers": {"depletion": {"window": 60}},
+            }],
+        })
+        assert any("redundancy_groups['rack'].triggers.depletion.window" in e
+                   for e in errors)
+
+    @pytest.mark.unit
+    def test_legacy_docker_and_discord_configs_are_not_unknown_key_errors(self):
+        raw_data = {
+            "ups": {"name": "UPS@localhost"},
+            "docker": {"enabled": True},
+            "discord": {"webhook_url": "https://discord.com/api/webhooks/1/a"},
+            "notifications": {
+                "discord": {"webhook_url": "https://discord.com/api/webhooks/2/b"},
+            },
+        }
+        errors = self._errors(raw_data)
+        assert not any("unknown config key" in e for e in errors)
+
+
 class TestNotificationsSuppressValidation:
     """Issue #27 / B3: per-event notification suppression with safety blocklist."""
 
@@ -966,5 +1045,3 @@ redundancy_groups:
         """Configs with no ``redundancy_groups`` section never reference them."""
         msgs = ConfigLoader.validate_config(default_config)
         assert not any("redundancy" in m.lower() for m in msgs)
-
-

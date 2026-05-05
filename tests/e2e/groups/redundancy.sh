@@ -17,7 +17,8 @@
 # graceful exit each clear it -- so those rm lines became redundant
 # and were removed. With them gone, every existing test doubles as a
 # regression catch for the startup-cleanup contract; Test 37 below
-# is the explicit fire->recover->fire-again scenario. Do NOT add the
+# is the explicit fire->recover->fire-again scenario, and Test 38
+# pre-creates a restart-stale flag before daemon startup. Do NOT add the
 # rm lines back without first confirming the contract is intentionally
 # being inverted.
 
@@ -442,6 +443,47 @@ cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 2
 echo "PASS: redundancy re-arm verified across two consecutive quorum-loss events"
+)
+
+# ======================================================================
+# Test 38: Stale redundancy flag from prior daemon restart is cleared
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 38: Stale redundancy flag across restart is cleared"
+
+echo "=== Test 38: stale flag restart ==="
+
+# Pre-5.3.0/rc4 regression: a stale flag from a prior daemon instance
+# suppressed the executor before it could log REDUNDANCY GROUP SHUTDOWN.
+# This uses the real redundancy flag path derived from
+# logging.shutdown_flag_file's parent plus the group name.
+printf "stale-pre-rc4-flag\n" > /tmp/ups-shutdown-redundancy-rack-1-dual-psu
+cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
+cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
+sleep 3
+
+timeout 30s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown \
+  > /tmp/test38.log 2>&1 || true
+
+if ! grep -q "REDUNDANCY GROUP SHUTDOWN: rack-1-dual-psu" /tmp/test38.log; then
+  echo "FAIL: stale restart flag blocked redundancy shutdown"
+  echo "----- /tmp/test38.log (full) -----"
+  cat /tmp/test38.log
+  echo "----- /tmp/test38.log end -----"
+  exit 1
+fi
+if grep -q "suppressed: flag .* startup cleanup bypassed" /tmp/test38.log; then
+  echo "FAIL: stale flag suppression warning fired after startup cleanup"
+  cat /tmp/test38.log
+  exit 1
+fi
+
+# Restore for downstream tests
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
+sleep 2
+echo "PASS: stale restart flag was cleared before redundancy shutdown"
 )
 
 # ======================================================================

@@ -1747,7 +1747,35 @@ class TestCoordinatorRedundancyWiring:
 
         # The executor mock's clear_shutdown_state must have been called
         # exactly once -- before the evaluator started polling.
-        mock_executor_cls.return_value.clear_shutdown_state.assert_called_once()
+        mock_executor_cls.return_value.clear_shutdown_state.assert_called_once_with(
+            refuse_active_peer=True
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("exc", [
+        RuntimeError("active peer"),
+        PermissionError("/var/run/ups-shutdown-redundancy-rack"),
+        OSError("/var/run/ups-shutdown-redundancy-rack"),
+    ])
+    def test_start_monitors_exits_when_redundancy_flag_cannot_be_cleared(
+        self, tmp_path, exc
+    ):
+        """A startup flag-cleanup failure is fatal: running with a
+        possibly active peer would make the re-entry guard untrustworthy."""
+        config = self._config_with_redundancy(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+
+        with patch("eneru.multi_ups.threading.Thread"), \
+             patch("eneru.multi_ups.UPSGroupMonitor") as mock_monitor_cls, \
+             patch("eneru.multi_ups.RedundancyGroupExecutor") as mock_executor_cls:
+            mock_monitor_cls.return_value = MagicMock()
+            mock_executor_cls.return_value.clear_shutdown_state.side_effect = exc
+            with pytest.raises(SystemExit):
+                coord._start_monitors()
+
+        assert any("FATAL ERROR" in call.args[0]
+                   for call in coord._log.call_args_list)
 
     @pytest.mark.unit
     def test_handle_signal_clears_redundancy_executor_state(self, tmp_path):
