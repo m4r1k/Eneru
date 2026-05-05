@@ -204,7 +204,7 @@ If the daemon ever sees the flag at first call (someone touched it manually,
 `/var/run` is read-only, the startup-cleanup hook was bypassed) it logs the
 exact line below — operators can grep their journal for it verbatim:
 
-```
+```text
 ⚠️ Redundancy shutdown for '{group}' suppressed: flag /var/run/ups-shutdown-redundancy-{group} already present at first call (startup cleanup bypassed). Will re-arm when quorum recovers.
 ```
 

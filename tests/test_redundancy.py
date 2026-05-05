@@ -442,6 +442,40 @@ class TestEvaluatorIdempotency:
         executor.shutdown.assert_called_once()
 
     @pytest.mark.unit
+    def test_recovery_clears_executor_state_even_when_never_fired(self):
+        """5.3.0 contract regression: when ``shutdown()`` is suppressed
+        by a stale flag (CodeRabbit P1 #2), ``_fired`` never flips to
+        True. Pre-fix, the recovery branch only cleared executor state
+        when ``_fired`` was True, so the executor's ``_shutdown_done``
+        stayed latched and silently blocked every subsequent quorum
+        loss for the rest of the daemon's life. The recovery branch
+        must always call ``clear_shutdown_state()``.
+        """
+        group = _redundancy_group(min_healthy=1)
+        monitors = {
+            "UPS-A": _FakeMonitor("UPS-A", _snap(trigger_active=True, trigger_reason="x")),
+            "UPS-B": _FakeMonitor("UPS-B", _snap(trigger_active=True, trigger_reason="x")),
+        }
+        executor = MagicMock()
+        executor.shutdown.return_value = False  # simulate stale-flag suppression
+        ev = RedundancyGroupEvaluator(
+            group, monitors, executor,
+            stop_event=threading.Event(), logger=None,
+        )
+        ev.evaluate_once()  # quorum lost, shutdown suppressed
+        assert ev._fired is False  # never flipped because shutdown returned False
+        executor.clear_shutdown_state.assert_not_called()
+        # Both back to healthy -- recovery must clear executor state
+        # even though _fired is False.
+        for name in ("UPS-A", "UPS-B"):
+            with monitors[name].state._lock:
+                monitors[name].state.trigger_active = False
+                monitors[name].state.trigger_reason = ""
+                monitors[name].state.latest_status = "OL"
+        ev.evaluate_once()
+        executor.clear_shutdown_state.assert_called_once()
+
+    @pytest.mark.unit
     def test_quorum_recovery_re_arms_for_next_event(self):
         """5.3.0 contract: recovery re-arms the evaluator + executor.
 

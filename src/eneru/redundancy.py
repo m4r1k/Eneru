@@ -204,19 +204,28 @@ class RedundancyGroupExecutor(
         with self._lock:
             if self._shutdown_done:
                 return False
-            if self._shutdown_flag_path.exists():
+            # Atomic flag acquisition. ``exists()`` + ``touch()`` was a
+            # TOCTOU window: two daemons (operator mistake, systemd
+            # restart race, container test rig) could both see the flag
+            # missing and both enter the shutdown path before either
+            # marked it. ``touch(exist_ok=False)`` collapses check +
+            # create into one ``open(O_CREAT|O_EXCL)`` syscall so the
+            # filesystem itself arbitrates. self._lock still covers
+            # intra-process atomicity for ``_shutdown_done``.
+            try:
+                self._shutdown_flag_path.touch(exist_ok=False)
+            except FileExistsError:
                 # 5.3.0: should never happen on a healthy install --
                 # startup cleanup unconditionally removes any stale flag.
                 # Reaching here means startup-cleanup was bypassed (file
                 # owned by another user, /var/run remounted read-only,
-                # someone touched the flag manually). Surface it so the
-                # operator sees the diagnostic the pre-5.3.0 silent
-                # no-op never gave them.
+                # someone touched the flag manually, peer daemon won the
+                # race). Surface it so the operator sees the diagnostic
+                # the pre-5.3.0 silent no-op never gave them.
                 self._shutdown_done = True
                 suppressed_by_stale_flag = True
             else:
                 self._shutdown_done = True
-                self._shutdown_flag_path.touch()
 
         if suppressed_by_stale_flag:
             # Logged outside the lock: the logger may block on disk and
@@ -405,14 +414,20 @@ class RedundancyGroupEvaluator(threading.Thread):
             )
         elif (not quorum_lost) and self._was_quorum_lost:
             tally = ", ".join(f"{name}={h.value}" for name, h in per_ups.items())
+            # 5.3.0 contract: ALWAYS clear the executor's re-entry
+            # guard on lost->recovered. The ``_fired == True`` case is
+            # the common one (shutdown ran but the host stayed up --
+            # is_local: false rack topology, sandbox, dummy-UPS rig).
+            # The ``_fired == False`` case covers the stale-flag
+            # suppression path: ``shutdown()`` returned False because
+            # the flag already existed, ``_fired`` never flipped, but
+            # the executor's ``_shutdown_done`` is still latched True
+            # -- skipping the clear here would silently block every
+            # subsequent quorum loss for the rest of this daemon's
+            # life, exactly the issue #4 symptom this PR fixes.
+            # ``clear_shutdown_state()`` is idempotent.
+            self._executor.clear_shutdown_state()
             if self._fired:
-                # 5.3.0 contract: shutdown ran but the host stayed up
-                # (custom command, sandbox, is_local: false rack
-                # topology, dummy-UPS rig, non-root invocation). Clear
-                # the executor's re-entry guard so the next quorum loss
-                # can re-trigger. Mirrors the per-UPS POWER_RESTORED
-                # re-arm shipped for bug #4 in 5.2.2.
-                self._executor.clear_shutdown_state()
                 self._fired = False
                 self._log(
                     f"✅ Redundancy group '{self._group.name}' quorum restored "
