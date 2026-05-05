@@ -442,28 +442,42 @@ class TestEvaluatorIdempotency:
         executor.shutdown.assert_called_once()
 
     @pytest.mark.unit
-    def test_recovery_then_re_loss_keeps_fired_state(self):
-        """Once fired, the evaluator stays "fired" -- recovery is informational only."""
+    def test_quorum_recovery_re_arms_for_next_event(self):
+        """5.3.0 contract: recovery re-arms the evaluator + executor.
+
+        Pre-5.3.0 the evaluator stayed pinned at ``_fired = True`` after
+        the first quorum loss, so subsequent quorum losses silently
+        no-op'd. With the per-UPS bug-#4 analog now wired in, the
+        evaluator clears its own ``_fired`` AND calls
+        ``executor.clear_shutdown_state()`` on the lost->recovered
+        transition.
+        """
         group = _redundancy_group(min_healthy=1)
         monitors = {
             "UPS-A": _FakeMonitor("UPS-A", _snap(trigger_active=True, trigger_reason="x")),
             "UPS-B": _FakeMonitor("UPS-B", _snap(trigger_active=True, trigger_reason="x")),
         }
         ev, executor = self._make(group, monitors)
-        ev.evaluate_once()  # fires
-        # Snap UPS-A back to healthy
-        with monitors["UPS-A"].state._lock:
-            monitors["UPS-A"].state.trigger_active = False
-            monitors["UPS-A"].state.trigger_reason = ""
-            monitors["UPS-A"].state.latest_status = "OL"
-        ev.evaluate_once()  # quorum recovered, no extra calls
-        # UPS-A drops again
-        with monitors["UPS-A"].state._lock:
-            monitors["UPS-A"].state.trigger_active = True
-            monitors["UPS-A"].state.trigger_reason = "x"
-            monitors["UPS-A"].state.latest_status = "OB FSD"
-        ev.evaluate_once()  # would fire again but already fired
-        executor.shutdown.assert_called_once()
+        ev.evaluate_once()  # fires once
+        assert ev._fired is True
+        # Snap both back to healthy -- quorum recovers
+        for name in ("UPS-A", "UPS-B"):
+            with monitors[name].state._lock:
+                monitors[name].state.trigger_active = False
+                monitors[name].state.trigger_reason = ""
+                monitors[name].state.latest_status = "OL"
+        ev.evaluate_once()  # recovery re-arms
+        executor.clear_shutdown_state.assert_called_once()
+        assert ev._fired is False
+        # Both drop again -- second quorum loss must fire a new shutdown
+        for name in ("UPS-A", "UPS-B"):
+            with monitors[name].state._lock:
+                monitors[name].state.trigger_active = True
+                monitors[name].state.trigger_reason = "x"
+                monitors[name].state.latest_status = "OB FSD"
+        ev.evaluate_once()
+        assert executor.shutdown.call_count == 2
+        assert ev._fired is True
 
 
 class TestEvaluatorThreadLifecycle:
@@ -646,12 +660,62 @@ class TestExecutorShutdown:
 
     @pytest.mark.unit
     def test_idempotent_against_existing_flag_file(self, tmp_path):
+        # Defense-in-depth: even though the 5.3.0 contract has the
+        # coordinator clear the flag at startup, the executor itself
+        # still refuses to re-fire if it observes a flag at first call.
+        # This covers the contract-violation case (flag owned by another
+        # user, /var/run remounted RO mid-run, manual touch).
         cfg = _base_config(dry_run=False, tmp_path=tmp_path)
         ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
         # Pre-create the flag file as if a previous Eneru run left it behind.
         ex._shutdown_flag_path.touch()
         assert ex.shutdown(reason="x") is False
         assert ex._shutdown_done is True
+
+    @pytest.mark.unit
+    def test_stale_flag_emits_warning_log(self, tmp_path):
+        """5.3.0: the silent no-op path now surfaces a warning so the
+        operator sees what the pre-5.3.0 silent suppression hid."""
+        cfg = _base_config(dry_run=False, tmp_path=tmp_path)
+        ex = RedundancyGroupExecutor(_redundancy_group(name="rg-x"),
+                                      base_config=cfg)
+        ex.logger = MagicMock()
+        ex._shutdown_flag_path.touch()  # simulate startup-cleanup bypassed
+        assert ex.shutdown(reason="x") is False
+        logged = " ".join(call.args[0] for call in ex.logger.log.call_args_list)
+        assert "suppressed" in logged
+        assert "rg-x" in logged
+        assert "startup cleanup bypassed" in logged
+
+    @pytest.mark.unit
+    def test_clear_shutdown_state_unlinks_flag_and_resets_done(self, tmp_path):
+        cfg = _base_config(dry_run=False, tmp_path=tmp_path)
+        # Explicit is_local=False so this test stays correct even if the
+        # _redundancy_group() default ever flips -- the local resource
+        # mixins (_shutdown_vms, _unmount_filesystems) would otherwise
+        # try to run for real with dry_run=False.
+        ex = RedundancyGroupExecutor(_redundancy_group(is_local=False),
+                                     base_config=cfg)
+        # Fire a shutdown so the flag is on disk and _shutdown_done is True.
+        assert ex.shutdown(reason="x") is True
+        assert ex._shutdown_flag_path.exists()
+        assert ex._shutdown_done is True
+        # Clear: both must be reset.
+        ex.clear_shutdown_state()
+        assert not ex._shutdown_flag_path.exists()
+        assert ex._shutdown_done is False
+        # Re-fire is now possible.
+        assert ex.shutdown(reason="y") is True
+
+    @pytest.mark.unit
+    def test_clear_shutdown_state_is_idempotent(self, tmp_path):
+        cfg = _base_config(dry_run=False, tmp_path=tmp_path)
+        ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
+        # No fire yet -- flag absent. Clear must not raise.
+        ex.clear_shutdown_state()
+        ex.clear_shutdown_state()
+        assert not ex._shutdown_flag_path.exists()
+        assert ex._shutdown_done is False
 
     @pytest.mark.unit
     def test_remote_shutdown_called_in_dry_run(self, tmp_path):

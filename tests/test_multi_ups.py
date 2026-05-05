@@ -1725,3 +1725,56 @@ class TestCoordinatorRedundancyWiring:
         with pytest.raises(SystemExit):
             coord._handle_signal(15, None)
         assert len(joined_evals) == 2
+
+    @pytest.mark.unit
+    def test_start_monitors_clears_redundancy_executor_state_at_startup(self, tmp_path):
+        """5.3.0 contract: the daemon owns the redundancy flag's
+        lifecycle. The coordinator must call clear_shutdown_state() on
+        every freshly constructed executor so a stale on-disk flag from
+        a prior daemon instance can't silently block the next quorum
+        loss (issue #4)."""
+        config = self._config_with_redundancy(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+
+        with patch("eneru.multi_ups.threading.Thread"), \
+             patch("eneru.multi_ups.UPSGroupMonitor") as mock_monitor_cls, \
+             patch("eneru.multi_ups.RedundancyGroupExecutor") as mock_executor_cls, \
+             patch("eneru.multi_ups.RedundancyGroupEvaluator") as mock_eval_cls:
+            mock_monitor_cls.return_value = MagicMock()
+            mock_eval_cls.return_value = MagicMock()
+            coord._start_monitors()
+
+        # The executor mock's clear_shutdown_state must have been called
+        # exactly once -- before the evaluator started polling.
+        mock_executor_cls.return_value.clear_shutdown_state.assert_called_once()
+
+    @pytest.mark.unit
+    def test_handle_signal_clears_redundancy_executor_state(self, tmp_path):
+        """5.3.0 contract: graceful exit clears redundancy flags too,
+        not just the per-UPS coordinator flag."""
+        coord = MultiUPSCoordinator(self._config_with_redundancy(tmp_path))
+        coord._logger = MagicMock()
+        ex_a, ex_b = MagicMock(), MagicMock()
+        coord._redundancy_executors = {"rg-A": ex_a, "rg-B": ex_b}
+
+        with pytest.raises(SystemExit):
+            coord._handle_signal(15, None)
+
+        ex_a.clear_shutdown_state.assert_called_once()
+        ex_b.clear_shutdown_state.assert_called_once()
+
+    @pytest.mark.unit
+    def test_handle_signal_swallows_redundancy_clear_failures(self, tmp_path):
+        """A flag-cleanup failure in one executor must NOT block exit
+        nor stop other executors from being cleared."""
+        coord = MultiUPSCoordinator(self._config_with_redundancy(tmp_path))
+        coord._logger = MagicMock()
+        bad = MagicMock()
+        bad.clear_shutdown_state.side_effect = OSError("flag dir gone")
+        good = MagicMock()
+        coord._redundancy_executors = {"rg-bad": bad, "rg-good": good}
+
+        with pytest.raises(SystemExit):
+            coord._handle_signal(15, None)
+        good.clear_shutdown_state.assert_called_once()

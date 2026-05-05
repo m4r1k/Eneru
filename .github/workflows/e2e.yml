@@ -23,8 +23,9 @@ env:
 # of the previous ~6+ minute single sequential job.
 #
 # v5.1.2 split the previous `Redundancy and Stats` job into two
-# (`Redundancy` runs tests 21-27, `Stats` runs tests 28-32) so the
-# heaviest group no longer gates the matrix on its own.
+# (`Redundancy` runs tests 21-27 + 37 + R1/R2, `Stats` runs tests
+# 28-32 + 34/35) so the heaviest group no longer gates the matrix on
+# its own.
 #
 # OPERATOR ACTION REQUIRED when this PR's branch protection updates:
 # the required checks on `main` are now FIVE E2E jobs (was four).

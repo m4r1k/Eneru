@@ -179,6 +179,39 @@ Good targets:
 
 If the surviving UPS overloads, software cannot save the rack. Fix the load or UPS sizing.
 
+## Operational notes
+
+### Re-entry guard / flag-file lifecycle
+
+Each redundancy group has a flag at `/var/run/ups-shutdown-redundancy-{group}` that
+prevents a single quorum-loss event from firing the shutdown sequence twice. From
+**5.3.0** onward the daemon owns this flag's lifecycle:
+
+- Cleared at coordinator **startup** so a stale flag from a prior daemon
+  instance can't silently block the next quorum loss. **This is the
+  load-bearing guarantee**; the next two clears are optimizations.
+- Cleared on **quorum recovery** so the next quorum loss can fire its own
+  shutdown without waiting for a daemon restart. Look for `quorum restored
+  -- re-armed for next event` in the log.
+- Cleared on **graceful exit via SIGINT / SIGTERM** so the next start is
+  clean. A non-graceful exit (crash, SIGKILL, OOM) leaves the flag on
+  disk, but the next coordinator startup re-clears it.
+
+The flag's only role is in-flight re-entry protection within a single
+quorum-loss event. It never persists across runs or across events.
+
+If the daemon ever sees the flag at first call (someone touched it manually,
+`/var/run` is read-only, the startup-cleanup hook was bypassed) it logs the
+exact line below — operators can grep their journal for it verbatim:
+
+```
+⚠️ Redundancy shutdown for '{group}' suppressed: flag /var/run/ups-shutdown-redundancy-{group} already present at first call (startup cleanup bypassed). Will re-arm when quorum recovers.
+```
+
+Pre-5.3.0 the suppression was silent and cost some operators (issue #4) hours of
+debugging. If you see the warning, check for stuck SSH sessions, stale lock
+files, or a previous instance that didn't exit cleanly.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -187,10 +220,5 @@ If the surviving UPS overloads, software cannot save the rack. Fix the load or U
 | On-battery member still counts healthy | `degraded_counts_as: healthy` is the default |
 | Advisory log appears but no shutdown | Another member still satisfies quorum |
 | Group never starts | `ups_sources` names do not match exactly |
-| Repeated tests do not fire | A previous dry-run or killed process left `/var/run/ups-shutdown-redundancy-*` |
-
-Clear stale redundancy flags only after confirming no real shutdown is in progress:
-
-```bash
-sudo rm -f /var/run/ups-shutdown-redundancy-*
-```
+| Repeated tests do not fire | Pre-5.3.0 only: stale `/var/run/ups-shutdown-redundancy-*` from a prior run. 5.3.0+ clears these automatically at startup |
+| `⚠️ Redundancy shutdown … suppressed` log line | The startup-cleanup contract was bypassed — see Operational notes above |

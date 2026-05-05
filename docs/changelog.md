@@ -9,7 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [5.3.0] - Unreleased
 
+### Behavior change — daemon owns redundancy flag lifecycle
+- **The redundancy executor's flag file
+  (`/var/run/ups-shutdown-redundancy-{group}`) is now daemon-managed.**
+  Old contract (≤5.2.2): the flag persisted across daemon restarts and
+  across quorum-recovery events; once any redundancy shutdown ran without
+  the host actually halting (`is_local: false` rack topology, sandboxed
+  test environments, dummy-UPS rigs), the flag stayed on disk and silently
+  blocked every subsequent redundancy shutdown until manually deleted. New contract
+  (5.3.0+): the flag is unconditionally cleared at three points —
+  coordinator startup, quorum recovery, and graceful signal exit. Its
+  only role is now in-flight re-entry protection within a single
+  quorum-loss event. Reported by ckrevel in
+  [issue #4](https://github.com/m4r1k/Eneru/issues/4#issuecomment-4375517607).
+  No user action required; if you had been deleting
+  `/var/run/ups-shutdown-redundancy-*` manually as a workaround, you can
+  stop. This mirrors the per-UPS path's behavior since the bug #4 fix in
+  5.2.2.
+- **Diagnostic warning when the contract is bypassed.** If the executor
+  ever sees the flag at first call (someone touched it manually, the
+  startup-cleanup hook was bypassed, `/var/run` is read-only), a
+  one-line `⚠️ Redundancy shutdown for '{group}' suppressed: …` warning
+  now fires. Pre-5.3.0 the suppression was silent.
+
 ### Fixed
+- **Redundancy shutdown no longer pinned at "fired" after first event.**
+  Companion to the contract change above: the evaluator now resets its
+  `_fired` flag and clears the executor's re-entry guard on the
+  quorum-loss → recovered transition, so the next quorum loss fires its
+  own shutdown sequence. New `quorum restored -- re-armed for next event`
+  log line marks the transition. Direct fix for the symptom in issue #4.
 - **Redundancy runtime NUT visibility now honors connection grace.**
   Issue #4 exposed a path where both redundancy members could turn brief
   stale/lost NUT data into `UNKNOWN` before the per-UPS connection grace
@@ -46,6 +75,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `unknown_counts_as: critical` still triggers quorum loss after connection
   grace expires. The change only prevents transient runtime NUT visibility
   loss from bypassing the existing grace window.
+- The redundancy flag lifecycle change is also drop-in. Anyone who was
+  deleting `/var/run/ups-shutdown-redundancy-*` manually as a workaround
+  for the issue #4 symptom can stop — the daemon now owns it.
 
 ---
 
