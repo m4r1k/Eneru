@@ -304,6 +304,11 @@ class MultiUPSCoordinator:
                     notification_worker=self._notification_worker,
                     local_shutdown_callback=self._handle_local_shutdown,
                 )
+                # 5.3.0 contract: daemon owns the redundancy flag's
+                # lifecycle. Clear any stale flag from a prior daemon
+                # instance so the executor starts from a known-clean
+                # state. Mirrors the per-UPS unlink at line 95 above.
+                executor.clear_shutdown_state()
                 self._redundancy_executors[rg.name] = executor
                 evaluator = RedundancyGroupEvaluator(
                     rg,
@@ -607,6 +612,20 @@ class MultiUPSCoordinator:
             )
 
         self._global_shutdown_flag.unlink(missing_ok=True)
+        # 5.3.0 contract: clear redundancy executor flags too on
+        # graceful exit so the next daemon instance starts from a
+        # known-clean state. Defensive try-block: a flag-cleanup
+        # failure must NOT block process exit. Log a breadcrumb so
+        # operators have something to grep when a non-graceful exit
+        # leaves a flag the next startup-cleanup then has to handle.
+        for name, executor in self._redundancy_executors.items():
+            try:
+                executor.clear_shutdown_state()
+            except Exception as e:
+                self._log(
+                    f"⚠️ Failed to clear redundancy flag for '{name}' "
+                    f"during exit: {e}. Next startup will re-clear."
+                )
         sys.exit(0)
 
     def _log(self, message: str):

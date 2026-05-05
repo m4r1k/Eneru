@@ -2,6 +2,16 @@
 
 Intelligent UPS monitoring daemon for NUT (Network UPS Tools). Orchestrates graceful shutdown of VMs, containers, remote servers, and local systems during power events.
 
+## Primary Directives
+
+These apply to every task in this repo, ahead of any section-specific guidance below.
+
+1. **Be brief.**
+2. **Decide locally. Flag assumptions only when the choice is non-obvious or hard to reverse.**
+3. **No speculative complexity. Build for the problem in front of you, not the one you imagine next.**
+4. **Define success criteria. Loop until verified.**
+5. **Touch only what you must. Clean up only your own mess.**
+
 ## Development Setup
 
 **CRITICAL: NEVER run `pip`, `pip3`, `python -m pip`, `python`, `pytest`, or any other dev/Python tooling directly against the system Python. ALL Python work — install, uninstall, run, test, version-check — MUST happen inside a `uv` virtualenv. No exceptions.**

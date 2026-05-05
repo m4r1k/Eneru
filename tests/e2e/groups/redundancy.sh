@@ -8,6 +8,18 @@
 # workflow had per-step shell isolation -- we preserve it here).
 # Each group runs as a separate parallel matrix job (see
 # .github/workflows/e2e.yml).
+#
+# 5.3.0 contract note: pre-5.3.0 every test body opened with
+#   rm -f /tmp/eneru-e2e-redundancy*-shutdown-flag* \
+#         /tmp/ups-shutdown-redundancy-* 2>/dev/null || true
+# to scrub stale flags between tests. The redundancy executor's flag
+# is now daemon-managed -- coordinator startup, quorum recovery, and
+# graceful exit each clear it -- so those rm lines became redundant
+# and were removed. With them gone, every existing test doubles as a
+# regression catch for the startup-cleanup contract; Test 37 below
+# is the explicit fire->recover->fire-again scenario. Do NOT add the
+# rm lines back without first confirming the contract is intentionally
+# being inverted.
 
 set -euo pipefail
 
@@ -103,9 +115,6 @@ echo ""
 echo ">>> Running: Test 21: Redundancy quorum holds when 1 of 2 healthy"
 
 echo "=== Test 21: Quorum holds ==="
-rm -f /tmp/eneru-e2e-redundancy-shutdown-flag* \
-      /tmp/ups-shutdown-redundancy-* 2>/dev/null || true
-
 # UPS1 critical (low battery), UPS2 healthy
 cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
@@ -144,9 +153,6 @@ echo ""
 echo ">>> Running: Test 22: Both UPSes critical → redundancy shutdown fires"
 
 echo "=== Test 22: Quorum exhausted ==="
-rm -f /tmp/eneru-e2e-redundancy-shutdown-flag* \
-      /tmp/ups-shutdown-redundancy-* 2>/dev/null || true
-
 cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
 cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 3
@@ -179,9 +185,6 @@ echo ""
 echo ">>> Running: Test 23: unknown_counts_as=critical surfaces UNKNOWN as failure"
 
 echo "=== Test 23: UNKNOWN handling ==="
-rm -f /tmp/eneru-e2e-redundancy-shutdown-flag* \
-      /tmp/ups-shutdown-redundancy-* 2>/dev/null || true
-
 # UPS1 healthy; UPS2 health UNKNOWN (we'll just keep it online --
 # the goal is to confirm UNKNOWN is *handled*, not to force it).
 # We assert the handling indirectly via Test 22's matching log lines
@@ -216,9 +219,6 @@ echo ""
 echo ">>> Running: Test 24: Both UPSes UNKNOWN -> fail-safe shutdown"
 
 echo "=== Test 24: Both UNKNOWN ==="
-rm -f /tmp/eneru-e2e-redundancy-shutdown-flag* \
-      /tmp/ups-shutdown-redundancy-* 2>/dev/null || true
-
 # Both UPSes go on-battery + low; on top, the failsafe-relevant
 # combination "OB + dropped data" is hard to provoke with the
 # dummy. We rely on the same low-battery scenario as Test 22,
@@ -249,9 +249,6 @@ echo ""
 echo ">>> Running: Test 25: Cross-group cascade (UPS in both tiers)"
 
 echo "=== Test 25: Cross-group cascade ==="
-rm -f /tmp/eneru-e2e-redundancy-shutdown-flag* \
-      /tmp/ups-shutdown-redundancy-* 2>/dev/null || true
-
 # UPS1 critical -- it appears in both an independent group AND
 # the redundancy group. UPS2 is healthy. The redundancy evaluator
 # must NOT fire (1 of 2 healthy >= min_healthy=1) regardless of
@@ -282,9 +279,6 @@ echo ""
 echo ">>> Running: Test 26: Advisory-mode log signature"
 
 echo "=== Test 26: Advisory-mode log signature ==="
-rm -f /tmp/eneru-e2e-redundancy-shutdown-flag* \
-      /tmp/ups-shutdown-redundancy-* 2>/dev/null || true
-
 # UPS1 critical (only it is in the redundancy group); UPS2 healthy.
 cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
@@ -318,9 +312,6 @@ echo ""
 echo ">>> Running: Test 27: Separate-Eneru-UPS topology"
 
 echo "=== Test 27: Separate-Eneru-UPS ==="
-rm -f /tmp/eneru-e2e-redundancy-shutdown-flag* \
-      /tmp/ups-shutdown-redundancy-* 2>/dev/null || true
-
 # TestUPS healthy (powers Eneru host); UPS1 + UPS2 critical
 # (powers remote rack). The redundancy shutdown must fire for
 # the rack, but TestUPS is unaffected, so the Eneru host stays
@@ -357,6 +348,103 @@ echo "PASS: Separate-Eneru-UPS topology verified"
 )
 
 # ======================================================================
+# Test 37: Re-arm after quorum recovery (issue #4)
+# ======================================================================
+#
+# Pre-5.3.0: once a redundancy group fired a shutdown, the evaluator
+# pinned ``_fired = True`` for the lifetime of the daemon AND the
+# executor's on-disk flag survived restarts. Result: every quorum
+# loss after the first one silently no-op'd, even after power was
+# restored. Reported by ckrevel in
+# github.com/m4r1k/Eneru/issues/4#issuecomment-4375517607.
+#
+# This test drives two consecutive quorum-loss events back-to-back
+# and asserts the second one fires its own shutdown sequence.
+(
+echo ""
+echo ">>> Running: Test 37: Redundancy re-arm after quorum recovery (issue #4)"
+
+echo "=== Test 37: re-arm ==="
+
+# Start from a known-healthy quorum so the evaluator's startup grace
+# elapses without firing.
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
+sleep 2
+
+# Run eneru in background -- we need to drive scenarios in flight,
+# so --exit-after-shutdown is intentionally omitted. Budget: 13s
+# startup grace + three 8s phase sleeps + dry-run shutdown sequence
+# overhead per phase = ~50s expected. 90s leaves headroom for slow
+# CI runners (matches the safety margin of R1/R2 below).
+timeout 90s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml \
+  > /tmp/test37.log 2>&1 &
+ENERU_PID=$!
+trap 'kill "$ENERU_PID" 2>/dev/null || true' EXIT
+
+# Clear evaluator startup grace (~10s for check_interval=1).
+sleep 13
+
+# Phase 1: drop both UPSes critical -> first quorum-loss shutdown.
+cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
+cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
+sleep 8
+
+# Phase 2: restore both -> evaluator must log "quorum restored -- re-armed"
+# AND clear the executor's re-entry guard.
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
+sleep 8
+
+# Phase 3: drop both critical again -> SECOND quorum-loss shutdown.
+cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
+cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
+sleep 8
+
+kill "$ENERU_PID" 2>/dev/null || true
+wait "$ENERU_PID" 2>/dev/null || true
+trap - EXIT
+
+t37_fail() {
+  echo "$1"
+  echo "----- /tmp/test37.log (full) -----"
+  cat /tmp/test37.log
+  echo "----- /tmp/test37.log end -----"
+  exit 1
+}
+
+# 1. Quorum LOST must appear at least twice (once per phase).
+LOST_COUNT=$(grep -c "rack-1-dual-psu.* quorum LOST" /tmp/test37.log || true)
+if [ "$LOST_COUNT" -lt 2 ]; then
+  t37_fail "FAIL: expected >=2 'quorum LOST' lines, got $LOST_COUNT"
+fi
+
+# 2. Re-arm log line must appear between the two losses.
+if ! grep -q "quorum restored -- re-armed" /tmp/test37.log; then
+  t37_fail "FAIL: expected 'quorum restored -- re-armed' log line after first shutdown"
+fi
+
+# 3. The load-bearing assertion: TWO shutdowns must have actually fired.
+SHUTDOWN_COUNT=$(grep -c "REDUNDANCY GROUP SHUTDOWN: rack-1-dual-psu" /tmp/test37.log || true)
+if [ "$SHUTDOWN_COUNT" -lt 2 ]; then
+  t37_fail "FAIL: expected 2 'REDUNDANCY GROUP SHUTDOWN' lines (re-arm broken, issue #4 regression), got $SHUTDOWN_COUNT"
+fi
+
+# 4. The pre-5.3.0 silent-no-op path must NOT have surfaced. Its
+#    presence here would mean the startup-cleanup contract failed to
+#    clean a leftover flag.
+if grep -q "suppressed: flag .* startup cleanup bypassed" /tmp/test37.log; then
+  t37_fail "FAIL: stale-flag suppression warning fired -- startup cleanup contract violated"
+fi
+
+# Restore for downstream tests
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
+sleep 2
+echo "PASS: redundancy re-arm verified across two consecutive quorum-loss events"
+)
+
+# ======================================================================
 # Regression R1: Runtime transient NUT loss stays inside redundancy grace
 # ======================================================================
 (
@@ -364,9 +452,6 @@ echo ""
 echo ">>> Running: Regression R1: Runtime transient NUT loss stays inside redundancy grace"
 
 echo "=== Regression R1: transient runtime NUT visibility loss ==="
-rm -f /tmp/eneru-e2e-redundancy-grace-shutdown-flag* \
-      /tmp/ups-shutdown-redundancy-* 2>/dev/null || true
-
 dbg "R1 step 1/8: pre-test restart_redundancy_nut_server"
 restart_redundancy_nut_server
 dump_redundancy_nut_state "R1 after first restart"
@@ -432,9 +517,6 @@ echo ""
 echo ">>> Running: Regression R2: Runtime persistent NUT loss fails safe after grace"
 
 echo "=== Regression R2: persistent runtime NUT visibility loss ==="
-rm -f /tmp/eneru-e2e-redundancy-grace-shutdown-flag* \
-      /tmp/ups-shutdown-redundancy-* 2>/dev/null || true
-
 dbg "R2 step 1/8: pre-test restart_redundancy_nut_server"
 restart_redundancy_nut_server
 dump_redundancy_nut_state "R2 after first restart"

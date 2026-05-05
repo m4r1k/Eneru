@@ -169,20 +169,77 @@ class RedundancyGroupExecutor(
 
     # ----- public API -----
 
+    def clear_shutdown_state(self) -> None:
+        """Reset the in-process and on-disk re-entry guards.
+
+        5.3.0 contract: the daemon owns the redundancy flag's lifecycle.
+        Cleared at coordinator startup, on quorum recovery, and on
+        graceful signal exit. The flag's only role is in-flight
+        re-entry protection within a single quorum-loss event -- it
+        never persists across runs or events. Mirrors the per-UPS
+        re-arm path added for bug #4 in 5.2.2.
+
+        Both the in-memory bool flip AND the on-disk unlink happen
+        under ``self._lock`` so the two halves of "guard is cleared"
+        stay atomic w.r.t. ``shutdown()``. A future caller from a
+        third thread (e.g. a control plane) won't be able to observe
+        a torn pair.
+        """
+        with self._lock:
+            self._shutdown_done = False
+            self._shutdown_flag_path.unlink(missing_ok=True)
+
     def shutdown(self, reason: str) -> bool:
         """Run the redundancy group's shutdown sequence (idempotent).
 
         Returns ``True`` if this call performed the shutdown,
         ``False`` if a previous call (or external flag file) already did.
+
+        Within a single quorum-loss event the in-memory ``_shutdown_done``
+        + the on-disk flag prevent double-fire. Across events / restarts,
+        :meth:`clear_shutdown_state` (called by the coordinator at
+        startup and by the evaluator on quorum recovery) re-arms both.
         """
+        suppressed_by_stale_flag = False
         with self._lock:
             if self._shutdown_done:
                 return False
-            if self._shutdown_flag_path.exists():
+            # Atomic flag acquisition. ``exists()`` + ``touch()`` was a
+            # TOCTOU window: two daemons (operator mistake, systemd
+            # restart race, container test rig) could both see the flag
+            # missing and both enter the shutdown path before either
+            # marked it. ``touch(exist_ok=False)`` collapses check +
+            # create into one ``open(O_CREAT|O_EXCL)`` syscall so the
+            # filesystem itself arbitrates. self._lock still covers
+            # intra-process atomicity for ``_shutdown_done``.
+            try:
+                self._shutdown_flag_path.touch(exist_ok=False)
+            except FileExistsError:
+                # 5.3.0: should never happen on a healthy install --
+                # startup cleanup unconditionally removes any stale flag.
+                # Reaching here means startup-cleanup was bypassed (file
+                # owned by another user, /var/run remounted read-only,
+                # someone touched the flag manually, peer daemon won the
+                # race). Surface it so the operator sees the diagnostic
+                # the pre-5.3.0 silent no-op never gave them.
                 self._shutdown_done = True
-                return False
-            self._shutdown_done = True
-            self._shutdown_flag_path.touch()
+                suppressed_by_stale_flag = True
+            else:
+                self._shutdown_done = True
+
+        if suppressed_by_stale_flag:
+            # Logged outside the lock: the logger may block on disk and
+            # we never want diagnostic I/O to widen ``self._lock``'s
+            # critical section. The bool was set inside the lock so this
+            # branch executes at most once per process per stale-flag
+            # observation.
+            self._log_message(
+                f"⚠️ Redundancy shutdown for '{self._group.name}' "
+                f"suppressed: flag {self._shutdown_flag_path} already "
+                f"present at first call (startup cleanup bypassed). "
+                f"Will re-arm when quorum recovers."
+            )
+            return False
 
         self._log_message(
             f"🚨 REDUNDANCY GROUP SHUTDOWN: {self._group.name}"
@@ -355,12 +412,33 @@ class RedundancyGroupEvaluator(threading.Thread):
                 f"🚨 Redundancy group '{self._group.name}' quorum LOST "
                 f"(healthy={healthy_count}, min_healthy={self._group.min_healthy}; {tally})"
             )
-        elif (not quorum_lost) and self._was_quorum_lost and not self._fired:
+        elif (not quorum_lost) and self._was_quorum_lost:
             tally = ", ".join(f"{name}={h.value}" for name, h in per_ups.items())
-            self._log(
-                f"✅ Redundancy group '{self._group.name}' quorum restored "
-                f"(healthy={healthy_count}, min_healthy={self._group.min_healthy}; {tally})"
-            )
+            # 5.3.0 contract: ALWAYS clear the executor's re-entry
+            # guard on lost->recovered. The ``_fired == True`` case is
+            # the common one (shutdown ran but the host stayed up --
+            # is_local: false rack topology, sandbox, dummy-UPS rig).
+            # The ``_fired == False`` case covers the stale-flag
+            # suppression path: ``shutdown()`` returned False because
+            # the flag already existed, ``_fired`` never flipped, but
+            # the executor's ``_shutdown_done`` is still latched True
+            # -- skipping the clear here would silently block every
+            # subsequent quorum loss for the rest of this daemon's
+            # life, exactly the issue #4 symptom this PR fixes.
+            # ``clear_shutdown_state()`` is idempotent.
+            self._executor.clear_shutdown_state()
+            if self._fired:
+                self._fired = False
+                self._log(
+                    f"✅ Redundancy group '{self._group.name}' quorum restored "
+                    f"-- re-armed for next event "
+                    f"(healthy={healthy_count}, min_healthy={self._group.min_healthy}; {tally})"
+                )
+            else:
+                self._log(
+                    f"✅ Redundancy group '{self._group.name}' quorum restored "
+                    f"(healthy={healthy_count}, min_healthy={self._group.min_healthy}; {tally})"
+                )
 
         self._was_quorum_lost = quorum_lost
 

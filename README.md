@@ -6,11 +6,10 @@
 
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-e8e8ed?style=for-the-badge&labelColor=090909" alt="MIT"></a>
 <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.9+-e8e8ed?style=for-the-badge&labelColor=090909" alt="Python 3.9+"></a>
-<a href="https://networkupstools.org/"><img src="https://img.shields.io/badge/NUT-compatible-e8e8ed?style=for-the-badge&labelColor=090909" alt="NUT compatible"></a>
 <a href="https://codecov.io/gh/m4r1k/Eneru"><img src="https://img.shields.io/codecov/c/github/m4r1k/Eneru?style=for-the-badge&labelColor=090909&color=e8e8ed&label=Coverage" alt="Coverage"></a>
 <a href="https://eneru.readthedocs.io/"><img src="https://img.shields.io/badge/Docs-Read%20The%20Docs-e8e8ed?style=for-the-badge&labelColor=090909" alt="Documentation"></a>
 <a href="https://pypi.org/project/eneru/"><img src="https://img.shields.io/pypi/v/eneru?style=for-the-badge&labelColor=090909&color=e8e8ed&label=PyPI" alt="PyPI"></a>
-<a href="https://buymeacoffee.com/m4r1k"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-e8e8ed?style=for-the-badge&labelColor=090909&logo=buymeacoffee&logoColor=e8e8ed" alt="Buy Me a Coffee"></a>
+<a href="https://buymeacoffee.com/m4r1k"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?style=for-the-badge&labelColor=090909&logo=buymeacoffee&logoColor=e8e8ed" alt="Buy Me a Coffee"></a>
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-diagram.svg" alt="Eneru Architecture" width="600">
@@ -160,7 +159,7 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 - Notifications to 100+ services (Discord, Slack, Telegram, ntfy, email) via [Apprise](https://github.com/caronc/apprise/wiki)
 - Power quality monitoring: voltage, AVR, bypass, overload
 - Dry-run mode for safe testing
-- 300 tests, 9 Linux distros, E2E tests with real NUT/SSH/Docker on every commit
+- Comprehensive test suite across multiple Linux distros, with E2E tests against real NUT, SSH, Docker, and libvirt on every commit
 
 ---
 
