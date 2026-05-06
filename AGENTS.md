@@ -200,7 +200,7 @@ README.md                       # Project overview
 - **Adding a new file under `src/eneru/`?** Also add a matching `contents:` entry in `nfpm.yaml`. The deb/rpm builds enumerate every module file explicitly — they do NOT glob. The pip path uses pyproject.toml autodiscovery, so a missing entry passes pip CI silently and only fails at deb/rpm install time with `ModuleNotFoundError`. Triple-checking via the isolated-interpreter package-layout simulation (see `src/eneru/AGENTS.md`) before push is the way to catch this.
 - **Adding state to the SQLite stats DB?** Bump `SCHEMA_VERSION` in `src/eneru/stats.py` and add an idempotent `ALTER TABLE` migration in `_init_schema._migrate_schema` keyed off `meta.schema_version`. Migrations are append-only — never modify a previous version's block. Every `ALTER` is wrapped via `_safe_alter` so duplicate-column errors are benign. The version is bumped *after* the migration succeeds, so a crash mid-migration is replayed safely. See `src/eneru/AGENTS.md` "Stats schema evolution" for the full pattern + when-to-add-a-column guidance. New event types (rows in `events`) do NOT need a schema bump — only new columns or tables do.
 
-## Working efficiently in Claude Code
+## Working efficiently
 
 This repo deliberately keeps individual files small (`monitor.py` is now ~830 lines after the v5.1 mixin decomposition; the largest test file is ~735 lines). To stay within the 200k context window during longer sessions:
 
@@ -253,16 +253,20 @@ Tags are the immutable release snapshots. No release branches -- tags are suffic
 
 ## Code review workflow (manual AI invocation)
 
-This repo uses **three layers of AI review**: a Claude-side pre-push review via the `agent-skills:code-reviewer` subagent, plus two GitHub-side reviewers (`coderabbitai` and `cubic-dev-ai`) invoked manually after CI is green. All three are configured for **manual invocation** rather than reviewing every PR commit automatically.
+This repo uses **three layers of AI review**: a pre-push review via the `agent-skills:code-reviewer` subagent, plus two GitHub-side reviewers (`coderabbitai` and `cubic-dev-ai`) invoked manually after CI is green. All three are configured for **manual invocation** rather than reviewing every PR commit automatically.
 
 **Why manual:**
 - **CodeRabbit** free tier allows one review per 45 minutes. Per-commit auto-review burns the quota fast and produces noisy partial reviews against intermediate diffs.
 - **cubic.dev** free tier allows 40 reviews per month. Same problem.
 - We deliberately push commits early so the GitHub Actions E2E suite (`E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy`, `E2E Stats`) gates work-in-progress and gives feedback fast on real-world scenarios. That CI feedback loop must stay cheap; AI review should not bottleneck it.
 
-**Pre-push: spawn `agent-skills:code-reviewer` as a SUBAGENT (model=opus).**
+**Pre-push: spawn `agent-skills:code-reviewer` as a SUBAGENT**
 
-Before pushing a substantive feature branch, the Claude session running the work MUST spawn the `agent-skills:code-reviewer` skill via the `Agent` tool with `subagent_type: agent-skills:code-reviewer` and `model: opus`. Two reasons:
+Before pushing a substantive feature branch, you MUST spawn the `agent-skills:code-reviewer` skill via the `Agent` tool with `subagent_type: agent-skills:code-reviewer` and:
+- if you're Claude Code, you must leverage the `model: opus`.
+- if you're Codex, you must leverage the `model: gpt-5.5` with `reasoning_effort: high`.
+
+Two reasons:
 
 1. **Minimal context = efficient.** The reviewer runs in a fresh context; the main session's token budget stays unaffected.
 2. **Minimal context = independent opinion.** The reviewer doesn't see what the main session decided, defended, or rationalized. That separation is the whole value — a same-session review is biased toward defending its own choices. Findings come back categorized P0/P1/P2/P3; triage and fix before pushing.
@@ -270,7 +274,7 @@ Before pushing a substantive feature branch, the Claude session running the work
 **Workflow on every non-trivial PR:**
 ```
 1. Implement the change. Run pytest in the uv venv. Iterate.
-2. PRE-PUSH: spawn agent-skills:code-reviewer subagent (opus) with the
+2. PRE-PUSH: spawn agent-skills:code-reviewer subagent with the
    diff, the plan file, and any specific concerns. Triage findings.
 3. Push commits. Let CI run on each push (E2E especially). Iterate on
    CI failures.
@@ -345,7 +349,7 @@ When releasing a new version, update `docs/changelog.md` with the comparison tab
 
 ### Changelog workflow: verbose during dev, trim before release
 
-The `[Unreleased]` section is a **working surface, not a published artifact**. During development add detail freely — per-rc breakouts (`rc6 — added X`, `rc7 — fixed Y`), file references, code snippets, design rationale. The reasoning: future Claude sessions pick up context cheaper from a single long file than by reading individual commits with `git log -p` (one paragraph in a markdown file ≪ one full diff). Trade a fat `[Unreleased]` block for fewer tokens spent reconstructing what changed.
+The `[Unreleased]` section is a **working surface, not a published artifact**. During development add detail freely — per-rc breakouts (`rc6 — added X`, `rc7 — fixed Y`), file references, code snippets, design rationale. The reasoning: future sessions pick up context cheaper from a single long file than by reading individual commits with `git log -p` (one paragraph in a markdown file ≪ one full diff). Trade a fat `[Unreleased]` block for fewer tokens spent reconstructing what changed.
 
 **Before tagging the release**, consolidate the verbose `[Unreleased]` block into a published-quality entry that matches the size and density of prior shipped releases. Reference points: v5.0.0 was ~600 words; v5.1.0 was trimmed from ~2950 words (rc1 through rc9 accumulated) down to ~1100 words (the published entry). Reader-friendly always wins at release time.
 
