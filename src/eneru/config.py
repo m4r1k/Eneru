@@ -470,7 +470,15 @@ class ConfigLoader:
         # Load YAML
         try:
             with open(path, 'r') as f:
-                data = yaml.safe_load(f) or {}
+                raw_data = yaml.safe_load(f)
+            if raw_data is None:
+                data = {}
+            elif isinstance(raw_data, dict):
+                data = raw_data
+            else:
+                print(f"Error reading config file {path}: root must be a YAML mapping.")
+                print("Using default configuration.")
+                return config
         except Exception as e:
             print(f"Error reading config file {path}: {e}")
             print("Using default configuration.")

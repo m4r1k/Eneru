@@ -56,8 +56,17 @@ def _load_raw_config_for_validation(args):
     try:
         import yaml
         with open(path, 'r') as f:
-            return yaml.safe_load(f) or {}
+            raw_data = yaml.safe_load(f)
+        if raw_data is None:
+            return {}
+        if not isinstance(raw_data, dict):
+            raise ConfigValidationLoadError(
+                f"ERROR: Config root in {path} must be a YAML mapping."
+            )
+        return raw_data
     except Exception as exc:
+        if isinstance(exc, ConfigValidationLoadError):
+            raise
         raise ConfigValidationLoadError(
             f"ERROR: Failed to parse {path} for validation: {exc}"
         ) from exc

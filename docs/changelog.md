@@ -31,11 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   startup-cleanup hook was bypassed, `/var/run` is read-only), a
   one-line `⚠️ Redundancy shutdown for '{group}' suppressed: …` warning
   now fires. Pre-5.3.0 the suppression was silent.
-- **Redundancy flags now record PID ownership.** Startup still clears stale
-  redundancy flags from dead daemon sessions, but refuses to clear a flag
-  owned by a still-running PID. That turns overlapping daemon instances or
-  unreadable `/var/run` state into an immediate fatal startup error instead
-  of weakening the shutdown re-entry guard.
+- **Redundancy flags now record process ownership.** Startup still clears
+  stale redundancy flags from dead daemon sessions, but refuses to clear a flag
+  owned by a still-running process. On Linux the owner check includes process
+  start identity, so a stale flag is not confused with a reused PID. That turns
+  overlapping daemon instances or unreadable `/var/run` state into an
+  immediate fatal startup error instead of weakening the shutdown re-entry
+  guard.
 - **Unknown trigger/behavior keys are validation errors.** Typos in
   `behavior`, top-level and per-UPS `triggers`, and
   `redundancy_groups[*].triggers` now fail validation with a "did you mean"

@@ -16,6 +16,9 @@ import time
 from enum import Enum
 from typing import Optional
 
+from eneru.config import TriggersConfig
+from eneru.state import HealthSnapshot
+
 
 class UPSHealth(str, Enum):
     """Per-UPS contribution to a redundancy group's quorum count.
@@ -42,8 +45,8 @@ STALE_RETRY_TOLERANCE_MULTIPLIER = 5
 
 
 def assess_health(
-    snapshot,
-    triggers=None,
+    snapshot: HealthSnapshot,
+    triggers: Optional[TriggersConfig] = None,
     check_interval: int = 1,
     *,
     max_stale_data_tolerance: int = 3,

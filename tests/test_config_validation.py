@@ -3,6 +3,7 @@
 import pytest
 import yaml
 from pathlib import Path
+from typing import Any, Mapping
 
 from eneru import (
     Config,
@@ -89,7 +90,7 @@ class TestConfigValidation:
 class TestUnknownKeyValidation:
     """Unknown safety keys are hard errors, with legacy aliases preserved."""
 
-    def _errors(self, raw_data):
+    def _errors(self, raw_data: Mapping[str, Any]) -> list[str]:
         config = ConfigLoader._parse_config(raw_data)
         return [
             m for m in ConfigLoader.validate_config(config, raw_data)

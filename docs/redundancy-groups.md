@@ -194,9 +194,11 @@ prevents a single quorum-loss event from firing the shutdown sequence twice. Fro
 - Cleared at coordinator **startup** so a stale flag from a prior daemon
   instance can't silently block the next quorum loss. **This is the
   load-bearing guarantee**; the next two clears are optimizations. From
-  5.3.0-rc4 onward the flag records the owning PID, and startup refuses
-  to clear it if that PID is still running. That prevents two overlapping
-  daemon instances from erasing each other's in-flight guard.
+  5.3.0-rc4 onward the flag records the owning PID plus Linux process
+  start identity when available, and startup refuses to clear it if that
+  same process is still running. That prevents two overlapping daemon
+  instances from erasing each other's in-flight guard without confusing a
+  stale flag with a reused PID.
 - Cleared on **quorum recovery** so the next quorum loss can fire its own
   shutdown without waiting for a daemon restart. Look for `quorum restored
   -- re-armed for next event` in the log.

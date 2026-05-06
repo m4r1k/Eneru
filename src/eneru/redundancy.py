@@ -170,31 +170,88 @@ class RedundancyGroupExecutor(
 
     # ----- public API -----
 
-    def _read_shutdown_flag_pid(self) -> Optional[int]:
-        """Return the PID recorded in the flag file, if it has one."""
+    @staticmethod
+    def _read_proc_start_time(pid: int) -> Optional[str]:
+        """Return Linux /proc starttime for PID reuse detection, if available."""
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+        except (FileNotFoundError, OSError, PermissionError):
+            return None
+        fields = stat.rsplit(") ", 1)[-1].split()
+        # proc_pid_stat(5): starttime is field 22, which is index 19 after
+        # removing pid + comm. It stays stable for one process lifetime.
+        if len(fields) <= 19:
+            return None
+        return fields[19]
+
+    @staticmethod
+    def _read_boot_id() -> Optional[str]:
+        """Return the Linux boot ID, if available."""
+        try:
+            return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        except (FileNotFoundError, OSError, PermissionError):
+            return None
+
+    def _current_owner_identity(self) -> Dict[str, str]:
+        """Build the flag owner identity for this daemon process."""
+        pid = os.getpid()
+        owner = {"pid": str(pid)}
+        start_time = self._read_proc_start_time(pid)
+        boot_id = self._read_boot_id()
+        if start_time is not None:
+            owner["start_time"] = start_time
+        if boot_id is not None:
+            owner["boot_id"] = boot_id
+        return owner
+
+    def _read_shutdown_flag_owner(self) -> Dict[str, str]:
+        """Return owner metadata recorded in the flag file."""
         try:
             content = self._shutdown_flag_path.read_text()
         except FileNotFoundError:
-            return None
+            return {}
+        owner = {}
         for line in content.splitlines():
-            if line.startswith("pid="):
-                try:
-                    return int(line.split("=", 1)[1])
-                except ValueError:
-                    return None
-        return None
+            if "=" in line:
+                key, value = line.split("=", 1)
+                owner[key] = value
+        return owner
 
-    def _pid_is_running(self, pid: int) -> bool:
-        """Best-effort liveness check for a PID from the shutdown flag."""
+    def _read_shutdown_flag_pid(self) -> Optional[int]:
+        """Return the PID recorded in the flag file, if it has one."""
+        try:
+            return int(self._read_shutdown_flag_owner().get("pid", ""))
+        except ValueError:
+            return None
+
+    def _pid_is_running(
+        self,
+        pid: int,
+        *,
+        start_time: Optional[str] = None,
+        boot_id: Optional[str] = None,
+    ) -> bool:
+        """Best-effort liveness check for a flag owner identity."""
         if pid <= 0:
             return False
+        if boot_id is not None:
+            current_boot_id = self._read_boot_id()
+            if current_boot_id is not None and current_boot_id != boot_id:
+                return False
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
             return False
         except PermissionError:
             # A process exists but we cannot signal it. Treat as active.
-            return True
+            pass
+        if start_time is not None:
+            current_start_time = self._read_proc_start_time(pid)
+            if (
+                current_start_time is not None
+                and current_start_time != start_time
+            ):
+                return False
         return True
 
     def _verify_shutdown_flag_access(self) -> None:
@@ -231,8 +288,20 @@ class RedundancyGroupExecutor(
         """
         with self._lock:
             if refuse_active_peer and self._shutdown_flag_path.exists():
-                pid = self._read_shutdown_flag_pid()
-                if pid is not None and pid != os.getpid() and self._pid_is_running(pid):
+                owner = self._read_shutdown_flag_owner()
+                try:
+                    pid = int(owner.get("pid", ""))
+                except ValueError:
+                    pid = None
+                if (
+                    pid is not None
+                    and pid != os.getpid()
+                    and self._pid_is_running(
+                        pid,
+                        start_time=owner.get("start_time"),
+                        boot_id=owner.get("boot_id"),
+                    )
+                ):
                     raise RuntimeError(
                         f"active redundancy shutdown flag {self._shutdown_flag_path} "
                         f"is owned by running PID {pid}"
@@ -271,7 +340,9 @@ class RedundancyGroupExecutor(
                     0o644,
                 )
                 with os.fdopen(fd, "w") as f:
-                    f.write(f"pid={os.getpid()}\ncreated_at={time.time():.3f}\n")
+                    for key, value in self._current_owner_identity().items():
+                        f.write(f"{key}={value}\n")
+                    f.write(f"created_at={time.time():.3f}\n")
             except FileExistsError:
                 # 5.3.0: should never happen on a healthy install --
                 # startup cleanup unconditionally removes any stale flag.

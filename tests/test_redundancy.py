@@ -32,6 +32,9 @@ from eneru.state import HealthSnapshot, MonitorState
 from eneru.health_model import assess_health
 
 
+_IMPOSSIBLE_PID = 999_999_999
+
+
 def _snap(**overrides):
     """Build a fresh ``HealthSnapshot``; ``last_update_time`` defaults to now
     so the evaluator's stale-snapshot rule does not flip these to UNKNOWN."""
@@ -804,10 +807,10 @@ class TestExecutorShutdown:
     def test_clear_shutdown_state_refuses_running_peer_pid(self, tmp_path):
         cfg = _base_config(dry_run=False, tmp_path=tmp_path)
         ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
-        ex._shutdown_flag_path.write_text("pid=12345\n")
+        ex._shutdown_flag_path.write_text(f"pid={_IMPOSSIBLE_PID}\n")
 
         with patch.object(ex, "_pid_is_running", return_value=True):
-            with pytest.raises(RuntimeError, match="running PID 12345"):
+            with pytest.raises(RuntimeError, match=f"running PID {_IMPOSSIBLE_PID}"):
                 ex.clear_shutdown_state(refuse_active_peer=True)
 
         assert ex._shutdown_flag_path.exists()
@@ -816,9 +819,24 @@ class TestExecutorShutdown:
     def test_clear_shutdown_state_removes_stale_peer_pid(self, tmp_path):
         cfg = _base_config(dry_run=False, tmp_path=tmp_path)
         ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
-        ex._shutdown_flag_path.write_text("pid=12345\n")
+        ex._shutdown_flag_path.write_text(f"pid={_IMPOSSIBLE_PID}\n")
 
         with patch.object(ex, "_pid_is_running", return_value=False):
+            ex.clear_shutdown_state(refuse_active_peer=True)
+
+        assert not ex._shutdown_flag_path.exists()
+
+    @pytest.mark.unit
+    def test_clear_shutdown_state_removes_reused_pid_identity(self, tmp_path):
+        cfg = _base_config(dry_run=False, tmp_path=tmp_path)
+        ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
+        ex._shutdown_flag_path.write_text(
+            f"pid={_IMPOSSIBLE_PID}\nstart_time=old\nboot_id=boot\n"
+        )
+
+        with patch("eneru.redundancy.os.kill", return_value=None), \
+             patch.object(ex, "_read_proc_start_time", return_value="new"), \
+             patch.object(ex, "_read_boot_id", return_value="boot"):
             ex.clear_shutdown_state(refuse_active_peer=True)
 
         assert not ex._shutdown_flag_path.exists()

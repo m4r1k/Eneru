@@ -709,6 +709,21 @@ behavior:
         assert "Failed to parse" in capsys.readouterr().out
 
     @pytest.mark.unit
+    def test_run_refuses_non_mapping_yaml_root(self, tmp_path, capsys):
+        """A YAML list root is not a valid Eneru config document."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("- just\n- a\n- list\n")
+
+        with patch.object(sys, "argv", ["eneru", "run", "-c", str(config_file)]):
+            with patch("eneru.cli.UPSGroupMonitor") as mock_monitor:
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 1
+        mock_monitor.assert_not_called()
+        assert "must be a YAML mapping" in capsys.readouterr().out
+
+    @pytest.mark.unit
     def test_validate_checks_unknown_keys_from_default_config_path(
         self, tmp_path, capsys
     ):
