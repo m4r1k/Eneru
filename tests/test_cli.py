@@ -670,6 +670,92 @@ behavior:
         config.behavior.dry_run = True
         assert config.behavior.dry_run is True
 
+    @pytest.mark.unit
+    def test_run_refuses_unknown_safety_config_key(self, tmp_path, capsys):
+        """The daemon must not start when validation finds hard errors."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  name: "TestUPS@localhost"
+
+behavior:
+  dry-run: true
+""")
+
+        with patch.object(sys, "argv", ["eneru", "run", "-c", str(config_file)]):
+            with patch("eneru.cli.UPSGroupMonitor") as mock_monitor:
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 1
+        mock_monitor.assert_not_called()
+        captured = capsys.readouterr()
+        assert "behavior.dry-run" in captured.out
+        assert "Did you mean 'dry_run'" in captured.out
+
+    @pytest.mark.unit
+    def test_run_refuses_malformed_yaml(self, tmp_path, capsys):
+        """Malformed YAML must not fall through to daemon startup defaults."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("ups: [broken\n")
+
+        with patch.object(sys, "argv", ["eneru", "run", "-c", str(config_file)]):
+            with patch("eneru.cli.UPSGroupMonitor") as mock_monitor:
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 1
+        mock_monitor.assert_not_called()
+        assert "Failed to parse" in capsys.readouterr().out
+
+    @pytest.mark.unit
+    def test_run_refuses_non_mapping_yaml_root(self, tmp_path, capsys):
+        """A YAML list root is not a valid Eneru config document."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("- just\n- a\n- list\n")
+
+        with patch.object(sys, "argv", ["eneru", "run", "-c", str(config_file)]):
+            with patch("eneru.cli.UPSGroupMonitor") as mock_monitor:
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 1
+        mock_monitor.assert_not_called()
+        assert "must be a YAML mapping" in capsys.readouterr().out
+
+    @pytest.mark.unit
+    def test_raw_config_validation_loads_empty_yaml_as_empty_mapping(self, tmp_path):
+        from eneru.cli import _load_raw_config_for_validation
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("")
+        args = type("Args", (), {"config": str(config_file)})()
+
+        assert _load_raw_config_for_validation(args) == {}
+
+    @pytest.mark.unit
+    def test_validate_checks_unknown_keys_from_default_config_path(
+        self, tmp_path, capsys
+    ):
+        """`eneru validate` without -c still validates the loaded YAML."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  name: "TestUPS@localhost"
+
+behavior:
+  dry-run: true
+""")
+
+        with patch.object(ConfigLoader, "DEFAULT_CONFIG_PATHS", [config_file]):
+            with patch.object(sys, "argv", ["eneru", "validate"]):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "behavior.dry-run" in captured.out
+
 
 class TestCLIExitAfterShutdown:
     """Test --exit-after-shutdown CLI flag on run subcommand."""

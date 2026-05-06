@@ -492,6 +492,8 @@ statistics:
 #     # At most one group across the whole config may set is_local: true.
 #     is_local: false
 #     # Optional per-group triggers; inherits from top-level `triggers:` if omitted.
+#     # `depletion.window` is computed by each UPS monitor, so set it globally
+#     # or under `ups[*].triggers`, not here.
 #     # triggers:
 #     #   low_battery_threshold: 20
 #     #   critical_runtime_threshold: 600

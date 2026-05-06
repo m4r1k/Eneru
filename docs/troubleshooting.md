@@ -171,7 +171,7 @@ For a controlled test:
 
 ## Clear stale shutdown flags
 
-Eneru writes shutdown flag files so an interrupted process does not run the same sequence repeatedly. After a killed dry-run test, a flag can remain.
+Eneru writes shutdown flag files so an interrupted process does not run the same sequence repeatedly. Recent versions clear stale flags automatically at startup and after recovery, but manual cleanup is still useful when investigating an interrupted test.
 
 Single UPS flag:
 
@@ -216,9 +216,9 @@ Check these in order:
 |-------|-------------|
 | Quorum still holds | With `min_healthy: 1`, one healthy member keeps a two-UPS group online |
 | DEGRADED counts healthy | Default `degraded_counts_as: healthy` means on-battery warning state may still satisfy quorum |
-| Advisory trigger missing | Per-UPS thresholds may not have crossed yet |
+| Advisory trigger missing | Per-UPS or redundancy-group thresholds may not have crossed yet |
 | Unknown policy | Default `unknown_counts_as: critical`; custom policy may be more tolerant |
-| Stale flag | `/var/run/ups-shutdown-redundancy-*` may remain after killed tests |
+| Stale flag | Recent versions clear restart-stale redundancy flags automatically; an active PID-owned flag blocks startup instead of being ignored |
 | Wrong source name | `ups_sources` must exactly match `ups[].name` |
 
 Run validation to catch source and ownership errors:

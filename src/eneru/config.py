@@ -1,6 +1,7 @@
 """Configuration classes and loader for Eneru."""
 
 from dataclasses import dataclass, field
+from difflib import get_close_matches
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -418,6 +419,26 @@ class ConfigLoader:
         Path("/etc/ups-monitor/config.yml"),
     ]
 
+    @staticmethod
+    def _unknown_key_errors(section: str, data: Any,
+                            allowed: set) -> List[str]:
+        """Return ERROR lines for unknown YAML keys in one mapping.
+
+        Deprecated-but-supported aliases are included in ``allowed`` by the
+        caller. Everything else is a hard error because misspelled safety
+        settings should never be silently ignored.
+        """
+        if not isinstance(data, dict):
+            return []
+        errors = []
+        for key in sorted(data):
+            if key in allowed:
+                continue
+            suggestion = get_close_matches(str(key), sorted(allowed), n=1)
+            hint = f" Did you mean '{suggestion[0]}'?" if suggestion else ""
+            errors.append(f"ERROR: unknown config key '{section}.{key}'.{hint}")
+        return errors
+
     @classmethod
     def load(cls, config_path: Optional[str] = None) -> Config:
         """Load configuration from file or use defaults."""
@@ -449,7 +470,15 @@ class ConfigLoader:
         # Load YAML
         try:
             with open(path, 'r') as f:
-                data = yaml.safe_load(f) or {}
+                raw_data = yaml.safe_load(f)
+            if raw_data is None:
+                data = {}
+            elif isinstance(raw_data, dict):
+                data = raw_data
+            else:
+                print(f"Error reading config file {path}: root must be a YAML mapping.")
+                print("Using default configuration.")
+                return config
         except Exception as e:
             print(f"Error reading config file {path}: {e}")
             print("Using default configuration.")
@@ -978,6 +1007,69 @@ class ConfigLoader:
         from eneru.notifications import APPRISE_AVAILABLE
 
         messages = []
+
+        if raw_data:
+            trigger_keys = {
+                "low_battery_threshold", "critical_runtime_threshold",
+                "depletion", "extended_time", "voltage_sensitivity",
+            }
+            depletion_keys = {"window", "critical_rate", "grace_period"}
+            extended_time_keys = {"enabled", "threshold"}
+            messages.extend(cls._unknown_key_errors(
+                "behavior", raw_data.get("behavior", {}), {"dry_run"},
+            ))
+
+            def _validate_triggers(section: str, data: Any):
+                if not isinstance(data, dict):
+                    return
+                messages.extend(cls._unknown_key_errors(section, data, trigger_keys))
+                messages.extend(cls._unknown_key_errors(
+                    f"{section}.depletion",
+                    data.get("depletion", {}),
+                    depletion_keys,
+                ))
+                messages.extend(cls._unknown_key_errors(
+                    f"{section}.extended_time",
+                    data.get("extended_time", {}),
+                    extended_time_keys,
+                ))
+
+            _validate_triggers("triggers", raw_data.get("triggers", {}))
+            ups_raw = raw_data.get("ups")
+            if isinstance(ups_raw, list):
+                for idx, entry in enumerate(ups_raw):
+                    if not isinstance(entry, dict):
+                        continue
+                    label = entry.get("name", idx)
+                    _validate_triggers(
+                        f"ups[{label!r}].triggers",
+                        entry.get("triggers", {}),
+                    )
+            groups_raw = raw_data.get("redundancy_groups", []) or []
+            if isinstance(groups_raw, list):
+                for idx, entry in enumerate(groups_raw):
+                    if not isinstance(entry, dict):
+                        continue
+                    label = entry.get("name", idx)
+                    group_triggers = entry.get("triggers", {})
+                    _validate_triggers(
+                        f"redundancy_groups[{label!r}].triggers",
+                        group_triggers,
+                    )
+                    depletion = (
+                        group_triggers.get("depletion", {})
+                        if isinstance(group_triggers, dict)
+                        else {}
+                    )
+                    if isinstance(depletion, dict) and "window" in depletion:
+                        messages.append(
+                            "ERROR: "
+                            f"redundancy_groups[{label!r}].triggers."
+                            "depletion.window is not supported; depletion "
+                            "rate history is computed by each UPS monitor. "
+                            "Set triggers.depletion.window globally or on "
+                            "ups[*].triggers instead."
+                        )
 
         # Check Apprise availability
         if config.notifications.enabled and not APPRISE_AVAILABLE:

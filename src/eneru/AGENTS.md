@@ -1,9 +1,9 @@
 # `src/eneru/` — package layout for agents
 
 This file gives session-local context when working inside the Eneru package.
-The root `/root/Workspace/Eneru/AGENTS.md` still applies — this one is **just
-the module map and the mixin pattern**, so a session can navigate without
-loading whole files first.
+The root `/root/Workspace/Eneru/AGENTS.md` still applies — including git,
+test, and AI-review workflow rules. This file is **just the module map and the
+mixin pattern**, so a session can navigate without loading whole files first.
 
 ## Module map
 

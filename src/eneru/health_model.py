@@ -16,6 +16,9 @@ import time
 from enum import Enum
 from typing import Optional
 
+from eneru.config import TriggersConfig
+from eneru.state import HealthSnapshot
+
 
 class UPSHealth(str, Enum):
     """Per-UPS contribution to a redundancy group's quorum count.
@@ -42,8 +45,8 @@ STALE_RETRY_TOLERANCE_MULTIPLIER = 5
 
 
 def assess_health(
-    snapshot,
-    triggers=None,
+    snapshot: HealthSnapshot,
+    triggers: Optional[TriggersConfig] = None,
     check_interval: int = 1,
     *,
     max_stale_data_tolerance: int = 3,
@@ -73,9 +76,10 @@ def assess_health(
 
     Args:
         snapshot: ``HealthSnapshot`` from ``MonitorState.snapshot()``.
-        triggers: ``TriggersConfig`` for the member UPS. Reserved for
-            future extensions; the monitor itself owns threshold
-            evaluation, so the evaluator trusts ``snapshot.trigger_active``.
+        triggers: ``TriggersConfig`` for the evaluator's policy layer.
+            Per-UPS monitors still publish ``snapshot.trigger_active``, but
+            redundancy groups may override thresholds without mutating the
+            member monitor's own config.
         check_interval: The member's ``ups.check_interval`` in seconds.
             Used to compute the stale-snapshot threshold.
         max_stale_data_tolerance: Consecutive stale polls tolerated before
@@ -88,8 +92,6 @@ def assess_health(
             in seconds.
         now: Optional ``time.time()`` override -- only used by tests.
     """
-    del triggers  # Reserved for future use.
-
     current_time = now if now is not None else time.time()
     interval = max(1, int(check_interval) if check_interval else 1)
 
@@ -159,6 +161,43 @@ def assess_health(
     # 2. CRITICAL
     if snapshot.trigger_active:
         return UPSHealth.CRITICAL
+    # Group-local thresholds mirror monitor.py's T1-T4 checks, which run
+    # inside the on-battery handler. A recovering OL UPS may still have low
+    # charge; that should not by itself exhaust redundancy quorum.
+    if triggers is not None and "OB" in snapshot.status:
+        try:
+            battery = int(float(snapshot.battery_charge))
+        except (TypeError, ValueError):
+            battery = None
+        try:
+            runtime = int(float(snapshot.runtime))
+        except (TypeError, ValueError):
+            runtime = None
+        if (
+            battery is not None
+            and battery < getattr(triggers, "low_battery_threshold", 20)
+        ):
+            return UPSHealth.CRITICAL
+        if (
+            runtime is not None
+            and runtime < getattr(triggers, "critical_runtime_threshold", 600)
+        ):
+            return UPSHealth.CRITICAL
+        depletion = getattr(triggers, "depletion", None)
+        if depletion is not None:
+            rate = getattr(snapshot, "depletion_rate", 0.0) or 0.0
+            if (
+                rate > getattr(depletion, "critical_rate", 15.0)
+                and snapshot.time_on_battery >= getattr(depletion, "grace_period", 90)
+            ):
+                return UPSHealth.CRITICAL
+        extended_time = getattr(triggers, "extended_time", None)
+        if (
+            extended_time is not None
+            and getattr(extended_time, "enabled", True)
+            and snapshot.time_on_battery > getattr(extended_time, "threshold", 900)
+        ):
+            return UPSHealth.CRITICAL
     if "FSD" in snapshot.status:
         return UPSHealth.CRITICAL
 

@@ -172,6 +172,14 @@ local_shutdown:
         config = ConfigLoader.load(str(temp_config_file))
         assert config.ups.name == "UPS@localhost"
 
+    @pytest.mark.unit
+    def test_load_non_mapping_yaml_root_returns_defaults(self, temp_config_file, capsys):
+        """A YAML list root is invalid and should not reach config parsing."""
+        temp_config_file.write_text("- not\n- a\n- mapping\n")
+        config = ConfigLoader.load(str(temp_config_file))
+        assert config.ups.name == "UPS@localhost"
+        assert "root must be a YAML mapping" in capsys.readouterr().out
+
 
 class TestRedundancyGroupLoading:
     """Tests for the redundancy_groups YAML section."""
@@ -377,5 +385,4 @@ redundancy_groups:
         assert config.redundancy_groups[0].name == "12345"
         assert all(isinstance(s, str)
                    for s in config.redundancy_groups[0].ups_sources)
-
 

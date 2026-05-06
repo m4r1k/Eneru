@@ -308,7 +308,14 @@ class MultiUPSCoordinator:
                 # lifecycle. Clear any stale flag from a prior daemon
                 # instance so the executor starts from a known-clean
                 # state. Mirrors the per-UPS unlink at line 95 above.
-                executor.clear_shutdown_state()
+                try:
+                    executor.clear_shutdown_state(refuse_active_peer=True)
+                except Exception as e:
+                    self._log(
+                        f"❌ FATAL ERROR: Cannot clear redundancy shutdown flag "
+                        f"for '{rg.name}' at startup: {e}"
+                    )
+                    sys.exit(1)
                 self._redundancy_executors[rg.name] = executor
                 evaluator = RedundancyGroupEvaluator(
                     rg,
