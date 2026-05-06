@@ -4,7 +4,13 @@ import time
 
 import pytest
 
-from eneru import UPSHealth, assess_health
+from eneru import (
+    DepletionConfig,
+    ExtendedTimeConfig,
+    TriggersConfig,
+    UPSHealth,
+    assess_health,
+)
 from eneru.state import HealthSnapshot
 
 
@@ -70,6 +76,92 @@ class TestAssessHealthBasicTiers:
     def test_no_observations_is_unknown(self):
         snap = _snap(last_update_time=0.0)
         assert assess_health(snap, None, 1, now=NOW) == UPSHealth.UNKNOWN
+
+
+class TestAssessHealthGroupTriggers:
+    """Direct coverage for redundancy group-local trigger thresholds."""
+
+    @pytest.mark.unit
+    def test_group_low_battery_threshold_is_critical(self):
+        triggers = TriggersConfig(low_battery_threshold=50)
+        snap = _snap(status="OB", battery_charge="49")
+        assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.CRITICAL
+
+    @pytest.mark.unit
+    def test_group_runtime_threshold_is_critical(self):
+        triggers = TriggersConfig(
+            low_battery_threshold=1,
+            critical_runtime_threshold=1200,
+        )
+        snap = _snap(status="OB", runtime="1199")
+        assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.CRITICAL
+
+    @pytest.mark.unit
+    def test_group_depletion_threshold_after_grace_is_critical(self):
+        triggers = TriggersConfig(
+            low_battery_threshold=1,
+            critical_runtime_threshold=0,
+            depletion=DepletionConfig(critical_rate=10.0, grace_period=30),
+        )
+        snap = _snap(status="OB", depletion_rate=10.1, time_on_battery=30)
+        assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.CRITICAL
+
+    @pytest.mark.unit
+    def test_group_extended_time_threshold_is_critical(self):
+        triggers = TriggersConfig(
+            low_battery_threshold=1,
+            critical_runtime_threshold=0,
+            extended_time=ExtendedTimeConfig(enabled=True, threshold=30),
+        )
+        snap = _snap(status="OB", time_on_battery=31)
+        assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.CRITICAL
+
+    @pytest.mark.unit
+    def test_group_threshold_edges_remain_degraded(self):
+        triggers = TriggersConfig(
+            low_battery_threshold=50,
+            critical_runtime_threshold=1200,
+            depletion=DepletionConfig(critical_rate=10.0, grace_period=30),
+            extended_time=ExtendedTimeConfig(enabled=True, threshold=30),
+        )
+        snap = _snap(
+            status="OB",
+            battery_charge="50",
+            runtime="1200",
+            depletion_rate=10.0,
+            time_on_battery=30,
+        )
+        assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.DEGRADED
+
+    @pytest.mark.unit
+    def test_group_thresholds_ignore_nonnumeric_battery_and_runtime(self):
+        triggers = TriggersConfig(
+            low_battery_threshold=50,
+            critical_runtime_threshold=1200,
+            extended_time=ExtendedTimeConfig(enabled=True, threshold=900),
+        )
+        snap = _snap(status="OB", battery_charge="bad", runtime="bad")
+        assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.DEGRADED
+
+    @pytest.mark.unit
+    def test_group_depletion_waits_for_grace_period(self):
+        triggers = TriggersConfig(
+            low_battery_threshold=1,
+            critical_runtime_threshold=0,
+            depletion=DepletionConfig(critical_rate=10.0, grace_period=30),
+        )
+        snap = _snap(status="OB", depletion_rate=20.0, time_on_battery=29)
+        assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.DEGRADED
+
+    @pytest.mark.unit
+    def test_group_extended_time_can_be_disabled(self):
+        triggers = TriggersConfig(
+            low_battery_threshold=1,
+            critical_runtime_threshold=0,
+            extended_time=ExtendedTimeConfig(enabled=False, threshold=30),
+        )
+        snap = _snap(status="OB", time_on_battery=300)
+        assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.DEGRADED
 
 
 class TestAssessHealthStaleness:
@@ -236,6 +328,19 @@ class TestAssessHealthStaleness:
         # Defensive: check_interval=0 must not divide-by-zero or be too tight.
         snap = _snap(last_update_time=NOW - 4)
         assert assess_health(snap, None, 0, now=NOW) == UPSHealth.HEALTHY
+
+    @pytest.mark.unit
+    def test_invalid_stale_options_fall_back_to_defaults(self):
+        snap = _snap(last_update_time=NOW - 4)
+        assert assess_health(
+            snap,
+            None,
+            1,
+            max_stale_data_tolerance="bad",
+            connection_grace_enabled=True,
+            connection_grace_duration="bad",
+            now=NOW,
+        ) == UPSHealth.HEALTHY
 
     @pytest.mark.unit
     def test_uses_real_clock_when_now_omitted(self):

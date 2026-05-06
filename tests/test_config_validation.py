@@ -153,6 +153,25 @@ class TestUnknownKeyValidation:
                    for e in errors)
 
     @pytest.mark.unit
+    def test_non_mapping_trigger_sections_are_ignored(self, default_config):
+        raw_data = {
+            "ups": [
+                {"name": "UPS-A", "triggers": []},
+                "not-a-mapping",
+            ],
+            "triggers": [],
+            "redundancy_groups": [
+                "not-a-mapping",
+                {"name": "rack", "triggers": []},
+            ],
+        }
+        errors = [
+            m for m in ConfigLoader.validate_config(default_config, raw_data)
+            if m.startswith("ERROR:")
+        ]
+        assert not any("unknown config key" in e for e in errors)
+
+    @pytest.mark.unit
     def test_legacy_docker_and_discord_configs_are_not_unknown_key_errors(self):
         raw_data = {
             "ups": {"name": "UPS@localhost"},

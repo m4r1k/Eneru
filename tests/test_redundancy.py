@@ -842,6 +842,16 @@ class TestExecutorShutdown:
         assert not ex._shutdown_flag_path.exists()
 
     @pytest.mark.unit
+    def test_clear_shutdown_state_ignores_invalid_pid_owner(self, tmp_path):
+        cfg = _base_config(dry_run=False, tmp_path=tmp_path)
+        ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
+        ex._shutdown_flag_path.write_text("pid=not-a-number\n")
+
+        ex.clear_shutdown_state(refuse_active_peer=True)
+
+        assert not ex._shutdown_flag_path.exists()
+
+    @pytest.mark.unit
     def test_clear_shutdown_state_probes_flag_directory_access(self, tmp_path):
         cfg = _base_config(dry_run=False, tmp_path=tmp_path)
         ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
@@ -849,6 +859,81 @@ class TestExecutorShutdown:
         with patch("eneru.redundancy.os.open", side_effect=PermissionError("denied")):
             with pytest.raises(PermissionError, match="denied"):
                 ex.clear_shutdown_state(refuse_active_peer=True)
+
+    @pytest.mark.unit
+    def test_read_shutdown_flag_pid_handles_missing_and_invalid_values(self, tmp_path):
+        cfg = _base_config(dry_run=False, tmp_path=tmp_path)
+        ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
+
+        assert ex._read_shutdown_flag_pid() is None
+        ex._shutdown_flag_path.write_text("pid=not-a-number\n")
+        assert ex._read_shutdown_flag_pid() is None
+        ex._shutdown_flag_path.write_text("created_at=1\n")
+        assert ex._read_shutdown_flag_pid() is None
+
+    @pytest.mark.unit
+    def test_pid_liveness_handles_missing_process_and_permission(self, tmp_path):
+        cfg = _base_config(dry_run=False, tmp_path=tmp_path)
+        ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
+
+        assert ex._pid_is_running(0) is False
+        with patch("eneru.redundancy.os.kill", side_effect=ProcessLookupError):
+            assert ex._pid_is_running(_IMPOSSIBLE_PID) is False
+        with patch("eneru.redundancy.os.kill", side_effect=PermissionError):
+            assert ex._pid_is_running(_IMPOSSIBLE_PID) is True
+
+    @pytest.mark.unit
+    def test_pid_liveness_rejects_mismatched_owner_identity(self, tmp_path):
+        cfg = _base_config(dry_run=False, tmp_path=tmp_path)
+        ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
+
+        with patch("eneru.redundancy.os.kill", return_value=None), \
+             patch.object(ex, "_read_boot_id", return_value="current"):
+            assert ex._pid_is_running(
+                _IMPOSSIBLE_PID, boot_id="previous"
+            ) is False
+
+        with patch("eneru.redundancy.os.kill", return_value=None), \
+             patch.object(ex, "_read_boot_id", return_value="boot"), \
+             patch.object(ex, "_read_proc_start_time", return_value="new"):
+            assert ex._pid_is_running(
+                _IMPOSSIBLE_PID, start_time="old", boot_id="boot"
+            ) is False
+
+    @pytest.mark.unit
+    def test_shutdown_flag_records_owner_identity(self, tmp_path):
+        cfg = _base_config(dry_run=False, tmp_path=tmp_path)
+        ex = RedundancyGroupExecutor(_redundancy_group(is_local=False),
+                                     base_config=cfg)
+
+        with patch.object(ex, "_read_proc_start_time", return_value="123"), \
+             patch.object(ex, "_read_boot_id", return_value="boot"):
+            assert ex.shutdown(reason="owner") is True
+
+        content = ex._shutdown_flag_path.read_text()
+        assert f"pid={os.getpid()}" in content
+        assert "start_time=123" in content
+        assert "boot_id=boot" in content
+
+    @pytest.mark.unit
+    def test_owner_identity_omits_unavailable_proc_fields(self, tmp_path):
+        cfg = _base_config(dry_run=False, tmp_path=tmp_path)
+        ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
+
+        with patch.object(ex, "_read_proc_start_time", return_value=None), \
+             patch.object(ex, "_read_boot_id", return_value=None):
+            assert ex._current_owner_identity() == {"pid": str(os.getpid())}
+
+    @pytest.mark.unit
+    def test_proc_start_time_parser_handles_missing_and_short_stat(self):
+        assert RedundancyGroupExecutor._read_proc_start_time(_IMPOSSIBLE_PID) is None
+        with patch("eneru.redundancy.Path.read_text", return_value="1 (x) S"):
+            assert RedundancyGroupExecutor._read_proc_start_time(os.getpid()) is None
+
+    @pytest.mark.unit
+    def test_boot_id_reader_handles_unavailable_proc(self):
+        with patch("eneru.redundancy.Path.read_text", side_effect=PermissionError):
+            assert RedundancyGroupExecutor._read_boot_id() is None
 
     @pytest.mark.unit
     def test_atomic_flag_acquisition_allows_only_one_executor(self, tmp_path):

@@ -724,6 +724,16 @@ behavior:
         assert "must be a YAML mapping" in capsys.readouterr().out
 
     @pytest.mark.unit
+    def test_raw_config_validation_loads_empty_yaml_as_empty_mapping(self, tmp_path):
+        from eneru.cli import _load_raw_config_for_validation
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("")
+        args = type("Args", (), {"config": str(config_file)})()
+
+        assert _load_raw_config_for_validation(args) == {}
+
+    @pytest.mark.unit
     def test_validate_checks_unknown_keys_from_default_config_path(
         self, tmp_path, capsys
     ):
