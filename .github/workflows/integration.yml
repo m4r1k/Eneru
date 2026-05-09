@@ -230,6 +230,10 @@ jobs:
               python3 -m pip install --no-deps paho-mqtt
               ;;
             10)
+              # ubi10 ships python3 without pip; install it explicitly
+              # before the pip-install fallback. python3-pip lives in
+              # the AppStream repo on RHEL 10.
+              dnf install -y python3-pip
               python3 -m pip install --no-deps --break-system-packages paho-mqtt
               ;;
           esac
