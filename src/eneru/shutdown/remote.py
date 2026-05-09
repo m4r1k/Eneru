@@ -8,11 +8,46 @@ followed by the final shutdown command.
 import shlex
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
 from eneru.actions import REMOTE_ACTIONS
 from eneru.config import RemoteServerConfig
 from eneru.utils import run_command
+
+
+@dataclass
+class RemotePreShutdownResult:
+    """Best-effort result summary for remote pre-shutdown commands."""
+
+    attempted: int = 0
+    failed: int = 0
+
+
+@dataclass
+class RemoteShutdownResult:
+    """Structured result for one remote shutdown worker."""
+
+    server: str
+    host: str
+    completed: bool = True
+    shutdown_sent: bool = False
+    dry_run: bool = False
+    pre_commands: RemotePreShutdownResult = field(default_factory=RemotePreShutdownResult)
+    error: str = ""
+    timed_out: bool = False
+    crashed: bool = False
+
+    @property
+    def success(self) -> bool:
+        """Return True only when the final shutdown command was accepted."""
+        return (
+            self.completed
+            and self.shutdown_sent
+            and not self.timed_out
+            and not self.crashed
+            and not self.error
+        )
 
 
 class RemoteShutdownMixin:
@@ -59,7 +94,7 @@ class RemoteShutdownMixin:
         else:
             self._log_message(f"🌐 Shutting down 1 remote server...")
 
-        completed = 0
+        results: List[RemoteShutdownResult] = []
 
         for phase_idx, key in enumerate(sorted_keys, 1):
             phase_servers = phases[key]
@@ -71,17 +106,30 @@ class RemoteShutdownMixin:
             # Use the same deadline-based thread path for one server and
             # many servers. A single unreachable host must not stall the
             # whole shutdown sequence longer than its configured budget.
-            completed += self._shutdown_servers_parallel(phase_servers)
+            results.extend(self._shutdown_servers_parallel(phase_servers))
 
         # Log summary
-        self._log_message(f"  ✅ Remote shutdown complete ({completed}/{server_count} servers)")
+        succeeded = sum(1 for result in results if result.success)
+        timed_out = sum(1 for result in results if result.timed_out)
+        crashed = sum(1 for result in results if result.crashed)
+        failed = server_count - succeeded - timed_out - crashed
+        icon = "✅" if succeeded == server_count else "⚠️"
+        details = [f"{succeeded}/{server_count} succeeded"]
+        if failed:
+            details.append(f"{failed} failed")
+        if timed_out:
+            details.append(f"{timed_out} timed out")
+        if crashed:
+            details.append(f"{crashed} crashed")
+        self._log_message(f"  {icon} Remote shutdown complete ({', '.join(details)})")
 
-    def _shutdown_servers_parallel(self, servers: List[RemoteServerConfig]) -> int:
+    def _shutdown_servers_parallel(
+        self, servers: List[RemoteServerConfig]
+    ) -> List[RemoteShutdownResult]:
         """Shutdown multiple remote servers in parallel using threads.
 
-        Returns the number of servers whose threads finished within the
-        timeout window (regardless of individual success/failure — per-server
-        errors are logged inside _shutdown_remote_server).
+        Returns one structured result per server.  The join is deadline-based
+        so a stuck SSH call cannot multiply the wait by the number of servers.
         """
         def calc_server_timeout(server: RemoteServerConfig) -> int:
             # Explicit None check so a per-command timeout of 0 (e.g. for
@@ -100,10 +148,42 @@ class RemoteShutdownMixin:
 
         max_timeout = max(calc_server_timeout(s) for s in servers)
 
+        results: Dict[threading.Thread, RemoteShutdownResult] = {}
+        lock = threading.Lock()
+
+        def default_result(
+            server: RemoteServerConfig,
+            *,
+            completed: bool = True,
+            error: str = "",
+            timed_out: bool = False,
+            crashed: bool = False,
+        ) -> RemoteShutdownResult:
+            return RemoteShutdownResult(
+                server=server.name or server.host,
+                host=server.host,
+                completed=completed,
+                shutdown_sent=False,
+                pre_commands=RemotePreShutdownResult(),
+                error=error,
+                timed_out=timed_out,
+                crashed=crashed,
+            )
+
+        def coerce_result(server: RemoteServerConfig, result) -> RemoteShutdownResult:
+            if isinstance(result, RemoteShutdownResult):
+                return result
+            # Backward-compatible test hook path: older tests monkeypatch
+            # _shutdown_remote_server with a function that returns None.
+            coerced = default_result(server)
+            coerced.shutdown_sent = True
+            return coerced
+
         def shutdown_server_thread(server: RemoteServerConfig):
             """Thread worker for shutting down a single server."""
+            result = None
             try:
-                self._shutdown_remote_server(server)
+                result = coerce_result(server, self._shutdown_remote_server(server))
             except Exception as exc:
                 # _shutdown_remote_server only catches SSH-style errors;
                 # bubbling exceptions (network, AttributeError, OOM…) would
@@ -112,6 +192,9 @@ class RemoteShutdownMixin:
                 self._log_message(
                     f"  ❌ Remote shutdown thread for {display} crashed: {exc}"
                 )
+                result = default_result(server, error=str(exc), crashed=True)
+            with lock:
+                results[threading.current_thread()] = result
 
         threads: List[threading.Thread] = []
         for server in servers:
@@ -139,7 +222,19 @@ class RemoteShutdownMixin:
                 "(continuing with next phase)"
             )
 
-        return len(servers) - len(still_running)
+        final_results: List[RemoteShutdownResult] = []
+        with lock:
+            for thread, server in zip(threads, servers):
+                result = results.get(thread)
+                if result is None:
+                    result = default_result(
+                        server,
+                        completed=False,
+                        timed_out=True,
+                        error="remote shutdown worker timed out",
+                    )
+                final_results.append(result)
+        return final_results
 
     def _run_remote_command(
         self,
@@ -191,7 +286,12 @@ class RemoteShutdownMixin:
             error_msg = stderr.strip() if stderr.strip() else f"exit code {exit_code}"
             return False, error_msg
 
-    def _execute_remote_pre_shutdown(self, server: RemoteServerConfig) -> bool:
+    def _execute_remote_pre_shutdown(
+        self,
+        server: RemoteServerConfig,
+        *,
+        collect_result: bool = False,
+    ):
         """Execute pre-shutdown commands on a remote server.
 
         Returns:
@@ -201,10 +301,13 @@ class RemoteShutdownMixin:
             False.
         """
         if not server.pre_shutdown_commands:
+            if collect_result:
+                return RemotePreShutdownResult()
             return True
 
         display_name = server.name or server.host
         cmd_count = len(server.pre_shutdown_commands)
+        result = RemotePreShutdownResult()
 
         self._log_message(f"  📋 Executing {cmd_count} pre-shutdown command(s)...")
 
@@ -222,6 +325,7 @@ class RemoteShutdownMixin:
                     self._log_message(
                         f"    ⚠️ [{idx}/{cmd_count}] Unknown action: {action_name} (skipping)"
                     )
+                    result.failed += 1
                     continue
 
                 # Validate stop_compose has path BEFORE rendering the
@@ -233,6 +337,7 @@ class RemoteShutdownMixin:
                     self._log_message(
                         f"    ⚠️ [{idx}/{cmd_count}] stop_compose requires 'path' parameter (skipping)"
                     )
+                    result.failed += 1
                     continue
 
                 # Get command template and substitute placeholders.
@@ -260,10 +365,12 @@ class RemoteShutdownMixin:
                 self._log_message(
                     f"    ⚠️ [{idx}/{cmd_count}] No action or command specified (skipping)"
                 )
+                result.failed += 1
                 continue
 
             # Log what we're about to do
             self._log_message(f"    ➡️ [{idx}/{cmd_count}] {description} (timeout: {timeout}s)")
+            result.attempted += 1
 
             if self.config.behavior.dry_run:
                 self._log_message(f"    🧪 [DRY-RUN] Would execute on {display_name}")
@@ -277,13 +384,16 @@ class RemoteShutdownMixin:
             if success:
                 self._log_message(f"    ✅ [{idx}/{cmd_count}] {description} completed")
             else:
+                result.failed += 1
                 self._log_message(
                     f"    ⚠️ [{idx}/{cmd_count}] {description} failed: {error_msg} (continuing)"
                 )
 
+        if collect_result:
+            return result
         return True
 
-    def _shutdown_remote_server(self, server: RemoteServerConfig):
+    def _shutdown_remote_server(self, server: RemoteServerConfig) -> RemoteShutdownResult:
         """Shutdown a single remote server via SSH.
 
         Execution order:
@@ -292,6 +402,11 @@ class RemoteShutdownMixin:
         """
         display_name = server.name or server.host
         has_pre_cmds = len(server.pre_shutdown_commands) > 0
+        result = RemoteShutdownResult(
+            server=display_name,
+            host=server.host,
+            pre_commands=RemotePreShutdownResult(),
+        )
 
         self._log_message(f"🌐 Initiating remote shutdown: {display_name} ({server.host})...")
 
@@ -305,17 +420,21 @@ class RemoteShutdownMixin:
 
         # Execute pre-shutdown commands first
         if has_pre_cmds:
-            self._execute_remote_pre_shutdown(server)
+            result.pre_commands = self._execute_remote_pre_shutdown(
+                server, collect_result=True,
+            )
 
         # Execute final shutdown command
         self._log_message(f"  🔌 Sending shutdown command: {server.shutdown_command}")
 
         if self.config.behavior.dry_run:
+            result.shutdown_sent = True
+            result.dry_run = True
             self._log_message(
                 f"  🧪 [DRY-RUN] Would send command '{server.shutdown_command}' to "
                 f"{server.user}@{server.host}"
             )
-            return
+            return result
 
         success, error_msg = self._run_remote_command(
             server,
@@ -325,6 +444,7 @@ class RemoteShutdownMixin:
         )
 
         if success:
+            result.shutdown_sent = True
             self._log_message(f"  ✅ {display_name} shutdown command sent successfully")
             # Per-server success used to fire a notification too; dropped in
             # v5.2 — the "Starting" notification is the per-server signal,
@@ -333,6 +453,7 @@ class RemoteShutdownMixin:
             # because they're the only thing the user actually needs to act
             # on individually.
         else:
+            result.error = error_msg
             self._log_message(
                 f"  ❌ WARNING: Failed to execute shutdown command on {display_name}: {error_msg}"
             )
@@ -342,3 +463,4 @@ class RemoteShutdownMixin:
                 self.config.NOTIFY_FAILURE,
                 category="shutdown",
             )
+        return result

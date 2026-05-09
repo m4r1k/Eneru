@@ -11,6 +11,7 @@ from eneru import (
     MonitorState,
     REMOTE_ACTIONS,
 )
+from eneru.shutdown.remote import RemoteShutdownResult
 
 
 class TestRemoteActionTemplates:
@@ -219,6 +220,28 @@ class TestRemotePreShutdownExecution:
             call_args = mock_run.call_args
             command = call_args[0][1]
             assert command == "systemctl stop my-service"
+
+    @pytest.mark.unit
+    def test_execute_pre_shutdown_collects_best_effort_failures(self, remote_monitor):
+        server = RemoteServerConfig(
+            name="Test Server",
+            enabled=True,
+            host="192.168.1.50",
+            user="root",
+            command_timeout=30,
+            pre_shutdown_commands=[
+                RemoteCommandConfig(command="systemctl stop app"),
+                RemoteCommandConfig(action="unknown_action"),
+            ],
+        )
+
+        with patch.object(remote_monitor, "_run_remote_command", return_value=(False, "boom")):
+            result = remote_monitor._execute_remote_pre_shutdown(
+                server, collect_result=True,
+            )
+
+        assert result.attempted == 1
+        assert result.failed == 2
 
     @pytest.mark.unit
     def test_execute_pre_shutdown_with_stop_compose(self, remote_monitor):
@@ -514,6 +537,49 @@ class TestRemotePreShutdownExecution:
         # Check that DRY-RUN was logged
         log_calls = [str(c) for c in remote_monitor.logger.log.call_args_list]
         assert any("DRY-RUN" in c for c in log_calls)
+
+    @pytest.mark.unit
+    def test_shutdown_remote_server_returns_structured_failure(self, remote_monitor):
+        server = RemoteServerConfig(
+            name="Test Server",
+            enabled=True,
+            host="192.168.1.50",
+            user="root",
+            command_timeout=30,
+        )
+
+        with patch.object(remote_monitor, "_run_remote_command",
+                          return_value=(False, "permission denied")):
+            result = remote_monitor._shutdown_remote_server(server)
+
+        assert isinstance(result, RemoteShutdownResult)
+        assert result.success is False
+        assert result.shutdown_sent is False
+        assert "permission denied" in result.error
+
+    @pytest.mark.unit
+    def test_remote_shutdown_summary_counts_failures(self, remote_monitor):
+        servers = [
+            RemoteServerConfig(name="ok", enabled=True, host="10.0.0.1", user="root"),
+            RemoteServerConfig(name="bad", enabled=True, host="10.0.0.2", user="root"),
+        ]
+        remote_monitor.config.ups_groups[0].remote_servers = servers
+
+        def fake_shutdown(server):
+            return RemoteShutdownResult(
+                server=server.name,
+                host=server.host,
+                shutdown_sent=(server.name == "ok"),
+                error="" if server.name == "ok" else "refused",
+            )
+
+        with patch.object(remote_monitor, "_shutdown_remote_server",
+                          side_effect=fake_shutdown):
+            remote_monitor._shutdown_remote_servers()
+
+        log_text = "\n".join(str(c) for c in remote_monitor.logger.log.call_args_list)
+        assert "1/2 succeeded" in log_text
+        assert "1 failed" in log_text
 
 
 class TestRunRemoteCommand:

@@ -9,6 +9,38 @@ from eneru.remote_health import read_remote_health_sidecar, remote_health_sideca
 from eneru.stats import StatsStore
 
 
+POWER_EVENT_TYPES = {
+    "ON_BATTERY",
+    "POWER_RESTORED",
+    "EMERGENCY_SHUTDOWN_INITIATED",
+    "SHUTDOWN_SEQUENCE_COMPLETE",
+    "VOLTAGE_LOW",
+    "VOLTAGE_HIGH",
+    "BROWNOUT_DETECTED",
+    "OVER_VOLTAGE_DETECTED",
+    "BYPASS_MODE_ACTIVE",
+    "OVERLOAD_ACTIVE",
+    "OVERLOAD_DETECTED",
+    "BATTERY_LOW",
+    "FSD_DETECTED",
+    "CONNECTION_LOST",
+    "CONNECTION_RESTORED",
+}
+LIFECYCLE_EVENT_TYPES = {
+    "DAEMON_START",
+    "DAEMON_STOP",
+    "DAEMON_RESTARTED",
+    "DAEMON_UPGRADED",
+    "DAEMON_RECOVERED",
+    # Back-compat aliases from pre-release observability drafts.
+    "SERVICE_STARTED",
+    "SERVICE_STOPPED",
+    "SERVICE_RESTARTED",
+    "SERVICE_UPGRADED",
+    "SERVICE_RECOVERED",
+}
+
+
 def sanitize_name(name: str) -> str:
     """Return the path-safe per-UPS identifier used by stats/state files."""
     return name.replace("@", "-").replace(":", "-").replace("/", "-")
@@ -27,6 +59,11 @@ def state_file_path_for_group(config: Config, group: UPSGroupConfig) -> Path:
     return Path(config.logging.state_file)
 
 
+def redundancy_state_file_path(config: Config, group_name: str) -> Path:
+    """Return the state path used by a redundancy-group executor."""
+    return Path(config.logging.state_file + f".redundancy-{sanitize_name(group_name)}")
+
+
 def iter_monitors(source: Any) -> List[Any]:
     """Return monitor-like objects from a single monitor or coordinator."""
     monitors = getattr(source, "_monitors", None)
@@ -41,7 +78,9 @@ def monitor_status(monitor: Any) -> Dict[str, Any]:
     group = config.ups_groups[0] if config.ups_groups else None
     snap = monitor.state.snapshot()
     label = config.ups.label
+    group_id = sanitize_name(config.ups.name)
     return {
+        "groupId": group_id,
         "name": config.ups.name,
         "label": label,
         "displayName": config.ups.display_name,
@@ -64,10 +103,42 @@ def monitor_status(monitor: Any) -> Dict[str, Any]:
 def collect_status(source: Any) -> Dict[str, Any]:
     """Collect all live UPS statuses from a source object."""
     monitors = iter_monitors(source)
+    config = getattr(source, "config", None)
     return {
         "generatedAt": time.time(),
         "ups": [monitor_status(m) for m in monitors],
+        "redundancyGroups": redundancy_group_statuses(source, config),
     }
+
+
+def redundancy_group_statuses(source: Any, config: Optional[Config]) -> List[dict]:
+    """Return status rows for redundancy groups configured on a coordinator."""
+    if config is None:
+        return []
+    rows = []
+    live_managers = {
+        getattr(manager, "group_label", ""): manager
+        for manager in getattr(source, "_redundancy_remote_health_managers", []) or []
+    }
+    for group in config.redundancy_groups:
+        label = f"redundancy:{group.name}"
+        manager = live_managers.get(label)
+        remote_health = (
+            manager.snapshot()
+            if manager is not None
+            else read_remote_health_sidecar(
+                remote_health_sidecar_path(redundancy_state_file_path(config, group.name))
+            )
+        )
+        rows.append({
+            "groupId": f"redundancy-{sanitize_name(group.name)}",
+            "name": group.name,
+            "upsSources": list(group.ups_sources),
+            "minHealthy": group.min_healthy,
+            "isLocal": group.is_local,
+            "remoteHealth": remote_health,
+        })
+    return rows
 
 
 def readiness(source: Any) -> Dict[str, Any]:
@@ -91,6 +162,7 @@ def config_summary(config: Config) -> Dict[str, Any]:
     return {
         "ups": [
             {
+                "groupId": sanitize_name(group.ups.name),
                 "name": group.ups.name,
                 "label": group.ups.label,
                 "isLocal": group.is_local,
@@ -111,6 +183,7 @@ def config_summary(config: Config) -> Dict[str, Any]:
         ],
         "redundancyGroups": [
             {
+                "groupId": f"redundancy-{sanitize_name(group.name)}",
                 "name": group.name,
                 "upsSources": list(group.ups_sources),
                 "minHealthy": group.min_healthy,
@@ -165,16 +238,30 @@ def remote_health_for_monitor(monitor: Any) -> List[dict]:
 
 
 def remote_health_for_config(config: Config) -> List[dict]:
-    """Read remote health sidecars for all configured UPS groups."""
+    """Read remote health sidecars for all configured UPS and redundancy groups."""
     rows: List[dict] = []
     for group in config.ups_groups:
         rows.extend(read_remote_health_sidecar(
             remote_health_sidecar_path(state_file_path_for_group(config, group))
         ))
+    for group in config.redundancy_groups:
+        rows.extend(read_remote_health_sidecar(
+            remote_health_sidecar_path(redundancy_state_file_path(config, group.name))
+        ))
     return rows
 
 
-def query_events(config: Config, *, limit: int = 100) -> List[dict]:
+def _event_matches_verbosity(row: dict, verbosity: int) -> bool:
+    """Match the TUI event tiers used by the event log view."""
+    if verbosity >= 2:
+        return True
+    event_type = row.get("eventType", "")
+    if verbosity == 1:
+        return event_type in POWER_EVENT_TYPES or event_type in LIFECYCLE_EVENT_TYPES
+    return event_type in POWER_EVENT_TYPES
+
+
+def query_events(config: Config, *, limit: int = 100, verbosity: int = 2) -> List[dict]:
     """Return recent event rows from all per-UPS stats DBs."""
     rows: List[dict] = []
     now = int(time.time())
@@ -202,7 +289,8 @@ def query_events(config: Config, *, limit: int = 100) -> List[dict]:
             except Exception:
                 pass
     rows.sort(key=lambda row: row["ts"])
-    return rows[-max(1, int(limit)):]
+    filtered = [row for row in rows if _event_matches_verbosity(row, int(verbosity))]
+    return filtered[-max(1, int(limit)):]
 
 
 def query_history(config: Config, ups_name: str, metric: str,

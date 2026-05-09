@@ -8,6 +8,7 @@ import pytest
 
 from eneru import Config, RemoteServerConfig
 from eneru.remote_health import (
+    REMOTE_HEALTH_DEGRADED,
     REMOTE_HEALTH_FAILED,
     REMOTE_HEALTH_HEALTHY,
     RemoteHealthManager,
@@ -78,3 +79,54 @@ def test_remote_health_failure_then_recovery(tmp_path, remote_server):
     assert rows[0]["status"] == REMOTE_HEALTH_HEALTHY
     assert rows[0]["consecutive_failures"] == 0
     assert any("Recovered" in body for body, _ in notifications)
+
+
+@pytest.mark.unit
+def test_remote_health_degrades_before_failure_threshold(tmp_path, remote_server):
+    config = Config()
+    config.remote_health.failure_threshold = 2
+    notifications = []
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[remote_server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+        notify_fn=lambda body, typ: notifications.append((body, typ)),
+    )
+
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(False, "refused", 12)):
+        rows = manager.check_once()
+    assert rows[0]["status"] == REMOTE_HEALTH_DEGRADED
+    assert notifications == []
+
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(False, "refused", 12)):
+        rows = manager.check_once()
+    assert rows[0]["status"] == REMOTE_HEALTH_FAILED
+    assert len(notifications) == 1
+
+
+@pytest.mark.unit
+def test_remote_health_suppresses_repeated_failure_notifications(tmp_path, remote_server):
+    config = Config()
+    config.remote_health.failure_threshold = 1
+    notifications = []
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[remote_server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+        notify_fn=lambda body, typ: notifications.append((body, typ)),
+    )
+
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(False, "refused", 12)):
+        manager.check_once()
+        manager.check_once()
+
+    assert len(notifications) == 1

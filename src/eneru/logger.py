@@ -3,12 +3,31 @@
 import json
 import logging
 import logging.handlers
+import re
 import sys
 import time
 from pathlib import Path
 from typing import Optional
 
 from eneru.config import Config
+
+
+SENSITIVE_PATTERNS = (
+    re.compile(r"(discord://)[^\s]+", re.IGNORECASE),
+    re.compile(r"(https://discord(?:app)?\.com/api/webhooks/)[^\s]+", re.IGNORECASE),
+    re.compile(r"([a-z][a-z0-9+.-]*://)([^:/\s]+):([^@\s]+)@", re.IGNORECASE),
+    re.compile(r"((?:token|password|passwd|secret|api[_-]?key)=)[^\s&]+", re.IGNORECASE),
+)
+
+
+def redact_sensitive_text(value: str) -> str:
+    """Redact credentials from log text before structured output."""
+    redacted = value
+    redacted = SENSITIVE_PATTERNS[0].sub(r"\1<redacted>", redacted)
+    redacted = SENSITIVE_PATTERNS[1].sub(r"\1<redacted>", redacted)
+    redacted = SENSITIVE_PATTERNS[2].sub(r"\1\2:<redacted>@", redacted)
+    redacted = SENSITIVE_PATTERNS[3].sub(r"\1<redacted>", redacted)
+    return redacted
 
 
 class TimezoneFormatter(logging.Formatter):
@@ -23,7 +42,8 @@ class JSONFormatter(logging.Formatter):
     """Minimal structured formatter for SIEM/log pipeline ingestion."""
 
     def format(self, record):
-        message = record.getMessage()
+        raw_message = record.getMessage()
+        message = redact_sensitive_text(raw_message)
         payload = {
             "timestamp": time.strftime(
                 "%Y-%m-%dT%H:%M:%S%z",
@@ -33,6 +53,10 @@ class JSONFormatter(logging.Formatter):
             "logger": record.name,
             "message": message,
         }
+        if message.startswith("[") and "] " in message:
+            group, rest = message.split("] ", 1)
+            payload["group"] = group.strip("[]")
+            payload["message"] = rest
         if "POWER EVENT:" in message:
             payload["category"] = "power_event"
             try:

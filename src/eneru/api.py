@@ -140,9 +140,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
         if path == "/api/v1/events":
             limit = int((qs.get("limit") or ["100"])[0])
+            verbosity = int((qs.get("verbosity") or ["2"])[0])
             return 200, "application/json", {
                 "generatedAt": time.time(),
-                "events": query_events(self.api_config, limit=limit),
+                "events": query_events(self.api_config, limit=limit, verbosity=verbosity),
             }
 
         if path == "/api/v1/config":
@@ -154,6 +155,8 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 manager = getattr(monitor, "_remote_health_manager", None)
                 if manager is not None:
                     rows.extend(manager.snapshot())
+            for manager in getattr(self.api_source, "_redundancy_remote_health_managers", []) or []:
+                rows.extend(manager.snapshot())
             if not rows:
                 rows = remote_health_for_config(self.api_config)
             return 200, "application/json", {"generatedAt": time.time(), "servers": rows}

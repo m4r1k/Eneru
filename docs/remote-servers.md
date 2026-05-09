@@ -253,7 +253,7 @@ remote_health:
   probe_command: "true"
 ```
 
-Health status appears in the TUI, API, and Prometheus metrics. It is advisory only: during a real shutdown sequence, Eneru still attempts each configured remote pre-shutdown command and final shutdown command with bounded timeouts.
+Health status appears in the TUI, API, and Prometheus metrics. It is advisory only: during a real shutdown sequence, Eneru still attempts each configured remote pre-shutdown command and final shutdown command with bounded timeouts. Remote command failures are best effort: one unreachable host is logged and counted in the summary, but it does not stall later shutdown phases indefinitely.
 
 ## Manual remote shutdown drill
 

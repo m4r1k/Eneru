@@ -89,6 +89,36 @@ class TestCLIManualRemoteShutdown:
                     main()
         mock_run.assert_not_called()
 
+    @pytest.mark.unit
+    def test_remote_shutdown_duplicate_server_requires_group(self, tmp_path, capsys):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  - name: UPS-A\n"
+            "    display_name: rack-a\n"
+            "    remote_servers:\n"
+            "      - name: nas\n"
+            "        enabled: true\n"
+            "        host: 10.0.0.10\n"
+            "        user: root\n"
+            "  - name: UPS-B\n"
+            "    display_name: rack-b\n"
+            "    remote_servers:\n"
+            "      - name: nas\n"
+            "        enabled: true\n"
+            "        host: 10.0.0.11\n"
+            "        user: root\n"
+        )
+
+        with patch.object(sys, "argv", [
+            "eneru", "shutdown", "remote",
+            "-c", str(config_file), "--server", "nas", "--dry-run",
+        ]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == "ERROR: remote server 'nas' is ambiguous. Use --group. Matches: rack-a, rack-b"
+
 
 class TestCLITuiAlias:
     """Test that `eneru tui` is registered as an alias for `eneru monitor`."""

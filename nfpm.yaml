@@ -20,6 +20,7 @@ license: MIT
 depends:
   - python3
   - nut-client
+  - python3-paho-mqtt
 
 # Recommended packages (not required but useful)
 recommends:
@@ -35,6 +36,7 @@ overrides:
     depends:
       - python3
       - python3-yaml
+      - python3-paho-mqtt
       - nut-client
     recommends:
       - apprise
@@ -43,6 +45,7 @@ overrides:
     depends:
       - python3
       - python3-pyyaml
+      - python3-paho-mqtt
       - nut-client
     recommends:
       - apprise

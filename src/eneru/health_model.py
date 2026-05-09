@@ -161,6 +161,8 @@ def assess_health(
     # 2. CRITICAL
     if snapshot.trigger_active:
         return UPSHealth.CRITICAL
+    if "FSD" in snapshot.status:
+        return UPSHealth.CRITICAL
     # Group-local thresholds mirror monitor.py's T1-T4 checks, which run
     # inside the on-battery handler. A recovering OL UPS may still have low
     # charge; that should not by itself exhaust redundancy quorum.
@@ -207,9 +209,6 @@ def assess_health(
             and snapshot.time_on_battery > getattr(extended_time, "threshold", 900)
         ):
             return UPSHealth.CRITICAL
-    if "FSD" in snapshot.status:
-        return UPSHealth.CRITICAL
-
     # 3. DEGRADED
     if "OB" in snapshot.status:
         return UPSHealth.DEGRADED

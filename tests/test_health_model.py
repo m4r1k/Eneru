@@ -63,6 +63,12 @@ class TestAssessHealthBasicTiers:
         assert assess_health(snap, None, 1, now=NOW) == UPSHealth.CRITICAL
 
     @pytest.mark.unit
+    def test_fsd_status_bypasses_on_battery_stabilization(self):
+        triggers = TriggersConfig(on_battery_stabilization_delay=30)
+        snap = _snap(status="OB FSD", time_on_battery=0)
+        assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.CRITICAL
+
+    @pytest.mark.unit
     def test_grace_period_is_degraded(self):
         snap = _snap(connection_state="GRACE_PERIOD")
         assert assess_health(snap, None, 1, now=NOW) == UPSHealth.DEGRADED

@@ -1696,6 +1696,34 @@ class TestCoordinatorRedundancyWiring:
         mock_eval_cls.return_value.start.assert_called_once()
 
     @pytest.mark.unit
+    def test_start_monitors_starts_remote_health_for_redundancy_remotes(self, tmp_path):
+        config = self._config_with_redundancy(tmp_path)
+        config.redundancy_groups[0].remote_servers = [
+            RemoteServerConfig(
+                name="nas",
+                enabled=True,
+                host="10.0.0.10",
+                user="root",
+            ),
+        ]
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+
+        with patch("eneru.multi_ups.threading.Thread"), \
+             patch("eneru.multi_ups.UPSGroupMonitor") as mock_monitor_cls, \
+             patch("eneru.multi_ups.RedundancyGroupExecutor"), \
+             patch("eneru.multi_ups.RedundancyGroupEvaluator") as mock_eval_cls, \
+             patch("eneru.multi_ups.RemoteHealthManager") as mock_manager_cls:
+            mock_monitor_cls.return_value = MagicMock()
+            mock_eval_cls.return_value = MagicMock()
+            mock_manager_cls.return_value = MagicMock()
+            coord._start_monitors()
+
+        assert mock_manager_cls.call_args.kwargs["group_label"] == "redundancy:rack-1"
+        assert mock_manager_cls.call_args.kwargs["servers"][0].name == "nas"
+        mock_manager_cls.return_value.start.assert_called_once()
+
+    @pytest.mark.unit
     def test_no_evaluator_when_no_redundancy_groups(self, tmp_path):
         coord = MultiUPSCoordinator(_coord_config(tmp_path))
         coord._log = lambda msg: None

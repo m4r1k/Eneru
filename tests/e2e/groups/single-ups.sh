@@ -708,5 +708,74 @@ trap - EXIT
 echo "PASS: embedded API health/readiness/metrics responded"
 )
 
+# ======================================================================
+# Test 44: Unreachable remote shutdown is bounded
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 44: Unreachable remote shutdown is bounded"
+
+cat >/tmp/config-e2e-unreachable-remote.yaml <<'YAML'
+ups:
+  name: TestUPS@localhost:3493
+  display_name: "E2E Unreachable Remote"
+  check_interval: 1
+triggers:
+  on_battery_stabilization_delay: 0
+  low_battery_threshold: 95
+  critical_runtime_threshold: 600
+behavior:
+  dry_run: false
+local_shutdown:
+  enabled: false
+remote_servers:
+  - name: unreachable
+    enabled: true
+    host: 203.0.113.1
+    user: root
+    connect_timeout: 1
+    command_timeout: 1
+    shutdown_safety_margin: 1
+    shutdown_command: "sudo shutdown -h now"
+    ssh_options:
+      - "StrictHostKeyChecking=no"
+      - "UserKnownHostsFile=/dev/null"
+remote_health:
+  enabled: false
+statistics:
+  db_directory: /tmp/eneru-e2e-stats
+logging:
+  file: null
+  state_file: /tmp/eneru-e2e-state
+  shutdown_flag_file: /tmp/eneru-e2e-shutdown-flag
+YAML
+
+cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply.dev
+START=$(date +%s)
+set +e
+timeout 12s eneru run --config /tmp/config-e2e-unreachable-remote.yaml \
+  --exit-after-shutdown 2>&1 | tee /tmp/test44.log
+RC=${PIPESTATUS[0]}
+set -e
+ELAPSED=$(( $(date +%s) - START ))
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+
+if [ "$RC" -eq 124 ]; then
+  echo "FAIL: unreachable remote stalled shutdown past outer timeout"
+  cat /tmp/test44.log
+  exit 1
+fi
+if [ "$ELAPSED" -ge 12 ]; then
+  echo "FAIL: unreachable remote took too long (${ELAPSED}s)"
+  exit 1
+fi
+if ! grep -Eq "0/1 succeeded|timed out|failed" /tmp/test44.log; then
+  echo "FAIL: remote shutdown summary did not report bounded failure"
+  cat /tmp/test44.log
+  exit 1
+fi
+echo "PASS: unreachable remote shutdown completed within bounded timeout"
+)
+
 echo ""
 echo "=== Group 'single-ups' completed successfully ==="

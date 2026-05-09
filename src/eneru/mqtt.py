@@ -52,11 +52,23 @@ class MQTTPublisher:
 
         interval = max(1, int(self.config.mqtt.publish_interval))
         topic = f"{self.config.mqtt.topic_prefix.rstrip('/')}/status"
+        last_fingerprint = ""
+        last_publish = 0.0
         try:
             while not self.stop_event.is_set():
-                payload = json.dumps(collect_status(self.source), sort_keys=True)
-                client.publish(topic, payload, qos=0, retain=False)
-                if self.stop_event.wait(interval):
+                status = collect_status(self.source)
+                payload = json.dumps(status, sort_keys=True)
+                fingerprint = self._status_fingerprint(status)
+                now = time.monotonic()
+                should_publish = (
+                    fingerprint != last_fingerprint
+                    or now - last_publish >= interval
+                )
+                if should_publish:
+                    client.publish(topic, payload, qos=0, retain=False)
+                    last_fingerprint = fingerprint
+                    last_publish = now
+                if self.stop_event.wait(1):
                     break
         finally:
             try:
@@ -64,3 +76,10 @@ class MQTTPublisher:
                 client.disconnect()
             except Exception:
                 pass
+
+    @staticmethod
+    def _status_fingerprint(status: dict) -> str:
+        """Return a stable fingerprint excluding generated timestamps."""
+        comparable = dict(status)
+        comparable.pop("generatedAt", None)
+        return json.dumps(comparable, sort_keys=True)

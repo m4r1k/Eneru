@@ -29,6 +29,10 @@ Endpoints:
 
 The default bind address is localhost because v5.3 has no auth layer. Keep it behind SSH, a local reverse proxy, or a trusted network boundary.
 
+UPS rows include a stable `groupId` derived from the configured UPS name. Multi-UPS responses also include `redundancyGroups` rows with their source UPS names, quorum target, locality flag, and remote-health rows.
+
+`/api/v1/events` accepts `limit` and `verbosity` query parameters. `verbosity=0` returns power/shutdown events, `verbosity=1` also includes lifecycle events, and `verbosity=2` returns all recorded events.
+
 ## Health and readiness
 
 `/health` returns 200 when the API server can answer.
@@ -72,7 +76,7 @@ remote_health:
   failure_threshold: 2
 ```
 
-Healthchecks never execute `pre_shutdown_commands`, VM/container shutdown commands, custom commands, or `shutdown_command`. Remote health is advisory: during a real shutdown sequence Eneru still attempts the configured remote command chain with bounded timeouts.
+Healthchecks never execute `pre_shutdown_commands`, VM/container shutdown commands, custom commands, or `shutdown_command`. Remote health is advisory: during a real shutdown sequence Eneru still attempts the configured remote command chain with bounded timeouts. Failed or unreachable remote targets are reported in the remote shutdown summary and do not block later shutdown phases indefinitely.
 
 ## MQTT
 
@@ -86,7 +90,7 @@ mqtt:
   publish_interval: 10
 ```
 
-Install the optional dependency when using PyPI:
+MQTT publishes when the status payload changes and also republishes at `publish_interval` while unchanged. Debian and RPM packages install the MQTT client dependency. Install the optional dependency when using PyPI:
 
 ```bash
 uv pip install "eneru[mqtt]"

@@ -22,9 +22,11 @@ from eneru.notifications import APPRISE_AVAILABLE, NotificationWorker
 from eneru.monitor import UPSGroupMonitor
 from eneru.api import EneruAPIServer
 from eneru.mqtt import MQTTPublisher
+from eneru.remote_health import RemoteHealthManager, remote_health_sidecar_path
 from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
 from eneru.redundancy import RedundancyGroupEvaluator, RedundancyGroupExecutor
 from eneru.stats import StatsStore
+from eneru.status import redundancy_state_file_path
 from eneru.lifecycle import (
     REASON_SEQUENCE_COMPLETE,
     REASON_SIGNAL,
@@ -62,6 +64,7 @@ class MultiUPSCoordinator:
         self._notification_worker: Optional[NotificationWorker] = None
         self._api_server: Optional[EneruAPIServer] = None
         self._mqtt_publisher: Optional[MQTTPublisher] = None
+        self._redundancy_remote_health_managers: List[RemoteHealthManager] = []
 
         # Redundancy-group runtime (Phase 2). Populated after monitors start.
         self._redundancy_executors: dict = {}
@@ -325,6 +328,7 @@ class MultiUPSCoordinator:
                     )
                     sys.exit(1)
                 self._redundancy_executors[rg.name] = executor
+                self._start_redundancy_remote_health(rg)
                 evaluator = RedundancyGroupEvaluator(
                     rg,
                     monitors_by_name,
@@ -342,6 +346,32 @@ class MultiUPSCoordinator:
 
         self._start_api_server()
         self._start_mqtt_publisher()
+
+    def _start_redundancy_remote_health(self, group) -> None:
+        """Start advisory SSH healthchecks for redundancy-group remotes."""
+        enabled_servers = [s for s in group.remote_servers if s.enabled]
+        if not enabled_servers:
+            return
+
+        notify_fn = None
+        if self._notification_worker is not None:
+            notify_fn = lambda body, typ: self._notification_worker.send(
+                body, typ, category="health",
+            )
+
+        manager = RemoteHealthManager(
+            config=self.config,
+            group_label=f"redundancy:{group.name}",
+            servers=enabled_servers,
+            sidecar_path=remote_health_sidecar_path(
+                redundancy_state_file_path(self.config, group.name)
+            ),
+            stop_event=self._stop_event,
+            log_fn=self._log,
+            notify_fn=notify_fn,
+        )
+        self._redundancy_remote_health_managers.append(manager)
+        manager.start()
 
     def _start_api_server(self):
         """Start the read-only API server for coordinator mode."""

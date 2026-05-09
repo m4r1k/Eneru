@@ -79,13 +79,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recoveries are logged and can notify, and the TUI/API/metrics expose
   the latest status. Health is advisory only: real shutdown still
   attempts configured remote pre-shutdown commands and final shutdown
-  commands with bounded timeouts.
+  commands with bounded timeouts. Redundancy-group-owned remote targets
+  now get the same health sidecars and API/TUI visibility as per-UPS
+  remote targets.
 - **Manual remote shutdown drill.** `eneru shutdown remote --server ...`
   tests one configured remote target through Eneru's SSH command path.
   `--dry-run` executes no configured commands; real execution requires
   `--i-really-want-to-proceed-with-remote-shutdown`.
 - **JSON logs, optional syslog forwarding, optional outbound MQTT, and a
-  reference Grafana dashboard** for the Prometheus metrics.
+  reference Grafana dashboard** for the Prometheus metrics. Debian and
+  RPM packages now depend on the Python MQTT client so packaged MQTT
+  deployments do not miss `paho-mqtt` at runtime.
 - **Slow NUT response visibility.** Slow `upsc` calls now produce
   rate-limited per-UPS log lines. Apprise notification is stricter and
   only fires after sustained full-poll slowness, so operators get an early
@@ -109,6 +113,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-server remote phases now use the same deadline-based thread
   path as multi-server phases, so one unreachable remote target cannot
   hold the entire shutdown sequence beyond its configured budget.
+- Remote shutdown summaries now count structured success, failure,
+  timeout, and worker-crash outcomes. Failed best-effort remote commands
+  are logged and counted without blocking later phases.
+- API and outbound MQTT payloads now include stable `groupId` values and
+  redundancy-group status rows. `/api/v1/events?verbosity=...` uses the
+  same event tiers as the TUI.
+- MQTT publishes immediately when status changes and still republishes at
+  the configured interval when unchanged.
+- JSON log output now extracts the group prefix into a `group` field and
+  redacts common credentials and webhook/token values from structured
+  messages.
 - Event display now uses user-facing tiers: Power Events by default,
   Diagnostics with `-v` / `<V>`, and Lifecycle with `-vv` / a second
   `<V>` press.

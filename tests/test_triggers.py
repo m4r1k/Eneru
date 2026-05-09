@@ -67,6 +67,24 @@ class TestTriggerEvaluation:
             mock_shutdown.assert_not_called()
 
     @pytest.mark.unit
+    def test_low_battery_trigger_waits_for_stabilization_delay(self, monitor):
+        monitor.config.triggers.low_battery_threshold = 20
+        monitor.config.triggers.on_battery_stabilization_delay = 30
+        ups_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "15",
+            "battery.runtime": "600",
+            "ups.load": "25",
+        }
+
+        with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
+            monitor.state.previous_status = "OB DISCHRG"
+            monitor.state.on_battery_start_time = int(time.time()) - 5
+            monitor._handle_on_battery(ups_data)
+
+        mock_shutdown.assert_not_called()
+
+    @pytest.mark.unit
     def test_critical_runtime_trigger(self, monitor):
         """Test that critical runtime triggers shutdown."""
         monitor.config.triggers.critical_runtime_threshold = 600  # 10 minutes
@@ -86,6 +104,42 @@ class TestTriggerEvaluation:
             mock_shutdown.assert_called_once()
             call_args = mock_shutdown.call_args[0][0]
             assert "Runtime" in call_args
+
+    @pytest.mark.unit
+    def test_runtime_trigger_waits_for_stabilization_delay(self, monitor):
+        monitor.config.triggers.critical_runtime_threshold = 600
+        monitor.config.triggers.on_battery_stabilization_delay = 30
+        ups_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "50",
+            "battery.runtime": "300",
+            "ups.load": "25",
+        }
+
+        with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
+            monitor.state.previous_status = "OB DISCHRG"
+            monitor.state.on_battery_start_time = int(time.time()) - 5
+            monitor._handle_on_battery(ups_data)
+
+        mock_shutdown.assert_not_called()
+
+    @pytest.mark.unit
+    def test_repeated_outage_ignores_unstable_runtime_after_restore(self, monitor):
+        """Regression for OB -> OL -> OB with transient fake runtime."""
+        monitor.config.triggers.critical_runtime_threshold = 600
+        monitor.config.triggers.on_battery_stabilization_delay = 30
+        second_outage = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "89",
+            "battery.runtime": "388",
+            "ups.load": "30",
+        }
+
+        with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
+            monitor.state.previous_status = "OL CHRG"
+            monitor._handle_on_battery(second_outage)
+
+        mock_shutdown.assert_not_called()
 
     @pytest.mark.unit
     def test_extended_time_trigger(self, monitor):
@@ -109,6 +163,25 @@ class TestTriggerEvaluation:
             mock_shutdown.assert_called_once()
             call_args = mock_shutdown.call_args[0][0]
             assert "Time on battery" in call_args
+
+    @pytest.mark.unit
+    def test_extended_time_trigger_waits_for_stabilization_delay(self, monitor):
+        monitor.config.triggers.extended_time.enabled = True
+        monitor.config.triggers.extended_time.threshold = 3
+        monitor.config.triggers.on_battery_stabilization_delay = 30
+        ups_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "80",
+            "battery.runtime": "3600",
+            "ups.load": "25",
+        }
+
+        with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
+            monitor.state.previous_status = "OB DISCHRG"
+            monitor.state.on_battery_start_time = int(time.time()) - 5
+            monitor._handle_on_battery(ups_data)
+
+        mock_shutdown.assert_not_called()
 
     @pytest.mark.unit
     def test_extended_time_disabled_no_trigger(self, monitor):
@@ -153,6 +226,26 @@ class TestTriggerEvaluation:
 
                 # Should NOT trigger during grace period
                 mock_shutdown.assert_not_called()
+
+    @pytest.mark.unit
+    def test_depletion_trigger_waits_for_stabilization_delay(self, monitor):
+        monitor.config.triggers.depletion.critical_rate = 15.0
+        monitor.config.triggers.depletion.grace_period = 0
+        monitor.config.triggers.on_battery_stabilization_delay = 30
+        ups_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "80",
+            "battery.runtime": "1800",
+            "ups.load": "25",
+        }
+
+        with patch.object(monitor, "_calculate_depletion_rate", return_value=20.0):
+            with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
+                monitor.state.previous_status = "OB DISCHRG"
+                monitor.state.on_battery_start_time = int(time.time()) - 5
+                monitor._handle_on_battery(ups_data)
+
+        mock_shutdown.assert_not_called()
 
     @pytest.mark.unit
     def test_depletion_rate_after_grace_period(self, monitor):
