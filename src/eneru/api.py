@@ -12,10 +12,10 @@ from eneru.status import (
     collect_status,
     config_summary,
     find_status,
+    live_remote_health,
     query_events,
     query_history,
     readiness,
-    remote_health_for_config,
 )
 
 
@@ -70,10 +70,11 @@ class EneruAPIServer:
         # templates to anyone who can reach this socket.
         if not _is_loopback_bind(self.config.api.bind):
             self.log_fn(
-                f"⚠️ API bound to {addr[0]} (non-loopback). v5.3 ships no "
-                f"authentication; /api/v1/config will expose server "
-                f"hostnames, SSH options, and pre-shutdown command "
-                f"templates to any client that can reach this socket. "
+                f"⚠️ API bound to {addr[0]} (non-loopback). v5.3 ships "
+                f"no authentication; /api/v1/config will expose remote "
+                f"server hostnames, SSH usernames, shutdown ordering, "
+                f"and presence flags for SSH options and pre-shutdown "
+                f"commands to any client that can reach this socket. "
                 f"Restrict network access (firewall, reverse proxy with "
                 f"auth) before exposing this beyond trusted hosts."
             )
@@ -192,15 +193,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             return 200, "application/json", config_summary(self.api_config)
 
         if path == "/api/v1/remote-health":
-            rows = []
-            for monitor in getattr(self.api_source, "_monitors", []) or []:
-                manager = getattr(monitor, "_remote_health_manager", None)
-                if manager is not None:
-                    rows.extend(manager.snapshot())
-            for manager in getattr(self.api_source, "_redundancy_remote_health_managers", []) or []:
-                rows.extend(manager.snapshot())
-            if not rows:
-                rows = remote_health_for_config(self.api_config)
+            rows = live_remote_health(self.api_source, self.api_config)
             return 200, "application/json", {"generatedAt": time.time(), "servers": rows}
 
         return 404, "application/json", self._error("NOT_FOUND", "Endpoint not found")

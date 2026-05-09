@@ -263,6 +263,33 @@ def remote_health_for_config(config: Config) -> List[dict]:
     return rows
 
 
+def live_remote_health(source: Any, config: Config) -> List[dict]:
+    """Aggregate remote-health rows from in-process managers, falling back to sidecars.
+
+    Centralises the lookup that the API's ``/api/v1/remote-health``
+    endpoint and any future in-daemon consumer needs. Looks at three
+    surfaces in order:
+
+    1. The per-UPS monitor's live ``_remote_health_manager``.
+    2. Redundancy-group managers held on the multi-UPS coordinator.
+    3. On-disk sidecars written by step (1) / (2), used when the
+       caller is the read-only API process running outside the daemon
+       (or before the managers have published their first snapshot).
+
+    Returning an empty list when nothing is configured is intentional.
+    """
+    rows: List[dict] = []
+    for monitor in getattr(source, "_monitors", []) or []:
+        manager = getattr(monitor, "_remote_health_manager", None)
+        if manager is not None:
+            rows.extend(manager.snapshot())
+    for manager in getattr(source, "_redundancy_remote_health_managers", []) or []:
+        rows.extend(manager.snapshot())
+    if not rows:
+        rows = remote_health_for_config(config)
+    return rows
+
+
 def query_events(config: Config, *, limit: int = 100, verbosity: int = 2) -> List[dict]:
     """Return recent event rows from all per-UPS stats DBs."""
     rows: List[dict] = []

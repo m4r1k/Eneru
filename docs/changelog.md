@@ -47,6 +47,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daemon startup with defaults.
 
 ### Fixed
+- **MQTT publisher race during connect / on_disconnect.** `on_disconnect`
+  is now attached only after `client.connect()` and `loop_start()` both
+  return, and the disconnect callback is detached during teardown.
+  Previously, paho's background thread could fire `on_disconnect`
+  against a not-yet-fully-constructed publisher state, forcing one
+  spurious reconnect cycle on every clean stop.
+- **`MQTTPublisher.stop()` no longer signals the daemon-wide stop
+  event.** The publisher now keeps a private `_local_stop` event and
+  polls both — calling `stop()` on the publisher (config reload, test
+  fixture, future "bounce only MQTT" code path) leaves the rest of the
+  daemon untouched.
+- **MQTT publish loop no longer collects status every tick.** The
+  `collect_status()` walk (which acquires per-monitor and per-remote-
+  health locks) now runs at most every `min(publish_interval, 5 s)`
+  instead of every 1 s — eliminates redundant lock contention with the
+  API server on busy multi-UPS setups while preserving "publish on
+  change OR every interval" semantics.
+- **`/api/v1/remote-health` no longer reaches into private monitor
+  state.** The aggregation moved to `status.live_remote_health(source,
+  config)`, mirroring the existing pattern for UPS / redundancy-group
+  status read-models. The route is now a one-liner.
+- **API non-loopback warning text matches what's actually exposed.**
+  `/api/v1/config` returns `hasPreShutdownCommands: bool` and
+  `sshOptionsConfigured: bool`, not full command templates or option
+  strings; the startup warning now lists "remote server hostnames, SSH
+  usernames, shutdown ordering, and presence flags".
 - **`StatsStore.from_connection()` no longer leaks an in-memory SQLite
   handle.** The wrapper opened a throw-away in-memory database via
   `__init__` and then rebound `_conn` to the caller-owned handle without

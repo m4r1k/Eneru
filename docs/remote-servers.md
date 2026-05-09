@@ -134,6 +134,10 @@ Eneru waits for remote shutdown threads using the command timeouts plus `shutdow
 
 One slow server can extend the phase deadline, but it does not make other servers run sequentially. Servers in the same phase still start together. Individual SSH command execution also gets a 30-second subprocess buffer in `_run_remote_command`; the phase deadline calculation uses the configured command timeouts plus `connect_timeout` and `shutdown_safety_margin`.
 
+### Timeout semantics
+
+When a remote command exceeds its budget, Eneru kills the **local** SSH process (SIGKILL via `subprocess.run(timeout=…)`). The remote shell command may still be running on the target host afterwards — for example a `pre_shutdown_command` of `systemctl stop kubelet` that takes longer than its timeout will leave `systemctl` running unattended on the remote, even though Eneru has moved on to the next command. Set timeouts conservatively (longer than the worst-case successful runtime) so the local kill only happens for genuinely-stuck commands, and avoid `pre_shutdown_commands` that you can't tolerate being interrupted mid-flight.
+
 ## SSH key setup
 
 Eneru normally runs as root, so create and test the key as root on the Eneru host.

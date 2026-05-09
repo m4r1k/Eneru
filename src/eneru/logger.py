@@ -90,7 +90,11 @@ class JSONFormatter(logging.Formatter):
                         pass
             elif "Remote health" in message:
                 payload["category"] = "health"
-            elif "SHUTDOWN" in message or "shutdown" in message:
+            elif "SHUTDOWN" in message:
+                # Uppercase SHUTDOWN is the daemon's own marker. Avoid
+                # the lowercase variant — it falsely tags config keys
+                # like "shutdown_safety_margin" and informational lines
+                # like "Local shutdown disabled" as shutdown events.
                 payload["category"] = "shutdown"
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 

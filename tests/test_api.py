@@ -380,12 +380,24 @@ def test_mqtt_publishes_on_state_change_without_optional_dependency(monkeypatch)
     config = Config()
     config.mqtt.enabled = True
     config.mqtt.broker = "mqtt://localhost:1883"
+    # Keep publish_interval high so the periodic-publish branch
+    # doesn't fire — we want to assert state-change semantics here.
     config.mqtt.publish_interval = 99
     monkeypatch.setattr("eneru.mqtt.MQTT_AVAILABLE", True)
     monkeypatch.setattr(
         "eneru.mqtt.mqtt_client",
         SimpleNamespace(Client=lambda **kwargs: FakeClient()),
     )
+    # Freeze monotonic so the rate-limit check at line 153 sees enough
+    # elapsed time on iteration 2 to allow a second collect (the test
+    # fixture's wait() doesn't advance real time).
+    fake_clock = [0.0]
+
+    def fake_monotonic():
+        fake_clock[0] += 5.0
+        return fake_clock[0]
+
+    monkeypatch.setattr("eneru.mqtt.time.monotonic", fake_monotonic)
     monkeypatch.setattr("eneru.mqtt.collect_status", lambda source: statuses.pop(0))
 
     MQTTPublisher(object(), config, FakeStopEvent())._run()
@@ -657,6 +669,128 @@ def test_mqtt_retries_with_backoff_until_connect_succeeds(monkeypatch):
     # First two backoff sleeps follow the exponential schedule.
     assert backoff_waits[0] == 1.0
     assert backoff_waits[1] == 2.0
+
+
+@pytest.mark.unit
+def test_mqtt_on_disconnect_during_connect_does_not_force_extra_reconnect(monkeypatch):
+    """on_disconnect firing while we're still inside connect()/loop_start()
+    must not cause the publish loop to immediately bail and reconnect.
+
+    Regression guard for a race where attaching on_disconnect BEFORE
+    loop_start() caused paho's background thread to set
+    _needs_reconnect against a not-yet-fully-constructed publisher
+    state — every clean stop then triggered one spurious reconnect
+    cycle on the way out.
+    """
+    publisher_holder = {}
+    publish_count = {"n": 0}
+
+    class RaceClient:
+        """Calls on_disconnect (if attached) inside its own connect()."""
+        on_disconnect = None
+
+        def tls_set(self, *args, **kwargs):
+            return None
+
+        def username_pw_set(self, *args, **kwargs):
+            return None
+
+        def connect(self, host, port, keepalive=30):
+            # Simulate paho's background thread firing on_disconnect
+            # in the same window where the outer code is constructing
+            # the publisher state.
+            cb = self.on_disconnect
+            if cb is not None:
+                cb(self, None, 0)
+
+        def loop_start(self):
+            return None
+
+        def publish(self, *args, **kwargs):
+            publish_count["n"] += 1
+            return SimpleNamespace(rc=0)
+
+        def loop_stop(self):
+            return None
+
+        def disconnect(self):
+            return None
+
+    class StopOnFirstWait:
+        def __init__(self):
+            self._calls = 0
+
+        def is_set(self):
+            return False
+
+        def wait(self, timeout):
+            self._calls += 1
+            # Let the publish loop run one tick, then exit.
+            return self._calls >= 1
+
+    config = Config()
+    config.mqtt.enabled = True
+    config.mqtt.broker = "mqtt://broker.example:1883"
+    monkeypatch.setattr("eneru.mqtt.MQTT_AVAILABLE", True)
+    monkeypatch.setattr(
+        "eneru.mqtt.mqtt_client",
+        SimpleNamespace(Client=lambda **kwargs: RaceClient()),
+    )
+    monkeypatch.setattr("eneru.mqtt.collect_status", lambda source: {"generatedAt": 1})
+
+    publisher = MQTTPublisher(object(), config, StopOnFirstWait())
+    publisher_holder["p"] = publisher
+    publisher._run()
+
+    # The publisher should have published exactly once and exited
+    # cleanly. If on_disconnect had spuriously set _needs_reconnect
+    # during the connect window, _run would have looped back and
+    # tried to reconnect — that's the regression we're guarding.
+    assert publish_count["n"] == 1
+
+
+@pytest.mark.unit
+def test_mqtt_local_stop_does_not_set_global_stop_event(monkeypatch):
+    """MQTTPublisher.stop() must not signal the daemon-wide stop event.
+
+    Otherwise calling stop() on the publisher (config reload, test
+    teardown, future "bounce only MQTT" code paths) would force the
+    rest of the daemon to shut down too.
+    """
+    class FakeClient:
+        def connect(self, *args, **kwargs):
+            return None
+
+        def loop_start(self):
+            return None
+
+        def publish(self, *args, **kwargs):
+            return SimpleNamespace(rc=0)
+
+        def loop_stop(self):
+            return None
+
+        def disconnect(self):
+            return None
+
+    config = Config()
+    config.mqtt.enabled = True
+    config.mqtt.broker = "mqtt://broker.example:1883"
+    monkeypatch.setattr("eneru.mqtt.MQTT_AVAILABLE", True)
+    monkeypatch.setattr(
+        "eneru.mqtt.mqtt_client",
+        SimpleNamespace(Client=lambda **kwargs: FakeClient()),
+    )
+
+    import threading
+    daemon_stop = threading.Event()
+    publisher = MQTTPublisher(object(), config, daemon_stop)
+    # No background thread started — call stop() directly.
+    publisher.stop(timeout=0)
+
+    assert not daemon_stop.is_set(), (
+        "publisher.stop() must not set the daemon-wide stop_event"
+    )
 
 
 @pytest.mark.unit

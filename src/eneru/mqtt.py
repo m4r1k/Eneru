@@ -43,12 +43,40 @@ class MQTTPublisher:
     ) -> None:
         self.source = source
         self.config = config
+        # Daemon-wide shutdown signal. Treat as read-only — never .set()
+        # this from inside the publisher; that would force the rest of
+        # the daemon to stop too.
         self.stop_event = stop_event
+        # Publisher-local stop signal. ``stop()`` sets this; either
+        # event firing exits the loop, but only the local one is set
+        # by us so a future "bounce only the MQTT publisher" caller
+        # (config reload, test fixture) won't take the daemon down.
+        self._local_stop = threading.Event()
         self.log_fn = log_fn or (lambda msg: None)
         self._thread: Optional[threading.Thread] = None
         # Set by on_disconnect or by a failed publish. The publish loop
         # checks it each tick and bails out so the outer loop reconnects.
         self._needs_reconnect = threading.Event()
+
+    def _stopping(self) -> bool:
+        """Either the daemon-wide or publisher-local stop was requested."""
+        return self.stop_event.is_set() or self._local_stop.is_set()
+
+    def _wait(self, timeout: float) -> bool:
+        """Sleep for ``timeout`` seconds, returning True if stop fired.
+
+        Pre-checks ``_local_stop`` (cheap), then waits on the daemon-
+        wide ``stop_event``, then re-checks ``_local_stop``. Daemon
+        shutdown sets both events together, so this returns promptly.
+        A standalone ``publisher.stop()`` (no daemon-wide stop) is
+        bounded by ``timeout`` — acceptable since the publish loop
+        ticks at ~1 s.
+        """
+        if self._local_stop.is_set():
+            return True
+        if self.stop_event.wait(timeout):
+            return True
+        return self._local_stop.is_set()
 
     def start(self) -> None:
         if not self.config.mqtt.enabled or self._thread is not None:
@@ -64,53 +92,71 @@ class MQTTPublisher:
         self._thread.start()
 
     def stop(self, timeout: int = 5) -> None:
-        """Signal the publisher loop and wait briefly for broker disconnect."""
-        self.stop_event.set()
+        """Signal only the publisher loop and wait briefly for shutdown."""
+        self._local_stop.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
             if not self._thread.is_alive():
                 self._thread = None
 
     def _run(self) -> None:
-        # Outer reconnect loop. Each iteration: (1) block in
-        # _connect_with_backoff until the broker is reachable or
-        # stop_event fires, (2) publish until disconnect / stop,
-        # (3) tear the client down, (4) loop back to reconnect ONLY
-        # if _publish_loop exited because of an unexpected
-        # disconnect; otherwise exit (stop_event drove the exit).
-        while not self.stop_event.is_set():
+        # Outer reconnect loop. Each iteration:
+        #   (1) clear the reconnect flag *before* we try to connect, so
+        #       any stale signal from a prior teardown can't immediately
+        #       short-circuit the new publish loop.
+        #   (2) block in _connect_with_backoff until the broker is
+        #       reachable or stop fires.
+        #   (3) publish until disconnect / stop.
+        #   (4) tear the client down (drop the on_disconnect callback
+        #       first so a teardown-time disconnect doesn't re-set the
+        #       reconnect flag).
+        #   (5) reconnect only if both: stop was NOT requested AND
+        #       _needs_reconnect is still set after teardown.
+        while not self._stopping():
+            self._needs_reconnect.clear()
             client = self._connect_with_backoff()
             if client is None:
                 return
             try:
                 self._publish_loop(client)
             finally:
+                # Detach our callback so the disconnect path itself can't
+                # spuriously set _needs_reconnect after we've decided to
+                # exit. paho-mqtt allows None here.
+                try:
+                    client.on_disconnect = None
+                except Exception:
+                    pass
                 try:
                     client.loop_stop()
                     client.disconnect()
                 except Exception as exc:
                     logging.getLogger(__name__).exception("MQTT disconnect failed")
                     self.log_fn(f"⚠️ MQTT disconnect failed: {exc}")
-            # Distinguish reconnect-needed from stop-driven exit. We
-            # can't rely on stop_event.is_set() here because some test
-            # fixtures (and some real Event subclasses) report False
-            # even when their .wait() returned True.
+            # Stop wins over reconnect — order matters for the "stop
+            # requested mid-disconnect" case.
+            if self._stopping():
+                return
             if not self._needs_reconnect.is_set():
                 return
-            self._needs_reconnect.clear()
 
     def _connect_with_backoff(self):
         """Connect to the broker, retrying with exponential backoff.
 
-        Returns the connected client, or ``None`` if ``stop_event`` was
-        set before any connect attempt succeeded.
+        Returns the connected client, or ``None`` if a stop was
+        requested before any connect attempt succeeded. The
+        ``on_disconnect`` callback is attached only AFTER ``connect()``
+        and ``loop_start()`` both return — otherwise paho's background
+        thread can fire a disconnect callback against a not-yet-fully-
+        constructed publisher state, setting ``_needs_reconnect`` while
+        the outer loop still thinks we're in steady state.
         """
         backoff = _INITIAL_BACKOFF_SECONDS
         parsed = urlparse(self.config.mqtt.broker)
         use_tls = parsed.scheme == "mqtts"
         host = parsed.hostname or self.config.mqtt.broker
         port = parsed.port or (8883 if use_tls else 1883)
-        while not self.stop_event.is_set():
+        while not self._stopping():
             client = _create_client()
             if use_tls:
                 # System CA bundle, default ciphers, TLS 1.2+.
@@ -118,46 +164,57 @@ class MQTTPublisher:
             if parsed.username:
                 password = unquote(parsed.password or "") if parsed.password is not None else None
                 client.username_pw_set(unquote(parsed.username), password)
-            client.on_disconnect = self._on_disconnect
             try:
                 client.connect(host, port, keepalive=30)
                 client.loop_start()
-                self.log_fn(f"📡 MQTT connected to {host}:{port}")
-                return client
             except Exception as exc:
                 wait = int(backoff)
                 self.log_fn(
                     f"⚠️ MQTT connection failed: {exc} — retrying in {wait}s"
                 )
-                # stop_event.wait returns True if set during the wait,
-                # which short-circuits the backoff for fast shutdown.
-                if self.stop_event.wait(backoff):
+                if self._wait(backoff):
                     return None
                 backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
+                continue
+            # Connection is live. Attach the disconnect callback now so
+            # a future broker drop sets _needs_reconnect cleanly.
+            client.on_disconnect = self._on_disconnect
+            self.log_fn(f"📡 MQTT connected to {host}:{port}")
+            return client
         return None
 
     def _publish_loop(self, client) -> None:
         interval = max(1, int(self.config.mqtt.publish_interval))
         topic = f"{self.config.mqtt.topic_prefix.rstrip('/')}/status"
+        # Don't snapshot more often than once per second, but cap the
+        # cadence at the configured publish_interval too — there's no
+        # value in walking every monitor's lock + remote-health-lock
+        # every tick when the user wants 30s publishes. The "publish
+        # on change" guarantee still holds because every collect runs
+        # the fingerprint check; we just space those collects out.
+        collect_period = max(1.0, min(float(interval), 5.0))
         last_fingerprint = ""
         last_publish = 0.0
-        while not self.stop_event.is_set():
+        last_collect = -collect_period  # force first collect immediately
+        while not self._stopping():
             if self._needs_reconnect.is_set():
                 return
-            status = collect_status(self.source)
-            payload = json.dumps(status, sort_keys=True)
-            fingerprint = self._status_fingerprint(status)
             now = time.monotonic()
-            should_publish = (
-                fingerprint != last_fingerprint
-                or now - last_publish >= interval
-            )
-            if should_publish:
-                if not self._publish_one(client, topic, payload):
-                    return
-                last_fingerprint = fingerprint
-                last_publish = now
-            if self.stop_event.wait(1):
+            if now - last_collect >= collect_period:
+                status = collect_status(self.source)
+                last_collect = now
+                payload = json.dumps(status, sort_keys=True)
+                fingerprint = self._status_fingerprint(status)
+                should_publish = (
+                    fingerprint != last_fingerprint
+                    or now - last_publish >= interval
+                )
+                if should_publish:
+                    if not self._publish_one(client, topic, payload):
+                        return
+                    last_fingerprint = fingerprint
+                    last_publish = now
+            if self._wait(1):
                 return
 
     def _publish_one(self, client, topic: str, payload: str) -> bool:
