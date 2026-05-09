@@ -9,7 +9,7 @@ ups:
     triggers:
       low_battery_threshold: 20
       critical_runtime_threshold: 600
-  on_battery_stabilization_delay: 0  # E2E legacy tests trigger immediately
+      on_battery_stabilization_delay: 0  # E2E legacy tests trigger immediately
     containers:
       enabled: true
       runtime: docker

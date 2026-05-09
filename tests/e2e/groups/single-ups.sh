@@ -418,6 +418,7 @@ ups:
 triggers:
   low_battery_threshold: 20
   critical_runtime_threshold: 600
+  on_battery_stabilization_delay: 0
   depletion:
     grace_period: 5
   extended_time:
