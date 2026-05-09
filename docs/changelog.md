@@ -120,7 +120,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   redundancy-group status rows. `/api/v1/events?verbosity=...` uses the
   same event tiers as the TUI.
 - MQTT publishes immediately when status changes and still republishes at
-  the configured interval when unchanged.
+  the configured interval when unchanged. Package integration checks now
+  assert that `paho.mqtt.client` imports after deb/rpm installation.
 - JSON log output now extracts the group prefix into a `group` field and
   redacts common credentials and webhook/token values from structured
   messages.

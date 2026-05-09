@@ -22,6 +22,8 @@ class RemotePreShutdownResult:
 
     attempted: int = 0
     failed: int = 0
+    timed_out: bool = False
+    error: str = ""
 
 
 @dataclass
@@ -183,7 +185,16 @@ class RemoteShutdownMixin:
             """Thread worker for shutting down a single server."""
             result = None
             try:
-                result = coerce_result(server, self._shutdown_remote_server(server))
+                try:
+                    result = self._shutdown_remote_server(server, deadline=deadline)
+                except TypeError as exc:
+                    if "unexpected keyword argument 'deadline'" not in str(exc):
+                        raise
+                    # Backward-compatible test hook path: older tests
+                    # monkeypatch _shutdown_remote_server with a function
+                    # that accepts only the server argument.
+                    result = self._shutdown_remote_server(server)
+                result = coerce_result(server, result)
             except Exception as exc:
                 # _shutdown_remote_server only catches SSH-style errors;
                 # bubbling exceptions (network, AttributeError, OOM…) would
@@ -196,6 +207,7 @@ class RemoteShutdownMixin:
             with lock:
                 results[threading.current_thread()] = result
 
+        deadline = time.monotonic() + max_timeout
         threads: List[threading.Thread] = []
         for server in servers:
             t = threading.Thread(
@@ -210,7 +222,6 @@ class RemoteShutdownMixin:
         # Deadline-based join: cap total wait at max_timeout regardless of
         # how many threads are stuck. Per-thread join() with the same
         # max_timeout would stack to N × max_timeout in the worst case.
-        deadline = time.monotonic() + max_timeout
         for t in threads:
             remaining = max(0.0, deadline - time.monotonic())
             t.join(timeout=remaining)
@@ -241,7 +252,9 @@ class RemoteShutdownMixin:
         server: RemoteServerConfig,
         command: str,
         timeout: int,
-        description: str
+        description: str,
+        *,
+        deadline: float = None,
     ) -> Tuple[bool, str]:
         """Run a single command on a remote server via SSH.
 
@@ -275,8 +288,17 @@ class RemoteShutdownMixin:
             command
         ])
 
-        # Add buffer to timeout to account for SSH connection overhead
-        exit_code, stdout, stderr = run_command(ssh_cmd, timeout=timeout + 30)
+        # Add buffer to account for SSH connection overhead, unless a
+        # shutdown-phase deadline requires a tighter cap. This prevents a
+        # hung pre-shutdown command from outliving the phase and later
+        # drifting into the final shutdown command.
+        command_timeout = timeout + 30
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False, "remote shutdown deadline exceeded"
+            command_timeout = max(1, min(command_timeout, int(remaining)))
+        exit_code, stdout, stderr = run_command(ssh_cmd, timeout=command_timeout)
 
         if exit_code == 0:
             return True, ""
@@ -286,11 +308,17 @@ class RemoteShutdownMixin:
             error_msg = stderr.strip() if stderr.strip() else f"exit code {exit_code}"
             return False, error_msg
 
+    @staticmethod
+    def _remote_deadline_exceeded(deadline: float = None) -> bool:
+        """Return True when a remote shutdown phase deadline has expired."""
+        return deadline is not None and time.monotonic() >= deadline
+
     def _execute_remote_pre_shutdown(
         self,
         server: RemoteServerConfig,
         *,
         collect_result: bool = False,
+        deadline: float = None,
     ):
         """Execute pre-shutdown commands on a remote server.
 
@@ -312,6 +340,15 @@ class RemoteShutdownMixin:
         self._log_message(f"  📋 Executing {cmd_count} pre-shutdown command(s)...")
 
         for idx, cmd_config in enumerate(server.pre_shutdown_commands, 1):
+            if self._remote_deadline_exceeded(deadline):
+                result.timed_out = True
+                result.error = "remote shutdown deadline exceeded before pre-shutdown completed"
+                self._log_message(
+                    f"    ⚠️ [{idx}/{cmd_count}] Skipping remaining pre-shutdown "
+                    "commands: remote shutdown deadline exceeded"
+                )
+                break
+
             # Determine timeout
             timeout = cmd_config.timeout
             if timeout is None:
@@ -378,7 +415,7 @@ class RemoteShutdownMixin:
 
             # Execute the command
             success, error_msg = self._run_remote_command(
-                server, command, timeout, description
+                server, command, timeout, description, deadline=deadline
             )
 
             if success:
@@ -389,11 +426,25 @@ class RemoteShutdownMixin:
                     f"    ⚠️ [{idx}/{cmd_count}] {description} failed: {error_msg} (continuing)"
                 )
 
+            if self._remote_deadline_exceeded(deadline):
+                result.timed_out = True
+                result.error = "remote shutdown deadline exceeded during pre-shutdown"
+                self._log_message(
+                    "    ⚠️ Remote shutdown deadline reached during pre-shutdown; "
+                    "final shutdown command will not be sent"
+                )
+                break
+
         if collect_result:
             return result
         return True
 
-    def _shutdown_remote_server(self, server: RemoteServerConfig) -> RemoteShutdownResult:
+    def _shutdown_remote_server(
+        self,
+        server: RemoteServerConfig,
+        *,
+        deadline: float = None,
+    ) -> RemoteShutdownResult:
         """Shutdown a single remote server via SSH.
 
         Execution order:
@@ -421,8 +472,20 @@ class RemoteShutdownMixin:
         # Execute pre-shutdown commands first
         if has_pre_cmds:
             result.pre_commands = self._execute_remote_pre_shutdown(
-                server, collect_result=True,
+                server, collect_result=True, deadline=deadline,
             )
+
+        if result.pre_commands.timed_out or self._remote_deadline_exceeded(deadline):
+            result.completed = False
+            result.timed_out = True
+            result.error = (
+                result.pre_commands.error
+                or "remote shutdown deadline exceeded before final shutdown command"
+            )
+            self._log_message(
+                f"  ⚠️ Skipping final shutdown command for {display_name}: {result.error}"
+            )
+            return result
 
         # Execute final shutdown command
         self._log_message(f"  🔌 Sending shutdown command: {server.shutdown_command}")
@@ -440,7 +503,8 @@ class RemoteShutdownMixin:
             server,
             server.shutdown_command,
             server.command_timeout,
-            "shutdown"
+            "shutdown",
+            deadline=deadline,
         )
 
         if success:

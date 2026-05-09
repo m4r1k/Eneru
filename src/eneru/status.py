@@ -257,7 +257,7 @@ def _event_matches_verbosity(row: dict, verbosity: int) -> bool:
         return True
     event_type = row.get("eventType", "")
     if verbosity == 1:
-        return event_type in POWER_EVENT_TYPES or event_type in LIFECYCLE_EVENT_TYPES
+        return event_type not in LIFECYCLE_EVENT_TYPES
     return event_type in POWER_EVENT_TYPES
 
 

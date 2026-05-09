@@ -581,6 +581,31 @@ class TestRemotePreShutdownExecution:
         assert "1/2 succeeded" in log_text
         assert "1 failed" in log_text
 
+    @pytest.mark.unit
+    def test_pre_shutdown_deadline_skips_late_final_shutdown(self, remote_monitor):
+        server = RemoteServerConfig(
+            name="slow",
+            enabled=True,
+            host="10.0.0.3",
+            user="root",
+            command_timeout=30,
+            pre_shutdown_commands=[
+                RemoteCommandConfig(command="sleep 999", timeout=1),
+                RemoteCommandConfig(command="sleep 999", timeout=1),
+            ],
+        )
+
+        with patch("eneru.shutdown.remote.time.monotonic", side_effect=[0.0, 11.0]):
+            with patch.object(remote_monitor, "_run_remote_command",
+                              return_value=(False, "timed out")) as mock_run:
+                result = remote_monitor._shutdown_remote_server(server, deadline=10.0)
+
+        assert result.timed_out is True
+        assert result.shutdown_sent is False
+        assert result.pre_commands.timed_out is True
+        assert mock_run.call_count == 1
+        assert mock_run.call_args.args[3] == "sleep 999"
+
 
 class TestRunRemoteCommand:
     """Test the _run_remote_command helper method."""

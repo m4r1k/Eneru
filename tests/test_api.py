@@ -104,13 +104,13 @@ def test_query_events_honors_verbosity(minimal_config, tmp_path):
         store.close()
 
     power_only = query_events(minimal_config, verbosity=0)
-    lifecycle = query_events(minimal_config, verbosity=1)
+    diagnostics = query_events(minimal_config, verbosity=1)
     all_events = query_events(minimal_config, verbosity=2)
 
     assert [row["eventType"] for row in power_only] == ["ON_BATTERY"]
-    assert [row["eventType"] for row in lifecycle] == [
+    assert [row["eventType"] for row in diagnostics] == [
         "ON_BATTERY",
-        "SERVICE_STARTED",
+        "REMOTE_HEALTH_FAILED",
     ]
     assert [row["eventType"] for row in all_events] == [
         "ON_BATTERY",

@@ -149,6 +149,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y python3 python3-yaml
+          dpkg-deb -f eneru_*.deb Depends | grep -q "python3-paho-mqtt"
           # --force-depends lets us install even though nut-client isn't
           # in the test container; subsequent `apt-get install -f` then
           # resolves any dependencies it can. Real install failures must
@@ -163,6 +164,7 @@ jobs:
           test -f /etc/ups-monitor/config.yaml
           # Run validation
           python3 /opt/ups-monitor/eneru.py version
+          python3 -c "import paho.mqtt.client; print('paho-mqtt import OK')"
           python3 /opt/ups-monitor/eneru.py validate --config /etc/ups-monitor/config.yaml
 
       - name: Validate example configs
@@ -205,8 +207,13 @@ jobs:
 
       - name: Install dependencies and package
         run: |
-          dnf install -y ${{ matrix.python_pkg }}
+          dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-${{ matrix.version }}.noarch.rpm
+          dnf install -y ${{ matrix.python_pkg }} python3-paho-mqtt
+          rpm -qpR eneru-*.rpm | grep -q "^python3-paho-mqtt"
           # Try rpm first (fast, with --nodeps for the missing nut-client).
+          # python3-paho-mqtt is installed above and asserted in package
+          # metadata; --nodeps is kept only because nut-client is absent in
+          # the minimal UBI test images.
           # If that fails for non-dep reasons, fall back to dnf with
           # --skip-broken. Real install failures still propagate.
           rpm -ivh --nodeps eneru-*.rpm || dnf install -y ./eneru-*.rpm --skip-broken
@@ -218,6 +225,7 @@ jobs:
           test -f /etc/ups-monitor/config.yaml
           # Run validation
           python3 /opt/ups-monitor/eneru.py version
+          python3 -c "import paho.mqtt.client; print('paho-mqtt import OK')"
           python3 /opt/ups-monitor/eneru.py validate --config /etc/ups-monitor/config.yaml
 
       - name: Validate example configs
