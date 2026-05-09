@@ -38,6 +38,13 @@ triggers:
   # 600 = 10 minutes
   critical_runtime_threshold: 600
 
+  # Ignore charge/runtime/depletion/extended-time shutdown triggers for
+  # the first few seconds after switching to battery. Some UPS firmware
+  # recalculates battery percentage/runtime during OB/OL/OB flaps and
+  # briefly reports pessimistic values. FSD and on-battery connection-loss
+  # failsafe still trigger immediately. Default 30s.
+  on_battery_stabilization_delay: 30
+
   # Battery depletion tracking
   depletion:
     # Window for calculating depletion rate (seconds)
@@ -80,10 +87,55 @@ behavior:
 logging:
   # Log file path (leave empty to disable file logging)
   file: "/var/log/ups-monitor.log"
+  # Log format: "text" (default) or "json" for SIEM/log pipelines
+  format: "text"
   # State file for current UPS status
   state_file: "/var/run/ups-monitor.state"
   # Battery history file for depletion tracking
   battery_history_file: "/var/run/ups-battery-history"
+  # Shutdown flag used as an idempotency guard
+  shutdown_flag_file: "/var/run/ups-shutdown-scheduled"
+  # Optional syslog forwarding. Existing local logger(1) power-event
+  # compatibility remains enabled separately.
+  syslog:
+    enabled: false
+    address: "/dev/log"   # or "syslog.example.com" with port below
+    port: 514
+    facility: "daemon"
+
+# ==============================================================================
+# READ-ONLY API / OBSERVABILITY
+# ==============================================================================
+api:
+  # Embedded read-only HTTP API. Bind localhost by default because v5.3
+  # intentionally has no auth/authz; v6 will add protected control APIs.
+  enabled: true
+  bind: "127.0.0.1"
+  port: 9100
+
+prometheus:
+  # Served at /metrics on the API server.
+  enabled: true
+
+remote_health:
+  # Harmless SSH healthchecks for configured remote servers. This never
+  # executes pre_shutdown_commands or shutdown_command. Shutdown sequences
+  # still attempt configured remote work even if health is red.
+  enabled: true
+  startup_check: true
+  interval: 3600
+  probe_command: "true"
+  failure_threshold: 2
+  notify_on_failure: true
+  notify_on_recovery: true
+
+mqtt:
+  # Optional outbound publishing for Home Assistant, Node-RED, etc.
+  # No inbound MQTT commands are supported in v5.3.
+  enabled: false
+  broker: "mqtt://127.0.0.1:1883"
+  topic_prefix: "eneru"
+  publish_interval: 10
 
 # ==============================================================================
 # NOTIFICATIONS (via Apprise)

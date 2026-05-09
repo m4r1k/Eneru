@@ -69,6 +69,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UNKNOWN`.
 
 ### Added
+- **Read-only observability foundation.** v5.3 adds a localhost-bound
+  embedded API with `/health`, `/ready`, `/api/v1/ups`,
+  `/api/v1/events`, `/api/v1/config`, `/api/v1/remote-health`, and
+  Prometheus `/metrics`. These surfaces are read-only; shutdown/control
+  APIs remain deferred until v6 auth/authz.
+- **Remote SSH healthchecks.** Enabled remote servers now get harmless
+  startup plus periodic SSH probes (`true` by default). Failures and
+  recoveries are logged and can notify, and the TUI/API/metrics expose
+  the latest status. Health is advisory only: real shutdown still
+  attempts configured remote pre-shutdown commands and final shutdown
+  commands with bounded timeouts.
+- **Manual remote shutdown drill.** `eneru shutdown remote --server ...`
+  tests one configured remote target through Eneru's SSH command path.
+  `--dry-run` executes no configured commands; real execution requires
+  `--i-really-want-to-proceed-with-remote-shutdown`.
+- **JSON logs, optional syslog forwarding, optional outbound MQTT, and a
+  reference Grafana dashboard** for the Prometheus metrics.
 - **Slow NUT response visibility.** Slow `upsc` calls now produce
   rate-limited per-UPS log lines. Apprise notification is stricter and
   only fires after sustained full-poll slowness, so operators get an early
@@ -85,6 +102,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   redundancy flag before daemon startup and proves shutdown still fires.
 
 ### Changed
+- Fresh on-battery transfers now have a 30-second stabilization window
+  before low-battery, critical-runtime, depletion-rate, or extended-time
+  triggers can fire. FSD and failsafe connection loss while on battery
+  remain immediate.
+- Single-server remote phases now use the same deadline-based thread
+  path as multi-server phases, so one unreachable remote target cannot
+  hold the entire shutdown sequence beyond its configured budget.
 - Event display now uses user-facing tiers: Power Events by default,
   Diagnostics with `-v` / `<V>`, and Lifecycle with `-vv` / a second
   `<V>` press.

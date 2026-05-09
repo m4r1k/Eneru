@@ -9,27 +9,40 @@ When a UPS is on battery, Eneru evaluates these conditions in order. The first m
 | Order | Trigger | Default | Why it exists |
 |-------|---------|---------|---------------|
 | 1 | FSD flag | UPS-provided | The UPS is explicitly telling clients to shut down |
-| 2 | Low battery | `20%` | Hard floor when the battery is nearly empty |
-| 3 | Critical runtime | `600s` | UPS estimate says runtime is too short |
-| 4 | Depletion rate | `15%/min` after `90s` | Observed battery loss is too fast |
-| 5 | Extended time | `900s` | Safety net for long outages or stuck UPS readings |
+| 2 | Stabilization window | `30s` | Delay firmware-derived trigger values after a fresh transfer |
+| 3 | Low battery | `20%` | Hard floor when the battery is nearly empty |
+| 4 | Critical runtime | `600s` | UPS estimate says runtime is too short |
+| 5 | Depletion rate | `15%/min` after `90s` | Observed battery loss is too fast |
+| 6 | Extended time | `900s` | Safety net for long outages or stuck UPS readings |
 | Always | Failsafe battery protection | built in | Connection lost while on battery means shut down now |
 
 Only on-battery status activates the shutdown triggers. Voltage, AVR, bypass, overload, and battery anomaly events are health alerts unless they also lead to one of the trigger conditions above.
 
 ### Power-event evaluation timeline
 
-This shows the normal path for a UPS that goes on battery but does not hit a shutdown trigger immediately. The numbers use the defaults from `src/eneru/config.py`: `check_interval: 1`, depletion `grace_period: 90`, critical runtime `600`, and extended time `900`.
+This shows the normal path for a UPS that goes on battery but does not hit a shutdown trigger immediately. The numbers use the defaults from `src/eneru/config.py`: `check_interval: 1`, `on_battery_stabilization_delay: 30`, depletion `grace_period: 90`, critical runtime `600`, and extended time `900`.
 
 | Time | UPS data | Eneru action |
 |------|----------|--------------|
 | 0s | `ups.status` changes from `OL` to `OB` | Logs the transition and records `ON_BATTERY` |
-| Next poll | Fresh NUT snapshot arrives | Checks FSD, battery percentage, runtime, depletion, and extended-time triggers in priority order |
+| Next poll | Fresh NUT snapshot arrives | Checks FSD immediately; low battery, runtime, depletion, and extended-time triggers wait for stabilization |
+| 30s | Stabilization window expires | Low battery and critical runtime can now trigger shutdown |
 | About 30 polls | Battery history reaches 30 readings | Depletion rate can now be calculated. With the default 1s `check_interval`, this is roughly 30s, but the 90s depletion grace period can still block shutdown |
 | 90s | Default depletion grace period expires | Depletion rate can trigger if it is above 15%/min |
 | Any poll | Runtime drops below 600s | Critical-runtime trigger fires unless an earlier trigger already started shutdown |
 | First poll after 900s | `time_on_battery > 900s` | Extended-time trigger fires even if battery and runtime still look safe |
 | Any poll | Power returns to `OL` | On-battery timers reset and no shutdown starts |
+
+## On-battery stabilization
+
+```yaml
+triggers:
+  on_battery_stabilization_delay: 30
+```
+
+Some UPS firmware recalculates charge percentage and runtime immediately after a transfer, especially when power briefly returns and fails again. During this window Eneru logs suspicious readings but does not start shutdown from low battery, critical runtime, depletion rate, or extended-time triggers.
+
+FSD and failsafe connection loss while already on battery are not delayed. Those signals can mean the UPS or monitor path is close to output cut-off.
 
 ## Low battery
 

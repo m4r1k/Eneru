@@ -21,6 +21,9 @@ from eneru.state import MonitorState
 from eneru.logger import UPSLogger
 from eneru.notifications import NotificationWorker, APPRISE_AVAILABLE
 from eneru.stats import StatsStore, StatsWriter
+from eneru.remote_health import RemoteHealthManager, remote_health_sidecar_path
+from eneru.api import EneruAPIServer
+from eneru.mqtt import MQTTPublisher
 from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
 from eneru.lifecycle import (
     EVENT_TYPE_DAEMON_START,
@@ -135,6 +138,7 @@ class UPSGroupMonitor(
         self._shutdown_flag_path = Path(config.logging.shutdown_flag_file + sfx)
         self._battery_history_path = Path(config.logging.battery_history_file + sfx)
         self._state_file_path = Path(config.logging.state_file + sfx)
+        self._remote_health_path = remote_health_sidecar_path(self._state_file_path)
 
         self._container_runtime: Optional[str] = None
         self._compose_available: bool = False
@@ -154,6 +158,9 @@ class UPSGroupMonitor(
             retention_hourly_days=config.statistics.retention.agg_hourly_days,
         )
         self._stats_writer: Optional[StatsWriter] = None
+        self._remote_health_manager: Optional[RemoteHealthManager] = None
+        self._api_server: Optional[EneruAPIServer] = None
+        self._mqtt_publisher: Optional[MQTTPublisher] = None
         self._slow_nut_log_threshold_seconds = SLOW_NUT_LOG_THRESHOLD_SECONDS
         self._slow_nut_log_rate_limit_seconds = SLOW_NUT_LOG_RATE_LIMIT_SECONDS
         self._slow_nut_notify_threshold_seconds = SLOW_NUT_NOTIFY_THRESHOLD_SECONDS
@@ -301,6 +308,43 @@ class UPSGroupMonitor(
         self._wait_for_initial_connection()
         self._initialize_voltage_thresholds()
         self._start_stats()
+        self._start_remote_health()
+        if not self._coordinator_mode:
+            self._start_api_server()
+            self._start_mqtt_publisher()
+
+    def _start_remote_health(self):
+        """Start advisory remote SSH healthchecks for this group."""
+        if self._remote_health_manager is not None:
+            return
+        self._remote_health_manager = RemoteHealthManager(
+            config=self.config,
+            group_label=self.config.ups.label,
+            servers=self.config.remote_servers,
+            sidecar_path=self._remote_health_path,
+            stop_event=self._stop_event,
+            log_fn=self._log_message,
+            notify_fn=lambda body, notify_type: self._send_notification(
+                body, notify_type, category="health",
+            ),
+        )
+        self._remote_health_manager.start()
+
+    def _start_api_server(self):
+        """Start the read-only API server for single-UPS mode."""
+        if self._api_server is not None:
+            return
+        self._api_server = EneruAPIServer(self, self.config, log_fn=self._log_message)
+        self._api_server.start()
+
+    def _start_mqtt_publisher(self):
+        """Start optional outbound MQTT publishing for single-UPS mode."""
+        if self._mqtt_publisher is not None:
+            return
+        self._mqtt_publisher = MQTTPublisher(
+            self, self.config, self._stop_event, log_fn=self._log_message,
+        )
+        self._mqtt_publisher.start()
 
     def _initialize_notifications(self):
         """Initialize the notification worker.
@@ -1061,6 +1105,9 @@ class UPSGroupMonitor(
         from pathlib import Path
         stats_dir = Path(self.config.statistics.db_directory)
 
+        if self._api_server is not None:
+            self._api_server.stop()
+
         if self._shutdown_flag_path.exists():
             if self._notification_worker:
                 # Mid-shutdown signal: still try to drain any in-flight
@@ -1209,6 +1256,10 @@ class UPSGroupMonitor(
         current_time = int(time.time())
         time_on_battery = current_time - self.state.on_battery_start_time
         depletion_rate = self._calculate_depletion_rate(battery_charge)
+        stabilization_delay = max(
+            0, int(self.config.triggers.on_battery_stabilization_delay)
+        )
+        stabilizing = time_on_battery < stabilization_delay
 
         shutdown_reason = ""
 
@@ -1216,10 +1267,18 @@ class UPSGroupMonitor(
         if is_numeric(battery_charge):
             battery_int = int(float(battery_charge))
             if battery_int < self.config.triggers.low_battery_threshold:
-                shutdown_reason = (
-                    f"Battery charge {battery_int}% below threshold "
-                    f"{self.config.triggers.low_battery_threshold}%"
-                )
+                if stabilizing:
+                    self._log_message(
+                        f"🕒 INFO: Low battery reading ({battery_int}% < "
+                        f"{self.config.triggers.low_battery_threshold}%) ignored during "
+                        f"on-battery stabilization "
+                        f"({time_on_battery}s/{stabilization_delay}s)."
+                    )
+                else:
+                    shutdown_reason = (
+                        f"Battery charge {battery_int}% below threshold "
+                        f"{self.config.triggers.low_battery_threshold}%"
+                    )
         else:
             self._log_message(f"⚠️ WARNING: Received non-numeric battery charge value: '{battery_charge}'")
 
@@ -1227,15 +1286,29 @@ class UPSGroupMonitor(
         if not shutdown_reason and is_numeric(battery_runtime):
             runtime_int = int(float(battery_runtime))
             if runtime_int < self.config.triggers.critical_runtime_threshold:
-                shutdown_reason = (
-                    f"Runtime {format_seconds(runtime_int)} below threshold "
-                    f"{format_seconds(self.config.triggers.critical_runtime_threshold)}"
-                )
+                if stabilizing:
+                    self._log_message(
+                        f"🕒 INFO: Critical runtime reading "
+                        f"({format_seconds(runtime_int)} < "
+                        f"{format_seconds(self.config.triggers.critical_runtime_threshold)}) "
+                        "ignored during on-battery stabilization "
+                        f"({time_on_battery}s/{stabilization_delay}s)."
+                    )
+                else:
+                    shutdown_reason = (
+                        f"Runtime {format_seconds(runtime_int)} below threshold "
+                        f"{format_seconds(self.config.triggers.critical_runtime_threshold)}"
+                    )
 
         # T3. Dangerous depletion rate (with grace period)
         if not shutdown_reason and is_numeric(depletion_rate) and depletion_rate > 0:
             if depletion_rate > self.config.triggers.depletion.critical_rate:
-                if time_on_battery < self.config.triggers.depletion.grace_period:
+                if stabilizing:
+                    self._log_message(
+                        f"🕒 INFO: High depletion rate ({depletion_rate}%/min) ignored during "
+                        f"on-battery stabilization ({time_on_battery}s/{stabilization_delay}s)."
+                    )
+                elif time_on_battery < self.config.triggers.depletion.grace_period:
                     self._log_message(
                         f"🕒 INFO: High depletion rate ({depletion_rate}%/min) ignored during "
                         f"grace period ({time_on_battery}s/{self.config.triggers.depletion.grace_period}s)."
@@ -1248,7 +1321,12 @@ class UPSGroupMonitor(
 
         # T4. Extended time on battery
         if not shutdown_reason and time_on_battery > self.config.triggers.extended_time.threshold:
-            if self.config.triggers.extended_time.enabled:
+            if stabilizing:
+                self._log_message(
+                    f"🕒 INFO: Extended-time trigger ignored during on-battery "
+                    f"stabilization ({time_on_battery}s/{stabilization_delay}s)."
+                )
+            elif self.config.triggers.extended_time.enabled:
                 shutdown_reason = (
                     f"Time on battery {format_seconds(time_on_battery)} exceeded "
                     f"threshold {format_seconds(self.config.triggers.extended_time.threshold)}"

@@ -6,10 +6,11 @@ from datetime import datetime
 from pathlib import Path
 
 from eneru.version import __version__
-from eneru.config import ConfigLoader
+from eneru.config import Config, ConfigLoader, UPSConfig, UPSGroupConfig
 from eneru.monitor import UPSGroupMonitor, compute_effective_order
 from eneru.multi_ups import MultiUPSCoordinator
 from eneru.notifications import APPRISE_AVAILABLE
+from eneru.remote_health import is_safe_probe_command, run_remote_probe
 
 # Optional import for Apprise (needed for test notifications)
 try:
@@ -370,6 +371,114 @@ def _cmd_test_notifications(args):
     sys.exit(exit_code)
 
 
+class _CLILogger:
+    """Small logger adapter used by one-shot CLI drills."""
+
+    def __init__(self, log_file=None):
+        self.log_file = Path(log_file) if log_file else None
+
+    def log(self, message: str):
+        print(message)
+        if self.log_file:
+            with self.log_file.open("a") as f:
+                f.write(message + "\n")
+
+
+def _iter_remote_server_owners(config):
+    """Yield ``(owner_label, owner_name, server)`` for every remote server."""
+    for group in config.ups_groups:
+        for server in group.remote_servers:
+            yield group.ups.label, group.ups.name, server
+    for group in config.redundancy_groups:
+        label = f"redundancy:{group.name}"
+        for server in group.remote_servers:
+            yield label, group.name, server
+
+
+def _select_remote_server(config, server_ref: str, group_ref: str = None):
+    """Select exactly one remote server from config."""
+    matches = []
+    for owner_label, owner_name, server in _iter_remote_server_owners(config):
+        names = {server.name, server.host, server.name or server.host}
+        if server_ref in names:
+            if group_ref and group_ref not in {owner_label, owner_name}:
+                continue
+            matches.append((owner_label, owner_name, server))
+    if not matches:
+        raise SystemExit(f"ERROR: remote server {server_ref!r} not found")
+    if len(matches) > 1:
+        owners = ", ".join(owner for owner, _, _ in matches)
+        raise SystemExit(
+            f"ERROR: remote server {server_ref!r} is ambiguous. "
+            f"Use --group. Matches: {owners}"
+        )
+    return matches[0]
+
+
+def _cmd_shutdown_remote(args):
+    """Run a manual one-server remote shutdown drill."""
+    config = _load_config(args)
+    _exit_on_config_errors(config, args)
+
+    if not args.dry_run and not args.confirm:
+        print(
+            "ERROR: real remote shutdown requires "
+            "--i-really-want-to-proceed-with-remote-shutdown"
+        )
+        sys.exit(2)
+
+    owner_label, owner_name, server = _select_remote_server(
+        config, args.server, args.group,
+    )
+
+    logger = _CLILogger(args.log_file)
+    logger.log(f"Manual remote shutdown drill: {server.name or server.host}")
+    logger.log(f"  Group: {owner_label}")
+    logger.log(f"  Host: {server.user}@{server.host}")
+    logger.log(f"  Mode: {'dry-run' if args.dry_run else 'REAL SHUTDOWN'}")
+
+    if args.connectivity_check:
+        probe = config.remote_health.probe_command
+        if not is_safe_probe_command(probe):
+            logger.log("  Connectivity check: skipped (unsafe probe command rejected)")
+        else:
+            ok, error, latency = run_remote_probe(server, probe)
+            if ok:
+                logger.log(f"  Connectivity check: OK ({latency} ms)")
+            else:
+                logger.log(f"  Connectivity check: FAILED ({error})")
+
+    drill_config = Config(
+        ups_groups=[
+            UPSGroupConfig(
+                ups=UPSConfig(name=owner_name or owner_label,
+                              display_name=owner_label),
+                remote_servers=[server],
+                is_local=False,
+            )
+        ],
+        behavior=config.behavior,
+        logging=config.logging,
+        notifications=config.notifications,
+        local_shutdown=config.local_shutdown,
+        statistics=config.statistics,
+        api=config.api,
+        prometheus=config.prometheus,
+        remote_health=config.remote_health,
+        mqtt=config.mqtt,
+    )
+    drill_config.behavior.dry_run = bool(args.dry_run)
+
+    monitor = UPSGroupMonitor(drill_config)
+    monitor.logger = logger
+    monitor._notification_worker = None
+
+    if args.dry_run:
+        logger.log("  Dry-run: configured remote commands will not be executed.")
+    monitor._shutdown_remote_server(server)
+    logger.log("Manual remote shutdown drill complete.")
+
+
 def _cmd_version(args):
     """Print version and exit."""
     print(f"Eneru v{__version__}")
@@ -460,6 +569,7 @@ def main():
         epilog=(
             "subcommands:\n"
             "  run                  Start the monitoring daemon\n"
+            "  shutdown remote      Manually drill one configured remote shutdown\n"
             "  validate             Validate configuration and show overview\n"
             "  monitor / tui        Launch real-time TUI dashboard\n"
             "  test-notifications   Send a test notification\n"
@@ -483,6 +593,37 @@ def main():
     run_parser.add_argument("--exit-after-shutdown", action="store_true",
                             help="Exit after completing shutdown sequence")
     run_parser.set_defaults(func=_cmd_run)
+
+    # --- shutdown remote ---
+    shutdown_parser = subparsers.add_parser("shutdown", help="Manual shutdown drills")
+    shutdown_sub = shutdown_parser.add_subparsers(dest="shutdown_command")
+    remote_parser = shutdown_sub.add_parser(
+        "remote",
+        help="Run a manual shutdown drill for one configured remote server",
+    )
+    remote_parser.add_argument("-c", "--config", help="Path to configuration file",
+                               default=None)
+    remote_parser.add_argument("--server", required=True,
+                               help="Remote server name or host from config")
+    remote_parser.add_argument("--group",
+                               help="UPS/redundancy group when server name is ambiguous")
+    remote_parser.add_argument("--dry-run", action="store_true",
+                               help="Do not execute configured remote commands")
+    remote_parser.add_argument(
+        "--i-really-want-to-proceed-with-remote-shutdown",
+        dest="confirm",
+        action="store_true",
+        help="Required for real remote command execution",
+    )
+    remote_parser.add_argument("--connectivity-check", dest="connectivity_check",
+                               action="store_true", default=True,
+                               help="Run harmless SSH probe first (default)")
+    remote_parser.add_argument("--no-connectivity-check", dest="connectivity_check",
+                               action="store_false",
+                               help="Skip harmless SSH probe")
+    remote_parser.add_argument("--log-file",
+                               help="Optional file to append this drill log to")
+    remote_parser.set_defaults(func=_cmd_shutdown_remote)
 
     # --- validate ---
     val_parser = subparsers.add_parser("validate", help="Validate configuration and show overview")
@@ -564,7 +705,7 @@ def main():
     args = parser.parse_args()
 
     # No subcommand provided -> show help
-    if args.command is None:
+    if args.command is None or not hasattr(args, "func"):
         parser.print_help()
         sys.exit(0)
 

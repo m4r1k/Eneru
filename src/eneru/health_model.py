@@ -165,6 +165,15 @@ def assess_health(
     # inside the on-battery handler. A recovering OL UPS may still have low
     # charge; that should not by itself exhaust redundancy quorum.
     if triggers is not None and "OB" in snapshot.status:
+        stabilization_delay = getattr(
+            triggers, "on_battery_stabilization_delay", 0
+        )
+        try:
+            stabilization_delay = max(0, int(stabilization_delay))
+        except (TypeError, ValueError):
+            stabilization_delay = 0
+        if snapshot.time_on_battery < stabilization_delay:
+            return UPSHealth.DEGRADED
         try:
             battery = int(float(snapshot.battery_charge))
         except (TypeError, ValueError):

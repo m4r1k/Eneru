@@ -561,5 +561,151 @@ cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
 echo "PASS: bug #4 re-arm; OB->OL->OB produced 2 EMERGENCY_SHUTDOWN_INITIATED rows"
 )
 
+# ======================================================================
+# Test 39: On-battery stabilization suppresses transient critical readings
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 39: On-battery stabilization suppresses transient critical readings"
+
+STAB_CFG=/tmp/config-e2e-stabilization.yaml
+sed '/on_battery_stabilization_delay/d' "$E2E_DIR/config-e2e-dry-run.yaml" > "$STAB_CFG"
+
+rm -f /tmp/eneru-e2e-shutdown-flag
+cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply.dev
+sleep 3
+
+set +e
+timeout 10s eneru run --config "$STAB_CFG" --exit-after-shutdown 2>&1 | tee /tmp/test39.log
+RC=${PIPESTATUS[0]}
+set -e
+if [ "$RC" -ne 124 ]; then
+  echo "FAIL: expected stabilization run to keep monitoring until timeout, got $RC"
+  cat /tmp/test39.log
+  exit 1
+fi
+if grep -q "SHUTDOWN SEQUENCE" /tmp/test39.log; then
+  echo "FAIL: shutdown fired inside on-battery stabilization window"
+  exit 1
+fi
+if ! grep -q "stabilization" /tmp/test39.log; then
+  echo "FAIL: expected stabilization log line"
+  exit 1
+fi
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+echo "PASS: on-battery stabilization suppressed transient critical readings"
+)
+
+# ======================================================================
+# Test 40: Remote SSH healthcheck is harmless
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 40: Remote SSH healthcheck is harmless"
+
+cd $E2E_DIR
+docker compose exec -T ssh-target sh -c "rm -f /var/run/shutdown-triggered && touch /var/run/server-alive"
+rm -f /tmp/eneru-e2e-state.remote-health.json /tmp/eneru-e2e-shutdown-flag
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+
+set +e
+timeout 8s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test40.log
+RC=${PIPESTATUS[0]}
+set -e
+if [ "$RC" -ne 124 ]; then
+  echo "FAIL: expected timeout while daemon stayed alive, got $RC"
+  exit 1
+fi
+if ! grep -q "HEALTHY" /tmp/eneru-e2e-state.remote-health.json; then
+  echo "FAIL: remote health sidecar did not show HEALTHY"
+  cat /tmp/eneru-e2e-state.remote-health.json 2>/dev/null || true
+  exit 1
+fi
+if docker compose exec -T ssh-target test -f /var/run/shutdown-triggered; then
+  echo "FAIL: healthcheck created shutdown marker"
+  exit 1
+fi
+echo "PASS: remote SSH healthcheck reached target without shutdown"
+)
+
+# ======================================================================
+# Test 41: Manual remote dry-run executes no configured commands
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 41: Manual remote dry-run executes no configured commands"
+
+cd $E2E_DIR
+docker compose exec -T ssh-target sh -c "rm -f /var/run/shutdown-triggered && touch /var/run/server-alive"
+
+eneru shutdown remote --config "$E2E_DIR/config-e2e.yaml" \
+  --server "E2E SSH Target" --dry-run 2>&1 | tee /tmp/test41.log
+
+if docker compose exec -T ssh-target test -f /var/run/shutdown-triggered; then
+  echo "FAIL: dry-run sent configured shutdown command"
+  exit 1
+fi
+if ! grep -q "Dry-run" /tmp/test41.log; then
+  echo "FAIL: dry-run output missing"
+  exit 1
+fi
+echo "PASS: manual remote dry-run did not execute configured commands"
+)
+
+# ======================================================================
+# Test 42: Manual confirmed remote shutdown reaches selected target
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 42: Manual confirmed remote shutdown reaches selected target"
+
+cd $E2E_DIR
+docker compose exec -T ssh-target sh -c "rm -f /var/run/shutdown-triggered && touch /var/run/server-alive"
+
+eneru shutdown remote --config "$E2E_DIR/config-e2e.yaml" \
+  --server "E2E SSH Target" \
+  --i-really-want-to-proceed-with-remote-shutdown 2>&1 | tee /tmp/test42.log
+
+if ! docker compose exec -T ssh-target test -f /var/run/shutdown-triggered; then
+  echo "FAIL: confirmed manual remote shutdown did not reach target"
+  exit 1
+fi
+echo "PASS: manual confirmed remote shutdown reached selected target"
+)
+
+# ======================================================================
+# Test 43: Embedded API health/readiness/metrics
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 43: Embedded API health/readiness/metrics"
+
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+timeout 12s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml \
+  > /tmp/test43-daemon.log 2>&1 &
+DAEMON_PID=$!
+trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
+
+for i in {1..10}; do
+  if curl -fsS http://127.0.0.1:9100/health >/tmp/test43-health.json; then
+    break
+  fi
+  sleep 1
+done
+curl -fsS http://127.0.0.1:9100/ready >/tmp/test43-ready.json
+curl -fsS http://127.0.0.1:9100/metrics >/tmp/test43-metrics.txt
+
+if ! grep -q "eneru_up 1" /tmp/test43-metrics.txt; then
+  echo "FAIL: metrics endpoint missing eneru_up"
+  cat /tmp/test43-metrics.txt
+  exit 1
+fi
+
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+trap - EXIT
+echo "PASS: embedded API health/readiness/metrics responded"
+)
+
 echo ""
 echo "=== Group 'single-ups' completed successfully ==="

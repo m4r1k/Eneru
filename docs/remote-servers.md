@@ -243,6 +243,37 @@ sudo eneru validate --config /etc/ups-monitor/config.yaml
 sudo eneru run --dry-run --config /etc/ups-monitor/config.yaml
 ```
 
+Eneru can also run advisory SSH healthchecks. These use a dedicated harmless probe command (`true` by default) and never execute configured pre-shutdown or shutdown commands:
+
+```yaml
+remote_health:
+  enabled: true
+  startup_check: true
+  interval: 3600
+  probe_command: "true"
+```
+
+Health status appears in the TUI, API, and Prometheus metrics. It is advisory only: during a real shutdown sequence, Eneru still attempts each configured remote pre-shutdown command and final shutdown command with bounded timeouts.
+
+## Manual remote shutdown drill
+
+To test one configured remote target through Eneru's SSH command path without waiting for a UPS event:
+
+```bash
+sudo eneru shutdown remote --config /etc/ups-monitor/config.yaml --server nas --dry-run
+```
+
+Dry-run mode does not execute configured remote commands. It may run the harmless connectivity probe so you can verify SSH access.
+
+Real execution requires an intentionally long confirmation flag:
+
+```bash
+sudo eneru shutdown remote --config /etc/ups-monitor/config.yaml --server nas \
+  --i-really-want-to-proceed-with-remote-shutdown
+```
+
+This command only targets the selected remote server. It does not run local VM shutdown, local container shutdown, filesystem unmounts, local poweroff, or whole-group drain.
+
 Only test the final shutdown command when you are prepared for the remote server to power off:
 
 ```bash

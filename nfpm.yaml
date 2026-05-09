@@ -162,6 +162,34 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/status.py
+    dst: /opt/ups-monitor/eneru/status.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/remote_health.py
+    dst: /opt/ups-monitor/eneru/remote_health.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/api.py
+    dst: /opt/ups-monitor/eneru/api.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/mqtt.py
+    dst: /opt/ups-monitor/eneru/mqtt.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   - src: src/eneru/graph.py
     dst: /opt/ups-monitor/eneru/graph.py
     file_info:

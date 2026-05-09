@@ -14,7 +14,7 @@ _eneru() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local subcommands="run validate monitor tui test-notifications completion version"
+    local subcommands="run shutdown validate monitor tui test-notifications completion version"
     local global_opts="-h --help"
     local config_opts="-c --config"
     local monitor_opts="--once --interval --graph --time --events-only -v --verbose --length"
@@ -67,6 +67,9 @@ _eneru() {
     case "$subcmd" in
         run)
             COMPREPLY=( $(compgen -W "$config_opts $run_opts $global_opts" -- "$cur") )
+            ;;
+        shutdown)
+            COMPREPLY=( $(compgen -W "remote $global_opts" -- "$cur") )
             ;;
         validate|test-notifications)
             COMPREPLY=( $(compgen -W "$config_opts $global_opts" -- "$cur") )

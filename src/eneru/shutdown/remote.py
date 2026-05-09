@@ -68,16 +68,10 @@ class RemoteShutdownMixin:
             if num_phases > 1:
                 self._log_message(f"  📋 Phase {phase_idx}/{num_phases} (order={key}): {names}")
 
-            if len(phase_servers) == 1:
-                server = phase_servers[0]
-                display_name = server.name or server.host
-                try:
-                    self._shutdown_remote_server(server)
-                    completed += 1
-                except Exception as e:
-                    self._log_message(f"  ❌ {display_name} shutdown failed: {e}")
-            else:
-                completed += self._shutdown_servers_parallel(phase_servers)
+            # Use the same deadline-based thread path for one server and
+            # many servers. A single unreachable host must not stall the
+            # whole shutdown sequence longer than its configured budget.
+            completed += self._shutdown_servers_parallel(phase_servers)
 
         # Log summary
         self._log_message(f"  ✅ Remote shutdown complete ({completed}/{server_count} servers)")
@@ -124,7 +118,8 @@ class RemoteShutdownMixin:
             t = threading.Thread(
                 target=shutdown_server_thread,
                 args=(server,),
-                name=f"remote-shutdown-{server.name or server.host}"
+                name=f"remote-shutdown-{server.name or server.host}",
+                daemon=True,
             )
             t.start()
             threads.append(t)

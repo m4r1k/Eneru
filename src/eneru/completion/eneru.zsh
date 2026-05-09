@@ -13,6 +13,7 @@ _eneru() {
 
     subcommands=(
         'run:Start the monitoring daemon'
+        'shutdown:Manual shutdown drills'
         'validate:Validate configuration and show overview'
         'monitor:Launch real-time TUI dashboard'
         'tui:Alias for monitor -- launch real-time TUI dashboard'
@@ -43,6 +44,9 @@ _eneru() {
                         '(-c --config)'{-c,--config}'[path to configuration file]:config file:_files' \
                         '--dry-run[run in dry-run mode (overrides config)]' \
                         '--exit-after-shutdown[exit after completing shutdown sequence]'
+                    ;;
+                shutdown)
+                    _values 'shutdown command' remote
                     ;;
                 validate|test-notifications)
                     _arguments \

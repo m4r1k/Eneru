@@ -39,6 +39,7 @@ class TriggersConfig:
     """Shutdown triggers configuration."""
     low_battery_threshold: int = 20
     critical_runtime_threshold: int = 600
+    on_battery_stabilization_delay: int = 30
     depletion: DepletionConfig = field(default_factory=DepletionConfig)
     extended_time: ExtendedTimeConfig = field(default_factory=ExtendedTimeConfig)
     # Voltage warning band as a fraction of input.voltage.nominal.
@@ -86,12 +87,58 @@ class UPSConfig:
 
 
 @dataclass
+class SyslogConfig:
+    """Optional syslog forwarding configuration."""
+    enabled: bool = False
+    address: str = "/dev/log"
+    port: int = 514
+    facility: str = "daemon"
+
+
+@dataclass
 class LoggingConfig:
     """Logging configuration."""
     file: Optional[str] = "/var/log/ups-monitor.log"
     state_file: str = "/var/run/ups-monitor.state"
     battery_history_file: str = "/var/run/ups-battery-history"
     shutdown_flag_file: str = "/var/run/ups-shutdown-scheduled"
+    format: str = "text"
+    syslog: SyslogConfig = field(default_factory=SyslogConfig)
+
+
+@dataclass
+class APIConfig:
+    """Embedded read-only HTTP API configuration."""
+    enabled: bool = True
+    bind: str = "127.0.0.1"
+    port: int = 9100
+
+
+@dataclass
+class PrometheusConfig:
+    """Prometheus endpoint configuration."""
+    enabled: bool = True
+
+
+@dataclass
+class RemoteHealthConfig:
+    """Harmless SSH healthcheck configuration for remote servers."""
+    enabled: bool = True
+    startup_check: bool = True
+    interval: int = 3600
+    probe_command: str = "true"
+    failure_threshold: int = 2
+    notify_on_failure: bool = True
+    notify_on_recovery: bool = True
+
+
+@dataclass
+class MQTTConfig:
+    """Optional outbound MQTT publishing configuration."""
+    enabled: bool = False
+    broker: str = ""
+    topic_prefix: str = "eneru"
+    publish_interval: int = 10
 
 
 @dataclass
@@ -346,6 +393,10 @@ class Config:
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     local_shutdown: LocalShutdownConfig = field(default_factory=LocalShutdownConfig)
     statistics: StatsConfig = field(default_factory=StatsConfig)
+    api: APIConfig = field(default_factory=APIConfig)
+    prometheus: PrometheusConfig = field(default_factory=PrometheusConfig)
+    remote_health: RemoteHealthConfig = field(default_factory=RemoteHealthConfig)
+    mqtt: MQTTConfig = field(default_factory=MQTTConfig)
     # v5.2.1: source path of the YAML this Config was loaded from.
     # Used by deferred_delivery to spawn a systemd-run timer that
     # re-loads the same config out-of-process. None when the Config
@@ -575,6 +626,10 @@ class ConfigLoader:
                                                     defaults.low_battery_threshold),
             critical_runtime_threshold=triggers_data.get('critical_runtime_threshold',
                                                          defaults.critical_runtime_threshold),
+            on_battery_stabilization_delay=triggers_data.get(
+                'on_battery_stabilization_delay',
+                defaults.on_battery_stabilization_delay,
+            ),
             depletion=DepletionConfig(
                 window=depletion_data.get('window', defaults.depletion.window),
                 critical_rate=depletion_data.get('critical_rate',
@@ -796,6 +851,7 @@ class ConfigLoader:
 
         if 'logging' in data:
             logging_data = data['logging']
+            syslog_data = logging_data.get('syslog') or {}
             config.logging = LoggingConfig(
                 file=logging_data.get('file', config.logging.file),
                 state_file=logging_data.get('state_file', config.logging.state_file),
@@ -803,6 +859,13 @@ class ConfigLoader:
                                                       config.logging.battery_history_file),
                 shutdown_flag_file=logging_data.get('shutdown_flag_file',
                                                     config.logging.shutdown_flag_file),
+                format=logging_data.get('format', config.logging.format),
+                syslog=SyslogConfig(
+                    enabled=syslog_data.get('enabled', config.logging.syslog.enabled),
+                    address=syslog_data.get('address', config.logging.syslog.address),
+                    port=syslog_data.get('port', config.logging.syslog.port),
+                    facility=syslog_data.get('facility', config.logging.syslog.facility),
+                ),
             )
 
         config.notifications = cls._parse_notifications(data)
@@ -835,6 +898,47 @@ class ConfigLoader:
                     agg_5min_days=retention_data.get('agg_5min_days', defaults.agg_5min_days),
                     agg_hourly_days=retention_data.get('agg_hourly_days', defaults.agg_hourly_days),
                 ),
+            )
+
+        if 'api' in data:
+            api_data = data.get('api') or {}
+            config.api = APIConfig(
+                enabled=api_data.get('enabled', config.api.enabled),
+                bind=api_data.get('bind', config.api.bind),
+                port=api_data.get('port', config.api.port),
+            )
+
+        if 'prometheus' in data:
+            prom_data = data.get('prometheus') or {}
+            config.prometheus = PrometheusConfig(
+                enabled=prom_data.get('enabled', config.prometheus.enabled),
+            )
+
+        if 'remote_health' in data:
+            rh_data = data.get('remote_health') or {}
+            config.remote_health = RemoteHealthConfig(
+                enabled=rh_data.get('enabled', config.remote_health.enabled),
+                startup_check=rh_data.get('startup_check',
+                                          config.remote_health.startup_check),
+                interval=rh_data.get('interval', config.remote_health.interval),
+                probe_command=rh_data.get('probe_command',
+                                          config.remote_health.probe_command),
+                failure_threshold=rh_data.get('failure_threshold',
+                                              config.remote_health.failure_threshold),
+                notify_on_failure=rh_data.get('notify_on_failure',
+                                              config.remote_health.notify_on_failure),
+                notify_on_recovery=rh_data.get('notify_on_recovery',
+                                               config.remote_health.notify_on_recovery),
+            )
+
+        if 'mqtt' in data:
+            mqtt_data = data.get('mqtt') or {}
+            config.mqtt = MQTTConfig(
+                enabled=mqtt_data.get('enabled', config.mqtt.enabled),
+                broker=mqtt_data.get('broker', config.mqtt.broker),
+                topic_prefix=mqtt_data.get('topic_prefix', config.mqtt.topic_prefix),
+                publish_interval=mqtt_data.get('publish_interval',
+                                               config.mqtt.publish_interval),
             )
 
         # Detect legacy vs multi-UPS format
@@ -1011,12 +1115,47 @@ class ConfigLoader:
         if raw_data:
             trigger_keys = {
                 "low_battery_threshold", "critical_runtime_threshold",
-                "depletion", "extended_time", "voltage_sensitivity",
+                "on_battery_stabilization_delay", "depletion",
+                "extended_time", "voltage_sensitivity",
             }
             depletion_keys = {"window", "critical_rate", "grace_period"}
             extended_time_keys = {"enabled", "threshold"}
             messages.extend(cls._unknown_key_errors(
                 "behavior", raw_data.get("behavior", {}), {"dry_run"},
+            ))
+            messages.extend(cls._unknown_key_errors(
+                "api", raw_data.get("api", {}), {"enabled", "bind", "port"},
+            ))
+            messages.extend(cls._unknown_key_errors(
+                "prometheus", raw_data.get("prometheus", {}), {"enabled"},
+            ))
+            messages.extend(cls._unknown_key_errors(
+                "remote_health",
+                raw_data.get("remote_health", {}),
+                {
+                    "enabled", "startup_check", "interval", "probe_command",
+                    "failure_threshold", "notify_on_failure",
+                    "notify_on_recovery",
+                },
+            ))
+            messages.extend(cls._unknown_key_errors(
+                "mqtt",
+                raw_data.get("mqtt", {}),
+                {"enabled", "broker", "topic_prefix", "publish_interval"},
+            ))
+            logging_raw = raw_data.get("logging", {})
+            messages.extend(cls._unknown_key_errors(
+                "logging",
+                logging_raw,
+                {
+                    "file", "state_file", "battery_history_file",
+                    "shutdown_flag_file", "format", "syslog",
+                },
+            ))
+            messages.extend(cls._unknown_key_errors(
+                "logging.syslog",
+                logging_raw.get("syslog", {}) if isinstance(logging_raw, dict) else {},
+                {"enabled", "address", "port", "facility"},
             ))
 
             def _validate_triggers(section: str, data: Any):
@@ -1076,6 +1215,65 @@ class ConfigLoader:
             messages.append(
                 "WARNING: Notifications enabled but apprise package not installed. "
                 "Notifications will be disabled. Install with: pip install apprise"
+            )
+
+        if config.logging.format not in ("text", "json"):
+            messages.append(
+                "ERROR: logging.format must be 'text' or 'json', "
+                f"got {config.logging.format!r}."
+            )
+
+        if (not isinstance(config.logging.syslog.port, int)
+                or isinstance(config.logging.syslog.port, bool)
+                or not 1 <= config.logging.syslog.port <= 65535):
+            messages.append(
+                "ERROR: logging.syslog.port must be an integer between 1 and 65535, "
+                f"got {config.logging.syslog.port!r}."
+            )
+
+        if (not isinstance(config.api.port, int)
+                or isinstance(config.api.port, bool)
+                or not 1 <= config.api.port <= 65535):
+            messages.append(
+                "ERROR: api.port must be an integer between 1 and 65535, "
+                f"got {config.api.port!r}."
+            )
+
+        if (not isinstance(config.remote_health.interval, int)
+                or isinstance(config.remote_health.interval, bool)
+                or config.remote_health.interval < 60):
+            messages.append(
+                "ERROR: remote_health.interval must be an integer >= 60 seconds, "
+                f"got {config.remote_health.interval!r}."
+            )
+
+        if (not isinstance(config.remote_health.failure_threshold, int)
+                or isinstance(config.remote_health.failure_threshold, bool)
+                or config.remote_health.failure_threshold < 1):
+            messages.append(
+                "ERROR: remote_health.failure_threshold must be an integer >= 1, "
+                f"got {config.remote_health.failure_threshold!r}."
+            )
+
+        if not str(config.remote_health.probe_command).strip():
+            messages.append("ERROR: remote_health.probe_command cannot be empty.")
+        else:
+            from eneru.remote_health import is_safe_probe_command
+            if not is_safe_probe_command(config.remote_health.probe_command):
+                messages.append(
+                    "ERROR: remote_health.probe_command must be a harmless "
+                    f"SSH probe, got {config.remote_health.probe_command!r}."
+                )
+
+        if config.mqtt.enabled and not str(config.mqtt.broker).strip():
+            messages.append("ERROR: mqtt.broker is required when mqtt.enabled is true.")
+
+        if (not isinstance(config.mqtt.publish_interval, int)
+                or isinstance(config.mqtt.publish_interval, bool)
+                or config.mqtt.publish_interval < 1):
+            messages.append(
+                "ERROR: mqtt.publish_interval must be an integer >= 1 second, "
+                f"got {config.mqtt.publish_interval!r}."
             )
 
         # Check for legacy Discord configuration
@@ -1179,6 +1377,29 @@ class ConfigLoader:
                 f"(got {hys}). A flap longer than ~10 minutes is no longer "
                 "a flap; consider lowering this value."
             )
+
+        for group in config.ups_groups:
+            delay = group.triggers.on_battery_stabilization_delay
+            if (not isinstance(delay, int)
+                    or isinstance(delay, bool)
+                    or delay < 0):
+                messages.append(
+                    f"ERROR: ups[{group.ups.label!r}]."
+                    "triggers.on_battery_stabilization_delay must be a "
+                    f"non-negative integer, got {delay!r}."
+                )
+
+        for rg in config.redundancy_groups:
+            delay = rg.triggers.on_battery_stabilization_delay
+            if (not isinstance(delay, int)
+                    or isinstance(delay, bool)
+                    or delay < 0):
+                label = rg.name or "(unnamed)"
+                messages.append(
+                    f"ERROR: redundancy_groups[{label!r}]."
+                    "triggers.on_battery_stabilization_delay must be a "
+                    f"non-negative integer, got {delay!r}."
+                )
 
         # Multi-UPS validation
         if config.multi_ups:

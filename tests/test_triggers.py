@@ -39,7 +39,7 @@ class TestTriggerEvaluation:
 
         with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
             monitor.state.previous_status = "OB DISCHRG"
-            monitor.state.on_battery_start_time = int(time.time()) - 10
+            monitor.state.on_battery_start_time = int(time.time()) - 40
             monitor._handle_on_battery(ups_data)
 
             mock_shutdown.assert_called_once()
@@ -61,7 +61,7 @@ class TestTriggerEvaluation:
 
         with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
             monitor.state.previous_status = "OB DISCHRG"
-            monitor.state.on_battery_start_time = int(time.time()) - 10
+            monitor.state.on_battery_start_time = int(time.time()) - 40
             monitor._handle_on_battery(ups_data)
 
             mock_shutdown.assert_not_called()
@@ -80,7 +80,7 @@ class TestTriggerEvaluation:
 
         with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
             monitor.state.previous_status = "OB DISCHRG"
-            monitor.state.on_battery_start_time = int(time.time()) - 10
+            monitor.state.on_battery_start_time = int(time.time()) - 40
             monitor._handle_on_battery(ups_data)
 
             mock_shutdown.assert_called_once()
@@ -235,7 +235,7 @@ class TestTriggerPriority:
 
         with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
             monitor.state.previous_status = "OB DISCHRG"
-            monitor.state.on_battery_start_time = int(time.time()) - 10
+            monitor.state.on_battery_start_time = int(time.time()) - 40
             monitor._handle_on_battery(ups_data)
 
             # Should trigger on low battery, not runtime
@@ -243,3 +243,43 @@ class TestTriggerPriority:
             call_args = mock_shutdown.call_args[0][0]
             assert "15%" in call_args  # Low battery message
             assert "Runtime" not in call_args
+
+    @pytest.mark.unit
+    def test_on_battery_stabilization_suppresses_runtime_trigger(self, monitor):
+        """Fresh OB readings can be firmware recalibration noise."""
+        monitor.config.triggers.critical_runtime_threshold = 600
+        monitor.config.triggers.on_battery_stabilization_delay = 30
+
+        ups_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "89",
+            "battery.runtime": "388",
+            "ups.load": "30",
+        }
+
+        with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
+            monitor.state.previous_status = "OB DISCHRG"
+            monitor.state.on_battery_start_time = int(time.time()) - 10
+            monitor._handle_on_battery(ups_data)
+
+            mock_shutdown.assert_not_called()
+
+    @pytest.mark.unit
+    def test_on_battery_stabilization_can_be_disabled(self, monitor):
+        """A zero stabilization delay preserves immediate legacy behavior."""
+        monitor.config.triggers.critical_runtime_threshold = 600
+        monitor.config.triggers.on_battery_stabilization_delay = 0
+
+        ups_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "89",
+            "battery.runtime": "388",
+            "ups.load": "30",
+        }
+
+        with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
+            monitor.state.previous_status = "OB DISCHRG"
+            monitor.state.on_battery_start_time = int(time.time()) - 1
+            monitor._handle_on_battery(ups_data)
+
+            mock_shutdown.assert_called_once()

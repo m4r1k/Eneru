@@ -18,6 +18,7 @@ from typing import Optional, Dict, List, Tuple
 from eneru.version import __version__
 from eneru.config import Config, UPSGroupConfig
 from eneru.graph import BrailleGraph
+from eneru.remote_health import read_remote_health_sidecar, remote_health_sidecar_path
 from eneru.stats import StatsStore
 
 
@@ -749,12 +750,30 @@ def collect_group_data(group: UPSGroupConfig, config: Config) -> Dict:
     server_n = len([s for s in group.remote_servers if s.enabled])
     if server_n:
         res_parts.append(f"{server_n} remote server{'s' if server_n != 1 else ''}")
+    remote_health = read_remote_health_sidecar(
+        remote_health_sidecar_path(state_path)
+    )
 
     return {
         "label": label, "name": name, "is_local": group.is_local,
         "state": state,
         "resources": ", ".join(res_parts) if res_parts else "none",
+        "remote_health": remote_health,
+        "remote_health_summary": summarize_remote_health(remote_health),
     }
+
+
+def summarize_remote_health(rows: List[Dict]) -> str:
+    """Return a compact remote-health summary for TUI display."""
+    if not rows:
+        return ""
+    counts: Dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("status", "UNKNOWN")).lower()
+        counts[status] = counts.get(status, 0) + 1
+    order = ("healthy", "degraded", "failed", "checking", "unknown", "disabled")
+    parts = [f"{counts[k]} {k}" for k in order if counts.get(k)]
+    return ", ".join(parts)
 
 
 def format_runtime(runtime: str) -> str:
@@ -941,6 +960,13 @@ def render_config_panel(win, y_start: int, y_end: int, width: int,
         # Resources
         safe_addstr(win, y, 0, f"   Resources: {data['resources']}", gray_attr)
         y += 1
+        if data.get("remote_health_summary") and y < y_end:
+            safe_addstr(
+                win, y, 0,
+                f"   Remote health: {data['remote_health_summary']}",
+                gray_attr,
+            )
+            y += 1
 
         # Spacing between groups
         if i < len(groups_data) - 1 and y < y_end:
@@ -1562,6 +1588,8 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
         else:
             print("  No data available (daemon not running or no state file)")
         print(f"  Resources: {data['resources']}")
+        if data.get("remote_health_summary"):
+            print(f"  Remote health: {data['remote_health_summary']}")
         if i < group_count - 1:
             print()
 

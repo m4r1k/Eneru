@@ -45,6 +45,49 @@ class TestCLIVersion:
         # `tui` is an alias for `monitor` -- both must surface in the
         # top-level help so users discover either spelling.
         assert "tui" in captured.out
+        assert "shutdown remote" in captured.out or "shutdown" in captured.out
+
+
+class TestCLIManualRemoteShutdown:
+    """Manual remote shutdown drill safety gates."""
+
+    def _remote_config(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "remote_servers:\n"
+            "  - name: nas\n"
+            "    enabled: true\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+            "    shutdown_command: 'sudo shutdown -h now'\n"
+        )
+        return config_file
+
+    @pytest.mark.unit
+    def test_real_remote_shutdown_requires_long_confirmation(self, tmp_path, capsys):
+        config_file = self._remote_config(tmp_path)
+        with patch.object(sys, "argv", [
+            "eneru", "shutdown", "remote",
+            "-c", str(config_file), "--server", "nas",
+        ]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 2
+        assert "i-really-want" in capsys.readouterr().out
+
+    @pytest.mark.unit
+    def test_remote_shutdown_dry_run_does_not_execute_configured_commands(self, tmp_path):
+        config_file = self._remote_config(tmp_path)
+        with patch("eneru.cli.run_remote_probe", return_value=(True, "", 1)):
+            with patch("eneru.shutdown.remote.RemoteShutdownMixin._run_remote_command") as mock_run:
+                with patch.object(sys, "argv", [
+                    "eneru", "shutdown", "remote",
+                    "-c", str(config_file), "--server", "nas", "--dry-run",
+                ]):
+                    main()
+        mock_run.assert_not_called()
 
 
 class TestCLITuiAlias:

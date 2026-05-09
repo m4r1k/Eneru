@@ -42,6 +42,7 @@ nav:
       - Remote servers: remote-servers.md
   - Operations:
       - Monitor and graphs: tui-graphs.md
+      - Observability and API: observability-api.md
       - Statistics: statistics.md
       - Troubleshooting: troubleshooting.md
   - Project:

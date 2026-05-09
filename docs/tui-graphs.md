@@ -32,6 +32,10 @@ eneru tui --config /etc/ups-monitor/config.yaml
 | `G` | Cycle graph metric: off, charge, load, voltage, runtime |
 | `T` | Cycle graph range: 1h, 6h, 24h, 7d, 30d |
 | `U` | Multi-UPS only. Cycle the UPS shown in the graph |
+| `V` | Cycle event verbosity: power, diagnostics, all |
+| `↑` / `↓` | Scroll the events panel |
+| `PgUp` / `PgDn` | Scroll events by a larger step |
+| `Home` / `End` | Jump to oldest / newest event rows |
 
 Graphs are hidden until you press `G`.
 
@@ -52,8 +56,10 @@ sudo eneru monitor --once --graph voltage --time 24h --config /etc/ups-monitor/c
 Print recent events only:
 
 ```bash
-sudo eneru monitor --once --events-only --time 24h --config /etc/ups-monitor/config.yaml
+sudo eneru monitor --once --events-only --length 100 --config /etc/ups-monitor/config.yaml
 ```
+
+Use `--length 0` to remove the event row cap for one-shot output.
 
 ## Graph metrics
 
@@ -110,6 +116,12 @@ In multi-UPS mode, event lines include the UPS label:
 14:03:12  [Rack A] ON_BATTERY: Battery: 85%
 14:03:14  [Rack B] POWER_RESTORED: Outage 6s
 ```
+
+## Remote health
+
+When remote SSH healthchecks are enabled, the live monitor and one-shot status include the latest remote target status when a health sidecar exists. Healthchecks run a dedicated harmless probe command and never execute configured pre-shutdown or shutdown commands.
+
+Remote health is advisory. During a shutdown sequence, Eneru still attempts the configured remote pre-shutdown commands and final shutdown command with bounded timeouts even if the last healthcheck failed.
 
 ## Troubleshooting
 

@@ -184,6 +184,10 @@ Validation catches YAML errors, invalid enum values, local-resource ownership mi
 | `triggers` | Global defaults, overridable per group | Shutdown thresholds and voltage sensitivity |
 | `behavior` | Global | Dry-run mode |
 | `logging` | Global | Log, state, history, and shutdown flag paths |
+| `api` | Global | Embedded read-only HTTP API |
+| `prometheus` | Global | `/metrics` endpoint toggle |
+| `remote_health` | Global | Harmless SSH connectivity checks for remote servers |
+| `mqtt` | Global | Optional outbound MQTT status publishing |
 | `notifications` | Global | Apprise URLs, retry, coalescing, and event suppression |
 | `statistics` | Global | SQLite history location and retention |
 | `virtual_machines` | Single UPS or local group only | Libvirt VM shutdown |
@@ -220,6 +224,7 @@ See [Troubleshooting](troubleshooting.md#intermittent-nut-drops) for tuning guid
 |-----|---------|-------------|
 | `low_battery_threshold` | `20` | Battery percentage that triggers shutdown |
 | `critical_runtime_threshold` | `600` | UPS runtime estimate, in seconds, that triggers shutdown |
+| `on_battery_stabilization_delay` | `30` | Seconds after a fresh OB transition before charge/runtime/rate/time triggers can fire |
 | `depletion.window` | `300` | Battery-history window for depletion calculation |
 | `depletion.critical_rate` | `15.0` | Percentage points per minute that triggers shutdown |
 | `depletion.grace_period` | `90` | Seconds after power loss before depletion rate can trigger shutdown |
@@ -291,10 +296,39 @@ See [Statistics](statistics.md) for schema and queries.
 | Key | Default | Description |
 |-----|---------|-------------|
 | `logging.file` | `/var/log/ups-monitor.log` | File log path. Set `null` to disable file logging |
+| `logging.format` | `text` | `text` or `json` |
 | `logging.state_file` | `/var/run/ups-monitor.state` | Current state file read by `eneru monitor` |
 | `logging.battery_history_file` | `/var/run/ups-battery-history` | Rolling battery history for depletion calculations |
 | `logging.shutdown_flag_file` | `/var/run/ups-shutdown-scheduled` | Idempotency flag for shutdown in progress |
+| `logging.syslog.enabled` | `false` | Forward log rows to syslog |
+| `logging.syslog.address` | `/dev/log` | Local syslog socket or remote syslog host |
+| `logging.syslog.port` | `514` | Remote syslog UDP port |
+| `logging.syslog.facility` | `daemon` | Syslog facility |
 | `behavior.dry_run` | `false` | Log shutdown actions without executing them |
+
+## API, metrics, remote health, and MQTT
+
+The v5.3 API is read-only and binds to localhost by default. Do not expose it to untrusted networks; authz is planned for v6.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `api.enabled` | `true` | Start the embedded read-only HTTP API with `eneru run` |
+| `api.bind` | `127.0.0.1` | Listen address |
+| `api.port` | `9100` | Listen port |
+| `prometheus.enabled` | `true` | Serve Prometheus text metrics at `/metrics` |
+| `remote_health.enabled` | `true` | Run harmless SSH probes for enabled remote servers |
+| `remote_health.startup_check` | `true` | Check remote SSH connectivity at daemon startup |
+| `remote_health.interval` | `3600` | Periodic check interval in seconds |
+| `remote_health.probe_command` | `true` | Harmless SSH command used only for healthchecks |
+| `remote_health.failure_threshold` | `2` | Consecutive failures before a target is marked failed |
+| `remote_health.notify_on_failure` | `true` | Send notification when a target enters failed state |
+| `remote_health.notify_on_recovery` | `true` | Send notification when a failed target recovers |
+| `mqtt.enabled` | `false` | Publish outbound status snapshots to MQTT |
+| `mqtt.broker` | `""` | Broker URL, for example `mqtt://192.0.2.10:1883` |
+| `mqtt.topic_prefix` | `eneru` | Topic prefix for published status |
+| `mqtt.publish_interval` | `10` | Periodic publish interval in seconds |
+
+Remote health is advisory. A green check does not skip shutdown work, and a red check does not prevent Eneru from attempting the configured remote pre-shutdown commands and final shutdown command during a real sequence.
 
 ## Virtual machines
 

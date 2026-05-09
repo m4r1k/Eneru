@@ -111,7 +111,7 @@ The scenario files simulate online, on-battery, low-battery, FSD, brownout, over
 
 ### E2E test inventory
 
-The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 38 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
+The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 43 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
 
 | Test | Group | What it proves |
 |------|-------|----------------|
@@ -155,6 +155,11 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 38 numb
 | 36 | UPS Multi | Multi-UPS coordinator applies the same single-restart-notification contract across per-UPS stores |
 | 37 | Redundancy | Two consecutive quorum-loss events both fire shutdown — proves the daemon-managed flag-file lifecycle (issue #4) |
 | 38 | Redundancy | A stale redundancy flag from a prior daemon start is cleared before quorum-loss shutdown |
+| 39 | UPS Single | On-battery stabilization ignores transient low runtime after a fresh transfer |
+| 40 | UPS Single | Remote SSH healthcheck reaches the test target without sending shutdown commands |
+| 41 | CLI | Manual remote shutdown dry-run executes no configured remote commands |
+| 42 | CLI | Manual confirmed remote shutdown reaches only the selected target |
+| 43 | UPS Single | `/health`, `/ready`, and `/metrics` respond from the embedded API |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
 
 Every commit on the protected workflow has to prove the daemon works against real services, not just isolated Python assertions: real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.

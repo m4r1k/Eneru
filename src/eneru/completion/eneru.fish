@@ -41,6 +41,7 @@ end
 
 # Subcommands.
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'run' -d 'Start the monitoring daemon'
+complete -c eneru -n '__eneru_no_subcommand' -f -a 'shutdown' -d 'Manual shutdown drills'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'validate' -d 'Validate configuration and show overview'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'monitor' -d 'Launch real-time TUI dashboard'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'tui' -d 'Alias for monitor'
@@ -59,6 +60,9 @@ end
 # `run` options.
 complete -c eneru -n '__eneru_using run' -l dry-run -d 'Run in dry-run mode'
 complete -c eneru -n '__eneru_using run' -l exit-after-shutdown -d 'Exit after shutdown sequence'
+
+# `shutdown` subcommands.
+complete -c eneru -n '__eneru_using shutdown' -f -a 'remote' -d 'Run one remote shutdown drill'
 
 # `monitor` / `tui` options.
 for sub in monitor tui

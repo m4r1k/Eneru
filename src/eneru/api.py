@@ -1,0 +1,223 @@
+"""Embedded read-only HTTP API and Prometheus endpoint."""
+
+import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Dict, Tuple
+from urllib.parse import parse_qs, unquote, urlparse
+
+from eneru.status import (
+    collect_status,
+    config_summary,
+    find_status,
+    query_events,
+    query_history,
+    readiness,
+    remote_health_for_config,
+)
+
+
+class EneruAPIServer:
+    """Small stdlib HTTP server for read-only observability endpoints."""
+
+    def __init__(self, source: Any, config, log_fn=None):
+        self.source = source
+        self.config = config
+        self.log_fn = log_fn or (lambda msg: None)
+        self._httpd = None
+        self._thread = None
+
+    def start(self) -> None:
+        """Start the API server when enabled."""
+        if not self.config.api.enabled or self._thread is not None:
+            return
+
+        source = self.source
+        config = self.config
+
+        class Handler(EneruAPIHandler):
+            api_source = source
+            api_config = config
+
+        addr = (self.config.api.bind, int(self.config.api.port))
+        try:
+            self._httpd = ThreadingHTTPServer(addr, Handler)
+        except OSError as exc:
+            self.log_fn(f"⚠️ API server failed to bind {addr[0]}:{addr[1]}: {exc}")
+            return
+        self._thread = threading.Thread(
+            target=self._httpd.serve_forever,
+            name="eneru-api",
+            daemon=True,
+        )
+        self._thread.start()
+        self.log_fn(f"📊 API server listening on {addr[0]}:{addr[1]}")
+
+    def stop(self) -> None:
+        """Stop the API server."""
+        if self._httpd is None:
+            return
+        try:
+            self._httpd.shutdown()
+            self._httpd.server_close()
+        except Exception:
+            pass
+        self._httpd = None
+        self._thread = None
+
+
+class EneruAPIHandler(BaseHTTPRequestHandler):
+    """Request handler for the read-only v5.3 API."""
+
+    api_source: Any = None
+    api_config: Any = None
+
+    server_version = "EneruAPI/1.0"
+
+    def do_GET(self):  # noqa: N802 - stdlib hook
+        try:
+            status, content_type, body = self._route()
+        except Exception:
+            status, content_type, body = (
+                500, "application/json",
+                {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}},
+            )
+        if content_type == "application/json":
+            raw = json.dumps(body, sort_keys=True).encode("utf-8")
+        else:
+            raw = str(body).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, fmt, *args):  # noqa: A003 - stdlib hook
+        return
+
+    def _route(self) -> Tuple[int, str, Any]:
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        qs = parse_qs(parsed.query)
+
+        if path == "/health":
+            return 200, "application/json", {"status": "ok", "generatedAt": time.time()}
+
+        if path == "/ready":
+            payload = readiness(self.api_source)
+            return (200 if payload["ready"] else 503), "application/json", payload
+
+        if path == "/metrics":
+            if not self.api_config.prometheus.enabled:
+                return 404, "application/json", self._error("NOT_FOUND", "Metrics disabled")
+            return 200, "text/plain", render_prometheus_metrics(self.api_source)
+
+        if path == "/api/v1/ups":
+            return 200, "application/json", collect_status(self.api_source)
+
+        if path.startswith("/api/v1/ups/"):
+            parts = path.split("/")
+            ups_name = unquote(parts[4]) if len(parts) > 4 else ""
+            if len(parts) == 5:
+                payload = collect_status(self.api_source)
+                row = find_status(payload, ups_name)
+                if row is None:
+                    return 404, "application/json", self._error("NOT_FOUND", "UPS not found")
+                return 200, "application/json", row
+            if len(parts) == 6 and parts[5] == "history":
+                metric = (qs.get("metric") or ["charge"])[0]
+                end = int((qs.get("to") or [str(int(time.time()))])[0])
+                start = int((qs.get("from") or [str(end - 3600)])[0])
+                rows = query_history(self.api_config, ups_name, metric, start, end)
+                if rows is None:
+                    return 404, "application/json", self._error("NOT_FOUND", "UPS not found")
+                return 200, "application/json", {
+                    "ups": ups_name, "metric": metric, "from": start,
+                    "to": end, "data": rows,
+                }
+
+        if path == "/api/v1/events":
+            limit = int((qs.get("limit") or ["100"])[0])
+            return 200, "application/json", {
+                "generatedAt": time.time(),
+                "events": query_events(self.api_config, limit=limit),
+            }
+
+        if path == "/api/v1/config":
+            return 200, "application/json", config_summary(self.api_config)
+
+        if path == "/api/v1/remote-health":
+            rows = []
+            for monitor in getattr(self.api_source, "_monitors", []) or []:
+                manager = getattr(monitor, "_remote_health_manager", None)
+                if manager is not None:
+                    rows.extend(manager.snapshot())
+            if not rows:
+                rows = remote_health_for_config(self.api_config)
+            return 200, "application/json", {"generatedAt": time.time(), "servers": rows}
+
+        return 404, "application/json", self._error("NOT_FOUND", "Endpoint not found")
+
+    @staticmethod
+    def _error(code: str, message: str) -> Dict[str, Dict[str, str]]:
+        return {"error": {"code": code, "message": message}}
+
+
+def _metric_line(name: str, labels: Dict[str, str], value) -> str:
+    label_text = ",".join(
+        f'{k}="{str(v).replace(chr(34), "")}"'
+        for k, v in labels.items()
+    )
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        numeric = 0.0
+    return f"{name}{{{label_text}}} {numeric}"
+
+
+def render_prometheus_metrics(source: Any) -> str:
+    """Render Prometheus text exposition for live Eneru state."""
+    payload = collect_status(source)
+    lines = [
+        "# HELP eneru_up Whether Eneru API is serving metrics.",
+        "# TYPE eneru_up gauge",
+        "eneru_up 1",
+        "# HELP eneru_ups_battery_charge UPS battery charge percentage.",
+        "# TYPE eneru_ups_battery_charge gauge",
+    ]
+    for row in payload.get("ups", []):
+        labels = {"ups": row["name"], "label": row["label"]}
+        lines.append(_metric_line("eneru_ups_battery_charge", labels, row["batteryCharge"]))
+        lines.append(_metric_line("eneru_ups_runtime_seconds", labels, row["runtime"]))
+        lines.append(_metric_line("eneru_ups_load_percent", labels, row["load"]))
+        lines.append(_metric_line("eneru_ups_depletion_rate_percent_per_minute", labels, row["depletionRate"]))
+        lines.append(_metric_line("eneru_ups_time_on_battery_seconds", labels, row["timeOnBattery"]))
+        lines.append(_metric_line(
+            "eneru_ups_connection_failed",
+            labels,
+            1 if row["connectionState"] == "FAILED" else 0,
+        ))
+        lines.append(_metric_line(
+            "eneru_ups_trigger_active",
+            labels,
+            1 if row["triggerActive"] else 0,
+        ))
+        for server in row.get("remoteHealth", []):
+            s_labels = {
+                "ups": row["name"],
+                "server": server.get("server", ""),
+                "host": server.get("host", ""),
+            }
+            lines.append(_metric_line(
+                "eneru_remote_health_status",
+                {**s_labels, "status": server.get("status", "UNKNOWN")},
+                1,
+            ))
+            lines.append(_metric_line(
+                "eneru_remote_health_consecutive_failures",
+                s_labels,
+                server.get("consecutive_failures", 0),
+            ))
+    return "\n".join(lines) + "\n"

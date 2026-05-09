@@ -86,6 +86,31 @@ class TestConfigValidation:
             messages = ConfigLoader.validate_config(minimal_config)
             assert not any("trigger_on" in m for m in messages)
 
+    @pytest.mark.unit
+    def test_validate_new_observability_defaults(self, minimal_config):
+        """v5.3 observability defaults are safe and valid."""
+        messages = ConfigLoader.validate_config(minimal_config)
+        assert not any("api.port" in m for m in messages)
+        assert minimal_config.api.bind == "127.0.0.1"
+        assert minimal_config.prometheus.enabled is True
+        assert minimal_config.remote_health.probe_command == "true"
+
+    @pytest.mark.unit
+    def test_validate_rejects_unsafe_remote_health_probe(self, minimal_config):
+        """Healthchecks must not be configured to send shutdown commands."""
+        minimal_config.remote_health.probe_command = "sudo shutdown -h now"
+        messages = ConfigLoader.validate_config(minimal_config)
+        errors = [m for m in messages if m.startswith("ERROR")]
+        assert any("probe_command" in m for m in errors)
+
+    @pytest.mark.unit
+    def test_validate_mqtt_requires_broker_when_enabled(self, minimal_config):
+        minimal_config.mqtt.enabled = True
+        minimal_config.mqtt.broker = ""
+        messages = ConfigLoader.validate_config(minimal_config)
+        errors = [m for m in messages if m.startswith("ERROR")]
+        assert any("mqtt.broker" in m for m in errors)
+
 
 class TestUnknownKeyValidation:
     """Unknown safety keys are hard errors, with legacy aliases preserved."""
@@ -105,6 +130,15 @@ class TestUnknownKeyValidation:
         })
         assert any("behavior.dry-run" in e for e in errors)
         assert any("Did you mean 'dry_run'" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_api_typo_is_error_with_hint(self):
+        errors = self._errors({
+            "ups": {"name": "UPS@localhost"},
+            "api": {"prot": 9101},
+        })
+        assert any("api.prot" in e for e in errors)
+        assert any("Did you mean 'port'" in e for e in errors)
 
     @pytest.mark.unit
     def test_top_level_extended_time_typo_is_error_with_hint(self):
