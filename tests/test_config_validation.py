@@ -128,6 +128,27 @@ class TestConfigValidation:
         assert not any("logging.syslog.facility" in m for m in messages)
         assert minimal_config.logging.syslog.facility == "local0"
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize("port", [0, -1, 65536, 100000, "abc", None, True])
+    def test_validate_rejects_invalid_syslog_port(self, minimal_config, port):
+        """Boundary cases for the syslog port validator (1-65535)."""
+        minimal_config.logging.syslog.port = port
+        messages = ConfigLoader.validate_config(minimal_config)
+        errors = [m for m in messages if m.startswith("ERROR")]
+        assert any("logging.syslog.port" in m for m in errors), (
+            f"port={port!r} should have produced an ERROR; got {errors!r}"
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("port", [1, 514, 65535])
+    def test_validate_accepts_valid_syslog_port(self, minimal_config, port):
+        minimal_config.logging.syslog.port = port
+        messages = ConfigLoader.validate_config(minimal_config)
+        assert not any(
+            "logging.syslog.port" in m and m.startswith("ERROR")
+            for m in messages
+        )
+
 
 class TestUnknownKeyValidation:
     """Unknown safety keys are hard errors, with legacy aliases preserved."""

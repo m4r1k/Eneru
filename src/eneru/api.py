@@ -63,6 +63,20 @@ class EneruAPIServer:
         )
         self._thread.start()
         self.log_fn(f"📊 API server listening on {addr[0]}:{addr[1]}")
+        # The API ships with no auth in v5.3 by design (read-only,
+        # localhost-by-default). If the user opted in to a non-loopback
+        # bind, surface that /api/v1/config exposes server hostnames,
+        # SSH-options-configured flags, and pre-shutdown command
+        # templates to anyone who can reach this socket.
+        if not _is_loopback_bind(self.config.api.bind):
+            self.log_fn(
+                f"⚠️ API bound to {addr[0]} (non-loopback). v5.3 ships no "
+                f"authentication; /api/v1/config will expose server "
+                f"hostnames, SSH options, and pre-shutdown command "
+                f"templates to any client that can reach this socket. "
+                f"Restrict network access (firewall, reverse proxy with "
+                f"auth) before exposing this beyond trusted hosts."
+            )
 
     def stop(self) -> None:
         """Stop the API server."""
@@ -240,16 +254,47 @@ def _metric_line(name: str, labels: Dict[str, str], value) -> str:
     return f"{name}{{{label_text}}} {numeric}"
 
 
+_LOOPBACK_BINDS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _is_loopback_bind(bind: str) -> bool:
+    """Return True if the configured bind address is loopback-only."""
+    return (bind or "").strip().lower() in _LOOPBACK_BINDS
+
+
+# Prometheus exposition format expects every metric to be preceded by
+# its own HELP/TYPE block exactly once per scrape. Centralising the
+# catalogue keeps render_prometheus_metrics() honest as new metrics are
+# added — every entry here gets emitted, regardless of whether any UPS
+# row currently produces a sample.
+_METRIC_CATALOGUE = (
+    ("eneru_up", "gauge", "Whether the Eneru API is serving metrics (1) or not."),
+    ("eneru_ups_battery_charge", "gauge", "UPS battery charge percentage."),
+    ("eneru_ups_runtime_seconds", "gauge", "UPS runtime estimate in seconds."),
+    ("eneru_ups_load_percent", "gauge", "UPS load percentage."),
+    ("eneru_ups_depletion_rate_percent_per_minute", "gauge",
+     "UPS battery depletion rate (charge percent per minute on battery)."),
+    ("eneru_ups_time_on_battery_seconds", "gauge",
+     "Seconds the UPS has been continuously on battery (0 when on line)."),
+    ("eneru_ups_connection_failed", "gauge",
+     "1 if the upsd connection for this UPS is in the FAILED state, 0 otherwise."),
+    ("eneru_ups_trigger_active", "gauge",
+     "1 if a shutdown trigger is currently active for this UPS, 0 otherwise."),
+    ("eneru_remote_health_status", "gauge",
+     "Remote SSH target status indicator (1 per status label combination)."),
+    ("eneru_remote_health_consecutive_failures", "gauge",
+     "Consecutive failed remote-health probes for this SSH target."),
+)
+
+
 def render_prometheus_metrics(source: Any) -> str:
     """Render Prometheus text exposition for live Eneru state."""
     payload = collect_status(source)
-    lines = [
-        "# HELP eneru_up Whether Eneru API is serving metrics.",
-        "# TYPE eneru_up gauge",
-        "eneru_up 1",
-        "# HELP eneru_ups_battery_charge UPS battery charge percentage.",
-        "# TYPE eneru_ups_battery_charge gauge",
-    ]
+    lines = []
+    for name, mtype, help_text in _METRIC_CATALOGUE:
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} {mtype}")
+    lines.append("eneru_up 1")
     for row in payload.get("ups", []):
         labels = {"ups": row["name"], "label": row["label"]}
         lines.append(_metric_line("eneru_ups_battery_charge", labels, row["batteryCharge"]))

@@ -493,3 +493,261 @@ def test_mqtt_disconnect_failures_are_logged(monkeypatch):
     MQTTPublisher(object(), config, FakeStopEvent(), log_fn=logs.append)._run()
 
     assert any("disconnect failed" in line for line in logs)
+
+
+@pytest.mark.unit
+def test_mqtt_enables_tls_for_mqtts_scheme(monkeypatch):
+    """mqtts:// URLs must call client.tls_set() and default port 8883."""
+    calls = {}
+
+    class FakeClient:
+        def tls_set(self, *args, **kwargs):
+            calls["tls_set"] = True
+
+        def connect(self, host, port, keepalive=30):
+            calls["host"] = host
+            calls["port"] = port
+
+        def loop_start(self):
+            return None
+
+        def publish(self, *args, **kwargs):
+            return SimpleNamespace(rc=0)
+
+        def loop_stop(self):
+            return None
+
+        def disconnect(self):
+            return None
+
+    class FakeStopEvent:
+        def is_set(self):
+            return False
+
+        def wait(self, timeout):
+            return True
+
+    config = Config()
+    config.mqtt.enabled = True
+    # No port in URL — should default to 8883 for mqtts.
+    config.mqtt.broker = "mqtts://broker.example"
+    monkeypatch.setattr("eneru.mqtt.MQTT_AVAILABLE", True)
+    monkeypatch.setattr(
+        "eneru.mqtt.mqtt_client",
+        SimpleNamespace(Client=lambda **kwargs: FakeClient()),
+    )
+    monkeypatch.setattr("eneru.mqtt.collect_status", lambda source: {"generatedAt": 1})
+
+    MQTTPublisher(object(), config, FakeStopEvent())._run()
+
+    assert calls.get("tls_set") is True
+    assert calls.get("port") == 8883
+    assert calls.get("host") == "broker.example"
+
+
+@pytest.mark.unit
+def test_mqtt_does_not_enable_tls_for_plain_mqtt_scheme(monkeypatch):
+    """Plaintext mqtt:// must NOT call tls_set."""
+    calls = {"tls_set": False}
+
+    class FakeClient:
+        def tls_set(self, *args, **kwargs):
+            calls["tls_set"] = True
+
+        def connect(self, *args, **kwargs):
+            return None
+
+        def loop_start(self):
+            return None
+
+        def publish(self, *args, **kwargs):
+            return SimpleNamespace(rc=0)
+
+        def loop_stop(self):
+            return None
+
+        def disconnect(self):
+            return None
+
+    class FakeStopEvent:
+        def is_set(self):
+            return False
+
+        def wait(self, timeout):
+            return True
+
+    config = Config()
+    config.mqtt.enabled = True
+    config.mqtt.broker = "mqtt://broker.example:1883"
+    monkeypatch.setattr("eneru.mqtt.MQTT_AVAILABLE", True)
+    monkeypatch.setattr(
+        "eneru.mqtt.mqtt_client",
+        SimpleNamespace(Client=lambda **kwargs: FakeClient()),
+    )
+    monkeypatch.setattr("eneru.mqtt.collect_status", lambda source: {"generatedAt": 1})
+
+    MQTTPublisher(object(), config, FakeStopEvent())._run()
+
+    assert calls["tls_set"] is False
+
+
+@pytest.mark.unit
+def test_mqtt_retries_with_backoff_until_connect_succeeds(monkeypatch):
+    """A failing connect must retry; stop_event.wait short-circuits backoff."""
+    connect_attempts = []
+    backoff_waits = []
+
+    class FailThenSucceedClient:
+        """First connect raises; subsequent ones succeed."""
+        instances = 0
+
+        def __init__(self):
+            FailThenSucceedClient.instances += 1
+            self._idx = FailThenSucceedClient.instances
+
+        def connect(self, host, port, keepalive=30):
+            connect_attempts.append(self._idx)
+            if self._idx <= 2:
+                raise OSError(f"fake refused #{self._idx}")
+
+        def loop_start(self):
+            return None
+
+        def publish(self, *args, **kwargs):
+            return SimpleNamespace(rc=0)
+
+        def loop_stop(self):
+            return None
+
+        def disconnect(self):
+            return None
+
+    class FakeStopEvent:
+        """Records every wait() call (backoff sleeps go through here)."""
+        def __init__(self):
+            self._publish_waits = 0
+
+        def is_set(self):
+            return False
+
+        def wait(self, timeout):
+            backoff_waits.append(timeout)
+            # Let publish loop's wait() exit the test on first hit
+            # AFTER we've successfully connected. Backoff waits return
+            # False so we keep retrying.
+            if timeout >= 1.0 and len(connect_attempts) >= 3:
+                # publish-loop wait(1) — exit
+                return True
+            return False
+
+    config = Config()
+    config.mqtt.enabled = True
+    config.mqtt.broker = "mqtt://broker.example:1883"
+    monkeypatch.setattr("eneru.mqtt.MQTT_AVAILABLE", True)
+    monkeypatch.setattr(
+        "eneru.mqtt.mqtt_client",
+        SimpleNamespace(Client=lambda **kwargs: FailThenSucceedClient()),
+    )
+    monkeypatch.setattr("eneru.mqtt.collect_status", lambda source: {"generatedAt": 1})
+
+    MQTTPublisher(object(), config, FakeStopEvent())._run()
+
+    # Two failed connects + one successful connect = 3 attempts.
+    assert connect_attempts == [1, 2, 3]
+    # First two backoff sleeps follow the exponential schedule.
+    assert backoff_waits[0] == 1.0
+    assert backoff_waits[1] == 2.0
+
+
+@pytest.mark.unit
+def test_mqtt_backoff_exits_when_stop_event_short_circuits(monkeypatch):
+    """stop_event.wait returning True during backoff must exit cleanly."""
+    connect_attempts = []
+
+    class AlwaysFailClient:
+        def connect(self, *args, **kwargs):
+            connect_attempts.append(1)
+            raise OSError("never reachable")
+
+        def loop_start(self):
+            return None
+
+        def loop_stop(self):
+            return None
+
+        def disconnect(self):
+            return None
+
+    class StopOnFirstWait:
+        def is_set(self):
+            return False
+
+        def wait(self, timeout):
+            return True  # short-circuit immediately
+
+    config = Config()
+    config.mqtt.enabled = True
+    config.mqtt.broker = "mqtt://broker.example:1883"
+    monkeypatch.setattr("eneru.mqtt.MQTT_AVAILABLE", True)
+    monkeypatch.setattr(
+        "eneru.mqtt.mqtt_client",
+        SimpleNamespace(Client=lambda **kwargs: AlwaysFailClient()),
+    )
+
+    MQTTPublisher(object(), config, StopOnFirstWait())._run()
+
+    # Exactly one connect attempt — stop_event short-circuited the
+    # backoff before a retry.
+    assert connect_attempts == [1]
+
+
+@pytest.mark.unit
+def test_json_formatter_uses_structured_extras_over_message_text():
+    """Structured extra={...} fields take precedence over message-text heuristics."""
+    formatter = JSONFormatter()
+    record = logging.LogRecord(
+        "ups-monitor",
+        logging.INFO,
+        __file__,
+        1,
+        "no recognisable structure here",
+        (),
+        None,
+    )
+    # Mimic logging's handling of `extra={...}` — it sets attributes
+    # on the LogRecord directly.
+    record.category = "shutdown"
+    record.event_type = "FSD"
+    record.group = "Rack-A"
+    record.ups = "ups-01"
+
+    payload = json.loads(formatter.format(record))
+
+    assert payload["category"] == "shutdown"
+    assert payload["event_type"] == "FSD"
+    assert payload["group"] == "Rack-A"
+    assert payload["ups"] == "ups-01"
+    # Message is preserved verbatim when no heuristic group prefix.
+    assert payload["message"] == "no recognisable structure here"
+
+
+@pytest.mark.unit
+def test_json_formatter_extras_win_over_heuristics():
+    """If extras are present they override the heuristic group/category."""
+    formatter = JSONFormatter()
+    record = logging.LogRecord(
+        "ups-monitor",
+        logging.INFO,
+        __file__,
+        1,
+        "[Wrong-Group] ⚡ POWER EVENT: OL - back",
+        (),
+        None,
+    )
+    record.group = "Right-Group"
+    record.category = "lifecycle"
+
+    payload = json.loads(formatter.format(record))
+
+    assert payload["group"] == "Right-Group"
+    assert payload["category"] == "lifecycle"

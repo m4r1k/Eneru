@@ -208,14 +208,46 @@ jobs:
       - name: Install dependencies and package
         run: |
           dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-${{ matrix.version }}.noarch.rpm
-          dnf install -y ${{ matrix.python_pkg }} python3-paho-mqtt
-          rpm -qpR eneru-*.rpm | grep -q "^python3-paho-mqtt"
-          # Try rpm first (fast, with --nodeps for the missing nut-client).
-          # python3-paho-mqtt is installed above and asserted in package
-          # metadata; --nodeps is kept only because nut-client is absent in
-          # the minimal UBI test images.
-          # If that fails for non-dep reasons, fall back to dnf with
-          # --skip-broken. Real install failures still propagate.
+          dnf install -y ${{ matrix.python_pkg }}
+          # paho-mqtt is a SOFT dep on RPM (see nfpm.yaml). Install it
+          # per-RHEL-version because the distro story is uneven:
+          #   * RHEL 9 + EPEL ships python3-paho-mqtt for the system
+          #     python3 — works as a normal dnf install.
+          #   * RHEL 8's EPEL build is for system python3 (3.6); this
+          #     CI matrix uses python3.9 via the `python39` package, so
+          #     the dnf-installed paho would land in the wrong site-
+          #     packages. Use pip into python3 (== 3.9 here) instead.
+          #   * RHEL 10 has no python3-paho-mqtt in BaseOS / AppStream /
+          #     CRB / EPEL 10 at all. pip-install it; --break-system-
+          #     packages is required by PEP 668 since EL 10 marks the
+          #     site-packages as externally managed (acceptable in a
+          #     throw-away CI container).
+          case "${{ matrix.version }}" in
+            9)
+              dnf install -y python3-paho-mqtt
+              ;;
+            8)
+              python3 -m pip install --no-deps paho-mqtt
+              ;;
+            10)
+              python3 -m pip install --no-deps --break-system-packages paho-mqtt
+              ;;
+          esac
+          # Lock in the new packaging contract: python3-paho-mqtt MUST
+          # NOT be a hard dep on the rpm — otherwise `dnf install` of
+          # eneru would fail on RHEL 10 (where the package doesn't
+          # exist). It may still appear under `Recommends:`, which dnf
+          # resolves opportunistically. `rpm -qpR` lists hard deps only.
+          if rpm -qpR eneru-*.rpm | grep -q "^python3-paho-mqtt"; then
+            echo "ERROR: python3-paho-mqtt regressed to a hard rpm dep."
+            echo "       Move it back to recommends: in nfpm.yaml."
+            exit 1
+          fi
+          # Try rpm first (fast, with --nodeps for the missing nut-
+          # client). --nodeps is kept only because nut-client is absent
+          # in the minimal UBI test images. If that fails for non-dep
+          # reasons, fall back to dnf with --skip-broken. Real install
+          # failures still propagate.
           rpm -ivh --nodeps eneru-*.rpm || dnf install -y ./eneru-*.rpm --skip-broken
 
       - name: Verify installation

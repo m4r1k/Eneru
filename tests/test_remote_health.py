@@ -71,6 +71,42 @@ def test_probe_safety_rejects_obvious_shutdown_commands():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("probe", [
+    "true; shutdown -h now",
+    "true && halt",
+    "echo ok | xargs reboot",
+    "echo $(whoami)",
+    "echo `id`",
+    "true > /tmp/x",
+    "true < /etc/passwd",
+    "true\nshutdown",
+    "(reboot)",
+])
+def test_probe_safety_rejects_shell_metacharacters(probe):
+    """Even commands whose prefix is benign get rejected if they chain."""
+    assert not is_safe_probe_command(probe)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("probe", [
+    "true",
+    "uname -a",
+    "hostname",
+    "echo ok",
+    "/bin/true",
+    "true ",  # trailing whitespace stripped
+])
+def test_probe_safety_accepts_harmless_commands(probe):
+    assert is_safe_probe_command(probe)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("probe", ["", None, "   "])
+def test_probe_safety_rejects_empty(probe):
+    assert not is_safe_probe_command(probe)
+
+
+@pytest.mark.unit
 def test_remote_health_failure_then_recovery(tmp_path, remote_server):
     config = Config()
     config.remote_health.enabled = True

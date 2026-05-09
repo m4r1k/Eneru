@@ -39,7 +39,19 @@ class TimezoneFormatter(logging.Formatter):
 
 
 class JSONFormatter(logging.Formatter):
-    """Minimal structured formatter for SIEM/log pipeline ingestion."""
+    """Minimal structured formatter for SIEM/log pipeline ingestion.
+
+    Prefers explicit ``extra={...}`` fields on the LogRecord (set by
+    callers via ``logger.log(msg, extra={"category": "shutdown", ...})``).
+    Falls back to heuristic message parsing for legacy call sites that
+    don't pass structured context — these are correctness-best-effort
+    and should be migrated over time.
+    """
+
+    # The set of fields a caller may opt into via the ``extra`` kwarg of
+    # ``logging.Logger`` calls. Anything else is ignored to keep the
+    # JSON shape stable for log pipelines.
+    _EXTRA_FIELDS = ("group", "event_type", "category", "ups", "server")
 
     def format(self, record):
         raw_message = record.getMessage()
@@ -53,21 +65,33 @@ class JSONFormatter(logging.Formatter):
             "logger": record.name,
             "message": message,
         }
-        if message.startswith("[") and "] " in message:
+        # Pull explicit structured fields first. The Python logging
+        # module promotes ``extra={...}`` keys into LogRecord attributes,
+        # so we read them directly off the record.
+        for field in self._EXTRA_FIELDS:
+            value = getattr(record, field, None)
+            if value is not None and value != "":
+                payload[field] = value
+        # Fallback heuristics for call sites that don't yet pass
+        # structured extras. These run only to fill in fields the
+        # caller didn't already provide.
+        if "group" not in payload and message.startswith("[") and "] " in message:
             group, rest = message.split("] ", 1)
             payload["group"] = group.strip("[]")
             payload["message"] = rest
-        if "POWER EVENT:" in message:
-            payload["category"] = "power_event"
-            try:
-                event_part = message.split("POWER EVENT:", 1)[1].strip()
-                payload["event_type"] = event_part.split(" ", 1)[0]
-            except Exception:
-                pass
-        elif "Remote health" in message:
-            payload["category"] = "health"
-        elif "SHUTDOWN" in message or "shutdown" in message:
-            payload["category"] = "shutdown"
+        if "category" not in payload:
+            if "POWER EVENT:" in message:
+                payload["category"] = "power_event"
+                if "event_type" not in payload:
+                    try:
+                        event_part = message.split("POWER EVENT:", 1)[1].strip()
+                        payload["event_type"] = event_part.split(" ", 1)[0]
+                    except Exception:
+                        pass
+            elif "Remote health" in message:
+                payload["category"] = "health"
+            elif "SHUTDOWN" in message or "shutdown" in message:
+                payload["category"] = "shutdown"
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
@@ -130,6 +154,17 @@ class UPSLogger:
             except Exception as exc:
                 print(f"Warning: Cannot initialize syslog forwarding: {exc}")
 
-    def log(self, message: str):
-        """Log a message with timezone info."""
-        self.logger.info(message)
+    def log(self, message: str, **extra):
+        """Log a message with timezone info.
+
+        Optional ``**extra`` keyword arguments (e.g. ``category="shutdown"``,
+        ``group="ups0"``, ``event_type="OB"``) are forwarded to the
+        underlying ``logging.Logger`` as structured fields. The text
+        formatter ignores them; ``JSONFormatter`` uses them in
+        preference to its message-text heuristics. See
+        ``JSONFormatter._EXTRA_FIELDS`` for the recognised keys.
+        """
+        if extra:
+            self.logger.info(message, extra=extra)
+        else:
+            self.logger.info(message)

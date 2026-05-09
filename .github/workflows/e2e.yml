@@ -73,7 +73,7 @@ jobs:
       - name: Verify v5.3 E2E coverage is wired
         if: matrix.group == 'single-ups'
         run: |
-          grep -q "Test 39: On-battery stabilization suppresses transient readings" tests/e2e/groups/single-ups.sh
+          grep -q "Test 39: On-battery stabilization suppresses transient critical readings" tests/e2e/groups/single-ups.sh
           grep -q "Test 40: Remote SSH healthcheck is harmless" tests/e2e/groups/single-ups.sh
           grep -q "Test 41: Manual remote dry-run executes no configured commands" tests/e2e/groups/single-ups.sh
           grep -q "Test 42: Manual confirmed remote shutdown reaches selected target" tests/e2e/groups/single-ups.sh

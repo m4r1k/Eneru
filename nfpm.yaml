@@ -16,11 +16,14 @@ vendor: Eneru
 homepage: https://github.com/m4r1k/Eneru
 license: MIT
 
-# Dependencies
+# Default dependencies (used as the fallback when no packager-specific
+# `overrides` block matches). Both packagers we ship (deb, rpm) define
+# their own `overrides` below — this list is dead in practice, so we keep
+# only the cross-distro essentials and avoid implying paho-mqtt is a hard
+# dep on every target. See the per-packager overrides for the real lists.
 depends:
   - python3
   - nut-client
-  - python3-paho-mqtt
 
 # Recommended packages (not required but useful)
 recommends:
@@ -45,11 +48,21 @@ overrides:
     depends:
       - python3
       - python3-pyyaml
-      - python3-paho-mqtt
       - nut-client
+    # python3-paho-mqtt is a SOFT dep on RPM. RHEL 10 doesn't ship it
+    # at all (not in BaseOS / AppStream / CRB / EPEL 10); RHEL 8 ships
+    # an EPEL build only for the system python3 (3.6), which doesn't
+    # match the python3.9+ interpreter we install. Making it a hard
+    # `depends:` would break installation on RHEL 8 and 10. The MQTT
+    # publisher gracefully degrades when paho is missing (see
+    # src/eneru/mqtt.py), so RPM users who want MQTT install it via
+    # `pip install paho-mqtt` (use a venv or `--break-system-packages`
+    # on EL10 per PEP 668). RHEL 9 with EPEL still resolves the
+    # `recommends:` automatically.
     recommends:
       - apprise
       - openssh-clients
+      - python3-paho-mqtt
 
 # Files to include in the package
 contents:

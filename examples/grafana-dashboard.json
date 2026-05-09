@@ -7,13 +7,29 @@
     "from": "now-6h",
     "to": "now"
   },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "hide": 0,
+        "refresh": 1,
+        "current": {},
+        "options": []
+      }
+    ]
+  },
   "panels": [
     {
       "type": "timeseries",
       "title": "Battery charge",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
       "targets": [
         {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
           "expr": "eneru_ups_battery_charge",
           "legendFormat": "{{label}}"
         }
@@ -26,9 +42,11 @@
     {
       "type": "timeseries",
       "title": "Runtime remaining",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
       "targets": [
         {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
           "expr": "eneru_ups_runtime_seconds",
           "legendFormat": "{{label}}"
         }
@@ -41,9 +59,11 @@
     {
       "type": "timeseries",
       "title": "UPS load",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "targets": [
         {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
           "expr": "eneru_ups_load_percent",
           "legendFormat": "{{label}}"
         }
@@ -56,9 +76,11 @@
     {
       "type": "stat",
       "title": "Remote health failures",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "targets": [
         {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
           "expr": "sum(eneru_remote_health_consecutive_failures)",
           "legendFormat": "failures"
         }

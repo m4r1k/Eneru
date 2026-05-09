@@ -1007,6 +1007,14 @@ class StatsStore:
     def from_connection(cls, conn: sqlite3.Connection) -> "StatsStore":
         """Wrap an existing SQLite connection without taking ownership."""
         store = cls(Path(":memory:"))
+        # __init__ already opened a throw-away in-memory SQLite handle
+        # to keep the dataclass invariants happy. Close it before
+        # rebinding to the caller-owned connection so the wrapper
+        # doesn't leak one sqlite handle per call.
+        try:
+            store._conn.close()
+        except Exception:
+            pass
         store._conn = conn
         return store
 

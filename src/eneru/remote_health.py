@@ -30,6 +30,13 @@ DANGEROUS_PROBE_WORDS = (
     "podman stop", "virsh shutdown", "virsh destroy",
     "qm shutdown", "qm stop", "pct shutdown", "pct stop",
 )
+# Reject any shell metacharacter that could chain a dangerous command
+# after a benign-looking probe (e.g. ``true; shutdown -h now`` slips
+# past the keyword list because the prefix is harmless). The probe runs
+# inside ssh's remote shell, so command-line operators here apply
+# remote-side. Newlines are rejected too — multi-line commands are
+# almost certainly a misconfiguration in this context.
+DANGEROUS_PROBE_CHARS = frozenset(";|&$`><()\n\r")
 SSH_OPTIONS_WITH_SEPARATE_ARG = {
     "-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J",
     "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w",
@@ -57,10 +64,19 @@ def remote_health_sidecar_path(state_file_path: Path) -> Path:
 
 
 def is_safe_probe_command(command: str) -> bool:
-    """Reject obvious shutdown/control commands in remote health probes."""
-    lowered = (command or "").strip().lower()
-    if not lowered:
+    """Reject obvious shutdown/control commands in remote health probes.
+
+    Two-stage check:
+      1. Reject shell metacharacters that could chain a dangerous
+         command after a benign prefix.
+      2. Reject any keyword from the dangerous-words list.
+    """
+    raw = (command or "").strip()
+    if not raw:
         return False
+    if any(ch in DANGEROUS_PROBE_CHARS for ch in raw):
+        return False
+    lowered = raw.lower()
     return not any(word in lowered for word in DANGEROUS_PROBE_WORDS)
 
 

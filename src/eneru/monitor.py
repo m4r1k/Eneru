@@ -565,11 +565,21 @@ class UPSGroupMonitor(
 
         self._log_message(f"📋 Enabled features: {', '.join(features) if features else 'None'}")
 
-    def _log_message(self, message: str):
-        """Log a message using the logger, with optional prefix for multi-UPS."""
+    def _log_message(self, message: str, **extra):
+        """Log a message using the logger, with optional prefix for multi-UPS.
+
+        Extra keyword arguments (``category``, ``event_type``, etc.) are
+        forwarded to ``UPSLogger.log`` and become structured fields under
+        the JSON formatter. The text formatter ignores them. The
+        ``group`` field is filled in automatically from
+        ``self._log_prefix`` when present so JSON pipelines can group
+        per-UPS rows without parsing the message text.
+        """
         prefixed = f"{self._log_prefix}{message}" if self._log_prefix else message
+        if self._log_prefix and "group" not in extra:
+            extra["group"] = self._log_prefix.strip().rstrip(":").strip(" []")
         if self.logger:
-            self.logger.log(prefixed)
+            self.logger.log(prefixed, **extra)
         else:
             tz_name = time.strftime('%Z')
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -633,7 +643,11 @@ class UPSGroupMonitor(
         validation-rejected from ``suppress`` so they cannot be
         silenced here even if a user tried.
         """
-        self._log_message(f"⚡ POWER EVENT: {event} - {details}")
+        self._log_message(
+            f"⚡ POWER EVENT: {event} - {details}",
+            category="power_event",
+            event_type=event,
+        )
 
         try:
             run_command([

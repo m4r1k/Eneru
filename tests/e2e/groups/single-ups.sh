@@ -687,13 +687,31 @@ timeout 12s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml \
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
 
-for i in {1..10}; do
-  if curl -fsS http://127.0.0.1:9100/ready >/tmp/test43-ready.json; then
-    break
-  fi
-  sleep 1
-done
-curl -fsS http://127.0.0.1:9100/metrics >/tmp/test43-metrics.txt
+# Bounded poll for daemon readiness. 0.5 s cadence x 20 attempts =
+# 10 s budget against the 12 s outer timeout. Every endpoint we test
+# (ready, metrics) runs through its own retry so a slow service-thread
+# spin-up doesn't race the assertion.
+poll_endpoint() {
+  local url="$1" out="$2" tries="${3:-20}"
+  for _ in $(seq 1 "$tries"); do
+    if curl -fsS "$url" >"$out" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+if ! poll_endpoint http://127.0.0.1:9100/ready /tmp/test43-ready.json; then
+  echo "FAIL: /ready never responded within poll budget"
+  cat /tmp/test43-daemon.log
+  exit 1
+fi
+if ! poll_endpoint http://127.0.0.1:9100/metrics /tmp/test43-metrics.txt; then
+  echo "FAIL: /metrics never responded within poll budget"
+  cat /tmp/test43-daemon.log
+  exit 1
+fi
 
 if ! grep -q "eneru_up 1" /tmp/test43-metrics.txt; then
   echo "FAIL: metrics endpoint missing eneru_up"
@@ -750,13 +768,17 @@ logging:
 YAML
 
 cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply.dev
-START=$(date +%s)
+# Nanosecond-precision wallclock so the upper-bound assertion below
+# isn't hostage to whole-second rounding (a 10.999 s real run would
+# round down to 10 with `date +%s` and silently pass).
+START_NS=$(date +%s%N)
 set +e
 timeout 12s eneru run --config /tmp/config-e2e-unreachable-remote.yaml \
   --exit-after-shutdown 2>&1 | tee /tmp/test44.log
 RC=${PIPESTATUS[0]}
 set -e
-ELAPSED=$(( $(date +%s) - START ))
+ELAPSED_NS=$(( $(date +%s%N) - START_NS ))
+ELAPSED_MS=$(( ELAPSED_NS / 1000000 ))
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
 
 if [ "$RC" -eq 124 ]; then
@@ -764,8 +786,11 @@ if [ "$RC" -eq 124 ]; then
   cat /tmp/test44.log
   exit 1
 fi
-if [ "$ELAPSED" -ge 12 ]; then
-  echo "FAIL: unreachable remote took too long (${ELAPSED}s)"
+# 12 s outer timeout enforced via `timeout`; assert the daemon itself
+# returned in well under that so a near-boundary edge case still fails
+# loudly. 11 s gives a 1 s safety margin on shared CI runners.
+if [ "$ELAPSED_MS" -ge 11000 ]; then
+  echo "FAIL: unreachable remote took too long (${ELAPSED_MS} ms)"
   exit 1
 fi
 if ! grep -Eq "0/1 succeeded|timed out|failed" /tmp/test44.log; then
