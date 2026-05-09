@@ -324,9 +324,25 @@ The v5.3 API is read-only, opt-in, and binds to localhost by default when enable
 | `remote_health.notify_on_failure` | `true` | Send notification when a target enters failed state |
 | `remote_health.notify_on_recovery` | `true` | Send notification when a failed target recovers |
 | `mqtt.enabled` | `false` | Publish outbound status snapshots to MQTT |
-| `mqtt.broker` | `""` | Broker URL, for example `mqtt://192.0.2.10:1883` |
-| `mqtt.topic_prefix` | `eneru` | Topic prefix for published status |
-| `mqtt.publish_interval` | `10` | Periodic publish interval in seconds |
+| `mqtt.broker` | `""` | Broker URL: `mqtt://host:port` for plaintext or `mqtts://host:port` for TLS via the system trust store (default port 8883 for `mqtts`). |
+| `mqtt.topic_prefix` | `eneru` | Topic prefix; messages publish to `<topic_prefix>/status` (QoS 0, retain false) |
+| `mqtt.publish_interval` | `10` | Republish at this interval even when the status fingerprint is unchanged |
+
+`api.bind` defaults to `127.0.0.1`. If you set it to a non-loopback address, Eneru emits a startup warning because `/api/v1/config` returns server hostnames, the `sshOptionsConfigured` flag, and pre-shutdown command templates with no auth. Front-end the API with SSH or a reverse proxy that adds auth before exposing it beyond a trusted boundary.
+
+`remote_health.probe_command` is rejected at validation time if it contains shell metacharacters (`;`, `|`, `&`, `$`, backtick, redirections, parentheses, or newlines) or any keyword in the dangerous-words blocklist. Probes are advisory: they never run pre-shutdown commands, VM/container shutdown commands, custom commands, or the configured `shutdown_command`.
+
+**MQTT on RHEL.** Debian/Ubuntu `.deb` packages install `python3-paho-mqtt` as a hard dependency. RPM packages list it as a `Recommends:` only — RHEL 9 + EPEL pulls it in automatically, but on RHEL 8 (where the EPEL build targets the system python3.6, not the python3.9 used by Eneru) and on RHEL 10 (no `python3-paho-mqtt` exists in BaseOS / AppStream / CRB / EPEL 10) you need to install it via pip after installing eneru:
+
+```bash
+# RHEL 8 (with python39 alternative):
+python3 -m pip install paho-mqtt
+
+# RHEL 10 (PEP 668 — system site-packages externally managed):
+python3 -m pip install --break-system-packages paho-mqtt
+```
+
+If MQTT is enabled but `paho-mqtt` isn't importable, the publisher logs a warning and disables itself; the daemon keeps running. The MQTT publisher reconnects with bounded exponential backoff (1 s → 60 s) on connection failure or unexpected disconnect.
 
 Remote health is advisory. A green check does not skip shutdown work, and a red check does not prevent Eneru from attempting the configured remote pre-shutdown commands and final shutdown command during a real sequence.
 

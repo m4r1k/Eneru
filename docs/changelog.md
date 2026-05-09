@@ -47,6 +47,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daemon startup with defaults.
 
 ### Fixed
+- **`StatsStore.from_connection()` no longer leaks an in-memory SQLite
+  handle.** The wrapper opened a throw-away in-memory database via
+  `__init__` and then rebound `_conn` to the caller-owned handle without
+  closing the original. Now the throw-away handle is closed before
+  reassignment.
+- **`tests/e2e/groups/single-ups.sh` Test 43 retries each endpoint.**
+  The `/ready` poll already retried; `/metrics` did not. Both endpoints
+  now use a shared 0.5 s × 20-attempt poll with explicit failure on
+  exhaustion, removing the slow-startup flake risk under CI load.
+- **`tests/e2e/groups/single-ups.sh` Test 44 uses nanosecond-precision
+  wall clock.** The bounded-runtime assertion was hostage to whole-second
+  rounding from `date +%s`; switched to `date +%s%N` and tightened the
+  upper bound from 12 s to 11 s.
+- **`.github/workflows/e2e.yml` v5.3 coverage-grep matches the actual
+  test header.** The grep asserted "transient readings" but the test
+  in `single-ups.sh` reads "transient critical readings", so the
+  workflow always failed.
 - **Redundancy shutdown no longer pinned at "fired" after first event.**
   Companion to the contract change above: the evaluator now resets its
   `_fired` flag and clears the executor's re-entry guard on the
@@ -89,9 +106,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--dry-run` executes no configured commands; real execution requires
   `--i-really-want-to-proceed-with-remote-shutdown`.
 - **JSON logs, optional syslog forwarding, optional outbound MQTT, and a
-  reference Grafana dashboard** for the Prometheus metrics. Debian and
-  RPM packages now depend on the Python MQTT client so packaged MQTT
-  deployments do not miss `paho-mqtt` at runtime.
+  reference Grafana dashboard** for the Prometheus metrics. JSON log
+  output now prefers explicit structured fields (`category`,
+  `event_type`, `group`, `ups`, `server`) over heuristic message-text
+  parsing — power events, shutdown sequences, and remote-health
+  transitions all set those fields directly. The Grafana dashboard ships
+  with a `datasource` template variable so it imports cleanly into
+  multi-datasource setups.
+- **MQTT publisher hardening.** The publisher now reconnects with
+  bounded exponential backoff (1 s → 60 s) on connect failure or
+  unexpected broker disconnect instead of silently giving up after the
+  first attempt. `mqtts://` broker URLs enable TLS via the system trust
+  store (default port 8883); mTLS / client certs remain out of scope for
+  v5.3.
 - **Slow NUT response visibility.** Slow `upsc` calls now produce
   rate-limited per-UPS log lines. Apprise notification is stricter and
   only fires after sustained full-poll slowness, so operators get an early
@@ -108,6 +135,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   redundancy flag before daemon startup and proves shutdown still fires.
 
 ### Changed
+- **`python3-paho-mqtt` is now a `Recommends:` (soft dep) on RPM
+  packages, not a hard dependency.** The package is unavailable on RHEL
+  10 (BaseOS / AppStream / CRB / EPEL 10 all lack it) and on RHEL 8 the
+  EPEL build only targets the system python3.6 — neither resolves
+  cleanly against the python3.9+ interpreter Eneru installs. Debian and
+  Ubuntu `.deb` packages keep `python3-paho-mqtt` as a hard dependency.
+  RHEL users who enable MQTT install paho via `python3 -m pip install
+  paho-mqtt` (with `--break-system-packages` on EL10 per PEP 668); see
+  `docs/configuration.md` for the full callout. If MQTT is enabled but
+  paho is missing the publisher logs a warning and disables itself
+  rather than failing daemon startup.
+- **API startup warning when `api.bind` is non-loopback.** v5.3 ships
+  with no auth layer; binding the API to `0.0.0.0` exposes
+  `/api/v1/config` (server hostnames, `sshOptionsConfigured`,
+  pre-shutdown command templates) to anyone who can reach the socket. A
+  visible startup warning calls this out so it isn't silently misconfigured.
+- **`/metrics` exposition completeness.** Every emitted metric
+  (`eneru_up`, `eneru_ups_*`, `eneru_remote_health_*`) now ships with
+  proper `# HELP` and `# TYPE` lines, not just two of them.
+- **Probe-command validator hardening.** `remote_health.probe_command`
+  values are now rejected if they contain shell metacharacters (`;`,
+  `|`, `&`, `$`, backtick, redirections, parentheses, newlines) in
+  addition to the dangerous-words blocklist. A probe like
+  `true; shutdown -h now` no longer slips through.
 - Fresh on-battery transfers now have a 30-second stabilization window
   before low-battery, critical-runtime, depletion-rate, or extended-time
   triggers can fire. FSD and failsafe connection loss while on battery

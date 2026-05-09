@@ -15,19 +15,41 @@ api:
 
 Endpoints:
 
-| Endpoint | Purpose |
-|----------|---------|
-| `/health` | API process is alive |
-| `/ready` | Monitoring has usable UPS visibility |
-| `/api/v1/ups` | Current UPS/group status |
-| `/api/v1/ups/<name>` | One UPS status |
-| `/api/v1/ups/<name>/history` | SQLite metric history |
-| `/api/v1/events` | Recent event rows |
-| `/api/v1/config` | Sanitized config summary |
-| `/api/v1/remote-health` | Remote SSH health status |
-| `/metrics` | Prometheus text metrics |
+| Endpoint | Purpose | Status codes |
+|----------|---------|--------------|
+| `/health` | API process is alive | 200 |
+| `/ready` | Monitoring has usable UPS visibility | 200 ready / 503 not ready |
+| `/api/v1/ups` | Current UPS/group status | 200 |
+| `/api/v1/ups/<name>` | One UPS status | 200 / 404 |
+| `/api/v1/ups/<name>/history` | SQLite metric history | 200 / 400 (bad metric) / 404 |
+| `/api/v1/events` | Recent event rows | 200 / 400 (bad query) |
+| `/api/v1/config` | Sanitized config summary | 200 |
+| `/api/v1/remote-health` | Remote SSH health status | 200 |
+| `/metrics` | Prometheus text metrics | 200 / 404 (Prometheus disabled) |
 
-The API is disabled by default. When enabled, the default bind address is localhost because v5.3 has no auth layer. Keep it behind SSH, a local reverse proxy, or a trusted network boundary.
+The API is disabled by default. When enabled, the default bind address is localhost because v5.3 has no auth layer. If you set `api.bind` to a non-loopback address (e.g. `0.0.0.0`), Eneru emits a warning at startup: `/api/v1/config` returns the configured server hostnames, the `sshOptionsConfigured` flag, and pre-shutdown command templates with no authentication, so anyone who can reach the socket can enumerate that information. Keep the API behind SSH, a local reverse proxy, or a trusted network boundary.
+
+Example response shapes:
+
+```json
+// GET /api/v1/ups
+{
+  "generatedAt": 1720000000.0,
+  "ups": [
+    {
+      "name": "ups0", "label": "Rack-A", "groupId": "ups0",
+      "status": "OL CHRG", "batteryCharge": 97, "runtime": 1200,
+      "load": 20, "depletionRate": 0.0, "timeOnBattery": 0,
+      "connectionState": "OK", "triggerActive": false,
+      "remoteHealth": [...]
+    }
+  ],
+  "redundancyGroups": []
+}
+
+// GET /api/v1/events?limit=2&verbosity=1
+{"generatedAt": 1720000000.0, "events": [{"ts": 1720000000, "category": "power_event", "event": "ON_BATTERY", "details": "..."}]}
+```
 
 UPS rows include a stable `groupId` derived from the configured UPS name. Multi-UPS responses also include `redundancyGroups` rows with their source UPS names, quorum target, locality flag, and remote-health rows.
 
@@ -90,13 +112,29 @@ mqtt:
   publish_interval: 10
 ```
 
-MQTT publishes when the status payload changes and also republishes at `publish_interval` while unchanged. Debian and RPM packages install the MQTT client dependency. Install the optional dependency when using PyPI:
+**Topic, QoS, retention.** All snapshots publish to `<topic_prefix>/status` (default `eneru/status`) with **QoS 0** and **retain=False**. The payload is the same JSON object served by `/api/v1/ups`, sorted by key for stable diffing on the consumer side. The publisher emits a new message every time the status fingerprint (everything except `generatedAt`) changes, and republishes at `publish_interval` seconds while unchanged so consumers always have a recent sample.
+
+**Reconnect.** On a failed connect or unexpected disconnect, the publisher retries with bounded exponential backoff (1 s → 2 s → 4 s → … capped at 60 s) and resumes publishing automatically once the broker is reachable again. The reconnect loop is interrupted by daemon shutdown, so a hung broker can't delay `eneru` exiting.
+
+**TLS.** Set the broker URL to `mqtts://...` to enable TLS using the system trust store. Default port is 8883 unless explicitly given. mTLS / client certificates are not supported in v5.3.
+
+**Packaging.** Debian/Ubuntu `.deb` packages install `python3-paho-mqtt` as a hard dependency. RPM packages list it under `Recommends:` only because EPEL coverage is uneven: RHEL 9 + EPEL ships it for the system Python; RHEL 8's EPEL build is for system python3 (3.6) and won't satisfy a python3.9-based install; RHEL 10 doesn't ship it at all. On RHEL 8 and 10, install paho via pip after installing eneru:
+
+```bash
+# RHEL 8 (python3.9 alternative active):
+python3 -m pip install paho-mqtt
+
+# RHEL 10 (PEP 668 — system site-packages externally managed):
+python3 -m pip install --break-system-packages paho-mqtt
+```
+
+For PyPI installs use the optional extra:
 
 ```bash
 uv pip install "eneru[mqtt]"
 ```
 
-No inbound MQTT commands are supported in v5.3.
+If MQTT is enabled but `paho-mqtt` isn't importable, the publisher logs a warning at startup and disables itself; the daemon keeps running normally. No inbound MQTT commands are supported in v5.3.
 
 ## JSON logs and syslog
 
@@ -106,6 +144,8 @@ Use JSON logs for SIEM pipelines:
 logging:
   format: "json"
 ```
+
+Each line is a JSON object with `timestamp`, `level`, `logger`, `message`, and — when the call site supplies them — `category`, `event_type`, `group`, `ups`, and `server`. Power events, shutdown sequences, and remote-health transitions all set the structured fields explicitly; older call sites fall back to a heuristic that parses the message text, so existing log pipelines keep working unchanged.
 
 Forward logs to syslog:
 
@@ -117,4 +157,4 @@ logging:
     facility: "daemon"
 ```
 
-The existing local power-event `logger -t eneru` compatibility path remains.
+Eneru uses Python's standard `logging.handlers.SysLogHandler`, which emits **RFC 3164 (BSD syslog)** format. RFC 5424 structured-data support is not available in v5.3. The existing local power-event `logger -t eneru` compatibility path remains.
