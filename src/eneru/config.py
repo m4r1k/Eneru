@@ -109,9 +109,9 @@ class LoggingConfig:
 @dataclass
 class APIConfig:
     """Embedded read-only HTTP API configuration."""
-    enabled: bool = True
+    enabled: bool = False
     bind: str = "127.0.0.1"
-    port: int = 9100
+    port: int = 9191
 
 
 @dataclass
@@ -123,7 +123,7 @@ class PrometheusConfig:
 @dataclass
 class RemoteHealthConfig:
     """Harmless SSH healthcheck configuration for remote servers."""
-    enabled: bool = True
+    enabled: bool = False
     startup_check: bool = True
     interval: int = 3600
     probe_command: str = "true"
@@ -464,6 +464,18 @@ class Config:
 
 class ConfigLoader:
     """Loads and validates configuration from YAML file."""
+
+    @staticmethod
+    def _is_int_nonbool_in_range(value: Any, *, minimum: int = None,
+                                 maximum: int = None) -> bool:
+        """Return True for integers, excluding bool, inside optional bounds."""
+        if not isinstance(value, int) or isinstance(value, bool):
+            return False
+        if minimum is not None and value < minimum:
+            return False
+        if maximum is not None and value > maximum:
+            return False
+        return True
 
     DEFAULT_CONFIG_PATHS = [
         Path("/etc/ups-monitor/config.yaml"),
@@ -1223,33 +1235,41 @@ class ConfigLoader:
                 f"got {config.logging.format!r}."
             )
 
-        if (not isinstance(config.logging.syslog.port, int)
-                or isinstance(config.logging.syslog.port, bool)
-                or not 1 <= config.logging.syslog.port <= 65535):
+        if not cls._is_int_nonbool_in_range(
+            config.logging.syslog.port, minimum=1, maximum=65535,
+        ):
             messages.append(
                 "ERROR: logging.syslog.port must be an integer between 1 and 65535, "
                 f"got {config.logging.syslog.port!r}."
             )
 
-        if (not isinstance(config.api.port, int)
-                or isinstance(config.api.port, bool)
-                or not 1 <= config.api.port <= 65535):
+        import logging.handlers
+        valid_facilities = set(logging.handlers.SysLogHandler.facility_names)
+        facility = config.logging.syslog.facility
+        if (not isinstance(facility, str)
+                or facility.lower() not in valid_facilities):
+            messages.append(
+                "ERROR: logging.syslog.facility must be a valid syslog "
+                f"facility, got {facility!r}."
+            )
+        elif facility != facility.lower():
+            config.logging.syslog.facility = facility.lower()
+
+        if not cls._is_int_nonbool_in_range(config.api.port, minimum=1, maximum=65535):
             messages.append(
                 "ERROR: api.port must be an integer between 1 and 65535, "
                 f"got {config.api.port!r}."
             )
 
-        if (not isinstance(config.remote_health.interval, int)
-                or isinstance(config.remote_health.interval, bool)
-                or config.remote_health.interval < 60):
+        if not cls._is_int_nonbool_in_range(config.remote_health.interval, minimum=60):
             messages.append(
                 "ERROR: remote_health.interval must be an integer >= 60 seconds, "
                 f"got {config.remote_health.interval!r}."
             )
 
-        if (not isinstance(config.remote_health.failure_threshold, int)
-                or isinstance(config.remote_health.failure_threshold, bool)
-                or config.remote_health.failure_threshold < 1):
+        if not cls._is_int_nonbool_in_range(
+            config.remote_health.failure_threshold, minimum=1,
+        ):
             messages.append(
                 "ERROR: remote_health.failure_threshold must be an integer >= 1, "
                 f"got {config.remote_health.failure_threshold!r}."
@@ -1268,9 +1288,7 @@ class ConfigLoader:
         if config.mqtt.enabled and not str(config.mqtt.broker).strip():
             messages.append("ERROR: mqtt.broker is required when mqtt.enabled is true.")
 
-        if (not isinstance(config.mqtt.publish_interval, int)
-                or isinstance(config.mqtt.publish_interval, bool)
-                or config.mqtt.publish_interval < 1):
+        if not cls._is_int_nonbool_in_range(config.mqtt.publish_interval, minimum=1):
             messages.append(
                 "ERROR: mqtt.publish_interval must be an integer >= 1 second, "
                 f"got {config.mqtt.publish_interval!r}."

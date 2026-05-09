@@ -380,6 +380,7 @@ class _CLILogger:
     def log(self, message: str):
         print(message)
         if self.log_file:
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
             with self.log_file.open("a") as f:
                 f.write(message + "\n")
 
@@ -399,13 +400,15 @@ def _select_remote_server(config, server_ref: str, group_ref: str = None):
     """Select exactly one remote server from config."""
     matches = []
     for owner_label, owner_name, server in _iter_remote_server_owners(config):
+        if not server.enabled:
+            continue
         names = {server.name, server.host, server.name or server.host}
         if server_ref in names:
             if group_ref and group_ref not in {owner_label, owner_name}:
                 continue
             matches.append((owner_label, owner_name, server))
     if not matches:
-        raise SystemExit(f"ERROR: remote server {server_ref!r} not found")
+        raise SystemExit(f"ERROR: enabled remote server {server_ref!r} not found")
     if len(matches) > 1:
         owners = ", ".join(owner for owner, _, _ in matches)
         raise SystemExit(

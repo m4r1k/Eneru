@@ -1105,6 +1105,11 @@ class UPSGroupMonitor(
         from pathlib import Path
         stats_dir = Path(self.config.statistics.db_directory)
 
+        self._stop_event.set()
+        if self._remote_health_manager is not None:
+            self._remote_health_manager.stop()
+        if self._mqtt_publisher is not None:
+            self._mqtt_publisher.stop()
         if self._api_server is not None:
             self._api_server.stop()
 

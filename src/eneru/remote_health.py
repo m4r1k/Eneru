@@ -30,6 +30,10 @@ DANGEROUS_PROBE_WORDS = (
     "podman stop", "virsh shutdown", "virsh destroy",
     "qm shutdown", "qm stop", "pct shutdown", "pct stop",
 )
+SSH_OPTIONS_WITH_SEPARATE_ARG = {
+    "-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J",
+    "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w",
+}
 
 
 @dataclass
@@ -64,11 +68,16 @@ def build_ssh_probe_command(server: RemoteServerConfig,
                             probe_command: str) -> List[str]:
     """Build an SSH argv for a remote health probe."""
     ssh_cmd = ["ssh"]
+    pending_arg = False
     for opt in server.ssh_options:
-        if opt.startswith("-o "):
+        if pending_arg:
+            ssh_cmd.append(opt)
+            pending_arg = False
+        elif opt.startswith("-o "):
             ssh_cmd.extend(opt.split(None, 1))
         elif opt.startswith("-"):
             ssh_cmd.append(opt)
+            pending_arg = opt in SSH_OPTIONS_WITH_SEPARATE_ARG
         else:
             ssh_cmd.extend(["-o", opt])
     ssh_cmd.extend([
@@ -123,6 +132,9 @@ class RemoteHealthManager:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._notified_failed: Dict[str, bool] = {}
+        probe = config.remote_health.probe_command
+        self._validated_probe_command = probe if is_safe_probe_command(probe) else None
+        self._sidecar_write_failed_paths = set()
         initial = REMOTE_HEALTH_UNKNOWN if config.remote_health.enabled else REMOTE_HEALTH_DISABLED
         self._statuses: Dict[str, RemoteHealthStatus] = {
             self._key(server): RemoteHealthStatus(
@@ -148,6 +160,14 @@ class RemoteHealthManager:
             daemon=True,
         )
         self._thread.start()
+
+    def stop(self, timeout: int = 5) -> None:
+        """Signal the healthcheck loop and wait briefly for it to exit."""
+        self.stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+            if not self._thread.is_alive():
+                self._thread = None
 
     def snapshot(self) -> List[dict]:
         """Return JSON-serializable health rows."""
@@ -181,8 +201,8 @@ class RemoteHealthManager:
             row.status = REMOTE_HEALTH_CHECKING
         self._write_sidecar()
 
-        probe = self.config.remote_health.probe_command
-        if not is_safe_probe_command(probe):
+        probe = self._validated_probe_command
+        if probe is None:
             success, error, latency_ms = False, "unsafe probe command rejected", 0
         else:
             success, error, latency_ms = run_remote_probe(server, probe)
@@ -240,8 +260,14 @@ class RemoteHealthManager:
             tmp = self.sidecar_path.with_name(self.sidecar_path.name + ".tmp")
             tmp.write_text(json.dumps(payload, sort_keys=True))
             tmp.replace(self.sidecar_path)
-        except Exception:
-            pass
+        except Exception as exc:
+            key = str(self.sidecar_path)
+            if key not in self._sidecar_write_failed_paths:
+                self._sidecar_write_failed_paths.add(key)
+                self.log_fn(
+                    f"⚠️ Failed to write remote health sidecar for "
+                    f"{self.group_label} at {self.sidecar_path}: {exc}"
+                )
 
     @staticmethod
     def _key(server: RemoteServerConfig) -> str:

@@ -9,6 +9,13 @@ from eneru.remote_health import read_remote_health_sidecar, remote_health_sideca
 from eneru.stats import StatsStore
 
 
+HISTORY_METRICS = {
+    "charge": "battery_charge",
+    "runtime": "battery_runtime",
+    "load": "ups_load",
+    "voltage": "input_voltage",
+    "depletion": "depletion_rate",
+}
 POWER_EVENT_TYPES = {
     "ON_BATTERY",
     "POWER_RESTORED",
@@ -84,7 +91,7 @@ def monitor_status(monitor: Any) -> Dict[str, Any]:
         "name": config.ups.name,
         "label": label,
         "displayName": config.ups.display_name,
-        "isLocal": bool(getattr(group, "is_local", True)),
+        "isLocal": bool(getattr(group, "is_local", False)),
         "status": snap.status,
         "batteryCharge": snap.battery_charge,
         "runtime": snap.runtime,
@@ -143,7 +150,17 @@ def redundancy_group_statuses(source: Any, config: Optional[Config]) -> List[dic
 
 def readiness(source: Any) -> Dict[str, Any]:
     """Return readiness state from monitor snapshots."""
-    rows = [monitor_status(m) for m in iter_monitors(source)]
+    rows = []
+    for monitor in iter_monitors(source):
+        config = monitor.config
+        snap = monitor.state.snapshot()
+        rows.append({
+            "groupId": sanitize_name(config.ups.name),
+            "name": config.ups.name,
+            "label": config.ups.label,
+            "connectionState": snap.connection_state,
+            "lastUpdateTime": snap.last_update_time,
+        })
     if not rows:
         return {"ready": False, "reason": "no monitors", "ups": []}
     failed = [
@@ -157,6 +174,19 @@ def readiness(source: Any) -> Dict[str, Any]:
     }
 
 
+def _remote_server_summary(server: Any) -> Dict[str, Any]:
+    """Return a sanitized remote-server configuration summary."""
+    return {
+        "name": server.name or server.host,
+        "host": server.host,
+        "user": server.user,
+        "enabled": server.enabled,
+        "shutdownOrder": server.shutdown_order,
+        "hasPreShutdownCommands": bool(server.pre_shutdown_commands),
+        "sshOptionsConfigured": bool(server.ssh_options),
+    }
+
+
 def config_summary(config: Config) -> Dict[str, Any]:
     """Return a sanitized configuration summary."""
     return {
@@ -167,16 +197,7 @@ def config_summary(config: Config) -> Dict[str, Any]:
                 "label": group.ups.label,
                 "isLocal": group.is_local,
                 "remoteServers": [
-                    {
-                        "name": s.name or s.host,
-                        "host": s.host,
-                        "user": s.user,
-                        "enabled": s.enabled,
-                        "shutdownOrder": s.shutdown_order,
-                        "hasPreShutdownCommands": bool(s.pre_shutdown_commands),
-                        "sshOptionsConfigured": bool(s.ssh_options),
-                    }
-                    for s in group.remote_servers
+                    _remote_server_summary(s) for s in group.remote_servers
                 ],
             }
             for group in config.ups_groups
@@ -189,16 +210,7 @@ def config_summary(config: Config) -> Dict[str, Any]:
                 "minHealthy": group.min_healthy,
                 "isLocal": group.is_local,
                 "remoteServers": [
-                    {
-                        "name": s.name or s.host,
-                        "host": s.host,
-                        "user": s.user,
-                        "enabled": s.enabled,
-                        "shutdownOrder": s.shutdown_order,
-                        "hasPreShutdownCommands": bool(s.pre_shutdown_commands),
-                        "sshOptionsConfigured": bool(s.ssh_options),
-                    }
-                    for s in group.remote_servers
+                    _remote_server_summary(s) for s in group.remote_servers
                 ],
             }
             for group in config.redundancy_groups
@@ -251,76 +263,59 @@ def remote_health_for_config(config: Config) -> List[dict]:
     return rows
 
 
-def _event_matches_verbosity(row: dict, verbosity: int) -> bool:
-    """Match the TUI event tiers used by the event log view."""
-    if verbosity >= 2:
-        return True
-    event_type = row.get("eventType", "")
-    if verbosity == 1:
-        return event_type not in LIFECYCLE_EVENT_TYPES
-    return event_type in POWER_EVENT_TYPES
-
-
 def query_events(config: Config, *, limit: int = 100, verbosity: int = 2) -> List[dict]:
     """Return recent event rows from all per-UPS stats DBs."""
     rows: List[dict] = []
     now = int(time.time())
+    limit = max(1, int(limit))
+    verbosity = int(verbosity)
+    include_types = POWER_EVENT_TYPES if verbosity == 0 else None
+    exclude_types = LIFECYCLE_EVENT_TYPES if verbosity == 1 else None
     for group in config.ups_groups:
         conn = StatsStore.open_readonly(stats_db_path_for_group(config, group))
         if conn is None:
             continue
         try:
-            store = StatsStore(Path(":memory:"))
-            store._conn = conn
-            try:
-                for ts, event_type, detail in store.query_events(0, now):
-                    rows.append({
-                        "ts": int(ts),
-                        "ups": group.ups.name,
-                        "label": group.ups.label,
-                        "eventType": event_type,
-                        "detail": detail or "",
-                    })
-            finally:
-                store._conn = None
+            store = StatsStore.from_connection(conn)
+            for ts, event_type, detail in store.query_recent_events(
+                end_ts=now,
+                limit=limit,
+                include_types=include_types,
+                exclude_types=exclude_types,
+            ):
+                rows.append({
+                    "ts": int(ts),
+                    "ups": group.ups.name,
+                    "label": group.ups.label,
+                    "eventType": event_type,
+                    "detail": detail or "",
+                })
         finally:
             try:
                 conn.close()
             except Exception:
                 pass
     rows.sort(key=lambda row: row["ts"])
-    filtered = [row for row in rows if _event_matches_verbosity(row, int(verbosity))]
-    return filtered[-max(1, int(limit)):]
+    return rows[-limit:]
 
 
 def query_history(config: Config, ups_name: str, metric: str,
                   start: int, end: int) -> Optional[List[dict]]:
-    """Return metric history for one UPS, or None when the UPS is unknown."""
+    """Return metric history, or None for an unknown UPS or metric."""
     group = next((g for g in config.ups_groups
                   if g.ups.name == ups_name or sanitize_name(g.ups.name) == ups_name), None)
     if group is None:
         return None
-    allowed = {
-        "charge": "battery_charge",
-        "runtime": "battery_runtime",
-        "load": "ups_load",
-        "voltage": "input_voltage",
-        "depletion": "depletion_rate",
-    }
-    column = allowed.get(metric)
+    column = HISTORY_METRICS.get(metric)
     if column is None:
-        return []
+        return None
     conn = StatsStore.open_readonly(stats_db_path_for_group(config, group))
     if conn is None:
         return []
     try:
-        store = StatsStore(Path(":memory:"))
-        store._conn = conn
-        try:
-            return [{"ts": int(ts), "value": value}
-                    for ts, value in store.query_range(column, int(start), int(end))]
-        finally:
-            store._conn = None
+        store = StatsStore.from_connection(conn)
+        return [{"ts": int(ts), "value": value}
+                for ts, value in store.query_range(column, int(start), int(end))]
     finally:
         try:
             conn.close()

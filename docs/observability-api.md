@@ -4,13 +4,13 @@ Eneru v5.3 adds read-only observability endpoints and outbound integrations. Not
 
 ## API server
 
-The API starts with `eneru run` when enabled:
+The API starts with `eneru run` when explicitly enabled:
 
 ```yaml
 api:
   enabled: true
   bind: "127.0.0.1"
-  port: 9100
+  port: 9191
 ```
 
 Endpoints:
@@ -27,7 +27,7 @@ Endpoints:
 | `/api/v1/remote-health` | Remote SSH health status |
 | `/metrics` | Prometheus text metrics |
 
-The default bind address is localhost because v5.3 has no auth layer. Keep it behind SSH, a local reverse proxy, or a trusted network boundary.
+The API is disabled by default. When enabled, the default bind address is localhost because v5.3 has no auth layer. Keep it behind SSH, a local reverse proxy, or a trusted network boundary.
 
 UPS rows include a stable `groupId` derived from the configured UPS name. Multi-UPS responses also include `redundancyGroups` rows with their source UPS names, quorum target, locality flag, and remote-health rows.
 
@@ -65,7 +65,7 @@ Useful metric names include:
 
 ## Remote SSH health
 
-Remote healthchecks run a separate harmless probe command, default `true`.
+Remote healthchecks are disabled by default. When enabled, they run a separate harmless probe command, default `"true"`.
 
 ```yaml
 remote_health:

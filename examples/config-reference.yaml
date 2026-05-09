@@ -109,9 +109,9 @@ logging:
 api:
   # Embedded read-only HTTP API. Bind localhost by default because v5.3
   # intentionally has no auth/authz; v6 will add protected control APIs.
-  enabled: true
+  enabled: false
   bind: "127.0.0.1"
-  port: 9100
+  port: 9191
 
 prometheus:
   # Served at /metrics on the API server.
@@ -121,7 +121,7 @@ remote_health:
   # Harmless SSH healthchecks for configured remote servers. This never
   # executes pre_shutdown_commands or shutdown_command. Shutdown sequences
   # still attempt configured remote work even if health is red.
-  enabled: true
+  enabled: false
   startup_check: true
   interval: 3600
   probe_command: "true"

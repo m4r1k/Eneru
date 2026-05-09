@@ -2,6 +2,7 @@
 
 import pytest
 import sys
+import re
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -45,7 +46,7 @@ class TestCLIVersion:
         # `tui` is an alias for `monitor` -- both must surface in the
         # top-level help so users discover either spelling.
         assert "tui" in captured.out
-        assert "shutdown remote" in captured.out or "shutdown" in captured.out
+        assert re.search(r"\bshutdown\s+remote\b", captured.out)
 
 
 class TestCLIManualRemoteShutdown:
@@ -75,7 +76,8 @@ class TestCLIManualRemoteShutdown:
             with pytest.raises(SystemExit) as exc_info:
                 main()
         assert exc_info.value.code == 2
-        assert "i-really-want" in capsys.readouterr().out
+        captured = capsys.readouterr()
+        assert "i-really-want" in (captured.out + captured.err)
 
     @pytest.mark.unit
     def test_remote_shutdown_dry_run_does_not_execute_configured_commands(self, tmp_path):
@@ -118,6 +120,38 @@ class TestCLIManualRemoteShutdown:
                 main()
 
         assert exc_info.value.code == "ERROR: remote server 'nas' is ambiguous. Use --group. Matches: rack-a, rack-b"
+
+    @pytest.mark.unit
+    def test_remote_shutdown_ignores_disabled_servers(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "remote_servers:\n"
+            "  - name: nas\n"
+            "    enabled: false\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+        )
+
+        with patch.object(sys, "argv", [
+            "eneru", "shutdown", "remote",
+            "-c", str(config_file), "--server", "nas", "--dry-run",
+        ]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert "enabled remote server 'nas' not found" in str(exc_info.value)
+
+    @pytest.mark.unit
+    def test_remote_shutdown_log_file_parent_is_created(self, tmp_path):
+        from eneru.cli import _CLILogger
+
+        logger = _CLILogger(tmp_path / "drills" / "run.log")
+
+        logger.log("hello")
+
+        assert (tmp_path / "drills" / "run.log").read_text() == "hello\n"
 
 
 class TestCLITuiAlias:
@@ -210,6 +244,32 @@ class TestCLICompletion:
         else:
             assert "--verbose" in out
             assert "--length" in out
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
+    def test_completion_lists_shutdown_remote_flags(self, shell, capsys):
+        """Packaged completion scripts must expose manual remote drill flags."""
+        with patch.object(sys, "argv", ["eneru", "completion", shell]):
+            main()
+        out = capsys.readouterr().out
+        if shell == "fish":
+            for flag in (
+                "-l server",
+                "-l dry-run",
+                "-l i-really-want-to-proceed-with-remote-shutdown",
+                "-l no-connectivity-check",
+                "-l log-file",
+            ):
+                assert flag in out
+        else:
+            for flag in (
+                "--server",
+                "--dry-run",
+                "--i-really-want-to-proceed-with-remote-shutdown",
+                "--no-connectivity-check",
+                "--log-file",
+            ):
+                assert flag in out
 
     @pytest.mark.unit
     def test_invalid_shell_rejected(self):

@@ -15,7 +15,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote as urlquote
 
 
@@ -594,6 +594,42 @@ class StatsStore:
             self._log_error_once(f"stats: query_events failed: {e}")
             return []
 
+    def query_recent_events(
+        self,
+        *,
+        end_ts: int,
+        limit: int,
+        include_types: Optional[set] = None,
+        exclude_types: Optional[set] = None,
+    ) -> List[Tuple]:
+        """Return recent events ascending by ts without loading full history."""
+        if self._conn is None:
+            return []
+        limit = max(1, int(limit))
+        clauses = ["ts <= ?"]
+        params: List[Any] = [int(end_ts)]
+        if include_types:
+            placeholders = ", ".join("?" for _ in include_types)
+            clauses.append(f"event_type IN ({placeholders})")
+            params.extend(sorted(str(item) for item in include_types))
+        if exclude_types:
+            placeholders = ", ".join("?" for _ in exclude_types)
+            clauses.append(f"event_type NOT IN ({placeholders})")
+            params.extend(sorted(str(item) for item in exclude_types))
+        params.append(limit)
+        query = (
+            "SELECT ts, event_type, detail FROM events "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY ts DESC LIMIT ?"
+        )
+        try:
+            with self._db_lock:
+                cur = self._conn.execute(query, params)
+                return list(reversed(cur.fetchall()))
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: query_recent_events failed: {e}")
+            return []
+
     # ----- notification queue (v4+) -----
 
     def enqueue_notification(self, body: str, notify_type: str,
@@ -966,6 +1002,13 @@ class StatsStore:
         # writer's WAL can't stall the TUI refresh for more than 500 ms.
         conn.execute("PRAGMA busy_timeout = 500")
         return conn
+
+    @classmethod
+    def from_connection(cls, conn: sqlite3.Connection) -> "StatsStore":
+        """Wrap an existing SQLite connection without taking ownership."""
+        store = cls(Path(":memory:"))
+        store._conn = conn
+        return store
 
     # ----- error rate-limiting -----
 

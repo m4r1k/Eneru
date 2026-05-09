@@ -91,8 +91,11 @@ class TestConfigValidation:
         """v5.3 observability defaults are safe and valid."""
         messages = ConfigLoader.validate_config(minimal_config)
         assert not any("api.port" in m for m in messages)
+        assert minimal_config.api.enabled is False
         assert minimal_config.api.bind == "127.0.0.1"
+        assert minimal_config.api.port == 9191
         assert minimal_config.prometheus.enabled is True
+        assert minimal_config.remote_health.enabled is False
         assert minimal_config.remote_health.probe_command == "true"
 
     @pytest.mark.unit
@@ -110,6 +113,20 @@ class TestConfigValidation:
         messages = ConfigLoader.validate_config(minimal_config)
         errors = [m for m in messages if m.startswith("ERROR")]
         assert any("mqtt.broker" in m for m in errors)
+
+    @pytest.mark.unit
+    def test_validate_syslog_facility(self, minimal_config):
+        minimal_config.logging.syslog.facility = "not-a-facility"
+        messages = ConfigLoader.validate_config(minimal_config)
+        errors = [m for m in messages if m.startswith("ERROR")]
+        assert any("logging.syslog.facility" in m for m in errors)
+
+    @pytest.mark.unit
+    def test_validate_normalizes_syslog_facility_case(self, minimal_config):
+        minimal_config.logging.syslog.facility = "LOCAL0"
+        messages = ConfigLoader.validate_config(minimal_config)
+        assert not any("logging.syslog.facility" in m for m in messages)
+        assert minimal_config.logging.syslog.facility == "local0"
 
 
 class TestUnknownKeyValidation:

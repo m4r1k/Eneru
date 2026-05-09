@@ -46,7 +46,19 @@ _eneru() {
                         '--exit-after-shutdown[exit after completing shutdown sequence]'
                     ;;
                 shutdown)
-                    _values 'shutdown command' remote
+                    if [[ "$line[2]" == "remote" ]]; then
+                        _arguments \
+                            '(-c --config)'{-c,--config}'[path to configuration file]:config file:_files' \
+                            '--server[remote server name or host]:server:' \
+                            '--group[UPS or redundancy group]:group:' \
+                            '--dry-run[do not execute configured commands]' \
+                            '--i-really-want-to-proceed-with-remote-shutdown[confirm real remote shutdown]' \
+                            '--connectivity-check[run harmless SSH probe first]' \
+                            '--no-connectivity-check[skip harmless SSH probe]' \
+                            '--log-file[append drill log to file]:log file:_files'
+                    else
+                        _values 'shutdown command' remote
+                    fi
                     ;;
                 validate|test-notifications)
                     _arguments \

@@ -308,18 +308,18 @@ See [Statistics](statistics.md) for schema and queries.
 
 ## API, metrics, remote health, and MQTT
 
-The v5.3 API is read-only and binds to localhost by default. Do not expose it to untrusted networks; authz is planned for v6.
+The v5.3 API is read-only, opt-in, and binds to localhost by default when enabled. Do not expose it to untrusted networks; authz is planned for v6.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `api.enabled` | `true` | Start the embedded read-only HTTP API with `eneru run` |
+| `api.enabled` | `false` | Start the embedded read-only HTTP API with `eneru run` |
 | `api.bind` | `127.0.0.1` | Listen address |
-| `api.port` | `9100` | Listen port |
+| `api.port` | `9191` | Listen port |
 | `prometheus.enabled` | `true` | Serve Prometheus text metrics at `/metrics` |
-| `remote_health.enabled` | `true` | Run harmless SSH probes for enabled remote servers |
+| `remote_health.enabled` | `false` | Run harmless SSH probes for explicitly enabled remote servers |
 | `remote_health.startup_check` | `true` | Check remote SSH connectivity at daemon startup |
 | `remote_health.interval` | `3600` | Periodic check interval in seconds |
-| `remote_health.probe_command` | `true` | Harmless SSH command used only for healthchecks |
+| `remote_health.probe_command` | `"true"` | Harmless SSH command (the Unix `true(1)`) used only for healthchecks |
 | `remote_health.failure_threshold` | `2` | Consecutive failures before a target is marked failed |
 | `remote_health.notify_on_failure` | `true` | Send notification when a target enters failed state |
 | `remote_health.notify_on_recovery` | `true` | Send notification when a failed target recovers |

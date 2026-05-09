@@ -589,6 +589,10 @@ class MultiUPSCoordinator:
 
         self._stop_event.set()
 
+        for manager in self._redundancy_remote_health_managers:
+            manager.stop()
+        if self._mqtt_publisher is not None:
+            self._mqtt_publisher.stop()
         if self._api_server is not None:
             self._api_server.stop()
 

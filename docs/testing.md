@@ -29,7 +29,10 @@ Eneru uses unit tests, package-install tests, and end-to-end tests with real NUT
    ╱─────────────────────────────────────────────╲
 ```
 
-The pyramid is intentionally bottom-heavy. Most behavior is covered by fast pytest tests. E2E tests are fewer, but they exercise the real service boundaries where packaging, NUT, SSH, Docker, filesystem, and CLI assumptions meet.
+The pyramid is intentionally bottom-heavy. As of the v5.3 review-fix pass,
+the local pytest suite contains 1124 tests. E2E tests are fewer, but they
+exercise the real service boundaries where packaging, NUT, SSH, Docker,
+filesystem, and CLI assumptions meet.
 
 ## CI layout
 
@@ -82,6 +85,7 @@ done
 | Health monitoring | Voltage thresholds, AVR, bypass, overload, battery anomaly filtering |
 | Notifications | Formatting, retry queue, lifecycle classification, coalescing, suppression rules |
 | Statistics and TUI | SQLite schema, aggregation, event tier filtering, TUI grouping, graphs, one-shot monitor output |
+| Observability | API routing, readiness, Prometheus escaping, remote-health sidecars, MQTT publishing |
 | Packaging | nFPM file list, package install paths, wrapper execution |
 
 ## End-to-end tests

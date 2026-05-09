@@ -73,7 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   embedded API with `/health`, `/ready`, `/api/v1/ups`,
   `/api/v1/events`, `/api/v1/config`, `/api/v1/remote-health`, and
   Prometheus `/metrics`. These surfaces are read-only; shutdown/control
-  APIs remain deferred until v6 auth/authz.
+  APIs remain deferred until v6 auth/authz. The API is opt-in and
+  defaults to port 9191 to avoid common node-exporter deployments.
 - **Remote SSH healthchecks.** Enabled remote servers now get harmless
   startup plus periodic SSH probes (`true` by default). Failures and
   recoveries are logged and can notify, and the TUI/API/metrics expose
@@ -81,7 +82,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attempts configured remote pre-shutdown commands and final shutdown
   commands with bounded timeouts. Redundancy-group-owned remote targets
   now get the same health sidecars and API/TUI visibility as per-UPS
-  remote targets.
+  remote targets. The healthcheck runner is opt-in and only probes
+  remote servers explicitly marked `enabled: true`.
 - **Manual remote shutdown drill.** `eneru shutdown remote --server ...`
   tests one configured remote target through Eneru's SSH command path.
   `--dry-run` executes no configured commands; real execution requires

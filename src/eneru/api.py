@@ -4,10 +4,11 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 from eneru.status import (
+    HISTORY_METRICS,
     collect_status,
     config_summary,
     find_status,
@@ -18,15 +19,24 @@ from eneru.status import (
 )
 
 
+class APIBadRequest(ValueError):
+    """Raised when a client supplies invalid API query parameters."""
+
+
 class EneruAPIServer:
     """Small stdlib HTTP server for read-only observability endpoints."""
 
-    def __init__(self, source: Any, config, log_fn=None):
-        self.source = source
-        self.config = config
-        self.log_fn = log_fn or (lambda msg: None)
-        self._httpd = None
-        self._thread = None
+    def __init__(
+        self,
+        source: Any,
+        config: Any,
+        log_fn: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        self.source: Any = source
+        self.config: Any = config
+        self.log_fn: Callable[[str], None] = log_fn or (lambda msg: None)
+        self._httpd: Optional[ThreadingHTTPServer] = None
+        self._thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
         """Start the API server when enabled."""
@@ -78,6 +88,11 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - stdlib hook
         try:
             status, content_type, body = self._route()
+        except APIBadRequest as exc:
+            status, content_type, body = (
+                400, "application/json",
+                self._error("INVALID_REQUEST", str(exc)),
+            )
         except Exception:
             status, content_type, body = (
                 500, "application/json",
@@ -88,7 +103,14 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         else:
             raw = str(body).encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
+        # Keep the header value on a literal whitelist. Routes only return
+        # these two content types, but this avoids header-injection false
+        # positives if a future route accidentally passes user data through.
+        if content_type == "text/plain":
+            content_type_header = "text/plain; charset=utf-8"
+        else:
+            content_type_header = "application/json; charset=utf-8"
+        self.send_header("Content-Type", content_type_header)
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -128,8 +150,14 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 return 200, "application/json", row
             if len(parts) == 6 and parts[5] == "history":
                 metric = (qs.get("metric") or ["charge"])[0]
-                end = int((qs.get("to") or [str(int(time.time()))])[0])
-                start = int((qs.get("from") or [str(end - 3600)])[0])
+                if metric not in HISTORY_METRICS:
+                    allowed = ", ".join(sorted(HISTORY_METRICS))
+                    return 400, "application/json", self._error(
+                        "INVALID_REQUEST",
+                        f"metric must be one of: {allowed}",
+                    )
+                end = _parse_int_param(qs, "to", int(time.time()))
+                start = _parse_int_param(qs, "from", end - 3600)
                 rows = query_history(self.api_config, ups_name, metric, start, end)
                 if rows is None:
                     return 404, "application/json", self._error("NOT_FOUND", "UPS not found")
@@ -139,8 +167,8 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 }
 
         if path == "/api/v1/events":
-            limit = int((qs.get("limit") or ["100"])[0])
-            verbosity = int((qs.get("verbosity") or ["2"])[0])
+            limit = _parse_int_param(qs, "limit", 100, minimum=1)
+            verbosity = _parse_int_param(qs, "verbosity", 2, minimum=0, maximum=2)
             return 200, "application/json", {
                 "generatedAt": time.time(),
                 "events": query_events(self.api_config, limit=limit, verbosity=verbosity),
@@ -168,9 +196,41 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         return {"error": {"code": code, "message": message}}
 
 
+def _parse_int_param(
+    qs: Dict[str, list],
+    name: str,
+    default: int,
+    *,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> int:
+    """Return one integer query parameter or raise ``APIBadRequest``."""
+    raw = (qs.get(name) or [str(default)])[0]
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise APIBadRequest(f"{name} must be an integer") from None
+    if minimum is not None and value < minimum:
+        raise APIBadRequest(f"{name} must be >= {minimum}")
+    if maximum is not None and value > maximum:
+        raise APIBadRequest(f"{name} must be <= {maximum}")
+    return value
+
+
+def _escape_label_value(value: Any) -> str:
+    """Escape a Prometheus label value."""
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("\n", "\\n")
+        .replace("\r", "\\n")
+        .replace('"', '\\"')
+    )
+
+
 def _metric_line(name: str, labels: Dict[str, str], value) -> str:
     label_text = ",".join(
-        f'{k}="{str(v).replace(chr(34), "")}"'
+        f'{k}="{_escape_label_value(v)}"'
         for k, v in labels.items()
     )
     try:

@@ -688,12 +688,11 @@ DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
 
 for i in {1..10}; do
-  if curl -fsS http://127.0.0.1:9100/health >/tmp/test43-health.json; then
+  if curl -fsS http://127.0.0.1:9100/ready >/tmp/test43-ready.json; then
     break
   fi
   sleep 1
 done
-curl -fsS http://127.0.0.1:9100/ready >/tmp/test43-ready.json
 curl -fsS http://127.0.0.1:9100/metrics >/tmp/test43-metrics.txt
 
 if ! grep -q "eneru_up 1" /tmp/test43-metrics.txt; then
