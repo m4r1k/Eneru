@@ -845,6 +845,8 @@ mqtt:
 YAML
 
 rm -f /tmp/test45-mqtt.json /tmp/test45-subscriber.log
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+sleep 3
 python3 - <<'PY' > /tmp/test45-subscriber.log 2>&1 &
 import json
 import os
@@ -867,7 +869,16 @@ def new_client():
 def on_message(client, userdata, msg):
     payload = json.loads(msg.payload.decode("utf-8"))
     ups = payload.get("ups") or []
-    if ups and "powerQuality" in ups[0]:
+    power = ups[0].get("powerQuality", {}) if ups else {}
+    # The MQTT publisher sends a status snapshot immediately after it
+    # connects. During daemon startup that first frame can legitimately
+    # contain the powerQuality object before the first UPS poll has
+    # populated readings, so wait for the observed telemetry frame.
+    if (
+        power.get("inputVoltage") not in ("", None)
+        and "voltageState" in power
+        and "nominalVoltage" in power
+    ):
         with open(OUT, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, sort_keys=True)
         client.disconnect()
@@ -890,7 +901,6 @@ sys.exit(0 if os.path.exists(OUT) else 1)
 PY
 SUB_PID=$!
 
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
 timeout 12s eneru run --config /tmp/config-e2e-mqtt.yaml \
   > /tmp/test45-daemon.log 2>&1 &
 DAEMON_PID=$!
