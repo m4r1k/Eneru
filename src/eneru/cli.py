@@ -421,10 +421,13 @@ def _format_remote_list_table(rows):
         for i, column in enumerate(columns)
     ]
     last = len(widths) - 1
-    fmt_row = lambda row: "  ".join(
-        str(cell) if i == last else str(cell).ljust(widths[i])
-        for i, cell in enumerate(row)
-    )
+
+    def fmt_row(row):
+        return "  ".join(
+            str(cell) if i == last else str(cell).ljust(widths[i])
+            for i, cell in enumerate(row)
+        )
+
     lines = [fmt_row(headers)]
     for row in rows:
         lines.append(fmt_row(row))
@@ -588,7 +591,7 @@ def _resolve_group_for_rehearsal(config, group_ref: str):
     first and the canonical name second; redundancy groups against
     ``RedundancyGroupConfig.name``. Raises SystemExit with an
     operator-friendly message when nothing matches or the name is
-    ambiguous across kinds.
+    ambiguous (within or across kinds).
     """
     matches = []
     for group in config.ups_groups:
@@ -603,16 +606,21 @@ def _resolve_group_for_rehearsal(config, group_ref: str):
             f"Use 'eneru remote list' to see configured names."
         )
     if len(matches) > 1:
-        kinds = ", ".join(kind for kind, _ in matches)
+        described = ", ".join(
+            f"{(g.ups.label if kind == 'ups' else g.name) or '(unnamed)'} ({kind})"
+            for kind, g in matches
+        )
         raise SystemExit(
-            f"ERROR: group {group_ref!r} matches multiple groups ({kinds}). "
-            f"Rename one of them or open an issue if you need a --kind flag."
+            f"ERROR: group {group_ref!r} matches multiple groups: "
+            f"{described}. Rename one of them or open an issue if you "
+            f"need a --kind flag."
         )
     return matches[0]
 
 
 def _cmd_shutdown_group(args):
     """Run a manual full-sequence shutdown rehearsal for one named group."""
+    import atexit
     import shutil
     import tempfile
     import threading
@@ -638,16 +646,34 @@ def _cmd_shutdown_group(args):
         # The coordinator's local-poweroff callback isn't wired in this
         # one-shot path. Calling it would let an operator confirm a
         # "rehearsal" and accidentally halt the host because the
-        # callback bypasses the per-rehearsal flag isolation.
-        logger.log(
-            "  Note: redundancy rehearsal does not fire local poweroff "
-            "even with confirm flag."
-        )
+        # callback bypasses the per-rehearsal flag isolation. The
+        # executor still drains is_local resources (VMs, containers,
+        # filesystems) before that gated step, so a confirmed rehearsal
+        # of an is_local redundancy group really does stop them.
+        is_local_redundancy = bool(getattr(group, "is_local", False))
+        if is_local_redundancy and not args.dry_run and args.confirm:
+            logger.log(
+                "  WARNING: this is_local redundancy group WILL stop "
+                "local VMs/containers and unmount configured filesystems "
+                "on this host. Only the final poweroff command is "
+                "suppressed by the rehearsal."
+            )
+        else:
+            logger.log(
+                "  Note: redundancy rehearsal does not fire local "
+                "poweroff even with confirm flag."
+            )
 
     # Isolate per-rehearsal state files so the rehearsal can never
     # collide with a running daemon's flag/state files (which would
-    # block the daemon from re-firing its own shutdowns).
+    # block the daemon from re-firing its own shutdowns). The
+    # atexit hook is belt-and-braces: try/finally below covers normal
+    # control flow, atexit covers an unexpected interpreter shutdown
+    # before the finally runs (e.g. an unhandled SystemExit raised
+    # deep in a mixin). Neither path covers SIGKILL — accepted, the
+    # tempdir holds no secrets and is mode 0700.
     rehearsal_dir = Path(tempfile.mkdtemp(prefix="eneru-rehearsal-"))
+    atexit.register(shutil.rmtree, str(rehearsal_dir), True)
     try:
         config.logging.shutdown_flag_file = str(
             rehearsal_dir / "rehearsal.shutdown-flag"

@@ -1,6 +1,7 @@
 """Embedded read-only HTTP API and Prometheus endpoint."""
 
 import json
+import math
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -253,13 +254,24 @@ def _metric_line(name: str, labels: Dict[str, str], value) -> str:
     # genuine zero reading. Emitting 0.0 for an unreported NUT field
     # (e.g. a UPS that never publishes input.voltage) would let alert
     # rules confuse "no telemetry" with "voltage collapsed to zero".
+    # The exposition format also requires the canonical sentinels
+    # ``NaN``, ``+Inf``, ``-Inf`` (case-sensitive); Python's default
+    # float repr produces lowercase ``nan``/``inf`` which strict parsers
+    # reject — drop the whole scrape, blank dashboards, mute alerts.
     if value is None or value == "":
         numeric_text = "NaN"
     else:
         try:
-            numeric_text = f"{float(value)}"
+            numeric = float(value)
         except (TypeError, ValueError):
             numeric_text = "NaN"
+        else:
+            if math.isnan(numeric):
+                numeric_text = "NaN"
+            elif math.isinf(numeric):
+                numeric_text = "+Inf" if numeric > 0 else "-Inf"
+            else:
+                numeric_text = f"{numeric}"
     return f"{name}{{{label_text}}} {numeric_text}"
 
 
@@ -274,11 +286,18 @@ _BINARY_STATE_LABELS = ("INACTIVE", "ACTIVE")
 
 
 def _state_metric_lines(name, labels, current, possible_labels, default):
+    # Build the labels dict once and only mutate the "state" entry per
+    # iteration; the previous {**labels, "state": label} comprehension
+    # allocated one fresh dict per state per UPS per scrape (10 per UPS
+    # across the four state metrics). _metric_line consumes the dict
+    # synchronously so reusing the same instance is safe.
     active = current if current in possible_labels else default
-    return [
-        _metric_line(name, {**labels, "state": label}, 1 if label == active else 0)
-        for label in possible_labels
-    ]
+    line_labels = dict(labels)
+    lines = []
+    for label in possible_labels:
+        line_labels["state"] = label
+        lines.append(_metric_line(name, line_labels, 1 if label == active else 0))
+    return lines
 
 
 _LOOPBACK_BINDS = frozenset({"127.0.0.1", "::1", "localhost"})

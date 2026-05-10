@@ -145,6 +145,22 @@ def test_prometheus_metrics_emit_nan_for_missing_readings(monitor):
 
 
 @pytest.mark.unit
+def test_prometheus_metric_line_formats_inf_and_nan_per_spec():
+    # Prometheus exposition is case-sensitive: parsers reject lowercase
+    # ``inf``/``nan``. Python's f"{float(...)}" emits the lowercase
+    # forms, so _metric_line must canonicalise to ``+Inf``/``-Inf``/``NaN``.
+    from eneru.api import _metric_line
+
+    overflow = _metric_line("test_metric", {"ups": "u"}, "1e500")
+    underflow = _metric_line("test_metric", {"ups": "u"}, "-1e500")
+    not_a_number = _metric_line("test_metric", {"ups": "u"}, float("nan"))
+
+    assert overflow.endswith(" +Inf"), overflow
+    assert underflow.endswith(" -Inf"), underflow
+    assert not_a_number.endswith(" NaN"), not_a_number
+
+
+@pytest.mark.unit
 def test_prometheus_state_metrics_emit_one_series_per_label(monitor):
     text = render_prometheus_metrics(monitor)
 

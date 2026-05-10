@@ -1193,3 +1193,64 @@ class TestCLIShutdownGroupRehearsal:
         kwargs = mock_executor_cls.call_args.kwargs
         assert kwargs["local_shutdown_callback"] is None
         assert "does not fire local poweroff" in capsys.readouterr().out
+
+    def _is_local_redundancy_config(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  - name: UPS-A\n"
+            "    display_name: rack-a\n"
+            "  - name: UPS-B\n"
+            "    display_name: rack-b\n"
+            "redundancy_groups:\n"
+            "  - name: local-pair\n"
+            "    ups_sources: [UPS-A, UPS-B]\n"
+            "    min_healthy: 1\n"
+            "    is_local: true\n"
+            "    remote_servers:\n"
+            "      - name: nas\n"
+            "        enabled: true\n"
+            "        host: nas.local\n"
+            "        user: root\n"
+        )
+        return config_file
+
+    @pytest.mark.unit
+    def test_is_local_redundancy_confirm_warns_about_destructive_mixins(
+        self, tmp_path, capsys,
+    ):
+        # is_local redundancy + confirm + real execution: the executor
+        # still drains VMs/containers/filesystems before the suppressed
+        # poweroff. The CLI must explicitly warn about that, not just say
+        # "no local poweroff" (which understates the blast radius).
+        config_file = self._is_local_redundancy_config(tmp_path)
+        with patch("eneru.cli.RedundancyGroupExecutor") as mock_executor_cls:
+            mock_executor_cls.return_value = MagicMock()
+            with patch.object(sys, "argv", [
+                "eneru", "shutdown", "group",
+                "-c", str(config_file), "--group", "local-pair",
+                "--i-really-want-to-proceed-with-group-shutdown",
+            ]):
+                main()
+        out = capsys.readouterr().out
+        assert "WARNING" in out
+        assert "local VMs/containers" in out
+        assert "unmount configured filesystems" in out
+
+    @pytest.mark.unit
+    def test_is_local_redundancy_dry_run_keeps_softer_disclaimer(
+        self, tmp_path, capsys,
+    ):
+        # In dry-run mode no real damage can land, so the softer
+        # "rehearsal does not fire local poweroff" line is appropriate.
+        config_file = self._is_local_redundancy_config(tmp_path)
+        with patch("eneru.cli.RedundancyGroupExecutor") as mock_executor_cls:
+            mock_executor_cls.return_value = MagicMock()
+            with patch.object(sys, "argv", [
+                "eneru", "shutdown", "group",
+                "-c", str(config_file), "--group", "local-pair", "--dry-run",
+            ]):
+                main()
+        out = capsys.readouterr().out
+        assert "WARNING" not in out
+        assert "does not fire local poweroff" in out
