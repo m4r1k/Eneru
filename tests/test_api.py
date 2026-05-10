@@ -134,6 +134,52 @@ def test_prometheus_metrics_include_eneru_specific_values(monitor):
 
 
 @pytest.mark.unit
+def test_prometheus_metrics_emit_nan_for_missing_readings(monitor):
+    monitor.state.latest_input_voltage = ""
+    monitor.state.latest_ups_temperature = ""
+
+    text = render_prometheus_metrics(monitor)
+
+    assert 'eneru_ups_input_voltage{ups="TestUPS@localhost",label="TestUPS@localhost"} NaN' in text
+    assert 'eneru_ups_temperature_celsius{ups="TestUPS@localhost",label="TestUPS@localhost"} NaN' in text
+
+
+@pytest.mark.unit
+def test_prometheus_state_metrics_emit_one_series_per_label(monitor):
+    text = render_prometheus_metrics(monitor)
+
+    voltage_lines = [
+        line for line in text.splitlines()
+        if line.startswith("eneru_ups_voltage_state{")
+    ]
+    avr_lines = [
+        line for line in text.splitlines()
+        if line.startswith("eneru_ups_avr_state{")
+    ]
+    bypass_lines = [
+        line for line in text.splitlines()
+        if line.startswith("eneru_ups_bypass_state{")
+    ]
+    overload_lines = [
+        line for line in text.splitlines()
+        if line.startswith("eneru_ups_overload_state{")
+    ]
+
+    # Three voltage states (NORMAL/LOW/HIGH), three AVR (INACTIVE/BOOST/TRIM),
+    # two bypass (INACTIVE/ACTIVE), two overload (INACTIVE/ACTIVE).
+    assert len(voltage_lines) == 3
+    assert len(avr_lines) == 3
+    assert len(bypass_lines) == 2
+    assert len(overload_lines) == 2
+
+    # Exactly one active series per metric (the one matching current state).
+    assert sum(line.endswith(" 1.0") for line in voltage_lines) == 1
+    assert sum(line.endswith(" 0.0") for line in voltage_lines) == 2
+    assert any('state="NORMAL"' in line and line.endswith(" 1.0")
+               for line in voltage_lines)
+
+
+@pytest.mark.unit
 def test_prometheus_metrics_escape_label_values(monitor):
     monitor.config.ups.name = 'UPS"rack\\a'
     monitor.config.ups.display_name = "Line\nOne"

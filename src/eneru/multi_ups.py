@@ -347,7 +347,7 @@ class MultiUPSCoordinator:
         self._start_api_server()
         self._start_mqtt_publisher()
 
-    def _start_redundancy_remote_health(self, group, monitors_by_name=None) -> None:
+    def _start_redundancy_remote_health(self, group, monitors_by_name) -> None:
         """Start advisory SSH healthchecks for redundancy-group remotes."""
         enabled_servers = [s for s in group.remote_servers if s.enabled]
         if not enabled_servers:
@@ -384,7 +384,7 @@ class MultiUPSCoordinator:
             notify_fn=notify_fn,
             event_fn=lambda event_type, detail, notification_sent: (
                 self._record_redundancy_remote_health_event(
-                    group, monitors_by_name or {}, event_type, detail,
+                    group, monitors_by_name, event_type, detail,
                     notification_sent,
                 )
             ),
@@ -400,7 +400,16 @@ class MultiUPSCoordinator:
         detail: str,
         notification_sent: bool,
     ) -> None:
-        """Write redundancy remote-health transitions to member UPS stores."""
+        """Write redundancy remote-health transitions to member UPS stores.
+
+        Stats are per-UPS in the current schema, so a redundancy-group
+        remote-health transition is fanned out to every member's events
+        table. The detail string carries the ``redundancy:<group>``
+        prefix and the originating server, so per-UPS event readers
+        (TUI, /api/v1/events) still attribute the event correctly even
+        though it appears in N rows for an N-UPS group. A future
+        group-scoped events store would let this become a single write.
+        """
         for source_name in getattr(group, "ups_sources", []):
             monitor = monitors_by_name.get(source_name)
             store = getattr(monitor, "_stats_store", None)

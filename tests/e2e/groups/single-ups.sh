@@ -889,7 +889,7 @@ client.on_message = on_message
 client.connect("127.0.0.1", 1883, 30)
 client.subscribe(TOPIC)
 client.loop_start()
-deadline = time.time() + 12
+deadline = time.time() + 25
 while time.time() < deadline and not os.path.exists(OUT):
     time.sleep(0.2)
 client.loop_stop()
@@ -901,7 +901,7 @@ sys.exit(0 if os.path.exists(OUT) else 1)
 PY
 SUB_PID=$!
 
-timeout 12s eneru run --config /tmp/config-e2e-mqtt.yaml \
+timeout 20s eneru run --config /tmp/config-e2e-mqtt.yaml \
   > /tmp/test45-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" "$SUB_PID" 2>/dev/null || true' EXIT

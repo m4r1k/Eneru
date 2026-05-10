@@ -177,7 +177,7 @@ Bug-fix release with one small TUI improvement. Bundles fixes from a third-party
 - **Voltage severity escalation never fired** when a brownout crossed the severe threshold AFTER the LOW state was already pending. Severity is now re-evaluated every poll.
 - **Silent config drops.** `notifications.suppress`, `notifications.voltage_hysteresis_seconds`, and per-group `statistics` in multi-UPS mode were never read from YAML. All three now round-trip.
 - **Legacy `ups-monitor` syslog tag** renamed to `eneru` so journalctl filtering matches the rest of the daemon's output.
-- **Long tail of robustness fixes** across `shutdown/`, `health/`, `graph.py`, `logger.py`, `stats.py`, `utils.py`, `cli.py`, and bash completion.
+- **Smaller follow-up fixes** across `shutdown/`, `health/`, `graph.py`, `logger.py`, `stats.py`, `utils.py`, `cli.py`, and bash completion.
 
 ### Security
 - **`stop_compose` remote-shell injection.** Template double-quoting didn't block `$()`/backticks/`${...}`. `shlex.quote` now runs at the call site.

@@ -164,6 +164,7 @@ class RemoteHealthManager:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._notified_failed: Dict[str, bool] = {}
+        self._event_fn_logged_failure = False
         probe = config.remote_health.probe_command
         self._validated_probe_command = probe if is_safe_probe_command(probe) else None
         self._sidecar_write_failed_paths = set()
@@ -316,10 +317,16 @@ class RemoteHealthManager:
                 detail,
                 notification_sent,
             )
-        except Exception:
-            # Stats are diagnostic only. A broken DB must not affect health
-            # checks or the shutdown path.
-            pass
+        except Exception as exc:
+            # Stats are diagnostic only. A broken DB must not affect
+            # health checks or the shutdown path. Log the first failure
+            # so a silently broken events table leaves a journal trail.
+            if not self._event_fn_logged_failure:
+                self._event_fn_logged_failure = True
+                self.log_fn(
+                    f"⚠️ Remote health stats event failed (further "
+                    f"failures will be silent): {exc}"
+                )
 
     def _write_sidecar(self) -> None:
         try:

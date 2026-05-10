@@ -249,11 +249,36 @@ def _metric_line(name: str, labels: Dict[str, str], value) -> str:
         f'{k}="{_escape_label_value(v)}"'
         for k, v in labels.items()
     )
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        numeric = 0.0
-    return f"{name}{{{label_text}}} {numeric}"
+    # Prometheus exposition treats NaN as "no data" rather than as a
+    # genuine zero reading. Emitting 0.0 for an unreported NUT field
+    # (e.g. a UPS that never publishes input.voltage) would let alert
+    # rules confuse "no telemetry" with "voltage collapsed to zero".
+    if value is None or value == "":
+        numeric_text = "NaN"
+    else:
+        try:
+            numeric_text = f"{float(value)}"
+        except (TypeError, ValueError):
+            numeric_text = "NaN"
+    return f"{name}{{{label_text}}} {numeric_text}"
+
+
+# State-machine metric labels. Standard Prometheus practice for
+# enum/state metrics is to emit one series per possible label with
+# 0 or 1, so transitions appear as flips rather than series gaps.
+# Keep these tuples aligned with the values written by
+# src/eneru/health/voltage.py.
+_VOLTAGE_STATE_LABELS = ("NORMAL", "LOW", "HIGH")
+_AVR_STATE_LABELS = ("INACTIVE", "BOOST", "TRIM")
+_BINARY_STATE_LABELS = ("INACTIVE", "ACTIVE")
+
+
+def _state_metric_lines(name, labels, current, possible_labels, default):
+    active = current if current in possible_labels else default
+    return [
+        _metric_line(name, {**labels, "state": label}, 1 if label == active else 0)
+        for label in possible_labels
+    ]
 
 
 _LOOPBACK_BINDS = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -284,13 +309,13 @@ _METRIC_CATALOGUE = (
     ("eneru_ups_voltage_warning_low", "gauge", "Derived low-voltage warning threshold."),
     ("eneru_ups_voltage_warning_high", "gauge", "Derived high-voltage warning threshold."),
     ("eneru_ups_voltage_state", "gauge",
-     "Current grid-quality voltage state (1 for the active state label)."),
+     "Grid-quality voltage state (one series per label, 1 if active)."),
     ("eneru_ups_avr_state", "gauge",
-     "Current AVR state (1 for the active state label)."),
+     "AVR state (one series per label, 1 if active)."),
     ("eneru_ups_bypass_state", "gauge",
-     "Current bypass state (1 for the active state label)."),
+     "Bypass state (one series per label, 1 if active)."),
     ("eneru_ups_overload_state", "gauge",
-     "Current overload state (1 for the active state label)."),
+     "Overload state (one series per label, 1 if active)."),
     ("eneru_ups_depletion_rate_percent_per_minute", "gauge",
      "UPS battery depletion rate (charge percent per minute on battery)."),
     ("eneru_ups_time_on_battery_seconds", "gauge",
@@ -329,25 +354,21 @@ def render_prometheus_metrics(source: Any) -> str:
         lines.append(_metric_line("eneru_ups_nominal_voltage", labels, power.get("nominalVoltage")))
         lines.append(_metric_line("eneru_ups_voltage_warning_low", labels, power.get("warningLow")))
         lines.append(_metric_line("eneru_ups_voltage_warning_high", labels, power.get("warningHigh")))
-        lines.append(_metric_line(
-            "eneru_ups_voltage_state",
-            {**labels, "state": power.get("voltageState", "NORMAL")},
-            1,
+        lines.extend(_state_metric_lines(
+            "eneru_ups_voltage_state", labels,
+            power.get("voltageState"), _VOLTAGE_STATE_LABELS, "NORMAL",
         ))
-        lines.append(_metric_line(
-            "eneru_ups_avr_state",
-            {**labels, "state": power.get("avrState", "INACTIVE")},
-            1,
+        lines.extend(_state_metric_lines(
+            "eneru_ups_avr_state", labels,
+            power.get("avrState"), _AVR_STATE_LABELS, "INACTIVE",
         ))
-        lines.append(_metric_line(
-            "eneru_ups_bypass_state",
-            {**labels, "state": power.get("bypassState", "INACTIVE")},
-            1,
+        lines.extend(_state_metric_lines(
+            "eneru_ups_bypass_state", labels,
+            power.get("bypassState"), _BINARY_STATE_LABELS, "INACTIVE",
         ))
-        lines.append(_metric_line(
-            "eneru_ups_overload_state",
-            {**labels, "state": power.get("overloadState", "INACTIVE")},
-            1,
+        lines.extend(_state_metric_lines(
+            "eneru_ups_overload_state", labels,
+            power.get("overloadState"), _BINARY_STATE_LABELS, "INACTIVE",
         ))
         lines.append(_metric_line("eneru_ups_depletion_rate_percent_per_minute", labels, row["depletionRate"]))
         lines.append(_metric_line("eneru_ups_time_on_battery_seconds", labels, row["timeOnBattery"]))

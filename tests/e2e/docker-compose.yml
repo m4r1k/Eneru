@@ -79,8 +79,11 @@ services:
   mqtt-broker:
     image: eclipse-mosquitto:2
     container_name: eneru-e2e-mqtt
+    # Bind to loopback only. The broker is anonymous-auth for E2E
+    # convenience, so leaking it onto an external interface would let
+    # any reachable host publish/subscribe without credentials.
     ports:
-      - "1883:1883"
+      - "127.0.0.1:1883:1883"
     volumes:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     networks:

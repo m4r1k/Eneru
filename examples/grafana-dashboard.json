@@ -139,22 +139,22 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by (state) (eneru_ups_voltage_state)",
+          "expr": "max by (state) (eneru_ups_voltage_state) > 0",
           "legendFormat": "voltage {{state}}"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by (state) (eneru_ups_avr_state)",
+          "expr": "max by (state) (eneru_ups_avr_state) > 0",
           "legendFormat": "avr {{state}}"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by (state) (eneru_ups_bypass_state)",
+          "expr": "max by (state) (eneru_ups_bypass_state) > 0",
           "legendFormat": "bypass {{state}}"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by (state) (eneru_ups_overload_state)",
+          "expr": "max by (state) (eneru_ups_overload_state) > 0",
           "legendFormat": "overload {{state}}"
         }
       ],

@@ -42,8 +42,11 @@ Example response shapes:
       "load": 20, "depletionRate": 0.0, "timeOnBattery": 0,
       "powerQuality": {
         "inputVoltage": "229.4", "outputVoltage": "230.1",
+        "batteryVoltage": "27.2", "temperature": "32",
         "inputFrequency": "50.0", "outputFrequency": "50.0",
-        "voltageState": "NORMAL", "avrState": "INACTIVE"
+        "voltageState": "NORMAL", "avrState": "INACTIVE",
+        "bypassState": "INACTIVE", "overloadState": "INACTIVE",
+        "nominalVoltage": 230.0, "warningLow": 207.0, "warningHigh": 253.0
       },
       "connectionState": "OK", "triggerActive": false,
       "remoteHealth": [...]
@@ -57,6 +60,8 @@ Example response shapes:
 ```
 
 UPS rows include a stable `groupId` derived from the configured UPS name. Multi-UPS responses also include `redundancyGroups` rows with their source UPS names, quorum target, locality flag, and remote-health rows.
+
+`powerQuality` mixes JSON strings and numbers by source: raw NUT readings (`inputVoltage`, `outputVoltage`, `batteryVoltage`, `temperature`, `inputFrequency`, `outputFrequency`) and state labels (`voltageState`, `avrState`, `bypassState`, `overloadState`) are strings; Eneru-derived values (`nominalVoltage`, `warningLow`, `warningHigh`) are numbers. Strings are empty when the UPS does not publish that NUT field. Consumers that compare numeric ranges should coerce the string fields with `float()` (or `| float` in Home Assistant templates) and treat empty strings as missing data.
 
 `/api/v1/events` accepts `limit` and `verbosity` query parameters. `verbosity=0` returns power/shutdown events, `verbosity=1` also includes diagnostics, and `verbosity=2` returns all recorded events including lifecycle rows.
 

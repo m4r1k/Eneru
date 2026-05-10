@@ -37,7 +37,7 @@ runs:
       shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install -y nut-client openssh-client
+        sudo apt-get install -y nut-client openssh-client mosquitto-clients
 
     - name: Generate SSH keys for E2E tests
       shell: bash
@@ -93,9 +93,15 @@ runs:
 
         echo ""
         echo "Waiting for MQTT broker..."
+        # A bare `nc -z` only proves the listener has bound the
+        # socket; the broker can still be inside its own startup
+        # window where CONNECT is rejected. mosquitto_pub forces a
+        # real CONNECT/PUBLISH round-trip and -W bounds the per-try
+        # wait so a hung broker doesn't stall the whole job.
         mqtt_ready=false
         for i in {1..30}; do
-          if nc -z localhost 1883 2>/dev/null; then
+          if mosquitto_pub -h 127.0.0.1 -p 1883 \
+              -t eneru/e2e/ready -m ok -W 2 2>/dev/null; then
             echo "  MQTT broker ready!"
             mqtt_ready=true
             break
@@ -104,7 +110,7 @@ runs:
           sleep 2
         done
         if [ "$mqtt_ready" != "true" ]; then
-          echo "ERROR: MQTT broker never became ready (localhost:1883)" >&2
+          echo "ERROR: MQTT broker never became ready (127.0.0.1:1883)" >&2
           exit 1
         fi
 
