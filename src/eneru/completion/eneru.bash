@@ -14,11 +14,12 @@ _eneru() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local subcommands="run validate monitor tui test-notifications completion version"
+    local subcommands="run shutdown validate monitor tui test-notifications completion version"
     local global_opts="-h --help"
     local config_opts="-c --config"
     local monitor_opts="--once --interval --graph --time --events-only -v --verbose --length"
     local run_opts="--dry-run --exit-after-shutdown"
+    local shutdown_remote_opts="$config_opts --server --group --dry-run --i-really-want-to-proceed-with-remote-shutdown --connectivity-check --no-connectivity-check --log-file"
     local graph_choices="charge load voltage runtime"
     local time_choices="1h 6h 24h 7d 30d"
     local completion_shells="bash zsh fish"
@@ -55,6 +56,14 @@ _eneru() {
             COMPREPLY=( $(compgen -W "1 2 5 10 30 60" -- "$cur") )
             return 0
             ;;
+        --server|--group)
+            COMPREPLY=()
+            return 0
+            ;;
+        --log-file)
+            mapfile -t COMPREPLY < <(compgen -f -- "$cur")
+            return 0
+            ;;
     esac
 
     # No subcommand yet: complete subcommands.
@@ -67,6 +76,20 @@ _eneru() {
     case "$subcmd" in
         run)
             COMPREPLY=( $(compgen -W "$config_opts $run_opts $global_opts" -- "$cur") )
+            ;;
+        shutdown)
+            local shutdown_leaf=""
+            for ((i=2; i < COMP_CWORD; i++)); do
+                case "${COMP_WORDS[i]}" in
+                    -*) continue ;;
+                    remote) shutdown_leaf="remote"; break ;;
+                esac
+            done
+            if [[ "$shutdown_leaf" == "remote" ]]; then
+                COMPREPLY=( $(compgen -W "$shutdown_remote_opts $global_opts" -- "$cur") )
+            else
+                mapfile -t COMPREPLY < <(compgen -W "remote $global_opts" -- "$cur")
+            fi
             ;;
         validate|test-notifications)
             COMPREPLY=( $(compgen -W "$config_opts $global_opts" -- "$cur") )

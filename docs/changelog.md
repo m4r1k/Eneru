@@ -47,6 +47,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daemon startup with defaults.
 
 ### Fixed
+- **MQTT publisher backoff now wakes promptly on publisher-local stop.**
+  `_wait()` slices long sleeps into 5 s chunks so a `publisher.stop()`
+  during a 60 s reconnect-backoff is detected within ~5 s instead of
+  waiting out the full sleep. Short waits (publish-loop tick, early
+  backoff values) still take a single direct wait so test fixtures'
+  wait-call counts are preserved.
+- **`live_remote_health()` no longer misses single-UPS live managers.**
+  When the API source is a `UPSGroupMonitor` directly (single-UPS
+  deployment, not a `MultiUPSCoordinator`), its own
+  `_remote_health_manager` was being skipped — `/api/v1/remote-health`
+  fell back to the on-disk sidecar (stale until the next write tick).
+  The lookup now inspects `getattr(source, '_remote_health_manager',
+  None)` first.
+- **`/metrics` now exports remote-health metrics for redundancy-group
+  servers.** `render_prometheus_metrics()` previously only iterated
+  `payload["ups"]`, so any remote target attached under
+  `redundancy_groups[*].remote_servers` was silently absent from
+  `eneru_remote_health_status` and `eneru_remote_health_consecutive_failures`.
+  Redundancy-group metrics use a `redundancy_group=` label for clean
+  Prometheus aggregation.
+- **`/api/v1/events` now caps `limit` at 10000.** Previously only the
+  lower bound was enforced; a hostile or accidental
+  `?limit=10000000` would attempt a multi-second SQLite scan across
+  every configured stats DB.
+- **`ThreadingHTTPServer` worker threads are daemonized.** A hung
+  request handler can no longer block daemon shutdown beyond
+  `server_close()`; previously non-daemon worker threads kept the
+  process alive past the requested stop.
+- **Config loader handles non-mapping nested YAML cleanly.** Writing
+  `api: true` (instead of `api: {enabled: true}`) used to crash
+  `ConfigLoader.load_config()` with `AttributeError` on `.get`;
+  defensive `isinstance(_, dict)` checks now produce a clean fall-
+  back to defaults for `api`, `prometheus`, `remote_health`, `mqtt`,
+  and `logging.syslog` sections.
+- **Stale redundancy-group remote-health sidecars are cleared.**
+  Disabling all `remote_servers` on a redundancy group at runtime
+  used to leave the previous sidecar JSON on disk; the API/TUI/MQTT
+  surfaces would keep showing the dead status. The startup hook now
+  unlinks the orphan sidecar before returning early.
+- **`StatsStore.query_recent_events` is now deterministic.** Added a
+  `rowid DESC` tiebreaker after `ts DESC` so paginated reads return
+  consistent subsets when multiple events share the same timestamp
+  (notification fanout, rapid trigger flap).
+- **TUI defends against malformed remote-health sidecar rows.**
+  `summarize_remote_health()` skips entries that aren't dicts so a
+  partially-written or hand-edited sidecar doesn't crash panel
+  rendering.
+- **TUI per-group height accounts for the new remote-health line.**
+  When `remote_health.enabled: true`, the config-panel sizing now
+  budgets 6 rows per group instead of 5; previously the row was
+  silently truncated on tight terminals or multi-group layouts.
+- **Syslog-init failure logs through the configured logger.** A bare
+  `print()` was bypassing the JSON formatter and producing an
+  unstructured stderr line that JSON log consumers couldn't parse;
+  the warning now flows through `self.logger.warning()`.
+- **Remote SSH timeout error reports the effective (deadline-capped)
+  timeout.** When a phase deadline shrinks `command_timeout` below
+  the configured per-command value, the failure message now includes
+  both the configured and effective timeouts so operators can tell
+  why a command was killed earlier than expected.
+- **`build_ssh_probe_command` rejects dangling SSH options.** A
+  trailing flag in `server.ssh_options` that requires a separate
+  argument (e.g. ending the list with `-i` and no key path) used to
+  silently consume the appended `-o ConnectTimeout=…` as that flag's
+  value. The function now raises `ValueError` with a clear hint.
+- **Drill `_CLILogger.log` accepts `**kwargs` and writes UTF-8.**
+  Mirrors `UPSLogger.log` signature so structured-extras-aware call
+  sites don't blow up when the drill is the active logger; the log
+  file open is now `encoding="utf-8"` so emoji and non-ASCII server
+  identifiers round-trip cleanly regardless of `LANG`/`LC_ALL`.
+- **Defensive `python3-pip` install on RHEL 8 in CI.** `python39`
+  brings pip in via dependency on ubi8 today, but making it explicit
+  prevents a future ubi8 layer change from regressing us into the
+  "No module named pip" failure RHEL 10 hit.
+- **Documentation accuracy.** `docs/observability-api.md` no longer
+  claims the API/MQTT surfaces "cannot run UPS/SSH commands" without
+  qualifying that remote-health probes do execute SSH (restricted
+  to the harmless `probe_command`); `docs/remote-servers.md` drill
+  examples now use `--server NAS` to match the configured `name:
+  "NAS"` (the lookup is exact-match); `pre_shutdown_command`
+  references corrected to the real plural key
+  `pre_shutdown_commands`.
+- **Drill dry-run precedence documented.**
+  `docs/remote-servers.md` "Manual remote shutdown drill" now spells
+  out that the drill follows the `--dry-run` CLI flag, not the
+  daemon's `behavior.dry_run` config setting. The two are
+  deliberately decoupled — the drill confirmation flag
+  `--i-really-want-to-proceed-with-remote-shutdown` is the safety
+  contract, and `--dry-run` is the per-invocation choice. A code
+  comment at `cli.py:474+` mirrors the rationale for code auditors.
+- **MQTT publisher race during connect / on_disconnect.** `on_disconnect`
+  is now attached only after `client.connect()` and `loop_start()` both
+  return, and the disconnect callback is detached during teardown.
+  Previously, paho's background thread could fire `on_disconnect`
+  against a not-yet-fully-constructed publisher state, forcing one
+  spurious reconnect cycle on every clean stop.
+- **`MQTTPublisher.stop()` no longer signals the daemon-wide stop
+  event.** The publisher now keeps a private `_local_stop` event and
+  polls both — calling `stop()` on the publisher (config reload, test
+  fixture, future "bounce only MQTT" code path) leaves the rest of the
+  daemon untouched.
+- **MQTT publish loop no longer collects status every tick.** The
+  `collect_status()` walk (which acquires per-monitor and per-remote-
+  health locks) now runs at most every `min(publish_interval, 5 s)`
+  instead of every 1 s — eliminates redundant lock contention with the
+  API server on busy multi-UPS setups while preserving "publish on
+  change OR every interval" semantics.
+- **`/api/v1/remote-health` no longer reaches into private monitor
+  state.** The aggregation moved to `status.live_remote_health(source,
+  config)`, mirroring the existing pattern for UPS / redundancy-group
+  status read-models. The route is now a one-liner.
+- **API non-loopback warning text matches what's actually exposed.**
+  `/api/v1/config` returns `hasPreShutdownCommands: bool` and
+  `sshOptionsConfigured: bool`, not full command templates or option
+  strings; the startup warning now lists "remote server hostnames, SSH
+  usernames, shutdown ordering, and presence flags".
+- **`StatsStore.from_connection()` no longer leaks an in-memory SQLite
+  handle.** The wrapper opened a throw-away in-memory database via
+  `__init__` and then rebound `_conn` to the caller-owned handle without
+  closing the original. Now the throw-away handle is closed before
+  reassignment.
+- **`tests/e2e/groups/single-ups.sh` Test 43 retries each endpoint.**
+  The `/ready` poll already retried; `/metrics` did not. Both endpoints
+  now use a shared 0.5 s × 20-attempt poll with explicit failure on
+  exhaustion, removing the slow-startup flake risk under CI load.
+- **`tests/e2e/groups/single-ups.sh` Test 44 uses nanosecond-precision
+  wall clock.** The bounded-runtime assertion was hostage to whole-second
+  rounding from `date +%s`; switched to `date +%s%N` and tightened the
+  upper bound from 12 s to 11 s.
+- **`.github/workflows/e2e.yml` v5.3 coverage-grep matches the actual
+  test header.** The grep asserted "transient readings" but the test
+  in `single-ups.sh` reads "transient critical readings", so the
+  workflow always failed.
 - **Redundancy shutdown no longer pinned at "fired" after first event.**
   Companion to the contract change above: the evaluator now resets its
   `_fired` flag and clears the executor's re-entry guard on the
@@ -69,6 +202,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UNKNOWN`.
 
 ### Added
+- **Read-only observability foundation.** v5.3 adds a localhost-bound
+  embedded API with `/health`, `/ready`, `/api/v1/ups`,
+  `/api/v1/events`, `/api/v1/config`, `/api/v1/remote-health`, and
+  Prometheus `/metrics`. These surfaces are read-only; shutdown/control
+  APIs remain deferred until v6 auth/authz. The API is opt-in and
+  defaults to port 9191 to avoid common node-exporter deployments.
+- **Remote SSH healthchecks.** Enabled remote servers now get harmless
+  startup plus periodic SSH probes (`true` by default). Failures and
+  recoveries are logged and can notify, and the TUI/API/metrics expose
+  the latest status. Health is advisory only: real shutdown still
+  attempts configured remote pre-shutdown commands and final shutdown
+  commands with bounded timeouts. Redundancy-group-owned remote targets
+  now get the same health sidecars and API/TUI visibility as per-UPS
+  remote targets. The healthcheck runner is opt-in and only probes
+  remote servers explicitly marked `enabled: true`.
+- **Manual remote shutdown drill.** `eneru shutdown remote --server ...`
+  tests one configured remote target through Eneru's SSH command path.
+  `--dry-run` executes no configured commands; real execution requires
+  `--i-really-want-to-proceed-with-remote-shutdown`.
+- **JSON logs, optional syslog forwarding, optional outbound MQTT, and a
+  reference Grafana dashboard** for the Prometheus metrics. JSON log
+  output now prefers explicit structured fields (`category`,
+  `event_type`, `group`, `ups`, `server`) over heuristic message-text
+  parsing — power events, shutdown sequences, and remote-health
+  transitions all set those fields directly. The Grafana dashboard ships
+  with a `datasource` template variable so it imports cleanly into
+  multi-datasource setups.
+- **MQTT publisher hardening.** The publisher now reconnects with
+  bounded exponential backoff (1 s → 60 s) on connect failure or
+  unexpected broker disconnect instead of silently giving up after the
+  first attempt. `mqtts://` broker URLs enable TLS via the system trust
+  store (default port 8883); mTLS / client certs remain out of scope for
+  v5.3.
 - **Slow NUT response visibility.** Slow `upsc` calls now produce
   rate-limited per-UPS log lines. Apprise notification is stricter and
   only fires after sustained full-poll slowness, so operators get an early
@@ -85,6 +251,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   redundancy flag before daemon startup and proves shutdown still fires.
 
 ### Changed
+- **`python3-paho-mqtt` is now a `Recommends:` (soft dep) on RPM
+  packages, not a hard dependency.** The package is unavailable on RHEL
+  10 (BaseOS / AppStream / CRB / EPEL 10 all lack it) and on RHEL 8 the
+  EPEL build only targets the system python3.6 — neither resolves
+  cleanly against the python3.9+ interpreter Eneru installs. Debian and
+  Ubuntu `.deb` packages keep `python3-paho-mqtt` as a hard dependency.
+  RHEL users who enable MQTT install paho via `python3 -m pip install
+  paho-mqtt` (with `--break-system-packages` on EL10 per PEP 668); see
+  `docs/configuration.md` for the full callout. If MQTT is enabled but
+  paho is missing the publisher logs a warning and disables itself
+  rather than failing daemon startup.
+- **API startup warning when `api.bind` is non-loopback.** v5.3 ships
+  with no auth layer; binding the API to `0.0.0.0` exposes
+  `/api/v1/config` (which returns remote server hostnames, SSH usernames,
+  shutdown ordering, and `sshOptionsConfigured` /
+  `hasPreShutdownCommands` presence flags — not the actual command
+  strings, but enough metadata to enumerate the SSH topology) to anyone
+  who can reach the socket. A visible startup warning calls this out so
+  it isn't silently misconfigured.
+- **`/metrics` exposition completeness.** Every emitted metric
+  (`eneru_up`, `eneru_ups_*`, `eneru_remote_health_*`) now ships with
+  proper `# HELP` and `# TYPE` lines, not just two of them.
+- **Probe-command validator hardening.** `remote_health.probe_command`
+  values are now rejected if they contain shell metacharacters (`;`,
+  `|`, `&`, `$`, backtick, redirections, parentheses, newlines) in
+  addition to the dangerous-words blocklist. A probe like
+  `true; shutdown -h now` no longer slips through.
+- Fresh on-battery transfers now have a 30-second stabilization window
+  before low-battery, critical-runtime, depletion-rate, or extended-time
+  triggers can fire. FSD and failsafe connection loss while on battery
+  remain immediate.
+- Single-server remote phases now use the same deadline-based thread
+  path as multi-server phases, so one unreachable remote target cannot
+  hold the entire shutdown sequence beyond its configured budget.
+- Remote shutdown summaries now count structured success, failure,
+  timeout, and worker-crash outcomes. Failed best-effort remote commands
+  are logged and counted without blocking later phases.
+- API and outbound MQTT payloads now include stable `groupId` values and
+  redundancy-group status rows. `/api/v1/events?verbosity=...` uses the
+  same event tiers as the TUI.
+- MQTT publishes immediately when status changes and still republishes at
+  the configured interval when unchanged. Package integration checks now
+  assert that `paho.mqtt.client` imports after deb/rpm installation.
+- JSON log output now extracts the group prefix into a `group` field and
+  redacts common credentials and webhook/token values from structured
+  messages.
 - Event display now uses user-facing tiers: Power Events by default,
   Diagnostics with `-v` / `<V>`, and Lifecycle with `-vv` / a second
   `<V>` press.

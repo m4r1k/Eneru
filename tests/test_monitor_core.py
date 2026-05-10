@@ -228,7 +228,7 @@ class TestShutdownTriggers:
         """T1: Battery below threshold triggers shutdown."""
         monitor = make_monitor(tmp_path)
         monitor.state.previous_status = "OB DISCHRG"
-        monitor.state.on_battery_start_time = int(time.time()) - 10
+        monitor.state.on_battery_start_time = int(time.time()) - 40
 
         ups_data = {
             "ups.status": "OB DISCHRG",
@@ -265,7 +265,7 @@ class TestShutdownTriggers:
         """T2: Runtime below threshold triggers shutdown."""
         monitor = make_monitor(tmp_path)
         monitor.state.previous_status = "OB DISCHRG"
-        monitor.state.on_battery_start_time = int(time.time()) - 10
+        monitor.state.on_battery_start_time = int(time.time()) - 40
 
         ups_data = {
             "ups.status": "OB DISCHRG",
@@ -325,7 +325,7 @@ class TestShutdownTriggers:
         """T1 fires first -- T2 is not evaluated."""
         monitor = make_monitor(tmp_path)
         monitor.state.previous_status = "OB DISCHRG"
-        monitor.state.on_battery_start_time = int(time.time()) - 10
+        monitor.state.on_battery_start_time = int(time.time()) - 40
 
         ups_data = {
             "ups.status": "OB DISCHRG",
@@ -352,7 +352,10 @@ class TestFSDFlag:
     @pytest.mark.unit
     def test_fsd_triggers_immediate_shutdown(self, tmp_path):
         """FSD status triggers _trigger_immediate_shutdown directly."""
-        monitor = make_monitor(tmp_path)
+        monitor = make_monitor(
+            tmp_path,
+            triggers=TriggersConfig(on_battery_stabilization_delay=0),
+        )
 
         with patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
             # Simulate what the main loop does for FSD
@@ -509,7 +512,10 @@ class TestShutdownReArmOnPowerRestored:
         exactly (with the shutdown sequence mocked so the test doesn't
         actually call out to real shutdown code).
         """
-        monitor = make_monitor(tmp_path)
+        monitor = make_monitor(
+            tmp_path,
+            triggers=TriggersConfig(on_battery_stabilization_delay=0),
+        )
 
         # First OB: trigger fires, flag is set.
         monitor.state.previous_status = ""
@@ -1542,7 +1548,7 @@ class TestAdvisoryTriggers:
         monitor = make_monitor(tmp_path)
         monitor._in_redundancy_group = True
         monitor.state.previous_status = "OB DISCHRG"
-        monitor.state.on_battery_start_time = int(time.time()) - 10
+        monitor.state.on_battery_start_time = int(time.time()) - 40
 
         ups_data = {
             "ups.status": "OB DISCHRG",
@@ -1562,7 +1568,7 @@ class TestAdvisoryTriggers:
         monitor = make_monitor(tmp_path)
         # in_redundancy_group defaults to False
         monitor.state.previous_status = "OB DISCHRG"
-        monitor.state.on_battery_start_time = int(time.time()) - 10
+        monitor.state.on_battery_start_time = int(time.time()) - 40
 
         ups_data = {
             "ups.status": "OB DISCHRG",

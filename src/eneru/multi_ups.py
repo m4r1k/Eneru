@@ -20,9 +20,13 @@ from eneru.config import Config
 from eneru.logger import UPSLogger
 from eneru.notifications import APPRISE_AVAILABLE, NotificationWorker
 from eneru.monitor import UPSGroupMonitor
+from eneru.api import EneruAPIServer
+from eneru.mqtt import MQTTPublisher
+from eneru.remote_health import RemoteHealthManager, remote_health_sidecar_path
 from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
 from eneru.redundancy import RedundancyGroupEvaluator, RedundancyGroupExecutor
 from eneru.stats import StatsStore
+from eneru.status import redundancy_state_file_path
 from eneru.lifecycle import (
     REASON_SEQUENCE_COMPLETE,
     REASON_SIGNAL,
@@ -58,6 +62,9 @@ class MultiUPSCoordinator:
         # Shared resources
         self._logger: Optional[UPSLogger] = None
         self._notification_worker: Optional[NotificationWorker] = None
+        self._api_server: Optional[EneruAPIServer] = None
+        self._mqtt_publisher: Optional[MQTTPublisher] = None
+        self._redundancy_remote_health_managers: List[RemoteHealthManager] = []
 
         # Redundancy-group runtime (Phase 2). Populated after monitors start.
         self._redundancy_executors: dict = {}
@@ -252,6 +259,10 @@ class MultiUPSCoordinator:
                 notifications=self.config.notifications,
                 local_shutdown=self.config.local_shutdown,
                 statistics=self.config.statistics,
+                api=self.config.api,
+                prometheus=self.config.prometheus,
+                remote_health=self.config.remote_health,
+                mqtt=self.config.mqtt,
             )
 
             # Sanitize UPS name for file paths
@@ -317,6 +328,7 @@ class MultiUPSCoordinator:
                     )
                     sys.exit(1)
                 self._redundancy_executors[rg.name] = executor
+                self._start_redundancy_remote_health(rg)
                 evaluator = RedundancyGroupEvaluator(
                     rg,
                     monitors_by_name,
@@ -331,6 +343,64 @@ class MultiUPSCoordinator:
                     f"  Started redundancy evaluator '{rg.name}' "
                     f"({len(rg.ups_sources)} sources, min_healthy={rg.min_healthy})"
                 )
+
+        self._start_api_server()
+        self._start_mqtt_publisher()
+
+    def _start_redundancy_remote_health(self, group) -> None:
+        """Start advisory SSH healthchecks for redundancy-group remotes."""
+        enabled_servers = [s for s in group.remote_servers if s.enabled]
+        if not enabled_servers:
+            # If a previous run had enabled servers, the sidecar still
+            # exists on disk and the API/TUI/MQTT will surface it as
+            # current state. Remove it so consumers don't see ghost
+            # entries after the operator turned remote-health off.
+            stale = remote_health_sidecar_path(
+                redundancy_state_file_path(self.config, group.name)
+            )
+            try:
+                stale.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+            return
+
+        notify_fn = None
+        if self._notification_worker is not None:
+            notify_fn = lambda body, typ: self._notification_worker.send(
+                body, typ, category="health",
+            )
+
+        manager = RemoteHealthManager(
+            config=self.config,
+            group_label=f"redundancy:{group.name}",
+            servers=enabled_servers,
+            sidecar_path=remote_health_sidecar_path(
+                redundancy_state_file_path(self.config, group.name)
+            ),
+            stop_event=self._stop_event,
+            log_fn=self._log,
+            notify_fn=notify_fn,
+        )
+        self._redundancy_remote_health_managers.append(manager)
+        manager.start()
+
+    def _start_api_server(self):
+        """Start the read-only API server for coordinator mode."""
+        if self._api_server is not None:
+            return
+        self._api_server = EneruAPIServer(self, self.config, log_fn=self._log)
+        self._api_server.start()
+
+    def _start_mqtt_publisher(self):
+        """Start optional outbound MQTT publishing for coordinator mode."""
+        if self._mqtt_publisher is not None:
+            return
+        self._mqtt_publisher = MQTTPublisher(
+            self, self.config, self._stop_event, log_fn=self._log,
+        )
+        self._mqtt_publisher.start()
 
     def _run_monitor(self, monitor: UPSGroupMonitor, group):
         """Thread target: run a single UPS monitor."""
@@ -531,6 +601,13 @@ class MultiUPSCoordinator:
         self._log("🛑 Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
 
         self._stop_event.set()
+
+        for manager in self._redundancy_remote_health_managers:
+            manager.stop()
+        if self._mqtt_publisher is not None:
+            self._mqtt_publisher.stop()
+        if self._api_server is not None:
+            self._api_server.stop()
 
         # Wait briefly for monitor + evaluator threads to finish
         for thread in self._threads:

@@ -19,6 +19,11 @@ Right now nothing can talk to Eneru programmatically. This version adds the plum
 - Optional JSON log format for SIEM integration (Splunk, Elastic, Loki)
 - Syslog forwarding (RFC 5424)
 - Reference Grafana dashboard JSON
+- Remote SSH healthchecks with startup plus periodic harmless probes
+- CLI-only manual remote shutdown drill with explicit confirmation for real execution
+- On-battery stabilization to avoid acting on transient UPS runtime/charge recalculations
+
+v5.3 deliberately keeps all programmatic surfaces read-only. Authenticated control APIs move to v6 with auth/authz.
 
 ---
 
