@@ -96,12 +96,17 @@ runs:
         # A bare `nc -z` only proves the listener has bound the
         # socket; the broker can still be inside its own startup
         # window where CONNECT is rejected. mosquitto_pub forces a
-        # real CONNECT/PUBLISH round-trip and -W bounds the per-try
-        # wait so a hung broker doesn't stall the whole job.
+        # real CONNECT/PUBLISH round-trip. We wrap it in `timeout`
+        # rather than mosquitto_pub's own `-W` flag because in
+        # mosquitto-clients 2.0.x `-W` is a per-message confirmation
+        # timeout for QoS 1/2 and behaves unreliably with QoS 0 +
+        # an unauthenticated broker; GNU timeout is unambiguous.
+        # stderr is left attached so a future failure is diagnosable
+        # without re-running CI in debug mode.
         mqtt_ready=false
         for i in {1..30}; do
-          if mosquitto_pub -h 127.0.0.1 -p 1883 \
-              -t eneru/e2e/ready -m ok -W 2 2>/dev/null; then
+          if timeout 3 mosquitto_pub -h 127.0.0.1 -p 1883 \
+              -t eneru/e2e/ready -m ok; then
             echo "  MQTT broker ready!"
             mqtt_ready=true
             break
