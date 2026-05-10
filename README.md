@@ -15,7 +15,7 @@
   <img src="https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-diagram.svg" alt="Eneru Architecture" width="600">
 </p>
 
-A Python-based UPS monitoring daemon for [Network UPS Tools (NUT)](https://networkupstools.org/). Monitors one or more UPSes, orchestrates shutdown of VMs, containers, and remote servers during power events.
+A Python-based UPS monitoring daemon for [Network UPS Tools (NUT)](https://networkupstools.org/). Monitors one or more UPSes, orchestrates shutdown of VMs, containers, and remote servers during power events, and exposes read-only API, Prometheus, MQTT, and Grafana observability.
 
 [Documentation](https://eneru.readthedocs.io/) •
 [Getting Started](https://eneru.readthedocs.io/latest/getting-started/) •
@@ -47,6 +47,7 @@ Most UPS shutdown tools handle one machine. If you have more than one, things ge
 | Battery estimates are unreliable | ✅ Multi-vector shutdown triggers |
 | Network down during outage | ✅ Non-blocking notifications with persistent retry |
 | Firmware recalibrates battery silently | ✅ Battery anomaly detection and alerts |
+| Need power-quality telemetry | ✅ API, Prometheus, MQTT, Grafana, JSON logs, and SQLite events |
 
 ---
 
@@ -158,6 +159,7 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 - Shuts down VMs, containers, remote servers, filesystems, and the local system in order
 - Notifications to 100+ services (Discord, Slack, Telegram, ntfy, email) via [Apprise](https://github.com/caronc/apprise/wiki)
 - Power quality monitoring: voltage, AVR, bypass, overload
+- Read-only API, Prometheus metrics, outbound MQTT, JSON/syslog logs, and Grafana dashboard
 - Dry-run mode for safe testing
 - Comprehensive test suite across multiple Linux distros, with E2E tests against real NUT, SSH, Docker, and libvirt on every commit
 

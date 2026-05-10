@@ -7,311 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [5.3.0] - Unreleased
+## [5.3.0] - 2026-05-10
 
-### Behavior change — daemon owns redundancy flag lifecycle
-- **The redundancy executor's flag file
-  (`/var/run/ups-shutdown-redundancy-{group}`) is now daemon-managed.**
-  Old contract (≤5.2.2): the flag persisted across daemon restarts and
-  across quorum-recovery events; once any redundancy shutdown ran without
-  the host actually halting (`is_local: false` rack topology, sandboxed
-  test environments, dummy-UPS rigs), the flag stayed on disk and silently
-  blocked every subsequent redundancy shutdown until manually deleted. New contract
-  (5.3.0+): the flag is unconditionally cleared at three points —
-  coordinator startup, quorum recovery, and graceful signal exit. Its
-  only role is now in-flight re-entry protection within a single
-  quorum-loss event. Reported by ckrevel in
-  [issue #4](https://github.com/m4r1k/Eneru/issues/4#issuecomment-4375517607).
-  No user action required; if you had been deleting
-  `/var/run/ups-shutdown-redundancy-*` manually as a workaround, you can
-  stop. This mirrors the per-UPS path's behavior since the bug #4 fix in
-  5.2.2.
-- **Diagnostic warning when the contract is bypassed.** If the executor
-  ever sees the flag at first call (someone touched it manually, the
-  startup-cleanup hook was bypassed, `/var/run` is read-only), a
-  one-line `⚠️ Redundancy shutdown for '{group}' suppressed: …` warning
-  now fires. Pre-5.3.0 the suppression was silent.
-- **Redundancy flags now record process ownership.** Startup still clears
-  stale redundancy flags from dead daemon sessions, but refuses to clear a flag
-  owned by a still-running process. On Linux the owner check includes process
-  start identity, so a stale flag is not confused with a reused PID. That turns
-  overlapping daemon instances or unreadable `/var/run` state into an
-  immediate fatal startup error instead of weakening the shutdown re-entry
-  guard.
-- **Unknown trigger/behavior keys are validation errors.** Typos in
-  `behavior`, top-level and per-UPS `triggers`, and
-  `redundancy_groups[*].triggers` now fail validation with a "did you mean"
-  hint where possible. Legacy compatibility sections that still work,
-  including top-level `docker:` and Discord webhook config, remain accepted.
-  Malformed YAML is also fatal for `eneru run`, instead of falling through to
-  daemon startup with defaults.
-
-### Fixed
-- **MQTT publisher backoff now wakes promptly on publisher-local stop.**
-  `_wait()` slices long sleeps into 5 s chunks so a `publisher.stop()`
-  during a 60 s reconnect-backoff is detected within ~5 s instead of
-  waiting out the full sleep. Short waits (publish-loop tick, early
-  backoff values) still take a single direct wait so test fixtures'
-  wait-call counts are preserved.
-- **`live_remote_health()` no longer misses single-UPS live managers.**
-  When the API source is a `UPSGroupMonitor` directly (single-UPS
-  deployment, not a `MultiUPSCoordinator`), its own
-  `_remote_health_manager` was being skipped — `/api/v1/remote-health`
-  fell back to the on-disk sidecar (stale until the next write tick).
-  The lookup now inspects `getattr(source, '_remote_health_manager',
-  None)` first.
-- **`/metrics` now exports remote-health metrics for redundancy-group
-  servers.** `render_prometheus_metrics()` previously only iterated
-  `payload["ups"]`, so any remote target attached under
-  `redundancy_groups[*].remote_servers` was silently absent from
-  `eneru_remote_health_status` and `eneru_remote_health_consecutive_failures`.
-  Redundancy-group metrics use a `redundancy_group=` label for clean
-  Prometheus aggregation.
-- **`/api/v1/events` now caps `limit` at 10000.** Previously only the
-  lower bound was enforced; a hostile or accidental
-  `?limit=10000000` would attempt a multi-second SQLite scan across
-  every configured stats DB.
-- **`ThreadingHTTPServer` worker threads are daemonized.** A hung
-  request handler can no longer block daemon shutdown beyond
-  `server_close()`; previously non-daemon worker threads kept the
-  process alive past the requested stop.
-- **Config loader handles non-mapping nested YAML cleanly.** Writing
-  `api: true` (instead of `api: {enabled: true}`) used to crash
-  `ConfigLoader.load_config()` with `AttributeError` on `.get`;
-  defensive `isinstance(_, dict)` checks now produce a clean fall-
-  back to defaults for `api`, `prometheus`, `remote_health`, `mqtt`,
-  and `logging.syslog` sections.
-- **Stale redundancy-group remote-health sidecars are cleared.**
-  Disabling all `remote_servers` on a redundancy group at runtime
-  used to leave the previous sidecar JSON on disk; the API/TUI/MQTT
-  surfaces would keep showing the dead status. The startup hook now
-  unlinks the orphan sidecar before returning early.
-- **`StatsStore.query_recent_events` is now deterministic.** Added a
-  `rowid DESC` tiebreaker after `ts DESC` so paginated reads return
-  consistent subsets when multiple events share the same timestamp
-  (notification fanout, rapid trigger flap).
-- **TUI defends against malformed remote-health sidecar rows.**
-  `summarize_remote_health()` skips entries that aren't dicts so a
-  partially-written or hand-edited sidecar doesn't crash panel
-  rendering.
-- **TUI per-group height accounts for the new remote-health line.**
-  When `remote_health.enabled: true`, the config-panel sizing now
-  budgets 6 rows per group instead of 5; previously the row was
-  silently truncated on tight terminals or multi-group layouts.
-- **Syslog-init failure logs through the configured logger.** A bare
-  `print()` was bypassing the JSON formatter and producing an
-  unstructured stderr line that JSON log consumers couldn't parse;
-  the warning now flows through `self.logger.warning()`.
-- **Remote SSH timeout error reports the effective (deadline-capped)
-  timeout.** When a phase deadline shrinks `command_timeout` below
-  the configured per-command value, the failure message now includes
-  both the configured and effective timeouts so operators can tell
-  why a command was killed earlier than expected.
-- **`build_ssh_probe_command` rejects dangling SSH options.** A
-  trailing flag in `server.ssh_options` that requires a separate
-  argument (e.g. ending the list with `-i` and no key path) used to
-  silently consume the appended `-o ConnectTimeout=…` as that flag's
-  value. The function now raises `ValueError` with a clear hint.
-- **Drill `_CLILogger.log` accepts `**kwargs` and writes UTF-8.**
-  Mirrors `UPSLogger.log` signature so structured-extras-aware call
-  sites don't blow up when the drill is the active logger; the log
-  file open is now `encoding="utf-8"` so emoji and non-ASCII server
-  identifiers round-trip cleanly regardless of `LANG`/`LC_ALL`.
-- **Defensive `python3-pip` install on RHEL 8 in CI.** `python39`
-  brings pip in via dependency on ubi8 today, but making it explicit
-  prevents a future ubi8 layer change from regressing us into the
-  "No module named pip" failure RHEL 10 hit.
-- **Documentation accuracy.** `docs/observability-api.md` no longer
-  claims the API/MQTT surfaces "cannot run UPS/SSH commands" without
-  qualifying that remote-health probes do execute SSH (restricted
-  to the harmless `probe_command`); `docs/remote-servers.md` drill
-  examples now use `--server NAS` to match the configured `name:
-  "NAS"` (the lookup is exact-match); `pre_shutdown_command`
-  references corrected to the real plural key
-  `pre_shutdown_commands`.
-- **Drill dry-run precedence documented.**
-  `docs/remote-servers.md` "Manual remote shutdown drill" now spells
-  out that the drill follows the `--dry-run` CLI flag, not the
-  daemon's `behavior.dry_run` config setting. The two are
-  deliberately decoupled — the drill confirmation flag
-  `--i-really-want-to-proceed-with-remote-shutdown` is the safety
-  contract, and `--dry-run` is the per-invocation choice. A code
-  comment at `cli.py:474+` mirrors the rationale for code auditors.
-- **MQTT publisher race during connect / on_disconnect.** `on_disconnect`
-  is now attached only after `client.connect()` and `loop_start()` both
-  return, and the disconnect callback is detached during teardown.
-  Previously, paho's background thread could fire `on_disconnect`
-  against a not-yet-fully-constructed publisher state, forcing one
-  spurious reconnect cycle on every clean stop.
-- **`MQTTPublisher.stop()` no longer signals the daemon-wide stop
-  event.** The publisher now keeps a private `_local_stop` event and
-  polls both — calling `stop()` on the publisher (config reload, test
-  fixture, future "bounce only MQTT" code path) leaves the rest of the
-  daemon untouched.
-- **MQTT publish loop no longer collects status every tick.** The
-  `collect_status()` walk (which acquires per-monitor and per-remote-
-  health locks) now runs at most every `min(publish_interval, 5 s)`
-  instead of every 1 s — eliminates redundant lock contention with the
-  API server on busy multi-UPS setups while preserving "publish on
-  change OR every interval" semantics.
-- **`/api/v1/remote-health` no longer reaches into private monitor
-  state.** The aggregation moved to `status.live_remote_health(source,
-  config)`, mirroring the existing pattern for UPS / redundancy-group
-  status read-models. The route is now a one-liner.
-- **API non-loopback warning text matches what's actually exposed.**
-  `/api/v1/config` returns `hasPreShutdownCommands: bool` and
-  `sshOptionsConfigured: bool`, not full command templates or option
-  strings; the startup warning now lists "remote server hostnames, SSH
-  usernames, shutdown ordering, and presence flags".
-- **`StatsStore.from_connection()` no longer leaks an in-memory SQLite
-  handle.** The wrapper opened a throw-away in-memory database via
-  `__init__` and then rebound `_conn` to the caller-owned handle without
-  closing the original. Now the throw-away handle is closed before
-  reassignment.
-- **`tests/e2e/groups/single-ups.sh` Test 43 retries each endpoint.**
-  The `/ready` poll already retried; `/metrics` did not. Both endpoints
-  now use a shared 0.5 s × 20-attempt poll with explicit failure on
-  exhaustion, removing the slow-startup flake risk under CI load.
-- **`tests/e2e/groups/single-ups.sh` Test 44 uses nanosecond-precision
-  wall clock.** The bounded-runtime assertion was hostage to whole-second
-  rounding from `date +%s`; switched to `date +%s%N` and tightened the
-  upper bound from 12 s to 11 s.
-- **`.github/workflows/e2e.yml` v5.3 coverage-grep matches the actual
-  test header.** The grep asserted "transient readings" but the test
-  in `single-ups.sh` reads "transient critical readings", so the
-  workflow always failed.
-- **Redundancy shutdown no longer pinned at "fired" after first event.**
-  Companion to the contract change above: the evaluator now resets its
-  `_fired` flag and clears the executor's re-entry guard on the
-  quorum-loss → recovered transition, so the next quorum loss fires its
-  own shutdown sequence. New `quorum restored -- re-armed for next event`
-  log line marks the transition. Direct fix for the symptom in issue #4.
-- **Redundancy group-specific triggers now affect quorum evaluation.**
-  The evaluator applies `redundancy_groups[*].triggers` directly to each
-  member snapshot, so group-local thresholds work without mutating per-UPS
-  monitor configs.
-- **Redundancy runtime NUT visibility now honors connection grace.**
-  Issue #4 exposed a path where both redundancy members could turn brief
-  stale/lost NUT data into `UNKNOWN` before the per-UPS connection grace
-  expired. That could drop `healthy_count` to 0 under the default
-  `unknown_counts_as: critical` policy and fire a redundancy shutdown
-  during a short NUT flap. Members that already had a successful poll now
-  contribute `DEGRADED` while stale/lost data is still inside connection
-  grace, and only become `UNKNOWN` after the monitor marks the connection
-  `FAILED`. A member with no successful poll after startup grace remains
-  `UNKNOWN`.
+Stable v5.3 release. This is a drop-in upgrade for v5.2 users.
 
 ### Added
-- **Read-only observability foundation.** v5.3 adds a localhost-bound
-  embedded API with `/health`, `/ready`, `/api/v1/ups`,
-  `/api/v1/events`, `/api/v1/config`, `/api/v1/remote-health`, and
-  Prometheus `/metrics`. These surfaces are read-only; shutdown/control
-  APIs remain deferred until v6 auth/authz. The API is opt-in and
-  defaults to port 9191 to avoid common node-exporter deployments.
-- **Remote SSH healthchecks.** Enabled remote servers now get harmless
-  startup plus periodic SSH probes (`true` by default). Failures and
-  recoveries are logged and can notify, and the TUI/API/metrics expose
-  the latest status. Health is advisory only: real shutdown still
-  attempts configured remote pre-shutdown commands and final shutdown
-  commands with bounded timeouts. Redundancy-group-owned remote targets
-  now get the same health sidecars and API/TUI visibility as per-UPS
-  remote targets. The healthcheck runner is opt-in and only probes
-  remote servers explicitly marked `enabled: true`.
-- **Manual remote shutdown drill.** `eneru shutdown remote --server ...`
-  tests one configured remote target through Eneru's SSH command path.
-  `--dry-run` executes no configured commands; real execution requires
-  `--i-really-want-to-proceed-with-remote-shutdown`.
-- **JSON logs, optional syslog forwarding, optional outbound MQTT, and a
-  reference Grafana dashboard** for the Prometheus metrics. JSON log
-  output now prefers explicit structured fields (`category`,
-  `event_type`, `group`, `ups`, `server`) over heuristic message-text
-  parsing — power events, shutdown sequences, and remote-health
-  transitions all set those fields directly. The Grafana dashboard ships
-  with a `datasource` template variable so it imports cleanly into
-  multi-datasource setups.
-- **MQTT publisher hardening.** The publisher now reconnects with
-  bounded exponential backoff (1 s → 60 s) on connect failure or
-  unexpected broker disconnect instead of silently giving up after the
-  first attempt. `mqtts://` broker URLs enable TLS via the system trust
-  store (default port 8883); mTLS / client certs remain out of scope for
-  v5.3.
-- **Slow NUT response visibility.** Slow `upsc` calls now produce
-  rate-limited per-UPS log lines. Apprise notification is stricter and
-  only fires after sustained full-poll slowness, so operators get an early
-  journal clue without alert noise from a one-off slow response.
-- **Regression coverage for issue #4.** Unit coverage now pins transient
-  stale/grace snapshots as `DEGRADED`, persistent post-grace loss as
-  `UNKNOWN`, slow-poll log rate limiting, and sustained slow-poll
-  notification behavior. The redundancy E2E group adds runtime cases for
-  brief NUT visibility loss that recovers inside grace and persistent loss
-  that still fails safe after grace.
-- **Redundancy flag hardening coverage.** Unit tests now prove two executor
-  instances cannot both acquire the same flag and that active PID-owned
-  flags are not cleared at startup. E2E Test 38 pre-creates a stale
-  redundancy flag before daemon startup and proves shutdown still fires.
+- **Read-only observability.** The embedded API now serves `/health`, `/ready`, `/api/v1/ups`, `/api/v1/events`, `/api/v1/config`, `/api/v1/remote-health`, and Prometheus `/metrics`. API and MQTT payloads share the same status model, including stable `groupId` values, redundancy-group rows, event verbosity tiers, and power-quality fields.
+- **Power-quality metrics.** API, MQTT, Prometheus, and the reference Grafana dashboard now expose input/output voltage, input/output frequency, battery voltage, UPS temperature, nominal voltage, derived warning thresholds, voltage state, AVR state, bypass state, and overload state.
+- **Remote SSH health.** Remote health is enabled by default for configured remote servers. The daemon runs the safe SSH `probe_command` (`true` by default), writes live state plus sidecar JSON, marks failed probes `DEGRADED` before `FAILED`, records state transitions in SQLite events, and sends one failure notification per failed period plus one recovery notification.
+- **Manual remote shutdown drill.** `eneru shutdown remote --server ...` exercises one configured remote through Eneru's SSH path. `--dry-run` executes no configured commands; real execution requires `--i-really-want-to-proceed-with-remote-shutdown`.
+- **JSON/syslog/MQTT/Grafana surfaces.** JSON logs now carry structured fields where call sites provide them, syslog forwarding is configurable, MQTT reconnects with bounded backoff, and `examples/grafana-dashboard.json` imports with a Prometheus datasource variable.
+- **Slow NUT poll visibility.** Slow `upsc` calls now produce rate-limited log lines, and notifications require consecutive slow full-poll cycles. Operators get a journal breadcrumb for NUT latency without alert noise from a one-off slow read.
 
 ### Changed
-- **`python3-paho-mqtt` is now a `Recommends:` (soft dep) on RPM
-  packages, not a hard dependency.** The package is unavailable on RHEL
-  10 (BaseOS / AppStream / CRB / EPEL 10 all lack it) and on RHEL 8 the
-  EPEL build only targets the system python3.6 — neither resolves
-  cleanly against the python3.9+ interpreter Eneru installs. Debian and
-  Ubuntu `.deb` packages keep `python3-paho-mqtt` as a hard dependency.
-  RHEL users who enable MQTT install paho via `python3 -m pip install
-  paho-mqtt` (with `--break-system-packages` on EL10 per PEP 668); see
-  `docs/configuration.md` for the full callout. If MQTT is enabled but
-  paho is missing the publisher logs a warning and disables itself
-  rather than failing daemon startup.
-- **API startup warning when `api.bind` is non-loopback.** v5.3 ships
-  with no auth layer; binding the API to `0.0.0.0` exposes
-  `/api/v1/config` (which returns remote server hostnames, SSH usernames,
-  shutdown ordering, and `sshOptionsConfigured` /
-  `hasPreShutdownCommands` presence flags — not the actual command
-  strings, but enough metadata to enumerate the SSH topology) to anyone
-  who can reach the socket. A visible startup warning calls this out so
-  it isn't silently misconfigured.
-- **`/metrics` exposition completeness.** Every emitted metric
-  (`eneru_up`, `eneru_ups_*`, `eneru_remote_health_*`) now ships with
-  proper `# HELP` and `# TYPE` lines, not just two of them.
-- **Probe-command validator hardening.** `remote_health.probe_command`
-  values are now rejected if they contain shell metacharacters (`;`,
-  `|`, `&`, `$`, backtick, redirections, parentheses, newlines) in
-  addition to the dangerous-words blocklist. A probe like
-  `true; shutdown -h now` no longer slips through.
-- Fresh on-battery transfers now have a 30-second stabilization window
-  before low-battery, critical-runtime, depletion-rate, or extended-time
-  triggers can fire. FSD and failsafe connection loss while on battery
-  remain immediate.
-- Single-server remote phases now use the same deadline-based thread
-  path as multi-server phases, so one unreachable remote target cannot
-  hold the entire shutdown sequence beyond its configured budget.
-- Remote shutdown summaries now count structured success, failure,
-  timeout, and worker-crash outcomes. Failed best-effort remote commands
-  are logged and counted without blocking later phases.
-- API and outbound MQTT payloads now include stable `groupId` values and
-  redundancy-group status rows. `/api/v1/events?verbosity=...` uses the
-  same event tiers as the TUI.
-- MQTT publishes immediately when status changes and still republishes at
-  the configured interval when unchanged. Package integration checks now
-  assert that `paho.mqtt.client` imports after deb/rpm installation.
-- JSON log output now extracts the group prefix into a `group` field and
-  redacts common credentials and webhook/token values from structured
-  messages.
-- Event display now uses user-facing tiers: Power Events by default,
-  Diagnostics with `-v` / `<V>`, and Lifecycle with `-vv` / a second
-  `<V>` press.
-- Live TUI events are grouped by tier; `--once` remains a flat,
-  timestamp-sorted list.
-- Event caps preserve Power first, then Diagnostics, then Lifecycle.
+- **Redundancy shutdown re-arms correctly.** The redundancy executor's `/var/run/ups-shutdown-redundancy-{group}` flag is now daemon-managed. Stale flags are cleared at coordinator startup, quorum recovery, and graceful signal exit; active PID-owned flags are refused. Repeated quorum-loss events now fire independently instead of staying pinned after the first event. This closes the issue #4 class of failures.
+- **Runtime NUT visibility honors connection grace.** Redundancy members with fresh prior data contribute `DEGRADED` during connection grace and become `UNKNOWN` only after the monitor marks the connection failed. This prevents short NUT flaps from bypassing the existing grace window.
+- **TUI events are tiered by verbosity.** Default event views show Power Events first. `-v` / first `<V>` adds Diagnostics, `-vv` / second `<V>` adds Lifecycle, and `--length` now consistently caps event rows in one-shot output. Live grouping keeps Power Events visible before lower-priority rows.
+- **On-battery stabilization.** Fresh on-battery transfers wait 30 seconds before charge, runtime, depletion-rate, or extended-time shutdown triggers can fire. FSD and on-battery connection-loss failsafe remain immediate.
+- **Remote shutdown accounting is stricter.** Single-server phases use the same deadline-based worker path as multi-server phases, summaries count success/failure/timeout/worker-crash outcomes, and timeout logs include both configured and deadline-capped values.
+- **MQTT packaging on RPM is soft.** Debian/Ubuntu packages still depend on `python3-paho-mqtt`. RPM packages recommend it because RHEL 8 and 10 packaging coverage is uneven; if MQTT is enabled without paho, Eneru logs a warning and keeps running.
+
+### Fixed
+- API and metrics fixes: single-UPS `/api/v1/remote-health` now reads the live manager, `/metrics` includes redundancy-group remote targets, every metric has `HELP`/`TYPE`, `/api/v1/events` caps `limit` at 10000, and API worker threads no longer block daemon shutdown.
+- Config and validation fixes: non-mapping nested YAML falls back cleanly, unknown trigger/behavior keys are validation errors with suggestions, and unsafe `remote_health.probe_command` values with shell metacharacters are rejected.
+- TUI and stats fixes: malformed remote-health sidecar rows are ignored, per-group height includes the remote-health row, recent events have deterministic timestamp ties, Ghostty sessions fall back to `xterm-256color` when `xterm-ghostty` terminfo is missing, and `StatsStore.from_connection()` no longer leaks an in-memory handle.
+- Logging and docs fixes: syslog-init failures use the configured logger, non-loopback API warnings describe the sanitized config data accurately, manual-drill docs now match `--server` exact-name lookup and dry-run precedence, and SELinux/AppArmor troubleshooting notes were added.
+- E2E hardening: Test 43 retries API endpoints, Test 44 uses nanosecond timing for bounded remote failure, Test 45 proves MQTT status payloads reach a broker with power-quality fields, and the v5.3 workflow grep is documented as a wiring guard.
 
 ### Migration notes
-- No YAML changes are required. The default remains fail-safe:
-  `unknown_counts_as: critical` still triggers quorum loss after connection
-  grace expires. The change only prevents transient runtime NUT visibility
-  loss from bypassing the existing grace window.
-- The redundancy flag lifecycle change is also drop-in. Anyone who was
-  deleting `/var/run/ups-shutdown-redundancy-*` manually as a workaround
-  for the issue #4 symptom can stop — the daemon now owns it.
+- No YAML changes are required. `remote_health.enabled` now defaults to `true`, but only configured remote servers are probed, and probes use the harmless `probe_command`. Set it to `false` if you do not want periodic SSH connectivity checks.
+- If you were deleting `/var/run/ups-shutdown-redundancy-*` manually after tests or issue #4-style no-op shutdowns, stop doing that. The daemon owns those flags now.
+- API, Prometheus, and MQTT remain read-only in v5.3. Authenticated control APIs are still planned for v6.
 
 ---
 
@@ -1078,6 +804,21 @@ During power outages, network connectivity is often unreliable. The previous blo
 ---
 
 ## Version Comparison
+
+### v5.3 vs v5.2
+
+| Feature | v5.2 | v5.3 |
+|---------|------|------|
+| Observability | TUI graphs/events and SQLite stats | Read-only API, Prometheus, MQTT, Grafana dashboard, JSON logs, syslog |
+| Power-quality telemetry | TUI/log events for voltage, AVR, bypass, overload | API/MQTT payload fields plus Prometheus metrics and Grafana panels |
+| Remote health | Not available | Safe SSH probe (`true` by default), TUI/API/MQTT/metrics status, SQLite transition events |
+| Manual remote drill | Not available | `eneru shutdown remote --server ...` with dry-run and explicit confirmed execution |
+| Event display | TUI event panel could bury power events in lifecycle/diagnostic noise | Power / Diagnostics / Lifecycle verbosity tiers with Power preserved first |
+| Slow NUT diagnostics | Brief stale/slow polls were hard to distinguish from healthy polling | Rate-limited slow-`upsc` logs plus sustained slowness notification gate |
+| Redundancy re-arm | Could stay blocked by stale group flag after no-op/test shutdowns | Daemon-managed flags clear on startup, recovery, and graceful exit |
+| Runtime NUT flaps in redundancy | Could become `UNKNOWN` before connection grace expired | Fresh members remain `DEGRADED` during grace, then follow configured unknown policy |
+| On-battery transfer handling | Charge/runtime triggers could act on immediate transient readings | 30 s stabilization for charge/runtime/depletion/extended-time triggers |
+| Test count | 871 | 1162 (+45 numbered E2E cases) |
 
 ### v5.2 vs v5.1
 

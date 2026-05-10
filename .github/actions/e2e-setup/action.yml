@@ -31,7 +31,7 @@ runs:
 
     - name: Install Eneru
       shell: bash
-      run: pip install ".[notifications]"
+      run: pip install ".[notifications,mqtt]"
 
     - name: Install system dependencies
       shell: bash
@@ -90,6 +90,23 @@ runs:
             exit 1
           fi
         done
+
+        echo ""
+        echo "Waiting for MQTT broker..."
+        mqtt_ready=false
+        for i in {1..30}; do
+          if nc -z localhost 1883 2>/dev/null; then
+            echo "  MQTT broker ready!"
+            mqtt_ready=true
+            break
+          fi
+          echo "  Attempt $i/30..."
+          sleep 2
+        done
+        if [ "$mqtt_ready" != "true" ]; then
+          echo "ERROR: MQTT broker never became ready (localhost:1883)" >&2
+          exit 1
+        fi
 
         echo ""
         echo "=== E2E Environment Ready ==="

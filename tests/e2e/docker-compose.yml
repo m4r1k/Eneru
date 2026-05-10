@@ -76,6 +76,16 @@ services:
     networks:
       - eneru-e2e
 
+  mqtt-broker:
+    image: eclipse-mosquitto:2
+    container_name: eneru-e2e-mqtt
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    networks:
+      - eneru-e2e
+
 networks:
   eneru-e2e:
     driver: bridge

@@ -78,12 +78,12 @@
     <text x="396" y="214" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#3D3632">Pre-shutdown</text>
     <text x="396" y="226" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="10" font-weight="400" fill="#8A7A6A">Commands</text>
 
-    <!-- Alerts Box -->
+    <!-- Alerts and Observability Box -->
     <rect x="325" y="280" width="120" height="56" rx="6" ry="6" fill="#F5DDD5" stroke="#D4BBA8" stroke-width="1.2"/>
     <!-- Bell icon -->
     <path d="M351,299 Q351,293 356,293 Q361,293 361,299 L362,307 L350,307 Z M354,310 Q356,312 358,310" fill="none" stroke="#3D3632" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-    <text x="393" y="306" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="600" fill="#3D3632">Alerts</text>
-    <text x="393" y="320" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="10" font-weight="400" fill="#8A7A6A">100+ services</text>
+    <text x="393" y="306" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="600" fill="#3D3632">Observability</text>
+    <text x="393" y="320" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="10" font-weight="400" fill="#8A7A6A">API MQTT metrics</text>
 
     <!-- Virtual Machines -->
     <rect x="578" y="75" width="180" height="40" rx="6" ry="6" fill="#FFFAF6" stroke="#D4BBA8" stroke-width="1.2"/>

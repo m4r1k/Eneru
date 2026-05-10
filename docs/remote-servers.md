@@ -257,7 +257,7 @@ remote_health:
   probe_command: "true"
 ```
 
-Health status appears in the TUI, API, and Prometheus metrics. It is advisory only: during a real shutdown sequence, Eneru still attempts each configured remote pre-shutdown command and final shutdown command with bounded timeouts. Remote command failures are best effort: one unreachable host is logged and counted in the summary, but it does not stall later shutdown phases indefinitely.
+Remote health is enabled by default for configured remote servers. Health status appears in the TUI, API, MQTT payload, and Prometheus metrics. The daemon runs only the safe `probe_command`; those read-only surfaces only consume live manager state or sidecar JSON. An unreachable target becomes `DEGRADED`, then `FAILED` at `failure_threshold`; Eneru sends one failure notification per failed period and one recovery notification when it returns. The health signal is advisory: during a real shutdown sequence, Eneru still attempts each configured remote pre-shutdown command and final shutdown command with bounded timeouts.
 
 ## Manual remote shutdown drill
 

@@ -59,7 +59,7 @@ These intervals come from `StatsWriter` defaults in `src/eneru/stats.py`: `flush
 | `samples` | Raw poll samples, typically 1 Hz |
 | `agg_5min` | Five-minute aggregate buckets |
 | `agg_hourly` | Hourly aggregate buckets |
-| `events` | Power, health, lifecycle, and shutdown events |
+| `events` | Power, health, lifecycle, remote-health transition, and shutdown events |
 | `notifications` | Persistent notification queue and delivery history |
 | `meta` | Schema version and lifecycle metadata |
 

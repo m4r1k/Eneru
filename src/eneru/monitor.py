@@ -327,8 +327,19 @@ class UPSGroupMonitor(
             notify_fn=lambda body, notify_type: self._send_notification(
                 body, notify_type, category="health",
             ),
+            event_fn=self._record_remote_health_event,
         )
         self._remote_health_manager.start()
+
+    def _record_remote_health_event(
+        self, event_type: str, detail: str, notification_sent: bool
+    ) -> None:
+        """Mirror remote-health state changes into the per-UPS event log."""
+        self._stats_store.log_event(
+            event_type,
+            detail,
+            notification_sent=notification_sent,
+        )
 
     def _start_api_server(self):
         """Start the read-only API server for single-UPS mode."""
@@ -1712,6 +1723,12 @@ class UPSGroupMonitor(
                 self.state.latest_battery_charge = ups_data.get('battery.charge', '')
                 self.state.latest_runtime = ups_data.get('battery.runtime', '')
                 self.state.latest_load = ups_data.get('ups.load', '')
+                self.state.latest_input_voltage = ups_data.get('input.voltage', '')
+                self.state.latest_output_voltage = ups_data.get('output.voltage', '')
+                self.state.latest_battery_voltage = ups_data.get('battery.voltage', '')
+                self.state.latest_ups_temperature = ups_data.get('ups.temperature', '')
+                self.state.latest_input_frequency = ups_data.get('input.frequency', '')
+                self.state.latest_output_frequency = ups_data.get('output.frequency', '')
                 self.state.latest_time_on_battery = (
                     int(time.time()) - self.state.on_battery_start_time
                     if self.state.on_battery_start_time > 0 else 0

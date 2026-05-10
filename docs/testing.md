@@ -29,8 +29,8 @@ Eneru uses unit tests, package-install tests, and end-to-end tests with real NUT
    ╱─────────────────────────────────────────────╲
 ```
 
-The pyramid is intentionally bottom-heavy. As of the v5.3 review-fix pass,
-the local pytest suite contains 1124 tests. E2E tests are fewer, but they
+The pyramid is intentionally bottom-heavy. As of the v5.3 stable pass,
+the local pytest suite contains 1162 tests. E2E tests are fewer, but they
 exercise the real service boundaries where packaging, NUT, SSH, Docker,
 filesystem, and CLI assumptions meet.
 
@@ -85,7 +85,7 @@ done
 | Health monitoring | Voltage thresholds, AVR, bypass, overload, battery anomaly filtering |
 | Notifications | Formatting, retry queue, lifecycle classification, coalescing, suppression rules |
 | Statistics and TUI | SQLite schema, aggregation, event tier filtering, TUI grouping, graphs, one-shot monitor output |
-| Observability | API routing, readiness, Prometheus escaping, remote-health sidecars, MQTT publishing |
+| Observability | API routing, readiness, Prometheus escaping, power-quality metrics, remote-health sidecars, MQTT publishing |
 | Packaging | nFPM file list, package install paths, wrapper execution |
 
 ## End-to-end tests
@@ -115,7 +115,7 @@ The scenario files simulate online, on-battery, low-battery, FSD, brownout, over
 
 ### E2E test inventory
 
-The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 44 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
+The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 45 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
 
 | Test | Group | What it proves |
 |------|-------|----------------|
@@ -165,6 +165,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 44 numb
 | 42 | CLI | Manual confirmed remote shutdown reaches only the selected target |
 | 43 | UPS Single | `/health`, `/ready`, and `/metrics` respond from the embedded API |
 | 44 | UPS Single | An unreachable remote target is reported as a bounded best-effort failure instead of stalling shutdown |
+| 45 | UPS Single | MQTT status publishing reaches the broker and includes power-quality fields |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
 
 Every commit on the protected workflow has to prove the daemon works against real services, not just isolated Python assertions: real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.

@@ -274,6 +274,23 @@ _METRIC_CATALOGUE = (
     ("eneru_ups_battery_charge", "gauge", "UPS battery charge percentage."),
     ("eneru_ups_runtime_seconds", "gauge", "UPS runtime estimate in seconds."),
     ("eneru_ups_load_percent", "gauge", "UPS load percentage."),
+    ("eneru_ups_input_voltage", "gauge", "UPS input voltage in volts."),
+    ("eneru_ups_output_voltage", "gauge", "UPS output voltage in volts."),
+    ("eneru_ups_battery_voltage", "gauge", "UPS battery voltage in volts."),
+    ("eneru_ups_temperature_celsius", "gauge", "UPS temperature in degrees Celsius."),
+    ("eneru_ups_input_frequency_hz", "gauge", "UPS input frequency in hertz."),
+    ("eneru_ups_output_frequency_hz", "gauge", "UPS output frequency in hertz."),
+    ("eneru_ups_nominal_voltage", "gauge", "Snapped nominal grid voltage in volts."),
+    ("eneru_ups_voltage_warning_low", "gauge", "Derived low-voltage warning threshold."),
+    ("eneru_ups_voltage_warning_high", "gauge", "Derived high-voltage warning threshold."),
+    ("eneru_ups_voltage_state", "gauge",
+     "Current grid-quality voltage state (1 for the active state label)."),
+    ("eneru_ups_avr_state", "gauge",
+     "Current AVR state (1 for the active state label)."),
+    ("eneru_ups_bypass_state", "gauge",
+     "Current bypass state (1 for the active state label)."),
+    ("eneru_ups_overload_state", "gauge",
+     "Current overload state (1 for the active state label)."),
     ("eneru_ups_depletion_rate_percent_per_minute", "gauge",
      "UPS battery depletion rate (charge percent per minute on battery)."),
     ("eneru_ups_time_on_battery_seconds", "gauge",
@@ -299,9 +316,39 @@ def render_prometheus_metrics(source: Any) -> str:
     lines.append("eneru_up 1")
     for row in payload.get("ups", []):
         labels = {"ups": row["name"], "label": row["label"]}
+        power = row.get("powerQuality", {})
         lines.append(_metric_line("eneru_ups_battery_charge", labels, row["batteryCharge"]))
         lines.append(_metric_line("eneru_ups_runtime_seconds", labels, row["runtime"]))
         lines.append(_metric_line("eneru_ups_load_percent", labels, row["load"]))
+        lines.append(_metric_line("eneru_ups_input_voltage", labels, power.get("inputVoltage")))
+        lines.append(_metric_line("eneru_ups_output_voltage", labels, power.get("outputVoltage")))
+        lines.append(_metric_line("eneru_ups_battery_voltage", labels, power.get("batteryVoltage")))
+        lines.append(_metric_line("eneru_ups_temperature_celsius", labels, power.get("temperature")))
+        lines.append(_metric_line("eneru_ups_input_frequency_hz", labels, power.get("inputFrequency")))
+        lines.append(_metric_line("eneru_ups_output_frequency_hz", labels, power.get("outputFrequency")))
+        lines.append(_metric_line("eneru_ups_nominal_voltage", labels, power.get("nominalVoltage")))
+        lines.append(_metric_line("eneru_ups_voltage_warning_low", labels, power.get("warningLow")))
+        lines.append(_metric_line("eneru_ups_voltage_warning_high", labels, power.get("warningHigh")))
+        lines.append(_metric_line(
+            "eneru_ups_voltage_state",
+            {**labels, "state": power.get("voltageState", "NORMAL")},
+            1,
+        ))
+        lines.append(_metric_line(
+            "eneru_ups_avr_state",
+            {**labels, "state": power.get("avrState", "INACTIVE")},
+            1,
+        ))
+        lines.append(_metric_line(
+            "eneru_ups_bypass_state",
+            {**labels, "state": power.get("bypassState", "INACTIVE")},
+            1,
+        ))
+        lines.append(_metric_line(
+            "eneru_ups_overload_state",
+            {**labels, "state": power.get("overloadState", "INACTIVE")},
+            1,
+        ))
         lines.append(_metric_line("eneru_ups_depletion_rate_percent_per_minute", labels, row["depletionRate"]))
         lines.append(_metric_line("eneru_ups_time_on_battery_seconds", labels, row["timeOnBattery"]))
         lines.append(_metric_line(

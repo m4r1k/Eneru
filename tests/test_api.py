@@ -42,8 +42,17 @@ def monitor(minimal_config, tmp_path):
         latest_battery_charge="97",
         latest_runtime="1200",
         latest_load="20",
+        latest_input_voltage="229.4",
+        latest_output_voltage="230.1",
+        latest_battery_voltage="27.2",
+        latest_ups_temperature="32",
+        latest_input_frequency="50.0",
+        latest_output_frequency="50.0",
         latest_update_time=time.time(),
     )
+    monitor.state.nominal_voltage = 230.0
+    monitor.state.voltage_warning_low = 207.0
+    monitor.state.voltage_warning_high = 253.0
     monitor.logger = MagicMock()
     return monitor
 
@@ -55,6 +64,8 @@ def test_collect_status_is_read_only_shape(monitor):
     assert payload["ups"][0]["batteryCharge"] == "97"
     assert payload["ups"][0]["connectionState"] == "OK"
     assert payload["ups"][0]["groupId"] == "TestUPS-localhost"
+    assert payload["ups"][0]["powerQuality"]["inputVoltage"] == "229.4"
+    assert payload["ups"][0]["powerQuality"]["voltageState"] == "NORMAL"
 
 
 @pytest.mark.unit
@@ -118,6 +129,8 @@ def test_prometheus_metrics_include_eneru_specific_values(monitor):
     assert "eneru_up 1" in text
     assert "eneru_ups_battery_charge" in text
     assert "eneru_ups_depletion_rate_percent_per_minute" in text
+    assert 'eneru_ups_input_voltage{ups="TestUPS@localhost",label="TestUPS@localhost"} 229.4' in text
+    assert 'eneru_ups_voltage_state{ups="TestUPS@localhost",label="TestUPS@localhost",state="NORMAL"} 1.0' in text
 
 
 @pytest.mark.unit

@@ -151,6 +151,7 @@ class RemoteHealthManager:
         stop_event: threading.Event,
         log_fn: Callable[[str], None],
         notify_fn: Optional[Callable[[str, str], None]] = None,
+        event_fn: Optional[Callable[[str, str, bool], None]] = None,
     ):
         self.config = config
         self.group_label = group_label
@@ -159,6 +160,7 @@ class RemoteHealthManager:
         self.stop_event = stop_event
         self.log_fn = log_fn
         self.notify_fn = notify_fn
+        self.event_fn = event_fn
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._notified_failed: Dict[str, bool] = {}
@@ -259,14 +261,20 @@ class RemoteHealthManager:
             current = row.status
 
         display = server.name or server.host
+        notification_sent = False
         if success and previous in (REMOTE_HEALTH_DEGRADED, REMOTE_HEALTH_FAILED):
             self._notified_failed[key] = False
             self.log_fn(f"✅ Remote health recovered: {display}")
-            if self.config.remote_health.notify_on_recovery and self.notify_fn:
+            if (
+                previous == REMOTE_HEALTH_FAILED
+                and self.config.remote_health.notify_on_recovery
+                and self.notify_fn
+            ):
                 self.notify_fn(
                     f"✅ **Remote SSH Health Recovered:** {display}\nHost: {server.host}",
                     self.config.NOTIFY_SUCCESS,
                 )
+                notification_sent = True
         elif current == REMOTE_HEALTH_FAILED and not self._notified_failed.get(key):
             self._notified_failed[key] = True
             self.log_fn(f"❌ Remote health failed: {display}: {error}")
@@ -276,8 +284,42 @@ class RemoteHealthManager:
                     f"Host: {server.host}\nError: {error}",
                     self.config.NOTIFY_FAILURE,
                 )
+                notification_sent = True
         elif not success:
             self.log_fn(f"⚠️ Remote health degraded: {display}: {error}")
+        self._record_status_transition(
+            previous, current, display, server.host, row.last_error,
+            notification_sent,
+        )
+
+    def _record_status_transition(
+        self,
+        previous: str,
+        current: str,
+        display: str,
+        host: str,
+        error: str,
+        notification_sent: bool,
+    ) -> None:
+        """Record stable remote-health state transitions in SQLite events."""
+        if self.event_fn is None or current == previous:
+            return
+        detail = (
+            f"{self.group_label}/{display} ({host}) "
+            f"{previous} -> {current}"
+        )
+        if error:
+            detail = f"{detail}: {error}"
+        try:
+            self.event_fn(
+                f"REMOTE_HEALTH_{current}",
+                detail,
+                notification_sent,
+            )
+        except Exception:
+            # Stats are diagnostic only. A broken DB must not affect health
+            # checks or the shutdown path.
+            pass
 
     def _write_sidecar(self) -> None:
         try:

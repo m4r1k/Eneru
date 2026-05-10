@@ -1,8 +1,8 @@
 {
   "title": "Eneru UPS Overview",
   "schemaVersion": 39,
-  "version": 1,
-  "refresh": "10s",
+  "version": 2,
+  "refresh": "15s",
   "time": {
     "from": "now-6h",
     "to": "now"
@@ -26,7 +26,7 @@
       "type": "timeseries",
       "title": "Battery charge",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 0},
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
@@ -34,16 +34,13 @@
           "legendFormat": "{{label}}"
         }
       ],
-      "fieldConfig": {
-        "defaults": {"unit": "percent", "min": 0, "max": 100},
-        "overrides": []
-      }
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []}
     },
     {
       "type": "timeseries",
       "title": "Runtime remaining",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 0},
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
@@ -51,16 +48,13 @@
           "legendFormat": "{{label}}"
         }
       ],
-      "fieldConfig": {
-        "defaults": {"unit": "s"},
-        "overrides": []
-      }
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
     },
     {
       "type": "timeseries",
       "title": "UPS load",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 0},
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
@@ -68,16 +62,109 @@
           "legendFormat": "{{label}}"
         }
       ],
-      "fieldConfig": {
-        "defaults": {"unit": "percent", "min": 0, "max": 100},
-        "overrides": []
-      }
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "Input and output voltage",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 7},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "eneru_ups_input_voltage",
+          "legendFormat": "{{label}} input"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "eneru_ups_output_voltage",
+          "legendFormat": "{{label}} output"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "eneru_ups_voltage_warning_low",
+          "legendFormat": "{{label}} low warning"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "eneru_ups_voltage_warning_high",
+          "legendFormat": "{{label}} high warning"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "volt"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "Input and output frequency",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 7},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "eneru_ups_input_frequency_hz",
+          "legendFormat": "{{label}} input"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "eneru_ups_output_frequency_hz",
+          "legendFormat": "{{label}} output"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "hertz"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "Temperature and battery voltage",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "eneru_ups_temperature_celsius",
+          "legendFormat": "{{label}} temperature"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "eneru_ups_battery_voltage",
+          "legendFormat": "{{label}} battery voltage"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "title": "Power-quality states",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 15},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (state) (eneru_ups_voltage_state)",
+          "legendFormat": "voltage {{state}}"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (state) (eneru_ups_avr_state)",
+          "legendFormat": "avr {{state}}"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (state) (eneru_ups_bypass_state)",
+          "legendFormat": "bypass {{state}}"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (state) (eneru_ups_overload_state)",
+          "legendFormat": "overload {{state}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []}
     },
     {
       "type": "stat",
       "title": "Remote health failures",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 15},
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
@@ -85,10 +172,7 @@
           "legendFormat": "failures"
         }
       ],
-      "fieldConfig": {
-        "defaults": {"unit": "short", "min": 0},
-        "overrides": []
-      }
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []}
     }
   ]
 }
