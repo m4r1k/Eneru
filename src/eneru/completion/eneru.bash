@@ -14,12 +14,14 @@ _eneru() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local subcommands="run shutdown validate monitor tui test-notifications completion version"
+    local subcommands="run shutdown remote validate monitor tui test-notifications completion version"
     local global_opts="-h --help"
     local config_opts="-c --config"
     local monitor_opts="--once --interval --graph --time --events-only -v --verbose --length"
     local run_opts="--dry-run --exit-after-shutdown"
     local shutdown_remote_opts="$config_opts --server --group --dry-run --i-really-want-to-proceed-with-remote-shutdown --connectivity-check --no-connectivity-check --log-file"
+    local shutdown_group_opts="$config_opts --group --dry-run --i-really-want-to-proceed-with-group-shutdown --log-file"
+    local remote_list_opts="$config_opts"
     local graph_choices="charge load voltage runtime"
     local time_choices="1h 6h 24h 7d 30d"
     local completion_shells="bash zsh fish"
@@ -82,13 +84,33 @@ _eneru() {
             for ((i=2; i < COMP_CWORD; i++)); do
                 case "${COMP_WORDS[i]}" in
                     -*) continue ;;
-                    remote) shutdown_leaf="remote"; break ;;
+                    remote|group) shutdown_leaf="${COMP_WORDS[i]}"; break ;;
                 esac
             done
-            if [[ "$shutdown_leaf" == "remote" ]]; then
-                COMPREPLY=( $(compgen -W "$shutdown_remote_opts $global_opts" -- "$cur") )
+            case "$shutdown_leaf" in
+                remote)
+                    COMPREPLY=( $(compgen -W "$shutdown_remote_opts $global_opts" -- "$cur") )
+                    ;;
+                group)
+                    COMPREPLY=( $(compgen -W "$shutdown_group_opts $global_opts" -- "$cur") )
+                    ;;
+                *)
+                    mapfile -t COMPREPLY < <(compgen -W "remote group $global_opts" -- "$cur")
+                    ;;
+            esac
+            ;;
+        remote)
+            local remote_leaf=""
+            for ((i=2; i < COMP_CWORD; i++)); do
+                case "${COMP_WORDS[i]}" in
+                    -*) continue ;;
+                    list) remote_leaf="list"; break ;;
+                esac
+            done
+            if [[ "$remote_leaf" == "list" ]]; then
+                COMPREPLY=( $(compgen -W "$remote_list_opts $global_opts" -- "$cur") )
             else
-                mapfile -t COMPREPLY < <(compgen -W "remote $global_opts" -- "$cur")
+                mapfile -t COMPREPLY < <(compgen -W "list $global_opts" -- "$cur")
             fi
             ;;
         validate|test-notifications)

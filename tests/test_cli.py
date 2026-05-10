@@ -1016,3 +1016,180 @@ ups:
 
         captured = capsys.readouterr()
         assert "MyUPS@10.0.0.1" in captured.out
+
+
+class TestCLIRemoteList:
+    """`eneru remote list` discovery output."""
+
+    def _multi_target_config(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  - name: UPS-A\n"
+            "    display_name: rack-a\n"
+            "    is_local: true\n"
+            "    remote_servers:\n"
+            "      - name: Synology NAS\n"
+            "        enabled: true\n"
+            "        host: nas.local\n"
+            "        user: admin\n"
+            "        shutdown_order: 10\n"
+            "      - name: Proxmox-1\n"
+            "        enabled: true\n"
+            "        host: pve1.local\n"
+            "        user: root\n"
+            "        shutdown_order: 5\n"
+            "      - name: dev-box\n"
+            "        enabled: false\n"
+            "        host: dev.local\n"
+            "        user: ubuntu\n"
+        )
+        return config_file
+
+    @pytest.mark.unit
+    def test_remote_list_prints_all_groups(self, tmp_path, capsys):
+        config_file = self._multi_target_config(tmp_path)
+        with patch.object(sys, "argv", [
+            "eneru", "remote", "list", "-c", str(config_file),
+        ]):
+            main()
+        out = capsys.readouterr().out
+        assert "REMOTE TARGETS (3 configured, 2 enabled)" in out
+        assert "Synology NAS" in out
+        assert "Proxmox-1" in out
+        assert "dev-box" in out
+        # Per-server effective order is what the daemon would actually use,
+        # so explicit shutdown_order values must show through.
+        assert "10" in out and "5" in out
+
+    @pytest.mark.unit
+    def test_remote_list_shows_user_at_host(self, tmp_path, capsys):
+        config_file = self._multi_target_config(tmp_path)
+        with patch.object(sys, "argv", [
+            "eneru", "remote", "list", "-c", str(config_file),
+        ]):
+            main()
+        out = capsys.readouterr().out
+        assert "admin@nas.local" in out
+        assert "root@pve1.local" in out
+
+    @pytest.mark.unit
+    def test_remote_list_no_targets_exits_nonzero(self, tmp_path, capsys):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+        )
+        with patch.object(sys, "argv", [
+            "eneru", "remote", "list", "-c", str(config_file),
+        ]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 1
+        assert "No remote targets configured" in capsys.readouterr().out
+
+
+class TestCLIShutdownGroupRehearsal:
+    """`eneru shutdown group --group ...` full-sequence rehearsal."""
+
+    def _ups_group_config(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "  display_name: rack-a\n"
+            "remote_servers:\n"
+            "  - name: nas\n"
+            "    enabled: true\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+            "    shutdown_command: 'sudo shutdown -h now'\n"
+            "local_shutdown:\n"
+            "  enabled: false\n"
+        )
+        return config_file
+
+    def _redundancy_config(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  - name: UPS-A\n"
+            "    display_name: rack-a\n"
+            "  - name: UPS-B\n"
+            "    display_name: rack-b\n"
+            "redundancy_groups:\n"
+            "  - name: rack-pair\n"
+            "    ups_sources: [UPS-A, UPS-B]\n"
+            "    min_healthy: 1\n"
+            "    remote_servers:\n"
+            "      - name: nas\n"
+            "        enabled: true\n"
+            "        host: nas.local\n"
+            "        user: root\n"
+        )
+        return config_file
+
+    @pytest.mark.unit
+    def test_real_shutdown_requires_long_confirmation(self, tmp_path, capsys):
+        config_file = self._ups_group_config(tmp_path)
+        with patch.object(sys, "argv", [
+            "eneru", "shutdown", "group",
+            "-c", str(config_file), "--group", "rack-a",
+        ]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 2
+        assert "i-really-want-to-proceed-with-group-shutdown" in (
+            capsys.readouterr().out
+        )
+
+    @pytest.mark.unit
+    def test_unknown_group_exits_nonzero(self, tmp_path):
+        config_file = self._ups_group_config(tmp_path)
+        with patch.object(sys, "argv", [
+            "eneru", "shutdown", "group",
+            "-c", str(config_file), "--group", "no-such-group",
+            "--dry-run",
+        ]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert "no-such-group" in str(exc_info.value)
+
+    @pytest.mark.unit
+    def test_dry_run_invokes_full_sequence_under_dry_run(self, tmp_path):
+        config_file = self._ups_group_config(tmp_path)
+        with patch(
+            "eneru.cli.UPSGroupMonitor"
+        ) as mock_monitor_cls:
+            mock_monitor = MagicMock()
+            mock_monitor_cls.return_value = mock_monitor
+            with patch.object(sys, "argv", [
+                "eneru", "shutdown", "group",
+                "-c", str(config_file), "--group", "rack-a", "--dry-run",
+            ]):
+                main()
+        mock_monitor._execute_shutdown_sequence.assert_called_once()
+        # Whatever Config the monitor was instantiated with must have
+        # dry_run flipped on; otherwise the rehearsal would be live.
+        drill_config = mock_monitor_cls.call_args.args[0]
+        assert drill_config.behavior.dry_run is True
+
+    @pytest.mark.unit
+    def test_redundancy_group_routes_through_executor(self, tmp_path, capsys):
+        config_file = self._redundancy_config(tmp_path)
+        with patch(
+            "eneru.cli.RedundancyGroupExecutor"
+        ) as mock_executor_cls:
+            mock_executor = MagicMock()
+            mock_executor_cls.return_value = mock_executor
+            with patch.object(sys, "argv", [
+                "eneru", "shutdown", "group",
+                "-c", str(config_file), "--group", "rack-pair", "--dry-run",
+            ]):
+                main()
+        mock_executor.shutdown.assert_called_once()
+        # Local poweroff callback is intentionally NOT wired so an
+        # operator can't accidentally halt the host with "rehearsal".
+        kwargs = mock_executor_cls.call_args.kwargs
+        assert kwargs["local_shutdown_callback"] is None
+        assert "does not fire local poweroff" in capsys.readouterr().out

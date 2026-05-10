@@ -11,6 +11,7 @@ from eneru.config import Config, ConfigLoader, UPSConfig, UPSGroupConfig
 from eneru.monitor import UPSGroupMonitor, compute_effective_order
 from eneru.multi_ups import MultiUPSCoordinator
 from eneru.notifications import APPRISE_AVAILABLE
+from eneru.redundancy import RedundancyGroupExecutor
 from eneru.remote_health import is_safe_probe_command, run_remote_probe
 
 # Optional import for Apprise (needed for test notifications)
@@ -405,6 +406,83 @@ def _iter_remote_server_owners(config):
             yield label, group.name, server
 
 
+def _format_remote_list_table(rows):
+    """Format remote-target rows as a fixed-width ASCII table.
+
+    Width is computed per-column from the actual data so long names
+    don't truncate; each column has a minimum that keeps the header
+    readable when every row is short.
+    """
+    headers = ("NAME", "GROUP", "HOST", "ENABLED", "ORDER")
+    minimums = (10, 10, 10, 7, 5)
+    columns = list(zip(*([headers] + rows))) if rows else [(h,) for h in headers]
+    widths = [
+        max(minimums[i], max(len(str(cell)) for cell in column))
+        for i, column in enumerate(columns)
+    ]
+    last = len(widths) - 1
+    fmt_row = lambda row: "  ".join(
+        str(cell) if i == last else str(cell).ljust(widths[i])
+        for i, cell in enumerate(row)
+    )
+    lines = [fmt_row(headers)]
+    for row in rows:
+        lines.append(fmt_row(row))
+    return "\n".join(lines)
+
+
+def _cmd_remote_list(args):
+    """List configured remote shutdown targets across all groups."""
+    config = _load_config(args)
+    _exit_on_config_errors(config, args)
+
+    # Stable per-group ordering so users see related rows next to each
+    # other. Within a group, sort by effective shutdown order so the
+    # printed sequence matches what the daemon would actually run.
+    rows = []
+    enabled_count = 0
+    for group in config.ups_groups:
+        owner_label = (
+            f"{group.ups.name} ({group.ups.label})"
+            if group.ups.label and group.ups.label != group.ups.name
+            else (group.ups.name or group.ups.label or "(unnamed)")
+        )
+        ordered = compute_effective_order(group.remote_servers)
+        for effective_order, server in ordered:
+            host = f"{server.user}@{server.host}" if server.user else server.host
+            rows.append((
+                server.name or server.host,
+                owner_label,
+                host,
+                "yes" if server.enabled else "no",
+                str(effective_order),
+            ))
+            if server.enabled:
+                enabled_count += 1
+    for group in config.redundancy_groups:
+        owner_label = f"redundancy:{group.name}"
+        ordered = compute_effective_order(group.remote_servers)
+        for effective_order, server in ordered:
+            host = f"{server.user}@{server.host}" if server.user else server.host
+            rows.append((
+                server.name or server.host,
+                owner_label,
+                host,
+                "yes" if server.enabled else "no",
+                str(effective_order),
+            ))
+            if server.enabled:
+                enabled_count += 1
+
+    if not rows:
+        print("No remote targets configured.")
+        sys.exit(1)
+
+    print(f"REMOTE TARGETS ({len(rows)} configured, {enabled_count} enabled)")
+    print()
+    print(_format_remote_list_table(rows))
+
+
 def _select_remote_server(config, server_ref: str, group_ref: str = None):
     """Select exactly one remote server from config."""
     matches = []
@@ -502,6 +580,119 @@ def _cmd_shutdown_remote(args):
     logger.log("Manual remote shutdown drill complete.")
 
 
+def _resolve_group_for_rehearsal(config, group_ref: str):
+    """Locate a UPS or redundancy group by name for the rehearsal command.
+
+    Returns ``(kind, group)`` where ``kind`` is ``"ups"`` or
+    ``"redundancy"``. Matches UPS groups against the friendly label
+    first and the canonical name second; redundancy groups against
+    ``RedundancyGroupConfig.name``. Raises SystemExit with an
+    operator-friendly message when nothing matches or the name is
+    ambiguous across kinds.
+    """
+    matches = []
+    for group in config.ups_groups:
+        if group_ref in {group.ups.label, group.ups.name}:
+            matches.append(("ups", group))
+    for group in config.redundancy_groups:
+        if group_ref == group.name:
+            matches.append(("redundancy", group))
+    if not matches:
+        raise SystemExit(
+            f"ERROR: group {group_ref!r} not found. "
+            f"Use 'eneru remote list' to see configured names."
+        )
+    if len(matches) > 1:
+        kinds = ", ".join(kind for kind, _ in matches)
+        raise SystemExit(
+            f"ERROR: group {group_ref!r} matches multiple groups ({kinds}). "
+            f"Rename one of them or open an issue if you need a --kind flag."
+        )
+    return matches[0]
+
+
+def _cmd_shutdown_group(args):
+    """Run a manual full-sequence shutdown rehearsal for one named group."""
+    import shutil
+    import tempfile
+    import threading
+
+    config = _load_config(args)
+    _exit_on_config_errors(config, args)
+
+    if not args.dry_run and not args.confirm:
+        print(
+            "ERROR: real group shutdown requires "
+            "--i-really-want-to-proceed-with-group-shutdown"
+        )
+        sys.exit(2)
+
+    kind, group = _resolve_group_for_rehearsal(config, args.group)
+
+    logger = _CLILogger(args.log_file)
+    label = group.ups.label if kind == "ups" else group.name
+    logger.log(f"Manual group shutdown rehearsal: {label}")
+    logger.log(f"  Kind: {kind}")
+    logger.log(f"  Mode: {'dry-run' if args.dry_run else 'REAL SHUTDOWN'}")
+    if kind == "redundancy":
+        # The coordinator's local-poweroff callback isn't wired in this
+        # one-shot path. Calling it would let an operator confirm a
+        # "rehearsal" and accidentally halt the host because the
+        # callback bypasses the per-rehearsal flag isolation.
+        logger.log(
+            "  Note: redundancy rehearsal does not fire local poweroff "
+            "even with confirm flag."
+        )
+
+    # Isolate per-rehearsal state files so the rehearsal can never
+    # collide with a running daemon's flag/state files (which would
+    # block the daemon from re-firing its own shutdowns).
+    rehearsal_dir = Path(tempfile.mkdtemp(prefix="eneru-rehearsal-"))
+    try:
+        config.logging.shutdown_flag_file = str(
+            rehearsal_dir / "rehearsal.shutdown-flag"
+        )
+        config.logging.battery_history_file = str(
+            rehearsal_dir / "rehearsal.battery-history"
+        )
+        config.logging.state_file = str(
+            rehearsal_dir / "rehearsal.state"
+        )
+        config.behavior.dry_run = bool(args.dry_run)
+
+        if kind == "ups":
+            drill_config = Config(
+                ups_groups=[group],
+                behavior=config.behavior,
+                logging=config.logging,
+                notifications=config.notifications,
+                local_shutdown=config.local_shutdown,
+                statistics=config.statistics,
+                api=config.api,
+                prometheus=config.prometheus,
+                remote_health=config.remote_health,
+                mqtt=config.mqtt,
+            )
+            monitor = UPSGroupMonitor(drill_config)
+            monitor.logger = logger
+            monitor._notification_worker = None
+            monitor._execute_shutdown_sequence()
+        else:
+            executor = RedundancyGroupExecutor(
+                group,
+                base_config=config,
+                logger=logger,
+                stop_event=threading.Event(),
+                notification_worker=None,
+                local_shutdown_callback=None,
+            )
+            executor.shutdown(reason="manual rehearsal via CLI")
+    finally:
+        shutil.rmtree(rehearsal_dir, ignore_errors=True)
+
+    logger.log("Manual group shutdown rehearsal complete.")
+
+
 def _cmd_version(args):
     """Print version and exit."""
     print(f"Eneru v{__version__}")
@@ -592,7 +783,9 @@ def main():
         epilog=(
             "subcommands:\n"
             "  run                  Start the monitoring daemon\n"
+            "  remote list          List configured remote shutdown targets\n"
             "  shutdown remote      Manually drill one configured remote shutdown\n"
+            "  shutdown group       Rehearse the full shutdown sequence for one group\n"
             "  validate             Validate configuration and show overview\n"
             "  monitor / tui        Launch real-time TUI dashboard\n"
             "  test-notifications   Send a test notification\n"
@@ -600,6 +793,8 @@ def main():
             "  version              Show version information\n"
             "\nExamples:\n"
             "  eneru run --config /etc/ups-monitor/config.yaml\n"
+            "  eneru remote list --config /etc/ups-monitor/config.yaml\n"
+            "  eneru shutdown group --group rack-a --dry-run --config /etc/ups-monitor/config.yaml\n"
             "  eneru validate --config /etc/ups-monitor/config.yaml\n"
             "  eneru monitor --config /etc/ups-monitor/config.yaml\n"
             "  eneru tui --config /etc/ups-monitor/config.yaml\n"
@@ -647,6 +842,44 @@ def main():
     remote_parser.add_argument("--log-file",
                                help="Optional file to append this drill log to")
     remote_parser.set_defaults(func=_cmd_shutdown_remote)
+
+    # --- shutdown group ---
+    group_parser = shutdown_sub.add_parser(
+        "group",
+        help="Rehearse the full configured shutdown sequence for one group",
+    )
+    group_parser.add_argument("-c", "--config", help="Path to configuration file",
+                              default=None)
+    group_parser.add_argument("--group", required=True,
+                              help="UPS group label/name or redundancy group name")
+    group_parser.add_argument("--dry-run", action="store_true",
+                              help="Log every phase without executing real commands")
+    group_parser.add_argument(
+        "--i-really-want-to-proceed-with-group-shutdown",
+        dest="confirm",
+        action="store_true",
+        help=(
+            "Required for real execution. For UPS groups this WILL halt the "
+            "host if local_shutdown.enabled. Redundancy groups never fire "
+            "local poweroff from the CLI rehearsal."
+        ),
+    )
+    group_parser.add_argument("--log-file",
+                              help="Optional file to append this rehearsal log to")
+    group_parser.set_defaults(func=_cmd_shutdown_group)
+
+    # --- remote list ---
+    remote_top_parser = subparsers.add_parser(
+        "remote", help="Inspect configured remote shutdown targets",
+    )
+    remote_top_sub = remote_top_parser.add_subparsers(dest="remote_command")
+    remote_list_parser = remote_top_sub.add_parser(
+        "list", help="List configured remote shutdown targets",
+    )
+    remote_list_parser.add_argument(
+        "-c", "--config", help="Path to configuration file", default=None,
+    )
+    remote_list_parser.set_defaults(func=_cmd_remote_list)
 
     # --- validate ---
     val_parser = subparsers.add_parser("validate", help="Validate configuration and show overview")
