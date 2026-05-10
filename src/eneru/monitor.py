@@ -1276,7 +1276,7 @@ class UPSGroupMonitor(
                 "ON_BATTERY",
                 f"Battery: {battery_charge}%, Runtime: {battery_runtime} seconds, Load: {ups_load}%"
             )
-            if not self.config.behavior.dry_run:
+            if self.config.local_shutdown.wall and not self.config.behavior.dry_run:
                 run_command([
                     "wall",
                     f"⚠️ WARNING: Power failure detected! System running on UPS battery "
@@ -1407,7 +1407,7 @@ class UPSGroupMonitor(
                 f"Battery: {battery_charge}% (Status: {ups_status}), "
                 f"Input: {input_voltage}V, Outage duration: {format_seconds(time_on_battery)}"
             )
-            if not self.config.behavior.dry_run:
+            if self.config.local_shutdown.wall and not self.config.behavior.dry_run:
                 run_command([
                     "wall",
                     f"✅ Power has been restored. UPS Status: {ups_status}. "
