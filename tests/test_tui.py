@@ -187,6 +187,23 @@ class TestGhosttyTerminfoFallback:
                 assert wrapper.call_count == 1
 
 
+class TestRemoteHealthSummary:
+    """Remote health summary for the TUI resource panel."""
+
+    @pytest.mark.unit
+    def test_summarize_remote_health_counts_statuses(self):
+        from eneru.tui import summarize_remote_health
+
+        summary = summarize_remote_health([
+            {"status": "HEALTHY"},
+            {"status": "HEALTHY"},
+            {"status": "FAILED"},
+        ])
+
+        assert "2 healthy" in summary
+        assert "1 failed" in summary
+
+
 class TestEventsScrollAutoPromote:
     """5.1.1 (CodeRabbit): scrolling toward older history while in
     normal-cap mode (8 rows) used to be a silent no-op because the

@@ -9,6 +9,7 @@ ups:
 triggers:
   low_battery_threshold: 20
   critical_runtime_threshold: 600
+  on_battery_stabilization_delay: 0  # E2E legacy tests trigger immediately
   depletion:
     window: 300
     critical_rate: 15.0
@@ -27,6 +28,21 @@ logging:
 
 statistics:
   db_directory: "/tmp/eneru-e2e-stats"
+
+api:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 9100
+
+prometheus:
+  enabled: true
+
+remote_health:
+  enabled: true
+  startup_check: true
+  interval: 3600
+  probe_command: "true"
+  failure_threshold: 1
 
 notifications:
   enabled: false

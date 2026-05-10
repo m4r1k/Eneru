@@ -63,6 +63,12 @@ class TestAssessHealthBasicTiers:
         assert assess_health(snap, None, 1, now=NOW) == UPSHealth.CRITICAL
 
     @pytest.mark.unit
+    def test_fsd_status_bypasses_on_battery_stabilization(self):
+        triggers = TriggersConfig(on_battery_stabilization_delay=30)
+        snap = _snap(status="OB FSD", time_on_battery=0)
+        assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.CRITICAL
+
+    @pytest.mark.unit
     def test_grace_period_is_degraded(self):
         snap = _snap(connection_state="GRACE_PERIOD")
         assert assess_health(snap, None, 1, now=NOW) == UPSHealth.DEGRADED
@@ -84,7 +90,7 @@ class TestAssessHealthGroupTriggers:
     @pytest.mark.unit
     def test_group_low_battery_threshold_is_critical(self):
         triggers = TriggersConfig(low_battery_threshold=50)
-        snap = _snap(status="OB", battery_charge="49")
+        snap = _snap(status="OB", battery_charge="49", time_on_battery=40)
         assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.CRITICAL
 
     @pytest.mark.unit
@@ -93,7 +99,7 @@ class TestAssessHealthGroupTriggers:
             low_battery_threshold=1,
             critical_runtime_threshold=1200,
         )
-        snap = _snap(status="OB", runtime="1199")
+        snap = _snap(status="OB", runtime="1199", time_on_battery=40)
         assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.CRITICAL
 
     @pytest.mark.unit

@@ -1,6 +1,9 @@
 """Logging utilities for Eneru."""
 
+import json
 import logging
+import logging.handlers
+import re
 import sys
 import time
 from pathlib import Path
@@ -9,12 +12,93 @@ from typing import Optional
 from eneru.config import Config
 
 
+SENSITIVE_PATTERNS = (
+    re.compile(r"(discord://)[^\s]+", re.IGNORECASE),
+    re.compile(r"(https://discord(?:app)?\.com/api/webhooks/)[^\s]+", re.IGNORECASE),
+    re.compile(r"([a-z][a-z0-9+.-]*://)([^:/\s]+):([^@\s]+)@", re.IGNORECASE),
+    re.compile(r"((?:token|password|passwd|secret|api[_-]?key)=)[^\s&]+", re.IGNORECASE),
+)
+
+
+def redact_sensitive_text(value: str) -> str:
+    """Redact credentials from log text before structured output."""
+    redacted = value
+    redacted = SENSITIVE_PATTERNS[0].sub(r"\1<redacted>", redacted)
+    redacted = SENSITIVE_PATTERNS[1].sub(r"\1<redacted>", redacted)
+    redacted = SENSITIVE_PATTERNS[2].sub(r"\1\2:<redacted>@", redacted)
+    redacted = SENSITIVE_PATTERNS[3].sub(r"\1<redacted>", redacted)
+    return redacted
+
+
 class TimezoneFormatter(logging.Formatter):
     """Custom formatter that includes timezone abbreviation."""
 
     def format(self, record):
         record.timezone = time.strftime('%Z')
         return super().format(record)
+
+
+class JSONFormatter(logging.Formatter):
+    """Minimal structured formatter for SIEM/log pipeline ingestion.
+
+    Prefers explicit structured fields on the LogRecord (set by callers
+    via Eneru's ``UPSLogger.log(msg, **extra)`` wrapper, which forwards
+    the kwargs as ``logging.Logger.info(msg, extra=extra)`` — the stdlib
+    promotes those keys into LogRecord attributes that this formatter
+    then reads). Falls back to heuristic message parsing for legacy
+    call sites that don't pass structured context — these are
+    correctness-best-effort and should be migrated over time.
+    """
+
+    # The set of fields a caller may opt into via the ``extra`` kwarg of
+    # ``logging.Logger`` calls. Anything else is ignored to keep the
+    # JSON shape stable for log pipelines.
+    _EXTRA_FIELDS = ("group", "event_type", "category", "ups", "server")
+
+    def format(self, record):
+        raw_message = record.getMessage()
+        message = redact_sensitive_text(raw_message)
+        payload = {
+            "timestamp": time.strftime(
+                "%Y-%m-%dT%H:%M:%S%z",
+                time.localtime(record.created),
+            ),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": message,
+        }
+        # Pull explicit structured fields first. The Python logging
+        # module promotes ``extra={...}`` keys into LogRecord attributes,
+        # so we read them directly off the record.
+        for field in self._EXTRA_FIELDS:
+            value = getattr(record, field, None)
+            if value is not None and value != "":
+                payload[field] = value
+        # Fallback heuristics for call sites that don't yet pass
+        # structured extras. These run only to fill in fields the
+        # caller didn't already provide.
+        if "group" not in payload and message.startswith("[") and "] " in message:
+            group, rest = message.split("] ", 1)
+            payload["group"] = group.strip("[]")
+            payload["message"] = rest
+        if "category" not in payload:
+            if "POWER EVENT:" in message:
+                payload["category"] = "power_event"
+                if "event_type" not in payload:
+                    try:
+                        event_part = message.split("POWER EVENT:", 1)[1].strip()
+                        payload["event_type"] = event_part.split(" ", 1)[0]
+                    except Exception:
+                        pass
+            elif "Remote health" in message:
+                payload["category"] = "health"
+            elif "SHUTDOWN" in message:
+                # Uppercase SHUTDOWN is the daemon's own marker. Avoid
+                # the lowercase variant — it falsely tags config keys
+                # like "shutdown_safety_margin" and informational lines
+                # like "Local shutdown disabled" as shutdown events.
+                payload["category"] = "shutdown"
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 class UPSLogger:
@@ -41,10 +125,13 @@ class UPSLogger:
         # if the embedding application configured root handlers.
         self.logger.propagate = False
 
-        formatter = TimezoneFormatter(
-            '%(asctime)s %(timezone)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
+        if config.logging.format == "json":
+            formatter = JSONFormatter()
+        else:
+            formatter = TimezoneFormatter(
+                '%(asctime)s %(timezone)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
 
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
@@ -59,6 +146,38 @@ class UPSLogger:
             except PermissionError:
                 print(f"Warning: Cannot write to {self.log_file}, logging to console only")
 
-    def log(self, message: str):
-        """Log a message with timezone info."""
-        self.logger.info(message)
+        if config.logging.syslog.enabled:
+            try:
+                address = config.logging.syslog.address
+                if not str(address).startswith("/"):
+                    address = (address, int(config.logging.syslog.port))
+                syslog_handler = logging.handlers.SysLogHandler(
+                    address=address,
+                    facility=config.logging.syslog.facility,
+                )
+                syslog_handler.setFormatter(formatter)
+                self.logger.addHandler(syslog_handler)
+            except Exception as exc:
+                # Route through the logger we already configured (text
+                # or JSON formatter applies, file handler captures it,
+                # console handler emits it). A bare ``print`` would
+                # produce an unstructured stderr line that JSON log
+                # consumers can't parse.
+                self.logger.warning(
+                    "Cannot initialize syslog forwarding: %s", exc,
+                )
+
+    def log(self, message: str, **extra):
+        """Log a message with timezone info.
+
+        Optional ``**extra`` keyword arguments (e.g. ``category="shutdown"``,
+        ``group="ups0"``, ``event_type="OB"``) are forwarded to the
+        underlying ``logging.Logger`` as structured fields. The text
+        formatter ignores them; ``JSONFormatter`` uses them in
+        preference to its message-text heuristics. See
+        ``JSONFormatter._EXTRA_FIELDS`` for the recognised keys.
+        """
+        if extra:
+            self.logger.info(message, extra=extra)
+        else:
+            self.logger.info(message)

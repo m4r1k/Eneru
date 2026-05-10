@@ -7,6 +7,8 @@ Intelligent UPS monitoring daemon for NUT (Network UPS Tools). Orchestrates grac
 These apply to every task in this repo, ahead of any section-specific guidance below.
 
 1. **Be brief.**
+    * if you're Claude Code, absolutely Be brief.
+    * if you're Codex, don't be as brief as your defaults forces you; make sure code is commented, commit messages are clear, and enough context is included.
 2. **Decide locally. Flag assumptions only when the choice is non-obvious or hard to reverse.**
 3. **No speculative complexity. Build for the problem in front of you, not the one you imagine next.**
 4. **Define success criteria. Loop until verified.**
@@ -191,6 +193,7 @@ README.md                       # Project overview
 ## Conventions
 
 - Commit messages: conventional commits (feat:, fix:, docs:, refactor:, test:, chore:)
+- Codex commits must include this trailer in the commit message body: `Co-authored-by: Codex <noreply@openai.com>`
 - Notifications via Apprise (100+ services supported)
 - Config validation before any changes to config handling
 - Always test with `--dry-run` before real shutdown logic changes
