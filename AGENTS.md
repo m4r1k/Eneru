@@ -194,6 +194,7 @@ README.md                       # Project overview
 
 - Commit messages: conventional commits (feat:, fix:, docs:, refactor:, test:, chore:)
 - Codex commits must include this trailer in the commit message body: `Co-authored-by: Codex <noreply@openai.com>`
+- Claude commits must include this trailer in the commit message body: `Co-authored-by: Claude <noreply@anthropic.com>` (model-agnostic — don't pin a specific version like `Opus 4.7`; new model releases shouldn't require a doc bump)
 - Notifications via Apprise (100+ services supported)
 - Config validation before any changes to config handling
 - Always test with `--dry-run` before real shutdown logic changes
