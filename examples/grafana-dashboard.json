@@ -119,17 +119,31 @@
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15},
       "targets": [
         {
+          "refId": "A",
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
           "expr": "eneru_ups_temperature_celsius",
           "legendFormat": "{{label}} temperature"
         },
         {
+          "refId": "B",
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
           "expr": "eneru_ups_battery_voltage",
           "legendFormat": "{{label}} battery voltage"
         }
       ],
-      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+      "fieldConfig": {
+        "defaults": {"unit": "short"},
+        "overrides": [
+          {
+            "matcher": {"id": "byFrameRefID", "options": "A"},
+            "properties": [{"id": "unit", "value": "celsius"}]
+          },
+          {
+            "matcher": {"id": "byFrameRefID", "options": "B"},
+            "properties": [{"id": "unit", "value": "volt"}]
+          }
+        ]
+      }
     },
     {
       "type": "stat",

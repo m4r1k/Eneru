@@ -149,18 +149,18 @@ mqtt:
 
 **Topic, QoS, retention.** All snapshots publish to `<topic_prefix>/status` (default `eneru/status`) with **QoS 0** and **retain=False**. The payload is the same JSON object served by `/api/v1/ups`, sorted by key for stable diffing on the consumer side. The publisher emits a new message every time the status fingerprint (everything except `generatedAt`) changes, and republishes at `publish_interval` seconds while unchanged so consumers always have a recent sample.
 
-Home Assistant example using the MQTT integration:
+Home Assistant example using the MQTT integration. The numeric power-quality fields can be empty strings when the UPS does not report a value, so the templates default to `none` (sets the sensor to `unavailable`) instead of raising a conversion error:
 
 ```yaml
 mqtt:
   sensor:
     - name: "Eneru UPS battery"
       state_topic: "eneru/status"
-      value_template: "{{ value_json.ups[0].batteryCharge | float }}"
+      value_template: "{{ value_json.ups[0].batteryCharge | float(default=none) }}"
       unit_of_measurement: "%"
     - name: "Eneru input voltage"
       state_topic: "eneru/status"
-      value_template: "{{ value_json.ups[0].powerQuality.inputVoltage | float }}"
+      value_template: "{{ value_json.ups[0].powerQuality.inputVoltage | float(default=none) }}"
       unit_of_measurement: "V"
     - name: "Eneru grid quality"
       state_topic: "eneru/status"

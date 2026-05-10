@@ -1061,6 +1061,55 @@ class TestCLIRemoteList:
         # Per-server effective order is what the daemon would actually use,
         # so explicit shutdown_order values must show through.
         assert "10" in out and "5" in out
+        # KIND column is present and tags ups groups correctly.
+        assert "ups" in out
+        # Disabled targets show '—' for ORDER, not a numeric position
+        # in a rotation they don't participate in.
+        dev_line = next(line for line in out.splitlines() if "dev-box" in line)
+        assert "—" in dev_line
+        assert "no" in dev_line
+
+    @pytest.mark.unit
+    def test_remote_list_group_column_matches_what_shutdown_group_accepts(
+        self, tmp_path, capsys,
+    ):
+        # Regression guard: the GROUP column value must be exactly what
+        # `eneru shutdown group --group <X>` accepts (no parentheticals,
+        # no `redundancy:` prefix). The CLI resolver looks at name/label
+        # for ups groups and name for redundancy groups.
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  - name: UPS-A\n"
+            "    display_name: rack-a\n"
+            "    remote_servers:\n"
+            "      - name: nas\n"
+            "        enabled: true\n"
+            "        host: nas.local\n"
+            "        user: root\n"
+            "redundancy_groups:\n"
+            "  - name: rack-pair\n"
+            "    ups_sources: [UPS-A]\n"
+            "    min_healthy: 1\n"
+            "    remote_servers:\n"
+            "      - name: vault\n"
+            "        enabled: true\n"
+            "        host: vault.local\n"
+            "        user: root\n"
+        )
+        with patch.object(sys, "argv", [
+            "eneru", "remote", "list", "-c", str(config_file),
+        ]):
+            main()
+        out = capsys.readouterr().out
+        # No legacy `name (label)` parenthetical or `redundancy:` prefix.
+        assert "(rack-a)" not in out
+        assert "redundancy:" not in out
+        # The bare group names that --group accepts ARE present.
+        nas_line = next(line for line in out.splitlines() if "nas " in line)
+        vault_line = next(line for line in out.splitlines() if "vault" in line)
+        assert "UPS-A" in nas_line
+        assert "rack-pair" in vault_line
 
     @pytest.mark.unit
     def test_remote_list_shows_user_at_host(self, tmp_path, capsys):

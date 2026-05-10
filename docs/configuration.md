@@ -308,7 +308,7 @@ See [Statistics](statistics.md) for schema and queries.
 
 ## API, metrics, remote health, and MQTT
 
-The v5.3 API is read-only, opt-in, and binds to localhost by default when enabled. Do not expose it to untrusted networks; authz is planned for v6.
+The v5.3 API is read-only, opt-in, and binds to localhost by default when enabled. Do not expose it to untrusted networks; authz is planned for v6. Two surfaces in this section deviate from "off unless enabled": Prometheus `/metrics` is on by default once the API itself is enabled (it's the canonical observability output), and `remote_health.enabled` defaults to `true` because the probes are harmless (run only against the configured `probe_command`, default `true`) and only target remote servers explicitly marked `enabled: true` elsewhere in the config.
 
 | Key | Default | Description |
 |-----|---------|-------------|

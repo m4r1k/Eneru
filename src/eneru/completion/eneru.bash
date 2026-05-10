@@ -89,10 +89,10 @@ _eneru() {
             done
             case "$shutdown_leaf" in
                 remote)
-                    COMPREPLY=( $(compgen -W "$shutdown_remote_opts $global_opts" -- "$cur") )
+                    mapfile -t COMPREPLY < <(compgen -W "$shutdown_remote_opts $global_opts" -- "$cur")
                     ;;
                 group)
-                    COMPREPLY=( $(compgen -W "$shutdown_group_opts $global_opts" -- "$cur") )
+                    mapfile -t COMPREPLY < <(compgen -W "$shutdown_group_opts $global_opts" -- "$cur")
                     ;;
                 *)
                     mapfile -t COMPREPLY < <(compgen -W "remote group $global_opts" -- "$cur")
@@ -108,7 +108,7 @@ _eneru() {
                 esac
             done
             if [[ "$remote_leaf" == "list" ]]; then
-                COMPREPLY=( $(compgen -W "$remote_list_opts $global_opts" -- "$cur") )
+                mapfile -t COMPREPLY < <(compgen -W "$remote_list_opts $global_opts" -- "$cur")
             else
                 mapfile -t COMPREPLY < <(compgen -W "list $global_opts" -- "$cur")
             fi

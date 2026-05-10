@@ -13,7 +13,7 @@ import signal
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from eneru.version import __version__
 from eneru.config import Config
@@ -347,7 +347,11 @@ class MultiUPSCoordinator:
         self._start_api_server()
         self._start_mqtt_publisher()
 
-    def _start_redundancy_remote_health(self, group, monitors_by_name) -> None:
+    def _start_redundancy_remote_health(
+        self,
+        group,
+        monitors_by_name: Dict[str, UPSGroupMonitor],
+    ) -> None:
         """Start advisory SSH healthchecks for redundancy-group remotes."""
         enabled_servers = [s for s in group.remote_servers if s.enabled]
         if not enabled_servers:
@@ -395,7 +399,7 @@ class MultiUPSCoordinator:
     def _record_redundancy_remote_health_event(
         self,
         group,
-        monitors_by_name,
+        monitors_by_name: Dict[str, UPSGroupMonitor],
         event_type: str,
         detail: str,
         notification_sent: bool,
@@ -409,15 +413,27 @@ class MultiUPSCoordinator:
         (TUI, /api/v1/events) still attribute the event correctly even
         though it appears in N rows for an N-UPS group. A future
         group-scoped events store would let this become a single write.
+
+        Each member's ``log_event`` is wrapped in its own try/except so
+        a broken or not-yet-opened stats DB on one member doesn't
+        suppress the fan-out to the rest. Stats are diagnostic only and
+        must never block the health-check path.
         """
         for source_name in getattr(group, "ups_sources", []):
             monitor = monitors_by_name.get(source_name)
             store = getattr(monitor, "_stats_store", None)
-            if store is not None:
+            if store is None:
+                continue
+            try:
                 store.log_event(
                     event_type,
                     detail,
                     notification_sent=notification_sent,
+                )
+            except Exception as exc:
+                self._log(
+                    f"⚠️ stats: failed to record redundancy remote-health "
+                    f"event on {source_name}: {exc}"
                 )
 
     def _start_api_server(self):

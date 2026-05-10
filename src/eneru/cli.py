@@ -406,16 +406,16 @@ def _iter_remote_server_owners(config):
             yield label, group.name, server
 
 
-def _format_remote_list_table(rows):
+def _format_remote_list_table(rows: list) -> str:
     """Format remote-target rows as a fixed-width ASCII table.
 
     Width is computed per-column from the actual data so long names
     don't truncate; each column has a minimum that keeps the header
     readable when every row is short.
     """
-    headers = ("NAME", "GROUP", "HOST", "ENABLED", "ORDER")
-    minimums = (10, 10, 10, 7, 5)
-    columns = list(zip(*([headers] + rows))) if rows else [(h,) for h in headers]
+    headers = ("NAME", "GROUP", "KIND", "HOST", "ENABLED", "ORDER")
+    minimums = (10, 10, 10, 10, 7, 5)
+    columns = list(zip(*[headers, *rows])) if rows else [(h,) for h in headers]
     widths = [
         max(minimums[i], max(len(str(cell)) for cell in column))
         for i, column in enumerate(columns)
@@ -434,48 +434,68 @@ def _format_remote_list_table(rows):
     return "\n".join(lines)
 
 
+def _build_remote_list_rows_for_group(group, group_name: str, kind: str) -> tuple:
+    """Build display rows for one group's remote_servers.
+
+    Returns ``(rows, enabled_count)``. ``group_name`` is the value an
+    operator passes to ``--group`` to address this group — keeping the
+    GROUP column 1-to-1 with the CLI flag avoids the v5.3-rc disagreement
+    where the column showed ``name (label)`` but ``--group`` only
+    accepted the raw token.
+
+    Effective order is computed on ``enabled`` servers only so the
+    printed ORDER matches what the daemon would actually use during
+    shutdown (the daemon also filters before computing). Disabled rows
+    show ``—`` since they don't participate in the rotation at all.
+    """
+    enabled_servers = [s for s in group.remote_servers if s.enabled]
+    order_by_id = {
+        id(s): effective for effective, s in compute_effective_order(enabled_servers)
+    }
+    rows = []
+    for server in group.remote_servers:
+        host = f"{server.user}@{server.host}" if server.user else server.host
+        if server.enabled:
+            order_text = str(order_by_id[id(server)])
+        else:
+            order_text = "—"
+        rows.append((
+            server.name or server.host,
+            group_name,
+            kind,
+            host,
+            "yes" if server.enabled else "no",
+            order_text,
+        ))
+    return rows, len(enabled_servers)
+
+
 def _cmd_remote_list(args):
     """List configured remote shutdown targets across all groups."""
     config = _load_config(args)
     _exit_on_config_errors(config, args)
 
     # Stable per-group ordering so users see related rows next to each
-    # other. Within a group, sort by effective shutdown order so the
-    # printed sequence matches what the daemon would actually run.
+    # other. Within a group, the helper sorts by daemon-effective
+    # shutdown order so the printed sequence matches a real shutdown.
     rows = []
     enabled_count = 0
     for group in config.ups_groups:
-        owner_label = (
-            f"{group.ups.name} ({group.ups.label})"
-            if group.ups.label and group.ups.label != group.ups.name
-            else (group.ups.name or group.ups.label or "(unnamed)")
+        # Use the canonical name when present so the GROUP column is
+        # exactly the string `eneru shutdown group --group ...` accepts;
+        # fall back to the label only when name is empty.
+        group_name = group.ups.name or group.ups.label or "(unnamed)"
+        group_rows, group_enabled = _build_remote_list_rows_for_group(
+            group, group_name, "ups",
         )
-        ordered = compute_effective_order(group.remote_servers)
-        for effective_order, server in ordered:
-            host = f"{server.user}@{server.host}" if server.user else server.host
-            rows.append((
-                server.name or server.host,
-                owner_label,
-                host,
-                "yes" if server.enabled else "no",
-                str(effective_order),
-            ))
-            if server.enabled:
-                enabled_count += 1
+        rows.extend(group_rows)
+        enabled_count += group_enabled
     for group in config.redundancy_groups:
-        owner_label = f"redundancy:{group.name}"
-        ordered = compute_effective_order(group.remote_servers)
-        for effective_order, server in ordered:
-            host = f"{server.user}@{server.host}" if server.user else server.host
-            rows.append((
-                server.name or server.host,
-                owner_label,
-                host,
-                "yes" if server.enabled else "no",
-                str(effective_order),
-            ))
-            if server.enabled:
-                enabled_count += 1
+        group_rows, group_enabled = _build_remote_list_rows_for_group(
+            group, group.name, "redundancy",
+        )
+        rows.extend(group_rows)
+        enabled_count += group_enabled
 
     if not rows:
         print("No remote targets configured.")
@@ -702,6 +722,15 @@ def _cmd_shutdown_group(args):
             monitor = UPSGroupMonitor(drill_config)
             monitor.logger = logger
             monitor._notification_worker = None
+            # Detect container runtime + compose support before the
+            # shutdown sequence runs. The daemon does this in
+            # _initialize() before its main loop; the rehearsal goes
+            # straight to _execute_shutdown_sequence(), so without this
+            # call _container_runtime stays None and the containers
+            # phase is silently skipped — defeating the point of a
+            # rehearsal. Mirrors what RedundancyGroupExecutor does in
+            # its own __init__.
+            monitor._check_dependencies()
             monitor._execute_shutdown_sequence()
         else:
             executor = RedundancyGroupExecutor(

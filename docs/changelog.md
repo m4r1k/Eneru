@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [5.3.0] - 2026-05-10
 
-Stable v5.3 release. This is a drop-in upgrade for v5.2 users.
+Stable v5.3 release. Drop-in for v5.2 users in most cases — see Migration notes below for two behaviour changes that may need a small adjustment to existing dashboards or RPM-based MQTT setups.
 
 ### Added
 - **Read-only observability.** The embedded API now serves `/health`, `/ready`, `/api/v1/ups`, `/api/v1/events`, `/api/v1/config`, `/api/v1/remote-health`, and Prometheus `/metrics`. API and MQTT payloads share the same status model, including stable `groupId` values, redundancy-group rows, event verbosity tiers, and power-quality fields.
@@ -39,6 +39,8 @@ Stable v5.3 release. This is a drop-in upgrade for v5.2 users.
 - No YAML changes are required. `remote_health.enabled` now defaults to `true`, but only configured remote servers are probed, and probes use the harmless `probe_command`. Set it to `false` if you do not want periodic SSH connectivity checks.
 - If you were deleting `/var/run/ups-shutdown-redundancy-*` manually after tests or issue #4-style no-op shutdowns, stop doing that. The daemon owns those flags now.
 - API, Prometheus, and MQTT remain read-only in v5.3. Authenticated control APIs are still planned for v6.
+- **Prometheus no-data semantics**: `/metrics` now exports `NaN` for power-quality fields a UPS does not report (previously `0.0`). Alert rules and Grafana panels written against v5.2 that compared `eneru_ups_input_voltage < 200` would never fire on missing data; under v5.3 they correctly stay quiet (no false alarm) but a `< 200` comparison against `NaN` is also `false`, so an under-voltage alert on a UPS that doesn't report voltage at all will not fire either. If you alert on these fields, audit the rule with `absent()` or `eneru_ups_input_voltage == eneru_ups_input_voltage` to detect the missing-data case.
+- **MQTT publishing requires `paho-mqtt`**: the dependency is a hard requirement on Debian/Ubuntu packages and on PyPI installs (`pip install eneru[mqtt]`). RPM packages list it as a soft `Recommends:` because RHEL 8/10 packaging coverage is uneven; if you enable `mqtt:` on RPM, install paho explicitly: `python3 -m pip install paho-mqtt` (use `--break-system-packages` on EL10 per PEP 668). If MQTT is enabled without paho, Eneru logs a warning and keeps running; the publisher just stays disabled.
 
 ---
 

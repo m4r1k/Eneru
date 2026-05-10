@@ -267,16 +267,16 @@ Remote health is enabled by default for configured remote servers. Health status
 eneru remote list --config /etc/ups-monitor/config.yaml
 ```
 
-```
+```text
 REMOTE TARGETS (3 configured, 2 enabled)
 
-NAME          GROUP                  HOST                       ENABLED  ORDER
-Synology NAS  UPS-A (rack-a)         nas-admin@192.168.1.10     yes      10
-Proxmox-1     UPS-A (rack-a)         root@192.168.1.20          yes      5
-dev-box       redundancy:rack-pair   ubuntu@dev.local           no       0
+NAME          GROUP       KIND        HOST                    ENABLED  ORDER
+Synology NAS  UPS-A       ups         nas-admin@192.168.1.10  yes      10
+Proxmox-1     UPS-A       ups         root@192.168.1.20       yes      5
+dev-box       rack-pair   redundancy  ubuntu@dev.local        no       —
 ```
 
-The `NAME` column is what `--server` accepts. `ORDER` is the value `compute_effective_order` resolves at runtime, so legacy `parallel: true` shows as `0` and explicit `shutdown_order: 5` shows through unchanged. The command exits non-zero with a friendly note when no remote targets are configured.
+The `NAME` column is what `--server` accepts. The `GROUP` column is the exact string `--group` accepts; `KIND` distinguishes UPS groups from redundancy groups when names happen to collide. `ORDER` is the value `compute_effective_order` resolves over the **enabled** servers in that group (matching what the daemon actually uses); disabled rows show `—` because they don't participate in the rotation at all. The command exits non-zero with a friendly note when no remote targets are configured.
 
 ## Manual remote shutdown drill
 

@@ -5,7 +5,7 @@ import math
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 from eneru.status import (
@@ -285,7 +285,13 @@ _AVR_STATE_LABELS = ("INACTIVE", "BOOST", "TRIM")
 _BINARY_STATE_LABELS = ("INACTIVE", "ACTIVE")
 
 
-def _state_metric_lines(name, labels, current, possible_labels, default):
+def _state_metric_lines(
+    name: str,
+    labels: Dict[str, str],
+    current: Any,
+    possible_labels: Sequence[str],
+    default: str,
+) -> List[str]:
     # Build the labels dict once and only mutate the "state" entry per
     # iteration; the previous {**labels, "state": label} comprehension
     # allocated one fresh dict per state per UPS per scrape (10 per UPS
