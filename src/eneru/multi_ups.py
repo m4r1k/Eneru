@@ -351,6 +351,19 @@ class MultiUPSCoordinator:
         """Start advisory SSH healthchecks for redundancy-group remotes."""
         enabled_servers = [s for s in group.remote_servers if s.enabled]
         if not enabled_servers:
+            # If a previous run had enabled servers, the sidecar still
+            # exists on disk and the API/TUI/MQTT will surface it as
+            # current state. Remove it so consumers don't see ghost
+            # entries after the operator turned remote-health off.
+            stale = remote_health_sidecar_path(
+                redundancy_state_file_path(self.config, group.name)
+            )
+            try:
+                stale.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
             return
 
         notify_fn = None

@@ -617,10 +617,15 @@ class StatsStore:
             clauses.append(f"event_type NOT IN ({placeholders})")
             params.extend(sorted(str(item) for item in exclude_types))
         params.append(limit)
+        # ``rowid`` is the implicit insertion-order key — using it as
+        # the tiebreaker makes "latest N events" deterministic when
+        # multiple events share the same second (notification fanout,
+        # rapid trigger flap), so paginated reads don't return
+        # different subsets across calls.
         query = (
             "SELECT ts, event_type, detail FROM events "
             f"WHERE {' AND '.join(clauses)} "
-            "ORDER BY ts DESC LIMIT ?"
+            "ORDER BY ts DESC, rowid DESC LIMIT ?"
         )
         try:
             with self._db_lock:

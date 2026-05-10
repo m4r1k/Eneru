@@ -47,6 +47,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daemon startup with defaults.
 
 ### Fixed
+- **MQTT publisher backoff now wakes promptly on publisher-local stop.**
+  `_wait()` slices long sleeps into 5 s chunks so a `publisher.stop()`
+  during a 60 s reconnect-backoff is detected within ~5 s instead of
+  waiting out the full sleep. Short waits (publish-loop tick, early
+  backoff values) still take a single direct wait so test fixtures'
+  wait-call counts are preserved.
+- **`live_remote_health()` no longer misses single-UPS live managers.**
+  When the API source is a `UPSGroupMonitor` directly (single-UPS
+  deployment, not a `MultiUPSCoordinator`), its own
+  `_remote_health_manager` was being skipped — `/api/v1/remote-health`
+  fell back to the on-disk sidecar (stale until the next write tick).
+  The lookup now inspects `getattr(source, '_remote_health_manager',
+  None)` first.
+- **`/metrics` now exports remote-health metrics for redundancy-group
+  servers.** `render_prometheus_metrics()` previously only iterated
+  `payload["ups"]`, so any remote target attached under
+  `redundancy_groups[*].remote_servers` was silently absent from
+  `eneru_remote_health_status` and `eneru_remote_health_consecutive_failures`.
+  Redundancy-group metrics use a `redundancy_group=` label for clean
+  Prometheus aggregation.
+- **`/api/v1/events` now caps `limit` at 10000.** Previously only the
+  lower bound was enforced; a hostile or accidental
+  `?limit=10000000` would attempt a multi-second SQLite scan across
+  every configured stats DB.
+- **`ThreadingHTTPServer` worker threads are daemonized.** A hung
+  request handler can no longer block daemon shutdown beyond
+  `server_close()`; previously non-daemon worker threads kept the
+  process alive past the requested stop.
+- **Config loader handles non-mapping nested YAML cleanly.** Writing
+  `api: true` (instead of `api: {enabled: true}`) used to crash
+  `ConfigLoader.load_config()` with `AttributeError` on `.get`;
+  defensive `isinstance(_, dict)` checks now produce a clean fall-
+  back to defaults for `api`, `prometheus`, `remote_health`, `mqtt`,
+  and `logging.syslog` sections.
+- **Stale redundancy-group remote-health sidecars are cleared.**
+  Disabling all `remote_servers` on a redundancy group at runtime
+  used to leave the previous sidecar JSON on disk; the API/TUI/MQTT
+  surfaces would keep showing the dead status. The startup hook now
+  unlinks the orphan sidecar before returning early.
+- **`StatsStore.query_recent_events` is now deterministic.** Added a
+  `rowid DESC` tiebreaker after `ts DESC` so paginated reads return
+  consistent subsets when multiple events share the same timestamp
+  (notification fanout, rapid trigger flap).
+- **TUI defends against malformed remote-health sidecar rows.**
+  `summarize_remote_health()` skips entries that aren't dicts so a
+  partially-written or hand-edited sidecar doesn't crash panel
+  rendering.
+- **TUI per-group height accounts for the new remote-health line.**
+  When `remote_health.enabled: true`, the config-panel sizing now
+  budgets 6 rows per group instead of 5; previously the row was
+  silently truncated on tight terminals or multi-group layouts.
+- **Syslog-init failure logs through the configured logger.** A bare
+  `print()` was bypassing the JSON formatter and producing an
+  unstructured stderr line that JSON log consumers couldn't parse;
+  the warning now flows through `self.logger.warning()`.
+- **Remote SSH timeout error reports the effective (deadline-capped)
+  timeout.** When a phase deadline shrinks `command_timeout` below
+  the configured per-command value, the failure message now includes
+  both the configured and effective timeouts so operators can tell
+  why a command was killed earlier than expected.
+- **`build_ssh_probe_command` rejects dangling SSH options.** A
+  trailing flag in `server.ssh_options` that requires a separate
+  argument (e.g. ending the list with `-i` and no key path) used to
+  silently consume the appended `-o ConnectTimeout=…` as that flag's
+  value. The function now raises `ValueError` with a clear hint.
+- **Drill `_CLILogger.log` accepts `**kwargs` and writes UTF-8.**
+  Mirrors `UPSLogger.log` signature so structured-extras-aware call
+  sites don't blow up when the drill is the active logger; the log
+  file open is now `encoding="utf-8"` so emoji and non-ASCII server
+  identifiers round-trip cleanly regardless of `LANG`/`LC_ALL`.
+- **Defensive `python3-pip` install on RHEL 8 in CI.** `python39`
+  brings pip in via dependency on ubi8 today, but making it explicit
+  prevents a future ubi8 layer change from regressing us into the
+  "No module named pip" failure RHEL 10 hit.
+- **Documentation accuracy.** `docs/observability-api.md` no longer
+  claims the API/MQTT surfaces "cannot run UPS/SSH commands" without
+  qualifying that remote-health probes do execute SSH (restricted
+  to the harmless `probe_command`); `docs/remote-servers.md` drill
+  examples now use `--server NAS` to match the configured `name:
+  "NAS"` (the lookup is exact-match); `pre_shutdown_command`
+  references corrected to the real plural key
+  `pre_shutdown_commands`.
+- **Drill dry-run precedence documented.**
+  `docs/remote-servers.md` "Manual remote shutdown drill" now spells
+  out that the drill follows the `--dry-run` CLI flag, not the
+  daemon's `behavior.dry_run` config setting. The two are
+  deliberately decoupled — the drill confirmation flag
+  `--i-really-want-to-proceed-with-remote-shutdown` is the safety
+  contract, and `--dry-run` is the per-invocation choice. A code
+  comment at `cli.py:474+` mirrors the rationale for code auditors.
 - **MQTT publisher race during connect / on_disconnect.** `on_disconnect`
   is now attached only after `client.connect()` and `loop_start()` both
   return, and the disconnect callback is detached during teardown.
@@ -174,9 +264,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than failing daemon startup.
 - **API startup warning when `api.bind` is non-loopback.** v5.3 ships
   with no auth layer; binding the API to `0.0.0.0` exposes
-  `/api/v1/config` (server hostnames, `sshOptionsConfigured`,
-  pre-shutdown command templates) to anyone who can reach the socket. A
-  visible startup warning calls this out so it isn't silently misconfigured.
+  `/api/v1/config` (which returns remote server hostnames, SSH usernames,
+  shutdown ordering, and `sshOptionsConfigured` /
+  `hasPreShutdownCommands` presence flags — not the actual command
+  strings, but enough metadata to enumerate the SSH topology) to anyone
+  who can reach the socket. A visible startup warning calls this out so
+  it isn't silently misconfigured.
 - **`/metrics` exposition completeness.** Every emitted metric
   (`eneru_up`, `eneru_ups_*`, `eneru_remote_health_*`) now ships with
   proper `# HELP` and `# TYPE` lines, not just two of them.

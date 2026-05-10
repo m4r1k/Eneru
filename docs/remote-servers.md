@@ -136,7 +136,7 @@ One slow server can extend the phase deadline, but it does not make other server
 
 ### Timeout semantics
 
-When a remote command exceeds its budget, Eneru kills the **local** SSH process (SIGKILL via `subprocess.run(timeout=…)`). The remote shell command may still be running on the target host afterwards — for example a `pre_shutdown_command` of `systemctl stop kubelet` that takes longer than its timeout will leave `systemctl` running unattended on the remote, even though Eneru has moved on to the next command. Set timeouts conservatively (longer than the worst-case successful runtime) so the local kill only happens for genuinely-stuck commands, and avoid `pre_shutdown_commands` that you can't tolerate being interrupted mid-flight.
+When a remote command exceeds its budget, Eneru kills the **local** SSH process (SIGKILL via `subprocess.run(timeout=…)`). The remote shell command may still be running on the target host afterwards — for example a configured `pre_shutdown_commands` entry of `systemctl stop kubelet` that takes longer than its timeout will leave `systemctl` running unattended on the remote, even though Eneru has moved on to the next command. Set timeouts conservatively (longer than the worst-case successful runtime) so the local kill only happens for genuinely-stuck commands, and avoid `pre_shutdown_commands` entries that you can't tolerate being interrupted mid-flight.
 
 ## SSH key setup
 
@@ -264,7 +264,7 @@ Health status appears in the TUI, API, and Prometheus metrics. It is advisory on
 To test one configured remote target through Eneru's SSH command path without waiting for a UPS event:
 
 ```bash
-sudo eneru shutdown remote --config /etc/ups-monitor/config.yaml --server nas --dry-run
+sudo eneru shutdown remote --config /etc/ups-monitor/config.yaml --server NAS --dry-run
 ```
 
 Dry-run mode does not execute configured remote commands. It may run the harmless connectivity probe so you can verify SSH access.
@@ -272,11 +272,30 @@ Dry-run mode does not execute configured remote commands. It may run the harmles
 Real execution requires an intentionally long confirmation flag:
 
 ```bash
-sudo eneru shutdown remote --config /etc/ups-monitor/config.yaml --server nas \
+sudo eneru shutdown remote --config /etc/ups-monitor/config.yaml --server NAS \
   --i-really-want-to-proceed-with-remote-shutdown
 ```
 
 This command only targets the selected remote server. It does not run local VM shutdown, local container shutdown, filesystem unmounts, local poweroff, or whole-group drain.
+
+### Dry-run precedence
+
+The drill respects the `--dry-run` CLI flag, **not** the daemon's
+`behavior.dry_run` config setting. The two are deliberately decoupled:
+
+- `behavior.dry_run: true` in your config protects the **daemon** —
+  scheduled and event-triggered shutdowns simulate without running real
+  commands. It applies to every shutdown the daemon initiates.
+- `--dry-run` on the drill protects **this single invocation** of the
+  drill — it tells `eneru shutdown remote` whether you want a
+  simulation or a real test, regardless of the daemon's config.
+
+The drill's safety contract is the
+`--i-really-want-to-proceed-with-remote-shutdown` flag (line 426-431
+of `cli.py` enforces it). If you typed that flag without `--dry-run`,
+you've explicitly asked for real execution — config-level dry-run does
+not silently override that choice. If you want the drill to honor the
+daemon's dry-run config too, run with `--dry-run`.
 
 Only test the final shutdown command when you are prepared for the remote server to power off:
 

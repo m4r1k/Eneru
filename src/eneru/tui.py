@@ -769,6 +769,11 @@ def summarize_remote_health(rows: List[Dict]) -> str:
         return ""
     counts: Dict[str, int] = {}
     for row in rows:
+        # Defend against malformed sidecar content — a partially
+        # written / hand-edited / older-schema entry that's not a
+        # mapping must not crash the TUI rendering.
+        if not isinstance(row, dict):
+            continue
         status = str(row.get("status", "UNKNOWN")).lower()
         counts[status] = counts.get(status, 0) + 1
     order = ("healthy", "degraded", "failed", "checking", "unknown", "disabled")
@@ -1302,10 +1307,21 @@ def run_tui(config: Config, interval: int = 5, *,
             render_header(stdscr, 0, width, len(config.ups_groups))
 
             # Calculate panel split: config panel gets what it needs,
-            # logs panel gets the rest
+            # logs panel gets the rest. Add one extra row per group
+            # whenever remote-health rendering may emit its own line
+            # (the renderer at render_config_panel emits "Remote
+            # health: …" only if a summary is non-empty, but at panel-
+            # sizing time we don't know which groups will have it —
+            # budget the row anyway so panels don't get clipped on
+            # tight terminals).
             groups_needed = 0
+            includes_remote_health = bool(
+                getattr(config, "remote_health", None)
+                and getattr(config.remote_health, "enabled", False)
+            )
+            per_group = 6 if includes_remote_health else 5
             for group in config.ups_groups:
-                groups_needed += 5  # 4 data lines + 1 spacing
+                groups_needed += per_group  # data lines + 1 spacing
             groups_needed = max(groups_needed - 1, 4)
             groups_needed += 2  # top + bottom padding
 

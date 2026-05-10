@@ -1,6 +1,6 @@
 # Observability and API
 
-Eneru v5.3 adds read-only observability endpoints and outbound integrations. Nothing on this page can trigger shutdown or run UPS/SSH commands.
+Eneru v5.3 adds read-only observability endpoints and outbound integrations. None of the API or MQTT surfaces here can trigger UPS shutdown, mutate state, or run commands you didn't already configure for the daemon. Note that **remote-health probes do execute SSH commands** against your configured remote servers — they're restricted to a deliberately-harmless `probe_command` (default `true`) that never touches your `pre_shutdown_commands` or `shutdown_command`. See "Remote SSH health" below for the safety contract.
 
 ## API server
 

@@ -862,8 +862,9 @@ class ConfigLoader:
             )
 
         if 'logging' in data:
-            logging_data = data['logging']
-            syslog_data = logging_data.get('syslog') or {}
+            logging_data = data['logging'] if isinstance(data.get('logging'), dict) else {}
+            raw_syslog = logging_data.get('syslog')
+            syslog_data = raw_syslog if isinstance(raw_syslog, dict) else {}
             config.logging = LoggingConfig(
                 file=logging_data.get('file', config.logging.file),
                 state_file=logging_data.get('state_file', config.logging.state_file),
@@ -913,7 +914,12 @@ class ConfigLoader:
             )
 
         if 'api' in data:
-            api_data = data.get('api') or {}
+            # Each nested section is parsed defensively — a YAML scalar
+            # like ``api: true`` (instead of ``api: {enabled: true}``)
+            # would otherwise crash the loader with AttributeError on
+            # ``.get`` instead of producing a clean validation message.
+            raw_api = data.get('api')
+            api_data = raw_api if isinstance(raw_api, dict) else {}
             config.api = APIConfig(
                 enabled=api_data.get('enabled', config.api.enabled),
                 bind=api_data.get('bind', config.api.bind),
@@ -921,13 +927,15 @@ class ConfigLoader:
             )
 
         if 'prometheus' in data:
-            prom_data = data.get('prometheus') or {}
+            raw_prom = data.get('prometheus')
+            prom_data = raw_prom if isinstance(raw_prom, dict) else {}
             config.prometheus = PrometheusConfig(
                 enabled=prom_data.get('enabled', config.prometheus.enabled),
             )
 
         if 'remote_health' in data:
-            rh_data = data.get('remote_health') or {}
+            raw_rh = data.get('remote_health')
+            rh_data = raw_rh if isinstance(raw_rh, dict) else {}
             config.remote_health = RemoteHealthConfig(
                 enabled=rh_data.get('enabled', config.remote_health.enabled),
                 startup_check=rh_data.get('startup_check',
@@ -944,7 +952,8 @@ class ConfigLoader:
             )
 
         if 'mqtt' in data:
-            mqtt_data = data.get('mqtt') or {}
+            raw_mqtt = data.get('mqtt')
+            mqtt_data = raw_mqtt if isinstance(raw_mqtt, dict) else {}
             config.mqtt = MQTTConfig(
                 enabled=mqtt_data.get('enabled', config.mqtt.enabled),
                 broker=mqtt_data.get('broker', config.mqtt.broker),

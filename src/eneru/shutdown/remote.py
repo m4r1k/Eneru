@@ -9,7 +9,7 @@ import shlex
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from eneru.actions import REMOTE_ACTIONS
 from eneru.config import RemoteServerConfig
@@ -254,7 +254,7 @@ class RemoteShutdownMixin:
         timeout: int,
         description: str,
         *,
-        deadline: float = None,
+        deadline: Optional[float] = None,
     ) -> Tuple[bool, str]:
         """Run a single command on a remote server via SSH.
 
@@ -303,13 +303,24 @@ class RemoteShutdownMixin:
         if exit_code == 0:
             return True, ""
         elif exit_code == 124:
+            # ``command_timeout`` is the value actually handed to
+            # ``run_command`` (timeout + 30 s buffer, capped by the
+            # phase deadline). Reporting just ``timeout`` would mislead
+            # operators when deadline-capping shrinks the effective
+            # window below what was configured per-command.
+            if command_timeout != timeout + 30:
+                return (
+                    False,
+                    f"timed out after {command_timeout}s "
+                    f"(configured {timeout}s, capped by phase deadline)",
+                )
             return False, f"timed out after {timeout}s"
         else:
             error_msg = stderr.strip() if stderr.strip() else f"exit code {exit_code}"
             return False, error_msg
 
     @staticmethod
-    def _remote_deadline_exceeded(deadline: float = None) -> bool:
+    def _remote_deadline_exceeded(deadline: Optional[float] = None) -> bool:
         """Return True when a remote shutdown phase deadline has expired."""
         return deadline is not None and time.monotonic() >= deadline
 
@@ -318,7 +329,7 @@ class RemoteShutdownMixin:
         server: RemoteServerConfig,
         *,
         collect_result: bool = False,
-        deadline: float = None,
+        deadline: Optional[float] = None,
     ):
         """Execute pre-shutdown commands on a remote server.
 
@@ -443,7 +454,7 @@ class RemoteShutdownMixin:
         self,
         server: RemoteServerConfig,
         *,
-        deadline: float = None,
+        deadline: Optional[float] = None,
     ) -> RemoteShutdownResult:
         """Shutdown a single remote server via SSH.
 

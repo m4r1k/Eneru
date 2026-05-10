@@ -227,6 +227,12 @@ jobs:
               dnf install -y python3-paho-mqtt
               ;;
             8)
+              # python39 brings python3-pip in via dependency on ubi8,
+              # but make it explicit so a future ubi8 layer change
+              # (or someone testing with a slimmer base image) can't
+              # silently regress us into the "No module named pip"
+              # failure mode RHEL 10 hit.
+              dnf install -y python3-pip
               python3 -m pip install --no-deps paho-mqtt
               ;;
             10)

@@ -41,11 +41,13 @@ class TimezoneFormatter(logging.Formatter):
 class JSONFormatter(logging.Formatter):
     """Minimal structured formatter for SIEM/log pipeline ingestion.
 
-    Prefers explicit ``extra={...}`` fields on the LogRecord (set by
-    callers via ``logger.log(msg, extra={"category": "shutdown", ...})``).
-    Falls back to heuristic message parsing for legacy call sites that
-    don't pass structured context — these are correctness-best-effort
-    and should be migrated over time.
+    Prefers explicit structured fields on the LogRecord (set by callers
+    via Eneru's ``UPSLogger.log(msg, **extra)`` wrapper, which forwards
+    the kwargs as ``logging.Logger.info(msg, extra=extra)`` — the stdlib
+    promotes those keys into LogRecord attributes that this formatter
+    then reads). Falls back to heuristic message parsing for legacy
+    call sites that don't pass structured context — these are
+    correctness-best-effort and should be migrated over time.
     """
 
     # The set of fields a caller may opt into via the ``extra`` kwarg of
@@ -156,7 +158,14 @@ class UPSLogger:
                 syslog_handler.setFormatter(formatter)
                 self.logger.addHandler(syslog_handler)
             except Exception as exc:
-                print(f"Warning: Cannot initialize syslog forwarding: {exc}")
+                # Route through the logger we already configured (text
+                # or JSON formatter applies, file handler captures it,
+                # console handler emits it). A bare ``print`` would
+                # produce an unstructured stderr line that JSON log
+                # consumers can't parse.
+                self.logger.warning(
+                    "Cannot initialize syslog forwarding: %s", exc,
+                )
 
     def log(self, message: str, **extra):
         """Log a message with timezone info.

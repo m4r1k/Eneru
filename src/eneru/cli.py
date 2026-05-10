@@ -4,6 +4,7 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from eneru.version import __version__
 from eneru.config import Config, ConfigLoader, UPSConfig, UPSGroupConfig
@@ -374,14 +375,22 @@ def _cmd_test_notifications(args):
 class _CLILogger:
     """Small logger adapter used by one-shot CLI drills."""
 
-    def __init__(self, log_file=None):
+    def __init__(self, log_file: Optional[Path] = None) -> None:
         self.log_file = Path(log_file) if log_file else None
 
-    def log(self, message: str):
+    def log(self, message: str, **_extra) -> None:
+        # ``**_extra`` mirrors UPSLogger.log(message, **extra). The drill is
+        # one-shot and prints to stdout / appends to a flat log file, so
+        # structured kwargs (category, event_type, group, ...) are accepted
+        # for signature compatibility but otherwise ignored — they're
+        # meaningful only under the JSON formatter that the daemon uses.
         print(message)
         if self.log_file:
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
-            with self.log_file.open("a") as f:
+            # encoding="utf-8" so emoji and non-ASCII names in server.host /
+            # server.user round-trip cleanly into the log file regardless
+            # of the user's LANG/LC_ALL.
+            with self.log_file.open("a", encoding="utf-8") as f:
                 f.write(message + "\n")
 
 
@@ -470,6 +479,17 @@ def _cmd_shutdown_remote(args):
         remote_health=config.remote_health,
         mqtt=config.mqtt,
     )
+    # PRECEDENCE NOTE: the drill follows the CLI flag, NOT the config-level
+    # ``behavior.dry_run`` setting. The drill is a per-invocation operator
+    # tool gated by ``--i-really-want-to-proceed-with-remote-shutdown``;
+    # that explicit confirmation flag is the safety contract, and the
+    # ``--dry-run`` flag is what the operator picks per drill. Config-level
+    # ``behavior.dry_run: true`` does NOT silently downgrade a confirmed
+    # drill to dry-run — see docs/remote-servers.md "Manual remote
+    # shutdown drill" for the full precedence rationale. If you're
+    # auditing this for safety: the drill cannot run real commands
+    # without ``--i-really-want-to-proceed-with-remote-shutdown`` (line
+    # 426-431 above).
     drill_config.behavior.dry_run = bool(args.dry_run)
 
     monitor = UPSGroupMonitor(drill_config)

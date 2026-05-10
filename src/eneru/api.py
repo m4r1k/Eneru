@@ -56,6 +56,12 @@ class EneruAPIServer:
         except OSError as exc:
             self.log_fn(f"⚠️ API server failed to bind {addr[0]}:{addr[1]}: {exc}")
             return
+        # Mark per-request worker threads as daemon. ThreadingHTTPServer's
+        # ``server_close()`` only stops the accept loop; in-flight worker
+        # threads keep running. With daemon_threads=True a hung handler
+        # cannot keep the daemon process alive past shutdown — this is
+        # acceptable here because every endpoint is read-only and idempotent.
+        self._httpd.daemon_threads = True
         self._thread = threading.Thread(
             target=self._httpd.serve_forever,
             name="eneru-api",
@@ -182,7 +188,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 }
 
         if path == "/api/v1/events":
-            limit = _parse_int_param(qs, "limit", 100, minimum=1)
+            # Cap ``limit`` so a hostile or accidental ``?limit=10000000``
+            # can't fan out into a multi-second SQLite scan across every
+            # configured stats DB.
+            limit = _parse_int_param(qs, "limit", 100, minimum=1, maximum=10000)
             verbosity = _parse_int_param(qs, "verbosity", 2, minimum=0, maximum=2)
             return 200, "application/json", {
                 "generatedAt": time.time(),
@@ -308,6 +317,29 @@ def render_prometheus_metrics(source: Any) -> str:
         for server in row.get("remoteHealth", []):
             s_labels = {
                 "ups": row["name"],
+                "server": server.get("server", ""),
+                "host": server.get("host", ""),
+            }
+            lines.append(_metric_line(
+                "eneru_remote_health_status",
+                {**s_labels, "status": server.get("status", "UNKNOWN")},
+                1,
+            ))
+            lines.append(_metric_line(
+                "eneru_remote_health_consecutive_failures",
+                s_labels,
+                server.get("consecutive_failures", 0),
+            ))
+    # Redundancy-group-owned remote targets (configured under
+    # ``redundancy_groups[*].remote_servers``) need the same coverage as
+    # ups-owned ones — otherwise a Prometheus consumer scraping for
+    # ``eneru_remote_health_status`` silently misses every target attached
+    # to a redundancy group. Use ``redundancy_group`` as the grouping
+    # label so a downstream alert can ``by (redundancy_group)`` cleanly.
+    for group in payload.get("redundancyGroups", []):
+        for server in group.get("remoteHealth", []):
+            s_labels = {
+                "redundancy_group": group.get("name", ""),
                 "server": server.get("server", ""),
                 "host": server.get("host", ""),
             }

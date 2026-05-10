@@ -267,18 +267,29 @@ def live_remote_health(source: Any, config: Config) -> List[dict]:
     """Aggregate remote-health rows from in-process managers, falling back to sidecars.
 
     Centralises the lookup that the API's ``/api/v1/remote-health``
-    endpoint and any future in-daemon consumer needs. Looks at three
+    endpoint and any future in-daemon consumer needs. Looks at four
     surfaces in order:
 
-    1. The per-UPS monitor's live ``_remote_health_manager``.
-    2. Redundancy-group managers held on the multi-UPS coordinator.
-    3. On-disk sidecars written by step (1) / (2), used when the
+    1. The single-UPS source's own ``_remote_health_manager`` (when the
+       API is attached directly to a ``UPSGroupMonitor``, not a
+       ``MultiUPSCoordinator``).
+    2. Each per-UPS monitor's ``_remote_health_manager`` (multi-UPS
+       coordinator path — iterates ``source._monitors``).
+    3. Redundancy-group managers held on the multi-UPS coordinator.
+    4. On-disk sidecars written by steps (1) - (3), used when the
        caller is the read-only API process running outside the daemon
        (or before the managers have published their first snapshot).
 
     Returning an empty list when nothing is configured is intentional.
     """
     rows: List[dict] = []
+    # Single-UPS source case: the source itself is the monitor and
+    # holds the manager directly. Without this lookup the live snapshot
+    # is invisible to the API in single-UPS deployments and we fall
+    # back to the on-disk sidecar (stale until the next write tick).
+    own_manager = getattr(source, "_remote_health_manager", None)
+    if own_manager is not None:
+        rows.extend(own_manager.snapshot())
     for monitor in getattr(source, "_monitors", []) or []:
         manager = getattr(monitor, "_remote_health_manager", None)
         if manager is not None:

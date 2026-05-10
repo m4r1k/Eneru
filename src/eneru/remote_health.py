@@ -82,7 +82,15 @@ def is_safe_probe_command(command: str) -> bool:
 
 def build_ssh_probe_command(server: RemoteServerConfig,
                             probe_command: str) -> List[str]:
-    """Build an SSH argv for a remote health probe."""
+    """Build an SSH argv for a remote health probe.
+
+    Raises:
+        ValueError: If ``server.ssh_options`` ends with a flag that
+            requires a separate argument (e.g. trailing ``-i`` with no
+            key path). Without this guard the ``-o ConnectTimeout=…``
+            we append below would silently be consumed as the dangling
+            flag's value.
+    """
     ssh_cmd = ["ssh"]
     pending_arg = False
     for opt in server.ssh_options:
@@ -96,6 +104,12 @@ def build_ssh_probe_command(server: RemoteServerConfig,
             pending_arg = opt in SSH_OPTIONS_WITH_SEPARATE_ARG
         else:
             ssh_cmd.extend(["-o", opt])
+    if pending_arg:
+        raise ValueError(
+            f"remote server {server.name or server.host!r} has a dangling "
+            f"SSH option in ssh_options ({ssh_cmd[-1]!r}); add the "
+            f"argument as the next list entry"
+        )
     ssh_cmd.extend([
         "-o", f"ConnectTimeout={server.connect_timeout}",
         "-o", "BatchMode=yes",

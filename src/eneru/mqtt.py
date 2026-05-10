@@ -62,21 +62,41 @@ class MQTTPublisher:
         """Either the daemon-wide or publisher-local stop was requested."""
         return self.stop_event.is_set() or self._local_stop.is_set()
 
+    # Cap each ``stop_event.wait`` slice so a long backoff (up to
+    # ``_MAX_BACKOFF_SECONDS``) still notices a publisher-local stop
+    # within ~5 s. Short waits (publish-loop tick of 1 s, early-backoff
+    # values <= 5 s) take a single direct wait — preserving the test
+    # fixtures' wait-call counting.
+    _LOCAL_STOP_POLL_SECONDS = 5.0
+
     def _wait(self, timeout: float) -> bool:
         """Sleep for ``timeout`` seconds, returning True if stop fired.
 
-        Pre-checks ``_local_stop`` (cheap), then waits on the daemon-
-        wide ``stop_event``, then re-checks ``_local_stop``. Daemon
-        shutdown sets both events together, so this returns promptly.
-        A standalone ``publisher.stop()`` (no daemon-wide stop) is
-        bounded by ``timeout`` — acceptable since the publish loop
-        ticks at ~1 s.
+        For ``timeout <= 5 s`` this is a single ``stop_event.wait`` call
+        sandwiched between two cheap ``_local_stop`` checks — daemon
+        shutdown (which sets both events together) returns promptly,
+        and standalone ``publisher.stop()`` is bounded by ``timeout``.
+
+        For longer waits (60 s reconnect-backoff), we slice into 5 s
+        polls so ``publisher.stop()`` mid-backoff is detected within
+        ~5 s instead of waiting out the full sleep.
         """
         if self._local_stop.is_set():
             return True
-        if self.stop_event.wait(timeout):
-            return True
-        return self._local_stop.is_set()
+        if timeout <= self._LOCAL_STOP_POLL_SECONDS:
+            if self.stop_event.wait(timeout):
+                return True
+            return self._local_stop.is_set()
+        deadline = time.monotonic() + timeout
+        while True:
+            if self._local_stop.is_set():
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            slice_ = min(self._LOCAL_STOP_POLL_SECONDS, remaining)
+            if self.stop_event.wait(slice_):
+                return True
 
     def start(self) -> None:
         if not self.config.mqtt.enabled or self._thread is not None:
