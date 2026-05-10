@@ -227,12 +227,16 @@ jobs:
               dnf install -y python3-paho-mqtt
               ;;
             8)
-              # python39 brings python3-pip in via dependency on ubi8,
-              # but make it explicit so a future ubi8 layer change
-              # (or someone testing with a slimmer base image) can't
-              # silently regress us into the "No module named pip"
-              # failure mode RHEL 10 hit.
-              dnf install -y python3-pip
+              # IMPORTANT: install python39-pip, NOT python3-pip.
+              # On ubi8 `python3-pip` targets the SYSTEM python3 (3.6)
+              # and installing it drags python3 (3.6) into the image,
+              # which then wins the `python3` alternative slot away
+              # from python3.9 — and Eneru needs dataclasses (Python
+              # 3.7+) so the next `python3 /opt/ups-monitor/eneru.py
+              # version` blows up with `ModuleNotFoundError: No module
+              # named 'dataclasses'`. python39-pip is the pip package
+              # for the 3.9 stack, mirroring python39-pyyaml above.
+              dnf install -y python39-pip
               python3 -m pip install --no-deps paho-mqtt
               ;;
             10)
