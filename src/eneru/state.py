@@ -30,11 +30,27 @@ HealthSnapshot = namedtuple(
         # readers must treat both cases as "no live grace timer to consult".
         "stale_data_count",    # consecutive failed/stale polls since last success
         "connection_lost_time", # ``time.time()`` when connection grace started
+        "input_voltage",       # latest ``input.voltage`` (string, volts)
+        "output_voltage",      # latest ``output.voltage`` (string, volts)
+        "battery_voltage",     # latest ``battery.voltage`` (string, volts)
+        "ups_temperature",     # latest ``ups.temperature`` (string, celsius)
+        "input_frequency",     # latest ``input.frequency`` (string, hertz)
+        "output_frequency",    # latest ``output.frequency`` (string, hertz)
+        "voltage_state",       # NORMAL / LOW / HIGH
+        "avr_state",           # INACTIVE / BOOST / TRIM
+        "bypass_state",        # INACTIVE / ACTIVE
+        "overload_state",      # INACTIVE / ACTIVE
+        "nominal_voltage",     # snapped grid nominal used for thresholds
+        "voltage_warning_low", # derived warning lower bound
+        "voltage_warning_high", # derived warning upper bound
     ],
 )
 # Back-compat for tests / third-party code still constructing the old
 # 10-field HealthSnapshot shape directly.
-HealthSnapshot.__new__.__defaults__ = (0, 0.0)
+HealthSnapshot.__new__.__defaults__ = (
+    0, 0.0, "", "", "", "", "", "", "NORMAL", "INACTIVE", "INACTIVE",
+    "INACTIVE", 230.0, 0.0, 0.0,
+)
 
 
 @dataclass
@@ -112,6 +128,12 @@ class MonitorState:
     latest_battery_charge: str = ""
     latest_runtime: str = ""
     latest_load: str = ""
+    latest_input_voltage: str = ""
+    latest_output_voltage: str = ""
+    latest_battery_voltage: str = ""
+    latest_ups_temperature: str = ""
+    latest_input_frequency: str = ""
+    latest_output_frequency: str = ""
     latest_depletion_rate: float = 0.0
     latest_time_on_battery: int = 0
     latest_update_time: float = 0.0
@@ -149,4 +171,17 @@ class MonitorState:
                 trigger_reason=self.trigger_reason,
                 stale_data_count=self.stale_data_count,
                 connection_lost_time=self.connection_lost_time,
+                input_voltage=self.latest_input_voltage,
+                output_voltage=self.latest_output_voltage,
+                battery_voltage=self.latest_battery_voltage,
+                ups_temperature=self.latest_ups_temperature,
+                input_frequency=self.latest_input_frequency,
+                output_frequency=self.latest_output_frequency,
+                voltage_state=self.voltage_state,
+                avr_state=self.avr_state,
+                bypass_state=self.bypass_state,
+                overload_state=self.overload_state,
+                nominal_voltage=self.nominal_voltage,
+                voltage_warning_low=self.voltage_warning_low,
+                voltage_warning_high=self.voltage_warning_high,
             )

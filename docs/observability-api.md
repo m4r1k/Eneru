@@ -40,6 +40,14 @@ Example response shapes:
       "name": "ups0", "label": "Rack-A", "groupId": "ups0",
       "status": "OL CHRG", "batteryCharge": 97, "runtime": 1200,
       "load": 20, "depletionRate": 0.0, "timeOnBattery": 0,
+      "powerQuality": {
+        "inputVoltage": "229.4", "outputVoltage": "230.1",
+        "batteryVoltage": "27.2", "temperature": "32",
+        "inputFrequency": "50.0", "outputFrequency": "50.0",
+        "voltageState": "NORMAL", "avrState": "INACTIVE",
+        "bypassState": "INACTIVE", "overloadState": "INACTIVE",
+        "nominalVoltage": 230.0, "warningLow": 207.0, "warningHigh": 253.0
+      },
       "connectionState": "OK", "triggerActive": false,
       "remoteHealth": [...]
     }
@@ -52,6 +60,8 @@ Example response shapes:
 ```
 
 UPS rows include a stable `groupId` derived from the configured UPS name. Multi-UPS responses also include `redundancyGroups` rows with their source UPS names, quorum target, locality flag, and remote-health rows.
+
+`powerQuality` mixes JSON strings and numbers by source: raw NUT readings (`inputVoltage`, `outputVoltage`, `batteryVoltage`, `temperature`, `inputFrequency`, `outputFrequency`) and state labels (`voltageState`, `avrState`, `bypassState`, `overloadState`) are strings; Eneru-derived values (`nominalVoltage`, `warningLow`, `warningHigh`) are numbers. Strings are empty when the UPS does not publish that NUT field. Consumers that compare numeric ranges should coerce the string fields with `float()` (or `| float` in Home Assistant templates) and treat empty strings as missing data.
 
 `/api/v1/events` accepts `limit` and `verbosity` query parameters. `verbosity=0` returns power/shutdown events, `verbosity=1` also includes diagnostics, and `verbosity=2` returns all recorded events including lifecycle rows.
 
@@ -70,6 +80,16 @@ prometheus:
   enabled: true
 ```
 
+Prometheus scrape example:
+
+```yaml
+scrape_configs:
+  - job_name: eneru
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["127.0.0.1:9191"]
+```
+
 Useful metric names include:
 
 | Metric | Meaning |
@@ -78,6 +98,19 @@ Useful metric names include:
 | `eneru_ups_battery_charge` | Battery percentage |
 | `eneru_ups_runtime_seconds` | UPS runtime estimate |
 | `eneru_ups_load_percent` | UPS load |
+| `eneru_ups_input_voltage` | Input voltage |
+| `eneru_ups_output_voltage` | Output voltage |
+| `eneru_ups_battery_voltage` | Battery voltage |
+| `eneru_ups_input_frequency_hz` | Input frequency |
+| `eneru_ups_output_frequency_hz` | Output frequency |
+| `eneru_ups_temperature_celsius` | UPS temperature |
+| `eneru_ups_nominal_voltage` | Snapped nominal grid voltage |
+| `eneru_ups_voltage_warning_low` | Derived low-voltage warning threshold |
+| `eneru_ups_voltage_warning_high` | Derived high-voltage warning threshold |
+| `eneru_ups_voltage_state` | Current grid-quality state label |
+| `eneru_ups_avr_state` | Current AVR state label |
+| `eneru_ups_bypass_state` | Current bypass state label |
+| `eneru_ups_overload_state` | Current overload state label |
 | `eneru_ups_depletion_rate_percent_per_minute` | Eneru depletion-rate calculation |
 | `eneru_ups_connection_failed` | UPS visibility failed |
 | `eneru_ups_trigger_active` | Shutdown trigger active/advisory |
@@ -87,7 +120,7 @@ Useful metric names include:
 
 ## Remote SSH health
 
-Remote healthchecks are disabled by default. When enabled, they run a separate harmless probe command, default `"true"`.
+Remote healthchecks are enabled by default for configured remote servers. They run a separate harmless probe command, default `"true"`.
 
 ```yaml
 remote_health:
@@ -99,6 +132,8 @@ remote_health:
 ```
 
 Healthchecks never execute `pre_shutdown_commands`, VM/container shutdown commands, custom commands, or `shutdown_command`. Remote health is advisory: during a real shutdown sequence Eneru still attempts the configured remote command chain with bounded timeouts. Failed or unreachable remote targets are reported in the remote shutdown summary and do not block later shutdown phases indefinitely.
+
+The daemon marks a failed probe as `DEGRADED` until `failure_threshold` is reached, then marks it `FAILED`. It sends at most one failure notification for that failed period and one recovery notification when the target returns. State transitions are also recorded in the SQLite `events` table.
 
 ## MQTT
 
@@ -113,6 +148,24 @@ mqtt:
 ```
 
 **Topic, QoS, retention.** All snapshots publish to `<topic_prefix>/status` (default `eneru/status`) with **QoS 0** and **retain=False**. The payload is the same JSON object served by `/api/v1/ups`, sorted by key for stable diffing on the consumer side. The publisher emits a new message every time the status fingerprint (everything except `generatedAt`) changes, and republishes at `publish_interval` seconds while unchanged so consumers always have a recent sample.
+
+Home Assistant example using the MQTT integration. The numeric power-quality fields can be empty strings when the UPS does not report a value, so the templates default to `none` (sets the sensor to `unavailable`) instead of raising a conversion error:
+
+```yaml
+mqtt:
+  sensor:
+    - name: "Eneru UPS battery"
+      state_topic: "eneru/status"
+      value_template: "{{ value_json.ups[0].batteryCharge | float(default=none) }}"
+      unit_of_measurement: "%"
+    - name: "Eneru input voltage"
+      state_topic: "eneru/status"
+      value_template: "{{ value_json.ups[0].powerQuality.inputVoltage | float(default=none) }}"
+      unit_of_measurement: "V"
+    - name: "Eneru grid quality"
+      state_topic: "eneru/status"
+      value_template: "{{ value_json.ups[0].powerQuality.voltageState }}"
+```
 
 **Reconnect.** On a failed connect or unexpected disconnect, the publisher retries with bounded exponential backoff (1 s → 2 s → 4 s → … capped at 60 s) and resumes publishing automatically once the broker is reachable again. The reconnect loop is interrupted by daemon shutdown, so a hung broker can't delay `eneru` exiting.
 

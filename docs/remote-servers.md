@@ -257,7 +257,26 @@ remote_health:
   probe_command: "true"
 ```
 
-Health status appears in the TUI, API, and Prometheus metrics. It is advisory only: during a real shutdown sequence, Eneru still attempts each configured remote pre-shutdown command and final shutdown command with bounded timeouts. Remote command failures are best effort: one unreachable host is logged and counted in the summary, but it does not stall later shutdown phases indefinitely.
+Remote health is enabled by default for configured remote servers. Health status appears in the TUI, API, MQTT payload, and Prometheus metrics. The daemon runs only the safe `probe_command`; those read-only surfaces only consume live manager state or sidecar JSON. An unreachable target becomes `DEGRADED`, then `FAILED` at `failure_threshold`; Eneru sends one failure notification per failed period and one recovery notification when it returns. The health signal is advisory: during a real shutdown sequence, Eneru still attempts each configured remote pre-shutdown command and final shutdown command with bounded timeouts.
+
+## Discovering configured targets
+
+`eneru remote list` prints every remote target across UPS groups and redundancy groups:
+
+```bash
+eneru remote list --config /etc/ups-monitor/config.yaml
+```
+
+```text
+REMOTE TARGETS (3 configured, 2 enabled)
+
+NAME          GROUP       KIND        HOST                    ENABLED  ORDER
+Synology NAS  UPS-A       ups         nas-admin@192.168.1.10  yes      10
+Proxmox-1     UPS-A       ups         root@192.168.1.20       yes      5
+dev-box       rack-pair   redundancy  ubuntu@dev.local        no       —
+```
+
+The `NAME` column is what `--server` accepts. The `GROUP` column is the exact string `--group` accepts; `KIND` distinguishes UPS groups from redundancy groups when names happen to collide. `ORDER` is the value `compute_effective_order` resolves over the **enabled** servers in that group (matching what the daemon actually uses); disabled rows show `—` because they don't participate in the rotation at all. The command exits non-zero with a friendly note when no remote targets are configured.
 
 ## Manual remote shutdown drill
 
@@ -277,6 +296,23 @@ sudo eneru shutdown remote --config /etc/ups-monitor/config.yaml --server NAS \
 ```
 
 This command only targets the selected remote server. It does not run local VM shutdown, local container shutdown, filesystem unmounts, local poweroff, or whole-group drain.
+
+### Full-sequence rehearsal
+
+When you want to verify the entire configured shutdown sequence for one group — multi-server `shutdown_order`, VMs, containers, filesystems, then per-server pre-shutdown commands and shutdown commands — use `shutdown group` instead:
+
+```bash
+sudo eneru shutdown group --config /etc/ups-monitor/config.yaml --group rack-a --dry-run
+```
+
+Behaviour by group kind:
+
+- **UPS group** (matched by `display_name` or `name`): runs `_execute_shutdown_sequence` end to end. With `--i-really-want-to-proceed-with-group-shutdown`, the final `local_shutdown.command` will fire if `local_shutdown.enabled`, halting the host.
+- **Redundancy group** (matched by `redundancy_groups[*].name`): runs `RedundancyGroupExecutor.shutdown` end to end. Local poweroff is **not** wired in the rehearsal even with the confirm flag — the coordinator's poweroff callback is intentionally absent so an operator cannot accidentally halt the host with a "rehearsal". To exercise that path, run `eneru run` with `behavior.dry_run: true` against the same config.
+
+The rehearsal isolates its own `shutdown_flag_file` / `state_file` / `battery_history_file` in a per-invocation temp directory so it never collides with a running daemon.
+
+When in doubt, `eneru remote list` shows the names you can pass to `--group` and `--server`.
 
 ### Dry-run precedence
 

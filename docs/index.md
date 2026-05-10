@@ -21,7 +21,7 @@ Eneru is the layer above NUT. NUT talks to the UPS hardware. Eneru decides what 
 | Remote systems | SSH shutdown with ordered phases and pre-shutdown actions for Proxmox, ESXi, XCP-ng, Docker, and custom commands |
 | Multiple UPSes | Independent UPS groups, shared configuration defaults, and one local-shutdown owner |
 | Redundant power | Quorum-based redundancy groups for dual-PSU servers and A+B power feeds |
-| Operators | TUI dashboard, one-shot status output, SQLite history, graphs, and Apprise notifications |
+| Operators | TUI dashboard, one-shot status output, SQLite history/events, API, Prometheus, MQTT, Grafana, JSON/syslog logs, and Apprise notifications |
 
 !!! note "Eneru does not replace NUT"
     NUT still owns UPS drivers, hardware communication, and the `upsc` data model. Eneru consumes that data and runs the shutdown policy.

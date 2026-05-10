@@ -208,6 +208,19 @@ sqlite3 /var/lib/eneru/UPS-192-168-1-100.db "SELECT COUNT(*) FROM events;"
 
 If the DB is missing, check `statistics.db_directory` and permissions.
 
+## SELinux and AppArmor checks
+
+Eneru does not ship a custom SELinux policy or AppArmor profile. Native RPM/DEB installs should work with the standard package labels and the distro's default Python/systemd behavior. If a Rocky 9 or RHEL-family host is enforcing SELinux and Eneru cannot read config, write logs, write stats, or execute SSH/NUT helpers, check policy denials before changing the daemon:
+
+```bash
+getenforce
+sudo ausearch -m AVC,USER_AVC -ts recent
+ls -Z /etc/ups-monitor /var/lib/eneru /var/log/ups-monitor.log
+sudo restorecon -Rv /etc/ups-monitor /var/lib/eneru /var/log/ups-monitor.log
+```
+
+`restorecon` fixes mislabeled package paths after manual copies or backup restores. If AVC denials continue after labels are correct, open an issue with the denial lines and the install method. On AppArmor-based distributions, Eneru relies on the standard systemd/Python behavior unless the operator adds a local profile; check `journalctl -k` or `aa-status` for local profile denials.
+
 ## Redundancy group does not fire
 
 Check these in order:

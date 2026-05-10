@@ -123,7 +123,7 @@ class PrometheusConfig:
 @dataclass
 class RemoteHealthConfig:
     """Harmless SSH healthcheck configuration for remote servers."""
-    enabled: bool = False
+    enabled: bool = True
     startup_check: bool = True
     interval: int = 3600
     probe_command: str = "true"

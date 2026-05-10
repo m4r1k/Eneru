@@ -718,6 +718,16 @@ if ! grep -q "eneru_up 1" /tmp/test43-metrics.txt; then
   cat /tmp/test43-metrics.txt
   exit 1
 fi
+if ! grep -q "eneru_ups_input_voltage" /tmp/test43-metrics.txt; then
+  echo "FAIL: metrics endpoint missing power-quality voltage metric"
+  cat /tmp/test43-metrics.txt
+  exit 1
+fi
+if ! grep -q "eneru_ups_voltage_state" /tmp/test43-metrics.txt; then
+  echo "FAIL: metrics endpoint missing grid-quality state metric"
+  cat /tmp/test43-metrics.txt
+  exit 1
+fi
 
 kill "$DAEMON_PID" 2>/dev/null || true
 wait "$DAEMON_PID" 2>/dev/null || true
@@ -799,6 +809,126 @@ if ! grep -Eq "0/1 succeeded|timed out|failed" /tmp/test44.log; then
   exit 1
 fi
 echo "PASS: unreachable remote shutdown completed within bounded timeout"
+)
+
+# ======================================================================
+# Test 45: MQTT status publishes power-quality metrics
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 45: MQTT status publishes power-quality metrics"
+
+cat >/tmp/config-e2e-mqtt.yaml <<'YAML'
+ups:
+  name: TestUPS@localhost:3493
+  display_name: "E2E MQTT UPS"
+  check_interval: 1
+triggers:
+  on_battery_stabilization_delay: 0
+behavior:
+  dry_run: true
+local_shutdown:
+  enabled: false
+remote_health:
+  enabled: false
+statistics:
+  db_directory: /tmp/eneru-e2e-stats
+logging:
+  file: null
+  state_file: /tmp/eneru-e2e-state
+  shutdown_flag_file: /tmp/eneru-e2e-shutdown-flag
+mqtt:
+  enabled: true
+  broker: mqtt://127.0.0.1:1883
+  topic_prefix: eneru-e2e
+  publish_interval: 1
+YAML
+
+rm -f /tmp/test45-mqtt.json /tmp/test45-subscriber.log
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+sleep 3
+python3 - <<'PY' > /tmp/test45-subscriber.log 2>&1 &
+import json
+import os
+import sys
+import time
+
+import paho.mqtt.client as mqtt
+
+OUT = "/tmp/test45-mqtt.json"
+TOPIC = "eneru-e2e/status"
+
+
+def new_client():
+    try:
+        return mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION1)
+    except (AttributeError, TypeError):
+        return mqtt.Client()
+
+
+def on_message(client, userdata, msg):
+    payload = json.loads(msg.payload.decode("utf-8"))
+    ups = payload.get("ups") or []
+    power = ups[0].get("powerQuality", {}) if ups else {}
+    # The MQTT publisher sends a status snapshot immediately after it
+    # connects. During daemon startup that first frame can legitimately
+    # contain the powerQuality object before the first UPS poll has
+    # populated readings, so wait for the observed telemetry frame.
+    if (
+        power.get("inputVoltage") not in ("", None)
+        and "voltageState" in power
+        and "nominalVoltage" in power
+    ):
+        with open(OUT, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+        client.disconnect()
+
+
+client = new_client()
+client.on_message = on_message
+client.connect("127.0.0.1", 1883, 30)
+client.subscribe(TOPIC)
+client.loop_start()
+deadline = time.time() + 25
+while time.time() < deadline and not os.path.exists(OUT):
+    time.sleep(0.2)
+client.loop_stop()
+try:
+    client.disconnect()
+except Exception:
+    pass
+sys.exit(0 if os.path.exists(OUT) else 1)
+PY
+SUB_PID=$!
+
+timeout 20s eneru run --config /tmp/config-e2e-mqtt.yaml \
+  > /tmp/test45-daemon.log 2>&1 &
+DAEMON_PID=$!
+trap 'kill "$DAEMON_PID" "$SUB_PID" 2>/dev/null || true' EXIT
+
+if ! wait "$SUB_PID"; then
+  echo "FAIL: MQTT subscriber did not receive Eneru status payload"
+  cat /tmp/test45-subscriber.log
+  cat /tmp/test45-daemon.log
+  exit 1
+fi
+
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+trap - EXIT
+
+python3 - <<'PY'
+import json
+
+with open("/tmp/test45-mqtt.json", encoding="utf-8") as handle:
+    payload = json.load(handle)
+power = payload["ups"][0]["powerQuality"]
+assert power["inputVoltage"] != ""
+assert "voltageState" in power
+assert "nominalVoltage" in power
+PY
+
+echo "PASS: MQTT status payload arrived with power-quality metrics"
 )
 
 echo ""

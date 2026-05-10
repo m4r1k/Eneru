@@ -22,7 +22,7 @@ Eneru does not talk to UPS hardware directly. NUT owns drivers and hardware comm
                   v                               v                                v
        +----------+-----------+       +-----------+----------+        +------------+---------+
        | Shutdown phases      |       | Observability        |        | Notifications        |
-       | VMs, containers, SSH |       | SQLite, events, TUI  |        | Apprise queue, retry |
+       | VMs, containers, SSH |       | SQLite, API, metrics |        | Apprise queue, retry |
        | filesystems, local   |       | graphs, state file   |        | coalescing          |
        +----------------------+       +----------------------+        +----------------------+
 ```
@@ -235,6 +235,24 @@ The monitoring loop writes samples to an in-memory buffer. `StatsWriter` flushes
 ```
 
 Read [`src/eneru/stats.py`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/stats.py), [`src/eneru/tui.py`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/tui.py), and [`src/eneru/graph.py`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/graph.py) for the data store, dashboard, and Braille graph renderer.
+
+## Read-only observability
+
+The API, Prometheus renderer, MQTT publisher, and TUI all read from the same status model in `src/eneru/status.py`. That model combines live monitor snapshots with sidecar JSON for remote health. It includes UPS battery/runtime/load, power-quality readings, grid-quality states, remote-health rows, redundancy-group rows, and event history.
+
+```text
+monitor state + sidecars
+        |
+        v
+  status read model
+        |
+        +-- HTTP API (/api/v1/ups, /api/v1/events, /api/v1/remote-health)
+        +-- Prometheus /metrics
+        +-- MQTT status payload
+        +-- TUI one-shot and live views
+```
+
+Remote-health probes are the exception to the "read-only consumer" rule: the daemon's `RemoteHealthManager` runs the configured harmless SSH `probe_command`, default `true`, then writes live state and sidecar JSON. API, MQTT, Prometheus, and the TUI only read that state.
 
 ## Configuration as a safety boundary
 

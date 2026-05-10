@@ -4,26 +4,18 @@ Planned direction for Eneru. None of this is built yet -- things will change as 
 
 Feature requests and feedback: [GitHub Issues](https://github.com/m4r1k/Eneru/issues).
 
-Recently shipped: v5.0 (2026-04-11), v5.1 (2026-04-21), v5.2 (2026-04-24). See the [changelog](changelog.md) for details.
+Recently shipped: v5.0 (2026-04-11), v5.1 (2026-04-21), v5.2 (2026-04-24), and v5.3 (2026-05-10). See the [changelog](changelog.md) for details.
 
 ---
 
-## v5.3 -- API and observability (planned)
+## v5.4 -- Generic container runtime support (planned)
 
-Right now nothing can talk to Eneru programmatically. This version adds the plumbing for that.
+Eneru already handles Docker, Podman, and compose. v5.4 focuses on making the container phase less tied to those specific command surfaces.
 
-- Read-only REST API: UPS status, time-series history, event log, config summary, health check
-- Prometheus `/metrics` endpoint with Eneru-specific metrics (trigger states, depletion rate, connection flap count, group health, anomaly status)
-- `/health` and `/ready` endpoints for Kubernetes probes and load balancers
-- MQTT publishing to a configurable broker (Home Assistant, Node-RED, custom automation)
-- Optional JSON log format for SIEM integration (Splunk, Elastic, Loki)
-- Syslog forwarding (RFC 5424)
-- Reference Grafana dashboard JSON
-- Remote SSH healthchecks with startup plus periodic harmless probes
-- CLI-only manual remote shutdown drill with explicit confirmation for real execution
-- On-battery stabilization to avoid acting on transient UPS runtime/charge recalculations
-
-v5.3 deliberately keeps all programmatic surfaces read-only. Authenticated control APIs move to v6 with auth/authz.
+- Runtime abstraction for additional container engines where a host exposes a compatible stop/list interface
+- Cleaner runtime capability checks in validation and startup logs
+- Per-runtime documentation for shutdown behavior, timeout semantics, and dry-run output
+- E2E coverage for at least one non-Docker runtime path if the CI environment can support it
 
 ---
 

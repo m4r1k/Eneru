@@ -171,6 +171,32 @@ def test_remote_health_degrades_before_failure_threshold(tmp_path, remote_server
 
 
 @pytest.mark.unit
+def test_remote_health_recovery_notification_only_after_failed(tmp_path, remote_server):
+    config = Config()
+    config.remote_health.enabled = True
+    config.remote_health.failure_threshold = 2
+    notifications = []
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[remote_server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+        notify_fn=lambda body, typ: notifications.append((body, typ)),
+    )
+
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(False, "refused", 12)):
+        assert manager.check_once()[0]["status"] == REMOTE_HEALTH_DEGRADED
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(True, "", 8)):
+        assert manager.check_once()[0]["status"] == REMOTE_HEALTH_HEALTHY
+
+    assert notifications == []
+
+
+@pytest.mark.unit
 def test_remote_health_suppresses_repeated_failure_notifications(tmp_path, remote_server):
     config = Config()
     config.remote_health.enabled = True
@@ -192,6 +218,43 @@ def test_remote_health_suppresses_repeated_failure_notifications(tmp_path, remot
         manager.check_once()
 
     assert len(notifications) == 1
+
+
+@pytest.mark.unit
+def test_remote_health_records_only_status_transitions(tmp_path, remote_server):
+    config = Config()
+    config.remote_health.enabled = True
+    config.remote_health.failure_threshold = 1
+    events = []
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[remote_server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+        notify_fn=lambda body, typ: None,
+        event_fn=lambda etype, detail, notified: events.append(
+            (etype, detail, notified)
+        ),
+    )
+
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(False, "refused", 12)):
+        manager.check_once()
+        manager.check_once()
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(True, "", 8)):
+        manager.check_once()
+
+    assert [event[0] for event in events] == [
+        "REMOTE_HEALTH_FAILED",
+        "REMOTE_HEALTH_HEALTHY",
+    ]
+    assert events[0][2] is True
+    assert events[1][2] is True
+    assert "UNKNOWN -> FAILED" in events[0][1]
+    assert "FAILED -> HEALTHY" in events[1][1]
 
 
 @pytest.mark.unit

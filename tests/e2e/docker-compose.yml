@@ -76,6 +76,25 @@ services:
     networks:
       - eneru-e2e
 
+  mqtt-broker:
+    # Pinned to a specific version so PR CI is reproducible — a moved
+    # `:2` floating tag would let upstream Mosquitto changes break our
+    # E2E without any local code change. Refresh on the same cadence
+    # as the GitHub Actions SHA pins (~quarterly), or sooner on a
+    # security advisory. The `-alpine` variant is ~5x smaller so the
+    # CI pull is faster.
+    image: eclipse-mosquitto:2.1.2-alpine
+    container_name: eneru-e2e-mqtt
+    # Bind to loopback only. The broker is anonymous-auth for E2E
+    # convenience, so leaking it onto an external interface would let
+    # any reachable host publish/subscribe without credentials.
+    ports:
+      - "127.0.0.1:1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    networks:
+      - eneru-e2e
+
 networks:
   eneru-e2e:
     driver: bridge

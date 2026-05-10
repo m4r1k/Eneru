@@ -845,6 +845,101 @@ class TestNotificationPolicyV52:
         )
 
     @pytest.mark.unit
+    def test_wall_disabled_suppresses_on_battery_event_broadcast(self, tmp_path):
+        """Regression: an operator running with the documented default
+        ``local_shutdown.wall: false`` reported wall(1) messages firing
+        on a real power cut. Lines 1279 (on-battery transition) and
+        1410 (power restored) historically only checked dry_run, not
+        the wall flag, so the documented default lied. Both call sites
+        must respect the flag — pin that here for the on-battery path."""
+        monitor = make_monitor(tmp_path)
+        monitor.config.behavior.dry_run = False
+        monitor.config.local_shutdown.wall = False
+        monitor.state.previous_status = "OL"  # was on line; transition fires
+        monitor.state.battery_history = deque()
+
+        with patch("eneru.monitor.run_command") as run_cmd:
+            monitor._handle_on_battery({
+                "battery.charge": "85",
+                "battery.runtime": "1200",
+                "ups.load": "30",
+                "ups.status": "OB DISCHRG",
+            })
+
+        wall_calls = [c for c in run_cmd.call_args_list
+                      if c.args and c.args[0] and c.args[0][0] == "wall"]
+        assert wall_calls == [], (
+            f"wall(1) must not fire on the on-battery transition when "
+            f"local_shutdown.wall=False; got {wall_calls}"
+        )
+
+    @pytest.mark.unit
+    def test_wall_enabled_fires_on_battery_event_broadcast(self, tmp_path):
+        """Mirror of the suppression test: with the flag opted on, the
+        on-battery transition does broadcast via wall(1)."""
+        monitor = make_monitor(tmp_path)
+        monitor.config.behavior.dry_run = False
+        monitor.config.local_shutdown.wall = True
+        monitor.state.previous_status = "OL"
+        monitor.state.battery_history = deque()
+
+        with patch("eneru.monitor.run_command") as run_cmd:
+            monitor._handle_on_battery({
+                "battery.charge": "85",
+                "battery.runtime": "1200",
+                "ups.load": "30",
+                "ups.status": "OB DISCHRG",
+            })
+
+        wall_calls = [c for c in run_cmd.call_args_list
+                      if c.args and c.args[0] and c.args[0][0] == "wall"]
+        assert len(wall_calls) == 1, wall_calls
+        assert "Power failure detected" in wall_calls[0].args[0][1]
+
+    @pytest.mark.unit
+    def test_wall_disabled_suppresses_power_restored_broadcast(self, tmp_path):
+        """Power-restored side of the on-battery suppression regression."""
+        monitor = make_monitor(tmp_path)
+        monitor.config.behavior.dry_run = False
+        monitor.config.local_shutdown.wall = False
+        monitor.state.previous_status = "OB DISCHRG"  # was on battery
+        monitor.state.on_battery_start_time = int(time.time()) - 60
+
+        with patch("eneru.monitor.run_command") as run_cmd:
+            monitor._handle_on_line({
+                "battery.charge": "92",
+                "input.voltage": "230",
+                "ups.status": "OL CHRG",
+            })
+
+        wall_calls = [c for c in run_cmd.call_args_list
+                      if c.args and c.args[0] and c.args[0][0] == "wall"]
+        assert wall_calls == [], (
+            f"wall(1) must not fire on power restoration when "
+            f"local_shutdown.wall=False; got {wall_calls}"
+        )
+
+    @pytest.mark.unit
+    def test_wall_enabled_fires_power_restored_broadcast(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.behavior.dry_run = False
+        monitor.config.local_shutdown.wall = True
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.on_battery_start_time = int(time.time()) - 60
+
+        with patch("eneru.monitor.run_command") as run_cmd:
+            monitor._handle_on_line({
+                "battery.charge": "92",
+                "input.voltage": "230",
+                "ups.status": "OL CHRG",
+            })
+
+        wall_calls = [c for c in run_cmd.call_args_list
+                      if c.args and c.args[0] and c.args[0][0] == "wall"]
+        assert len(wall_calls) == 1, wall_calls
+        assert "Power has been restored" in wall_calls[0].args[0][1]
+
+    @pytest.mark.unit
     def test_summary_notification_fires_when_local_shutdown_disabled(self, tmp_path):
         """The "✅ Shutdown Sequence Complete" summary used to fire only
         when local_shutdown.enabled=true (because the system was about

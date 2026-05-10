@@ -308,7 +308,7 @@ See [Statistics](statistics.md) for schema and queries.
 
 ## API, metrics, remote health, and MQTT
 
-The v5.3 API is read-only, opt-in, and binds to localhost by default when enabled. Do not expose it to untrusted networks; authz is planned for v6.
+The v5.3 API is read-only, opt-in, and binds to localhost by default when enabled. Do not expose it to untrusted networks; authz is planned for v6. Two surfaces in this section deviate from "off unless enabled": Prometheus `/metrics` is on by default once the API itself is enabled (it's the canonical observability output), and `remote_health.enabled` defaults to `true` because the probes are harmless (run only against the configured `probe_command`, default `true`) and only target remote servers explicitly marked `enabled: true` elsewhere in the config.
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -316,7 +316,7 @@ The v5.3 API is read-only, opt-in, and binds to localhost by default when enable
 | `api.bind` | `127.0.0.1` | Listen address |
 | `api.port` | `9191` | Listen port |
 | `prometheus.enabled` | `true` | Serve Prometheus text metrics at `/metrics` |
-| `remote_health.enabled` | `false` | Run harmless SSH probes for explicitly enabled remote servers |
+| `remote_health.enabled` | `true` | Run harmless SSH probes for explicitly enabled remote servers |
 | `remote_health.startup_check` | `true` | Check remote SSH connectivity at daemon startup |
 | `remote_health.interval` | `3600` | Periodic check interval in seconds |
 | `remote_health.probe_command` | `"true"` | Harmless SSH command (the Unix `true(1)`) used only for healthchecks |
@@ -328,7 +328,7 @@ The v5.3 API is read-only, opt-in, and binds to localhost by default when enable
 | `mqtt.topic_prefix` | `eneru` | Topic prefix; messages publish to `<topic_prefix>/status` (QoS 0, retain false) |
 | `mqtt.publish_interval` | `10` | Republish at this interval even when the status fingerprint is unchanged |
 
-`api.bind` defaults to `127.0.0.1`. If you set it to a non-loopback address, Eneru emits a startup warning because `/api/v1/config` returns server hostnames, the `sshOptionsConfigured` flag, and pre-shutdown command templates with no auth. Front-end the API with SSH or a reverse proxy that adds auth before exposing it beyond a trusted boundary.
+`api.bind` defaults to `127.0.0.1`. If you set it to a non-loopback address, Eneru emits a startup warning because `/api/v1/config` returns server hostnames, SSH usernames, shutdown ordering, and presence flags with no auth. Front-end the API with SSH or a reverse proxy that adds auth before exposing it beyond a trusted boundary.
 
 `remote_health.probe_command` is rejected at validation time if it contains shell metacharacters (`;`, `|`, `&`, `$`, backtick, redirections, parentheses, or newlines) or any keyword in the dangerous-words blocklist. Probes are advisory: they never run pre-shutdown commands, VM/container shutdown commands, custom commands, or the configured `shutdown_command`.
 
@@ -344,7 +344,9 @@ python3 -m pip install --break-system-packages paho-mqtt
 
 If MQTT is enabled but `paho-mqtt` isn't importable, the publisher logs a warning and disables itself; the daemon keeps running. The MQTT publisher reconnects with bounded exponential backoff (1 s → 60 s) on connection failure or unexpected disconnect.
 
-Remote health is advisory. A green check does not skip shutdown work, and a red check does not prevent Eneru from attempting the configured remote pre-shutdown commands and final shutdown command during a real sequence.
+Remote health is advisory. The daemon runs the safe SSH `probe_command` itself, default `true`, and moves unreachable targets to `DEGRADED` before `FAILED` at `failure_threshold`. Failure notifications fire once per failed period and recovery notifications fire once when the target returns. API, MQTT, and Prometheus only read the manager's live state or its sidecar JSON; they do not run SSH.
+
+The API and MQTT status payloads include `powerQuality` for each UPS: input/output voltage, input/output frequency, battery voltage, UPS temperature, nominal voltage, derived warning band, AVR state, bypass state, overload state, and grid voltage state.
 
 ## Virtual machines
 

@@ -14,6 +14,7 @@ _eneru() {
     subcommands=(
         'run:Start the monitoring daemon'
         'shutdown:Manual shutdown drills'
+        'remote:Inspect configured remote shutdown targets'
         'validate:Validate configuration and show overview'
         'monitor:Launch real-time TUI dashboard'
         'tui:Alias for monitor -- launch real-time TUI dashboard'
@@ -46,18 +47,37 @@ _eneru() {
                         '--exit-after-shutdown[exit after completing shutdown sequence]'
                     ;;
                 shutdown)
-                    if [[ "$line[2]" == "remote" ]]; then
+                    case "$line[2]" in
+                        remote)
+                            _arguments \
+                                '(-c --config)'{-c,--config}'[path to configuration file]:config file:_files' \
+                                '--server[remote server name or host]:server:' \
+                                '--group[UPS or redundancy group]:group:' \
+                                '--dry-run[do not execute configured commands]' \
+                                '--i-really-want-to-proceed-with-remote-shutdown[confirm real remote shutdown]' \
+                                '--connectivity-check[run harmless SSH probe first]' \
+                                '--no-connectivity-check[skip harmless SSH probe]' \
+                                '--log-file[append drill log to file]:log file:_files'
+                            ;;
+                        group)
+                            _arguments \
+                                '(-c --config)'{-c,--config}'[path to configuration file]:config file:_files' \
+                                '--group[UPS group label/name or redundancy group name]:group:' \
+                                '--dry-run[log every phase without executing]' \
+                                '--i-really-want-to-proceed-with-group-shutdown[confirm real group shutdown]' \
+                                '--log-file[append rehearsal log to file]:log file:_files'
+                            ;;
+                        *)
+                            _values 'shutdown command' remote group
+                            ;;
+                    esac
+                    ;;
+                remote)
+                    if [[ "$line[2]" == "list" ]]; then
                         _arguments \
-                            '(-c --config)'{-c,--config}'[path to configuration file]:config file:_files' \
-                            '--server[remote server name or host]:server:' \
-                            '--group[UPS or redundancy group]:group:' \
-                            '--dry-run[do not execute configured commands]' \
-                            '--i-really-want-to-proceed-with-remote-shutdown[confirm real remote shutdown]' \
-                            '--connectivity-check[run harmless SSH probe first]' \
-                            '--no-connectivity-check[skip harmless SSH probe]' \
-                            '--log-file[append drill log to file]:log file:_files'
+                            '(-c --config)'{-c,--config}'[path to configuration file]:config file:_files'
                     else
-                        _values 'shutdown command' remote
+                        _values 'remote command' list
                     fi
                     ;;
                 validate|test-notifications)

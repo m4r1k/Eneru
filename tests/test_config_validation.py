@@ -95,7 +95,7 @@ class TestConfigValidation:
         assert minimal_config.api.bind == "127.0.0.1"
         assert minimal_config.api.port == 9191
         assert minimal_config.prometheus.enabled is True
-        assert minimal_config.remote_health.enabled is False
+        assert minimal_config.remote_health.enabled is True
         assert minimal_config.remote_health.probe_command == "true"
 
     @pytest.mark.unit

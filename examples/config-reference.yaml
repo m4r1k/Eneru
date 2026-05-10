@@ -121,7 +121,7 @@ remote_health:
   # Harmless SSH healthchecks for configured remote servers. This never
   # executes pre_shutdown_commands or shutdown_command. Shutdown sequences
   # still attempt configured remote work even if health is red.
-  enabled: false
+  enabled: true
   startup_check: true
   interval: 3600
   probe_command: "true"

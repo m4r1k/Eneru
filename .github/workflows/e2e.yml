@@ -73,12 +73,17 @@ jobs:
       - name: Verify v5.3 E2E coverage is wired
         if: matrix.group == 'single-ups'
         run: |
+          # This step is a wiring guard for v5.3's E2E cases. The tests
+          # themselves run in the group script above; these greps catch a
+          # workflow/script mismatch where the release-critical cases were
+          # renamed, moved, or accidentally dropped from the single-UPS job.
           grep -q "Test 39: On-battery stabilization suppresses transient critical readings" tests/e2e/groups/single-ups.sh
           grep -q "Test 40: Remote SSH healthcheck is harmless" tests/e2e/groups/single-ups.sh
           grep -q "Test 41: Manual remote dry-run executes no configured commands" tests/e2e/groups/single-ups.sh
           grep -q "Test 42: Manual confirmed remote shutdown reaches selected target" tests/e2e/groups/single-ups.sh
           grep -q "Test 43: Embedded API health/readiness/metrics" tests/e2e/groups/single-ups.sh
           grep -q "Test 44: Unreachable remote shutdown is bounded" tests/e2e/groups/single-ups.sh
+          grep -q "Test 45: MQTT status publishes power-quality metrics" tests/e2e/groups/single-ups.sh
 
       - name: Collect logs on failure
         if: failure()

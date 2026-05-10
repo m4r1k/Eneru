@@ -13,7 +13,7 @@ import signal
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from eneru.version import __version__
 from eneru.config import Config
@@ -328,7 +328,7 @@ class MultiUPSCoordinator:
                     )
                     sys.exit(1)
                 self._redundancy_executors[rg.name] = executor
-                self._start_redundancy_remote_health(rg)
+                self._start_redundancy_remote_health(rg, monitors_by_name)
                 evaluator = RedundancyGroupEvaluator(
                     rg,
                     monitors_by_name,
@@ -347,7 +347,11 @@ class MultiUPSCoordinator:
         self._start_api_server()
         self._start_mqtt_publisher()
 
-    def _start_redundancy_remote_health(self, group) -> None:
+    def _start_redundancy_remote_health(
+        self,
+        group,
+        monitors_by_name: Dict[str, UPSGroupMonitor],
+    ) -> None:
         """Start advisory SSH healthchecks for redundancy-group remotes."""
         enabled_servers = [s for s in group.remote_servers if s.enabled]
         if not enabled_servers:
@@ -382,9 +386,55 @@ class MultiUPSCoordinator:
             stop_event=self._stop_event,
             log_fn=self._log,
             notify_fn=notify_fn,
+            event_fn=lambda event_type, detail, notification_sent: (
+                self._record_redundancy_remote_health_event(
+                    group, monitors_by_name, event_type, detail,
+                    notification_sent,
+                )
+            ),
         )
         self._redundancy_remote_health_managers.append(manager)
         manager.start()
+
+    def _record_redundancy_remote_health_event(
+        self,
+        group,
+        monitors_by_name: Dict[str, UPSGroupMonitor],
+        event_type: str,
+        detail: str,
+        notification_sent: bool,
+    ) -> None:
+        """Write redundancy remote-health transitions to member UPS stores.
+
+        Stats are per-UPS in the current schema, so a redundancy-group
+        remote-health transition is fanned out to every member's events
+        table. The detail string carries the ``redundancy:<group>``
+        prefix and the originating server, so per-UPS event readers
+        (TUI, /api/v1/events) still attribute the event correctly even
+        though it appears in N rows for an N-UPS group. A future
+        group-scoped events store would let this become a single write.
+
+        Each member's ``log_event`` is wrapped in its own try/except so
+        a broken or not-yet-opened stats DB on one member doesn't
+        suppress the fan-out to the rest. Stats are diagnostic only and
+        must never block the health-check path.
+        """
+        for source_name in getattr(group, "ups_sources", []):
+            monitor = monitors_by_name.get(source_name)
+            store = getattr(monitor, "_stats_store", None)
+            if store is None:
+                continue
+            try:
+                store.log_event(
+                    event_type,
+                    detail,
+                    notification_sent=notification_sent,
+                )
+            except Exception as exc:
+                self._log(
+                    f"⚠️ stats: failed to record redundancy remote-health "
+                    f"event on {source_name}: {exc}"
+                )
 
     def _start_api_server(self):
         """Start the read-only API server for coordinator mode."""
