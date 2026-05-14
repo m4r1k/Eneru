@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [5.4.0-rc0] - 2026-05-14
+## [5.4.0-rc1] - 2026-05-14
 
 Release candidate for the v5.4 observability polish pass.
 
