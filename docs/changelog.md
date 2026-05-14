@@ -13,13 +13,13 @@ Release candidate for the v5.4 observability polish pass.
 
 ### Changed
 - `/api/v1` now returns an endpoint index, and JSON 404 responses include the same available-endpoints list. When Prometheus is disabled, `/metrics` is omitted from both responses so clients don't see an endpoint advertised that genuinely returns 404.
-- The reference Grafana dashboard now renders power-quality state metrics as a timeline instead of a set of ambiguous stat values. Power, voltage, bypass, overload, AVR, shutdown-trigger, connection-failed, and remote-health-failed events are overlaid on every time-series panel via dashboard-wide Prometheus annotations, so operators can correlate a battery-charge inflection or voltage dip with the event that caused it without leaving Grafana.
-- The dashboard adds a Battery-charge / UPS-load / Runtime-remaining "now" row (gauge + sparkline stat) and a `$ups` multi-select template variable for filtering when many UPSes are configured. The standalone "Event signals" and "Remote health failures" panels were removed — annotations cover the same information in context.
-- The voltage panel now overlays the configured nominal voltage alongside the existing low/high warning thresholds.
+- The reference Grafana dashboard overlays power, voltage, bypass, overload, AVR, shutdown-trigger, connection-failed, and remote-health-failed events on every time-series panel via dashboard-wide Prometheus annotations, so operators can correlate a battery-charge inflection or voltage dip with the event that caused it without leaving Grafana. Each annotation carries a tooltip title and description text so the event name is visible on hover, and the toolbar toggles are hidden so the dashboard chrome stays clean.
+- The dashboard adds a Battery-charge / UPS-load / Runtime-remaining "now" row (gauge + sparkline stat) and a `$ups` multi-select template variable for filtering when many UPSes are configured.
+- The voltage panel overlays the configured nominal voltage alongside the existing low/high warning thresholds.
 
 ### Fixed
 - Remote-health startup probes no longer record a noisy `REMOTE_HEALTH_HEALTHY` event for the initial `UNKNOWN -> HEALTHY` baseline next to every `DAEMON_START`. Startup failures and later failure/recovery transitions are still recorded.
-- The SVG architecture diagram viewBox now matches the drawn content width (782×550 instead of 800×550), removing the residual blank right-side margin in rendered docs.
+- The SVG architecture diagram viewBox matches the drawn content width (782×550 instead of 960×550), removing the blank right-side margin in rendered docs.
 
 ---
 

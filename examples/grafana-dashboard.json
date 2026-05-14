@@ -40,99 +40,135 @@
         "name": "On battery",
         "datasource": {"type": "prometheus", "uid": "${datasource}"},
         "enable": true,
+        "hide": true,
         "iconColor": "red",
         "tags": ["power-cut"],
+        "tagKeys": "label",
+        "titleFormat": "On battery — {{label}}",
+        "textFormat": "{{label}} switched to battery",
         "target": {
           "expr": "eneru_ups_time_on_battery_seconds{label=~\"$ups\"} > 0",
-          "legendFormat": "{{label}} on battery"
+          "legendFormat": "{{label}}"
         }
       },
       {
         "name": "Brownout",
         "datasource": {"type": "prometheus", "uid": "${datasource}"},
         "enable": true,
+        "hide": true,
         "iconColor": "orange",
         "tags": ["voltage"],
+        "tagKeys": "label,state",
+        "titleFormat": "Brownout — {{label}}",
+        "textFormat": "{{label}} input voltage below low warning threshold",
         "target": {
           "expr": "eneru_ups_voltage_state{state=\"LOW\",label=~\"$ups\"} == 1",
-          "legendFormat": "{{label}} brownout"
+          "legendFormat": "{{label}}"
         }
       },
       {
         "name": "Over-voltage",
         "datasource": {"type": "prometheus", "uid": "${datasource}"},
         "enable": true,
+        "hide": true,
         "iconColor": "orange",
         "tags": ["voltage"],
+        "tagKeys": "label,state",
+        "titleFormat": "Over-voltage — {{label}}",
+        "textFormat": "{{label}} input voltage above high warning threshold",
         "target": {
           "expr": "eneru_ups_voltage_state{state=\"HIGH\",label=~\"$ups\"} == 1",
-          "legendFormat": "{{label}} over-voltage"
+          "legendFormat": "{{label}}"
         }
       },
       {
         "name": "AVR engaged",
         "datasource": {"type": "prometheus", "uid": "${datasource}"},
         "enable": true,
+        "hide": true,
         "iconColor": "yellow",
         "tags": ["voltage"],
+        "tagKeys": "label,state",
+        "titleFormat": "AVR {{state}} — {{label}}",
+        "textFormat": "{{label}} AVR engaged ({{state}})",
         "target": {
           "expr": "eneru_ups_avr_state{state=~\"BOOST|TRIM\",label=~\"$ups\"} == 1",
-          "legendFormat": "{{label}} avr {{state}}"
+          "legendFormat": "{{label}} {{state}}"
         }
       },
       {
         "name": "Bypass active",
         "datasource": {"type": "prometheus", "uid": "${datasource}"},
         "enable": true,
+        "hide": true,
         "iconColor": "purple",
         "tags": ["bypass"],
+        "tagKeys": "label",
+        "titleFormat": "Bypass active — {{label}}",
+        "textFormat": "{{label}} switched to bypass mode",
         "target": {
           "expr": "eneru_ups_bypass_state{state=\"ACTIVE\",label=~\"$ups\"} == 1",
-          "legendFormat": "{{label}} bypass"
+          "legendFormat": "{{label}}"
         }
       },
       {
         "name": "Overload",
         "datasource": {"type": "prometheus", "uid": "${datasource}"},
         "enable": true,
+        "hide": true,
         "iconColor": "red",
         "tags": ["overload"],
+        "tagKeys": "label",
+        "titleFormat": "Overload — {{label}}",
+        "textFormat": "{{label}} load exceeded UPS rating",
         "target": {
           "expr": "eneru_ups_overload_state{state=\"ACTIVE\",label=~\"$ups\"} == 1",
-          "legendFormat": "{{label}} overload"
+          "legendFormat": "{{label}}"
         }
       },
       {
         "name": "Shutdown trigger",
         "datasource": {"type": "prometheus", "uid": "${datasource}"},
         "enable": true,
+        "hide": true,
         "iconColor": "dark-red",
         "tags": ["trigger"],
+        "tagKeys": "label",
+        "titleFormat": "Shutdown trigger — {{label}}",
+        "textFormat": "{{label}} shutdown trigger active",
         "target": {
           "expr": "eneru_ups_trigger_active{label=~\"$ups\"} == 1",
-          "legendFormat": "{{label}} trigger"
+          "legendFormat": "{{label}}"
         }
       },
       {
         "name": "Connection failed",
         "datasource": {"type": "prometheus", "uid": "${datasource}"},
         "enable": true,
+        "hide": true,
         "iconColor": "rgba(140, 140, 140, 1)",
         "tags": ["connection"],
+        "tagKeys": "label",
+        "titleFormat": "Connection failed — {{label}}",
+        "textFormat": "{{label}} NUT connection failed",
         "target": {
           "expr": "eneru_ups_connection_failed{label=~\"$ups\"} == 1",
-          "legendFormat": "{{label}} connection failed"
+          "legendFormat": "{{label}}"
         }
       },
       {
         "name": "Remote health failed",
         "datasource": {"type": "prometheus", "uid": "${datasource}"},
         "enable": true,
+        "hide": true,
         "iconColor": "dark-red",
         "tags": ["remote"],
+        "tagKeys": "server,host",
+        "titleFormat": "Remote health failed — {{server}}",
+        "textFormat": "{{server}} ({{host}}) remote SSH probe failed",
         "target": {
           "expr": "eneru_remote_health_status{status=\"FAILED\"} == 1",
-          "legendFormat": "{{server}} remote failed"
+          "legendFormat": "{{server}}"
         }
       }
     ]
@@ -326,7 +362,7 @@
       "type": "timeseries",
       "title": "Temperature and battery voltage",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 21},
       "targets": [
         {
           "refId": "A",
@@ -354,40 +390,6 @@
           }
         ]
       }
-    },
-    {
-      "type": "state-timeline",
-      "title": "Power-quality state timeline",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 21},
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "eneru_ups_voltage_state{label=~\"$ups\"} == 1",
-          "legendFormat": "{{label}} voltage {{state}}"
-        },
-        {
-          "refId": "B",
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "eneru_ups_avr_state{label=~\"$ups\"} == 1",
-          "legendFormat": "{{label}} avr {{state}}"
-        },
-        {
-          "refId": "C",
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "eneru_ups_bypass_state{label=~\"$ups\"} == 1",
-          "legendFormat": "{{label}} bypass {{state}}"
-        },
-        {
-          "refId": "D",
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "eneru_ups_overload_state{label=~\"$ups\"} == 1",
-          "legendFormat": "{{label}} overload {{state}}"
-        }
-      ],
-      "options": {"mergeValues": true, "showValue": "auto"},
-      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "max": 1}, "overrides": []}
     }
   ]
 }

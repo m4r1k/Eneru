@@ -13,6 +13,12 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.unit
 def test_grafana_dashboard_has_observability_polish_panels():
     dashboard = json.loads((ROOT / "examples/grafana-dashboard.json").read_text())
+    titles = [panel["title"] for panel in dashboard["panels"]]
+    # Build the lookup only after asserting titles are unique so a
+    # duplicate doesn't silently overwrite a real panel and let later
+    # assertions pass against the wrong target.
+    duplicates = sorted({t for t in titles if titles.count(t) > 1})
+    assert not duplicates, f"duplicate panel titles: {duplicates}"
     panels = {panel["title"]: panel for panel in dashboard["panels"]}
 
     # Gauge row at the top: "now" view for at-a-glance health.
@@ -25,14 +31,15 @@ def test_grafana_dashboard_has_observability_polish_panels():
     assert panels["Runtime remaining"]["type"] == "timeseries"
     assert panels["UPS load"]["type"] == "timeseries"
 
-    # Power-quality state timeline kept from f36ab63.
-    assert panels["Power-quality state timeline"]["type"] == "state-timeline"
-
-    # The standalone "Event signals" and "Remote health failures" panels
-    # were removed — that information now lives in the dashboard-wide
-    # annotations so it overlays on every time-series panel in context.
+    # Standalone status panels are intentionally absent — the same
+    # information is overlaid on every time-series panel via the
+    # dashboard-wide annotations, so a separate panel would duplicate
+    # what's already in context. The state-timeline variant misrendered
+    # the merged voltage/AVR/bypass/overload series in Grafana 12, so it
+    # is not part of the shipped dashboard either.
     assert "Event signals" not in panels
     assert "Remote health failures" not in panels
+    assert "Power-quality state timeline" not in panels
 
     # Voltage panel includes nominal and warning thresholds for context.
     voltage = panels["Input and output voltage"]
@@ -63,10 +70,21 @@ def test_grafana_dashboard_overlays_events_via_annotations():
     }
     for name, fragment in expected.items():
         assert name in annotations, f"missing annotation: {name}"
-        assert annotations[name]["enable"] is True
-        assert fragment in annotations[name]["target"]["expr"], (
+        annotation = annotations[name]
+        assert annotation["enable"] is True
+        # Hidden from the top-of-dashboard annotation toggle bar — they
+        # render on the panels but don't crowd the dashboard chrome.
+        assert annotation["hide"] is True, (
+            f"{name} annotation should set hide:true to skip the toolbar toggle"
+        )
+        # titleFormat and textFormat are what makes the event name visible
+        # in the tooltip when you hover the marker. Without them Grafana
+        # falls back to the raw metric value (1) and labels.
+        assert annotation["titleFormat"], f"{name} missing titleFormat"
+        assert annotation["textFormat"], f"{name} missing textFormat"
+        assert fragment in annotation["target"]["expr"], (
             f"{name} expr does not contain {fragment!r}: "
-            f"{annotations[name]['target']['expr']}"
+            f"{annotation['target']['expr']}"
         )
 
 
