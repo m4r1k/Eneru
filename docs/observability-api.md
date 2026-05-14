@@ -118,11 +118,17 @@ Useful metric names include:
 | `eneru_remote_health_status` | Last remote health state |
 
 `examples/grafana-dashboard.json` is a starting dashboard for these metrics.
-It uses Prometheus only, so it shows event-like signals such as active
-shutdown triggers, failed UPS connections, non-healthy remote SSH states, and
-power-quality state changes. Exact SQLite event rows remain available from
-`/api/v1/events`; use a Grafana JSON/API datasource plugin if you want those
-rows rendered as a table or annotations inside Grafana.
+It is Prometheus-only and ships with a `$ups` template variable plus
+dashboard-wide annotations sourced from existing Prometheus signals
+(`eneru_ups_time_on_battery_seconds > 0` for power cuts, the voltage /
+AVR / bypass / overload state metrics for power-quality events, plus
+`eneru_ups_trigger_active`, `eneru_ups_connection_failed`, and
+`eneru_remote_health_status{status="FAILED"} == 1`). Annotations render as
+coloured regions across every time-series panel, so a power cut is
+visible directly on the Battery-charge and Runtime-remaining curves and a
+brownout is visible directly on the Input/output voltage panel — no extra
+Grafana plugin required. Exact SQLite event rows with their full detail
+text remain available from `/api/v1/events` if you want a tabular feed.
 
 ## Remote SSH health
 

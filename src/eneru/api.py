@@ -243,16 +243,26 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
     def _not_found(self, message: str) -> Dict[str, Any]:
         payload = self._error("NOT_FOUND", message)
-        payload["availableEndpoints"] = list(API_ENDPOINTS)
+        payload["availableEndpoints"] = self._available_endpoints()
         return payload
 
-    @staticmethod
-    def _api_index() -> Dict[str, Any]:
+    def _api_index(self) -> Dict[str, Any]:
         return {
             "generatedAt": time.time(),
             "version": "v1",
-            "endpoints": list(API_ENDPOINTS),
+            "endpoints": self._available_endpoints(),
         }
+
+    def _available_endpoints(self) -> List[Dict[str, Any]]:
+        # Don't advertise /metrics when Prometheus is disabled — the route
+        # genuinely returns 404 in that mode, so listing it would mislead
+        # clients that read availableEndpoints to discover what to call.
+        prometheus_enabled = bool(getattr(self.api_config.prometheus, "enabled", False))
+        return [
+            dict(endpoint)
+            for endpoint in API_ENDPOINTS
+            if endpoint["path"] != "/metrics" or prometheus_enabled
+        ]
 
 
 def _parse_int_param(

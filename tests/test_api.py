@@ -332,7 +332,10 @@ def test_api_core_routes(minimal_config, monitor):
     status, _, payload = handler._route()
     assert status == 404
     assert payload["error"]["message"] == "Metrics disabled"
-    assert any(row["path"] == "/metrics" for row in payload["availableEndpoints"])
+    advertised = {row["path"] for row in payload["availableEndpoints"]}
+    assert "/metrics" not in advertised
+    assert "/api/v1" in advertised
+    assert "/api/v1/ups" in advertised
 
 
 @pytest.mark.unit
@@ -400,6 +403,26 @@ def test_api_history_rejects_unknown_metric(minimal_config):
     assert status == 400
     assert content_type == "application/json"
     assert payload["error"]["code"] == "INVALID_REQUEST"
+
+
+@pytest.mark.unit
+def test_api_index_omits_metrics_when_prometheus_disabled(minimal_config):
+    minimal_config.prometheus.enabled = False
+    handler = object.__new__(EneruAPIHandler)
+    handler.path = "/api/v1"
+    handler.api_config = minimal_config
+    handler.api_source = MagicMock()
+
+    status, content_type, payload = handler._route()
+
+    assert status == 200
+    assert content_type == "application/json"
+    advertised = {row["path"] for row in payload["endpoints"]}
+    assert "/metrics" not in advertised
+    # The rest of the index is unchanged.
+    assert "/health" in advertised
+    assert "/api/v1" in advertised
+    assert "/api/v1/events" in advertised
 
 
 @pytest.mark.unit
