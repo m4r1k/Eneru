@@ -40,7 +40,7 @@ jobs:
   e2e:
     name: "E2E ${{ matrix.label }}"
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -84,6 +84,7 @@ jobs:
           grep -q "Test 43: Embedded API health/readiness/metrics" tests/e2e/groups/single-ups.sh
           grep -q "Test 44: Unreachable remote shutdown is bounded" tests/e2e/groups/single-ups.sh
           grep -q "Test 45: MQTT status publishes power-quality metrics" tests/e2e/groups/single-ups.sh
+          grep -q "Test 46: OCI image runs with API enabled by CLI flags" tests/e2e/groups/single-ups.sh
 
       - name: Collect logs on failure
         if: failure()

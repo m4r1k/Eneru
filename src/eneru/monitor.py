@@ -779,13 +779,26 @@ class UPSGroupMonitor(
 
     def _check_dependencies(self):
         """Check for required and optional dependencies."""
-        required_cmds = ["upsc", "sync", "shutdown", "logger"]
+        required_cmds = ["upsc"]
+        group = self.config.ups_groups[0] if self.config.ups_groups else None
+        is_local = group.is_local if group else True
+        if is_local and self.config.local_shutdown.enabled:
+            shutdown_cmd = str(self.config.local_shutdown.command).split()
+            if shutdown_cmd:
+                required_cmds.append(shutdown_cmd[0])
         missing = [cmd for cmd in required_cmds if not command_exists(cmd)]
 
         if missing:
             error_msg = f"❌ FATAL ERROR: Missing required commands: {', '.join(missing)}"
             print(error_msg)
             sys.exit(1)
+
+        if not command_exists("logger"):
+            self._log_message(
+                "⚠️ WARNING: 'logger' not found. Power events will still be "
+                "written to Eneru logs, but the legacy syslog side-channel "
+                "will be skipped."
+            )
 
         # Check optional dependencies based on enabled features
         if self.config.virtual_machines.enabled and not command_exists("virsh"):

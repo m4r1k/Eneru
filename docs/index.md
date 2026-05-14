@@ -22,6 +22,7 @@ Eneru is the layer above NUT. NUT talks to the UPS hardware. Eneru decides what 
 | Multiple UPSes | Independent UPS groups, shared configuration defaults, and one local-shutdown owner |
 | Redundant power | Quorum-based redundancy groups for dual-PSU servers and A+B power feeds |
 | Operators | TUI dashboard, one-shot status output, SQLite history/events, API, Prometheus, MQTT, Grafana, JSON/syslog logs, and Apprise notifications |
+| Deployment | Native systemd packages for local shutdown, plus an OCI image for remote-only Docker, Podman, and Kubernetes deployments |
 
 !!! note "Eneru does not replace NUT"
     NUT still owns UPS drivers, hardware communication, and the `upsc` data model. Eneru consumes that data and runs the shutdown policy.
@@ -75,7 +76,8 @@ Multi-UPS mode runs the same sequence per UPS group. Redundancy groups use the s
 2. Choose your shutdown policy: [Configuration reference](configuration.md).
 3. Tune the shutdown thresholds: [Shutdown triggers](triggers.md).
 4. Add remote systems if needed: [Remote servers](remote-servers.md).
-5. Test in dry-run mode before relying on it: [Troubleshooting](troubleshooting.md#safe-dry-run-test).
+5. Use the OCI image for remote-only containers or Kubernetes: [Containers and Kubernetes](containers-kubernetes.md).
+6. Test in dry-run mode before relying on it: [Troubleshooting](troubleshooting.md#safe-dry-run-test).
 
 ## Installation style in these docs
 

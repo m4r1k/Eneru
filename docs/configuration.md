@@ -330,6 +330,8 @@ The v5.3 API is read-only, opt-in, and binds to localhost by default when enable
 
 `api.bind` defaults to `127.0.0.1`. If you set it to a non-loopback address, Eneru emits a startup warning because `/api/v1/config` returns server hostnames, SSH usernames, shutdown ordering, and presence flags with no auth. Front-end the API with SSH or a reverse proxy that adds auth before exposing it beyond a trusted boundary.
 
+`eneru run --api`, `--api-bind`, and `--api-port` override these API settings for one daemon invocation. This is mainly for Docker, Podman, and Kubernetes healthchecks where the image should expose `/health` even if the mounted config does not enable the API.
+
 `remote_health.probe_command` is rejected at validation time if it contains shell metacharacters (`;`, `|`, `&`, `$`, backtick, redirections, parentheses, or newlines) or any keyword in the dangerous-words blocklist. Probes are advisory: they never run pre-shutdown commands, VM/container shutdown commands, custom commands, or the configured `shutdown_command`.
 
 **MQTT on RHEL.** Debian/Ubuntu `.deb` packages install `python3-paho-mqtt` as a hard dependency. RPM packages list it as a `Recommends:` only — RHEL 9 + EPEL pulls it in automatically, but on RHEL 8 (where the EPEL build targets the system python3.6, not the python3.9 used by Eneru) and on RHEL 10 (no `python3-paho-mqtt` exists in BaseOS / AppStream / CRB / EPEL 10) you need to install it via pip after installing eneru:
@@ -419,6 +421,7 @@ mounts:
 | `connect_timeout` | `10` | SSH connection timeout |
 | `command_timeout` | `30` | Default timeout for remote commands |
 | `shutdown_command` | `sudo shutdown -h now` | Final shutdown command |
+| `ssh_key_path` | `null` | Optional SSH private-key path, useful for container/Kubernetes volume mounts |
 | `ssh_options` | `[]` | Extra SSH options. Avoid disabling host-key checks in production |
 | `pre_shutdown_commands` | `[]` | Pre-shutdown actions or commands |
 | `shutdown_order` | unset | Explicit phase. Same value runs in parallel; higher values run later |
@@ -484,6 +487,9 @@ Common flags:
 |---------|------|---------|
 | `run`, `validate`, `monitor`, `test-notifications` | `-c`, `--config` | Config path |
 | `run` | `--dry-run` | Override config and do not execute shutdown actions |
+| `run` | `--api` | Enable the embedded read-only API for this run |
+| `run` | `--api-bind ADDRESS` | API listen address for this run; implies `--api` |
+| `run` | `--api-port PORT` | API listen port for this run; implies `--api` |
 | `run` | `--exit-after-shutdown` | Exit after a shutdown sequence finishes |
 | `monitor` | `--once` | Print one status snapshot |
 | `monitor` | `--interval` | TUI refresh interval |

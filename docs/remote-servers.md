@@ -151,7 +151,20 @@ sudo ssh -i /root/.ssh/id_ups_shutdown user@remote-server "echo OK"
 
 Leave the key without a passphrase. A passphrase-protected key cannot be used unattended during a power event.
 
-If you use a non-default key, add SSH options:
+If you use a non-default key, set `ssh_key_path`:
+
+```yaml
+remote_servers:
+  - name: "NAS"
+    enabled: true
+    host: "nas.example.lan"
+    user: "ups"
+    ssh_key_path: "/var/lib/eneru/ssh/id_ups_shutdown"
+```
+
+Eneru passes that path to OpenSSH as `-i <path>` for both remote shutdown commands and remote-health probes. This is the preferred form for Docker, Podman, and Kubernetes because the key can be mounted as a volume or Secret.
+
+The older `ssh_options` form still works for advanced OpenSSH settings:
 
 ```yaml
 ssh_options:

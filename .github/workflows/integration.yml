@@ -342,3 +342,36 @@ jobs:
             echo "Validating $config..."
             eneru validate --config "$config"
           done
+
+  # Build the official OCI image from the checked-out commit. PR CI must
+  # not depend on a GHCR tag that may not exist before the first 5.4 release.
+  test-oci-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep -oP '__version__\s*=\s*"\K[^"]+' src/eneru/version.py)
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build OCI image
+        run: docker build --build-arg VERSION=${{ steps.version.outputs.VERSION }} -t eneru:ci .
+
+      - name: Verify OCI image
+        run: |
+          docker run --rm eneru:ci version
+          docker run --rm eneru:ci validate --config /etc/ups-monitor/config.yaml
+
+      - name: Verify OCI image with Podman
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+          docker tag eneru:ci localhost/eneru:ci
+          docker save localhost/eneru:ci -o /tmp/eneru-ci.tar
+          sudo podman load -i /tmp/eneru-ci.tar
+          sudo podman run --rm localhost/eneru:ci version

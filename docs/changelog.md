@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.4.0-rc2] - Unreleased
+
+Release candidate for the v5.4 OCI image and Kubernetes deployment path.
+
+### Added
+- Official OCI image packaging for GHCR, with Docker and Podman smoke checks in CI and release-workflow publishing alongside deb/rpm packages.
+- `eneru run --api`, `--api-bind`, and `--api-port` so container healthchecks and Kubernetes probes can enable the read-only API without editing the YAML config.
+- `remote_servers[].ssh_key_path`, an explicit SSH identity-file path for container and Kubernetes volume mounts. Existing OpenSSH config and `ssh_options` behavior is unchanged.
+- Remote-only Kubernetes `Deployment` and `Pod` examples with non-root security contexts.
+
+### Changed
+- Containerized Eneru can run non-root for remote-only deployments. Startup now refuses local-host orchestration unless Eneru runs as root, so a Kubernetes or rootless Podman deployment fails clearly instead of half-running local shutdown steps it cannot execute.
+- Container shutdown now skips Eneru's own container automatically and skips compose stacks that include the running Eneru container.
+- Dependency checks are scoped to configured behavior: remote-only deployments no longer require local shutdown tooling, and the legacy `logger(1)` syslog side-channel is best effort.
+
+### Documentation
+- The README and docs now explain when to use the OCI image versus the systemd daemon, including Docker, Podman, SELinux volume labels, AppArmor/default confinement, and log collection through `docker logs` or `kubectl logs`.
+
 ## [5.4.0-rc1] - 2026-05-14
 
 Release candidate for the v5.4 observability polish pass.

@@ -4,18 +4,13 @@ Planned direction for Eneru. None of this is built yet -- things will change as 
 
 Feature requests and feedback: [GitHub Issues](https://github.com/m4r1k/Eneru/issues).
 
-Recently shipped: v5.0 (2026-04-11), v5.1 (2026-04-21), v5.2 (2026-04-24), and v5.3 (2026-05-10). See the [changelog](changelog.md) for details.
+Recently shipped: v5.0 (2026-04-11), v5.1 (2026-04-21), v5.2 (2026-04-24), v5.3 (2026-05-10), and v5.4 (2026-05-15). See the [changelog](changelog.md) for details.
 
 ---
 
-## v5.4 -- Generic container runtime support (planned)
+## v5.4 -- OCI image and Kubernetes samples (shipped)
 
-Eneru already handles Docker, Podman, and compose. v5.4 focuses on making the container phase less tied to those specific command surfaces.
-
-- Runtime abstraction for additional container engines where a host exposes a compatible stop/list interface
-- Cleaner runtime capability checks in validation and startup logs
-- Per-runtime documentation for shutdown behavior, timeout semantics, and dry-run output
-- E2E coverage for at least one non-Docker runtime path if the CI environment can support it
+v5.4 shipped the official OCI image, GHCR release publishing, Docker/Podman smoke coverage, and remote-only Kubernetes examples. Native deb/rpm packages remain the recommended local-host shutdown path; the image is aimed at remote UPS/server orchestration and container-native healthchecks.
 
 ---
 

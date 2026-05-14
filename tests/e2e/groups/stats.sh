@@ -18,6 +18,14 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
+eneru() {
+  if [ "${1:-}" = "run" ]; then
+    sudo -E env "PATH=$PATH" eneru "$@"
+  else
+    command eneru "$@"
+  fi
+}
+
 # ======================================================================
 # Test 28: SQLite stats persistence
 # ======================================================================

@@ -6,13 +6,67 @@ optional rootless Podman containers per non-system user.
 """
 
 from pathlib import Path
-from typing import Optional
+import socket
+from typing import Optional, Set
 
 from eneru.utils import command_exists, run_command
 
 
 class ContainerShutdownMixin:
     """Mixin: container runtime detection + shutdown for Docker/Podman."""
+
+    def _current_container_ids(self) -> Set[str]:
+        """Best-effort IDs for the container currently running Eneru.
+
+        Docker normally sets the hostname to the short container ID.
+        Container runtimes also expose the full ID in cgroup paths. We
+        collect both forms and later compare by prefix so a short `ps -q`
+        result still matches a full cgroup ID.
+        """
+        ids: Set[str] = set()
+
+        hostname = socket.gethostname().strip()
+        if _looks_like_container_id(hostname):
+            ids.add(hostname)
+
+        for path in (Path("/proc/self/cgroup"), Path("/proc/1/cgroup")):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for token in _container_id_tokens(text):
+                ids.add(token)
+
+        return ids
+
+    def _is_current_container(self, container_id: str, current_ids: Set[str]) -> bool:
+        """Return True when a runtime ID appears to identify this process."""
+        cid = container_id.strip()
+        if not cid:
+            return False
+        for current in current_ids:
+            if cid.startswith(current) or current.startswith(cid):
+                return True
+        return False
+
+    def _compose_stack_contains_self(self, file_path: str) -> bool:
+        """Return True when a compose file appears to include Eneru itself."""
+        current_ids = self._current_container_ids()
+        if not current_ids:
+            return False
+
+        runtime = self._container_runtime
+        exit_code, stdout, _ = run_command(
+            [runtime, "compose", "-f", file_path, "ps", "-q"],
+            timeout=10,
+        )
+        if exit_code != 0:
+            return False
+
+        for cid in stdout.strip().splitlines():
+            if self._is_current_container(cid, current_ids):
+                return True
+        return False
 
     def _detect_container_runtime(self) -> Optional[str]:
         """Detect available container runtime."""
@@ -84,6 +138,13 @@ class ContainerShutdownMixin:
                 self._log_message(f"  ⚠️ Compose file not found: {file_path} (skipping)")
                 continue
 
+            if self._compose_stack_contains_self(file_path):
+                self._log_message(
+                    f"  ⚠️ {file_path} includes the Eneru container; "
+                    "skipping compose down to avoid stopping this daemon."
+                )
+                continue
+
             self._log_message(f"  ➡️ Stopping: {file_path} (timeout: {timeout}s)")
 
             if self.config.behavior.dry_run:
@@ -140,7 +201,22 @@ class ContainerShutdownMixin:
             self._log_message(f"  ⚠️ Failed to get {runtime_display} container list")
             return
 
-        container_ids = [cid.strip() for cid in stdout.strip().split('\n') if cid.strip()]
+        current_ids = self._current_container_ids()
+        container_ids = []
+        skipped_self = []
+        for cid in stdout.strip().split('\n'):
+            cid = cid.strip()
+            if not cid:
+                continue
+            if self._is_current_container(cid, current_ids):
+                skipped_self.append(cid)
+                continue
+            container_ids.append(cid)
+
+        if skipped_self:
+            self._log_message(
+                "  ℹ️ Skipping Eneru's own container during container shutdown"
+            )
 
         if not container_ids:
             self._log_message(f"  ℹ️ No running {runtime_display} containers found")
@@ -209,3 +285,24 @@ class ContainerShutdownMixin:
                         run_command(stop_cmd, timeout=self.config.containers.stop_timeout + 30)
 
         self._log_message("  ✅ Rootless Podman containers stopped")
+
+
+def _looks_like_container_id(value: str) -> bool:
+    """Return True for common short/full OCI container ID tokens."""
+    if len(value) < 12 or len(value) > 64:
+        return False
+    return all(ch in "0123456789abcdef" for ch in value.lower())
+
+
+def _container_id_tokens(text: str) -> Set[str]:
+    """Extract likely OCI container IDs from cgroup file content."""
+    tokens: Set[str] = set()
+    for raw in text.replace(":", "/").split("/"):
+        token = raw.strip()
+        if token.startswith("docker-") and token.endswith(".scope"):
+            token = token[len("docker-"):-len(".scope")]
+        if token.startswith("cri-containerd-") and token.endswith(".scope"):
+            token = token[len("cri-containerd-"):-len(".scope")]
+        if _looks_like_container_id(token):
+            tokens.add(token)
+    return tokens

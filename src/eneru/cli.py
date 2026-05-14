@@ -1,6 +1,7 @@
 """CLI entry point for Eneru."""
 
 import argparse
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +44,80 @@ def _non_negative_int(value: str) -> int:
 def _load_config(args):
     """Load configuration from the --config path."""
     return ConfigLoader.load(getattr(args, 'config', None))
+
+
+def _apply_run_overrides(config: Config, args) -> None:
+    """Apply `eneru run` CLI overrides after YAML load, before validation."""
+    if args.dry_run:
+        config.behavior.dry_run = True
+
+    if getattr(args, "api", False):
+        config.api.enabled = True
+    if getattr(args, "api_bind", None) is not None:
+        config.api.enabled = True
+        config.api.bind = args.api_bind
+    if getattr(args, "api_port", None) is not None:
+        config.api.enabled = True
+        config.api.port = args.api_port
+
+
+def _root_required_reasons(config: Config) -> list:
+    """Return local-host features that require root at daemon startup."""
+    reasons = []
+    groups = list(config.ups_groups)
+    if not groups:
+        reasons.append("implicit single-UPS local-host mode")
+    for group in groups:
+        label = group.ups.label
+        if group.is_local:
+            reasons.append(f"UPS group '{label}' is marked is_local")
+        if group.virtual_machines.enabled:
+            reasons.append(f"UPS group '{label}' has virtual_machines enabled")
+        if group.containers.enabled:
+            reasons.append(f"UPS group '{label}' has containers enabled")
+        if group.filesystems.unmount.enabled:
+            reasons.append(f"UPS group '{label}' has filesystem unmount enabled")
+
+    for group in config.redundancy_groups:
+        label = group.name or "(unnamed)"
+        if group.is_local:
+            reasons.append(f"redundancy group '{label}' is marked is_local")
+        if group.virtual_machines.enabled:
+            reasons.append(f"redundancy group '{label}' has virtual_machines enabled")
+        if group.containers.enabled:
+            reasons.append(f"redundancy group '{label}' has containers enabled")
+        if group.filesystems.unmount.enabled:
+            reasons.append(f"redundancy group '{label}' has filesystem unmount enabled")
+
+    has_local_owner = any(g.is_local for g in groups) or any(
+        g.is_local for g in config.redundancy_groups
+    )
+    if config.local_shutdown.enabled and (
+        has_local_owner or not groups or config.local_shutdown.trigger_on == "any"
+    ):
+        reasons.append("local_shutdown can power off the Eneru host")
+
+    return sorted(set(reasons))
+
+
+def _exit_on_privilege_errors(config: Config) -> None:
+    """Refuse non-root startup when config declares local-host ownership."""
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None or geteuid() == 0:
+        return
+
+    reasons = _root_required_reasons(config)
+    if not reasons:
+        return
+
+    print("ERROR: Eneru must run as root for local-host orchestration.")
+    for reason in reasons:
+        print(f"  - {reason}")
+    print(
+        "For remote-only container/Kubernetes deployments, use multi-UPS "
+        "configuration with is_local: false and set local_shutdown.enabled: false."
+    )
+    sys.exit(1)
 
 
 def _load_raw_config_for_validation(args):
@@ -96,11 +171,10 @@ def _exit_on_config_errors(config, args):
 def _cmd_run(args):
     """Start the monitoring daemon."""
     config = _load_config(args)
-
-    if args.dry_run:
-        config.behavior.dry_run = True
+    _apply_run_overrides(config, args)
 
     _exit_on_config_errors(config, args)
+    _exit_on_privilege_errors(config)
 
     if config.multi_ups or config.redundancy_groups:
         coordinator = MultiUPSCoordinator(config, exit_after_shutdown=args.exit_after_shutdown)
@@ -863,6 +937,12 @@ def main():
     run_parser.add_argument("-c", "--config", help="Path to configuration file", default=None)
     run_parser.add_argument("--dry-run", action="store_true",
                             help="Run in dry-run mode (overrides config)")
+    run_parser.add_argument("--api", action="store_true",
+                            help="Enable the embedded read-only API")
+    run_parser.add_argument("--api-bind",
+                            help="API listen address (implies --api)")
+    run_parser.add_argument("--api-port", type=int,
+                            help="API listen port (implies --api)")
     run_parser.add_argument("--exit-after-shutdown", action="store_true",
                             help="Exit after completing shutdown sequence")
     run_parser.set_defaults(func=_cmd_run)

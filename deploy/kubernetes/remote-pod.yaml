@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: eneru
+  labels:
+    app: eneru
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+  containers:
+    - name: eneru
+      image: ghcr.io/m4r1k/eneru:5.4.0
+      args:
+        - run
+        - --config
+        - /etc/ups-monitor/config.yaml
+        - --api
+        - --api-bind
+        - 0.0.0.0
+      ports:
+        - name: http
+          containerPort: 9191
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: http
+        initialDelaySeconds: 45
+      readinessProbe:
+        httpGet:
+          path: /ready
+          port: http
+        initialDelaySeconds: 45
+      volumeMounts:
+        - name: config
+          mountPath: /etc/ups-monitor/config.yaml
+          subPath: config.yaml
+          readOnly: true
+        - name: state
+          mountPath: /var/lib/eneru
+        - name: runtime
+          mountPath: /var/run/eneru
+  volumes:
+    - name: config
+      configMap:
+        name: eneru-config
+    - name: state
+      emptyDir: {}
+    - name: runtime
+      emptyDir: {}

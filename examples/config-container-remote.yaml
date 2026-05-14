@@ -1,0 +1,24 @@
+# Remote-only container image starter config.
+# Mount your own file at /etc/ups-monitor/config.yaml in production.
+ups:
+  - name: "UPS@nut-server"
+    display_name: "Container UPS"
+    is_local: false
+
+local_shutdown:
+  enabled: false
+  trigger_on: none
+
+logging:
+  file: null
+  state_file: "/var/run/eneru/ups-monitor.state"
+  battery_history_file: "/var/run/eneru/ups-battery-history"
+  shutdown_flag_file: "/var/run/eneru/ups-shutdown-scheduled"
+
+statistics:
+  db_directory: "/var/lib/eneru"
+
+api:
+  enabled: true
+  bind: "0.0.0.0"
+  port: 9191

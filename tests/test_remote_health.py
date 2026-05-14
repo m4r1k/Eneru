@@ -39,6 +39,15 @@ def test_probe_command_builder_uses_probe_not_shutdown(remote_server):
 
 
 @pytest.mark.unit
+def test_probe_command_builder_uses_ssh_key_path(remote_server):
+    remote_server.ssh_key_path = "/var/lib/eneru/ssh/id_ups_shutdown"
+
+    cmd = build_ssh_probe_command(remote_server, "true")
+
+    assert cmd[0:3] == ["ssh", "-i", "/var/lib/eneru/ssh/id_ups_shutdown"]
+
+
+@pytest.mark.unit
 def test_probe_command_builder_preserves_ssh_option_arguments(remote_server):
     remote_server.ssh_options = [
         "-i",

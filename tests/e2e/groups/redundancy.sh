@@ -31,6 +31,14 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
+eneru() {
+  if [ "${1:-}" = "run" ]; then
+    sudo -E env "PATH=$PATH" eneru "$@"
+  else
+    command eneru "$@"
+  fi
+}
+
 # Timestamped step markers. The redundancy regressions chain many
 # fixed-duration sleeps with docker-compose calls; when CI runners are slow
 # the script can be SIGTERMed mid-flight with no idea where it hung. dbg()

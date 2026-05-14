@@ -39,6 +39,7 @@ concurrency:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   build-packages:
@@ -144,6 +145,42 @@ jobs:
         run: |
           VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager rpm --target .
           ls -la *.rpm
+
+      - name: Build OCI image
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          IMAGE_NAME: ghcr.io/${{ github.repository }}
+        run: |
+          IMAGE_NAME="${IMAGE_NAME,,}"
+          docker build --build-arg VERSION="$VERSION" -t "${IMAGE_NAME}:${VERSION}" .
+
+      - name: Push OCI image to GHCR
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          CHANNEL: ${{ steps.channel.outputs.CHANNEL }}
+          IMAGE_NAME: ghcr.io/${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IMAGE_NAME="${IMAGE_NAME,,}"
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if [ "$CHANNEL" = "stable" ]; then
+            docker tag "${IMAGE_NAME}:${VERSION}" "${IMAGE_NAME}:latest"
+            docker push "${IMAGE_NAME}:${VERSION}"
+            docker push "${IMAGE_NAME}:latest"
+          else
+            docker tag "${IMAGE_NAME}:${VERSION}" "${IMAGE_NAME}:testing"
+            docker push "${IMAGE_NAME}:${VERSION}"
+            docker push "${IMAGE_NAME}:testing"
+          fi
+
+      - name: Verify pushed OCI image
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          IMAGE_NAME: ghcr.io/${{ github.repository }}
+        run: |
+          IMAGE_NAME="${IMAGE_NAME,,}"
+          docker pull "${IMAGE_NAME}:${VERSION}"
+          docker run --rm "${IMAGE_NAME}:${VERSION}" version
 
       - name: Upload packages to GitHub Release
         if: github.event_name == 'release'

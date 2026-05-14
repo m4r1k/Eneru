@@ -997,6 +997,22 @@ redundancy_groups:
         assert any("containers" in m and "is_local" in m for m in errors)
 
     @pytest.mark.unit
+    def test_remote_server_empty_ssh_key_path_rejected(self, tmp_path):
+        """ssh_key_path must be useful when provided."""
+        config = self._write(tmp_path, """
+ups:
+  - name: "UPS-A@10.0.0.1"
+    remote_servers:
+      - name: "nas"
+        enabled: true
+        host: "10.0.0.10"
+        user: "ups"
+        ssh_key_path: ""
+""")
+        errors = _errors(ConfigLoader.validate_config(config))
+        assert any("ssh_key_path" in m and "non-empty" in m for m in errors)
+
+    @pytest.mark.unit
     def test_non_local_with_filesystems_rejected(self, tmp_path):
         """A non-``is_local`` group cannot enable ``filesystems.unmount``."""
         config = self._write(tmp_path, """

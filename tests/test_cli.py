@@ -9,7 +9,7 @@ from unittest.mock import patch, MagicMock
 
 from eneru import (
     main, ConfigLoader, __version__, Config, UPSConfig, UPSGroupConfig, MonitorState,
-    BehaviorConfig, LoggingConfig, LocalShutdownConfig, VMConfig, ContainersConfig,
+    APIConfig, BehaviorConfig, LoggingConfig, LocalShutdownConfig, VMConfig, ContainersConfig,
     FilesystemsConfig, UnmountConfig,
 )
 from test_constants import (
@@ -47,6 +47,63 @@ class TestCLIVersion:
         # top-level help so users discover either spelling.
         assert "tui" in captured.out
         assert re.search(r"\bshutdown\s+remote\b", captured.out)
+
+
+class TestCLIRunOverrides:
+    """Run-subcommand config overrides."""
+
+    @pytest.mark.unit
+    def test_api_bind_and_port_imply_api_enabled(self):
+        from argparse import Namespace
+        from eneru.cli import _apply_run_overrides
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@host"))],
+            api=APIConfig(enabled=False, bind="127.0.0.1", port=9191),
+        )
+        args = Namespace(
+            dry_run=False,
+            api=False,
+            api_bind="0.0.0.0",
+            api_port=9100,
+        )
+
+        _apply_run_overrides(config, args)
+
+        assert config.api.enabled is True
+        assert config.api.bind == "0.0.0.0"
+        assert config.api.port == 9100
+
+    @pytest.mark.unit
+    def test_non_root_remote_only_config_allowed(self):
+        from eneru.cli import _root_required_reasons
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@nut"),
+                is_local=False,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
+        )
+
+        assert _root_required_reasons(config) == []
+
+    @pytest.mark.unit
+    def test_non_root_local_config_reports_root_reasons(self):
+        from eneru.cli import _root_required_reasons
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host", display_name="Rack"),
+                is_local=True,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=True),
+        )
+
+        reasons = _root_required_reasons(config)
+
+        assert "UPS group 'Rack' is marked is_local" in reasons
+        assert "local_shutdown can power off the Eneru host" in reasons
 
 
 class TestCLIManualRemoteShutdown:

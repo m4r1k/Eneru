@@ -15,6 +15,7 @@ from eneru import (
     UPSGroupMonitor,
     MonitorState,
 )
+from eneru.shutdown.containers import _container_id_tokens
 
 
 def _make_container_monitor(
@@ -246,6 +247,27 @@ def test_shutdown_containers_real_stop_call(tmp_path):
 
 
 @pytest.mark.unit
+def test_shutdown_containers_skips_current_container(tmp_path):
+    """The remaining-container phase must not stop Eneru's own container."""
+    monitor = _make_container_monitor(tmp_path, compose_available=False, stop_timeout=20)
+    monitor._current_container_ids = lambda: {"abc123456789"}
+
+    def fake_run(cmd, **kwargs):
+        if cmd[-1] == "-q":
+            return (0, "abc123456789\ndef456\n", "")
+        return (0, "", "")
+
+    with patch("eneru.shutdown.containers.run_command", side_effect=fake_run) as mock_run:
+        monitor._shutdown_containers()
+
+    stop_calls = [c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "stop"]]
+    assert len(stop_calls) == 1
+    cmd = stop_calls[0].args[0]
+    assert "def456" in cmd
+    assert "abc123456789" not in cmd
+
+
+@pytest.mark.unit
 def test_shutdown_containers_ps_failure_logs_warning(tmp_path):
     """A failing 'docker ps' logs a warning and exits the phase."""
     monitor = _make_container_monitor(tmp_path, compose_available=False)
@@ -319,6 +341,40 @@ def test_compose_stacks_success(tmp_path):
     mock_run.assert_called_once()
     cmd = mock_run.call_args.args[0]
     assert cmd == ["docker", "compose", "-f", str(cf), "down"]
+
+
+@pytest.mark.unit
+def test_compose_stacks_skips_file_that_contains_current_container(tmp_path):
+    """Compose down is skipped when the project includes Eneru itself."""
+    cf = tmp_path / "compose.yml"
+    cf.write_text("services: {}\n")
+    monitor = _make_container_monitor(
+        tmp_path,
+        compose_files=[ComposeFileConfig(path=str(cf))],
+    )
+    monitor._current_container_ids = lambda: {"abc123456789"}
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["docker", "compose", "-f"] and cmd[-2:] == ["ps", "-q"]:
+            return (0, "abc123456789\n", "")
+        raise AssertionError(f"compose down should not be called: {cmd}")
+
+    with patch("eneru.shutdown.containers.run_command", side_effect=fake_run):
+        monitor._shutdown_compose_stacks()
+
+
+@pytest.mark.unit
+def test_container_id_tokens_extracts_systemd_scope_ids():
+    """cgroup parsing handles Docker/containerd systemd scope names."""
+    text = (
+        "0::/system.slice/docker-"
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ".scope\n"
+    )
+
+    assert _container_id_tokens(text) == {
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
 
 
 @pytest.mark.unit
