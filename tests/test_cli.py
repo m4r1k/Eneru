@@ -359,12 +359,20 @@ class TestRuntimeContextDetection:
             assert _detect_runtime_context() == "container (Podman)"
 
     @pytest.mark.unit
-    def test_container_env_var_detected(self):
+    def test_container_env_var_detected_known_runtime_capitalized(self):
         from eneru.cli import _detect_runtime_context
 
         with patch("pathlib.Path.exists", return_value=False), \
              patch.dict("os.environ", {"container": "podman"}, clear=False):
-            assert _detect_runtime_context() == "container (podman)"
+            assert _detect_runtime_context() == "container (Podman)"
+
+    @pytest.mark.unit
+    def test_container_env_var_detected_unknown_runtime_passthrough(self):
+        from eneru.cli import _detect_runtime_context
+
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch.dict("os.environ", {"container": "lxc"}, clear=False):
+            assert _detect_runtime_context() == "container (lxc)"
 
     @pytest.mark.unit
     def test_systemd_invocation_id_detected(self):

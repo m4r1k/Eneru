@@ -18,7 +18,7 @@ Use the image for remote-only deployments: Eneru monitors NUT, exposes `/health`
 | `latest` | Latest stable release. Moves on each stable tag. Convenient for samples and quick starts. |
 | `testing` | Latest pre-release (rc/beta/alpha). Moves on each pre-release tag. |
 
-The samples below use `:latest` so they work without per-release edits. Pin to a specific `<version>` for production — `:latest` is convenient but not immutable, and rolling restarts on a moving tag can mix versions. Pre-release builds never become `:latest`; they land at `:testing` and at their explicit `<version>` tag.
+The samples below use `:latest` so they work without per-release edits. Pin to a specific `<version>` for production — `:latest` is convenient but not immutable, and rolling restarts on a moving tag can mix versions. When you pin a version, also flip `imagePullPolicy` from `Always` to `IfNotPresent` so pod restarts don't hit the registry on every reschedule. Pre-release builds never become `:latest`; they land at `:testing` and at their explicit `<version>` tag.
 
 ## Remote-only Docker
 

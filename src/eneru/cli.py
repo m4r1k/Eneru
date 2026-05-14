@@ -124,7 +124,10 @@ def _detect_runtime_context() -> str:
 
     container_env = os.environ.get("container", "").strip().lower()
     if container_env:
-        return f"container ({container_env})"
+        # Normalize known runtime names so the output matches the
+        # /.dockerenv and /run/.containerenv branches above.
+        pretty = {"docker": "Docker", "podman": "Podman"}.get(container_env, container_env)
+        return f"container ({pretty})"
 
     try:
         cgroup_text = Path("/proc/1/cgroup").read_text(encoding="utf-8")

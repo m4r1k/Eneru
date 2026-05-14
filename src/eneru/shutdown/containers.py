@@ -328,28 +328,35 @@ def _container_id_tokens(text: str) -> Set[str]:
     return tokens
 
 
+# Markers whose NEXT path component is the container ID.
+# - Docker: bind-mounts /etc/hostname, /etc/resolv.conf, /etc/hosts from
+#   /var/lib/docker/containers/<id>/...; rootless Docker uses
+#   $XDG_DATA_HOME/docker/containers/<id>/...
+# - Podman: /var/lib/containers/storage/overlay-containers/<id>/userdata/...
+# Containerd (CRI) and K8s pods are intentionally NOT covered: they bind
+# from /var/lib/kubelet/pods/<pod-uuid>/... where the next path component
+# is a UUID, not a container hex ID. K8s deployments still self-detect via
+# the hostname signal (Pod containers default the hostname to the pod name,
+# so users either set --hostname to the container ID or accept the
+# hostname signal not firing).
 _MOUNTINFO_CONTAINER_PATH_MARKERS = (
     "/docker/containers/",
-    "/var/lib/docker/containers/",
-    "/var/lib/containers/storage/overlay-containers/",
     "/containers/storage/overlay-containers/",
-    "/var/lib/containerd/",
-    "/containerd/",
 )
 
 
 def _container_ids_from_mountinfo(text: str) -> Set[str]:
     """Extract container IDs from /proc/self/mountinfo source paths.
 
-    Docker bind-mounts /etc/hostname, /etc/resolv.conf, /etc/hosts from
-    /var/lib/docker/containers/<full-id>/<file>; Podman uses
-    /var/lib/containers/storage/overlay-containers/<full-id>/. Those source
-    paths appear in the mountinfo even when /proc/self/cgroup has been
-    flattened by cgroup namespaces.
+    Reliable on Docker and Podman where /etc/hostname, /etc/resolv.conf,
+    and /etc/hosts are bind-mounted from a container-runtime-owned path
+    that includes the container ID. Survives cgroup-namespace isolation,
+    which is what makes it the right fallback when /proc/self/cgroup
+    collapses to "0::/" on cgroup v2 hosts.
 
     Restricted to known container-runtime path prefixes so unrelated
-    hex-shaped tokens elsewhere in mountinfo (overlay layer hashes, etc.)
-    don't pollute the result set.
+    hex-shaped tokens (overlay layer hashes, etc.) don't pollute the
+    result set.
     """
     tokens: Set[str] = set()
     for line in text.splitlines():
