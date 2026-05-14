@@ -1,7 +1,7 @@
 {
   "title": "Eneru UPS Overview",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 4,
   "refresh": "15s",
   "time": {
     "from": "now-6h",
@@ -18,19 +18,260 @@
         "refresh": 1,
         "current": {},
         "options": []
+      },
+      {
+        "name": "ups",
+        "label": "UPS",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": {"qryType": 1, "query": "label_values(eneru_ups_battery_charge, label)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"selected": true, "text": ["All"], "value": ["$__all"]},
+        "options": []
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "On battery",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "red",
+        "tags": ["power-cut"],
+        "tagKeys": "label",
+        "titleFormat": "On battery — {{label}}",
+        "textFormat": "{{label}} switched to battery",
+        "target": {
+          "expr": "eneru_ups_time_on_battery_seconds{label=~\"$ups\"} > 0",
+          "legendFormat": "{{label}}"
+        }
+      },
+      {
+        "name": "Brownout",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "orange",
+        "tags": ["voltage"],
+        "tagKeys": "label,state",
+        "titleFormat": "Brownout — {{label}}",
+        "textFormat": "{{label}} input voltage below low warning threshold",
+        "target": {
+          "expr": "eneru_ups_voltage_state{state=\"LOW\",label=~\"$ups\"} == 1",
+          "legendFormat": "{{label}}"
+        }
+      },
+      {
+        "name": "Over-voltage",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "orange",
+        "tags": ["voltage"],
+        "tagKeys": "label,state",
+        "titleFormat": "Over-voltage — {{label}}",
+        "textFormat": "{{label}} input voltage above high warning threshold",
+        "target": {
+          "expr": "eneru_ups_voltage_state{state=\"HIGH\",label=~\"$ups\"} == 1",
+          "legendFormat": "{{label}}"
+        }
+      },
+      {
+        "name": "AVR engaged",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "yellow",
+        "tags": ["voltage"],
+        "tagKeys": "label,state",
+        "titleFormat": "AVR {{state}} — {{label}}",
+        "textFormat": "{{label}} AVR engaged ({{state}})",
+        "target": {
+          "expr": "eneru_ups_avr_state{state=~\"BOOST|TRIM\",label=~\"$ups\"} == 1",
+          "legendFormat": "{{label}} {{state}}"
+        }
+      },
+      {
+        "name": "Bypass active",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "purple",
+        "tags": ["bypass"],
+        "tagKeys": "label",
+        "titleFormat": "Bypass active — {{label}}",
+        "textFormat": "{{label}} switched to bypass mode",
+        "target": {
+          "expr": "eneru_ups_bypass_state{state=\"ACTIVE\",label=~\"$ups\"} == 1",
+          "legendFormat": "{{label}}"
+        }
+      },
+      {
+        "name": "Overload",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "red",
+        "tags": ["overload"],
+        "tagKeys": "label",
+        "titleFormat": "Overload — {{label}}",
+        "textFormat": "{{label}} load exceeded UPS rating",
+        "target": {
+          "expr": "eneru_ups_overload_state{state=\"ACTIVE\",label=~\"$ups\"} == 1",
+          "legendFormat": "{{label}}"
+        }
+      },
+      {
+        "name": "Shutdown trigger",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "dark-red",
+        "tags": ["trigger"],
+        "tagKeys": "label",
+        "titleFormat": "Shutdown trigger — {{label}}",
+        "textFormat": "{{label}} shutdown trigger active",
+        "target": {
+          "expr": "eneru_ups_trigger_active{label=~\"$ups\"} == 1",
+          "legendFormat": "{{label}}"
+        }
+      },
+      {
+        "name": "Connection failed",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(140, 140, 140, 1)",
+        "tags": ["connection"],
+        "tagKeys": "label",
+        "titleFormat": "Connection failed — {{label}}",
+        "textFormat": "{{label}} NUT connection failed",
+        "target": {
+          "expr": "eneru_ups_connection_failed{label=~\"$ups\"} == 1",
+          "legendFormat": "{{label}}"
+        }
+      },
+      {
+        "name": "Remote health failed",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "dark-red",
+        "tags": ["remote"],
+        "tagKeys": "server,host",
+        "titleFormat": "Remote health failed — {{server}}",
+        "textFormat": "{{server}} ({{host}}) remote SSH probe failed",
+        "target": {
+          "expr": "eneru_remote_health_status{status=\"FAILED\"} == 1",
+          "legendFormat": "{{server}}"
+        }
       }
     ]
   },
   "panels": [
     {
-      "type": "timeseries",
-      "title": "Battery charge",
+      "type": "gauge",
+      "title": "Battery charge (now)",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 0},
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 0},
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "eneru_ups_battery_charge",
+          "expr": "eneru_ups_battery_charge{label=~\"$ups\"}",
+          "legendFormat": "{{label}}"
+        }
+      ],
+      "options": {"showThresholdLabels": false, "showThresholdMarkers": true},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 20},
+              {"color": "green", "value": 50}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "gauge",
+      "title": "UPS load (now)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 0},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "eneru_ups_load_percent{label=~\"$ups\"}",
+          "legendFormat": "{{label}}"
+        }
+      ],
+      "options": {"showThresholdLabels": false, "showThresholdMarkers": true},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 70},
+              {"color": "red", "value": 90}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Runtime remaining (now)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 0},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "eneru_ups_runtime_seconds{label=~\"$ups\"}",
+          "legendFormat": "{{label}}"
+        }
+      ],
+      "options": {"graphMode": "area", "colorMode": "value", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 120},
+              {"color": "green", "value": 600}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Battery charge",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 6},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "eneru_ups_battery_charge{label=~\"$ups\"}",
           "legendFormat": "{{label}}"
         }
       ],
@@ -40,11 +281,11 @@
       "type": "timeseries",
       "title": "Runtime remaining",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 0},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 6},
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "eneru_ups_runtime_seconds",
+          "expr": "eneru_ups_runtime_seconds{label=~\"$ups\"}",
           "legendFormat": "{{label}}"
         }
       ],
@@ -54,11 +295,11 @@
       "type": "timeseries",
       "title": "UPS load",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 0},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 6},
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "eneru_ups_load_percent",
+          "expr": "eneru_ups_load_percent{label=~\"$ups\"}",
           "legendFormat": "{{label}}"
         }
       ],
@@ -68,26 +309,31 @@
       "type": "timeseries",
       "title": "Input and output voltage",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 7},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "eneru_ups_input_voltage",
+          "expr": "eneru_ups_input_voltage{label=~\"$ups\"}",
           "legendFormat": "{{label}} input"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "eneru_ups_output_voltage",
+          "expr": "eneru_ups_output_voltage{label=~\"$ups\"}",
           "legendFormat": "{{label}} output"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "eneru_ups_voltage_warning_low",
+          "expr": "eneru_ups_nominal_voltage{label=~\"$ups\"}",
+          "legendFormat": "{{label}} nominal"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "eneru_ups_voltage_warning_low{label=~\"$ups\"}",
           "legendFormat": "{{label}} low warning"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "eneru_ups_voltage_warning_high",
+          "expr": "eneru_ups_voltage_warning_high{label=~\"$ups\"}",
           "legendFormat": "{{label}} high warning"
         }
       ],
@@ -97,16 +343,16 @@
       "type": "timeseries",
       "title": "Input and output frequency",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 7},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "eneru_ups_input_frequency_hz",
+          "expr": "eneru_ups_input_frequency_hz{label=~\"$ups\"}",
           "legendFormat": "{{label}} input"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "eneru_ups_output_frequency_hz",
+          "expr": "eneru_ups_output_frequency_hz{label=~\"$ups\"}",
           "legendFormat": "{{label}} output"
         }
       ],
@@ -116,18 +362,18 @@
       "type": "timeseries",
       "title": "Temperature and battery voltage",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 21},
       "targets": [
         {
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "eneru_ups_temperature_celsius",
+          "expr": "eneru_ups_temperature_celsius{label=~\"$ups\"}",
           "legendFormat": "{{label}} temperature"
         },
         {
           "refId": "B",
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "eneru_ups_battery_voltage",
+          "expr": "eneru_ups_battery_voltage{label=~\"$ups\"}",
           "legendFormat": "{{label}} battery voltage"
         }
       ],
@@ -144,49 +390,6 @@
           }
         ]
       }
-    },
-    {
-      "type": "stat",
-      "title": "Power-quality states",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 15},
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "max by (state) (eneru_ups_voltage_state) > 0",
-          "legendFormat": "voltage {{state}}"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "max by (state) (eneru_ups_avr_state) > 0",
-          "legendFormat": "avr {{state}}"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "max by (state) (eneru_ups_bypass_state) > 0",
-          "legendFormat": "bypass {{state}}"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "max by (state) (eneru_ups_overload_state) > 0",
-          "legendFormat": "overload {{state}}"
-        }
-      ],
-      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []}
-    },
-    {
-      "type": "stat",
-      "title": "Remote health failures",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 15},
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum(eneru_remote_health_consecutive_failures)",
-          "legendFormat": "failures"
-        }
-      ],
-      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []}
     }
   ]
 }

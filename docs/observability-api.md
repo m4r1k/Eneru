@@ -1,6 +1,6 @@
 # Observability and API
 
-Eneru v5.3 adds read-only observability endpoints and outbound integrations. None of the API or MQTT surfaces here can trigger UPS shutdown, mutate state, or run commands you didn't already configure for the daemon. Note that **remote-health probes do execute SSH commands** against your configured remote servers — they're restricted to a deliberately-harmless `probe_command` (default `true`) that never touches your `pre_shutdown_commands` or `shutdown_command`. See "Remote SSH health" below for the safety contract.
+Eneru v5.3+ includes read-only observability endpoints and outbound integrations. None of the API or MQTT surfaces here can trigger UPS shutdown, mutate state, or run commands you didn't already configure for the daemon. Note that **remote-health probes do execute SSH commands** against your configured remote servers — they're restricted to a deliberately-harmless `probe_command` (default `true`) that never touches your `pre_shutdown_commands` or `shutdown_command`. See "Remote SSH health" below for the safety contract.
 
 ## API server
 
@@ -19,6 +19,7 @@ Endpoints:
 |----------|---------|--------------|
 | `/health` | API process is alive | 200 |
 | `/ready` | Monitoring has usable UPS visibility | 200 ready / 503 not ready |
+| `/api/v1` | API endpoint index | 200 |
 | `/api/v1/ups` | Current UPS/group status | 200 |
 | `/api/v1/ups/<name>` | One UPS status | 200 / 404 |
 | `/api/v1/ups/<name>/history` | SQLite metric history | 200 / 400 (bad metric) / 404 |
@@ -117,6 +118,17 @@ Useful metric names include:
 | `eneru_remote_health_status` | Last remote health state |
 
 `examples/grafana-dashboard.json` is a starting dashboard for these metrics.
+It is Prometheus-only and ships with a `$ups` template variable plus
+dashboard-wide annotations sourced from existing Prometheus signals
+(`eneru_ups_time_on_battery_seconds > 0` for power cuts, the voltage /
+AVR / bypass / overload state metrics for power-quality events, plus
+`eneru_ups_trigger_active`, `eneru_ups_connection_failed`, and
+`eneru_remote_health_status{status="FAILED"} == 1`). Annotations render as
+coloured regions across every time-series panel, so a power cut is
+visible directly on the Battery-charge and Runtime-remaining curves and a
+brownout is visible directly on the Input/output voltage panel — no extra
+Grafana plugin required. Exact SQLite event rows with their full detail
+text remain available from `/api/v1/events` if you want a tabular feed.
 
 ## Remote SSH health
 

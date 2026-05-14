@@ -258,6 +258,31 @@ def test_remote_health_records_only_status_transitions(tmp_path, remote_server):
 
 
 @pytest.mark.unit
+def test_remote_health_does_not_record_initial_healthy_baseline(tmp_path, remote_server):
+    config = Config()
+    config.remote_health.enabled = True
+    events = []
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[remote_server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+        event_fn=lambda etype, detail, notified: events.append(
+            (etype, detail, notified)
+        ),
+    )
+
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(True, "", 8)):
+        rows = manager.check_once()
+
+    assert rows[0]["status"] == REMOTE_HEALTH_HEALTHY
+    assert events == []
+
+
+@pytest.mark.unit
 def test_remote_health_probe_command_is_validated_once(tmp_path, remote_server):
     config = Config()
     config.remote_health.enabled = True

@@ -675,11 +675,11 @@ echo "PASS: manual confirmed remote shutdown reached selected target"
 )
 
 # ======================================================================
-# Test 43: Embedded API health/readiness/metrics
+# Test 43: Embedded API health/readiness/metrics/index
 # ======================================================================
 (
 echo ""
-echo ">>> Running: Test 43: Embedded API health/readiness/metrics"
+echo ">>> Running: Test 43: Embedded API health/readiness/metrics/index"
 
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
 timeout 12s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml \
@@ -712,6 +712,21 @@ if ! poll_endpoint http://127.0.0.1:9100/metrics /tmp/test43-metrics.txt; then
   cat /tmp/test43-daemon.log
   exit 1
 fi
+if ! poll_endpoint http://127.0.0.1:9100/api/v1 /tmp/test43-index.json; then
+  echo "FAIL: /api/v1 never responded within poll budget"
+  cat /tmp/test43-daemon.log
+  exit 1
+fi
+
+MISSING_UPS_STATUS=$(curl -sS \
+  -o /tmp/test43-missing-ups.json \
+  -w "%{http_code}" \
+  http://127.0.0.1:9100/api/v1/ups/missing)
+if [ "$MISSING_UPS_STATUS" != "404" ]; then
+  echo "FAIL: missing UPS endpoint returned HTTP $MISSING_UPS_STATUS, expected 404"
+  cat /tmp/test43-missing-ups.json
+  exit 1
+fi
 
 if ! grep -q "eneru_up 1" /tmp/test43-metrics.txt; then
   echo "FAIL: metrics endpoint missing eneru_up"
@@ -728,11 +743,21 @@ if ! grep -q "eneru_ups_voltage_state" /tmp/test43-metrics.txt; then
   cat /tmp/test43-metrics.txt
   exit 1
 fi
+if ! grep -q '"/api/v1/events"' /tmp/test43-index.json; then
+  echo "FAIL: API index missing /api/v1/events"
+  cat /tmp/test43-index.json
+  exit 1
+fi
+if ! grep -q '"availableEndpoints"' /tmp/test43-missing-ups.json; then
+  echo "FAIL: API 404 missing availableEndpoints"
+  cat /tmp/test43-missing-ups.json
+  exit 1
+fi
 
 kill "$DAEMON_PID" 2>/dev/null || true
 wait "$DAEMON_PID" 2>/dev/null || true
 trap - EXIT
-echo "PASS: embedded API health/readiness/metrics responded"
+echo "PASS: embedded API health/readiness/metrics/index responded"
 )
 
 # ======================================================================

@@ -24,6 +24,32 @@ class APIBadRequest(ValueError):
     """Raised when a client supplies invalid API query parameters."""
 
 
+API_ENDPOINTS = (
+    {"path": "/health", "description": "Liveness probe"},
+    {"path": "/ready", "description": "Readiness probe with fresh UPS data"},
+    {"path": "/metrics", "description": "Prometheus metrics when enabled"},
+    {"path": "/api/v1", "description": "API endpoint index"},
+    {"path": "/api/v1/ups", "description": "Current UPS and redundancy status"},
+    {"path": "/api/v1/ups/{name}", "description": "Current status for one UPS"},
+    {
+        "path": "/api/v1/ups/{name}/history",
+        "description": "SQLite metric history for one UPS",
+        "query": {
+            "metric": "charge|runtime|load|voltage|depletion",
+            "from": "unix timestamp",
+            "to": "unix timestamp",
+        },
+    },
+    {
+        "path": "/api/v1/events",
+        "description": "Recent SQLite event rows",
+        "query": {"limit": "1..10000", "verbosity": "0..2"},
+    },
+    {"path": "/api/v1/config", "description": "Sanitized configuration summary"},
+    {"path": "/api/v1/remote-health", "description": "Remote SSH health rows"},
+)
+
+
 class EneruAPIServer:
     """Small stdlib HTTP server for read-only observability endpoints."""
 
@@ -155,8 +181,11 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
         if path == "/metrics":
             if not self.api_config.prometheus.enabled:
-                return 404, "application/json", self._error("NOT_FOUND", "Metrics disabled")
+                return 404, "application/json", self._not_found("Metrics disabled")
             return 200, "text/plain", render_prometheus_metrics(self.api_source)
+
+        if path == "/api/v1":
+            return 200, "application/json", self._api_index()
 
         if path == "/api/v1/ups":
             return 200, "application/json", collect_status(self.api_source)
@@ -168,7 +197,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 payload = collect_status(self.api_source)
                 row = find_status(payload, ups_name)
                 if row is None:
-                    return 404, "application/json", self._error("NOT_FOUND", "UPS not found")
+                    return 404, "application/json", self._not_found("UPS not found")
                 return 200, "application/json", row
             if len(parts) == 6 and parts[5] == "history":
                 metric = (qs.get("metric") or ["charge"])[0]
@@ -182,7 +211,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 start = _parse_int_param(qs, "from", end - 3600)
                 rows = query_history(self.api_config, ups_name, metric, start, end)
                 if rows is None:
-                    return 404, "application/json", self._error("NOT_FOUND", "UPS not found")
+                    return 404, "application/json", self._not_found("UPS not found")
                 return 200, "application/json", {
                     "ups": ups_name, "metric": metric, "from": start,
                     "to": end, "data": rows,
@@ -206,11 +235,34 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             rows = live_remote_health(self.api_source, self.api_config)
             return 200, "application/json", {"generatedAt": time.time(), "servers": rows}
 
-        return 404, "application/json", self._error("NOT_FOUND", "Endpoint not found")
+        return 404, "application/json", self._not_found("Endpoint not found")
 
     @staticmethod
     def _error(code: str, message: str) -> Dict[str, Dict[str, str]]:
         return {"error": {"code": code, "message": message}}
+
+    def _not_found(self, message: str) -> Dict[str, Any]:
+        payload = self._error("NOT_FOUND", message)
+        payload["availableEndpoints"] = self._available_endpoints()
+        return payload
+
+    def _api_index(self) -> Dict[str, Any]:
+        return {
+            "generatedAt": time.time(),
+            "version": "v1",
+            "endpoints": self._available_endpoints(),
+        }
+
+    def _available_endpoints(self) -> List[Dict[str, Any]]:
+        # Don't advertise /metrics when Prometheus is disabled — the route
+        # genuinely returns 404 in that mode, so listing it would mislead
+        # clients that read availableEndpoints to discover what to call.
+        prometheus_enabled = bool(getattr(self.api_config.prometheus, "enabled", False))
+        return [
+            dict(endpoint)
+            for endpoint in API_ENDPOINTS
+            if endpoint["path"] != "/metrics" or prometheus_enabled
+        ]
 
 
 def _parse_int_param(
