@@ -1,6 +1,6 @@
 # Observability and API
 
-Eneru v5.3 adds read-only observability endpoints and outbound integrations. None of the API or MQTT surfaces here can trigger UPS shutdown, mutate state, or run commands you didn't already configure for the daemon. Note that **remote-health probes do execute SSH commands** against your configured remote servers — they're restricted to a deliberately-harmless `probe_command` (default `true`) that never touches your `pre_shutdown_commands` or `shutdown_command`. See "Remote SSH health" below for the safety contract.
+Eneru v5.3+ includes read-only observability endpoints and outbound integrations. None of the API or MQTT surfaces here can trigger UPS shutdown, mutate state, or run commands you didn't already configure for the daemon. Note that **remote-health probes do execute SSH commands** against your configured remote servers — they're restricted to a deliberately-harmless `probe_command` (default `true`) that never touches your `pre_shutdown_commands` or `shutdown_command`. See "Remote SSH health" below for the safety contract.
 
 ## API server
 
@@ -19,6 +19,7 @@ Endpoints:
 |----------|---------|--------------|
 | `/health` | API process is alive | 200 |
 | `/ready` | Monitoring has usable UPS visibility | 200 ready / 503 not ready |
+| `/api/v1` | API endpoint index | 200 |
 | `/api/v1/ups` | Current UPS/group status | 200 |
 | `/api/v1/ups/<name>` | One UPS status | 200 / 404 |
 | `/api/v1/ups/<name>/history` | SQLite metric history | 200 / 400 (bad metric) / 404 |
@@ -117,6 +118,11 @@ Useful metric names include:
 | `eneru_remote_health_status` | Last remote health state |
 
 `examples/grafana-dashboard.json` is a starting dashboard for these metrics.
+It uses Prometheus only, so it shows event-like signals such as active
+shutdown triggers, failed UPS connections, non-healthy remote SSH states, and
+power-quality state changes. Exact SQLite event rows remain available from
+`/api/v1/events`; use a Grafana JSON/API datasource plugin if you want those
+rows rendered as a table or annotations inside Grafana.
 
 ## Remote SSH health
 

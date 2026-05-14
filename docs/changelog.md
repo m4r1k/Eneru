@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.4.0-rc0] - 2026-05-14
+
+Release candidate for the v5.4 observability polish pass.
+
+### Changed
+- `/api/v1` now returns an endpoint index, and JSON 404 responses include the same available-endpoints list.
+- The reference Grafana dashboard now renders power-quality state metrics as a timeline instead of a set of ambiguous stat values, and adds Prometheus-backed event-signal coverage for shutdown triggers, failed UPS connections, and non-healthy remote targets.
+
+### Fixed
+- Remote-health startup probes no longer record a noisy `REMOTE_HEALTH_HEALTHY` event for the initial `UNKNOWN -> HEALTHY` baseline next to every `DAEMON_START`. Startup failures and later failure/recovery transitions are still recorded.
+- The SVG architecture diagram viewBox now matches the drawn content width, removing the blank right-side margin in rendered docs.
+
+---
+
 ## [5.3.0] - 2026-05-10
 
 Stable v5.3 release. Drop-in for v5.2 users in most cases — see Migration notes below for two behaviour changes that may need a small adjustment to existing dashboards or RPM-based MQTT setups.

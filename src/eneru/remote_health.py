@@ -305,6 +305,12 @@ class RemoteHealthManager:
         """Record stable remote-health state transitions in SQLite events."""
         if self.event_fn is None or current == previous:
             return
+        # UNKNOWN -> HEALTHY is the initial baseline after daemon start,
+        # not an operator-actionable state change. Keep startup failures
+        # and later recoveries visible, but do not add a healthy row next
+        # to every DAEMON_START event.
+        if previous == REMOTE_HEALTH_UNKNOWN and current == REMOTE_HEALTH_HEALTHY:
+            return
         detail = (
             f"{self.group_label}/{display} ({host}) "
             f"{previous} -> {current}"

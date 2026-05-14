@@ -311,6 +311,11 @@ def test_api_core_routes(minimal_config, monitor):
     assert status == 200
     assert payload["ups"][0]["name"] == "TestUPS@localhost"
 
+    handler.path = "/api/v1"
+    status, _, payload = handler._route()
+    assert status == 200
+    assert any(row["path"] == "/api/v1/events" for row in payload["endpoints"])
+
     handler.path = "/api/v1/ups/TestUPS-localhost"
     status, _, payload = handler._route()
     assert status == 200
@@ -320,12 +325,14 @@ def test_api_core_routes(minimal_config, monitor):
     status, _, payload = handler._route()
     assert status == 404
     assert payload["error"]["code"] == "NOT_FOUND"
+    assert any(row["path"] == "/api/v1/ups" for row in payload["availableEndpoints"])
 
     minimal_config.prometheus.enabled = False
     handler.path = "/metrics"
     status, _, payload = handler._route()
     assert status == 404
     assert payload["error"]["message"] == "Metrics disabled"
+    assert any(row["path"] == "/metrics" for row in payload["availableEndpoints"])
 
 
 @pytest.mark.unit
@@ -393,6 +400,22 @@ def test_api_history_rejects_unknown_metric(minimal_config):
     assert status == 400
     assert content_type == "application/json"
     assert payload["error"]["code"] == "INVALID_REQUEST"
+
+
+@pytest.mark.unit
+def test_api_history_404_includes_endpoint_index(minimal_config):
+    handler = object.__new__(EneruAPIHandler)
+    handler.path = "/api/v1/ups/missing/history"
+    handler.api_config = minimal_config
+    handler.api_source = MagicMock()
+
+    status, content_type, payload = handler._route()
+
+    assert status == 404
+    assert content_type == "application/json"
+    assert payload["error"]["code"] == "NOT_FOUND"
+    assert any(row["path"] == "/api/v1/ups/{name}/history"
+               for row in payload["availableEndpoints"])
 
 
 @pytest.mark.unit

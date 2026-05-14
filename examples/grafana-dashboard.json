@@ -1,7 +1,7 @@
 {
   "title": "Eneru UPS Overview",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "15s",
   "time": {
     "from": "now-6h",
@@ -146,47 +146,80 @@
       }
     },
     {
-      "type": "stat",
-      "title": "Power-quality states",
+      "type": "state-timeline",
+      "title": "Power-quality state timeline",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 15},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 15},
       "targets": [
         {
+          "refId": "A",
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "max by (state) (eneru_ups_voltage_state) > 0",
-          "legendFormat": "voltage {{state}}"
+          "expr": "eneru_ups_voltage_state == 1",
+          "legendFormat": "{{label}} voltage {{state}}"
         },
         {
+          "refId": "B",
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "max by (state) (eneru_ups_avr_state) > 0",
-          "legendFormat": "avr {{state}}"
+          "expr": "eneru_ups_avr_state == 1",
+          "legendFormat": "{{label}} avr {{state}}"
         },
         {
+          "refId": "C",
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "max by (state) (eneru_ups_bypass_state) > 0",
-          "legendFormat": "bypass {{state}}"
+          "expr": "eneru_ups_bypass_state == 1",
+          "legendFormat": "{{label}} bypass {{state}}"
         },
         {
+          "refId": "D",
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "max by (state) (eneru_ups_overload_state) > 0",
-          "legendFormat": "overload {{state}}"
+          "expr": "eneru_ups_overload_state == 1",
+          "legendFormat": "{{label}} overload {{state}}"
         }
       ],
-      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []}
+      "options": {"mergeValues": true, "showValue": "auto"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "max": 1}, "overrides": []}
     },
     {
       "type": "stat",
       "title": "Remote health failures",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 15},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 23},
       "targets": [
         {
+          "refId": "A",
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
           "expr": "sum(eneru_remote_health_consecutive_failures)",
           "legendFormat": "failures"
         }
       ],
       "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "Event signals",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 16, "x": 8, "y": 23},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "eneru_ups_trigger_active",
+          "legendFormat": "{{label}} trigger active"
+        },
+        {
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "eneru_ups_connection_failed",
+          "legendFormat": "{{label}} connection failed"
+        },
+        {
+          "refId": "C",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "eneru_remote_health_status{status!=\"HEALTHY\"}",
+          "legendFormat": "{{server}} remote {{status}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "max": 1}, "overrides": []}
     }
   ]
 }

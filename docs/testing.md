@@ -29,8 +29,8 @@ Eneru uses unit tests, package-install tests, and end-to-end tests with real NUT
    ╱─────────────────────────────────────────────╲
 ```
 
-The pyramid is intentionally bottom-heavy. As of the v5.3 stable pass,
-the local pytest suite contains 1162 tests. E2E tests are fewer, but they
+The pyramid is intentionally bottom-heavy. As of the v5.4.0-rc0 pass,
+the local pytest suite contains 1183 tests. E2E tests are fewer, but they
 exercise the real service boundaries where packaging, NUT, SSH, Docker,
 filesystem, and CLI assumptions meet.
 
@@ -163,7 +163,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 45 numb
 | 40 | UPS Single | Remote SSH healthcheck reaches the test target without sending shutdown commands |
 | 41 | CLI | Manual remote shutdown dry-run executes no configured remote commands |
 | 42 | CLI | Manual confirmed remote shutdown reaches only the selected target |
-| 43 | UPS Single | `/health`, `/ready`, and `/metrics` respond from the embedded API |
+| 43 | UPS Single | `/health`, `/ready`, `/metrics`, `/api/v1`, and JSON 404 endpoint discovery respond from the embedded API |
 | 44 | UPS Single | An unreachable remote target is reported as a bounded best-effort failure instead of stalling shutdown |
 | 45 | UPS Single | MQTT status publishing reaches the broker and includes power-quality fields |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
