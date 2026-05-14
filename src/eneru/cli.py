@@ -100,6 +100,59 @@ def _root_required_reasons(config: Config) -> list:
     return sorted(set(reasons))
 
 
+def _detect_runtime_context() -> str:
+    """Best-effort runtime-context label for the current process.
+
+    Returns one of:
+      - ``"container (Docker)"`` when ``/.dockerenv`` exists.
+      - ``"container (Podman)"`` when ``/run/.containerenv`` exists.
+      - ``"container"`` for other OCI runtimes (lxc, systemd-nspawn, etc.)
+        detected via the ``container`` env var or container paths in
+        ``/proc/1/cgroup`` or ``/proc/self/mountinfo``.
+      - ``"systemd service"`` when running under a systemd unit
+        (``INVOCATION_ID`` env var) and not in a container.
+      - ``"bare process"`` otherwise.
+
+    Container detection takes precedence: a systemd unit running inside
+    a container is reported as a container, since that is the user-visible
+    fact when troubleshooting.
+    """
+    if Path("/.dockerenv").exists():
+        return "container (Docker)"
+    if Path("/run/.containerenv").exists():
+        return "container (Podman)"
+
+    container_env = os.environ.get("container", "").strip().lower()
+    if container_env:
+        return f"container ({container_env})"
+
+    try:
+        cgroup_text = Path("/proc/1/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        cgroup_text = ""
+    if any(marker in cgroup_text for marker in ("docker", "kubepods", "containerd", "lxc")):
+        return "container"
+
+    try:
+        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+    except OSError:
+        mountinfo = ""
+    if "/docker/containers/" in mountinfo or "/containers/storage/overlay-containers/" in mountinfo:
+        return "container"
+
+    if os.environ.get("INVOCATION_ID"):
+        return "systemd service"
+
+    try:
+        comm = Path("/proc/1/comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        comm = ""
+    if comm == "systemd" and os.environ.get("JOURNAL_STREAM"):
+        return "systemd service"
+
+    return "bare process"
+
+
 def _exit_on_privilege_errors(config: Config) -> None:
     """Refuse non-root startup when config declares local-host ownership."""
     geteuid = getattr(os, "geteuid", None)
@@ -275,6 +328,7 @@ def _cmd_validate(args):
     exit_code = 0
 
     print(f"Eneru v{__version__}")
+    print(f"  Runtime context: {_detect_runtime_context()}")
 
     multi_ups = config.multi_ups
     if multi_ups:

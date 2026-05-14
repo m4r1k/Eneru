@@ -3,8 +3,8 @@
 Eneru v5.4 publishes one OCI image:
 
 ```bash
-docker pull ghcr.io/m4r1k/eneru:5.4.0
-podman pull ghcr.io/m4r1k/eneru:5.4.0
+docker pull ghcr.io/m4r1k/eneru:latest
+podman pull ghcr.io/m4r1k/eneru:latest
 ```
 
 Use the image for remote-only deployments: Eneru monitors NUT, exposes `/health` and `/ready`, and shuts down remote servers over SSH. Native deb/rpm packages remain the recommended path when Eneru must shut down the local host, local VMs, local containers, or local filesystems.
@@ -13,9 +13,12 @@ Use the image for remote-only deployments: Eneru monitors NUT, exposes `/health`
 
 | Tag | Meaning |
 |-----|---------|
-| `5.4.0`, `5.4.0-rc2`, etc. | Exact release |
-| `latest` | Latest stable release |
-| `testing` | Latest pre-release |
+| `5.4.0`, `5.4.1`, etc. | Exact stable release. Immutable. |
+| `5.4.0-rc1`, `5.4.0-rc2`, etc. | Exact pre-release. Immutable. |
+| `latest` | Latest stable release. Moves on each stable tag. Convenient for samples and quick starts. |
+| `testing` | Latest pre-release (rc/beta/alpha). Moves on each pre-release tag. |
+
+The samples below use `:latest` so they work without per-release edits. Pin to a specific `<version>` for production — `:latest` is convenient but not immutable, and rolling restarts on a moving tag can mix versions. Pre-release builds never become `:latest`; they land at `:testing` and at their explicit `<version>` tag.
 
 ## Remote-only Docker
 
@@ -29,7 +32,7 @@ docker run -d --name eneru \
   -v /srv/eneru/state:/var/lib/eneru \
   -v /srv/eneru/run:/var/run/eneru \
   -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro \
-  ghcr.io/m4r1k/eneru:5.4.0 \
+  ghcr.io/m4r1k/eneru:latest \
   run --config /etc/ups-monitor/config.yaml \
   --api --api-bind 0.0.0.0 --api-port 9191
 ```
@@ -72,7 +75,7 @@ podman run -d --name eneru \
   -v /srv/eneru/state:/var/lib/eneru:Z \
   -v /srv/eneru/run:/var/run/eneru:Z \
   -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z \
-  ghcr.io/m4r1k/eneru:5.4.0 \
+  ghcr.io/m4r1k/eneru:latest \
   run --config /etc/ups-monitor/config.yaml \
   --api --api-bind 0.0.0.0
 ```
@@ -95,7 +98,7 @@ docker run -d --name eneru \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro \
   -v /srv/eneru/state:/var/lib/eneru \
-  ghcr.io/m4r1k/eneru:5.4.0
+  ghcr.io/m4r1k/eneru:latest
 ```
 
 Eneru auto-detects and skips its own container during the remaining-container stop phase. If a configured compose file includes the Eneru container, Eneru skips `compose down` for that file to avoid killing itself.
@@ -115,15 +118,24 @@ kubectl create secret generic eneru-ssh-key \
   --from-file=id_ups_shutdown=/srv/eneru/ssh/id_ups_shutdown
 ```
 
-The image logs to stdout. Use:
+## Logging
 
-```bash
-kubectl logs deploy/eneru
-```
+Inside a container Eneru does not use journald. Logs go to two places:
 
-For Docker or Podman:
+1. **stdout / stderr**, captured by the container runtime. Tail with:
 
-```bash
-docker logs eneru
-podman logs eneru
-```
+   ```bash
+   docker logs -f eneru
+   podman logs -f eneru
+   kubectl logs -f deploy/eneru
+   ```
+
+2. **`/var/log/eneru/ups-monitor.log`** when `logging.file` points there. Mount a persistent volume at `/var/log/eneru` so the file survives container restarts and gives you a forensic timeline after the runtime log buffer rotates away. The container `eneru` user is UID/GID 10001, so the volume must be group-writable by 10001 — `fsGroup: 10001` in the pod `securityContext` (the sample manifests do this) is the simplest way.
+
+   Docker bind mount:
+
+   ```bash
+   -v /srv/eneru/logs:/var/log/eneru:Z
+   ```
+
+   The Kubernetes samples mount an `emptyDir` at `/var/log/eneru` so the path exists; swap in a `PersistentVolumeClaim` if you want the log file to survive pod rescheduling.

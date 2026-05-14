@@ -10,7 +10,7 @@ from unittest.mock import patch, MagicMock
 from eneru import (
     main, ConfigLoader, __version__, Config, UPSConfig, UPSGroupConfig, MonitorState,
     APIConfig, BehaviorConfig, LoggingConfig, LocalShutdownConfig, VMConfig, ContainersConfig,
-    FilesystemsConfig, UnmountConfig,
+    FilesystemsConfig, UnmountConfig, RedundancyGroupConfig,
 )
 from test_constants import (
     TEST_DISCORD_APPRISE_URL,
@@ -104,6 +104,297 @@ class TestCLIRunOverrides:
 
         assert "UPS group 'Rack' is marked is_local" in reasons
         assert "local_shutdown can power off the Eneru host" in reasons
+
+    @pytest.mark.unit
+    def test_api_flag_alone_implies_enabled(self):
+        from argparse import Namespace
+        from eneru.cli import _apply_run_overrides
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@host"))],
+            api=APIConfig(enabled=False, bind="127.0.0.1", port=9191),
+        )
+        args = Namespace(dry_run=False, api=True, api_bind=None, api_port=None)
+
+        _apply_run_overrides(config, args)
+
+        assert config.api.enabled is True
+        # bind and port unchanged when not provided
+        assert config.api.bind == "127.0.0.1"
+        assert config.api.port == 9191
+
+    @pytest.mark.unit
+    def test_api_bind_alone_implies_enabled(self):
+        from argparse import Namespace
+        from eneru.cli import _apply_run_overrides
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@host"))],
+            api=APIConfig(enabled=False, bind="127.0.0.1", port=9191),
+        )
+        args = Namespace(dry_run=False, api=False, api_bind="0.0.0.0", api_port=None)
+
+        _apply_run_overrides(config, args)
+
+        assert config.api.enabled is True
+        assert config.api.bind == "0.0.0.0"
+        assert config.api.port == 9191
+
+    @pytest.mark.unit
+    def test_api_port_alone_implies_enabled(self):
+        from argparse import Namespace
+        from eneru.cli import _apply_run_overrides
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@host"))],
+            api=APIConfig(enabled=False, bind="127.0.0.1", port=9191),
+        )
+        args = Namespace(dry_run=False, api=False, api_bind=None, api_port=9100)
+
+        _apply_run_overrides(config, args)
+
+        assert config.api.enabled is True
+        assert config.api.bind == "127.0.0.1"
+        assert config.api.port == 9100
+
+    @pytest.mark.unit
+    def test_cli_overrides_yaml_api_disabled(self):
+        """CLI flags must flip api.enabled True even when YAML had it False.
+
+        This is the container-healthcheck story: image users should not need
+        to author or mount a YAML to enable /health.
+        """
+        from argparse import Namespace
+        from eneru.cli import _apply_run_overrides
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@host"))],
+            api=APIConfig(enabled=False, bind="127.0.0.1", port=9191),
+        )
+        args = Namespace(dry_run=False, api=True, api_bind="0.0.0.0", api_port=9191)
+
+        _apply_run_overrides(config, args)
+
+        assert config.api.enabled is True
+
+
+class TestPrivilegeChecks:
+    """Root-vs-non-root startup gating."""
+
+    @pytest.mark.unit
+    def test_exit_on_privilege_errors_passes_for_root(self):
+        from eneru.cli import _exit_on_privilege_errors
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"), is_local=True,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=True),
+        )
+
+        with patch("eneru.cli.os.geteuid", return_value=0, create=True):
+            _exit_on_privilege_errors(config)  # Must not raise
+
+    @pytest.mark.unit
+    def test_exit_on_privilege_errors_passes_when_geteuid_absent(self):
+        """Non-Unix platforms (no os.geteuid) skip the check."""
+        from eneru.cli import _exit_on_privilege_errors
+        import eneru.cli
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"), is_local=True,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=True),
+        )
+
+        # Replace os.geteuid with a sentinel to simulate a platform that
+        # doesn't expose it; getattr in cli.py returns None and short-circuits.
+        original_geteuid = getattr(eneru.cli.os, "geteuid", None)
+        try:
+            if original_geteuid is not None:
+                del eneru.cli.os.geteuid
+            _exit_on_privilege_errors(config)  # Must not raise
+        finally:
+            if original_geteuid is not None:
+                eneru.cli.os.geteuid = original_geteuid
+
+    @pytest.mark.unit
+    def test_exit_on_privilege_errors_exits_for_non_root_with_local_features(self, capsys):
+        from eneru.cli import _exit_on_privilege_errors
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host", display_name="Rack"),
+                is_local=True,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=True),
+        )
+
+        with patch("eneru.cli.os.geteuid", return_value=1000, create=True):
+            with pytest.raises(SystemExit) as exc_info:
+                _exit_on_privilege_errors(config)
+        assert exc_info.value.code == 1
+
+        out = capsys.readouterr().out
+        assert "must run as root" in out
+        assert "is marked is_local" in out
+
+    @pytest.mark.unit
+    def test_exit_on_privilege_errors_passes_for_non_root_remote_only(self):
+        from eneru.cli import _exit_on_privilege_errors
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@nut"), is_local=False,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
+        )
+
+        with patch("eneru.cli.os.geteuid", return_value=1000, create=True):
+            _exit_on_privilege_errors(config)  # Must not raise
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("group_kwargs,expected_substring", [
+        ({"is_local": True}, "is marked is_local"),
+        ({"virtual_machines": VMConfig(enabled=True)}, "virtual_machines enabled"),
+        ({"containers": ContainersConfig(enabled=True)}, "containers enabled"),
+        ({"filesystems": FilesystemsConfig(unmount=UnmountConfig(enabled=True))},
+         "filesystem unmount enabled"),
+    ])
+    def test_root_required_reasons_per_ups_group_category(self, group_kwargs, expected_substring):
+        """Each local feature on a UPS group independently triggers a root-required reason."""
+        from eneru.cli import _root_required_reasons
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host", display_name="Rack"),
+                **group_kwargs,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
+        )
+        reasons = _root_required_reasons(config)
+        assert any(expected_substring in r for r in reasons), reasons
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("group_kwargs,expected_substring", [
+        ({"is_local": True}, "is marked is_local"),
+        ({"virtual_machines": VMConfig(enabled=True)}, "virtual_machines enabled"),
+        ({"containers": ContainersConfig(enabled=True)}, "containers enabled"),
+        ({"filesystems": FilesystemsConfig(unmount=UnmountConfig(enabled=True))},
+         "filesystem unmount enabled"),
+    ])
+    def test_root_required_reasons_per_redundancy_group_category(self, group_kwargs, expected_substring):
+        """Each local feature on a redundancy group independently triggers a reason."""
+        from eneru.cli import _root_required_reasons
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@nut"), is_local=False,
+            )],
+            redundancy_groups=[RedundancyGroupConfig(
+                name="rack-a",
+                **group_kwargs,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
+        )
+        reasons = _root_required_reasons(config)
+        assert any(expected_substring in r for r in reasons), reasons
+
+    @pytest.mark.unit
+    def test_local_shutdown_dormant_does_not_require_root(self):
+        """trigger_on='none' + all-remote groups means local_shutdown never fires.
+
+        Lock this in so a future "simplification" of the privilege check
+        doesn't accidentally start requiring root for a dormant configuration.
+        """
+        from eneru.cli import _root_required_reasons
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@nut"), is_local=False,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=True, trigger_on="none"),
+        )
+        reasons = _root_required_reasons(config)
+        assert reasons == []
+
+    @pytest.mark.unit
+    def test_local_shutdown_with_local_owner_requires_root_even_if_trigger_on_none(self):
+        """trigger_on='none' is the multi-UPS knob; with a local-owner group the
+        local UPS can still drive the host to shutdown when it goes critical."""
+        from eneru.cli import _root_required_reasons
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"), is_local=True,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=True, trigger_on="none"),
+        )
+        reasons = _root_required_reasons(config)
+        assert any("local_shutdown" in r for r in reasons)
+
+
+class TestRuntimeContextDetection:
+    """`eneru validate` reports the runtime context (container/systemd/bare)."""
+
+    @pytest.mark.unit
+    def test_dockerenv_marker_detected(self):
+        from eneru.cli import _detect_runtime_context
+
+        def fake_exists(self):
+            return str(self) == "/.dockerenv"
+
+        with patch("pathlib.Path.exists", new=fake_exists):
+            assert _detect_runtime_context() == "container (Docker)"
+
+    @pytest.mark.unit
+    def test_podman_containerenv_marker_detected(self):
+        from eneru.cli import _detect_runtime_context
+
+        def fake_exists(self):
+            return str(self) == "/run/.containerenv"
+
+        with patch("pathlib.Path.exists", new=fake_exists):
+            assert _detect_runtime_context() == "container (Podman)"
+
+    @pytest.mark.unit
+    def test_container_env_var_detected(self):
+        from eneru.cli import _detect_runtime_context
+
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch.dict("os.environ", {"container": "podman"}, clear=False):
+            assert _detect_runtime_context() == "container (podman)"
+
+    @pytest.mark.unit
+    def test_systemd_invocation_id_detected(self):
+        from eneru.cli import _detect_runtime_context
+
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch("pathlib.Path.read_text", side_effect=OSError), \
+             patch.dict("os.environ", {"INVOCATION_ID": "abc123", "container": ""}, clear=True):
+            assert _detect_runtime_context() == "systemd service"
+
+    @pytest.mark.unit
+    def test_bare_process_when_no_signals(self):
+        from eneru.cli import _detect_runtime_context
+
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch("pathlib.Path.read_text", side_effect=OSError), \
+             patch.dict("os.environ", {}, clear=True):
+            assert _detect_runtime_context() == "bare process"
+
+    @pytest.mark.unit
+    def test_container_takes_precedence_over_systemd(self):
+        """A systemd unit running inside a container should be reported as container."""
+        from eneru.cli import _detect_runtime_context
+
+        def fake_exists(self):
+            return str(self) == "/.dockerenv"
+
+        with patch("pathlib.Path.exists", new=fake_exists), \
+             patch.dict("os.environ", {"INVOCATION_ID": "abc"}, clear=False):
+            assert _detect_runtime_context() == "container (Docker)"
 
 
 class TestCLIManualRemoteShutdown:

@@ -18,10 +18,23 @@ class ContainerShutdownMixin:
     def _current_container_ids(self) -> Set[str]:
         """Best-effort IDs for the container currently running Eneru.
 
-        Docker normally sets the hostname to the short container ID.
-        Container runtimes also expose the full ID in cgroup paths. We
-        collect both forms and later compare by prefix so a short `ps -q`
-        result still matches a full cgroup ID.
+        Three signals, walked in order:
+
+        1. ``socket.gethostname()`` — Docker and Podman default the
+           container hostname to the short container ID. Fails when the
+           user passes ``--hostname`` or sets ``container_name`` in
+           Compose.
+        2. ``/proc/self/cgroup`` and ``/proc/1/cgroup`` — works on
+           cgroup v1 and on cgroup v2 hosts that don't enable cgroup
+           namespaces. Returns ``0::/`` (and therefore no token) on
+           modern Docker (>= 20.10 with cgroupns=private, the default
+           for cgroup v2 hosts).
+        3. ``/proc/self/mountinfo`` — Docker bind-mounts ``/etc/hostname``,
+           ``/etc/resolv.conf``, and ``/etc/hosts`` from
+           ``/var/lib/docker/containers/<full-id>/...``; Podman uses a
+           similar convention under ``/var/lib/containers/...``. Those
+           source paths survive cgroupns and are the most reliable
+           fallback when cgroup tokens go away.
         """
         ids: Set[str] = set()
 
@@ -36,6 +49,13 @@ class ContainerShutdownMixin:
                 continue
             for token in _container_id_tokens(text):
                 ids.add(token)
+
+        try:
+            mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+        except OSError:
+            mountinfo = ""
+        for token in _container_ids_from_mountinfo(mountinfo):
+            ids.add(token)
 
         return ids
 
@@ -305,4 +325,41 @@ def _container_id_tokens(text: str) -> Set[str]:
             token = token[len("cri-containerd-"):-len(".scope")]
         if _looks_like_container_id(token):
             tokens.add(token)
+    return tokens
+
+
+_MOUNTINFO_CONTAINER_PATH_MARKERS = (
+    "/docker/containers/",
+    "/var/lib/docker/containers/",
+    "/var/lib/containers/storage/overlay-containers/",
+    "/containers/storage/overlay-containers/",
+    "/var/lib/containerd/",
+    "/containerd/",
+)
+
+
+def _container_ids_from_mountinfo(text: str) -> Set[str]:
+    """Extract container IDs from /proc/self/mountinfo source paths.
+
+    Docker bind-mounts /etc/hostname, /etc/resolv.conf, /etc/hosts from
+    /var/lib/docker/containers/<full-id>/<file>; Podman uses
+    /var/lib/containers/storage/overlay-containers/<full-id>/. Those source
+    paths appear in the mountinfo even when /proc/self/cgroup has been
+    flattened by cgroup namespaces.
+
+    Restricted to known container-runtime path prefixes so unrelated
+    hex-shaped tokens elsewhere in mountinfo (overlay layer hashes, etc.)
+    don't pollute the result set.
+    """
+    tokens: Set[str] = set()
+    for line in text.splitlines():
+        for marker in _MOUNTINFO_CONTAINER_PATH_MARKERS:
+            idx = line.find(marker)
+            if idx == -1:
+                continue
+            tail = line[idx + len(marker):]
+            # The container ID is the next path component.
+            candidate = tail.split("/", 1)[0].split()[0]
+            if _looks_like_container_id(candidate):
+                tokens.add(candidate)
     return tokens

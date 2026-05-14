@@ -47,8 +47,8 @@ spec:
         fsGroup: 10001
       containers:
         - name: eneru
-          image: ghcr.io/m4r1k/eneru:5.4.0
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/m4r1k/eneru:latest
+          imagePullPolicy: Always
           args:
             - run
             - --config
@@ -61,6 +61,13 @@ spec:
           ports:
             - name: http
               containerPort: 9191
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
           livenessProbe:
             httpGet:
               path: /health
@@ -82,6 +89,8 @@ spec:
               mountPath: /var/lib/eneru
             - name: runtime
               mountPath: /var/run/eneru
+            - name: logs
+              mountPath: /var/log/eneru
             - name: ssh-key
               mountPath: /var/lib/eneru/ssh
               readOnly: true
@@ -92,6 +101,8 @@ spec:
         - name: state
           emptyDir: {}
         - name: runtime
+          emptyDir: {}
+        - name: logs
           emptyDir: {}
         - name: ssh-key
           secret:

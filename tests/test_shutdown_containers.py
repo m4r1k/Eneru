@@ -15,7 +15,11 @@ from eneru import (
     UPSGroupMonitor,
     MonitorState,
 )
-from eneru.shutdown.containers import _container_id_tokens
+from eneru.shutdown.containers import (
+    _container_id_tokens,
+    _container_ids_from_mountinfo,
+    _looks_like_container_id,
+)
 
 
 def _make_container_monitor(
@@ -419,3 +423,172 @@ def test_compose_stacks_timeout_exit_code_is_logged(tmp_path):
     )
     with patch("eneru.shutdown.containers.run_command", return_value=(124, "", "")):
         monitor._shutdown_compose_stacks()  # Must not raise
+
+
+# ----------------------------------------------------------------------
+# Self-container detection helpers
+# ----------------------------------------------------------------------
+
+_FULL_ID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+_SHORT_ID = _FULL_ID[:12]
+
+
+@pytest.mark.unit
+def test_looks_like_container_id_short_boundary_passes():
+    assert _looks_like_container_id(_SHORT_ID) is True
+
+
+@pytest.mark.unit
+def test_looks_like_container_id_full_boundary_passes():
+    assert _looks_like_container_id(_FULL_ID) is True
+
+
+@pytest.mark.unit
+def test_looks_like_container_id_too_short_rejected():
+    assert _looks_like_container_id(_FULL_ID[:11]) is False
+
+
+@pytest.mark.unit
+def test_looks_like_container_id_too_long_rejected():
+    assert _looks_like_container_id(_FULL_ID + "0") is False
+
+
+@pytest.mark.unit
+def test_looks_like_container_id_non_hex_rejected():
+    # 12 chars but contains 'g' which is not hex
+    assert _looks_like_container_id("abcdefg01234") is False
+
+
+@pytest.mark.unit
+def test_container_id_tokens_cgroup_v1_docker_scope():
+    """cgroup v1 line: numeric:subsystem:/system.slice/docker-<id>.scope."""
+    text = f"12:perf_event:/system.slice/docker-{_FULL_ID}.scope\n"
+    assert _container_id_tokens(text) == {_FULL_ID}
+
+
+@pytest.mark.unit
+def test_container_id_tokens_cgroup_v2_unified_bare_id():
+    """cgroup v2 unified: 0::/system.slice/docker-<id>.scope."""
+    text = f"0::/kubepods.slice/kubepods-burstable.slice/{_FULL_ID}\n"
+    assert _container_id_tokens(text) == {_FULL_ID}
+
+
+@pytest.mark.unit
+def test_container_id_tokens_cri_containerd_scope():
+    """K8s + containerd uses cri-containerd-<id>.scope."""
+    text = f"0::/system.slice/cri-containerd-{_FULL_ID}.scope\n"
+    assert _container_id_tokens(text) == {_FULL_ID}
+
+
+@pytest.mark.unit
+def test_container_id_tokens_no_match_for_bare_metal_paths():
+    """Bare-metal hosts have no container IDs to extract."""
+    text = (
+        "12:devices:/user.slice/user-1000.slice/session-2.scope\n"
+        "11:memory:/user.slice\n"
+    )
+    assert _container_id_tokens(text) == set()
+
+
+@pytest.mark.unit
+def test_is_current_container_short_id_matches_full_id(tmp_path):
+    monitor = _make_container_monitor(tmp_path)
+    assert monitor._is_current_container(_SHORT_ID, {_FULL_ID}) is True
+
+
+@pytest.mark.unit
+def test_is_current_container_full_id_matches_short_id(tmp_path):
+    monitor = _make_container_monitor(tmp_path)
+    assert monitor._is_current_container(_FULL_ID, {_SHORT_ID}) is True
+
+
+@pytest.mark.unit
+def test_is_current_container_disjoint_returns_false(tmp_path):
+    monitor = _make_container_monitor(tmp_path)
+    other = "fedcba9876543210" + _FULL_ID[16:]
+    assert monitor._is_current_container(other, {_FULL_ID}) is False
+
+
+@pytest.mark.unit
+def test_is_current_container_empty_id_returns_false(tmp_path):
+    monitor = _make_container_monitor(tmp_path)
+    assert monitor._is_current_container("", {_FULL_ID}) is False
+
+
+@pytest.mark.unit
+def test_current_container_ids_handles_missing_cgroup_files(tmp_path):
+    """No /proc/self/cgroup (bare metal) → must not raise; hostname-only fallback."""
+    monitor = _make_container_monitor(tmp_path)
+    with patch("eneru.shutdown.containers.socket.gethostname", return_value="laptop"), \
+         patch("pathlib.Path.read_text", side_effect=OSError):
+        ids = monitor._current_container_ids()
+    assert ids == set()  # Hostname "laptop" doesn't look like a container ID, no cgroup data
+
+
+@pytest.mark.unit
+def test_current_container_ids_picks_up_hostname_when_it_looks_like_id(tmp_path):
+    """Docker sets hostname to the short container ID by default."""
+    monitor = _make_container_monitor(tmp_path)
+    with patch("eneru.shutdown.containers.socket.gethostname", return_value=_SHORT_ID), \
+         patch("pathlib.Path.read_text", side_effect=OSError):
+        ids = monitor._current_container_ids()
+    assert ids == {_SHORT_ID}
+
+
+# ----------------------------------------------------------------------
+# Mountinfo-based container ID detection (cgroupns workaround)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_mountinfo_extracts_docker_container_id_from_etc_hostname():
+    """Docker bind-mounts /etc/hostname from /var/lib/docker/containers/<id>/hostname."""
+    text = (
+        f"1234 1233 0:75 /docker/containers/{_FULL_ID}/hostname /etc/hostname "
+        f"rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw\n"
+    )
+    assert _container_ids_from_mountinfo(text) == {_FULL_ID}
+
+
+@pytest.mark.unit
+def test_mountinfo_extracts_podman_container_id():
+    """Podman uses /var/lib/containers/storage/overlay-containers/<id>/userdata/..."""
+    text = (
+        f"567 566 0:80 /var/lib/containers/storage/overlay-containers/{_FULL_ID}/userdata/hostname "
+        f"/etc/hostname rw,relatime - tmpfs tmpfs rw\n"
+    )
+    assert _container_ids_from_mountinfo(text) == {_FULL_ID}
+
+
+@pytest.mark.unit
+def test_mountinfo_handles_cgroupns_only_collapsed_view():
+    """When cgroupns is enabled the host paths still appear in mountinfo."""
+    text = (
+        # Real-shape entry for /etc/resolv.conf bind-mount inside a Docker container
+        f"431 430 0:73 /var/lib/docker/containers/{_FULL_ID}/resolv.conf "
+        f"/etc/resolv.conf rw,nosuid,nodev,noexec,relatime master:80 - tmpfs tmpfs rw\n"
+        # Also handles /etc/hosts
+        f"432 430 0:74 /var/lib/docker/containers/{_FULL_ID}/hosts "
+        f"/etc/hosts rw,nosuid,nodev,noexec,relatime master:81 - tmpfs tmpfs rw\n"
+    )
+    assert _container_ids_from_mountinfo(text) == {_FULL_ID}
+
+
+@pytest.mark.unit
+def test_mountinfo_no_container_paths_returns_empty():
+    """Bare-metal mountinfo has no container-runtime paths."""
+    text = (
+        "23 28 0:21 / /sys rw,nosuid,nodev,noexec,relatime shared:7 - sysfs sysfs rw\n"
+        "24 28 0:22 / /proc rw,nosuid,nodev,noexec,relatime shared:14 - proc proc rw\n"
+    )
+    assert _container_ids_from_mountinfo(text) == set()
+
+
+@pytest.mark.unit
+def test_mountinfo_ignores_unrelated_hex_paths():
+    """Overlay layer hashes outside known container-runtime prefixes must not match."""
+    # An overlay layer ID at /var/lib/docker/overlay2/<hex>/... is NOT a container ID.
+    text = (
+        f"500 0 0:90 /var/lib/docker/overlay2/{_FULL_ID}/diff /some/path rw - overlay overlay rw\n"
+    )
+    assert _container_ids_from_mountinfo(text) == set()
