@@ -31,14 +31,6 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
-eneru() {
-  if [ "${1:-}" = "run" ]; then
-    sudo -E env "PATH=$PATH" eneru "$@"
-  else
-    command eneru "$@"
-  fi
-}
-
 # Timestamped step markers. The redundancy regressions chain many
 # fixed-duration sleeps with docker-compose calls; when CI runners are slow
 # the script can be SIGTERMed mid-flight with no idea where it hung. dbg()
@@ -133,7 +125,7 @@ sleep 3
 # Use a finite timeout since --exit-after-shutdown wouldn't trigger.
 # The evaluator has a startup grace (~10s for check_interval=1)
 # so we must run *past* the grace to prove no spurious fire.
-timeout 18s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test21.log || true
+timeout 18s sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test21.log || true
 
 # Evaluator must have started but never logged "quorum LOST"
 if ! grep -q "Redundancy group 'rack-1-dual-psu' evaluator started" /tmp/test21.log; then
@@ -167,7 +159,7 @@ cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 3
 
 # Grace ~10s, then evaluator ticks each second.
-timeout 30s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test22.log || true
+timeout 30s sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test22.log || true
 
 if ! grep -q "quorum LOST" /tmp/test22.log; then
   echo "FAIL: expected 'quorum LOST' log line"
@@ -203,7 +195,7 @@ cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 2
 
 # Long enough to clear the startup grace and confirm steady state.
-timeout 18s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test23.log || true
+timeout 18s sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test23.log || true
 
 # Evaluator must reference its policies in the startup line.
 if ! grep -q "Redundancy group 'rack-1-dual-psu' evaluator started" /tmp/test23.log; then
@@ -236,7 +228,7 @@ cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
 cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 3
 
-timeout 30s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test24.log || true
+timeout 30s sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test24.log || true
 
 if ! grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test24.log; then
   echo "FAIL: expected fail-safe shutdown"
@@ -266,7 +258,7 @@ cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 3
 
-timeout 18s eneru run --config $E2E_DIR/config-e2e-redundancy-cross-group.yaml --exit-after-shutdown 2>&1 | tee /tmp/test25.log || true
+timeout 18s sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-redundancy-cross-group.yaml --exit-after-shutdown 2>&1 | tee /tmp/test25.log || true
 
 # Redundancy quorum should hold
 if grep -q "rack-1-dual-psu.* quorum LOST" /tmp/test25.log; then
@@ -293,7 +285,7 @@ cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 3
 
-timeout 18s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test26.log || true
+timeout 18s sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test26.log || true
 
 # The advisory-mode log line is "Trigger condition met (advisory, redundancy group): ..."
 if ! grep -q "Trigger condition met (advisory, redundancy group)" /tmp/test26.log; then
@@ -330,7 +322,7 @@ cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
 cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 3
 
-timeout 35s eneru run --config $E2E_DIR/config-e2e-redundancy-separate-eneru.yaml --exit-after-shutdown 2>&1 | tee /tmp/test27.log || true
+timeout 35s sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-redundancy-separate-eneru.yaml --exit-after-shutdown 2>&1 | tee /tmp/test27.log || true
 
 if ! grep -q "remote-rack.* quorum LOST" /tmp/test27.log; then
   echo "FAIL: expected remote-rack quorum loss"
@@ -386,7 +378,7 @@ sleep 2
 # startup grace + three 8s phase sleeps + dry-run shutdown sequence
 # overhead per phase = ~50s expected. 90s leaves headroom for slow
 # CI runners (matches the safety margin of R1/R2 below).
-timeout 90s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml \
+timeout 90s sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-redundancy.yaml \
   > /tmp/test37.log 2>&1 &
 ENERU_PID=$!
 trap 'kill "$ENERU_PID" 2>/dev/null || true' EXIT
@@ -471,7 +463,7 @@ cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
 cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 3
 
-timeout 30s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown \
+timeout 30s sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown \
   > /tmp/test38.log 2>&1 || true
 
 if ! grep -q "REDUNDANCY GROUP SHUTDOWN: rack-1-dual-psu" /tmp/test38.log; then
@@ -507,7 +499,7 @@ restart_redundancy_nut_server
 dump_redundancy_nut_state "R1 after first restart"
 
 dbg "R1 step 2/8: launching eneru in background (timeout 90s)"
-timeout 90s eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
+timeout 90s sudo -E env "PATH=$PATH" eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
   > /tmp/test-r1.log 2>&1 &
 ENERU_PID=$!
 trap 'kill "$ENERU_PID" 2>/dev/null || true; restart_redundancy_nut_server >/dev/null 2>&1 || true' EXIT
@@ -572,7 +564,7 @@ restart_redundancy_nut_server
 dump_redundancy_nut_state "R2 after first restart"
 
 dbg "R2 step 2/8: launching eneru in background (timeout 105s)"
-timeout 105s eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
+timeout 105s sudo -E env "PATH=$PATH" eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
   > /tmp/test-r2.log 2>&1 &
 ENERU_PID=$!
 trap 'kill "$ENERU_PID" 2>/dev/null || true; restart_redundancy_nut_server >/dev/null 2>&1 || true' EXIT

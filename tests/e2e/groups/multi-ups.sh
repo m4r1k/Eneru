@@ -18,14 +18,6 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
-eneru() {
-  if [ "${1:-}" = "run" ]; then
-    sudo -E env "PATH=$PATH" eneru "$@"
-  else
-    command eneru "$@"
-  fi
-}
-
 # ======================================================================
 # Test 9: Multi-UPS isolation (UPS1 fails, UPS2 normal)
 # ======================================================================
@@ -69,7 +61,7 @@ else
 fi
 
 # Run multi-UPS Eneru briefly -- UPS1 should trigger shutdown for its group
-eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test9.log || true
+sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test9.log || true
 
 # Verify UPS1 triggered shutdown
 if grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdown" /tmp/test9.log; then
@@ -108,7 +100,7 @@ cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 3
 
 # Run briefly -- should NOT trigger any shutdown
-timeout 5 eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml 2>&1 | tee /tmp/test10.log || true
+timeout 5 sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml 2>&1 | tee /tmp/test10.log || true
 
 if grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED" /tmp/test10.log; then
   echo "FAIL: Shutdown triggered during normal multi-UPS operation!"
@@ -136,7 +128,7 @@ cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 3
 
 # Run multi-UPS Eneru -- both groups should trigger shutdown
-eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test14.log || true
+sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test14.log || true
 
 # Verify shutdown was triggered
 if ! grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdown" /tmp/test14.log; then
@@ -185,7 +177,7 @@ echo "UPS1 status: $UPS1_STATUS (should be OL)"
 echo "UPS2 status: $UPS2_STATUS (should be OB)"
 
 # Run multi-UPS Eneru -- UPS2 (non-local) should trigger, UPS1 unaffected
-eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test15.log || true
+sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test15.log || true
 
 # Verify UPS2 triggered shutdown
 if ! grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdown" /tmp/test15.log; then
@@ -222,7 +214,7 @@ cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 3
 
 # Run with drain config
-eneru run --config $E2E_DIR/config-e2e-multi-ups-drain.yaml --exit-after-shutdown 2>&1 | tee /tmp/test16.log || true
+sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-multi-ups-drain.yaml --exit-after-shutdown 2>&1 | tee /tmp/test16.log || true
 
 # Verify shutdown was triggered
 if ! grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdown" /tmp/test16.log; then
@@ -261,7 +253,7 @@ cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
 sleep 3
 
 # Run with default multi-UPS config (drain=false)
-eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test17.log || true
+sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test17.log || true
 
 # Verify UPS1 shutdown triggered
 if ! grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdown" /tmp/test17.log; then
@@ -296,7 +288,7 @@ cp $E2E_DIR/scenarios/on-battery.dev $E2E_DIR/scenarios/apply.dev
 sleep 3
 
 # Run Eneru in background
-timeout 12 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test18.log &
+timeout 12 sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test18.log &
 ENERU_PID=$!
 
 # Wait for Eneru to detect on-battery state
@@ -351,7 +343,7 @@ rm -f /tmp/eneru-e2e-shutdown-order-flag
 cp scenarios/low-battery.dev scenarios/apply.dev
 sleep 3
 
-eneru run --config config-e2e-shutdown-order.yaml --exit-after-shutdown 2>&1 \
+sudo -E env "PATH=$PATH" eneru run --config config-e2e-shutdown-order.yaml --exit-after-shutdown 2>&1 \
   | tee /tmp/test19.log || true
 
 echo ""
@@ -458,7 +450,7 @@ cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply-UPS2.dev"
 sleep 3
 
 # --- First run: coordinator startup, then SIGTERM. ---
-eneru run --config "$E2E_DIR/config-e2e-restart-multi.yaml" > /tmp/test36-run1.log 2>&1 &
+sudo -E env "PATH=$PATH" eneru run --config "$E2E_DIR/config-e2e-restart-multi.yaml" > /tmp/test36-run1.log 2>&1 &
 ENERU_PID=$!
 sleep 6  # coordinator init + per-UPS monitors register stores + drain memory buffer
 kill -TERM $ENERU_PID 2>/dev/null || true
@@ -496,7 +488,7 @@ fi
 echo "PASS (36a): coordinator left exactly 1 pending 'Service Stopped' row"
 
 # --- Second run: same config, simulating restart. ---
-eneru run --config "$E2E_DIR/config-e2e-restart-multi.yaml" > /tmp/test36-run2.log 2>&1 &
+sudo -E env "PATH=$PATH" eneru run --config "$E2E_DIR/config-e2e-restart-multi.yaml" > /tmp/test36-run2.log 2>&1 &
 ENERU_PID=$!
 sleep 7  # coordinator startup → _cancel_prev_pending_lifecycle_rows → new lifecycle send
 kill -TERM $ENERU_PID 2>/dev/null || true

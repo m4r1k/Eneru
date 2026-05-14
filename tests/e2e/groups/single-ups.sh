@@ -18,14 +18,6 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
-eneru() {
-  if [ "${1:-}" = "run" ]; then
-    sudo -E env "PATH=$PATH" eneru "$@"
-  else
-    command eneru "$@"
-  fi
-}
-
 # ======================================================================
 # Test 2: Monitor normal state (no shutdown triggered)
 # ======================================================================
@@ -48,7 +40,7 @@ sleep 3
 # termination during a "monitor normal state" check is itself a bug
 # this test must surface.
 set +e
-timeout 5 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test2.log
+timeout 5 sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test2.log
 RC=${PIPESTATUS[0]}
 set -e
 if [ "$RC" -ne 124 ]; then
@@ -86,7 +78,7 @@ sleep 3
 # exit 0 once the dry-run shutdown sequence completes; anything else
 # is a real failure that the previous `|| true` was masking.
 set +e
-eneru run --config $E2E_DIR/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test3.log
+sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test3.log
 RC=${PIPESTATUS[0]}
 set -e
 if [ "$RC" -ne 0 ]; then
@@ -132,7 +124,7 @@ cp scenarios/low-battery.dev scenarios/apply.dev
 sleep 3
 
 # Run Eneru briefly - will trigger shutdown and send SSH command
-eneru run --config config-e2e.yaml --exit-after-shutdown 2>&1 | tee /tmp/test4.log || true
+sudo -E env "PATH=$PATH" eneru run --config config-e2e.yaml --exit-after-shutdown 2>&1 | tee /tmp/test4.log || true
 
 echo ""
 echo "=== Verifying SSH shutdown ==="
@@ -171,7 +163,7 @@ cp $E2E_DIR/scenarios/fsd.dev $E2E_DIR/scenarios/apply.dev
 sleep 3
 
 # Run Eneru in dry-run mode
-eneru run --config $E2E_DIR/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test5.log || true
+sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test5.log || true
 
 # Verify FSD triggered shutdown
 if ! grep -q "FSD" /tmp/test5.log; then
@@ -204,7 +196,7 @@ cp $E2E_DIR/scenarios/brownout.dev $E2E_DIR/scenarios/apply.dev
 sleep 2
 
 # Run briefly to detect brownout
-timeout 8 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test6.log || true
+timeout 8 sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test6.log || true
 
 # Verify brownout was specifically detected -- not just any voltage
 # log line. The startup `Voltage Monitoring Active` line would match
@@ -325,7 +317,7 @@ if [ "$nominal" != "120" ]; then
   exit 1
 fi
 
-timeout 12 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test33.log || true
+timeout 12 sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test33.log || true
 
 # (8a) Startup log must report the percentage-band threshold honestly.
 if grep -q "Grid-quality warnings: 108.0V / 132.0V" /tmp/test33.log \
@@ -362,7 +354,7 @@ if [ "$voltage" != "107.0" ] && [ "$voltage" != "107" ]; then
   echo "FAIL (8c-setup): NUT never reported input.voltage=107 (last=${voltage:-empty})"
   exit 1
 fi
-timeout 8 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test33b.log || true
+timeout 8 sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test33b.log || true
 
 if grep -q "BROWNOUT_DETECTED" /tmp/test33b.log; then
   echo "PASS (8c): real brownout (107V) still fires BROWNOUT_DETECTED"
@@ -481,7 +473,7 @@ sleep 3
 
 # Daemon in background. NO --exit-after-shutdown; we want it to stay
 # alive across all three transitions.
-PYTHONUNBUFFERED=1 eneru run --config "$REARM_DIR/config.yaml" > "$REARM_DIR/daemon.log" 2>&1 &
+PYTHONUNBUFFERED=1 sudo -E env "PATH=$PATH" eneru run --config "$REARM_DIR/config.yaml" > "$REARM_DIR/daemon.log" 2>&1 &
 DAEMON_PID=$!
 # Single-quoted trap so $DAEMON_PID resolves at trap-fire time, not
 # trap-set time. Functionally equivalent here (DAEMON_PID is already
@@ -585,7 +577,7 @@ cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply.dev
 sleep 3
 
 set +e
-timeout 10s eneru run --config "$STAB_CFG" --exit-after-shutdown 2>&1 | tee /tmp/test39.log
+timeout 10s sudo -E env "PATH=$PATH" eneru run --config "$STAB_CFG" --exit-after-shutdown 2>&1 | tee /tmp/test39.log
 RC=${PIPESTATUS[0]}
 set -e
 if [ "$RC" -ne 124 ]; then
@@ -618,7 +610,7 @@ rm -f /tmp/eneru-e2e-state.remote-health.json /tmp/eneru-e2e-shutdown-flag
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
 
 set +e
-timeout 8s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test40.log
+timeout 8s sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test40.log
 RC=${PIPESTATUS[0]}
 set -e
 if [ "$RC" -ne 124 ]; then
@@ -690,7 +682,7 @@ echo ""
 echo ">>> Running: Test 43: Embedded API health/readiness/metrics/index"
 
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-timeout 12s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml \
+timeout 12s sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-dry-run.yaml \
   > /tmp/test43-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
@@ -895,7 +887,7 @@ cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply.dev
 # round down to 10 with `date +%s` and silently pass).
 START_NS=$(date +%s%N)
 set +e
-timeout 12s eneru run --config /tmp/config-e2e-unreachable-remote.yaml \
+timeout 12s sudo -E env "PATH=$PATH" eneru run --config /tmp/config-e2e-unreachable-remote.yaml \
   --exit-after-shutdown 2>&1 | tee /tmp/test44.log
 RC=${PIPESTATUS[0]}
 set -e
@@ -1013,7 +1005,7 @@ sys.exit(0 if os.path.exists(OUT) else 1)
 PY
 SUB_PID=$!
 
-timeout 20s eneru run --config /tmp/config-e2e-mqtt.yaml \
+timeout 20s sudo -E env "PATH=$PATH" eneru run --config /tmp/config-e2e-mqtt.yaml \
   > /tmp/test45-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" "$SUB_PID" 2>/dev/null || true' EXIT
