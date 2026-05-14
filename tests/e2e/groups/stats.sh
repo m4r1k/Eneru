@@ -46,7 +46,7 @@ done
 # Run for ~50s -- worst case 30s for the connection wait + 10s
 # for the writer to flush + headroom. PYTHONUNBUFFERED keeps
 # stdout flushing under tee.
-PYTHONUNBUFFERED=1 timeout 50s sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-stats.yaml --exit-after-shutdown 2>&1 | tee /tmp/test28.log || true
+PYTHONUNBUFFERED=1 timeout 50s eneru run --config $E2E_DIR/config-e2e-stats.yaml --exit-after-shutdown 2>&1 | tee /tmp/test28.log || true
 
 # 1. DB file must exist (single-UPS uses the "default.db" filename)
 DB="/tmp/eneru-e2e-stats/default.db"
@@ -116,7 +116,7 @@ EOF
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
 sleep 2
 
-timeout 10s sudo -E env "PATH=$PATH" eneru run --config /tmp/config-e2e-stats-broken.yaml --exit-after-shutdown 2>&1 | tee /tmp/test29.log || true
+timeout 10s eneru run --config /tmp/config-e2e-stats-broken.yaml --exit-after-shutdown 2>&1 | tee /tmp/test29.log || true
 
 # The daemon must have logged the warning AND kept polling.
 if ! grep -q "stats store open failed" /tmp/test29.log; then
@@ -160,7 +160,7 @@ if [ ! -f "$DB" ] || [ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM samples')" -lt 1 ]
     sleep 1
   done
 
-  PYTHONUNBUFFERED=1 timeout 50s sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-stats.yaml --exit-after-shutdown > /tmp/test30-daemon.log 2>&1 || true
+  PYTHONUNBUFFERED=1 timeout 50s eneru run --config $E2E_DIR/config-e2e-stats.yaml --exit-after-shutdown > /tmp/test30-daemon.log 2>&1 || true
 fi
 
 if [ ! -f "$DB" ]; then
@@ -209,7 +209,7 @@ if [ ! -f "$DB" ]; then
     fi
     sleep 1
   done
-  PYTHONUNBUFFERED=1 timeout 50s sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-stats.yaml --exit-after-shutdown > /tmp/test31-daemon.log 2>&1 || true
+  PYTHONUNBUFFERED=1 timeout 50s eneru run --config $E2E_DIR/config-e2e-stats.yaml --exit-after-shutdown > /tmp/test31-daemon.log 2>&1 || true
 fi
 
 if [ ! -f "$DB" ]; then
@@ -353,7 +353,7 @@ T_START=$(date +%s)
 
 # Run for ~15s -- long enough for the autodetect window
 # (10 polls at 1 Hz) to fill and the re-snap to fire.
-PYTHONUNBUFFERED=1 timeout 15s sudo -E env "PATH=$PATH" eneru run \
+PYTHONUNBUFFERED=1 timeout 15s eneru run \
   --config $E2E_DIR/config-e2e-voltage-autodetect.yaml \
   > /tmp/test32-daemon.log 2>&1 || true
 
@@ -448,7 +448,7 @@ sleep 3
 
 # Run eneru in the background — we drive the NUT scenario from the
 # foreground while the worker thread cycles through events.
-sudo -E env "PATH=$PATH" eneru run --config $E2E_DIR/config-e2e-coalesce.yaml > /tmp/test34.log 2>&1 &
+eneru run --config $E2E_DIR/config-e2e-coalesce.yaml > /tmp/test34.log 2>&1 &
 ENERU_PID=$!
 sleep 5  # let _initialize finish + register store + reach steady state
 
@@ -556,7 +556,7 @@ cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
 sleep 3
 
 # --- First run: clean start, then SIGTERM. ---
-sudo -E env "PATH=$PATH" eneru run --config "$E2E_DIR/config-e2e-restart.yaml" > /tmp/test35-run1.log 2>&1 &
+eneru run --config "$E2E_DIR/config-e2e-restart.yaml" > /tmp/test35-run1.log 2>&1 &
 ENERU_PID=$!
 sleep 5  # _initialize finishes, lifecycle classifier emits DAEMON_START
 kill -TERM $ENERU_PID 2>/dev/null || true
@@ -587,7 +587,7 @@ fi
 echo "PASS (35a): old daemon left exactly 1 pending lifecycle 'Service Stopped' row"
 
 # --- Second run: same config, simulating `systemctl restart`. ---
-sudo -E env "PATH=$PATH" eneru run --config "$E2E_DIR/config-e2e-restart.yaml" > /tmp/test35-run2.log 2>&1 &
+eneru run --config "$E2E_DIR/config-e2e-restart.yaml" > /tmp/test35-run2.log 2>&1 &
 ENERU_PID=$!
 sleep 6  # _initialize → classify_startup → cancel pending + send Restarted
 

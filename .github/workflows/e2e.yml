@@ -68,6 +68,13 @@ jobs:
           # matrix entry is harmless (only Test 7 reads it) and avoids
           # making the workflow group-aware.
           E2E_NOTIFICATION_URL: ${{ secrets.E2E_NOTIFICATION_URL }}
+          # Bypass the v5.4 "is_local requires root" startup check so
+          # eneru runs as the runner user. Sudo-elevating eneru would
+          # leave its SQLite DB and state files root-owned, which then
+          # breaks subsequent tests that read/write those files as the
+          # runner user. The check is documented as a testing/dry-run
+          # bypass; production containers never set it.
+          ENERU_SKIP_PRIVILEGE_CHECK: "1"
         run: bash tests/e2e/groups/${{ matrix.group }}.sh
 
       - name: Verify v5.3 E2E coverage is wired

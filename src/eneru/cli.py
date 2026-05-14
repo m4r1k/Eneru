@@ -157,7 +157,14 @@ def _detect_runtime_context() -> str:
 
 
 def _exit_on_privilege_errors(config: Config) -> None:
-    """Refuse non-root startup when config declares local-host ownership."""
+    """Refuse non-root startup when config declares local-host ownership.
+
+    The ``ENERU_SKIP_PRIVILEGE_CHECK`` env var (``1`` or ``true``) downgrades
+    the check to a printed warning. Intended for E2E suites and developers
+    iterating on dry-run configs where actual privilege isn't required.
+    Containers in production never set this var, so the default safety
+    guarantee for shipped images is unchanged.
+    """
     geteuid = getattr(os, "geteuid", None)
     if geteuid is None or geteuid() == 0:
         return
@@ -166,12 +173,26 @@ def _exit_on_privilege_errors(config: Config) -> None:
     if not reasons:
         return
 
+    if os.environ.get("ENERU_SKIP_PRIVILEGE_CHECK", "").strip().lower() in ("1", "true"):
+        print(
+            "WARNING: ENERU_SKIP_PRIVILEGE_CHECK is set; running non-root despite "
+            "local-host orchestration features in config:",
+            file=sys.stderr,
+        )
+        for reason in reasons:
+            print(f"  - {reason}", file=sys.stderr)
+        return
+
     print("ERROR: Eneru must run as root for local-host orchestration.")
     for reason in reasons:
         print(f"  - {reason}")
     print(
         "For remote-only container/Kubernetes deployments, use multi-UPS "
         "configuration with is_local: false and set local_shutdown.enabled: false."
+    )
+    print(
+        "To bypass for testing/dry-run, set ENERU_SKIP_PRIVILEGE_CHECK=1 "
+        "(downgrades the check to a warning)."
     )
     sys.exit(1)
 

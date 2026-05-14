@@ -29,6 +29,7 @@ Release candidate for the v5.4 OCI image and Kubernetes deployment path.
 - A dedicated logging section explains stdout capture (`docker logs`, `kubectl logs`) plus the `/var/log/eneru` forensics volume that survives container restarts (UID/GID 10001 ownership, `fsGroup: 10001` in the sample manifests).
 
 ### rc3 — fixes from audit
+- New `ENERU_SKIP_PRIVILEGE_CHECK` env var downgrades the v5.4 root-required startup check to a printed warning. Intended for E2E suites and developers iterating on dry-run configs without sudo. Production containers don't set it, so the default safety guarantee for shipped images is unchanged. The E2E workflow exports it once at the matrix step level so eneru runs as the runner user — sudo-elevating eneru would leave its SQLite DB and state files root-owned and break any later test that reads them as the unprivileged runner.
 - K8s and Docker samples now reference `ghcr.io/m4r1k/eneru:latest` instead of the not-yet-existing `:5.4.0` tag, with `imagePullPolicy: Always` and a documented expectation that production users pin to `<version>` for immutability.
 - Kubernetes manifests gain `resources.requests` (50m CPU, 64Mi memory) and `resources.limits` (200m CPU, 128Mi memory) so copy-paste deployments don't run unbounded.
 - Container logging story documented end-to-end: stdout via `docker/podman/kubectl logs`, plus an opt-in `/var/log/eneru/ups-monitor.log` on a mounted volume.

@@ -255,6 +255,64 @@ class TestPrivilegeChecks:
             _exit_on_privilege_errors(config)  # Must not raise
 
     @pytest.mark.unit
+    def test_eneru_skip_privilege_check_bypass_warns_but_does_not_exit(self, capsys):
+        """ENERU_SKIP_PRIVILEGE_CHECK=1 downgrades the fatal check to a warning.
+
+        Used by the E2E workflow so eneru runs as the unprivileged runner
+        user (no sudo, no file-ownership churn between tests).
+        """
+        from eneru.cli import _exit_on_privilege_errors
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host", display_name="Rack"),
+                is_local=True,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=True),
+        )
+
+        with patch("eneru.cli.os.geteuid", return_value=1000, create=True), \
+             patch.dict("os.environ", {"ENERU_SKIP_PRIVILEGE_CHECK": "1"}, clear=False):
+            _exit_on_privilege_errors(config)  # Must NOT raise
+
+        err = capsys.readouterr().err
+        assert "ENERU_SKIP_PRIVILEGE_CHECK" in err
+        assert "is marked is_local" in err
+
+    @pytest.mark.unit
+    def test_eneru_skip_privilege_check_accepts_true_value(self):
+        from eneru.cli import _exit_on_privilege_errors
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"), is_local=True,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
+        )
+
+        with patch("eneru.cli.os.geteuid", return_value=1000, create=True), \
+             patch.dict("os.environ", {"ENERU_SKIP_PRIVILEGE_CHECK": "true"}, clear=False):
+            _exit_on_privilege_errors(config)  # Must not raise
+
+    @pytest.mark.unit
+    def test_eneru_skip_privilege_check_unset_still_exits(self):
+        """Empty/unset env var must NOT bypass the check."""
+        from eneru.cli import _exit_on_privilege_errors
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"), is_local=True,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
+        )
+
+        with patch("eneru.cli.os.geteuid", return_value=1000, create=True), \
+             patch.dict("os.environ", {"ENERU_SKIP_PRIVILEGE_CHECK": ""}, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                _exit_on_privilege_errors(config)
+            assert exc_info.value.code == 1
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("group_kwargs,expected_substring", [
         ({"is_local": True}, "is marked is_local"),
         ({"virtual_machines": VMConfig(enabled=True)}, "virtual_machines enabled"),
