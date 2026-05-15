@@ -152,6 +152,12 @@ jobs:
           IMAGE_NAME: ghcr.io/${{ github.repository }}
         run: |
           IMAGE_NAME="${IMAGE_NAME,,}"
+          # Docker installs the copied source with pip, and
+          # pyproject.toml derives the package version from this file.
+          # Keep the OCI image on the clean release version so the
+          # wheel metadata and exact image tag are both valid/simple.
+          sed -i "s/^__version__ = .*/__version__ = \"$VERSION\"/" src/eneru/version.py
+          grep "__version__" src/eneru/version.py
           docker build --build-arg VERSION="$VERSION" -t "${IMAGE_NAME}:${VERSION}" .
 
       - name: Push OCI image to GHCR

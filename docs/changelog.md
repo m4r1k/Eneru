@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [5.4.0-rc3] - Unreleased
+## [5.4.0-rc4] - Unreleased
 
 Release candidate for the v5.4 OCI image and Kubernetes deployment path.
 
@@ -27,6 +27,13 @@ Release candidate for the v5.4 OCI image and Kubernetes deployment path.
 - The README and docs now explain when to use the OCI image versus the systemd daemon, including Docker, Podman, SELinux volume labels, AppArmor/default confinement, and log collection through `docker logs` or `kubectl logs`.
 - `docs/containers-kubernetes.md` documents the OCI tag channels (`latest` for stable, `testing` for pre-release, exact `<version>` for either), and the Kubernetes / Docker samples now reference `:latest` so they don't need a per-release edit.
 - A dedicated logging section explains stdout capture (`docker logs`, `kubectl logs`) plus the `/var/log/eneru` forensics volume that survives container restarts (UID/GID 10001 ownership, `fsGroup: 10001` in the sample manifests).
+
+### rc4 — release workflow fixes
+- The release workflow now resets `src/eneru/version.py` to the clean release version before building the OCI image. Deb/rpm packages still keep the full code-display version with the short git hash, but Docker's in-image `pip install` now sees a valid PEP 440 package version.
+- Exact OCI tags now use the package version shape (`5.4.0`, `5.4.0-rc4`) while channel tags stay `latest` for stable releases and `testing` for pre-releases.
+- The Dockerfile runs `apt-get upgrade -y` after `apt-get update` so images pick up Debian security fixes available at build time.
+- The OCI image now uses the Python 3.12 slim Trixie base for a newer Debian userspace.
+- The README now surfaces Docker first in the quick start while clarifying that root is only needed when Eneru manages local resources.
 
 ### rc3 — fixes from audit
 - New `ENERU_SKIP_PRIVILEGE_CHECK` env var downgrades the v5.4 root-required startup check to a printed warning. Intended for E2E suites and developers iterating on dry-run configs without sudo. Production containers don't set it, so the default safety guarantee for shipped images is unchanged. The E2E workflow exports it once at the matrix step level so eneru runs as the runner user — sudo-elevating eneru would leave its SQLite DB and state files root-owned and break any later test that reads them as the unprivileged runner.
