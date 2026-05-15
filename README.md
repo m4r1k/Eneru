@@ -92,7 +92,7 @@ docker run -d --name eneru \
   --api --api-bind 0.0.0.0 --api-port 9191
 ```
 
-Use `ghcr.io/m4r1k/eneru:testing` for pre-release builds. Run Eneru as root when it must manage local resources such as the local host, VMs, containers, or filesystems. Root is not needed for remote UPS monitoring and SSH shutdown.
+Use `ghcr.io/m4r1k/eneru:testing` for pre-release builds. The OCI image is for remote UPS monitoring and SSH shutdown. Use a native host install when Eneru must manage the local host, VMs, containers, or filesystems.
 
 **PyPI:**
 ```bash
@@ -188,7 +188,7 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 
 Eneru still works best as a native systemd daemon when it owns the local host shutdown sequence: stopping local VMs, stopping local Docker/Podman containers, syncing filesystems, and powering off the machine.
 
-v5.4 adds an official OCI image for remote-only and Kubernetes deployments. That scope now makes sense because Eneru can monitor NUT and orchestrate remote systems without root. If you configure `is_local: true` or local-host resources, the container must run as root with the required host access; otherwise startup fails clearly. Container shutdown also skips Eneru's own container so it does not stop itself mid-sequence.
+v5.4 adds an official OCI image for remote-only Docker, Podman, and Kubernetes deployments. Use it when Eneru monitors NUT, exposes API/health endpoints, publishes telemetry, and shuts down remote systems over SSH. Do not use the image for local-host ownership; install Eneru on the host instead.
 
 See the [container documentation](https://eneru.readthedocs.io/latest/containers-kubernetes/) for Docker, Podman, SELinux/AppArmor, and Kubernetes examples.
 
