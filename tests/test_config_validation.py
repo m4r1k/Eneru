@@ -256,6 +256,126 @@ class TestUnknownKeyValidation:
         errors = self._errors(raw_data)
         assert not any("unknown config key" in e for e in errors)
 
+    @pytest.mark.unit
+    def test_top_level_remote_server_typo_is_error(self):
+        """v5.4: top-level remote_servers list now validates unknown keys."""
+        errors = self._errors({
+            "ups": {"name": "UPS@localhost"},
+            "remote_servers": [{
+                "name": "nas",
+                "host": "nas.lan",
+                "ssh_keypath": "/missing-underscore",
+            }],
+        })
+        assert any("remote_servers['nas']" in e for e in errors)
+        assert any("ssh_keypath" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_per_ups_remote_server_typo_is_error(self):
+        """Multi-UPS ups[].remote_servers list also validates unknown keys."""
+        errors = self._errors({
+            "ups": [{
+                "name": "UPS-A",
+                "remote_servers": [{
+                    "name": "nas",
+                    "host": "nas.lan",
+                    "ssh_kee_path": "/typo",
+                }],
+            }],
+        })
+        assert any("ups['UPS-A'].remote_servers['nas']" in e for e in errors)
+        assert any("ssh_kee_path" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_redundancy_group_remote_server_typo_is_error(self):
+        """redundancy_groups[].remote_servers list also validates."""
+        errors = self._errors({
+            "ups": [{"name": "UPS-A"}, {"name": "UPS-B"}],
+            "redundancy_groups": [{
+                "name": "rack",
+                "ups_sources": ["UPS-A", "UPS-B"],
+                "remote_servers": [{
+                    "name": "node1",
+                    "host": "node1.lan",
+                    "ssh_keys": "/wrong",
+                }],
+            }],
+        })
+        assert any("redundancy_groups['rack'].remote_servers['node1']" in e for e in errors)
+        assert any("ssh_keys" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_pre_shutdown_command_typo_is_error(self):
+        """Nested pre_shutdown_commands entries also have their keys validated."""
+        errors = self._errors({
+            "ups": {"name": "UPS@localhost"},
+            "remote_servers": [{
+                "name": "nas",
+                "host": "nas.lan",
+                "pre_shutdown_commands": [
+                    {"action": "wait", "timeout": 5, "extra_key": "boom"},
+                ],
+            }],
+        })
+        assert any("remote_servers['nas'].pre_shutdown_commands[0]" in e for e in errors)
+        assert any("extra_key" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_remote_servers_non_list_validator_is_a_noop(self, default_config):
+        """Validator's defensive guard for malformed remote_servers shape:
+        when raw_data has a non-list remote_servers value, the unknown-key
+        pass must no-op (the dataclass loader surfaces the type error
+        elsewhere; we just don't want the validator to raise on top)."""
+        raw_data = {
+            "ups": {"name": "UPS@localhost"},
+            "remote_servers": "not-a-list",
+        }
+        # Call validate_config directly with a pre-built default config so we
+        # bypass the parser's separate type-checking on this field.
+        messages = ConfigLoader.validate_config(default_config, raw_data=raw_data)
+        # No remote_servers[...] errors and no exception
+        assert not any("remote_servers[" in m for m in messages)
+
+    @pytest.mark.unit
+    def test_remote_servers_non_dict_entry_is_skipped(self, default_config):
+        """Validator skips non-mapping list entries (e.g. a stray string)."""
+        raw_data = {
+            "ups": {"name": "UPS@localhost"},
+            "remote_servers": ["not-a-mapping", {"name": "ok", "host": "h"}],
+        }
+        messages = ConfigLoader.validate_config(default_config, raw_data=raw_data)
+        # Validator should not crash and should not emit a remote_servers['ok']
+        # unknown-key error since 'name' and 'host' are valid keys.
+        assert not any("remote_servers['ok']" in m and "unknown" in m.lower()
+                       for m in messages)
+
+    @pytest.mark.unit
+    def test_remote_server_known_keys_dont_trigger_errors(self):
+        """All documented remote_server keys must be accepted."""
+        errors = self._errors({
+            "ups": {"name": "UPS@localhost"},
+            "remote_servers": [{
+                "name": "nas",
+                "enabled": True,
+                "host": "nas.lan",
+                "user": "ups",
+                "connect_timeout": 5,
+                "command_timeout": 30,
+                "shutdown_command": "sudo shutdown -h now",
+                "ssh_key_path": "/root/.ssh/id_ups",
+                "ssh_options": ["-o", "StrictHostKeyChecking=no"],
+                "pre_shutdown_commands": [
+                    {"action": "wait", "timeout": 5},
+                ],
+                "parallel": True,
+                "shutdown_order": 1,
+                "shutdown_safety_margin": 30,
+            }],
+        })
+        # No remote_servers-related unknown-key errors at all.
+        assert not any("remote_servers['nas']" in e and "unknown" in e.lower()
+                       for e in errors), errors
+
 
 class TestNotificationsSuppressValidation:
     """Issue #27 / B3: per-event notification suppression with safety blocklist."""

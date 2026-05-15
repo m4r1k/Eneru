@@ -400,6 +400,19 @@ class TestPrivilegeChecks:
         assert reasons == []
 
     @pytest.mark.unit
+    def test_no_ups_groups_flags_implicit_single_ups_local_mode(self):
+        """Empty ups_groups (legacy single-UPS via top-level `ups:` mapping that
+        wasn't promoted to a group) is treated as local-host mode."""
+        from eneru.cli import _root_required_reasons
+
+        config = Config(
+            ups_groups=[],  # No groups at all
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
+        )
+        reasons = _root_required_reasons(config)
+        assert any("implicit single-UPS local-host mode" in r for r in reasons)
+
+    @pytest.mark.unit
     def test_local_shutdown_with_local_owner_requires_root_even_if_trigger_on_none(self):
         """trigger_on='none' is the multi-UPS knob; with a local-owner group the
         local UPS can still drive the host to shutdown when it goes critical."""
@@ -483,6 +496,55 @@ class TestRuntimeContextDetection:
         with patch("pathlib.Path.exists", new=fake_exists), \
              patch.dict("os.environ", {"INVOCATION_ID": "abc"}, clear=False):
             assert _detect_runtime_context() == "container (Docker)"
+
+    @pytest.mark.unit
+    def test_cgroup_marker_falls_through_to_generic_container(self):
+        """Old Docker on cgroup v1 (no /.dockerenv but cgroup path mentions docker)."""
+        from eneru.cli import _detect_runtime_context
+
+        def fake_read(self, *args, **kwargs):
+            if str(self) == "/proc/1/cgroup":
+                return "12:cpu:/docker/abc123\n"
+            raise OSError
+
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch("pathlib.Path.read_text", new=fake_read), \
+             patch.dict("os.environ", {}, clear=True):
+            assert _detect_runtime_context() == "container"
+
+    @pytest.mark.unit
+    def test_mountinfo_with_docker_path_detects_container(self):
+        """Modern Docker on cgroup v2 + cgroupns: cgroup is collapsed but
+        mountinfo still has /docker/containers/<id> bind-mount paths."""
+        from eneru.cli import _detect_runtime_context
+
+        def fake_read(self, *args, **kwargs):
+            if str(self) == "/proc/1/cgroup":
+                return "0::/\n"
+            if str(self) == "/proc/self/mountinfo":
+                return ("123 122 0:9 /docker/containers/abc123/hostname "
+                        "/etc/hostname rw - tmpfs tmpfs rw\n")
+            raise OSError
+
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch("pathlib.Path.read_text", new=fake_read), \
+             patch.dict("os.environ", {}, clear=True):
+            assert _detect_runtime_context() == "container"
+
+    @pytest.mark.unit
+    def test_systemd_via_proc_1_comm_and_journal_stream(self):
+        """When INVOCATION_ID isn't set, fall back to PID 1 comm + JOURNAL_STREAM."""
+        from eneru.cli import _detect_runtime_context
+
+        def fake_read(self, *args, **kwargs):
+            if str(self) == "/proc/1/comm":
+                return "systemd\n"
+            raise OSError
+
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch("pathlib.Path.read_text", new=fake_read), \
+             patch.dict("os.environ", {"JOURNAL_STREAM": "8:12345"}, clear=True):
+            assert _detect_runtime_context() == "systemd service"
 
 
 class TestCLIManualRemoteShutdown:

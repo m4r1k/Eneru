@@ -1796,3 +1796,84 @@ class TestAdvisoryTriggers:
     def test_constructor_default_is_not_in_redundancy_group(self, tmp_path):
         monitor = make_monitor(tmp_path)
         assert monitor._in_redundancy_group is False
+
+
+class TestCheckDependencies:
+    """v5.4: required deps depend on configured features.
+
+    Pre-v5.4 the daemon hard-required upsc, sync, shutdown, AND logger.
+    That blocked remote-only and containerized deployments where
+    /sbin/shutdown isn't on PATH and journald handles syslog instead of
+    logger(1). v5.4 trims required to upsc plus the configured local
+    shutdown command (when enabled), and downgrades logger(1) to a
+    soft warning.
+    """
+
+    @pytest.mark.unit
+    def test_remote_only_requires_only_upsc(self, tmp_path):
+        """Non-local config + local_shutdown disabled: only upsc is required."""
+        monitor = make_monitor(tmp_path)
+        monitor.config.ups_groups[0].is_local = False
+        monitor.config.local_shutdown.enabled = False
+
+        def cmd_present(cmd):
+            return cmd == "upsc"
+
+        with patch("eneru.monitor.command_exists", side_effect=cmd_present):
+            monitor._check_dependencies()  # Must not sys.exit
+
+    @pytest.mark.unit
+    def test_local_with_local_shutdown_requires_shutdown_binary(self, tmp_path):
+        """is_local + local_shutdown.enabled: configured shutdown command must be on PATH."""
+        monitor = make_monitor(tmp_path)
+        monitor.config.ups_groups[0].is_local = True
+        monitor.config.local_shutdown.enabled = True
+        monitor.config.local_shutdown.command = "/sbin/shutdown -h now"
+
+        seen = []
+
+        def cmd_present(cmd):
+            seen.append(cmd)
+            return True  # Pretend everything is present
+
+        with patch("eneru.monitor.command_exists", side_effect=cmd_present):
+            monitor._check_dependencies()
+
+        assert "upsc" in seen
+        # First token of the command becomes the required dep
+        assert "/sbin/shutdown" in seen
+
+    @pytest.mark.unit
+    def test_missing_required_command_exits(self, tmp_path, capsys):
+        monitor = make_monitor(tmp_path)
+        monitor.config.ups_groups[0].is_local = False
+        monitor.config.local_shutdown.enabled = False
+
+        with patch("eneru.monitor.command_exists", return_value=False):
+            with pytest.raises(SystemExit) as exc_info:
+                monitor._check_dependencies()
+        assert exc_info.value.code == 1
+        out = capsys.readouterr().out
+        assert "Missing required commands" in out
+        assert "upsc" in out
+
+    @pytest.mark.unit
+    def test_missing_logger_warns_but_does_not_exit(self, tmp_path):
+        """logger(1) is now advisory — containers without it must still start."""
+        monitor = make_monitor(tmp_path)
+        monitor.config.ups_groups[0].is_local = False
+        monitor.config.local_shutdown.enabled = False
+        # Disable VM/container/filesystem checks downstream
+        monitor.config.virtual_machines.enabled = False
+        monitor.config.containers.enabled = False
+        monitor.config.filesystems.unmount.enabled = False
+        log = []
+        monitor._log_message = log.append
+
+        def cmd_present(cmd):
+            return cmd != "logger"  # Everything except logger
+
+        with patch("eneru.monitor.command_exists", side_effect=cmd_present):
+            monitor._check_dependencies()  # Must not sys.exit
+
+        assert any("'logger' not found" in m for m in log), log

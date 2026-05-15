@@ -526,6 +526,34 @@ def test_is_current_container_empty_id_returns_false(tmp_path):
 
 
 @pytest.mark.unit
+def test_is_current_container_empty_current_ids_returns_false(tmp_path):
+    """When self-detection found nothing, no container is "ours"."""
+    monitor = _make_container_monitor(tmp_path)
+    assert monitor._is_current_container(_FULL_ID, set()) is False
+
+
+@pytest.mark.unit
+def test_compose_stack_contains_self_returns_false_when_no_current_ids(tmp_path):
+    """Bare-metal Eneru (no detected container) must not skip ANY compose file."""
+    monitor = _make_container_monitor(tmp_path)
+    # Shared fixture already stubs _current_container_ids to lambda: set()
+    # — confirm the early-return short-circuits before run_command is touched.
+    with patch("eneru.shutdown.containers.run_command",
+               side_effect=AssertionError("must not be called")):
+        assert monitor._compose_stack_contains_self("/some/file.yml") is False
+
+
+@pytest.mark.unit
+def test_compose_stack_contains_self_handles_compose_ps_failure(tmp_path):
+    """If `compose ps -q` returns nonzero, treat as 'doesn't contain self'."""
+    monitor = _make_container_monitor(tmp_path)
+    monitor._current_container_ids = lambda: {_SHORT_ID}
+    with patch("eneru.shutdown.containers.run_command",
+               return_value=(1, "", "compose: error")):
+        assert monitor._compose_stack_contains_self("/missing.yml") is False
+
+
+@pytest.mark.unit
 def test_current_container_ids_handles_missing_cgroup_files(tmp_path):
     """No /proc/self/cgroup (bare metal) → must not raise; hostname-only fallback."""
     monitor = _make_container_monitor(tmp_path)
