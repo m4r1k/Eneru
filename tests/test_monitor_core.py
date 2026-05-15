@@ -2570,3 +2570,370 @@ class TestExecuteShutdownSequence:
             monitor._execute_shutdown_sequence()  # Must not raise
 
         monitor._send_notification.assert_called_once()
+
+
+class TestTriggerImmediateShutdown:
+    """`_trigger_immediate_shutdown` is the path low-battery / FSD /
+    depletion fire when conditions become unsafe. Coverage: the wall(1)
+    broadcast and the EMERGENCY_SHUTDOWN_INITIATED event log."""
+
+    @pytest.mark.unit
+    def test_wall_broadcast_fires_when_configured(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.behavior.dry_run = False
+        monitor.config.local_shutdown.wall = True
+        monitor._stats_store = MagicMock()
+        monitor._execute_shutdown_sequence = MagicMock()
+
+        with patch("eneru.monitor.run_command") as runner:
+            monitor._trigger_immediate_shutdown("battery 5% < threshold 20%")
+
+        wall_calls = [c for c in runner.call_args_list
+                      if c.args and c.args[0] and c.args[0][0] == "wall"]
+        assert len(wall_calls) == 1
+        # Wall message includes the reason
+        assert "battery 5%" in wall_calls[0].args[0][1]
+        monitor._execute_shutdown_sequence.assert_called_once()
+
+    @pytest.mark.unit
+    def test_wall_broadcast_skipped_in_dry_run(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.behavior.dry_run = True
+        monitor.config.local_shutdown.wall = True
+        monitor._stats_store = MagicMock()
+        monitor._execute_shutdown_sequence = MagicMock()
+
+        with patch("eneru.monitor.run_command") as runner:
+            monitor._trigger_immediate_shutdown("test reason")
+
+        # No wall call in dry-run; only sequence runs (which is mocked)
+        assert all(
+            not (c.args and c.args[0] and c.args[0][0] == "wall")
+            for c in runner.call_args_list
+        )
+
+    @pytest.mark.unit
+    def test_emergency_event_log_failure_does_not_block_shutdown(self, tmp_path):
+        """A broken stats DB during EMERGENCY_SHUTDOWN_INITIATED
+        log_event must not prevent the shutdown sequence from running."""
+        monitor = make_monitor(tmp_path)
+        monitor.config.behavior.dry_run = True
+        monitor.config.local_shutdown.wall = False
+        monitor._stats_store = MagicMock()
+        monitor._stats_store.log_event.side_effect = OSError("db locked")
+        monitor._execute_shutdown_sequence = MagicMock()
+
+        monitor._trigger_immediate_shutdown("test reason")
+
+        monitor._execute_shutdown_sequence.assert_called_once()
+
+
+class TestCleanupAndExit:
+    """`_cleanup_and_exit` handles SIGTERM/SIGINT. Three distinct paths:
+    mid-shutdown signal (drain + exit), graceful stop with stats DB
+    available, and graceful stop when stats failed (worker fallback)."""
+
+    @pytest.mark.unit
+    def test_mid_shutdown_signal_drains_and_exits(self, tmp_path):
+        """If the shutdown_flag is already on disk (sequence in progress),
+        flush the worker and exit with stats stop. Skip lifecycle notif."""
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        monitor._stop_stats = MagicMock()
+
+        worker = MagicMock()
+        monitor._notification_worker = worker
+        monitor._remote_health_manager = MagicMock()
+        monitor._mqtt_publisher = MagicMock()
+        monitor._api_server = MagicMock()
+        monitor._send_notification = MagicMock()
+        monitor._shutdown_flag_path.touch()  # Pretend sequence in progress
+
+        with pytest.raises(SystemExit) as exc_info:
+            monitor._cleanup_and_exit(15, None)
+        assert exc_info.value.code == 0
+
+        # Mid-shutdown path: worker drained + stopped, stats stopped, exited
+        worker.flush.assert_called_once()
+        worker.stop.assert_called_once()
+        monitor._stop_stats.assert_called_once()
+        # No lifecycle notification on mid-shutdown
+        monitor._send_notification.assert_not_called()
+        # Subsystems were also stopped
+        monitor._remote_health_manager.stop.assert_called_once()
+        monitor._mqtt_publisher.stop.assert_called_once()
+        monitor._api_server.stop.assert_called_once()
+
+    @pytest.mark.unit
+    def test_graceful_stop_enqueues_lifecycle_notification(self, tmp_path):
+        """No shutdown_flag on disk → graceful stop. Touch flag, log
+        DAEMON_STOP, schedule deferred lifecycle notification, exit 0."""
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = MagicMock()
+        monitor._stats_store = store
+        monitor._stop_stats = MagicMock()
+        monitor._notification_worker = MagicMock()
+        monitor._send_notification = MagicMock(return_value=42)  # row id
+        # Make sure shutdown flag does NOT exist
+        monitor._shutdown_flag_path.unlink(missing_ok=True)
+
+        with patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.read_shutdown_marker", return_value=None), \
+             patch("eneru.monitor.write_shutdown_marker") as marker, \
+             patch("eneru.monitor.schedule_deferred_stop_or_eager_send") as scheduler:
+            with pytest.raises(SystemExit) as exc_info:
+                monitor._cleanup_and_exit(15, None)
+            assert exc_info.value.code == 0
+
+        # Lifecycle stop got enqueued and scheduled for deferred delivery
+        monitor._send_notification.assert_called_once()
+        scheduler.assert_called_once()
+        kwargs = scheduler.call_args.kwargs
+        assert kwargs["notification_id"] == 42
+
+        # REASON_SIGNAL marker dropped for the next start to detect restart
+        marker.assert_called_once()
+        from eneru.lifecycle import REASON_SIGNAL
+        assert marker.call_args.kwargs["reason"] == REASON_SIGNAL
+
+        # DAEMON_STOP logged in events
+        store.log_event.assert_any_call(
+            "DAEMON_STOP",
+            f"Eneru v{monitor.config.ups.name}".replace(monitor.config.ups.name, monitor.config.ups.name) and
+            store.log_event.call_args_list[0].args[1],  # tolerant
+        )
+
+    @pytest.mark.unit
+    def test_graceful_stop_skipped_during_upgrade(self, tmp_path):
+        """When read_upgrade_marker indicates an upgrade in progress,
+        suppress the lifecycle stop notification entirely (the next
+        daemon will emit a single 'Upgraded vX → vY' that supersedes
+        this stop)."""
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = MagicMock()
+        monitor._stats_store = store
+        monitor._stop_stats = MagicMock()
+        monitor._notification_worker = MagicMock()
+        monitor._send_notification = MagicMock()
+        monitor._shutdown_flag_path.unlink(missing_ok=True)
+
+        with patch("eneru.monitor.read_upgrade_marker",
+                   return_value={"from": "5.3.0", "to": "5.4.0"}), \
+             patch("eneru.monitor.read_shutdown_marker", return_value=None), \
+             patch("eneru.monitor.write_shutdown_marker"), \
+             patch("eneru.monitor.schedule_deferred_stop_or_eager_send") as scheduler:
+            with pytest.raises(SystemExit):
+                monitor._cleanup_and_exit(15, None)
+
+        monitor._send_notification.assert_not_called()
+        scheduler.assert_not_called()
+
+    @pytest.mark.unit
+    def test_graceful_stop_eager_fallback_when_stats_db_down(self, tmp_path):
+        """If the stats DB never opened (notif_id is None / _conn is None),
+        fall back to an eager Apprise send via the worker so the user
+        still gets a Stopped notification."""
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = None  # DB never opened
+        monitor._stats_store = store
+        monitor._stop_stats = MagicMock()
+        worker = MagicMock()
+        monitor._notification_worker = worker
+        monitor._send_notification = MagicMock(return_value=None)
+        monitor._shutdown_flag_path.unlink(missing_ok=True)
+
+        with patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.read_shutdown_marker", return_value=None), \
+             patch("eneru.monitor.write_shutdown_marker"), \
+             patch("eneru.monitor.schedule_deferred_stop_or_eager_send") as scheduler:
+            with pytest.raises(SystemExit):
+                monitor._cleanup_and_exit(15, None)
+
+        # Scheduler not invoked (no notif_id), eager Apprise fallback fires
+        scheduler.assert_not_called()
+        worker._send_via_apprise.assert_called_once()
+
+    @pytest.mark.unit
+    def test_graceful_stop_does_not_overwrite_sequence_complete_marker(self, tmp_path):
+        """If a SHUTDOWN_SEQUENCE_COMPLETE marker is already on disk
+        (because power-loss shutdown ran first), do NOT overwrite it
+        with REASON_SIGNAL — that would mask the power-loss event from
+        the next start."""
+        from eneru.lifecycle import REASON_SEQUENCE_COMPLETE
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = MagicMock()
+        monitor._stats_store = store
+        monitor._stop_stats = MagicMock()
+        monitor._notification_worker = MagicMock()
+        monitor._send_notification = MagicMock(return_value=1)
+        monitor._shutdown_flag_path.unlink(missing_ok=True)
+
+        existing = {"reason": REASON_SEQUENCE_COMPLETE, "version": "5.4.0"}
+        with patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.read_shutdown_marker", return_value=existing), \
+             patch("eneru.monitor.write_shutdown_marker") as marker, \
+             patch("eneru.monitor.schedule_deferred_stop_or_eager_send"):
+            with pytest.raises(SystemExit):
+                monitor._cleanup_and_exit(15, None)
+
+        marker.assert_not_called()  # Existing power-loss marker preserved
+
+
+class TestGetUpsVar:
+    """`_get_ups_var` queries a single NUT variable. Returns the
+    stripped value on success, None on failure — never raises."""
+
+    @pytest.mark.unit
+    def test_returns_stripped_value_on_success(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        with patch.object(monitor, "_run_upsc",
+                          return_value=(0, "  ON BATTERY \n", "")):
+            assert monitor._get_ups_var("ups.status") == "ON BATTERY"
+
+    @pytest.mark.unit
+    def test_returns_none_on_upsc_failure(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        with patch.object(monitor, "_run_upsc",
+                          return_value=(1, "", "no such ups")):
+            assert monitor._get_ups_var("ups.status") is None
+
+
+class TestConnectionRecoveryGracePeriod:
+    """When `_main_loop` sees fresh data after the connection state was
+    GRACE_PERIOD, it logs a quiet recovery + tracks flap count for
+    instability detection. Cover the GRACE_PERIOD branch and the
+    flap-threshold notification."""
+
+    @pytest.mark.unit
+    def test_grace_period_recovery_resets_state_quietly(self, tmp_path):
+        """A successful poll while connection_state=GRACE_PERIOD must
+        flip state back to OK without emitting a recovery notification."""
+        monitor = make_monitor(tmp_path)
+        log = []
+        monitor._log_message = log.append
+        monitor._send_notification = MagicMock()
+        # Set up the GRACE_PERIOD precondition
+        monitor.state.connection_state = "GRACE_PERIOD"
+        monitor.state.connection_lost_time = time.time() - 10
+        monitor.state.connection_flap_count = 0
+        monitor.state.connection_first_flap_time = 0.0
+        # Keep flap threshold high so a single flap doesn't trip notification
+        monitor.config.ups.connection_loss_grace_period.flap_threshold = 5
+
+        # Run one main loop iteration with a successful poll
+        ups_data = {
+            "ups.status": "OL CHRG",
+            "battery.charge": "100",
+            "battery.runtime": "3600",
+        }
+        _run_one_iteration(monitor, (True, ups_data, ""))
+
+        assert monitor.state.connection_state == "OK"
+        assert monitor.state.connection_lost_time == 0.0
+        # Quiet recovery — no notification
+        monitor._send_notification.assert_not_called()
+        # Flap counter incremented
+        assert monitor.state.connection_flap_count == 1
+        assert any("recovered during grace period" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_grace_period_flap_threshold_fires_unstable_notification(self, tmp_path):
+        """When connection_flap_count crosses flap_threshold, log a
+        warning and send an Unstable notification. Reset the counter
+        so the next outbreak fires only after another N flaps."""
+        monitor = make_monitor(tmp_path)
+        log = []
+        monitor._log_message = log.append
+        monitor._send_notification = MagicMock()
+        monitor.state.connection_state = "GRACE_PERIOD"
+        monitor.state.connection_lost_time = time.time() - 5
+        monitor.state.connection_flap_count = 4  # One short of threshold
+        monitor.state.connection_first_flap_time = time.time() - 100
+        monitor.config.ups.connection_loss_grace_period.flap_threshold = 5
+
+        _run_one_iteration(monitor, (True, {
+            "ups.status": "OL CHRG", "battery.charge": "100",
+            "battery.runtime": "3600",
+        }, ""))
+
+        # Counter incremented past threshold then reset
+        assert monitor.state.connection_flap_count == 0
+        assert monitor.state.connection_first_flap_time == 0.0
+        # Notification fired
+        monitor._send_notification.assert_called_once()
+        body = monitor._send_notification.call_args.args[0]
+        assert "NUT Server Unstable" in body
+        assert any("NUT server is unstable" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_failed_state_recovery_logs_power_event(self, tmp_path):
+        """A successful poll while connection_state=FAILED logs a
+        CONNECTION_RESTORED power event (loud) — that's the explicit
+        "comes back from a real outage" signal."""
+        monitor = make_monitor(tmp_path)
+        monitor._log_power_event = MagicMock()
+        monitor._send_notification = MagicMock()
+        monitor.state.connection_state = "FAILED"
+        monitor.state.connection_lost_time = time.time() - 600
+        monitor.state.connection_flap_count = 7  # Should reset
+
+        _run_one_iteration(monitor, (True, {
+            "ups.status": "OL CHRG", "battery.charge": "100",
+            "battery.runtime": "3600",
+        }, ""))
+
+        assert monitor.state.connection_state == "OK"
+        assert monitor.state.connection_flap_count == 0
+        monitor._log_power_event.assert_called_once()
+        assert monitor._log_power_event.call_args.args[0] == "CONNECTION_RESTORED"
+
+    @pytest.mark.unit
+    def test_grace_period_flap_count_resets_after_24h_ttl(self, tmp_path):
+        """Flap counter has a 24h TTL — flaps from yesterday don't
+        count toward today's threshold."""
+        monitor = make_monitor(tmp_path)
+        monitor._send_notification = MagicMock()
+        monitor.state.connection_state = "GRACE_PERIOD"
+        monitor.state.connection_lost_time = time.time() - 5
+        # Flaps from 25h ago — should be reset
+        monitor.state.connection_flap_count = 4
+        monitor.state.connection_first_flap_time = time.time() - 25 * 3600
+        monitor.config.ups.connection_loss_grace_period.flap_threshold = 5
+
+        _run_one_iteration(monitor, (True, {
+            "ups.status": "OL CHRG", "battery.charge": "100",
+            "battery.runtime": "3600",
+        }, ""))
+
+        # The 4 stale flaps were dropped, then this one flap counted as first.
+        # So count is 1 (not 5) — well below threshold, no unstable notif.
+        assert monitor.state.connection_flap_count == 1
+        monitor._send_notification.assert_not_called()
+
+
+class TestEmptyStatusHandling:
+    """When ups_data is fetched OK but `ups.status` is missing, log
+    an error and skip the rest of the iteration — never proceed
+    with an empty status to the trigger logic."""
+
+    @pytest.mark.unit
+    def test_empty_status_logs_error_and_skips_iteration(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        log = []
+        monitor._log_message = log.append
+        # Make sure we're not in any special connection state
+        monitor.state.connection_state = "OK"
+        monitor.state.previous_status = "OL"
+
+        # Successful fetch but no ups.status field
+        _run_one_iteration(monitor, (True, {
+            "battery.charge": "85",
+            "battery.runtime": "1200",
+            # NOTE: no ups.status
+        }, ""))
+
+        assert any("'ups.status' is missing" in m for m in log), log
