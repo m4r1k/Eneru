@@ -2937,3 +2937,38 @@ class TestEmptyStatusHandling:
         }, ""))
 
         assert any("'ups.status' is missing" in m for m in log), log
+
+
+class TestPowerRestoredCallback:
+    """The coordinator hook invoked when an UPS group recovers from
+    On Battery. Defensive contract: a callback that raises must NOT
+    propagate into the main loop — log a warning and continue."""
+
+    @pytest.mark.unit
+    def test_callback_exception_is_logged_and_swallowed(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        log = []
+        # _log_message accepts **extra kwargs (group, category, etc) — wrap
+        # so list.append doesn't choke on them.
+        monitor._log_message = lambda msg, **kw: log.append(msg)
+        monitor._send_notification = MagicMock()
+        # Set up an OB->OL transition: previous status was OB and trigger
+        # was active so _handle_on_line walks the recovery path.
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.trigger_active = True
+        monitor.state.on_battery_start_time = int(time.time()) - 60
+
+        def boom():
+            raise RuntimeError("coordinator gone away")
+
+        monitor._power_restored_callback = boom
+
+        ups_data = {
+            "ups.status": "OL CHRG",
+            "battery.charge": "75",
+            "input.voltage": "230.5",
+        }
+        # Must not raise.
+        monitor._handle_on_line(ups_data)
+
+        assert any("power_restored_callback raised" in m for m in log), log

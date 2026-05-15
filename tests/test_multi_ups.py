@@ -1988,6 +1988,88 @@ ups:
         assert any("failed to record redundancy remote-health" in m for m in log), log
 
     @pytest.mark.unit
+    def test_handle_signal_stops_subsystems_and_threads(self, tmp_path):
+        """SIGTERM/SIGINT must stop the redundancy remote-health managers,
+        MQTT publisher, API server, and join all monitor/evaluator threads
+        before exit."""
+        from eneru import ConfigLoader
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  - name: "UPS-A"
+  - name: "UPS-B"
+""")
+        config = ConfigLoader.load(str(config_file))
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+
+        rh1 = MagicMock()
+        rh2 = MagicMock()
+        coord._redundancy_remote_health_managers = [rh1, rh2]
+        coord._mqtt_publisher = MagicMock()
+        coord._api_server = MagicMock()
+
+        t1 = MagicMock()
+        t2 = MagicMock()
+        coord._threads = [t1, t2]
+        coord._evaluator_threads = []
+        coord._notification_worker = None
+        coord._stats_stores = []
+        coord._stats_writers = []
+        coord._stop_event = MagicMock()
+
+        with patch("eneru.multi_ups.read_upgrade_marker", return_value=None), \
+             patch("eneru.multi_ups.read_shutdown_marker", return_value=None), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.schedule_deferred_stop_or_eager_send"), \
+             pytest.raises(SystemExit):
+            coord._handle_signal(15, None)
+
+        rh1.stop.assert_called_once()
+        rh2.stop.assert_called_once()
+        coord._mqtt_publisher.stop.assert_called_once()
+        coord._api_server.stop.assert_called_once()
+        t1.join.assert_called_once_with(timeout=5)
+        t2.join.assert_called_once_with(timeout=5)
+
+    @pytest.mark.unit
+    def test_handle_signal_skips_lifecycle_notif_during_upgrade(self, tmp_path):
+        """An in-flight deb/rpm upgrade (read_upgrade_marker returns truthy)
+        means the next daemon will emit 'Upgraded vX → vY' — suppress the
+        lifecycle stop here so the user sees one combined message."""
+        from eneru import ConfigLoader
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  - name: "UPS-A"
+  - name: "UPS-B"
+""")
+        config = ConfigLoader.load(str(config_file))
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+        coord._redundancy_remote_health_managers = []
+        coord._mqtt_publisher = None
+        coord._api_server = None
+        coord._threads = []
+        coord._evaluator_threads = []
+        worker = MagicMock()
+        coord._notification_worker = worker
+        coord._stats_stores = []
+        coord._stats_writers = []
+        coord._stop_event = MagicMock()
+
+        with patch("eneru.multi_ups.read_upgrade_marker",
+                   return_value={"from": "5.3.0", "to": "5.4.0"}), \
+             patch("eneru.multi_ups.read_shutdown_marker", return_value=None), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.schedule_deferred_stop_or_eager_send") as scheduler, \
+             pytest.raises(SystemExit):
+            coord._handle_signal(15, None)
+
+        scheduler.assert_not_called()
+
+
+    @pytest.mark.unit
     def test_fanout_skips_members_without_a_store(self, tmp_path):
         """A monitor whose _stats_store is None (open() failed) is
         silently skipped — not a warning, just no fan-out for that one."""

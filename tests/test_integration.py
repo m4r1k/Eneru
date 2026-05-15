@@ -21,7 +21,7 @@ from eneru import (
 class TestConfigToMonitor:
     """Test configuration loading and monitor initialization."""
 
-    @pytest.mark.integration
+    @pytest.mark.unit
     def test_full_config_loads_and_initializes(self, tmp_path):
         """Test that a full configuration file can be loaded and used."""
         config_file = tmp_path / "config.yaml"
@@ -64,7 +64,7 @@ local_shutdown:
         monitor = UPSGroupMonitor(config)
         assert monitor.config.ups.name == "TestUPS@localhost"
 
-    @pytest.mark.integration
+    @pytest.mark.unit
     def test_monitor_initialization_sequence(self, minimal_config, tmp_path):
         """Test that monitor initializes correctly."""
         minimal_config.logging.state_file = str(tmp_path / "state")
@@ -127,7 +127,7 @@ class TestShutdownSequence:
 
         return monitor
 
-    @pytest.mark.integration
+    @pytest.mark.unit
     def test_dry_run_shutdown_sequence(self, shutdown_monitor):
         """Test that dry-run shutdown sequence executes without errors."""
         with patch("eneru.monitor.run_command") as mock_run:
@@ -148,7 +148,7 @@ class TestShutdownSequence:
                 # Verify key shutdown steps were logged
                 assert "SHUTDOWN SEQUENCE" in log_output or "DRY-RUN" in log_output
 
-    @pytest.mark.integration
+    @pytest.mark.unit
     def test_trigger_immediate_shutdown_sets_flag(self, shutdown_monitor):
         """Test that triggering shutdown sets the flag file."""
         flag_path = shutdown_monitor._shutdown_flag_path
@@ -171,7 +171,7 @@ class TestShutdownSequence:
         # Clean up
         flag_path.unlink(missing_ok=True)
 
-    @pytest.mark.integration
+    @pytest.mark.unit
     def test_duplicate_shutdown_prevented(self, shutdown_monitor):
         """Test that shutdown cannot be triggered twice."""
         # Create the flag file first
@@ -186,7 +186,7 @@ class TestShutdownSequence:
         # Clean up
         shutdown_monitor._shutdown_flag_path.unlink(missing_ok=True)
 
-    @pytest.mark.integration
+    @pytest.mark.unit
     def test_shutdown_flag_file_created_during_sequence(self, shutdown_monitor, tmp_path):
         """Test that the shutdown flag file is created during shutdown sequence."""
         flag_path = shutdown_monitor._shutdown_flag_path
@@ -217,7 +217,7 @@ class TestShutdownSequence:
         # The flag should have been created at some point during execution
         assert flag_was_created
 
-    @pytest.mark.integration
+    @pytest.mark.unit
     def test_shutdown_logs_dry_run_message(self, shutdown_monitor):
         """Test that dry-run mode is clearly indicated in logs."""
         with patch("eneru.monitor.run_command", return_value=(0, "", "")):

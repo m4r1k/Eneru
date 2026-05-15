@@ -4,11 +4,13 @@ import pytest
 import yaml
 from pathlib import Path
 from typing import Any, Mapping
+from unittest.mock import patch
 
 from eneru import (
     Config,
     ConfigLoader,
     UPSConfig,
+    UPSGroupConfig,
     TriggersConfig,
     NotificationsConfig,
     ContainersConfig,
@@ -348,6 +350,121 @@ class TestUnknownKeyValidation:
         # unknown-key error since 'name' and 'host' are valid keys.
         assert not any("remote_servers['ok']" in m and "unknown" in m.lower()
                        for m in messages)
+
+    @pytest.mark.unit
+    def test_yaml_unavailable_falls_back_to_default_config(self, tmp_path, capsys):
+        """When PyYAML can't be imported, ConfigLoader.load() must return
+        a usable default Config and warn the user — not crash."""
+        from eneru import config as cfg_mod
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("ups:\n  name: 'X'\n")
+        with patch.object(cfg_mod, "YAML_AVAILABLE", False):
+            cfg = ConfigLoader.load(str(config_file))
+        assert isinstance(cfg, Config)
+        out = capsys.readouterr().out
+        assert "PyYAML not installed" in out
+        assert "pip install pyyaml" in out
+
+    @pytest.mark.unit
+    def test_prometheus_section_with_non_dict_falls_back_to_defaults(self, tmp_path):
+        """A `prometheus: true` (non-mapping) value must not crash; defaults apply."""
+        from eneru import PrometheusConfig
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  name: "UPS@localhost"
+prometheus: true
+""")
+        cfg = ConfigLoader.load(str(config_file))
+        # Defaults still in place — no AttributeError on parse.
+        assert cfg.prometheus.enabled == PrometheusConfig().enabled
+
+    @pytest.mark.unit
+    def test_remote_health_section_with_non_dict_falls_back_to_defaults(self, tmp_path):
+        from eneru import RemoteHealthConfig
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  name: "UPS@localhost"
+remote_health: "yes please"
+""")
+        cfg = ConfigLoader.load(str(config_file))
+        assert cfg.remote_health.enabled == RemoteHealthConfig().enabled
+        assert cfg.remote_health.interval == RemoteHealthConfig().interval
+
+    @pytest.mark.unit
+    def test_mqtt_section_with_non_dict_falls_back_to_defaults(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  name: "UPS@localhost"
+mqtt: 42
+""")
+        cfg = ConfigLoader.load(str(config_file))
+        assert cfg.mqtt.enabled is False
+
+    @pytest.mark.unit
+    def test_pre_shutdown_commands_non_list_is_skipped(self, default_config):
+        """A `pre_shutdown_commands: 42` (non-list) on a remote_server
+        entry must not crash validation — skip it and move on."""
+        raw_data = {
+            "ups": {"name": "UPS@localhost"},
+            "remote_servers": [{
+                "name": "nas",
+                "host": "nas.lan",
+                "pre_shutdown_commands": 42,  # not a list
+            }],
+        }
+        # No exception, no unrelated errors
+        ConfigLoader.validate_config(default_config, raw_data=raw_data)
+
+    @pytest.mark.unit
+    def test_pre_shutdown_commands_non_dict_entry_is_skipped(self, default_config):
+        """A list whose entries aren't all dicts is partially skipped."""
+        raw_data = {
+            "ups": {"name": "UPS@localhost"},
+            "remote_servers": [{
+                "name": "nas",
+                "host": "nas.lan",
+                "pre_shutdown_commands": [
+                    "not-a-dict",  # skipped
+                    {"action": "wait", "timeout": 5},  # valid
+                ],
+            }],
+        }
+        messages = ConfigLoader.validate_config(default_config, raw_data=raw_data)
+        # No errors about pre_shutdown_commands[0] (the string)
+        assert not any("pre_shutdown_commands[0]" in m for m in messages)
+
+    @pytest.mark.unit
+    def test_logging_format_invalid_value_errors(self):
+        """logging.format only accepts 'text' or 'json'."""
+        from eneru import LoggingConfig
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS"))],
+            logging=LoggingConfig(format="xml"),  # invalid
+        )
+        messages = ConfigLoader.validate_config(config)
+        errors = [m for m in messages if m.startswith("ERROR:")]
+        assert any("logging.format must be 'text' or 'json'" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_apprise_unavailable_warning_when_notifications_enabled(self):
+        """When apprise isn't installed but notifications.enabled=True,
+        emit a WARNING (not ERROR) so validate doesn't fail but the
+        operator gets a clear pip-install hint."""
+        # APPRISE_AVAILABLE lives in eneru.notifications; validate_config
+        # imports it inside the function, so patch the source module.
+        from eneru import notifications as notif_mod
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS"))],
+            notifications=NotificationsConfig(enabled=True, urls=["discord://x/y"]),
+        )
+        with patch.object(notif_mod, "APPRISE_AVAILABLE", False):
+            messages = ConfigLoader.validate_config(config)
+        assert any("apprise package not installed" in m for m in messages)
+        # And it's a WARNING, not an ERROR
+        assert any(m.startswith("WARNING") and "apprise" in m for m in messages)
 
     @pytest.mark.unit
     def test_remote_server_known_keys_dont_trigger_errors(self):

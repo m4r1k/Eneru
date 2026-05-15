@@ -1274,6 +1274,111 @@ remote_servers:
         assert "INVALID" in out
 
 
+class TestCmdRunRouting:
+    """`eneru run` routes to UPSGroupMonitor for single-UPS or
+    MultiUPSCoordinator for multi-UPS / redundancy configs. Locks
+    that the right entry point is picked from the parsed config."""
+
+    @pytest.mark.unit
+    def test_multi_ups_routes_to_coordinator(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  - name: "UPS-A"
+  - name: "UPS-B"
+local_shutdown:
+  enabled: false
+  trigger_on: none
+""")
+        with patch.object(sys, "argv", ["eneru", "run", "-c", str(config_file),
+                                        "--exit-after-shutdown"]), \
+             patch.dict("os.environ", {"ENERU_SKIP_PRIVILEGE_CHECK": "1"}, clear=False), \
+             patch("eneru.cli.MultiUPSCoordinator") as coord_cls, \
+             patch("eneru.cli.UPSGroupMonitor") as mon_cls:
+            coord_cls.return_value = MagicMock()
+            main()
+        coord_cls.assert_called_once()
+        mon_cls.assert_not_called()
+
+    @pytest.mark.unit
+    def test_redundancy_groups_route_to_coordinator(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  - name: "UPS-A"
+  - name: "UPS-B"
+redundancy_groups:
+  - name: "rack"
+    ups_sources: ["UPS-A", "UPS-B"]
+local_shutdown:
+  enabled: false
+  trigger_on: none
+""")
+        with patch.object(sys, "argv", ["eneru", "run", "-c", str(config_file),
+                                        "--exit-after-shutdown"]), \
+             patch.dict("os.environ", {"ENERU_SKIP_PRIVILEGE_CHECK": "1"}, clear=False), \
+             patch("eneru.cli.MultiUPSCoordinator") as coord_cls, \
+             patch("eneru.cli.UPSGroupMonitor") as mon_cls:
+            coord_cls.return_value = MagicMock()
+            main()
+        coord_cls.assert_called_once()
+        mon_cls.assert_not_called()
+
+    @pytest.mark.unit
+    def test_single_ups_routes_to_monitor(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  name: "UPS@localhost"
+local_shutdown:
+  enabled: false
+  trigger_on: none
+""")
+        with patch.object(sys, "argv", ["eneru", "run", "-c", str(config_file),
+                                        "--exit-after-shutdown"]), \
+             patch.dict("os.environ", {"ENERU_SKIP_PRIVILEGE_CHECK": "1"}, clear=False), \
+             patch("eneru.cli.UPSGroupMonitor") as mon_cls, \
+             patch("eneru.cli.MultiUPSCoordinator") as coord_cls:
+            mon_cls.return_value = MagicMock()
+            main()
+        mon_cls.assert_called_once()
+        coord_cls.assert_not_called()
+
+
+class TestIterRemoteServerOwners:
+    """`_iter_remote_server_owners` yields (label, name, server) for
+    every remote server in the config — including redundancy_groups,
+    which use a `redundancy:<name>` label prefix."""
+
+    @pytest.mark.unit
+    def test_yields_redundancy_group_owners_with_label_prefix(self):
+        from eneru.cli import _iter_remote_server_owners
+        from eneru import RedundancyGroupConfig, RemoteServerConfig
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"),
+                remote_servers=[
+                    RemoteServerConfig(name="ups-target", enabled=True,
+                                       host="h1", user="u"),
+                ],
+            )],
+            redundancy_groups=[RedundancyGroupConfig(
+                name="rack",
+                remote_servers=[
+                    RemoteServerConfig(name="rg-target", enabled=True,
+                                       host="h2", user="u"),
+                ],
+            )],
+        )
+        rows = list(_iter_remote_server_owners(config))
+        # First row from ups_groups, second from redundancy_groups
+        assert len(rows) == 2
+        assert rows[0][0] == "UPS@host"  # owner_label = ups.label
+        assert rows[1][0] == "redundancy:rack"
+        assert rows[1][2].name == "rg-target"
+
+
 class TestCLITestNotifications:
     """Test 'eneru test-notifications' subcommand."""
 

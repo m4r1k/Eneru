@@ -17,6 +17,7 @@ from eneru.tui import (
     parse_log_events,
     human_status,
     status_color,
+    status_attr,
     collect_group_data,
     render_logs_panel,
     run_once,
@@ -1959,3 +1960,248 @@ class _CursesStub:
     @staticmethod
     def color_pair(_n):
         return 0
+
+
+# ====================================================================
+# Pure-logic helpers (no curses required)
+# ====================================================================
+
+
+class TestHumanStatus:
+    """Translate NUT status flags into operator-friendly strings."""
+
+    @pytest.mark.unit
+    def test_fsd_takes_precedence(self):
+        assert human_status("FSD OL CHRG") == "FORCED SHUTDOWN"
+
+    @pytest.mark.unit
+    def test_on_battery_low_takes_precedence_over_on_battery(self):
+        assert human_status("OB LB") == "ON BATTERY - LOW"
+
+    @pytest.mark.unit
+    def test_on_battery_discharging(self):
+        assert human_status("OB DISCHRG") == "ON BATTERY - DISCHARGING"
+
+    @pytest.mark.unit
+    def test_on_battery_alone(self):
+        assert human_status("OB") == "ON BATTERY"
+
+    @pytest.mark.unit
+    def test_online_charging(self):
+        assert human_status("OL CHRG") == "ONLINE - CHARGING"
+
+    @pytest.mark.unit
+    def test_online_alone(self):
+        assert human_status("OL") == "ONLINE"
+
+    @pytest.mark.unit
+    def test_charging_without_online_marker(self):
+        # Defensive: most NUT setups always include OL or OB; this is the
+        # fallback when only CHRG is present.
+        assert human_status("CHRG") == "CHARGING"
+
+    @pytest.mark.unit
+    def test_empty_status_is_unknown(self):
+        assert human_status("") == "UNKNOWN"
+        assert human_status("   ") == "UNKNOWN"
+
+    @pytest.mark.unit
+    def test_unrecognised_status_passes_through_uppercased(self):
+        # No rule matched — return the raw upper-cased status so
+        # operators can still see what the UPS reported.
+        assert human_status("WTF") == "WTF"
+
+
+class TestStatusColor:
+    """Map status flags to color-pair IDs for the badge."""
+
+    @pytest.mark.unit
+    def test_fsd_is_critical(self):
+        assert status_color("FSD") == C_STATUS_CRIT
+
+    @pytest.mark.unit
+    def test_low_battery_is_critical(self):
+        assert status_color("OB LB") == C_STATUS_CRIT
+
+    @pytest.mark.unit
+    def test_on_battery_discharging_is_critical(self):
+        assert status_color("OB DISCHRG") == C_STATUS_CRIT
+
+    @pytest.mark.unit
+    def test_on_battery_alone_is_warning(self):
+        assert status_color("OB") == C_STATUS_OB
+
+    @pytest.mark.unit
+    def test_online_is_ok(self):
+        assert status_color("OL") == C_STATUS_OK
+
+    @pytest.mark.unit
+    def test_charging_alone_is_ok(self):
+        assert status_color("CHRG") == C_STATUS_OK
+
+    @pytest.mark.unit
+    def test_unknown_status_is_unknown_color(self):
+        assert status_color("?") == C_STATUS_UNK
+
+
+class TestStatusAttr:
+    """`status_attr` adds A_BOLD always, and A_BLINK only for warning/critical
+    states (OB, FSD, LB) — the operator's signal that the UPS needs
+    attention even at a glance.
+
+    `curses.color_pair()` requires initscr() and crashes outside a real
+    curses session, so patch it to a no-op (the BLINK logic, not the
+    color_pair lookup, is what's under test)."""
+
+    @pytest.mark.unit
+    def test_online_status_is_bold_only(self):
+        with patch("eneru.tui.curses.color_pair", return_value=0):
+            attr = status_attr("OL CHRG")
+        assert attr & curses.A_BOLD
+        assert not (attr & curses.A_BLINK)
+
+    @pytest.mark.unit
+    def test_on_battery_status_blinks(self):
+        with patch("eneru.tui.curses.color_pair", return_value=0):
+            attr = status_attr("OB DISCHRG")
+        assert attr & curses.A_BOLD
+        assert attr & curses.A_BLINK
+
+    @pytest.mark.unit
+    def test_fsd_status_blinks(self):
+        with patch("eneru.tui.curses.color_pair", return_value=0):
+            attr = status_attr("FSD")
+        assert attr & curses.A_BLINK
+
+    @pytest.mark.unit
+    def test_low_battery_status_blinks(self):
+        with patch("eneru.tui.curses.color_pair", return_value=0):
+            attr = status_attr("OL LB")
+        assert attr & curses.A_BLINK
+
+
+class TestFormatRuntime:
+    """`format_runtime` converts NUT runtime seconds to a human display."""
+
+    @pytest.mark.unit
+    def test_hours_and_minutes(self):
+        from eneru.tui import format_runtime
+        assert format_runtime("3700") == "1h 1m"  # 3700 = 1h 1m 40s, seconds dropped
+        assert format_runtime("7200") == "2h 0m"
+
+    @pytest.mark.unit
+    def test_minutes_and_seconds(self):
+        from eneru.tui import format_runtime
+        assert format_runtime("125") == "2m 5s"
+        assert format_runtime("60") == "1m 0s"
+
+    @pytest.mark.unit
+    def test_sub_minute_shows_seconds(self):
+        from eneru.tui import format_runtime
+        assert format_runtime("45") == "45s"
+        assert format_runtime("0") == "0s"
+
+    @pytest.mark.unit
+    def test_invalid_input_returns_input_unchanged(self):
+        """A non-numeric runtime (e.g. NUT didn't report it) falls
+        back to the raw value so the operator at least sees what NUT
+        did send."""
+        from eneru.tui import format_runtime
+        assert format_runtime("?") == "?"
+        assert format_runtime("not-a-number") == "not-a-number"
+        assert format_runtime("") == ""
+
+    @pytest.mark.unit
+    def test_floating_point_input_truncates(self):
+        from eneru.tui import format_runtime
+        # NUT can return decimals
+        assert format_runtime("3661.7") == "1h 1m"
+
+
+# ====================================================================
+# Events-tier label helpers (run-once footer + placeholder text)
+# ====================================================================
+
+
+class TestEventsVerbosityLabel:
+    """`_events_verbosity_label` is the short string in the live TUI
+    footer telling the operator what tier they're seeing."""
+
+    @pytest.mark.unit
+    def test_power_label(self):
+        from eneru.tui import _events_verbosity_label, EVENTS_VERBOSITY_POWER
+        assert _events_verbosity_label(EVENTS_VERBOSITY_POWER) == "power"
+
+    @pytest.mark.unit
+    def test_diagnostics_label(self):
+        from eneru.tui import _events_verbosity_label, EVENTS_VERBOSITY_DIAGNOSTICS
+        assert _events_verbosity_label(EVENTS_VERBOSITY_DIAGNOSTICS) == "+diag"
+
+    @pytest.mark.unit
+    def test_all_label(self):
+        from eneru.tui import _events_verbosity_label, EVENTS_VERBOSITY_ALL
+        assert _events_verbosity_label(EVENTS_VERBOSITY_ALL) == "all"
+
+
+class TestNoEventsMessage:
+    """`_no_events_message` placeholder text varies by tier so the operator
+    knows whether they're seeing a true gap or just narrow filtering."""
+
+    @pytest.mark.unit
+    def test_power_tier_message(self):
+        from eneru.tui import _no_events_message, EVENTS_VERBOSITY_POWER
+        assert _no_events_message(EVENTS_VERBOSITY_POWER) == "(no power events recorded)"
+
+    @pytest.mark.unit
+    def test_higher_tier_uses_generic_no_events(self):
+        from eneru.tui import _no_events_message, EVENTS_VERBOSITY_DIAGNOSTICS
+        assert _no_events_message(EVENTS_VERBOSITY_DIAGNOSTICS) == "(no events)"
+
+
+class TestSummarizeRemoteHealth:
+    """Already partially covered; add malformed-row defensive guards."""
+
+    @pytest.mark.unit
+    def test_empty_rows_returns_empty_string(self):
+        from eneru.tui import summarize_remote_health
+        assert summarize_remote_health([]) == ""
+
+    @pytest.mark.unit
+    def test_non_dict_rows_are_skipped(self):
+        """A partially-written sidecar entry that isn't a mapping must
+        not crash the summary — skip and continue."""
+        from eneru.tui import summarize_remote_health
+        rows = [
+            "not-a-dict",  # malformed — must be skipped
+            {"status": "healthy"},
+            {"status": "failed"},
+            42,  # also not a dict
+            {"status": "healthy"},
+        ]
+        result = summarize_remote_health(rows)
+        # Two healthy + one failed counted; malformed entries skipped
+        assert "2 healthy" in result
+        assert "1 failed" in result
+
+    @pytest.mark.unit
+    def test_status_field_default_is_unknown(self):
+        from eneru.tui import summarize_remote_health
+        rows = [{"server": "x"}, {"server": "y"}]  # no status field
+        result = summarize_remote_health(rows)
+        assert "2 unknown" in result
+
+    @pytest.mark.unit
+    def test_orders_statuses_by_severity_priority(self):
+        """Order: healthy, degraded, failed, checking, unknown, disabled."""
+        from eneru.tui import summarize_remote_health
+        rows = [
+            {"status": "disabled"},
+            {"status": "healthy"},
+            {"status": "failed"},
+            {"status": "degraded"},
+        ]
+        result = summarize_remote_health(rows)
+        # The output is comma-separated in the priority order
+        assert result.index("1 healthy") < result.index("1 degraded")
+        assert result.index("1 degraded") < result.index("1 failed")
+        assert result.index("1 failed") < result.index("1 disabled")

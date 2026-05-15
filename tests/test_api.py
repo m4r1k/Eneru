@@ -1345,6 +1345,47 @@ def test_mqtt_on_disconnect_clean_does_not_set_reconnect(minimal_config):
 
 
 @pytest.mark.unit
+def test_mqtt_wait_short_timeout_uses_stop_event_directly(minimal_config):
+    """For timeouts <= LOCAL_STOP_POLL_SECONDS (5s), `_wait` waits on the
+    daemon-wide stop_event in one shot — no slicing loop needed."""
+    import threading
+    daemon_stop = threading.Event()
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=daemon_stop)
+
+    # Daemon stop already set → wait returns True immediately
+    daemon_stop.set()
+    assert pub._wait(timeout=2) is True
+
+
+@pytest.mark.unit
+def test_mqtt_wait_long_timeout_slices_for_local_stop_responsiveness(minimal_config):
+    """For timeouts > 5s, `_wait` loops in 5s slices so a publisher.stop()
+    mid-wait is detected within ~5s rather than waiting out the full
+    backoff (60s reconnect path)."""
+    import threading
+    daemon_stop = threading.Event()
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=daemon_stop)
+    # Configure local-stop to be set very quickly
+    pub._local_stop.set()
+    # Long timeout but local_stop fires in the first slice → returns True
+    assert pub._wait(timeout=30) is True
+
+
+@pytest.mark.unit
+def test_mqtt_wait_long_timeout_returns_false_when_no_stop(minimal_config):
+    """A long timeout with neither stop fired returns False (timeout
+    exhausted). Use a tiny effective timeout via monkeypatched poll
+    constant so the test stays fast."""
+    import threading
+    daemon_stop = threading.Event()
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=daemon_stop)
+    # Force the slicing loop with a 6s wait but a tiny poll interval
+    with patch.object(pub, "_LOCAL_STOP_POLL_SECONDS", 0.001):
+        # wait 0.01s sliced into 0.001s polls — must return False
+        assert pub._wait(timeout=0.01) is False
+
+
+@pytest.mark.unit
 def test_mqtt_status_fingerprint_excludes_generatedat():
     """Two payloads that differ only in generatedAt must hash the same
     so cache-coherent UPS state doesn't trigger a publish every poll."""
@@ -1574,6 +1615,56 @@ def test_query_history_returns_buffered_samples_in_range(minimal_config, tmp_pat
     assert rows[1]["ts"] == 102
     assert rows[0]["value"] == 60.0
     assert rows[1]["value"] == 70.0
+
+
+@pytest.mark.unit
+def test_state_file_path_for_group_multi_ups_uses_per_ups_suffix():
+    """In multi-UPS mode the state-file path is suffixed with the
+    sanitized UPS name so per-UPS rows don't collide."""
+    from eneru.status import state_file_path_for_group
+    from eneru import Config, UPSConfig, UPSGroupConfig, LoggingConfig
+    config = Config(
+        ups_groups=[
+            UPSGroupConfig(ups=UPSConfig(name="UPS-A@host:3493")),
+            UPSGroupConfig(ups=UPSConfig(name="UPS-B@host:3493")),
+        ],
+        logging=LoggingConfig(state_file="/tmp/eneru-state"),
+    )
+    p = state_file_path_for_group(config, config.ups_groups[0])
+    assert str(p).endswith(".UPS-A-host-3493")  # sanitized suffix
+
+
+@pytest.mark.unit
+def test_state_file_path_for_group_single_ups_uses_unsuffixed_path():
+    from eneru.status import state_file_path_for_group
+    from eneru import Config, UPSConfig, UPSGroupConfig, LoggingConfig
+    config = Config(
+        ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@host"))],
+        logging=LoggingConfig(state_file="/tmp/eneru-state"),
+    )
+    p = state_file_path_for_group(config, config.ups_groups[0])
+    assert str(p) == "/tmp/eneru-state"
+
+
+@pytest.mark.unit
+def test_redundancy_group_statuses_returns_empty_when_config_is_none():
+    from eneru.status import redundancy_group_statuses
+    assert redundancy_group_statuses(MagicMock(), None) == []
+
+
+@pytest.mark.unit
+def test_readiness_returns_no_monitors_for_empty_coordinator(minimal_config):
+    """A coordinator with zero monitors registered must report
+    `ready=False, reason='no monitors'` so the K8s probe fails clean
+    instead of returning success on no data."""
+    from eneru.status import readiness
+    coord = MagicMock()
+    coord._monitors = []  # No monitors registered
+    # Disable own state by removing the attribute the readiness path inspects
+    del coord.state
+    payload = readiness(coord)
+    assert payload["ready"] is False
+    assert "no monitors" in payload["reason"]
 
 
 @pytest.mark.unit
