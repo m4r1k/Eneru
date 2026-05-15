@@ -44,6 +44,9 @@ _eneru() {
                     _arguments \
                         '(-c --config)'{-c,--config}'[path to configuration file]:config file:_files' \
                         '--dry-run[run in dry-run mode (overrides config)]' \
+                        '--api[enable the embedded read-only API]' \
+                        '--api-bind[API listen address]:address:(127.0.0.1 0.0.0.0)' \
+                        '--api-port[API listen port]:port:(9191 9100)' \
                         '--exit-after-shutdown[exit after completing shutdown sequence]'
                     ;;
                 shutdown)

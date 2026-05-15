@@ -1834,3 +1834,271 @@ class TestCoordinatorRedundancyWiring:
         with pytest.raises(SystemExit):
             coord._handle_signal(15, None)
         good.clear_shutdown_state.assert_called_once()
+
+
+class TestCoordinatorRunHandlesKeyboardInterrupt:
+    """`MultiUPSCoordinator.run()` must catch KeyboardInterrupt and
+    route through _handle_signal so the per-group monitors are
+    cleaned up — otherwise Ctrl-C leaks daemon threads."""
+
+    @pytest.mark.unit
+    def test_keyboard_interrupt_invokes_handle_signal(self, tmp_path):
+        from eneru import ConfigLoader
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  - name: "UPS-A"
+  - name: "UPS-B"
+""")
+        config = ConfigLoader.load(str(config_file))
+        coord = MultiUPSCoordinator(config)
+
+        # Force KeyboardInterrupt out of _start_monitors and assert that
+        # _handle_signal is called rather than letting it propagate raw.
+        with patch.object(coord, "_initialize"), \
+             patch.object(coord, "_start_monitors", side_effect=KeyboardInterrupt), \
+             patch.object(coord, "_handle_signal") as handler:
+            coord.run()
+
+        handler.assert_called_once()
+        # First positional arg is signal.SIGINT
+        import signal as _signal
+        assert handler.call_args.args[0] == _signal.SIGINT
+
+
+class TestCoordinatorReadLastSeenVersion:
+    """`_read_last_seen_version_from_first_group` reads the meta table
+    on the first group's per-UPS DB so the lifecycle classifier can
+    spot version upgrades. SQLite, OS, and missing-row failures must
+    return None (best-effort) — never crash coordinator startup."""
+
+    @staticmethod
+    def _coord(tmp_path):
+        from eneru import ConfigLoader
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  - name: "UPS-A"
+  - name: "UPS-B"
+""")
+        config = ConfigLoader.load(str(config_file))
+        return MultiUPSCoordinator(config)
+
+    @pytest.mark.unit
+    def test_returns_none_when_no_groups(self, tmp_path):
+        from eneru import Config
+        coord = MultiUPSCoordinator(Config(ups_groups=[]))
+        assert coord._read_last_seen_version_from_first_group(tmp_path) is None
+
+    @pytest.mark.unit
+    def test_returns_none_when_open_readonly_raises(self, tmp_path):
+        coord = self._coord(tmp_path)
+        with patch("eneru.multi_ups.StatsStore.open_readonly",
+                   side_effect=OSError("perm denied")):
+            assert coord._read_last_seen_version_from_first_group(tmp_path) is None
+
+    @pytest.mark.unit
+    def test_returns_none_when_db_does_not_exist(self, tmp_path):
+        coord = self._coord(tmp_path)
+        # open_readonly returns None when the DB file doesn't exist
+        with patch("eneru.multi_ups.StatsStore.open_readonly", return_value=None):
+            assert coord._read_last_seen_version_from_first_group(tmp_path) is None
+
+    @pytest.mark.unit
+    def test_returns_none_on_query_failure(self, tmp_path):
+        coord = self._coord(tmp_path)
+        bad_conn = MagicMock()
+        bad_conn.execute.side_effect = Exception("schema corrupt")
+        with patch("eneru.multi_ups.StatsStore.open_readonly", return_value=bad_conn):
+            assert coord._read_last_seen_version_from_first_group(tmp_path) is None
+        # finally block always closes
+        bad_conn.close.assert_called_once()
+
+    @pytest.mark.unit
+    def test_returns_none_when_meta_row_absent(self, tmp_path):
+        coord = self._coord(tmp_path)
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = None
+        with patch("eneru.multi_ups.StatsStore.open_readonly", return_value=conn):
+            assert coord._read_last_seen_version_from_first_group(tmp_path) is None
+
+    @pytest.mark.unit
+    def test_returns_string_when_meta_row_present(self, tmp_path):
+        coord = self._coord(tmp_path)
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = ("5.4.0-rc2",)
+        with patch("eneru.multi_ups.StatsStore.open_readonly", return_value=conn):
+            assert coord._read_last_seen_version_from_first_group(tmp_path) == "5.4.0-rc2"
+
+    @pytest.mark.unit
+    def test_close_failure_swallowed_in_finally(self, tmp_path):
+        coord = self._coord(tmp_path)
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = ("5.4.0",)
+        conn.close.side_effect = OSError("already closed")
+        with patch("eneru.multi_ups.StatsStore.open_readonly", return_value=conn):
+            assert coord._read_last_seen_version_from_first_group(tmp_path) == "5.4.0"
+
+
+class TestCoordinatorRedundancyStatsLogging:
+    """`_record_redundancy_remote_health_event` mirrors a redundancy-group
+    event into each member's per-UPS stats DB. A bad/closed store on
+    one member must not suppress fan-out to the others."""
+
+    @pytest.mark.unit
+    def test_fanout_continues_when_one_member_store_raises(self, tmp_path):
+        from eneru import ConfigLoader, RedundancyGroupConfig
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  - name: "UPS-A"
+  - name: "UPS-B"
+  - name: "UPS-C"
+""")
+        config = ConfigLoader.load(str(config_file))
+        coord = MultiUPSCoordinator(config)
+
+        log = []
+        coord._log = log.append
+
+        good_a = MagicMock()
+        bad_b = MagicMock()
+        bad_b.log_event.side_effect = OSError("db locked")
+        good_c = MagicMock()
+
+        m_a = MagicMock(_stats_store=good_a)
+        m_b = MagicMock(_stats_store=bad_b)
+        m_c = MagicMock(_stats_store=good_c)
+        monitors_by_name = {"UPS-A": m_a, "UPS-B": m_b, "UPS-C": m_c}
+
+        group = RedundancyGroupConfig(
+            name="rack",
+            ups_sources=["UPS-A", "UPS-B", "UPS-C"],
+        )
+
+        coord._record_redundancy_remote_health_event(
+            group, monitors_by_name,
+            event_type="REMOTE_HEALTH_HEALTHY", detail="recovered",
+            notification_sent=True,
+        )
+
+        good_a.log_event.assert_called_once()
+        good_c.log_event.assert_called_once()
+        # The error from bad_b was logged as a warning, not raised
+        assert any("failed to record redundancy remote-health" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_handle_signal_stops_subsystems_and_threads(self, tmp_path):
+        """SIGTERM/SIGINT must stop the redundancy remote-health managers,
+        MQTT publisher, API server, and join all monitor/evaluator threads
+        before exit."""
+        from eneru import ConfigLoader
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  - name: "UPS-A"
+  - name: "UPS-B"
+        """)
+        config = ConfigLoader.load(str(config_file))
+        config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+
+        rh1 = MagicMock()
+        rh2 = MagicMock()
+        coord._redundancy_remote_health_managers = [rh1, rh2]
+        coord._mqtt_publisher = MagicMock()
+        coord._api_server = MagicMock()
+
+        t1 = MagicMock()
+        t2 = MagicMock()
+        coord._threads = [t1, t2]
+        coord._evaluator_threads = []
+        coord._notification_worker = None
+        coord._stats_stores = []
+        coord._stats_writers = []
+        coord._stop_event = MagicMock()
+
+        with patch("eneru.multi_ups.read_upgrade_marker", return_value=None), \
+             patch("eneru.multi_ups.read_shutdown_marker", return_value=None), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.schedule_deferred_stop_or_eager_send"), \
+             pytest.raises(SystemExit):
+            coord._handle_signal(15, None)
+
+        rh1.stop.assert_called_once()
+        rh2.stop.assert_called_once()
+        coord._mqtt_publisher.stop.assert_called_once()
+        coord._api_server.stop.assert_called_once()
+        t1.join.assert_called_once_with(timeout=5)
+        t2.join.assert_called_once_with(timeout=5)
+
+    @pytest.mark.unit
+    def test_handle_signal_skips_lifecycle_notif_during_upgrade(self, tmp_path):
+        """An in-flight deb/rpm upgrade (read_upgrade_marker returns truthy)
+        means the next daemon will emit 'Upgraded vX → vY' — suppress the
+        lifecycle stop here so the user sees one combined message."""
+        from eneru import ConfigLoader
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  - name: "UPS-A"
+  - name: "UPS-B"
+        """)
+        config = ConfigLoader.load(str(config_file))
+        config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+        coord._redundancy_remote_health_managers = []
+        coord._mqtt_publisher = None
+        coord._api_server = None
+        coord._threads = []
+        coord._evaluator_threads = []
+        worker = MagicMock()
+        coord._notification_worker = worker
+        coord._stats_stores = []
+        coord._stats_writers = []
+        coord._stop_event = MagicMock()
+
+        with patch("eneru.multi_ups.read_upgrade_marker",
+                   return_value={"from": "5.3.0", "to": "5.4.0"}), \
+             patch("eneru.multi_ups.read_shutdown_marker", return_value=None), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.schedule_deferred_stop_or_eager_send") as scheduler, \
+             pytest.raises(SystemExit):
+            coord._handle_signal(15, None)
+
+        scheduler.assert_not_called()
+
+
+    @pytest.mark.unit
+    def test_fanout_skips_members_without_a_store(self, tmp_path):
+        """A monitor whose _stats_store is None (open() failed) is
+        silently skipped — not a warning, just no fan-out for that one."""
+        from eneru import ConfigLoader, RedundancyGroupConfig
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  - name: "UPS-A"
+  - name: "UPS-B"
+""")
+        config = ConfigLoader.load(str(config_file))
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+
+        good_a = MagicMock()
+        m_a = MagicMock(_stats_store=good_a)
+        m_b = MagicMock(_stats_store=None)
+        monitors_by_name = {"UPS-A": m_a, "UPS-B": m_b}
+
+        group = RedundancyGroupConfig(
+            name="rack", ups_sources=["UPS-A", "UPS-B"],
+        )
+
+        coord._record_redundancy_remote_health_event(
+            group, monitors_by_name,
+            event_type="REMOTE_HEALTH_FAILED", detail="ssh failed",
+            notification_sent=False,
+        )
+
+        good_a.log_event.assert_called_once()

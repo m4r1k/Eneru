@@ -72,6 +72,26 @@ remote_servers:
         assert "-o StrictHostKeyChecking=no" in server2.ssh_options
 
     @pytest.mark.unit
+    def test_remote_server_ssh_key_path(self, temp_config_file):
+        """ssh_key_path is parsed without changing ssh_options behavior."""
+        config_data = """
+remote_servers:
+  - name: "NAS"
+    enabled: true
+    host: "192.168.1.50"
+    user: "admin"
+    ssh_key_path: "/var/lib/eneru/ssh/id_ups_shutdown"
+    ssh_options:
+      - "StrictHostKeyChecking=yes"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        server = config.remote_servers[0]
+        assert server.ssh_key_path == "/var/lib/eneru/ssh/id_ups_shutdown"
+        assert server.ssh_options == ["StrictHostKeyChecking=yes"]
+
+    @pytest.mark.unit
     def test_pre_shutdown_commands_with_actions(self, temp_config_file):
         """Test pre_shutdown_commands with predefined actions."""
         config_data = """

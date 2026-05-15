@@ -265,6 +265,9 @@ class RemoteShutdownMixin:
 
         ssh_cmd = ["ssh"]
 
+        if server.ssh_key_path:
+            ssh_cmd.extend(["-i", server.ssh_key_path])
+
         # Add configured SSH options. Three cases:
         #   1. "-o KEY=VALUE" / "-o KEY VALUE" (single string with space):
         #      split into two argv entries so ssh's getopt parser sees

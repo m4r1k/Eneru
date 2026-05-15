@@ -160,16 +160,19 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 - Notifications to 100+ services (Discord, Slack, Telegram, ntfy, email) via [Apprise](https://github.com/caronc/apprise/wiki)
 - Power quality monitoring: voltage, AVR, bypass, overload
 - Read-only API, Prometheus metrics, outbound MQTT, JSON/syslog logs, and Grafana dashboard
+- Official OCI image for remote-only Docker, Podman, and Kubernetes deployments
 - Dry-run mode for safe testing
 - Comprehensive test suite across multiple Linux distros, with E2E tests against real NUT, SSH, Docker, and libvirt on every commit
 
 ---
 
-## Why a systemd daemon? (No Docker)
+## Systemd daemon and OCI image
 
-Eneru runs as a systemd daemon, not a container. It shuts down Docker/Podman containers during power events, so running inside a container would mean getting killed during its own shutdown sequence.
+Eneru still works best as a native systemd daemon when it owns the local host shutdown sequence: stopping local VMs, stopping local Docker/Podman containers, syncing filesystems, and powering off the machine.
 
-See the [documentation](https://eneru.readthedocs.io/#why-a-systemd-daemon-no-docker) for the full explanation.
+v5.4 adds an official OCI image for remote-only and Kubernetes deployments. That scope now makes sense because Eneru can monitor NUT and orchestrate remote systems without root. If you configure `is_local: true` or local-host resources, the container must run as root with the required host access; otherwise startup fails clearly. Container shutdown also skips Eneru's own container so it does not stop itself mid-sequence.
+
+See the [container documentation](https://eneru.readthedocs.io/latest/containers-kubernetes/) for Docker, Podman, SELinux/AppArmor, and Kubernetes examples.
 
 ---
 

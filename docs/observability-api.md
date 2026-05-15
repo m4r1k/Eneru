@@ -13,6 +13,13 @@ api:
   port: 9191
 ```
 
+For container healthchecks, the same settings can be enabled at runtime:
+
+```bash
+eneru run --config /etc/ups-monitor/config.yaml \
+  --api --api-bind 0.0.0.0 --api-port 9191
+```
+
 Endpoints:
 
 | Endpoint | Purpose | Status codes |

@@ -653,6 +653,28 @@ class TestRunRemoteCommand:
             assert "echo test" in call_args
 
     @pytest.mark.unit
+    def test_run_remote_command_uses_ssh_key_path(self, ssh_monitor):
+        """ssh_key_path maps to OpenSSH -i without requiring ssh_options."""
+        server = RemoteServerConfig(
+            name="Test",
+            host="192.168.1.50",
+            user="admin",
+            ssh_key_path="/var/lib/eneru/ssh/id_ups_shutdown",
+        )
+
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (0, "", "")
+
+            ssh_monitor._run_remote_command(server, "echo test", 30, "test")
+
+            call_args = mock_run.call_args[0][0]
+            assert call_args[0:3] == [
+                "ssh",
+                "-i",
+                "/var/lib/eneru/ssh/id_ups_shutdown",
+            ]
+
+    @pytest.mark.unit
     def test_run_remote_command_success(self, ssh_monitor):
         """Test successful remote command execution."""
         server = RemoteServerConfig(host="192.168.1.50", user="root")

@@ -29,8 +29,8 @@ Eneru uses unit tests, package-install tests, and end-to-end tests with real NUT
    ╱─────────────────────────────────────────────╲
 ```
 
-The pyramid is intentionally bottom-heavy. As of the v5.4.0-rc1 pass,
-the local pytest suite contains 1179 tests. E2E tests are fewer, but they
+The pyramid is intentionally bottom-heavy. As of the v5.4.0-rc3 pass,
+the local pytest suite contains 1483 tests. E2E tests are fewer, but they
 exercise the real service boundaries where packaging, NUT, SSH, Docker,
 filesystem, and CLI assumptions meet.
 
@@ -86,7 +86,7 @@ done
 | Notifications | Formatting, retry queue, lifecycle classification, coalescing, suppression rules |
 | Statistics and TUI | SQLite schema, aggregation, event tier filtering, TUI grouping, graphs, one-shot monitor output |
 | Observability | API routing, readiness, Prometheus escaping, power-quality metrics, remote-health sidecars, MQTT publishing |
-| Packaging | nFPM file list, package install paths, wrapper execution |
+| Packaging | nFPM file list, package install paths, wrapper execution, OCI image smoke tests |
 
 ## End-to-end tests
 
@@ -115,7 +115,7 @@ The scenario files simulate online, on-battery, low-battery, FSD, brownout, over
 
 ### E2E test inventory
 
-The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 45 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
+The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 46 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
 
 | Test | Group | What it proves |
 |------|-------|----------------|
@@ -166,6 +166,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 45 numb
 | 43 | UPS Single | `/health`, `/ready`, `/metrics`, `/api/v1`, and JSON 404 endpoint discovery respond from the embedded API |
 | 44 | UPS Single | An unreachable remote target is reported as a bounded best-effort failure instead of stalling shutdown |
 | 45 | UPS Single | MQTT status publishing reaches the broker and includes power-quality fields |
+| 46 | UPS Single | The OCI image runs against the E2E NUT server with the API enabled only by CLI flags |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
 
 Every commit on the protected workflow has to prove the daemon works against real services, not just isolated Python assertions: real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.

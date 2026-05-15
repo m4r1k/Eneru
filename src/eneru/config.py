@@ -280,6 +280,7 @@ class RemoteServerConfig:
     connect_timeout: int = 10
     command_timeout: int = 30
     shutdown_command: str = "sudo shutdown -h now"
+    ssh_key_path: Optional[str] = None
     ssh_options: List[str] = field(default_factory=list)
     pre_shutdown_commands: List[RemoteCommandConfig] = field(default_factory=list)
     # Legacy ordering flag: None = unset (default behaves like True); True = run with the
@@ -680,6 +681,7 @@ class ConfigLoader:
                 connect_timeout=server_data.get('connect_timeout', 10),
                 command_timeout=server_data.get('command_timeout', 30),
                 shutdown_command=server_data.get('shutdown_command', 'sudo shutdown -h now'),
+                ssh_key_path=server_data.get('ssh_key_path'),
                 ssh_options=server_data.get('ssh_options', []),
                 pre_shutdown_commands=pre_cmds,
                 parallel=server_data.get('parallel'),
@@ -1139,6 +1141,13 @@ class ConfigLoader:
                 "on_battery_stabilization_delay", "depletion",
                 "extended_time", "voltage_sensitivity",
             }
+            remote_server_keys = {
+                "name", "enabled", "host", "user", "connect_timeout",
+                "command_timeout", "shutdown_command", "ssh_key_path",
+                "ssh_options", "pre_shutdown_commands", "parallel",
+                "shutdown_order", "shutdown_safety_margin",
+            }
+            pre_shutdown_keys = {"action", "command", "timeout", "path"}
             depletion_keys = {"window", "critical_rate", "grace_period"}
             extended_time_keys = {"enabled", "threshold"}
             messages.extend(cls._unknown_key_errors(
@@ -1194,7 +1203,33 @@ class ConfigLoader:
                     extended_time_keys,
                 ))
 
+            def _validate_remote_servers(section: str, data: Any):
+                if not isinstance(data, list):
+                    return
+                for idx, entry in enumerate(data):
+                    if not isinstance(entry, dict):
+                        continue
+                    label = entry.get("name") or entry.get("host") or idx
+                    server_section = f"{section}[{label!r}]"
+                    messages.extend(cls._unknown_key_errors(
+                        server_section, entry, remote_server_keys,
+                    ))
+                    pre_cmds = entry.get("pre_shutdown_commands", []) or []
+                    if not isinstance(pre_cmds, list):
+                        continue
+                    for cmd_idx, cmd in enumerate(pre_cmds):
+                        if not isinstance(cmd, dict):
+                            continue
+                        messages.extend(cls._unknown_key_errors(
+                            f"{server_section}.pre_shutdown_commands[{cmd_idx}]",
+                            cmd,
+                            pre_shutdown_keys,
+                        ))
+
             _validate_triggers("triggers", raw_data.get("triggers", {}))
+            _validate_remote_servers(
+                "remote_servers", raw_data.get("remote_servers", []),
+            )
             ups_raw = raw_data.get("ups")
             if isinstance(ups_raw, list):
                 for idx, entry in enumerate(ups_raw):
@@ -1204,6 +1239,10 @@ class ConfigLoader:
                     _validate_triggers(
                         f"ups[{label!r}].triggers",
                         entry.get("triggers", {}),
+                    )
+                    _validate_remote_servers(
+                        f"ups[{label!r}].remote_servers",
+                        entry.get("remote_servers", []),
                     )
             groups_raw = raw_data.get("redundancy_groups", []) or []
             if isinstance(groups_raw, list):
@@ -1215,6 +1254,10 @@ class ConfigLoader:
                     _validate_triggers(
                         f"redundancy_groups[{label!r}].triggers",
                         group_triggers,
+                    )
+                    _validate_remote_servers(
+                        f"redundancy_groups[{label!r}].remote_servers",
+                        entry.get("remote_servers", []),
                     )
                     depletion = (
                         group_triggers.get("depletion", {})
@@ -1611,11 +1654,21 @@ class ConfigLoader:
                     f"ERROR: Duplicate redundancy group name(s): {', '.join(duplicates)}."
                 )
 
-        # Validate shutdown_order, shutdown_safety_margin, and the
-        # mutual-exclusion of shutdown_order vs parallel.
-        for group in config.ups_groups:
-            for server in group.remote_servers:
+        # Validate SSH options, shutdown_order, shutdown_safety_margin,
+        # and the mutual-exclusion of shutdown_order vs parallel.
+        server_groups = [g.remote_servers for g in config.ups_groups]
+        server_groups.extend(g.remote_servers for g in config.redundancy_groups)
+        for servers in server_groups:
+            for server in servers:
                 display = server.name or server.host
+
+                if server.ssh_key_path is not None:
+                    if (not isinstance(server.ssh_key_path, str)
+                            or not server.ssh_key_path.strip()):
+                        messages.append(
+                            f"ERROR: Remote server '{display}': ssh_key_path "
+                            "must be a non-empty string when set."
+                        )
 
                 so = server.shutdown_order
                 so_valid = False

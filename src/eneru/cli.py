@@ -1,6 +1,7 @@
 """CLI entry point for Eneru."""
 
 import argparse
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -40,9 +41,175 @@ def _non_negative_int(value: str) -> int:
     return n
 
 
+def _port_int(value: str) -> int:
+    """argparse type for TCP port arguments: integer in 1..65535."""
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"port must be an integer, got {value!r}"
+        )
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError(
+            f"port must be in 1..65535, got {port}"
+        )
+    return port
+
+
 def _load_config(args):
     """Load configuration from the --config path."""
     return ConfigLoader.load(getattr(args, 'config', None))
+
+
+def _apply_run_overrides(config: Config, args: argparse.Namespace) -> None:
+    """Apply `eneru run` CLI overrides after YAML load, before validation."""
+    if args.dry_run:
+        config.behavior.dry_run = True
+
+    if getattr(args, "api", False):
+        config.api.enabled = True
+    if getattr(args, "api_bind", None) is not None:
+        config.api.enabled = True
+        config.api.bind = args.api_bind
+    if getattr(args, "api_port", None) is not None:
+        config.api.enabled = True
+        config.api.port = args.api_port
+
+
+def _root_required_reasons(config: Config) -> list[str]:
+    """Return local-host features that require root at daemon startup."""
+    reasons: list[str] = []
+    groups = list(config.ups_groups)
+    if not groups:
+        reasons.append("implicit single-UPS local-host mode")
+    for group in groups:
+        label = group.ups.label
+        if group.is_local:
+            reasons.append(f"UPS group '{label}' is marked is_local")
+        if group.virtual_machines.enabled:
+            reasons.append(f"UPS group '{label}' has virtual_machines enabled")
+        if group.containers.enabled:
+            reasons.append(f"UPS group '{label}' has containers enabled")
+        if group.filesystems.unmount.enabled:
+            reasons.append(f"UPS group '{label}' has filesystem unmount enabled")
+
+    for group in config.redundancy_groups:
+        label = group.name or "(unnamed)"
+        if group.is_local:
+            reasons.append(f"redundancy group '{label}' is marked is_local")
+        if group.virtual_machines.enabled:
+            reasons.append(f"redundancy group '{label}' has virtual_machines enabled")
+        if group.containers.enabled:
+            reasons.append(f"redundancy group '{label}' has containers enabled")
+        if group.filesystems.unmount.enabled:
+            reasons.append(f"redundancy group '{label}' has filesystem unmount enabled")
+
+    has_local_owner = any(g.is_local for g in groups) or any(
+        g.is_local for g in config.redundancy_groups
+    )
+    if config.local_shutdown.enabled and (
+        has_local_owner or not groups or config.local_shutdown.trigger_on == "any"
+    ):
+        reasons.append("local_shutdown can power off the Eneru host")
+
+    return sorted(set(reasons))
+
+
+def _detect_runtime_context() -> str:
+    """Best-effort runtime-context label for the current process.
+
+    Returns one of:
+      - ``"container (Docker)"`` when ``/.dockerenv`` exists.
+      - ``"container (Podman)"`` when ``/run/.containerenv`` exists.
+      - ``"container"`` for other OCI runtimes (lxc, systemd-nspawn, etc.)
+        detected via the ``container`` env var or container paths in
+        ``/proc/1/cgroup`` or ``/proc/self/mountinfo``.
+      - ``"systemd service"`` when running under a systemd unit
+        (``INVOCATION_ID`` env var) and not in a container.
+      - ``"bare process"`` otherwise.
+
+    Container detection takes precedence: a systemd unit running inside
+    a container is reported as a container, since that is the user-visible
+    fact when troubleshooting.
+    """
+    if Path("/.dockerenv").exists():
+        return "container (Docker)"
+    if Path("/run/.containerenv").exists():
+        return "container (Podman)"
+
+    container_env = os.environ.get("container", "").strip().lower()
+    if container_env:
+        # Normalize known runtime names so the output matches the
+        # /.dockerenv and /run/.containerenv branches above.
+        pretty = {"docker": "Docker", "podman": "Podman"}.get(container_env, container_env)
+        return f"container ({pretty})"
+
+    try:
+        cgroup_text = Path("/proc/1/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        cgroup_text = ""
+    if any(marker in cgroup_text for marker in ("docker", "kubepods", "containerd", "lxc")):
+        return "container"
+
+    try:
+        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+    except OSError:
+        mountinfo = ""
+    if "/docker/containers/" in mountinfo or "/containers/storage/overlay-containers/" in mountinfo:
+        return "container"
+
+    if os.environ.get("INVOCATION_ID"):
+        return "systemd service"
+
+    try:
+        comm = Path("/proc/1/comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        comm = ""
+    if comm == "systemd" and os.environ.get("JOURNAL_STREAM"):
+        return "systemd service"
+
+    return "bare process"
+
+
+def _exit_on_privilege_errors(config: Config) -> None:
+    """Refuse non-root startup when config declares local-host ownership.
+
+    The ``ENERU_SKIP_PRIVILEGE_CHECK`` env var (``1`` or ``true``) downgrades
+    the check to a printed warning. Intended for E2E suites and developers
+    iterating on dry-run configs where actual privilege isn't required.
+    Containers in production never set this var, so the default safety
+    guarantee for shipped images is unchanged.
+    """
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None or geteuid() == 0:
+        return
+
+    reasons = _root_required_reasons(config)
+    if not reasons:
+        return
+
+    if os.environ.get("ENERU_SKIP_PRIVILEGE_CHECK", "").strip().lower() in ("1", "true"):
+        print(
+            "WARNING: ENERU_SKIP_PRIVILEGE_CHECK is set; running non-root despite "
+            "local-host orchestration features in config:",
+            file=sys.stderr,
+        )
+        for reason in reasons:
+            print(f"  - {reason}", file=sys.stderr)
+        return
+
+    print("ERROR: Eneru must run as root for local-host orchestration.")
+    for reason in reasons:
+        print(f"  - {reason}")
+    print(
+        "For remote-only container/Kubernetes deployments, use multi-UPS "
+        "configuration with is_local: false and set local_shutdown.enabled: false."
+    )
+    print(
+        "To bypass for testing/dry-run, set ENERU_SKIP_PRIVILEGE_CHECK=1 "
+        "(downgrades the check to a warning)."
+    )
+    sys.exit(1)
 
 
 def _load_raw_config_for_validation(args):
@@ -96,11 +263,10 @@ def _exit_on_config_errors(config, args):
 def _cmd_run(args):
     """Start the monitoring daemon."""
     config = _load_config(args)
-
-    if args.dry_run:
-        config.behavior.dry_run = True
+    _apply_run_overrides(config, args)
 
     _exit_on_config_errors(config, args)
+    _exit_on_privilege_errors(config)
 
     if config.multi_ups or config.redundancy_groups:
         coordinator = MultiUPSCoordinator(config, exit_after_shutdown=args.exit_after_shutdown)
@@ -201,6 +367,7 @@ def _cmd_validate(args):
     exit_code = 0
 
     print(f"Eneru v{__version__}")
+    print(f"  Runtime context: {_detect_runtime_context()}")
 
     multi_ups = config.multi_ups
     if multi_ups:
@@ -863,6 +1030,12 @@ def main():
     run_parser.add_argument("-c", "--config", help="Path to configuration file", default=None)
     run_parser.add_argument("--dry-run", action="store_true",
                             help="Run in dry-run mode (overrides config)")
+    run_parser.add_argument("--api", action="store_true",
+                            help="Enable the embedded read-only API")
+    run_parser.add_argument("--api-bind",
+                            help="API listen address (implies --api)")
+    run_parser.add_argument("--api-port", type=_port_int,
+                            help="API listen port, 1..65535 (implies --api)")
     run_parser.add_argument("--exit-after-shutdown", action="store_true",
                             help="Exit after completing shutdown sequence")
     run_parser.set_defaults(func=_cmd_run)

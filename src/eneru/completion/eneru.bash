@@ -18,7 +18,7 @@ _eneru() {
     local global_opts="-h --help"
     local config_opts="-c --config"
     local monitor_opts="--once --interval --graph --time --events-only -v --verbose --length"
-    local run_opts="--dry-run --exit-after-shutdown"
+    local run_opts="--dry-run --api --api-bind --api-port --exit-after-shutdown"
     local shutdown_remote_opts="$config_opts --server --group --dry-run --i-really-want-to-proceed-with-remote-shutdown --connectivity-check --no-connectivity-check --log-file"
     local shutdown_group_opts="$config_opts --group --dry-run --i-really-want-to-proceed-with-group-shutdown --log-file"
     local remote_list_opts="$config_opts"
@@ -53,9 +53,13 @@ _eneru() {
             COMPREPLY=( $(compgen -W "$time_choices" -- "$cur") )
             return 0
             ;;
-        --interval|--length)
+        --interval|--length|--api-port)
             # Numeric; offer common defaults but allow free input.
             COMPREPLY=( $(compgen -W "1 2 5 10 30 60" -- "$cur") )
+            return 0
+            ;;
+        --api-bind)
+            COMPREPLY=( $(compgen -W "127.0.0.1 0.0.0.0" -- "$cur") )
             return 0
             ;;
         --server|--group)

@@ -92,6 +92,9 @@ def build_ssh_probe_command(server: RemoteServerConfig,
             flag's value.
     """
     ssh_cmd = ["ssh"]
+    if server.ssh_key_path:
+        ssh_cmd.extend(["-i", server.ssh_key_path])
+
     pending_arg = False
     for opt in server.ssh_options:
         if pending_arg:

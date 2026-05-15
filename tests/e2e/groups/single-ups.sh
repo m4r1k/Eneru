@@ -761,6 +761,85 @@ echo "PASS: embedded API health/readiness/metrics/index responded"
 )
 
 # ======================================================================
+# Test 46: OCI image runs with API enabled by CLI flags
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 46: OCI image runs with API enabled by CLI flags"
+
+cat >/tmp/test46-container-config.yaml <<'YAML'
+ups:
+  - name: "TestUPS@nut-server"
+    display_name: "Container E2E UPS"
+    is_local: false
+local_shutdown:
+  enabled: false
+  trigger_on: none
+logging:
+  file: null
+  state_file: "/var/run/eneru/ups-monitor.state"
+  battery_history_file: "/var/run/eneru/ups-battery-history"
+  shutdown_flag_file: "/var/run/eneru/ups-shutdown-scheduled"
+statistics:
+  db_directory: "/var/lib/eneru"
+YAML
+
+docker build -t eneru:e2e .
+NETWORK=$(docker network ls --format '{{.Name}}' | grep '_eneru-e2e$' | head -1)
+if [ -z "$NETWORK" ]; then
+  echo "FAIL: E2E Docker network not found"
+  docker network ls
+  exit 1
+fi
+
+docker rm -f eneru-e2e-under-test >/dev/null 2>&1 || true
+docker run -d --name eneru-e2e-under-test \
+  --network "$NETWORK" \
+  -p 127.0.0.1:19191:9191 \
+  -v /tmp/test46-container-config.yaml:/etc/ups-monitor/config.yaml:ro \
+  eneru:e2e \
+  run --config /etc/ups-monitor/config.yaml \
+  --api --api-bind 0.0.0.0 --api-port 9191
+
+cleanup_container() {
+  docker logs eneru-e2e-under-test >/tmp/test46-daemon.log 2>&1 || true
+  docker rm -f eneru-e2e-under-test >/dev/null 2>&1 || true
+}
+trap cleanup_container EXIT
+
+poll_endpoint() {
+  local url="$1" out="$2" tries="${3:-20}"
+  for _ in $(seq 1 "$tries"); do
+    if curl -fsS "$url" >"$out" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+if ! poll_endpoint http://127.0.0.1:19191/health /tmp/test46-health.json 60; then
+  echo "FAIL: container /health never responded"
+  docker logs eneru-e2e-under-test || true
+  exit 1
+fi
+if ! poll_endpoint http://127.0.0.1:19191/ready /tmp/test46-ready.json 60; then
+  echo "FAIL: container /ready never became ready"
+  docker logs eneru-e2e-under-test || true
+  exit 1
+fi
+if ! grep -Eq '"ready"[[:space:]]*:[[:space:]]*true' /tmp/test46-ready.json; then
+  echo "FAIL: container /ready did not report ready=true"
+  cat /tmp/test46-ready.json
+  exit 1
+fi
+
+cleanup_container
+trap - EXIT
+echo "PASS: OCI image responded with CLI-enabled API"
+)
+
+# ======================================================================
 # Test 44: Unreachable remote shutdown is bounded
 # ======================================================================
 (

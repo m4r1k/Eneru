@@ -117,6 +117,9 @@ end
 
 # `run` options.
 complete -c eneru -n '__eneru_using run' -l dry-run -d 'Run in dry-run mode'
+complete -c eneru -n '__eneru_using run' -l api -d 'Enable the embedded read-only API'
+complete -c eneru -n '__eneru_using run' -l api-bind -r -fa '127.0.0.1 0.0.0.0' -d 'API listen address'
+complete -c eneru -n '__eneru_using run' -l api-port -r -fa '9191 9100' -d 'API listen port'
 complete -c eneru -n '__eneru_using run' -l exit-after-shutdown -d 'Exit after shutdown sequence'
 
 # `shutdown` subcommands.

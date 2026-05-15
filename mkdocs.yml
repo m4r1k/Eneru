@@ -41,6 +41,7 @@ nav:
       - Notifications: notifications.md
       - Remote servers: remote-servers.md
   - Operations:
+      - Containers and Kubernetes: containers-kubernetes.md
       - Monitor and graphs: tui-graphs.md
       - Observability and API: observability-api.md
       - Statistics: statistics.md

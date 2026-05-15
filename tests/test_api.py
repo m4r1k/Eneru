@@ -5,7 +5,7 @@ import logging
 import time
 from io import BytesIO
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -915,6 +915,66 @@ def test_mqtt_local_stop_does_not_set_global_stop_event(monkeypatch):
 
 
 @pytest.mark.unit
+def test_mqtt_start_creates_daemon_thread(monkeypatch):
+    """start() owns only publisher lifecycle: it creates the MQTT thread
+    without running the target inline."""
+    created = []
+
+    class FakeThread:
+        def __init__(self, *, target, name, daemon):
+            self.target = target
+            self.name = name
+            self.daemon = daemon
+            self.started = False
+            created.append(self)
+
+        def start(self):
+            self.started = True
+
+    config = Config()
+    config.mqtt.enabled = True
+    monkeypatch.setattr("eneru.mqtt.MQTT_AVAILABLE", True)
+    monkeypatch.setattr("eneru.mqtt.threading.Thread", FakeThread)
+
+    publisher = MQTTPublisher(object(), config, stop_event=MagicMock())
+    publisher.start()
+    publisher.start()
+
+    assert len(created) == 1
+    assert created[0].target == publisher._run
+    assert created[0].name == "eneru-mqtt"
+    assert created[0].daemon is True
+    assert created[0].started is True
+    assert publisher._thread is created[0]
+
+
+@pytest.mark.unit
+def test_mqtt_stop_leaves_alive_thread_reference():
+    """If join times out, keep the thread reference so a later stop can
+    observe and join the same worker."""
+    class AliveThread:
+        def __init__(self):
+            self.join_timeout = None
+
+        def join(self, timeout=None):
+            self.join_timeout = timeout
+
+        def is_alive(self):
+            return True
+
+    config = Config()
+    publisher = MQTTPublisher(object(), config, stop_event=MagicMock())
+    thread = AliveThread()
+    publisher._thread = thread
+
+    publisher.stop(timeout=7)
+
+    assert publisher._local_stop.is_set()
+    assert thread.join_timeout == 7
+    assert publisher._thread is thread
+
+
+@pytest.mark.unit
 def test_mqtt_backoff_exits_when_stop_event_short_circuits(monkeypatch):
     """stop_event.wait returning True during backoff must exit cleanly."""
     connect_attempts = []
@@ -1006,3 +1066,904 @@ def test_json_formatter_extras_win_over_heuristics():
 
     assert payload["group"] == "Right-Group"
     assert payload["category"] == "lifecycle"
+
+
+# ====================================================================
+# EneruAPIServer lifecycle tests
+# ====================================================================
+
+
+@pytest.mark.unit
+def test_api_server_start_no_op_when_disabled(minimal_config):
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = False
+    server = EneruAPIServer(MagicMock(), minimal_config)
+    server.start()
+    assert server._thread is None
+    assert server._httpd is None
+
+
+@pytest.mark.unit
+def test_api_server_start_is_idempotent_when_already_running(minimal_config):
+    from unittest.mock import patch
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    server = EneruAPIServer(MagicMock(), minimal_config)
+
+    with patch("eneru.api.ThreadingHTTPServer") as fake_server:
+        fake_server.return_value = MagicMock()
+        server.start()
+        first_thread = server._thread
+        # Second call must early-return without re-binding
+        server.start()
+        assert server._thread is first_thread
+        assert fake_server.call_count == 1
+    server.stop()
+
+
+@pytest.mark.unit
+def test_api_server_start_logs_bind_failure_and_returns(minimal_config):
+    from unittest.mock import patch
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    minimal_config.api.port = 9191
+    log = []
+    server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
+
+    with patch("eneru.api.ThreadingHTTPServer", side_effect=OSError("port in use")):
+        server.start()
+
+    assert server._httpd is None
+    assert server._thread is None
+    assert any("API server failed to bind" in m for m in log), log
+
+
+@pytest.mark.unit
+def test_api_server_start_warns_on_non_loopback_bind(minimal_config):
+    from unittest.mock import patch
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "0.0.0.0"
+    log = []
+    server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
+
+    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+        server.start()
+
+    try:
+        # The bind announcement comes first, then the security warning
+        assert any("API server listening on 0.0.0.0" in m for m in log), log
+        assert any("non-loopback" in m and "no authentication" in m for m in log), log
+    finally:
+        server.stop()
+
+
+@pytest.mark.unit
+def test_api_server_stop_no_op_when_not_started(minimal_config):
+    from eneru.api import EneruAPIServer
+
+    server = EneruAPIServer(MagicMock(), minimal_config)
+    server.stop()  # Must not raise
+
+
+@pytest.mark.unit
+def test_api_server_stop_swallows_shutdown_exceptions(minimal_config):
+    from eneru.api import EneruAPIServer
+
+    server = EneruAPIServer(MagicMock(), minimal_config)
+    server._httpd = MagicMock()
+    server._httpd.shutdown.side_effect = RuntimeError("already stopped")
+    server._httpd.server_close.side_effect = RuntimeError("twice over")
+    # Both exceptions must be swallowed by the broad except.
+    server.stop()
+    assert server._httpd is None
+    assert server._thread is None
+
+
+@pytest.mark.unit
+def test_api_handler_returns_500_on_unexpected_exception():
+    """do_GET must catch generic exceptions and return a 500 JSON envelope."""
+    handler = object.__new__(EneruAPIHandler)
+    handler._route = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    headers = []
+    handler.send_response = lambda status: headers.append(("status", status))
+    handler.send_header = lambda key, value: headers.append((key, value))
+    handler.end_headers = lambda: None
+    handler.wfile = BytesIO()
+
+    handler.do_GET()
+
+    assert ("status", 500) in headers
+    body = json.loads(handler.wfile.getvalue())
+    assert body["error"]["code"] == "INTERNAL_ERROR"
+
+
+@pytest.mark.unit
+def test_api_metrics_route_returns_404_when_prometheus_disabled(minimal_config):
+    """When prometheus.enabled=False, /metrics genuinely returns 404 with
+    NOT_FOUND payload — independently of the index advertising."""
+    minimal_config.prometheus.enabled = False
+    handler = object.__new__(EneruAPIHandler)
+    handler.path = "/metrics"
+    handler.api_config = minimal_config
+    handler.api_source = MagicMock()
+
+    status, content_type, payload = handler._route()
+
+    assert status == 404
+    assert content_type == "application/json"
+    assert payload["error"]["code"] == "NOT_FOUND"
+    # And the available-endpoints list should not include /metrics
+    assert all(ep["path"] != "/metrics" for ep in payload["availableEndpoints"])
+
+
+@pytest.mark.unit
+def test_api_root_unknown_path_returns_404_with_endpoint_index(minimal_config):
+    handler = object.__new__(EneruAPIHandler)
+    handler.path = "/does-not-exist"
+    handler.api_config = minimal_config
+    handler.api_source = MagicMock()
+
+    status, content_type, payload = handler._route()
+
+    assert status == 404
+    assert payload["error"]["code"] == "NOT_FOUND"
+    assert isinstance(payload["availableEndpoints"], list)
+    assert len(payload["availableEndpoints"]) > 0
+
+
+@pytest.mark.unit
+def test_is_loopback_bind_matrix():
+    from eneru.api import _is_loopback_bind
+
+    assert _is_loopback_bind("127.0.0.1") is True
+    assert _is_loopback_bind("::1") is True
+    assert _is_loopback_bind("localhost") is True
+    assert _is_loopback_bind(" LOCALHOST ") is True  # case + whitespace
+    assert _is_loopback_bind("0.0.0.0") is False
+    assert _is_loopback_bind("192.168.1.10") is False
+    assert _is_loopback_bind("") is False
+    assert _is_loopback_bind(None) is False  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_metric_line_handles_value_error_with_nan_sentinel():
+    """A non-numeric, non-empty value that raises during float() must
+    render as NaN — never let Prometheus see lowercase 'nan' or
+    a Python repr that breaks strict parsers."""
+    from eneru.api import _metric_line
+
+    line = _metric_line("eneru_test", {"ups": "u1"}, [1, 2, 3])  # list raises TypeError
+    assert line == 'eneru_test{ups="u1"} NaN'
+
+
+@pytest.mark.unit
+def test_prometheus_metrics_emit_redundancy_group_remote_health(minimal_config):
+    """Coverage for the redundancy-group remote-health metric block."""
+    from eneru.api import render_prometheus_metrics
+
+    source = MagicMock()
+    # Stub collect_status to inject a redundancy-group remote-health row
+    with patch("eneru.api.collect_status", return_value={
+        "ups": [],
+        "redundancyGroups": [{
+            "name": "rack-a",
+            "remoteHealth": [{
+                "server": "node1",
+                "host": "node1.lan",
+                "status": "HEALTHY",
+                "consecutive_failures": 0,
+            }],
+        }],
+    }):
+        text = render_prometheus_metrics(source)
+
+    assert 'eneru_remote_health_status{' in text
+    assert 'redundancy_group="rack-a"' in text
+    assert 'server="node1"' in text
+    assert 'eneru_remote_health_consecutive_failures{' in text
+
+
+# ====================================================================
+# MQTT publisher lifecycle tests
+# ====================================================================
+
+
+@pytest.mark.unit
+def test_mqtt_start_no_op_when_disabled(minimal_config):
+    minimal_config.mqtt.enabled = False
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=__import__("threading").Event())
+    pub.start()
+    assert pub._thread is None
+
+
+@pytest.mark.unit
+def test_mqtt_start_warns_when_paho_missing(minimal_config):
+    """When MQTT_AVAILABLE is False, start() logs a warning and returns."""
+    minimal_config.mqtt.enabled = True
+    log = []
+    pub = MQTTPublisher(
+        MagicMock(),
+        minimal_config,
+        stop_event=__import__("threading").Event(),
+        log_fn=log.append,
+    )
+
+    with patch("eneru.mqtt.MQTT_AVAILABLE", False):
+        pub.start()
+
+    assert pub._thread is None
+    assert any("paho-mqtt is not installed" in m for m in log), log
+
+
+@pytest.mark.unit
+def test_mqtt_stop_no_op_when_no_thread(minimal_config):
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=__import__("threading").Event())
+    pub.stop()  # Must not raise
+
+
+@pytest.mark.unit
+def test_mqtt_local_stop_short_path_returns_immediately(minimal_config):
+    """_wait short-circuits if the local-stop event was already set."""
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=__import__("threading").Event())
+    pub._local_stop.set()
+    # _wait must return True without ever blocking, regardless of timeout.
+    assert pub._wait(timeout=0.001) is True
+    assert pub._wait(timeout=999) is True
+
+
+@pytest.mark.unit
+def test_mqtt_publisher_stop_does_not_set_daemon_stop_event(minimal_config):
+    """Regression guard: publisher.stop() must signal only its local
+    stop event, never the daemon-wide one. Otherwise a config-reload
+    or test cleanup that calls publisher.stop() ends the entire
+    monitor."""
+    import threading
+    daemon_stop = threading.Event()
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=daemon_stop)
+    pub.stop()
+    assert pub._local_stop.is_set()
+    assert not daemon_stop.is_set()
+
+
+@pytest.mark.unit
+def test_mqtt_publish_one_publish_exception_triggers_reconnect(minimal_config):
+    """When client.publish() raises, _publish_one logs the error,
+    sets _needs_reconnect, and returns False so the outer loop
+    tears down and reconnects."""
+    import threading
+    log = []
+    pub = MQTTPublisher(MagicMock(), minimal_config,
+                        stop_event=threading.Event(), log_fn=log.append)
+    fake_client = MagicMock()
+    fake_client.publish.side_effect = OSError("connection reset")
+
+    ok = pub._publish_one(fake_client, "eneru/status", "{}")
+
+    assert ok is False
+    assert pub._needs_reconnect.is_set()
+    assert any("MQTT publish failed" in m for m in log), log
+
+
+@pytest.mark.unit
+def test_mqtt_publish_one_nonzero_rc_triggers_reconnect(minimal_config):
+    """paho returns rc != 0 (e.g. MQTT_ERR_NO_CONN) when the broker
+    connection has dropped under us — surface and reconnect rather
+    than silently dropping every subsequent publish."""
+    import threading
+    log = []
+    pub = MQTTPublisher(MagicMock(), minimal_config,
+                        stop_event=threading.Event(), log_fn=log.append)
+    fake_client = MagicMock()
+    fake_client.publish.return_value = MagicMock(rc=4)  # MQTT_ERR_NO_CONN
+
+    ok = pub._publish_one(fake_client, "eneru/status", "{}")
+
+    assert ok is False
+    assert pub._needs_reconnect.is_set()
+    assert any("rc=4" in m for m in log), log
+
+
+@pytest.mark.unit
+def test_mqtt_publish_one_success_does_not_trigger_reconnect(minimal_config):
+    import threading
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=threading.Event())
+    fake_client = MagicMock()
+    fake_client.publish.return_value = MagicMock(rc=0)
+
+    ok = pub._publish_one(fake_client, "eneru/status", "{}")
+
+    assert ok is True
+    assert not pub._needs_reconnect.is_set()
+
+
+@pytest.mark.unit
+def test_mqtt_on_disconnect_unexpected_sets_reconnect(minimal_config):
+    """Non-zero rc on the on_disconnect callback means a broker-side
+    drop, not our own teardown — we must flag for reconnect."""
+    import threading
+    log = []
+    pub = MQTTPublisher(MagicMock(), minimal_config,
+                        stop_event=threading.Event(), log_fn=log.append)
+    pub._on_disconnect(client=None, userdata=None, rc=7)
+    assert pub._needs_reconnect.is_set()
+    assert any("disconnected unexpectedly" in m for m in log), log
+
+
+@pytest.mark.unit
+def test_mqtt_on_disconnect_clean_does_not_set_reconnect(minimal_config):
+    """rc=0 means we initiated the disconnect ourselves — don't reconnect."""
+    import threading
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=threading.Event())
+    pub._on_disconnect(client=None, userdata=None, rc=0)
+    assert not pub._needs_reconnect.is_set()
+
+
+@pytest.mark.unit
+def test_mqtt_wait_short_timeout_uses_stop_event_directly(minimal_config):
+    """For timeouts <= LOCAL_STOP_POLL_SECONDS (5s), `_wait` waits on the
+    daemon-wide stop_event in one shot — no slicing loop needed."""
+    import threading
+    daemon_stop = threading.Event()
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=daemon_stop)
+
+    # Daemon stop already set → wait returns True immediately
+    daemon_stop.set()
+    assert pub._wait(timeout=2) is True
+
+
+@pytest.mark.unit
+def test_mqtt_wait_long_timeout_slices_for_local_stop_responsiveness(minimal_config):
+    """For timeouts > 5s, `_wait` loops in 5s slices so a publisher.stop()
+    mid-wait is detected within ~5s rather than waiting out the full
+    backoff (60s reconnect path)."""
+    import threading
+    daemon_stop = threading.Event()
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=daemon_stop)
+    # Configure local-stop to be set very quickly
+    pub._local_stop.set()
+    # Long timeout but local_stop fires in the first slice → returns True
+    assert pub._wait(timeout=30) is True
+
+
+@pytest.mark.unit
+def test_mqtt_wait_long_timeout_returns_false_when_no_stop(minimal_config):
+    """A long timeout with neither stop fired returns False (timeout
+    exhausted). Use a tiny effective timeout via monkeypatched poll
+    constant so the test stays fast."""
+    import threading
+    daemon_stop = threading.Event()
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=daemon_stop)
+    # Force the slicing loop with a 6s wait but a tiny poll interval
+    with patch.object(pub, "_LOCAL_STOP_POLL_SECONDS", 0.001):
+        # wait 0.01s sliced into 0.001s polls — must return False
+        assert pub._wait(timeout=0.01) is False
+
+
+@pytest.mark.unit
+def test_mqtt_status_fingerprint_excludes_generatedat():
+    """Two payloads that differ only in generatedAt must hash the same
+    so cache-coherent UPS state doesn't trigger a publish every poll."""
+    snap_a = {"generatedAt": 100, "ups": [{"name": "u", "battery": "75"}]}
+    snap_b = {"generatedAt": 999, "ups": [{"name": "u", "battery": "75"}]}
+    assert MQTTPublisher._status_fingerprint(snap_a) == MQTTPublisher._status_fingerprint(snap_b)
+
+    snap_c = {"generatedAt": 100, "ups": [{"name": "u", "battery": "60"}]}
+    assert MQTTPublisher._status_fingerprint(snap_a) != MQTTPublisher._status_fingerprint(snap_c)
+
+
+# ====================================================================
+# logger.JSONFormatter heuristic-category tests
+# ====================================================================
+
+
+@pytest.mark.unit
+def test_json_formatter_categorizes_remote_health_messages():
+    formatter = JSONFormatter()
+    record = logging.LogRecord(
+        "ups-monitor", logging.INFO, __file__, 1,
+        "Remote health probe failed for node1", (), None,
+    )
+    payload = json.loads(formatter.format(record))
+    assert payload["category"] == "health"
+
+
+@pytest.mark.unit
+def test_json_formatter_categorizes_uppercase_shutdown_only():
+    """Lowercase 'shutdown' in config-key text or info lines must NOT be
+    miscategorised as a shutdown event — only the uppercase SHUTDOWN
+    marker the daemon emits is classified."""
+    formatter = JSONFormatter()
+    record = logging.LogRecord(
+        "ups-monitor", logging.INFO, __file__, 1,
+        "🔌 SHUTDOWN SEQUENCE STARTING", (), None,
+    )
+    payload = json.loads(formatter.format(record))
+    assert payload["category"] == "shutdown"
+
+    # And the lowercase informational line must NOT trip it
+    record2 = logging.LogRecord(
+        "ups-monitor", logging.INFO, __file__, 1,
+        "Local shutdown disabled", (), None,
+    )
+    payload2 = json.loads(formatter.format(record2))
+    assert payload2.get("category") != "shutdown"
+
+
+@pytest.mark.unit
+def test_json_formatter_extracts_event_type_from_power_event_message():
+    """⚡ POWER EVENT: <type> ... messages auto-fill event_type when no
+    structured extra was provided."""
+    formatter = JSONFormatter()
+    record = logging.LogRecord(
+        "ups-monitor", logging.INFO, __file__, 1,
+        "⚡ POWER EVENT: OB DISCHRG - on battery", (), None,
+    )
+    payload = json.loads(formatter.format(record))
+    assert payload["category"] == "power_event"
+    assert payload["event_type"] == "OB"
+
+
+# ====================================================================
+# UPSLogger setup tests — file/syslog handler init paths
+# ====================================================================
+
+
+@pytest.mark.unit
+def test_ups_logger_log_file_permission_error_falls_back_to_console(minimal_config, tmp_path, capsys):
+    """When the configured log file path is unwritable, UPSLogger
+    prints a warning to stdout and continues with console-only logging."""
+    from eneru.logger import UPSLogger
+    # Point at a path where mkdir succeeds but FileHandler can't open
+    bad_path = tmp_path / "logs" / "eneru.log"
+
+    with patch("eneru.logger.logging.FileHandler", side_effect=PermissionError("ro fs")):
+        UPSLogger(str(bad_path), minimal_config)
+
+    out = capsys.readouterr().out
+    assert "Cannot write to" in out
+    assert str(bad_path) in out
+
+
+@pytest.mark.unit
+def test_ups_logger_syslog_init_failure_logs_warning(minimal_config):
+    """A misconfigured syslog address must not crash logger setup —
+    log a warning through the already-installed handlers and move on."""
+    from eneru.logger import UPSLogger
+    minimal_config.logging.syslog.enabled = True
+    minimal_config.logging.syslog.address = "127.0.0.1"
+    minimal_config.logging.syslog.port = 0  # Forces SysLogHandler to fail
+    minimal_config.logging.syslog.facility = "user"
+
+    with patch(
+        "eneru.logger.logging.handlers.SysLogHandler",
+        side_effect=OSError("syslog socket refused"),
+    ):
+        # Must not raise.
+        ups_logger = UPSLogger(None, minimal_config)
+        # And the syslog handler must NOT have been attached.
+        assert all(
+            type(h).__name__ != "SysLogHandler"
+            for h in ups_logger.logger.handlers
+        )
+
+
+@pytest.mark.unit
+def test_ups_logger_log_with_extras_forwards_to_logger_info(minimal_config):
+    """`UPSLogger.log(msg, **extra)` must forward extras as the
+    `extra=` kwarg to the underlying logger so JSONFormatter sees them
+    as LogRecord attributes."""
+    from eneru.logger import UPSLogger
+    ups_logger = UPSLogger(None, minimal_config)
+    with patch.object(ups_logger.logger, "info") as info_mock:
+        ups_logger.log("hello", category="shutdown", group="ups0")
+    info_mock.assert_called_once()
+    # Second positional or `extra=` kwarg must contain the extras
+    kwargs = info_mock.call_args.kwargs
+    assert kwargs.get("extra") == {"category": "shutdown", "group": "ups0"}
+
+
+@pytest.mark.unit
+def test_ups_logger_log_without_extras_omits_extra_kwarg(minimal_config):
+    """When no extras are passed, UPSLogger uses the simple .info(msg)
+    path so the LogRecord has no extra attributes set."""
+    from eneru.logger import UPSLogger
+    ups_logger = UPSLogger(None, minimal_config)
+    with patch.object(ups_logger.logger, "info") as info_mock:
+        ups_logger.log("hello")
+    info_mock.assert_called_once_with("hello")
+
+
+@pytest.mark.unit
+def test_ups_logger_init_clears_stale_handlers(minimal_config):
+    """Re-initialising UPSLogger against the same module-level logger
+    must close and remove handlers from the prior instance — otherwise
+    every restart leaks file descriptors."""
+    from eneru.logger import UPSLogger
+    first = UPSLogger(None, minimal_config)
+    handler_count_first = len(first.logger.handlers)
+
+    # Build a second logger with the same config — handler set should
+    # match the first run, not be doubled.
+    second = UPSLogger(None, minimal_config)
+    assert len(second.logger.handlers) == handler_count_first
+
+
+@pytest.mark.unit
+def test_redact_sensitive_text_strips_common_credential_shapes():
+    """Token / password / api_key query strings + scheme://user:pass@
+    auth must be redacted before structured logging."""
+    from eneru.logger import redact_sensitive_text
+
+    samples = [
+        ("https://api.example.com/?token=abcdef123",
+         "<redacted>", "abcdef123"),
+        ("postgres://admin:supersecret@db.example.com",
+         "<redacted>", "supersecret"),
+        ("SLACK_WEBHOOK=password=mypw&channel=ops",
+         "<redacted>", "mypw"),
+        ("discord://1234567/abcdef",
+         "<redacted>", "1234567/abcdef"),
+    ]
+    for raw, must_contain, must_not_contain in samples:
+        scrubbed = redact_sensitive_text(raw)
+        assert must_contain in scrubbed, (raw, scrubbed)
+        assert must_not_contain not in scrubbed, (raw, scrubbed)
+
+
+# ====================================================================
+# status helpers — query_history defensive paths
+# ====================================================================
+
+
+@pytest.mark.unit
+def test_query_history_unknown_ups_returns_none(minimal_config):
+    """An unknown UPS name short-circuits to None (not an empty list)."""
+    rows = query_history(minimal_config, "no-such-ups", "charge", 0, 100)
+    assert rows is None
+
+
+@pytest.mark.unit
+def test_query_history_unknown_metric_returns_none(minimal_config):
+    """Unknown metric also returns None so callers map it to a 404."""
+    rows = query_history(minimal_config, "TestUPS@localhost", "watts", 0, 100)
+    assert rows is None
+
+
+@pytest.mark.unit
+def test_query_history_missing_db_returns_empty_list(minimal_config, tmp_path):
+    """When the UPS exists but the stats DB hasn't been opened (no run yet),
+    query_history returns [], not None — distinguishing 'no data' from
+    'no such UPS'."""
+    minimal_config.statistics.db_directory = str(tmp_path / "no-such-dir")
+    rows = query_history(minimal_config, "TestUPS@localhost", "charge", 0, 100)
+    assert rows == []
+
+
+@pytest.mark.unit
+def test_query_history_returns_buffered_samples_in_range(minimal_config, tmp_path):
+    """Happy path with a real (seeded) stats DB: query_history must
+    return the rows that fall inside [from, to], converted to the
+    JSON-friendly {ts, value} shape, and close the connection in
+    its finally block."""
+    minimal_config.statistics.db_directory = str(tmp_path)
+    store = StatsStore(tmp_path / "default.db")
+    store.open()
+    try:
+        # Seed a few samples spanning ts 100..103
+        for ts, charge in [(100, 50.0), (101, 60.0), (102, 70.0), (103, 80.0)]:
+            store.buffer_sample(
+                {"battery.charge": str(charge), "ups.status": "OL CHRG"},
+                ts=ts,
+            )
+        store.flush()
+    finally:
+        store.close()
+
+    # Query a range that includes 101..102
+    rows = query_history(minimal_config, "TestUPS@localhost", "charge", 101, 102)
+    assert isinstance(rows, list)
+    assert len(rows) == 2
+    # Rows shaped {ts, value}, sorted by ts
+    assert all(set(r.keys()) == {"ts", "value"} for r in rows)
+    assert rows[0]["ts"] == 101
+    assert rows[1]["ts"] == 102
+    assert rows[0]["value"] == 60.0
+    assert rows[1]["value"] == 70.0
+
+
+@pytest.mark.unit
+def test_state_file_path_for_group_multi_ups_uses_per_ups_suffix():
+    """In multi-UPS mode the state-file path is suffixed with the
+    sanitized UPS name so per-UPS rows don't collide."""
+    from eneru.status import state_file_path_for_group
+    from eneru import Config, UPSConfig, UPSGroupConfig, LoggingConfig
+    config = Config(
+        ups_groups=[
+            UPSGroupConfig(ups=UPSConfig(name="UPS-A@host:3493")),
+            UPSGroupConfig(ups=UPSConfig(name="UPS-B@host:3493")),
+        ],
+        logging=LoggingConfig(state_file="/tmp/eneru-state"),
+    )
+    p = state_file_path_for_group(config, config.ups_groups[0])
+    assert str(p).endswith(".UPS-A-host-3493")  # sanitized suffix
+
+
+@pytest.mark.unit
+def test_state_file_path_for_group_single_ups_uses_unsuffixed_path():
+    from eneru.status import state_file_path_for_group
+    from eneru import Config, UPSConfig, UPSGroupConfig, LoggingConfig
+    config = Config(
+        ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@host"))],
+        logging=LoggingConfig(state_file="/tmp/eneru-state"),
+    )
+    p = state_file_path_for_group(config, config.ups_groups[0])
+    assert str(p) == "/tmp/eneru-state"
+
+
+@pytest.mark.unit
+def test_redundancy_group_statuses_returns_empty_when_config_is_none():
+    from eneru.status import redundancy_group_statuses
+    assert redundancy_group_statuses(MagicMock(), None) == []
+
+
+@pytest.mark.unit
+def test_readiness_returns_no_monitors_for_empty_coordinator(minimal_config):
+    """A coordinator with zero monitors registered must report
+    `ready=False, reason='no monitors'` so the K8s probe fails clean
+    instead of returning success on no data."""
+    from eneru.status import readiness
+    coord = MagicMock()
+    coord._monitors = []  # No monitors registered
+    # Disable own state by removing the attribute the readiness path inspects
+    del coord.state
+    payload = readiness(coord)
+    assert payload["ready"] is False
+    assert "no monitors" in payload["reason"]
+
+
+@pytest.mark.unit
+def test_query_history_via_sanitized_ups_name(minimal_config, tmp_path):
+    """The lookup accepts both the raw UPS name and its sanitized form
+    (the one used in the URL path)."""
+    from eneru.status import sanitize_name
+    minimal_config.statistics.db_directory = str(tmp_path)
+    store = StatsStore(tmp_path / "default.db")
+    store.open()
+    try:
+        store.buffer_sample(
+            {"battery.charge": "42", "ups.status": "OL"}, ts=200,
+        )
+        store.flush()
+    finally:
+        store.close()
+
+    sanitized = sanitize_name("TestUPS@localhost")
+    rows = query_history(minimal_config, sanitized, "charge", 0, 1000)
+    assert rows == [{"ts": 200, "value": 42.0}]
+
+
+# ====================================================================
+# remote_health helper coverage
+# ====================================================================
+
+
+@pytest.mark.unit
+def test_build_ssh_probe_command_dangling_option_raises():
+    """An ssh_options entry like '-i' with no following key path is
+    rejected with a clear error — otherwise OpenSSH errors mid-shutdown
+    instead of failing fast."""
+    from eneru.remote_health import build_ssh_probe_command
+    from eneru import RemoteServerConfig
+
+    server = RemoteServerConfig(
+        name="nas",
+        host="nas.lan",
+        user="ups",
+        ssh_options=["-i"],  # Dangling - expects a path next
+    )
+    with pytest.raises(ValueError, match="dangling SSH option"):
+        build_ssh_probe_command(server, probe_command="true")
+
+
+@pytest.mark.unit
+def test_run_remote_probe_returns_timeout_message_on_124():
+    """Exit code 124 (GNU timeout) is reported with the connect_timeout
+    seconds so operators know which knob to bump."""
+    from eneru.remote_health import run_remote_probe
+    from eneru import RemoteServerConfig
+
+    server = RemoteServerConfig(
+        name="nas", host="nas.lan", user="ups", connect_timeout=7,
+    )
+    with patch("eneru.remote_health.run_command", return_value=(124, "", "")):
+        ok, err, _ = run_remote_probe(server, "true")
+    assert ok is False
+    assert "timed out after 7s" in err
+
+
+@pytest.mark.unit
+def test_run_remote_probe_falls_back_to_exit_code_when_stderr_empty():
+    """When stderr is empty, the failure message uses the exit code so
+    the row in the sidecar / TUI is never blank."""
+    from eneru.remote_health import run_remote_probe
+    from eneru import RemoteServerConfig
+
+    server = RemoteServerConfig(name="nas", host="nas.lan", user="ups")
+    with patch("eneru.remote_health.run_command", return_value=(255, "", "")):
+        ok, err, _ = run_remote_probe(server, "true")
+    assert ok is False
+    assert "exit code 255" in err
+
+
+@pytest.mark.unit
+def test_remote_health_manager_start_no_op_when_disabled(minimal_config, tmp_path):
+    """When remote_health.enabled=False, start() writes a sidecar then returns."""
+    import threading
+    from eneru.remote_health import RemoteHealthManager
+    from eneru import RemoteServerConfig
+
+    minimal_config.remote_health.enabled = False
+    sidecar = tmp_path / "remote-health.json"
+    mgr = RemoteHealthManager(
+        config=minimal_config,
+        group_label="g",
+        servers=[RemoteServerConfig(name="n", host="h", user="u")],
+        sidecar_path=sidecar,
+        stop_event=threading.Event(),
+        log_fn=lambda _: None,
+    )
+    mgr.start()
+    assert mgr._thread is None  # No background thread spawned
+
+
+@pytest.mark.unit
+def test_remote_health_manager_start_no_op_with_no_servers(minimal_config, tmp_path):
+    import threading
+    from eneru.remote_health import RemoteHealthManager
+
+    minimal_config.remote_health.enabled = True
+    sidecar = tmp_path / "remote-health.json"
+    mgr = RemoteHealthManager(
+        config=minimal_config,
+        group_label="g",
+        servers=[],  # Empty server list
+        sidecar_path=sidecar,
+        stop_event=threading.Event(),
+        log_fn=lambda _: None,
+    )
+    mgr.start()
+    assert mgr._thread is None
+
+
+@pytest.mark.unit
+def test_remote_health_manager_stop_handles_missing_thread(minimal_config, tmp_path):
+    import threading
+    from eneru.remote_health import RemoteHealthManager
+
+    sidecar = tmp_path / "rh.json"
+    mgr = RemoteHealthManager(
+        config=minimal_config,
+        group_label="g",
+        servers=[],
+        sidecar_path=sidecar,
+        stop_event=threading.Event(),
+        log_fn=lambda _: None,
+    )
+    # No start() called, _thread is None
+    mgr.stop()  # Must not raise
+
+
+@pytest.mark.unit
+def test_remote_health_manager_snapshot_returns_serializable_rows(minimal_config, tmp_path):
+    import threading
+    from eneru.remote_health import RemoteHealthManager
+    from eneru import RemoteServerConfig
+
+    sidecar = tmp_path / "rh.json"
+    mgr = RemoteHealthManager(
+        config=minimal_config,
+        group_label="g",
+        servers=[RemoteServerConfig(name="n", enabled=True, host="h.lan", user="u")],
+        sidecar_path=sidecar,
+        stop_event=threading.Event(),
+        log_fn=lambda _: None,
+    )
+    rows = mgr.snapshot()
+    assert isinstance(rows, list)
+    assert len(rows) == 1
+    assert rows[0]["server"] == "n"
+    assert rows[0]["host"] == "h.lan"
+    # The status field exists and is one of the known states
+    assert "status" in rows[0]
+
+
+@pytest.mark.unit
+def test_remote_health_manager_start_idempotent_when_already_running(minimal_config, tmp_path):
+    """A second start() call must not spawn a second thread."""
+    import threading
+    from eneru.remote_health import RemoteHealthManager
+    from eneru import RemoteServerConfig
+
+    minimal_config.remote_health.enabled = True
+    mgr = RemoteHealthManager(
+        config=minimal_config,
+        group_label="g",
+        servers=[RemoteServerConfig(name="n", enabled=True, host="h.lan", user="u")],
+        sidecar_path=tmp_path / "rh.json",
+        stop_event=threading.Event(),
+        log_fn=lambda _: None,
+    )
+    sentinel = MagicMock()
+    sentinel.is_alive.return_value = True
+    mgr._thread = sentinel  # Pretend already running
+    with patch("eneru.remote_health.threading.Thread") as t_cls:
+        mgr.start()
+    t_cls.assert_not_called()
+    assert mgr._thread is sentinel
+
+
+@pytest.mark.unit
+def test_remote_health_manager_stop_clears_thread_when_dead(minimal_config, tmp_path):
+    """`stop()` must clear `_thread` once the thread is no longer alive
+    so a subsequent `start()` can spawn a fresh one."""
+    import threading
+    from eneru.remote_health import RemoteHealthManager
+
+    mgr = RemoteHealthManager(
+        config=minimal_config, group_label="g", servers=[],
+        sidecar_path=tmp_path / "rh.json",
+        stop_event=threading.Event(), log_fn=lambda _: None,
+    )
+    fake_thread = MagicMock()
+    fake_thread.is_alive.return_value = False
+    mgr._thread = fake_thread
+    mgr.stop(timeout=0)
+    fake_thread.join.assert_called_once_with(timeout=0)
+    assert mgr._thread is None
+
+
+@pytest.mark.unit
+def test_remote_health_event_fn_failure_logs_only_first_time(minimal_config, tmp_path):
+    """A broken event_fn must not interrupt health checking — the first
+    failure logs, subsequent failures are silent."""
+    import threading
+    from eneru.remote_health import RemoteHealthManager
+    from eneru import RemoteServerConfig
+
+    log = []
+
+    def bad_event_fn(*_args, **_kw):
+        raise OSError("events table missing")
+
+    mgr = RemoteHealthManager(
+        config=minimal_config,
+        group_label="g",
+        servers=[RemoteServerConfig(name="n", enabled=True, host="h.lan", user="u")],
+        sidecar_path=tmp_path / "rh.json",
+        stop_event=threading.Event(),
+        log_fn=log.append,
+        event_fn=bad_event_fn,
+    )
+
+    for _ in range(2):
+        mgr._record_status_transition(
+            previous="HEALTHY",
+            current="FAILED",
+            display="n",
+            host="h.lan",
+            error="ssh timed out",
+            notification_sent=False,
+        )
+
+    failure_logs = [
+        m for m in log
+        if "Remote health stats event failed" in m
+    ]
+    assert len(failure_logs) == 1
+    assert "further failures will be silent" in failure_logs[0]

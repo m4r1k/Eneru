@@ -791,3 +791,61 @@ class TestErrorPaths:
             assert worker.flush(timeout=0.2) is False
         finally:
             worker.stop()
+
+
+# ====================================================================
+# NotificationWorker.start() — early-return paths
+# ====================================================================
+
+
+class TestNotificationWorkerStartEarlyReturns:
+    """`start()` is the entry point for the worker thread. It returns
+    False without starting if any precondition isn't met — verify each
+    branch so a regression doesn't silently start a worker that can't
+    actually deliver."""
+
+    @pytest.mark.unit
+    def test_start_returns_false_when_notifications_disabled(self, minimal_config):
+        from eneru.notifications import NotificationWorker
+        minimal_config.notifications.enabled = False
+        worker = NotificationWorker(minimal_config)
+        assert worker.start() is False
+        assert worker._worker_thread is None
+
+    @pytest.mark.unit
+    def test_start_returns_false_when_apprise_unavailable(self, minimal_config):
+        from eneru import notifications as notif_mod
+        minimal_config.notifications.enabled = True
+        minimal_config.notifications.urls = ["discord://fake/url"]
+        worker = notif_mod.NotificationWorker(minimal_config)
+        with patch.object(notif_mod, "APPRISE_AVAILABLE", False):
+            assert worker.start() is False
+        assert worker._worker_thread is None
+
+    @pytest.mark.unit
+    def test_start_returns_false_when_no_urls(self, minimal_config):
+        from eneru.notifications import NotificationWorker
+        minimal_config.notifications.enabled = True
+        minimal_config.notifications.urls = []  # No URLs configured
+        worker = NotificationWorker(minimal_config)
+        assert worker.start() is False
+
+    @pytest.mark.unit
+    def test_start_returns_false_when_all_urls_invalid(self, minimal_config, capsys):
+        """If apprise.add() rejects every URL, start() warns + returns False."""
+        from eneru.notifications import NotificationWorker
+        minimal_config.notifications.enabled = True
+        minimal_config.notifications.urls = ["bogus://not-a-real-scheme/x"]
+        worker = NotificationWorker(minimal_config)
+
+        with patch("eneru.notifications.APPRISE_AVAILABLE", True):
+            fake_apprise_instance = MagicMock()
+            # add() returns False for every URL, len() returns 0
+            fake_apprise_instance.add = MagicMock(return_value=False)
+            fake_apprise_instance.__len__ = MagicMock(return_value=0)
+            with patch("eneru.notifications.apprise.Apprise",
+                       return_value=fake_apprise_instance):
+                assert worker.start() is False
+
+        out = capsys.readouterr().out
+        assert "Failed to add notification URL" in out or "No valid notification URLs" in out

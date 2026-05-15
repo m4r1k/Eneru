@@ -708,3 +708,57 @@ class TestDeliverPendingStop:
         assert row[0] == "pending", (
             f"Failed Apprise send should leave row pending; got: {row}"
         )
+
+    @pytest.mark.unit
+    def test_reverts_claim_when_worker_cannot_start(self, tmp_path):
+        """Missing Apprise or invalid URLs must not leave a stop row marked
+        sent before delivery actually happened."""
+        db_path = tmp_path / "ups.db"
+        row_id = self._make_pending_row(db_path)
+        cfg = self._make_config()
+
+        with patch("eneru.notifications.NotificationWorker") as Worker:
+            worker = Worker.return_value
+            worker.start.return_value = False
+            rc = deliver_pending_stop(
+                notification_id=row_id,
+                db_path=db_path,
+                config=cfg,
+            )
+
+        assert rc == 0
+        worker._send_via_apprise.assert_not_called()
+        store = StatsStore(db_path)
+        store.open()
+        try:
+            row = store._conn.execute(
+                "SELECT status, sent_at FROM notifications WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+        finally:
+            store.close()
+        assert row == ("pending", None)
+
+
+class TestEagerSendMarkSentFailure:
+
+    @pytest.mark.unit
+    def test_logs_when_mark_sent_fails_after_successful_delivery(self):
+        """Delivery success is still useful even if SQLite cannot be updated;
+        the operator should get one breadcrumb about the harmless duplicate
+        risk."""
+        log = MagicMock()
+        worker = MagicMock()
+        worker._send_via_apprise.return_value = True
+
+        _eager_send(
+            notification_id=42,
+            db_path=object(),
+            body="🛑 Stopped",
+            notify_type="warning",
+            worker=worker,
+            log_fn=log,
+        )
+
+        worker._send_via_apprise.assert_called_once_with("🛑 Stopped", "warning")
+        assert any("mark_sent failed" in c.args[0] for c in log.call_args_list)

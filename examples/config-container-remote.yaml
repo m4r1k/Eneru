@@ -1,0 +1,37 @@
+# Remote-only container image starter config.
+# Mount your own file at /etc/ups-monitor/config.yaml in production.
+ups:
+  - name: "UPS@nut-server"
+    display_name: "Container UPS"
+    is_local: false
+    # Uncomment and adapt to drive remote shutdowns from this Eneru container.
+    # The ssh_key_path below points at a file mounted from a Kubernetes Secret
+    # or a Docker bind mount so the private key never lives in the image.
+    # remote_servers:
+    #   - name: "nas"
+    #     enabled: true
+    #     host: "nas.example.lan"
+    #     user: "ups"
+    #     ssh_key_path: "/var/lib/eneru/ssh/id_eneru"
+    #     shutdown_command: "sudo shutdown -h now"
+
+local_shutdown:
+  enabled: false
+  trigger_on: none
+
+logging:
+  # Forensic log file. Mount a volume at /var/log/eneru so this survives
+  # container restarts; set to null to disable file logging entirely and
+  # rely on `docker logs` / `kubectl logs` only.
+  file: "/var/log/eneru/ups-monitor.log"
+  state_file: "/var/run/eneru/ups-monitor.state"
+  battery_history_file: "/var/run/eneru/ups-battery-history"
+  shutdown_flag_file: "/var/run/eneru/ups-shutdown-scheduled"
+
+statistics:
+  db_directory: "/var/lib/eneru"
+
+api:
+  enabled: true
+  bind: "0.0.0.0"
+  port: 9191

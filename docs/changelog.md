@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.4.0-rc3] - Unreleased
+
+Release candidate for the v5.4 OCI image and Kubernetes deployment path.
+
+### Added
+- Official OCI image packaging for GHCR, with Docker and Podman smoke checks in CI and release-workflow publishing alongside deb/rpm packages.
+- `eneru run --api`, `--api-bind`, and `--api-port` so container healthchecks and Kubernetes probes can enable the read-only API without editing the YAML config.
+- `remote_servers[].ssh_key_path`, an explicit SSH identity-file path for container and Kubernetes volume mounts. Existing OpenSSH config and `ssh_options` behavior is unchanged.
+- Remote-only Kubernetes `Deployment` and `Pod` examples with non-root security contexts, `resources` requests/limits, and a `/var/log/eneru` log volume for forensic timeline data.
+
+### Changed
+- Containerized Eneru can run non-root for remote-only deployments. Startup now refuses local-host orchestration unless Eneru runs as root, so a Kubernetes or rootless Podman deployment fails clearly instead of half-running local shutdown steps it cannot execute.
+- Container shutdown now skips Eneru's own container automatically and skips compose stacks that include the running Eneru container.
+- Dependency checks are scoped to configured behavior: remote-only deployments no longer require local shutdown tooling, and the legacy `logger(1)` syslog side-channel is best effort.
+- The `examples/config-container-remote.yaml` starter config now ships with `logging.file: /var/log/eneru/ups-monitor.log` and a commented-out `remote_servers` block demonstrating `ssh_key_path` against a Kubernetes Secret / Docker bind-mount.
+
+### Documentation
+- The README and docs now explain when to use the OCI image versus the systemd daemon, including Docker, Podman, SELinux volume labels, AppArmor/default confinement, and log collection through `docker logs` or `kubectl logs`.
+- `docs/containers-kubernetes.md` documents the OCI tag channels (`latest` for stable, `testing` for pre-release, exact `<version>` for either), and the Kubernetes / Docker samples now reference `:latest` so they don't need a per-release edit.
+- A dedicated logging section explains stdout capture (`docker logs`, `kubectl logs`) plus the `/var/log/eneru` forensics volume that survives container restarts (UID/GID 10001 ownership, `fsGroup: 10001` in the sample manifests).
+
+### rc3 — fixes from audit
+- New `ENERU_SKIP_PRIVILEGE_CHECK` env var downgrades the v5.4 root-required startup check to a printed warning. Intended for E2E suites and developers iterating on dry-run configs without sudo. Production containers don't set it, so the default safety guarantee for shipped images is unchanged. The E2E workflow exports it once at the matrix step level so eneru runs as the runner user — sudo-elevating eneru would leave its SQLite DB and state files root-owned and break any later test that reads them as the unprivileged runner.
+- K8s and Docker samples now reference `ghcr.io/m4r1k/eneru:latest` instead of the not-yet-existing `:5.4.0` tag, with `imagePullPolicy: Always` and a documented expectation that production users pin to `<version>` for immutability.
+- Kubernetes manifests gain `resources.requests` (50m CPU, 64Mi memory) and `resources.limits` (200m CPU, 128Mi memory) so copy-paste deployments don't run unbounded.
+- Container logging story documented end-to-end: stdout via `docker/podman/kubectl logs`, plus an opt-in `/var/log/eneru/ups-monitor.log` on a mounted volume.
+- Self-container detection learns `/proc/self/mountinfo` as a third source. Modern Docker on cgroup v2 hosts enables cgroup namespaces by default, which collapses `/proc/self/cgroup` and `/proc/1/cgroup` to `0::/` with no extractable container ID. Docker bind-mounts `/etc/hostname`, `/etc/resolv.conf`, and `/etc/hosts` from `/var/lib/docker/containers/<id>/...`, and Podman uses `/var/lib/containers/storage/overlay-containers/<id>/...`; both survive cgroupns and let Eneru reliably skip its own container during shutdown.
+- `eneru validate` now reports the runtime context as one of `container (Docker)`, `container (Podman)`, `container`, `systemd service`, or `bare process`, so operators can confirm at a glance whether the deployment is running where they think it is.
+- Test coverage added: 18 unit tests for self-container detection (helper boundaries, cgroup v1/v2 parsing, mountinfo Docker/Podman/cgroupns, hostname fallback, missing-proc tolerance), 4 unit tests for `eneru run` API CLI overrides (each flag alone, CLI overrides YAML), 9 unit tests for privilege checks (root/non-root/non-Unix, parametrized per-feature, dormant-local-shutdown semantics), 6 unit tests for runtime-context detection.
+
 ## [5.4.0-rc1] - 2026-05-14
 
 Release candidate for the v5.4 observability polish pass.
