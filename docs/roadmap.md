@@ -8,12 +8,6 @@ Recently shipped: v5.0 (2026-04-11), v5.1 (2026-04-21), v5.2 (2026-04-24), v5.3 
 
 ---
 
-## v5.4 -- OCI image and Kubernetes samples (shipped)
-
-v5.4 shipped the official OCI image, GHCR release publishing, Docker/Podman smoke coverage, and remote-only Kubernetes examples. Native deb/rpm packages remain the recommended local-host shutdown path; the image is aimed at remote UPS/server orchestration and container-native healthchecks.
-
----
-
 ## v6.0 -- Web dashboard and UPS control (planned)
 
 - Browser-based dashboard with UPS status, battery graphs, event timeline, and group overview. Served by the embedded API server, no external dependencies

@@ -828,7 +828,7 @@ if ! poll_endpoint http://127.0.0.1:19191/ready /tmp/test46-ready.json 60; then
   docker logs eneru-e2e-under-test || true
   exit 1
 fi
-if ! grep -q '"ready": true' /tmp/test46-ready.json; then
+if ! grep -Eq '"ready"[[:space:]]*:[[:space:]]*true' /tmp/test46-ready.json; then
   echo "FAIL: container /ready did not report ready=true"
   cat /tmp/test46-ready.json
   exit 1

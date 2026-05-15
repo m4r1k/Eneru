@@ -745,7 +745,7 @@ class TestParseLogEvents:
         assert len(events) == 5
 
 
-class TestHumanStatus:
+class TestHumanStatusPureLogic:
     """Tests for NUT status to human-readable conversion."""
 
     @pytest.mark.unit
@@ -781,7 +781,7 @@ class TestHumanStatus:
         assert human_status("SOMETHING ELSE") == "SOMETHING ELSE"
 
 
-class TestStatusColor:
+class TestStatusColorPureLogic:
     """Tests for status color pair selection."""
 
     @pytest.mark.unit

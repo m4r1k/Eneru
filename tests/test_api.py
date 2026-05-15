@@ -1951,29 +1951,19 @@ def test_remote_health_event_fn_failure_logs_only_first_time(minimal_config, tmp
         event_fn=bad_event_fn,
     )
 
-    # Simulate two transitions through _record_remote_health_event
-    # (the private method that wraps event_fn). Use the public
-    # interface by directly invoking the wrapper.
-    mgr._record_remote_health_event = MagicMock()
-    # Pretend two transitions happen: trigger the wrapped path manually
     for _ in range(2):
-        try:
-            mgr.event_fn("REMOTE_HEALTH_FAILED", "dummy detail", False)
-        except Exception:
-            pass
+        mgr._record_status_transition(
+            previous="HEALTHY",
+            current="FAILED",
+            display="n",
+            host="h.lan",
+            error="ssh timed out",
+            notification_sent=False,
+        )
 
-    # The wrapper itself logs once on first failure; manually invoke
-    # the private path that contains the dedup logic
-    mgr._event_fn_logged_failure = False
-    # Simulate two _check_server transitions that exercise the
-    # event_fn try/except
-    for _ in range(2):
-        try:
-            mgr.event_fn("REMOTE_HEALTH_FAILED", "x", False)
-        except Exception as exc:
-            if not mgr._event_fn_logged_failure:
-                mgr._event_fn_logged_failure = True
-                mgr.log_fn(f"⚠️ Remote health stats event failed: {exc}")
-    # The dedup at the wrapped call site means we log at most once.
-    failure_logs = [m for m in log if "Remote health" in m]
-    assert len(failure_logs) <= 1
+    failure_logs = [
+        m for m in log
+        if "Remote health stats event failed" in m
+    ]
+    assert len(failure_logs) == 1
+    assert "further failures will be silent" in failure_logs[0]
