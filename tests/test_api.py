@@ -5,7 +5,7 @@ import logging
 import time
 from io import BytesIO
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1006,3 +1006,482 @@ def test_json_formatter_extras_win_over_heuristics():
 
     assert payload["group"] == "Right-Group"
     assert payload["category"] == "lifecycle"
+
+
+# ====================================================================
+# EneruAPIServer lifecycle tests
+# ====================================================================
+
+
+@pytest.mark.unit
+def test_api_server_start_no_op_when_disabled(minimal_config):
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = False
+    server = EneruAPIServer(MagicMock(), minimal_config)
+    server.start()
+    assert server._thread is None
+    assert server._httpd is None
+
+
+@pytest.mark.unit
+def test_api_server_start_is_idempotent_when_already_running(minimal_config):
+    from unittest.mock import patch
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    server = EneruAPIServer(MagicMock(), minimal_config)
+
+    with patch("eneru.api.ThreadingHTTPServer") as fake_server:
+        fake_server.return_value = MagicMock()
+        server.start()
+        first_thread = server._thread
+        # Second call must early-return without re-binding
+        server.start()
+        assert server._thread is first_thread
+        assert fake_server.call_count == 1
+    server.stop()
+
+
+@pytest.mark.unit
+def test_api_server_start_logs_bind_failure_and_returns(minimal_config):
+    from unittest.mock import patch
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    minimal_config.api.port = 9191
+    log = []
+    server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
+
+    with patch("eneru.api.ThreadingHTTPServer", side_effect=OSError("port in use")):
+        server.start()
+
+    assert server._httpd is None
+    assert server._thread is None
+    assert any("API server failed to bind" in m for m in log), log
+
+
+@pytest.mark.unit
+def test_api_server_start_warns_on_non_loopback_bind(minimal_config):
+    from unittest.mock import patch
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "0.0.0.0"
+    log = []
+    server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
+
+    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+        server.start()
+
+    try:
+        # The bind announcement comes first, then the security warning
+        assert any("API server listening on 0.0.0.0" in m for m in log), log
+        assert any("non-loopback" in m and "no authentication" in m for m in log), log
+    finally:
+        server.stop()
+
+
+@pytest.mark.unit
+def test_api_server_stop_no_op_when_not_started(minimal_config):
+    from eneru.api import EneruAPIServer
+
+    server = EneruAPIServer(MagicMock(), minimal_config)
+    server.stop()  # Must not raise
+
+
+@pytest.mark.unit
+def test_api_server_stop_swallows_shutdown_exceptions(minimal_config):
+    from eneru.api import EneruAPIServer
+
+    server = EneruAPIServer(MagicMock(), minimal_config)
+    server._httpd = MagicMock()
+    server._httpd.shutdown.side_effect = RuntimeError("already stopped")
+    server._httpd.server_close.side_effect = RuntimeError("twice over")
+    # Both exceptions must be swallowed by the broad except.
+    server.stop()
+    assert server._httpd is None
+    assert server._thread is None
+
+
+@pytest.mark.unit
+def test_api_handler_returns_500_on_unexpected_exception():
+    """do_GET must catch generic exceptions and return a 500 JSON envelope."""
+    handler = object.__new__(EneruAPIHandler)
+    handler._route = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    headers = []
+    handler.send_response = lambda status: headers.append(("status", status))
+    handler.send_header = lambda key, value: headers.append((key, value))
+    handler.end_headers = lambda: None
+    handler.wfile = BytesIO()
+
+    handler.do_GET()
+
+    assert ("status", 500) in headers
+    body = json.loads(handler.wfile.getvalue())
+    assert body["error"]["code"] == "INTERNAL_ERROR"
+
+
+@pytest.mark.unit
+def test_api_metrics_route_returns_404_when_prometheus_disabled(minimal_config):
+    """When prometheus.enabled=False, /metrics genuinely returns 404 with
+    NOT_FOUND payload — independently of the index advertising."""
+    minimal_config.prometheus.enabled = False
+    handler = object.__new__(EneruAPIHandler)
+    handler.path = "/metrics"
+    handler.api_config = minimal_config
+    handler.api_source = MagicMock()
+
+    status, content_type, payload = handler._route()
+
+    assert status == 404
+    assert content_type == "application/json"
+    assert payload["error"]["code"] == "NOT_FOUND"
+    # And the available-endpoints list should not include /metrics
+    assert all(ep["path"] != "/metrics" for ep in payload["availableEndpoints"])
+
+
+@pytest.mark.unit
+def test_api_root_unknown_path_returns_404_with_endpoint_index(minimal_config):
+    handler = object.__new__(EneruAPIHandler)
+    handler.path = "/does-not-exist"
+    handler.api_config = minimal_config
+    handler.api_source = MagicMock()
+
+    status, content_type, payload = handler._route()
+
+    assert status == 404
+    assert payload["error"]["code"] == "NOT_FOUND"
+    assert isinstance(payload["availableEndpoints"], list)
+    assert len(payload["availableEndpoints"]) > 0
+
+
+@pytest.mark.unit
+def test_is_loopback_bind_matrix():
+    from eneru.api import _is_loopback_bind
+
+    assert _is_loopback_bind("127.0.0.1") is True
+    assert _is_loopback_bind("::1") is True
+    assert _is_loopback_bind("localhost") is True
+    assert _is_loopback_bind(" LOCALHOST ") is True  # case + whitespace
+    assert _is_loopback_bind("0.0.0.0") is False
+    assert _is_loopback_bind("192.168.1.10") is False
+    assert _is_loopback_bind("") is False
+    assert _is_loopback_bind(None) is False  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_metric_line_handles_value_error_with_nan_sentinel():
+    """A non-numeric, non-empty value that raises during float() must
+    render as NaN — never let Prometheus see lowercase 'nan' or
+    a Python repr that breaks strict parsers."""
+    from eneru.api import _metric_line
+
+    line = _metric_line("eneru_test", {"ups": "u1"}, [1, 2, 3])  # list raises TypeError
+    assert line == 'eneru_test{ups="u1"} NaN'
+
+
+@pytest.mark.unit
+def test_prometheus_metrics_emit_redundancy_group_remote_health(minimal_config):
+    """Coverage for the redundancy-group remote-health metric block."""
+    from eneru.api import render_prometheus_metrics
+
+    source = MagicMock()
+    # Stub collect_status to inject a redundancy-group remote-health row
+    with patch("eneru.api.collect_status", return_value={
+        "ups": [],
+        "redundancyGroups": [{
+            "name": "rack-a",
+            "remoteHealth": [{
+                "server": "node1",
+                "host": "node1.lan",
+                "status": "HEALTHY",
+                "consecutive_failures": 0,
+            }],
+        }],
+    }):
+        text = render_prometheus_metrics(source)
+
+    assert 'eneru_remote_health_status{' in text
+    assert 'redundancy_group="rack-a"' in text
+    assert 'server="node1"' in text
+    assert 'eneru_remote_health_consecutive_failures{' in text
+
+
+# ====================================================================
+# MQTT publisher lifecycle tests
+# ====================================================================
+
+
+@pytest.mark.unit
+def test_mqtt_start_no_op_when_disabled(minimal_config):
+    minimal_config.mqtt.enabled = False
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=__import__("threading").Event())
+    pub.start()
+    assert pub._thread is None
+
+
+@pytest.mark.unit
+def test_mqtt_start_warns_when_paho_missing(minimal_config):
+    """When MQTT_AVAILABLE is False, start() logs a warning and returns."""
+    minimal_config.mqtt.enabled = True
+    log = []
+    pub = MQTTPublisher(
+        MagicMock(),
+        minimal_config,
+        stop_event=__import__("threading").Event(),
+        log_fn=log.append,
+    )
+
+    with patch("eneru.mqtt.MQTT_AVAILABLE", False):
+        pub.start()
+
+    assert pub._thread is None
+    assert any("paho-mqtt is not installed" in m for m in log), log
+
+
+@pytest.mark.unit
+def test_mqtt_stop_no_op_when_no_thread(minimal_config):
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=__import__("threading").Event())
+    pub.stop()  # Must not raise
+
+
+@pytest.mark.unit
+def test_mqtt_local_stop_short_path_returns_immediately(minimal_config):
+    """_wait short-circuits if the local-stop event was already set."""
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=__import__("threading").Event())
+    pub._local_stop.set()
+    # _wait must return True without ever blocking, regardless of timeout.
+    assert pub._wait(timeout=0.001) is True
+    assert pub._wait(timeout=999) is True
+
+
+@pytest.mark.unit
+def test_mqtt_publisher_stop_does_not_set_daemon_stop_event(minimal_config):
+    """Regression guard: publisher.stop() must signal only its local
+    stop event, never the daemon-wide one. Otherwise a config-reload
+    or test cleanup that calls publisher.stop() ends the entire
+    monitor."""
+    import threading
+    daemon_stop = threading.Event()
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=daemon_stop)
+    pub.stop()
+    assert pub._local_stop.is_set()
+    assert not daemon_stop.is_set()
+
+
+# ====================================================================
+# logger.JSONFormatter heuristic-category tests
+# ====================================================================
+
+
+@pytest.mark.unit
+def test_json_formatter_categorizes_remote_health_messages():
+    formatter = JSONFormatter()
+    record = logging.LogRecord(
+        "ups-monitor", logging.INFO, __file__, 1,
+        "Remote health probe failed for node1", (), None,
+    )
+    payload = json.loads(formatter.format(record))
+    assert payload["category"] == "health"
+
+
+@pytest.mark.unit
+def test_json_formatter_categorizes_uppercase_shutdown_only():
+    """Lowercase 'shutdown' in config-key text or info lines must NOT be
+    miscategorised as a shutdown event — only the uppercase SHUTDOWN
+    marker the daemon emits is classified."""
+    formatter = JSONFormatter()
+    record = logging.LogRecord(
+        "ups-monitor", logging.INFO, __file__, 1,
+        "🔌 SHUTDOWN SEQUENCE STARTING", (), None,
+    )
+    payload = json.loads(formatter.format(record))
+    assert payload["category"] == "shutdown"
+
+    # And the lowercase informational line must NOT trip it
+    record2 = logging.LogRecord(
+        "ups-monitor", logging.INFO, __file__, 1,
+        "Local shutdown disabled", (), None,
+    )
+    payload2 = json.loads(formatter.format(record2))
+    assert payload2.get("category") != "shutdown"
+
+
+@pytest.mark.unit
+def test_json_formatter_extracts_event_type_from_power_event_message():
+    """⚡ POWER EVENT: <type> ... messages auto-fill event_type when no
+    structured extra was provided."""
+    formatter = JSONFormatter()
+    record = logging.LogRecord(
+        "ups-monitor", logging.INFO, __file__, 1,
+        "⚡ POWER EVENT: OB DISCHRG - on battery", (), None,
+    )
+    payload = json.loads(formatter.format(record))
+    assert payload["category"] == "power_event"
+    assert payload["event_type"] == "OB"
+
+
+# ====================================================================
+# status helpers — query_history defensive paths
+# ====================================================================
+
+
+@pytest.mark.unit
+def test_query_history_unknown_ups_returns_none(minimal_config):
+    """An unknown UPS name short-circuits to None (not an empty list)."""
+    rows = query_history(minimal_config, "no-such-ups", "charge", 0, 100)
+    assert rows is None
+
+
+@pytest.mark.unit
+def test_query_history_unknown_metric_returns_none(minimal_config):
+    """Unknown metric also returns None so callers map it to a 404."""
+    rows = query_history(minimal_config, "TestUPS@localhost", "watts", 0, 100)
+    assert rows is None
+
+
+@pytest.mark.unit
+def test_query_history_missing_db_returns_empty_list(minimal_config, tmp_path):
+    """When the UPS exists but the stats DB hasn't been opened (no run yet),
+    query_history returns [], not None — distinguishing 'no data' from
+    'no such UPS'."""
+    minimal_config.statistics.db_directory = str(tmp_path / "no-such-dir")
+    rows = query_history(minimal_config, "TestUPS@localhost", "charge", 0, 100)
+    assert rows == []
+
+
+# ====================================================================
+# remote_health helper coverage
+# ====================================================================
+
+
+@pytest.mark.unit
+def test_build_ssh_probe_command_dangling_option_raises():
+    """An ssh_options entry like '-i' with no following key path is
+    rejected with a clear error — otherwise OpenSSH errors mid-shutdown
+    instead of failing fast."""
+    from eneru.remote_health import build_ssh_probe_command
+    from eneru import RemoteServerConfig
+
+    server = RemoteServerConfig(
+        name="nas",
+        host="nas.lan",
+        user="ups",
+        ssh_options=["-i"],  # Dangling - expects a path next
+    )
+    with pytest.raises(ValueError, match="dangling SSH option"):
+        build_ssh_probe_command(server, probe_command="true")
+
+
+@pytest.mark.unit
+def test_run_remote_probe_returns_timeout_message_on_124():
+    """Exit code 124 (GNU timeout) is reported with the connect_timeout
+    seconds so operators know which knob to bump."""
+    from eneru.remote_health import run_remote_probe
+    from eneru import RemoteServerConfig
+
+    server = RemoteServerConfig(
+        name="nas", host="nas.lan", user="ups", connect_timeout=7,
+    )
+    with patch("eneru.remote_health.run_command", return_value=(124, "", "")):
+        ok, err, _ = run_remote_probe(server, "true")
+    assert ok is False
+    assert "timed out after 7s" in err
+
+
+@pytest.mark.unit
+def test_run_remote_probe_falls_back_to_exit_code_when_stderr_empty():
+    """When stderr is empty, the failure message uses the exit code so
+    the row in the sidecar / TUI is never blank."""
+    from eneru.remote_health import run_remote_probe
+    from eneru import RemoteServerConfig
+
+    server = RemoteServerConfig(name="nas", host="nas.lan", user="ups")
+    with patch("eneru.remote_health.run_command", return_value=(255, "", "")):
+        ok, err, _ = run_remote_probe(server, "true")
+    assert ok is False
+    assert "exit code 255" in err
+
+
+@pytest.mark.unit
+def test_remote_health_manager_start_no_op_when_disabled(minimal_config, tmp_path):
+    """When remote_health.enabled=False, start() writes a sidecar then returns."""
+    import threading
+    from eneru.remote_health import RemoteHealthManager
+    from eneru import RemoteServerConfig
+
+    minimal_config.remote_health.enabled = False
+    sidecar = tmp_path / "remote-health.json"
+    mgr = RemoteHealthManager(
+        config=minimal_config,
+        group_label="g",
+        servers=[RemoteServerConfig(name="n", host="h", user="u")],
+        sidecar_path=sidecar,
+        stop_event=threading.Event(),
+        log_fn=lambda _: None,
+    )
+    mgr.start()
+    assert mgr._thread is None  # No background thread spawned
+
+
+@pytest.mark.unit
+def test_remote_health_manager_start_no_op_with_no_servers(minimal_config, tmp_path):
+    import threading
+    from eneru.remote_health import RemoteHealthManager
+
+    minimal_config.remote_health.enabled = True
+    sidecar = tmp_path / "remote-health.json"
+    mgr = RemoteHealthManager(
+        config=minimal_config,
+        group_label="g",
+        servers=[],  # Empty server list
+        sidecar_path=sidecar,
+        stop_event=threading.Event(),
+        log_fn=lambda _: None,
+    )
+    mgr.start()
+    assert mgr._thread is None
+
+
+@pytest.mark.unit
+def test_remote_health_manager_stop_handles_missing_thread(minimal_config, tmp_path):
+    import threading
+    from eneru.remote_health import RemoteHealthManager
+
+    sidecar = tmp_path / "rh.json"
+    mgr = RemoteHealthManager(
+        config=minimal_config,
+        group_label="g",
+        servers=[],
+        sidecar_path=sidecar,
+        stop_event=threading.Event(),
+        log_fn=lambda _: None,
+    )
+    # No start() called, _thread is None
+    mgr.stop()  # Must not raise
+
+
+@pytest.mark.unit
+def test_remote_health_manager_snapshot_returns_serializable_rows(minimal_config, tmp_path):
+    import threading
+    from eneru.remote_health import RemoteHealthManager
+    from eneru import RemoteServerConfig
+
+    sidecar = tmp_path / "rh.json"
+    mgr = RemoteHealthManager(
+        config=minimal_config,
+        group_label="g",
+        servers=[RemoteServerConfig(name="n", enabled=True, host="h.lan", user="u")],
+        sidecar_path=sidecar,
+        stop_event=threading.Event(),
+        log_fn=lambda _: None,
+    )
+    rows = mgr.snapshot()
+    assert isinstance(rows, list)
+    assert len(rows) == 1
+    assert rows[0]["server"] == "n"
+    assert rows[0]["host"] == "h.lan"
+    # The status field exists and is one of the known states
+    assert "status" in rows[0]

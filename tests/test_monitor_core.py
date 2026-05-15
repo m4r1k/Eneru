@@ -1877,3 +1877,424 @@ class TestCheckDependencies:
             monitor._check_dependencies()  # Must not sys.exit
 
         assert any("'logger' not found" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_missing_virsh_disables_vms_with_warning(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.ups_groups[0].is_local = False
+        monitor.config.local_shutdown.enabled = False
+        monitor.config.virtual_machines.enabled = True
+        monitor.config.containers.enabled = False
+        monitor.config.filesystems.unmount.enabled = False
+        log = []
+        monitor._log_message = log.append
+
+        def cmd_present(cmd):
+            return cmd not in ("virsh",)
+
+        with patch("eneru.monitor.command_exists", side_effect=cmd_present):
+            monitor._check_dependencies()
+
+        assert monitor.config.virtual_machines.enabled is False
+        assert any("virsh" in m and "VM shutdown" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_container_runtime_detected_logs_runtime(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.ups_groups[0].is_local = False
+        monitor.config.local_shutdown.enabled = False
+        monitor.config.containers.enabled = True
+        log = []
+        monitor._log_message = log.append
+
+        with patch("eneru.monitor.command_exists", return_value=True), \
+             patch.object(monitor, "_detect_container_runtime", return_value="podman"):
+            monitor._check_dependencies()
+
+        assert monitor._container_runtime == "podman"
+        assert any("Container runtime detected: podman" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_container_runtime_missing_disables_containers(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.ups_groups[0].is_local = False
+        monitor.config.local_shutdown.enabled = False
+        monitor.config.containers.enabled = True
+        log = []
+        monitor._log_message = log.append
+
+        with patch("eneru.monitor.command_exists", return_value=True), \
+             patch.object(monitor, "_detect_container_runtime", return_value=None):
+            monitor._check_dependencies()
+
+        assert monitor.config.containers.enabled is False
+        assert any("No container runtime found" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_compose_available_logs_enabled_message(self, tmp_path):
+        from eneru import ComposeFileConfig
+        monitor = make_monitor(tmp_path)
+        monitor.config.ups_groups[0].is_local = False
+        monitor.config.local_shutdown.enabled = False
+        monitor.config.containers.enabled = True
+        monitor.config.containers.compose_files = [ComposeFileConfig(path="/c.yml")]
+        log = []
+        monitor._log_message = log.append
+
+        with patch("eneru.monitor.command_exists", return_value=True), \
+             patch.object(monitor, "_detect_container_runtime", return_value="docker"), \
+             patch.object(monitor, "_check_compose_available", return_value=True):
+            monitor._check_dependencies()
+
+        assert monitor._compose_available is True
+        assert any("Compose support: enabled" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_compose_unavailable_warns_and_skips(self, tmp_path):
+        from eneru import ComposeFileConfig
+        monitor = make_monitor(tmp_path)
+        monitor.config.ups_groups[0].is_local = False
+        monitor.config.local_shutdown.enabled = False
+        monitor.config.containers.enabled = True
+        monitor.config.containers.compose_files = [ComposeFileConfig(path="/c.yml")]
+        log = []
+        monitor._log_message = log.append
+
+        with patch("eneru.monitor.command_exists", return_value=True), \
+             patch.object(monitor, "_detect_container_runtime", return_value="docker"), \
+             patch.object(monitor, "_check_compose_available", return_value=False):
+            monitor._check_dependencies()
+
+        assert any("compose_files configured" in m and "not available" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_remote_servers_disabled_when_ssh_missing(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.ups_groups[0].is_local = False
+        monitor.config.local_shutdown.enabled = False
+        monitor.config.ups_groups[0].remote_servers = [
+            RemoteServerConfig(name="nas", enabled=True, host="nas.lan", user="ups"),
+        ]
+        log = []
+        monitor._log_message = log.append
+
+        def cmd_present(cmd):
+            return cmd != "ssh"
+
+        with patch("eneru.monitor.command_exists", side_effect=cmd_present):
+            monitor._check_dependencies()
+
+        assert monitor.config.remote_servers[0].enabled is False
+        assert any("'ssh' not found" in m and "Remote shutdown will be skipped" in m for m in log), log
+
+
+class TestStartHelpersIdempotent:
+    """The _start_* lifecycle hooks must be safe to invoke twice
+    (called by both single-UPS startup and the multi-UPS coordinator
+    re-init path; running twice would leak threads and ports)."""
+
+    @pytest.mark.unit
+    def test_start_api_server_no_op_when_already_started(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.api.enabled = True
+        sentinel = MagicMock()
+        monitor._api_server = sentinel  # Pretend it's already running
+        monitor._start_api_server()
+        assert monitor._api_server is sentinel
+
+    @pytest.mark.unit
+    def test_start_api_server_creates_and_starts_when_absent(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.api.enabled = True
+        monitor._api_server = None
+        with patch("eneru.monitor.EneruAPIServer") as cls:
+            cls.return_value = MagicMock()
+            monitor._start_api_server()
+        cls.assert_called_once_with(monitor, monitor.config, log_fn=monitor._log_message)
+        cls.return_value.start.assert_called_once()
+
+    @pytest.mark.unit
+    def test_start_mqtt_publisher_no_op_when_already_started(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        sentinel = MagicMock()
+        monitor._mqtt_publisher = sentinel
+        monitor._start_mqtt_publisher()
+        assert monitor._mqtt_publisher is sentinel
+
+    @pytest.mark.unit
+    def test_start_mqtt_publisher_creates_and_starts_when_absent(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._mqtt_publisher = None
+        with patch("eneru.monitor.MQTTPublisher") as cls:
+            cls.return_value = MagicMock()
+            monitor._start_mqtt_publisher()
+        cls.return_value.start.assert_called_once()
+
+    @pytest.mark.unit
+    def test_start_remote_health_no_op_when_already_started(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        sentinel = MagicMock()
+        monitor._remote_health_manager = sentinel
+        monitor._start_remote_health()
+        assert monitor._remote_health_manager is sentinel
+
+
+class TestLogEnabledFeatures:
+    """Lock the `📋 Enabled features:` log-line construction.
+
+    This line is the operator's single source of truth for what the daemon
+    is configured to do at startup; if a feature is silently dropped from
+    the report it can mask a misconfiguration."""
+
+    def _features_line(self, monitor):
+        log = []
+        monitor._log_message = log.append
+        monitor._log_enabled_features()
+        return next(m for m in log if m.startswith("📋 Enabled features:"))
+
+    @pytest.mark.unit
+    def test_no_features_enabled_reports_none(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.virtual_machines.enabled = False
+        monitor.config.containers.enabled = False
+        monitor.config.filesystems.sync_enabled = False
+        monitor.config.filesystems.unmount.enabled = False
+        monitor.config.local_shutdown.enabled = False
+        monitor.config.ups_groups[0].remote_servers = []
+        monitor.config.ups.connection_loss_grace_period.enabled = False
+        line = self._features_line(monitor)
+        assert "Enabled features: None" in line
+
+    @pytest.mark.unit
+    def test_vm_feature_listed(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.virtual_machines.enabled = True
+        line = self._features_line(monitor)
+        assert "VMs" in line
+
+    @pytest.mark.unit
+    def test_containers_auto_with_no_compose_files(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.containers.enabled = True
+        monitor.config.containers.runtime = "auto"
+        monitor.config.containers.compose_files = []
+        line = self._features_line(monitor)
+        assert "Containers (auto-detect)" in line
+
+    @pytest.mark.unit
+    def test_containers_auto_with_compose_count(self, tmp_path):
+        from eneru import ComposeFileConfig
+        monitor = make_monitor(tmp_path)
+        monitor.config.containers.enabled = True
+        monitor.config.containers.runtime = "auto"
+        monitor.config.containers.compose_files = [
+            ComposeFileConfig(path="/a"), ComposeFileConfig(path="/b"),
+        ]
+        line = self._features_line(monitor)
+        assert "Containers (auto-detect, 2 compose)" in line
+
+    @pytest.mark.unit
+    def test_containers_explicit_runtime_with_compose(self, tmp_path):
+        from eneru import ComposeFileConfig
+        monitor = make_monitor(tmp_path)
+        monitor.config.containers.enabled = True
+        monitor.config.containers.runtime = "podman"
+        monitor.config.containers.compose_files = [ComposeFileConfig(path="/x")]
+        line = self._features_line(monitor)
+        assert "Containers (podman, 1 compose)" in line
+
+    @pytest.mark.unit
+    def test_filesystem_features_combine(self, tmp_path):
+        from eneru import UnmountConfig
+        monitor = make_monitor(tmp_path)
+        monitor.config.filesystems.sync_enabled = True
+        monitor.config.filesystems.unmount = UnmountConfig(enabled=True, mounts=["/a", "/b"])
+        line = self._features_line(monitor)
+        assert "FS (sync, unmount (2 mounts))" in line
+
+    @pytest.mark.unit
+    def test_remote_servers_count_only_enabled(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.ups_groups[0].remote_servers = [
+            RemoteServerConfig(name="a", enabled=True, host="h1", user="u"),
+            RemoteServerConfig(name="b", enabled=False, host="h2", user="u"),
+            RemoteServerConfig(name="c", enabled=True, host="h3", user="u"),
+        ]
+        line = self._features_line(monitor)
+        assert "Remote (2 servers)" in line
+
+    @pytest.mark.unit
+    def test_local_shutdown_listed(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.local_shutdown.enabled = True
+        line = self._features_line(monitor)
+        assert "Local Shutdown" in line
+
+    @pytest.mark.unit
+    def test_connection_grace_includes_duration(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.ups.connection_loss_grace_period.enabled = True
+        monitor.config.ups.connection_loss_grace_period.duration = 90
+        line = self._features_line(monitor)
+        assert "Connection Grace (90s)" in line
+
+
+class TestInitializeNotifications:
+    """v5.2 wired notification persistence into `_initialize_notifications`.
+    Cover the three runtime branches: disabled, apprise unavailable,
+    and happy path with a worker actually starting."""
+
+    @pytest.mark.unit
+    def test_notifications_disabled_logs_and_returns(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.notifications.enabled = False
+        monitor._notification_worker = None
+        log = []
+        monitor._log_message = log.append
+        # Bypass stats_store open() and lifecycle sweep for unit isolation
+        monitor._stats_store = MagicMock(_conn=None)
+
+        monitor._initialize_notifications()
+
+        assert monitor._notification_worker is None
+        assert any("📢 Notifications: disabled" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_notifications_apprise_unavailable_logs_warning(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.notifications.enabled = True
+        monitor._notification_worker = None
+        log = []
+        monitor._log_message = log.append
+        monitor._stats_store = MagicMock(_conn=None)
+
+        with patch("eneru.monitor.APPRISE_AVAILABLE", False):
+            monitor._initialize_notifications()
+
+        assert monitor.config.notifications.enabled is False
+        assert any("apprise not installed" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_notifications_happy_path_starts_worker(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.notifications.enabled = True
+        monitor._notification_worker = None
+        log = []
+        monitor._log_message = log.append
+        monitor._stats_store = MagicMock(_conn=None)
+
+        fake_worker = MagicMock()
+        fake_worker.start.return_value = True
+        fake_worker.get_service_count.return_value = 3
+
+        with patch("eneru.monitor.APPRISE_AVAILABLE", True), \
+             patch("eneru.monitor.NotificationWorker", return_value=fake_worker):
+            monitor._initialize_notifications()
+
+        assert monitor._notification_worker is fake_worker
+        fake_worker.start.assert_called_once()
+        assert any("Notifications: enabled (3 service(s))" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_notifications_worker_start_failure_disables(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.notifications.enabled = True
+        monitor._notification_worker = None
+        log = []
+        monitor._log_message = log.append
+        monitor._stats_store = MagicMock(_conn=None)
+
+        fake_worker = MagicMock()
+        fake_worker.start.return_value = False  # Simulate failure
+
+        with patch("eneru.monitor.APPRISE_AVAILABLE", True), \
+             patch("eneru.monitor.NotificationWorker", return_value=fake_worker):
+            monitor._initialize_notifications()
+
+        assert monitor.config.notifications.enabled is False
+        assert any("Failed to initialize notifications" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_notifications_coordinator_mode_registers_existing_worker(self, tmp_path):
+        """When a coordinator-injected worker exists, register our store and return."""
+        monitor = make_monitor(tmp_path)
+        existing = MagicMock()
+        monitor._notification_worker = existing
+        # Pretend the stats store has an open connection
+        store = MagicMock()
+        store._conn = MagicMock()  # truthy
+        monitor._stats_store = store
+
+        # Make find_pending_by_category return [] so the lifecycle sweep is a no-op
+        store.find_pending_by_category.return_value = []
+
+        monitor._initialize_notifications()
+
+        existing.register_store.assert_called_once_with(store)
+
+
+class TestWaitForInitialConnection:
+    """`_wait_for_initial_connection` polls NUT for up to 30s before
+    giving up with a warning. Cover both success and timeout."""
+
+    @pytest.mark.unit
+    def test_initial_connection_success_logs_check_mark(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        log = []
+        monitor._log_message = log.append
+
+        with patch.object(monitor, "_get_all_ups_data", return_value=(True, {}, "")):
+            monitor._wait_for_initial_connection()
+
+        assert any("Initial connection successful" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_initial_connection_timeout_logs_warning(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        log = []
+        monitor._log_message = log.append
+
+        # Always-fail get_all_ups_data, but skip the actual sleep
+        with patch.object(monitor, "_get_all_ups_data", return_value=(False, None, "err")), \
+             patch("eneru.monitor.time.sleep"):
+            monitor._wait_for_initial_connection()
+
+        assert any("Failed to connect" in m and "30s" in m for m in log), log
+
+
+class TestRunFatalErrorPath:
+    """`run()` must catch generic exceptions, log FATAL ERROR, write a
+    shutdown marker so the next start can emit
+    'Restarted (last instance exited fatally)', then re-raise."""
+
+    @pytest.mark.unit
+    def test_run_writes_fatal_marker_and_reraises(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+
+        def explode():
+            raise RuntimeError("boom in main loop")
+
+        log = []
+        monitor._log_message = log.append
+        monitor._send_notification = MagicMock()
+
+        with patch.object(monitor, "_initialize"), \
+             patch.object(monitor, "_main_loop", side_effect=explode), \
+             patch("eneru.monitor.write_shutdown_marker") as marker:
+            with pytest.raises(RuntimeError, match="boom in main loop"):
+                monitor.run()
+
+        assert any("FATAL ERROR" in m and "boom" in m for m in log), log
+        marker.assert_called_once()
+
+    @pytest.mark.unit
+    def test_run_fatal_marker_write_exception_does_not_mask_original(self, tmp_path):
+        """If the marker-write itself fails, the original FATAL must still propagate."""
+        monitor = make_monitor(tmp_path)
+        monitor._send_notification = MagicMock()
+
+        with patch.object(monitor, "_initialize"), \
+             patch.object(monitor, "_main_loop", side_effect=RuntimeError("primary")), \
+             patch("eneru.monitor.write_shutdown_marker", side_effect=OSError("disk full")):
+            with pytest.raises(RuntimeError, match="primary"):
+                monitor.run()  # OSError must not surface here
