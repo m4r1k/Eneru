@@ -76,6 +76,24 @@ Homelabs, virtualization hosts (Proxmox, ESXi, libvirt), Docker/Podman container
 
 ### Installation
 
+**Docker / Podman:**
+```bash
+docker pull ghcr.io/m4r1k/eneru:latest
+
+docker run -d --name eneru \
+  --restart unless-stopped \
+  -p 9191:9191 \
+  -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro \
+  -v /srv/eneru/state:/var/lib/eneru \
+  -v /srv/eneru/run:/var/run/eneru \
+  -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro \
+  ghcr.io/m4r1k/eneru:latest \
+  run --config /etc/ups-monitor/config.yaml \
+  --api --api-bind 0.0.0.0 --api-port 9191
+```
+
+Use `ghcr.io/m4r1k/eneru:testing` for pre-release builds. Run Eneru as root when it must manage local resources such as the local host, VMs, containers, or filesystems. Root is not needed for remote UPS monitoring and SSH shutdown.
+
 **PyPI:**
 ```bash
 pip install eneru[notifications]
