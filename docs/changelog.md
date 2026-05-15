@@ -32,6 +32,7 @@ Release candidate for the v5.4 OCI image and Kubernetes deployment path.
 - The release workflow now resets `src/eneru/version.py` to the clean release version before building the OCI image. Deb/rpm packages still keep the full code-display version with the short git hash, but Docker's in-image `pip install` now sees a valid PEP 440 package version.
 - Exact OCI tags now use the package version shape (`5.4.0`, `5.4.0-rc4`) while channel tags stay `latest` for stable releases and `testing` for pre-releases.
 - The Dockerfile runs `apt-get upgrade -y` after `apt-get update` so images pick up Debian security fixes available at build time.
+- The OCI image now uses the Python 3.12 slim Trixie base for a newer Debian userspace.
 - The README now surfaces Docker first in the quick start while clarifying that root is only needed when Eneru manages local resources.
 
 ### rc3 — fixes from audit
