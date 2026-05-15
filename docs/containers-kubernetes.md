@@ -80,28 +80,11 @@ podman run -d --name eneru \
   --api --api-bind 0.0.0.0
 ```
 
-Rootless Podman works for remote-only deployments as long as the mounted state and SSH-key paths are readable by the container user. If you mount the host Docker or Podman socket for local container orchestration, that is no longer remote-only and must be treated as privileged local-host access.
+Rootless Podman works for remote-only deployments as long as the mounted state and SSH-key paths are readable by the container user.
 
 ## AppArmor
 
-The default Docker AppArmor profile is enough for remote-only Eneru because it needs ordinary network access and writable state directories. Do not disable AppArmor for remote-only deployments. Local-host orchestration is different: stopping host containers, VMs, filesystems, or the host itself requires additional host access and usually belongs on the native systemd install path.
-
-## Local-host orchestration in a container
-
-If you configure `is_local: true`, local shutdown, local VMs, local containers, or filesystem unmounts, Eneru must run as root. A non-root container exits at startup with the local feature that requires root.
-
-For local container shutdown, mount the relevant runtime socket and keep Eneru outside the shutdown target set where possible:
-
-```bash
-docker run -d --name eneru \
-  --user 0:0 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro \
-  -v /srv/eneru/state:/var/lib/eneru \
-  ghcr.io/m4r1k/eneru:latest
-```
-
-Eneru auto-detects and skips its own container during the remaining-container stop phase. If a configured compose file includes the Eneru container, Eneru skips `compose down` for that file to avoid killing itself.
+The default Docker AppArmor profile is enough for remote-only Eneru because it needs ordinary network access and writable state directories. Do not disable AppArmor for remote-only deployments. If Eneru must stop local VMs, local containers, filesystems, or the host itself, use a native host install instead of the OCI image.
 
 ## Kubernetes
 
