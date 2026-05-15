@@ -242,9 +242,12 @@ class ContainerShutdownMixin:
             self._log_message(f"  ℹ️ No running {runtime_display} containers found")
         else:
             if self.config.behavior.dry_run:
-                exit_code, stdout, _ = run_command([runtime, "ps", "--format", "{{.Names}}"])
-                names = stdout.strip().replace('\n', ' ')
-                self._log_message(f"  🧪 [DRY-RUN] Would stop {runtime_display} containers: {names}")
+                # Use the already-filtered ID list so the preview matches exactly
+                # what the real run would stop (Eneru's own container is excluded).
+                ids = " ".join(container_ids)
+                self._log_message(
+                    f"  🧪 [DRY-RUN] Would stop {runtime_display} container IDs: {ids}"
+                )
             else:
                 # Stop containers with timeout
                 stop_cmd = [runtime, "stop", "-t", str(self.config.containers.stop_timeout)]

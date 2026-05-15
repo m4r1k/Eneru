@@ -177,6 +177,28 @@ class TestCLIRunOverrides:
 
         assert config.api.enabled is True
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_port", ["0", "-1", "65536", "70000", "abc"])
+    def test_api_port_argparse_rejects_out_of_range(self, bad_port, capsys):
+        """argparse-time validation: --api-port must be 1..65535 integer.
+
+        Catching this at parse time gives a clear error before any config or
+        privilege check fires; previously type=int let -1 / 70000 through.
+        """
+        with patch.object(sys, "argv", ["eneru", "run", "--api-port", bad_port]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        # argparse always exits 2 on parse-time failures.
+        assert exc_info.value.code == 2
+
+    @pytest.mark.unit
+    def test_port_int_validator_accepts_boundaries(self):
+        from eneru.cli import _port_int
+
+        assert _port_int("1") == 1
+        assert _port_int("65535") == 65535
+        assert _port_int("9191") == 9191
+
 
 class TestPrivilegeChecks:
     """Root-vs-non-root startup gating."""

@@ -41,12 +41,27 @@ def _non_negative_int(value: str) -> int:
     return n
 
 
+def _port_int(value: str) -> int:
+    """argparse type for TCP port arguments: integer in 1..65535."""
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"port must be an integer, got {value!r}"
+        )
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError(
+            f"port must be in 1..65535, got {port}"
+        )
+    return port
+
+
 def _load_config(args):
     """Load configuration from the --config path."""
     return ConfigLoader.load(getattr(args, 'config', None))
 
 
-def _apply_run_overrides(config: Config, args) -> None:
+def _apply_run_overrides(config: Config, args: argparse.Namespace) -> None:
     """Apply `eneru run` CLI overrides after YAML load, before validation."""
     if args.dry_run:
         config.behavior.dry_run = True
@@ -61,9 +76,9 @@ def _apply_run_overrides(config: Config, args) -> None:
         config.api.port = args.api_port
 
 
-def _root_required_reasons(config: Config) -> list:
+def _root_required_reasons(config: Config) -> list[str]:
     """Return local-host features that require root at daemon startup."""
-    reasons = []
+    reasons: list[str] = []
     groups = list(config.ups_groups)
     if not groups:
         reasons.append("implicit single-UPS local-host mode")
@@ -1019,8 +1034,8 @@ def main():
                             help="Enable the embedded read-only API")
     run_parser.add_argument("--api-bind",
                             help="API listen address (implies --api)")
-    run_parser.add_argument("--api-port", type=int,
-                            help="API listen port (implies --api)")
+    run_parser.add_argument("--api-port", type=_port_int,
+                            help="API listen port, 1..65535 (implies --api)")
     run_parser.add_argument("--exit-after-shutdown", action="store_true",
                             help="Exit after completing shutdown sequence")
     run_parser.set_defaults(func=_cmd_run)

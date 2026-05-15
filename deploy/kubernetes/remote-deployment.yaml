@@ -49,6 +49,11 @@ spec:
         - name: eneru
           image: ghcr.io/m4r1k/eneru:latest
           imagePullPolicy: Always
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           args:
             - run
             - --config
@@ -91,6 +96,8 @@ spec:
               mountPath: /var/run/eneru
             - name: logs
               mountPath: /var/log/eneru
+            - name: tmp
+              mountPath: /tmp
             - name: ssh-key
               mountPath: /var/lib/eneru/ssh
               readOnly: true
@@ -103,6 +110,8 @@ spec:
         - name: runtime
           emptyDir: {}
         - name: logs
+          emptyDir: {}
+        - name: tmp
           emptyDir: {}
         - name: ssh-key
           secret:

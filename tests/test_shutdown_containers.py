@@ -64,6 +64,10 @@ def _make_container_monitor(
     monitor._notification_worker = None
     monitor._container_runtime = container_runtime
     monitor._compose_available = compose_available
+    # Default to "no self-detected container IDs" so tests are deterministic
+    # even if pytest itself runs inside Docker/Podman. Self-detection-specific
+    # tests override this attribute on the returned monitor.
+    monitor._current_container_ids = lambda: set()
     return monitor
 
 
@@ -214,20 +218,26 @@ def test_shutdown_containers_no_running_containers(tmp_path):
 
 
 @pytest.mark.unit
-def test_shutdown_containers_dry_run_lists_names(tmp_path):
-    """In dry-run, the container list is fetched twice (-q and --format names) but never stopped."""
+def test_shutdown_containers_dry_run_logs_filtered_id_list(tmp_path):
+    """Dry-run preview lists IDs from the same filtered set the real run would
+    stop — no second `ps --format` query and no chance of including a container
+    that self-detection just excluded."""
     monitor = _make_container_monitor(tmp_path, compose_available=False, dry_run=True)
+    log = []
+    monitor._log_message = log.append
 
     def fake_run(cmd, **kwargs):
         if cmd[-1] == "-q":
             return (0, "abc123\ndef456\n", "")
-        if "{{.Names}}" in cmd:
-            return (0, "web\nworker\n", "")
-        # No 'docker stop' should ever be reached in dry-run
-        raise AssertionError(f"Unexpected stop call in dry-run: {cmd}")
+        # No 'docker ps --format' second query, no 'docker stop' in dry-run.
+        raise AssertionError(f"Unexpected call in dry-run: {cmd}")
 
     with patch("eneru.shutdown.containers.run_command", side_effect=fake_run):
         monitor._shutdown_containers()
+
+    dry_lines = [m for m in log if "DRY-RUN" in m]
+    assert len(dry_lines) == 1
+    assert "abc123" in dry_lines[0] and "def456" in dry_lines[0]
 
 
 @pytest.mark.unit
@@ -519,6 +529,8 @@ def test_is_current_container_empty_id_returns_false(tmp_path):
 def test_current_container_ids_handles_missing_cgroup_files(tmp_path):
     """No /proc/self/cgroup (bare metal) → must not raise; hostname-only fallback."""
     monitor = _make_container_monitor(tmp_path)
+    # Restore the real method (the shared fixture stubs it for determinism).
+    del monitor._current_container_ids
     with patch("eneru.shutdown.containers.socket.gethostname", return_value="laptop"), \
          patch("pathlib.Path.read_text", side_effect=OSError):
         ids = monitor._current_container_ids()
@@ -529,6 +541,8 @@ def test_current_container_ids_handles_missing_cgroup_files(tmp_path):
 def test_current_container_ids_picks_up_hostname_when_it_looks_like_id(tmp_path):
     """Docker sets hostname to the short container ID by default."""
     monitor = _make_container_monitor(tmp_path)
+    # Restore the real method (the shared fixture stubs it for determinism).
+    del monitor._current_container_ids
     with patch("eneru.shutdown.containers.socket.gethostname", return_value=_SHORT_ID), \
          patch("pathlib.Path.read_text", side_effect=OSError):
         ids = monitor._current_container_ids()

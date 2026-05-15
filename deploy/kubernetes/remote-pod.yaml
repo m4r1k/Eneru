@@ -14,6 +14,11 @@ spec:
     - name: eneru
       image: ghcr.io/m4r1k/eneru:latest
       imagePullPolicy: Always
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
       args:
         - run
         - --config
@@ -21,6 +26,8 @@ spec:
         - --api
         - --api-bind
         - 0.0.0.0
+        - --api-port
+        - "9191"
       ports:
         - name: http
           containerPort: 9191
@@ -52,6 +59,11 @@ spec:
           mountPath: /var/run/eneru
         - name: logs
           mountPath: /var/log/eneru
+        - name: tmp
+          mountPath: /tmp
+        - name: ssh-key
+          mountPath: /var/lib/eneru/ssh
+          readOnly: true
   volumes:
     - name: config
       configMap:
@@ -62,3 +74,9 @@ spec:
       emptyDir: {}
     - name: logs
       emptyDir: {}
+    - name: tmp
+      emptyDir: {}
+    - name: ssh-key
+      secret:
+        secretName: eneru-ssh-key
+        defaultMode: 0400
