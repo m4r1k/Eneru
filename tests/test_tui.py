@@ -19,6 +19,8 @@ from eneru.tui import (
     status_color,
     status_attr,
     collect_group_data,
+    init_colors,
+    render_config_panel,
     render_logs_panel,
     run_once,
     C_STATUS_OK, C_STATUS_OB, C_STATUS_CRIT, C_STATUS_UNK,
@@ -66,6 +68,44 @@ class _FakeWin:
     def attrs_in_row(self, y: int) -> set:
         return {self.cells.get((y, x), (None, None))[1]
                 for x in range(self.width)}
+
+
+class _FakeTuiScreen(_FakeWin):
+    """Curses stdscr stand-in for exercising the interactive loop."""
+
+    def __init__(self, height: int, width: int, keys):
+        super().__init__(height, width)
+        self.keys = list(keys)
+        self.timeout_value = None
+        self.background = None
+        self.keypad_enabled = None
+        self.refreshes = 0
+        self.moves = []
+
+    def erase(self):
+        self.cells.clear()
+
+    def timeout(self, value):
+        self.timeout_value = value
+
+    def bkgd(self, ch, attr=0):
+        self.background = (ch, attr)
+
+    def keypad(self, enabled):
+        self.keypad_enabled = enabled
+
+    def refresh(self):
+        self.refreshes += 1
+
+    def getch(self):
+        if self.keys:
+            return self.keys.pop(0)
+        return ord("q")
+
+    def move(self, y, x):
+        self.moves.append((y, x))
+        if y < 0 or y >= self.height or x < 0 or x >= self.width:
+            raise curses.error("move out of bounds")
 
 
 class TestFillRow:
@@ -188,6 +228,148 @@ class TestGhosttyTerminfoFallback:
                 assert wrapper.call_count == 1
 
 
+class TestRunTuiLoop:
+    """Exercise the curses event loop without requiring a real terminal."""
+
+    def _group_data(self, group, _config):
+        return {
+            "label": group.ups.label,
+            "name": group.ups.name,
+            "is_local": group.is_local,
+            "state": {
+                "STATUS": "OL",
+                "BATTERY": "98",
+                "RUNTIME": "3600",
+                "LOAD": "12",
+                "INPUT_VOLTAGE": "120.1",
+                "OUTPUT_VOLTAGE": "120.0",
+                "TIMESTAMP": "2026-05-15 12:00:00",
+            },
+            "resources": "VMs, containers",
+            "remote_health_summary": "1 healthy",
+        }
+
+    @pytest.mark.unit
+    def test_run_tui_handles_modes_navigation_and_scrolling(self):
+        from eneru import tui as tui_mod
+
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(
+                    ups=UPSConfig(
+                        name="ups-a@localhost",
+                        display_name="Rack A",
+                    ),
+                    is_local=True,
+                ),
+                UPSGroupConfig(
+                    ups=UPSConfig(
+                        name="ups-b@localhost",
+                        display_name="Rack B",
+                    ),
+                    is_local=False,
+                ),
+            ],
+        )
+        config.remote_health.enabled = True
+        screen = _FakeTuiScreen(
+            height=30,
+            width=120,
+            keys=[
+                ord("g"),
+                ord("t"),
+                ord("u"),
+                ord("v"),
+                curses.KEY_UP,
+                curses.KEY_NPAGE,
+                curses.KEY_END,
+                ord("m"),
+                ord("r"),
+                ord("q"),
+            ],
+        )
+        events = [
+            f"12:{i:02d}:00  POWER EVENT: battery event {i}"
+            for i in range(40)
+        ]
+
+        def wrapper(callback):
+            callback(screen)
+
+        with patch.object(tui_mod.curses, "wrapper", side_effect=wrapper), \
+             patch.object(tui_mod.curses, "COLORS", 256, create=True), \
+             patch.object(tui_mod.curses, "start_color", lambda: None), \
+             patch.object(tui_mod.curses, "init_pair", lambda *args: None), \
+             patch.object(tui_mod.curses, "color_pair", lambda n: n), \
+             patch.object(tui_mod.curses, "curs_set", lambda _value: None), \
+             patch.object(tui_mod, "collect_group_data",
+                          side_effect=self._group_data) as collect, \
+             patch.object(tui_mod, "update_live_buffer") as update_buffer, \
+             patch.object(tui_mod, "query_events_for_display",
+                          return_value=events) as query_events, \
+             patch.object(tui_mod, "render_graph_panel") as render_graph:
+            tui_mod.run_tui(
+                config,
+                interval=2,
+                initial_graph="charge",
+                initial_time_range="bad-range",
+                initial_ups_index=99,
+                verbose=True,
+            )
+
+        assert screen.timeout_value == 2000
+        assert screen.keypad_enabled is True
+        assert screen.background == (" ", tui_mod.C_BORDER)
+        assert screen.refreshes == 10
+        assert screen.moves
+        assert collect.call_count >= 2 * screen.refreshes
+        assert update_buffer.call_count >= 2 * screen.refreshes
+        assert query_events.call_args_list[0].kwargs["verbosity"] == (
+            tui_mod.EVENTS_VERBOSITY_DIAGNOSTICS
+        )
+        assert any(
+            call.kwargs["max_events"] == 500
+            for call in query_events.call_args_list
+        )
+        assert any(
+            call.args[7] == "1h"
+            for call in render_graph.call_args_list
+        )
+        assert any(
+            call.args[5].ups.name == "ups-b@localhost"
+            for call in render_graph.call_args_list
+        )
+
+    @pytest.mark.unit
+    def test_run_tui_handles_small_terminal_until_quit(self):
+        from eneru import tui as tui_mod
+
+        config = Config()
+        screen = _FakeTuiScreen(
+            height=8,
+            width=40,
+            keys=[ord("x"), ord("q")],
+        )
+
+        def wrapper(callback):
+            callback(screen)
+
+        with patch.object(tui_mod.curses, "wrapper", side_effect=wrapper), \
+             patch.object(tui_mod.curses, "COLORS", 256, create=True), \
+             patch.object(tui_mod.curses, "start_color", lambda: None), \
+             patch.object(tui_mod.curses, "init_pair", lambda *args: None), \
+             patch.object(tui_mod.curses, "color_pair", lambda n: n), \
+             patch.object(tui_mod.curses, "curs_set", lambda _value: None):
+            tui_mod.run_tui(config)
+
+        row0 = "".join(
+            screen.cells.get((0, x), (" ", 0))[0]
+            for x in range(screen.width)
+        )
+        assert "Terminal too small" in row0
+        assert screen.refreshes == 2
+
+
 class TestRemoteHealthSummary:
     """Remote health summary for the TUI resource panel."""
 
@@ -203,6 +385,116 @@ class TestRemoteHealthSummary:
 
         assert "2 healthy" in summary
         assert "1 failed" in summary
+
+
+class TestEventsVerbosityNormalize:
+    @pytest.mark.unit
+    def test_bool_values_map_to_power_and_diagnostics(self):
+        from eneru.tui import (
+            EVENTS_VERBOSITY_DIAGNOSTICS,
+            EVENTS_VERBOSITY_POWER,
+            _events_verbosity,
+        )
+
+        assert _events_verbosity(False) == EVENTS_VERBOSITY_POWER
+        assert _events_verbosity(True) == EVENTS_VERBOSITY_DIAGNOSTICS
+
+    @pytest.mark.unit
+    def test_invalid_values_fall_back_to_power_tier(self):
+        from eneru.tui import EVENTS_VERBOSITY_POWER, _events_verbosity
+
+        assert _events_verbosity(None) == EVENTS_VERBOSITY_POWER
+        assert _events_verbosity("bad") == EVENTS_VERBOSITY_POWER
+
+
+class TestInitColors:
+    """Color setup should stay deterministic across rich and basic terminals."""
+
+    @pytest.mark.unit
+    def test_init_colors_uses_256_color_palette(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(curses, "COLORS", 256, raising=False)
+        monkeypatch.setattr(curses, "start_color", lambda: None)
+        monkeypatch.setattr(curses, "init_pair",
+                            lambda *args: calls.append(args))
+
+        init_colors()
+
+        assert (3, curses.COLOR_WHITE, 243) in calls
+        assert (5, 16, 178) in calls
+        assert (7, 241, 178) in calls
+
+    @pytest.mark.unit
+    def test_init_colors_falls_back_for_basic_terminals(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(curses, "COLORS", 8, raising=False)
+        monkeypatch.setattr(curses, "start_color", lambda: None)
+        monkeypatch.setattr(curses, "init_pair",
+                            lambda *args: calls.append(args))
+
+        init_colors()
+
+        assert (3, curses.COLOR_WHITE, curses.COLOR_BLACK) in calls
+        assert (5, curses.COLOR_BLACK, curses.COLOR_YELLOW) in calls
+        assert (7, curses.COLOR_WHITE, curses.COLOR_YELLOW) in calls
+
+
+class TestRenderConfigPanel:
+    """Config panel rendering should cover missing daemon data and sidecars."""
+
+    def _row_text(self, win, y: int) -> str:
+        return "".join(
+            win.cells.get((y, x), (" ", 0))[0]
+            for x in range(win.width)
+        ).rstrip()
+
+    @pytest.mark.unit
+    def test_render_config_panel_handles_missing_state(self):
+        win = _FakeWin(height=12, width=80)
+        groups_data = [{
+            "label": "Rack UPS",
+            "name": "ups-a@localhost",
+            "is_local": False,
+            "state": {},
+            "resources": "remote servers",
+        }]
+
+        with patch.object(curses, "color_pair", lambda n: n):
+            render_config_panel(win, 0, 8, 80, groups_data)
+
+        assert "Rack UPS" in self._row_text(win, 1)
+        assert "daemon not running" in self._row_text(win, 1)
+        assert "No data available" in self._row_text(win, 2)
+        assert "Resources: remote servers" in self._row_text(win, 4)
+
+    @pytest.mark.unit
+    def test_render_config_panel_includes_local_marker_and_remote_health(self):
+        win = _FakeWin(height=14, width=100)
+        groups_data = [{
+            "label": "Rack UPS",
+            "name": "ups-a@localhost",
+            "is_local": True,
+            "state": {
+                "STATUS": "OL",
+                "BATTERY": "98",
+                "RUNTIME": "3600",
+                "LOAD": "12",
+                "INPUT_VOLTAGE": "120.1",
+                "OUTPUT_VOLTAGE": "120.0",
+                "TIMESTAMP": "2026-05-15 12:00:00",
+            },
+            "resources": "VMs, containers",
+            "remote_health_summary": "1 failed",
+        }]
+
+        with patch.object(curses, "color_pair", lambda n: n):
+            render_config_panel(win, 0, 9, 100, groups_data)
+
+        assert "[is_local]" in self._row_text(win, 1)
+        assert "ONLINE" in self._row_text(win, 1)
+        assert "Battery: 98% (1h 0m)" in self._row_text(win, 2)
+        assert "Last update: 2026-05-15 12:00:00" in self._row_text(win, 3)
+        assert "Remote health: 1 failed" in self._row_text(win, 5)
 
 
 class TestEventsScrollAutoPromote:

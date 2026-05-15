@@ -1,6 +1,7 @@
 """Tests for CLI argument handling and validation commands."""
 
 import pytest
+import runpy
 import sys
 import re
 from io import StringIO
@@ -47,6 +48,14 @@ class TestCLIVersion:
         # top-level help so users discover either spelling.
         assert "tui" in captured.out
         assert re.search(r"\bshutdown\s+remote\b", captured.out)
+
+    @pytest.mark.unit
+    def test_python_m_eneru_entrypoint_calls_cli_main(self):
+        """``python -m eneru`` must route through the same CLI main."""
+        with patch("eneru.cli.main") as cli_main:
+            runpy.run_module("eneru.__main__", run_name="__main__")
+
+        cli_main.assert_called_once_with()
 
 
 class TestCLIRunOverrides:

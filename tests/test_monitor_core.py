@@ -2327,7 +2327,7 @@ class TestInitializePathPermissions:
     def test_initialize_swallows_log_file_permission_error(self, tmp_path):
         from pathlib import Path as P
         monitor = make_monitor(tmp_path)
-        monitor.config.logging.file = str(tmp_path / "logs" / "eneru.log")
+        monitor.config.logging.file = str(tmp_path / "eneru.log")
         # Stub out the heavy collaborators _initialize calls
         monitor._initialize_notifications = MagicMock()
         monitor._check_dependencies = MagicMock()
@@ -2348,6 +2348,7 @@ class TestInitializePathPermissions:
     def test_initialize_logs_warning_on_battery_history_permission_error(self, tmp_path):
         from pathlib import Path as P
         monitor = make_monitor(tmp_path)
+        monitor.config.logging.file = str(tmp_path / "eneru.log")
         log = []
         monitor._log_message = log.append
         monitor._initialize_notifications = MagicMock()

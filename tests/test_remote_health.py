@@ -335,3 +335,168 @@ def test_remote_health_logs_sidecar_write_failure_once(tmp_path, remote_server):
 
     assert len(logs) == 1
     assert "Failed to write remote health sidecar" in logs[0]
+
+
+@pytest.mark.unit
+def test_remote_health_start_creates_daemon_thread(tmp_path, remote_server,
+                                                  monkeypatch):
+    created = []
+    config = Config()
+    config.remote_health.enabled = True
+
+    class FakeThread:
+        def __init__(self, *, target, name, daemon):
+            self.target = target
+            self.name = name
+            self.daemon = daemon
+            self.started = False
+            created.append(self)
+
+        def start(self):
+            self.started = True
+
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[remote_server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+    )
+    monkeypatch.setattr("eneru.remote_health.threading.Thread", FakeThread)
+
+    manager.start()
+    manager.start()
+
+    assert len(created) == 1
+    assert created[0].target == manager._run_loop
+    assert created[0].name == "remote-health-Rack"
+    assert created[0].daemon is True
+    assert created[0].started is True
+    assert manager._thread is created[0]
+
+
+@pytest.mark.unit
+def test_remote_health_stop_keeps_alive_thread_reference(tmp_path,
+                                                        remote_server):
+    class AliveThread:
+        def __init__(self):
+            self.join_timeout = None
+
+        def join(self, timeout=None):
+            self.join_timeout = timeout
+
+        def is_alive(self):
+            return True
+
+    config = Config()
+    config.remote_health.enabled = True
+    stop_event = threading.Event()
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[remote_server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=stop_event,
+        log_fn=lambda msg: None,
+    )
+    thread = AliveThread()
+    manager._thread = thread
+
+    manager.stop(timeout=7)
+
+    assert stop_event.is_set()
+    assert thread.join_timeout == 7
+    assert manager._thread is thread
+
+
+@pytest.mark.unit
+def test_remote_health_run_loop_startup_check_then_waits(tmp_path,
+                                                        remote_server):
+    config = Config()
+    config.remote_health.enabled = True
+    config.remote_health.startup_check = True
+    config.remote_health.interval = 1
+    waits = []
+    stop_event = threading.Event()
+
+    def stop_after_first_wait(timeout):
+        waits.append(timeout)
+        return True
+
+    stop_event.wait = stop_after_first_wait
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[remote_server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=stop_event,
+        log_fn=lambda msg: None,
+    )
+
+    with patch.object(manager, "check_once") as check_once:
+        manager._run_loop()
+
+    check_once.assert_called_once()
+    assert waits == [60]
+
+
+@pytest.mark.unit
+def test_remote_health_run_loop_without_startup_check_runs_after_wait(
+    tmp_path, remote_server,
+):
+    config = Config()
+    config.remote_health.enabled = True
+    config.remote_health.startup_check = False
+    config.remote_health.interval = 75
+    waits = []
+
+    class StopAfterSecondWait:
+        def wait(self, timeout):
+            waits.append(timeout)
+            return len(waits) >= 2
+
+        def set(self):
+            pass
+
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[remote_server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=StopAfterSecondWait(),
+        log_fn=lambda msg: None,
+    )
+
+    with patch.object(manager, "check_once") as check_once:
+        manager._run_loop()
+
+    check_once.assert_called_once()
+    assert waits == [75, 75]
+
+
+@pytest.mark.unit
+def test_remote_health_stats_event_failure_logs_only_once(tmp_path,
+                                                         remote_server):
+    config = Config()
+    config.remote_health.enabled = True
+    config.remote_health.failure_threshold = 1
+    logs = []
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[remote_server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=logs.append,
+        event_fn=lambda etype, detail, notified: (_ for _ in ()).throw(
+            RuntimeError("db down")
+        ),
+    )
+
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(False, "refused", 12)):
+        manager.check_once()
+        manager.check_once()
+
+    assert len([m for m in logs if "stats event failed" in m]) == 1

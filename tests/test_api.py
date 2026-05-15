@@ -915,6 +915,66 @@ def test_mqtt_local_stop_does_not_set_global_stop_event(monkeypatch):
 
 
 @pytest.mark.unit
+def test_mqtt_start_creates_daemon_thread(monkeypatch):
+    """start() owns only publisher lifecycle: it creates the MQTT thread
+    without running the target inline."""
+    created = []
+
+    class FakeThread:
+        def __init__(self, *, target, name, daemon):
+            self.target = target
+            self.name = name
+            self.daemon = daemon
+            self.started = False
+            created.append(self)
+
+        def start(self):
+            self.started = True
+
+    config = Config()
+    config.mqtt.enabled = True
+    monkeypatch.setattr("eneru.mqtt.MQTT_AVAILABLE", True)
+    monkeypatch.setattr("eneru.mqtt.threading.Thread", FakeThread)
+
+    publisher = MQTTPublisher(object(), config, stop_event=MagicMock())
+    publisher.start()
+    publisher.start()
+
+    assert len(created) == 1
+    assert created[0].target == publisher._run
+    assert created[0].name == "eneru-mqtt"
+    assert created[0].daemon is True
+    assert created[0].started is True
+    assert publisher._thread is created[0]
+
+
+@pytest.mark.unit
+def test_mqtt_stop_leaves_alive_thread_reference():
+    """If join times out, keep the thread reference so a later stop can
+    observe and join the same worker."""
+    class AliveThread:
+        def __init__(self):
+            self.join_timeout = None
+
+        def join(self, timeout=None):
+            self.join_timeout = timeout
+
+        def is_alive(self):
+            return True
+
+    config = Config()
+    publisher = MQTTPublisher(object(), config, stop_event=MagicMock())
+    thread = AliveThread()
+    publisher._thread = thread
+
+    publisher.stop(timeout=7)
+
+    assert publisher._local_stop.is_set()
+    assert thread.join_timeout == 7
+    assert publisher._thread is thread
+
+
+@pytest.mark.unit
 def test_mqtt_backoff_exits_when_stop_event_short_circuits(monkeypatch):
     """stop_event.wait returning True during backoff must exit cleanly."""
     connect_attempts = []

@@ -1998,8 +1998,9 @@ ups:
 ups:
   - name: "UPS-A"
   - name: "UPS-B"
-""")
+        """)
         config = ConfigLoader.load(str(config_file))
+        config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
         coord = MultiUPSCoordinator(config)
         coord._log = MagicMock()
 
@@ -2043,8 +2044,9 @@ ups:
 ups:
   - name: "UPS-A"
   - name: "UPS-B"
-""")
+        """)
         config = ConfigLoader.load(str(config_file))
+        config.logging.shutdown_flag_file = str(tmp_path / "shutdown-flag")
         coord = MultiUPSCoordinator(config)
         coord._log = MagicMock()
         coord._redundancy_remote_health_managers = []
