@@ -7,54 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [5.4.0-rc4] - Unreleased
+## [5.4.0] - 2026-05-15
 
-Release candidate for the v5.4 OCI image and Kubernetes deployment path.
+Stable v5.4 release. This release adds the official container deployment path while keeping local host shutdown on native installs.
 
 ### Added
-- Official OCI image packaging for GHCR, with Docker and Podman smoke checks in CI and release-workflow publishing alongside deb/rpm packages.
-- `eneru run --api`, `--api-bind`, and `--api-port` so container healthchecks and Kubernetes probes can enable the read-only API without editing the YAML config.
-- `remote_servers[].ssh_key_path`, an explicit SSH identity-file path for container and Kubernetes volume mounts. Existing OpenSSH config and `ssh_options` behavior is unchanged.
-- Remote-only Kubernetes `Deployment` and `Pod` examples with non-root security contexts, `resources` requests/limits, and a `/var/log/eneru` log volume for forensic timeline data.
+- Official GHCR image for remote-only Docker, Podman, and Kubernetes deployments. The release workflow publishes exact `<version>` tags, `latest` for stable releases, and `testing` for pre-releases.
+- `eneru run --api`, `--api-bind`, and `--api-port`, so container healthchecks and Kubernetes probes can enable the read-only API without editing YAML.
+- `remote_servers[].ssh_key_path` for SSH private keys mounted from Docker bind mounts or Kubernetes Secrets.
+- Kubernetes `Deployment` and `Pod` examples with non-root security contexts, resource requests/limits, HTTP probes, SSH Secret mounts, and a `/var/log/eneru` volume for retained log files.
 
 ### Changed
-- Containerized Eneru is documented as a remote-only deployment path. Local-host ownership stays on native host installs where shutdown, VM, container, and filesystem operations run in the host environment.
-- Dependency checks are scoped to configured behavior: remote-only deployments no longer require local shutdown tooling, and the legacy `logger(1)` syslog side-channel is best effort.
-- The `examples/config-container-remote.yaml` starter config now ships with `logging.file: /var/log/eneru/ups-monitor.log` and a commented-out `remote_servers` block demonstrating `ssh_key_path` against a Kubernetes Secret / Docker bind-mount.
-
-### Documentation
-- The README and docs now explain when to use the OCI image versus the systemd daemon, including Docker, Podman, SELinux volume labels, AppArmor/default confinement, and log collection through `docker logs` or `kubectl logs`.
-- `docs/containers-kubernetes.md` documents the OCI tag channels (`latest` for stable, `testing` for pre-release, exact `<version>` for either), and the Kubernetes / Docker samples now reference `:latest` so they don't need a per-release edit.
-- A dedicated logging section explains stdout capture (`docker logs`, `kubectl logs`) plus the `/var/log/eneru` forensics volume that survives container restarts (UID/GID 10001 ownership, `fsGroup: 10001` in the sample manifests).
-
-### rc4 — release workflow fixes
-- The release workflow now resets `src/eneru/version.py` to the clean release version before building the OCI image. Deb/rpm packages still keep the full code-display version with the short git hash, but Docker's in-image `pip install` now sees a valid PEP 440 package version.
-- Exact OCI tags now use the package version shape (`5.4.0`, `5.4.0-rc4`) while channel tags stay `latest` for stable releases and `testing` for pre-releases.
-- The Dockerfile runs `apt-get upgrade -y` after `apt-get update` so images pick up Debian security fixes available at build time.
-- The OCI image now uses the Python 3.12 slim Trixie base for a newer Debian userspace.
-- The README now surfaces Docker first in the quick start while clarifying that the OCI image is for remote-only deployments.
-
-### rc3 — fixes from audit
-- New `ENERU_SKIP_PRIVILEGE_CHECK` env var downgrades the v5.4 root-required startup check to a printed warning for E2E suites and local dry-run development. Production containers don't set it.
-- K8s and Docker samples now reference `ghcr.io/m4r1k/eneru:latest` instead of the not-yet-existing `:5.4.0` tag, with `imagePullPolicy: Always` and a documented expectation that production users pin to `<version>` for immutability.
-- Kubernetes manifests gain `resources.requests` (50m CPU, 64Mi memory) and `resources.limits` (200m CPU, 128Mi memory) so copy-paste deployments don't run unbounded.
-- Container logging story documented end-to-end: stdout via `docker/podman/kubectl logs`, plus an opt-in `/var/log/eneru/ups-monitor.log` on a mounted volume.
-- `eneru validate` now reports the runtime context as one of `container (Docker)`, `container (Podman)`, `container`, `systemd service`, or `bare process`, so operators can confirm at a glance whether the deployment is running where they think it is.
-- Test coverage added for `eneru run` API CLI overrides, privilege checks, runtime-context detection, and OCI deployment behavior.
-
-## [5.4.0-rc1] - 2026-05-14
-
-Release candidate for the v5.4 observability polish pass.
-
-### Changed
-- `/api/v1` now returns an endpoint index, and JSON 404 responses include the same available-endpoints list. When Prometheus is disabled, `/metrics` is omitted from both responses so clients don't see an endpoint advertised that genuinely returns 404.
-- The reference Grafana dashboard overlays power, voltage, bypass, overload, AVR, shutdown-trigger, connection-failed, and remote-health-failed events on every time-series panel via dashboard-wide Prometheus annotations, so operators can correlate a battery-charge inflection or voltage dip with the event that caused it without leaving Grafana. Each annotation carries a tooltip title and description text so the event name is visible on hover, and the toolbar toggles are hidden so the dashboard chrome stays clean.
-- The dashboard adds a Battery-charge / UPS-load / Runtime-remaining "now" row (gauge + sparkline stat) and a `$ups` multi-select template variable for filtering when many UPSes are configured.
-- The voltage panel overlays the configured nominal voltage alongside the existing low/high warning thresholds.
+- The OCI image is remote-only by design. Use native deb/rpm or PyPI installs when Eneru must stop local VMs, local containers, filesystems, or the host itself.
+- Dependency checks now follow configured behavior: remote-only deployments no longer require local shutdown tooling, and the legacy `logger(1)` syslog side-channel is best effort.
+- The container image uses the Python 3.12 slim Trixie base and runs `apt-get upgrade -y` during builds so release images pick up current Debian fixes.
+- `/api/v1` now returns an endpoint index, and JSON 404 responses include the same endpoint list. When Prometheus is disabled, `/metrics` is omitted from both.
+- The reference Grafana dashboard adds power-event annotations, a battery/load/runtime "now" row, a `$ups` selector, and a nominal-voltage overlay.
+- `eneru validate` reports whether it is running in Docker, Podman, another container, systemd, or a bare process.
 
 ### Fixed
 - Remote-health startup probes no longer record a noisy `REMOTE_HEALTH_HEALTHY` event for the initial `UNKNOWN -> HEALTHY` baseline next to every `DAEMON_START`. Startup failures and later failure/recovery transitions are still recorded.
 - The SVG architecture diagram viewBox matches the drawn content width (782×550 instead of 960×550), removing the blank right-side margin in rendered docs.
+
+### Migration notes
+- Existing native installs can upgrade without YAML changes.
+- Use `ghcr.io/m4r1k/eneru:latest` for the latest stable image, `ghcr.io/m4r1k/eneru:testing` for pre-releases, or pin `ghcr.io/m4r1k/eneru:<version>` for immutable production deployments.
+- For local host shutdown, local VM/container teardown, or filesystem unmounts, keep Eneru on the host. The OCI image is for remote UPS monitoring, API/health endpoints, telemetry, and SSH shutdown of remote systems.
 
 ---
 
