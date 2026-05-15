@@ -553,6 +553,174 @@ def test_compose_stack_contains_self_handles_compose_ps_failure(tmp_path):
         assert monitor._compose_stack_contains_self("/missing.yml") is False
 
 
+# ----------------------------------------------------------------------
+# Rootless Podman user-container shutdown
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_rootless_podman_dry_run_logs_and_skips(tmp_path):
+    """Dry-run path must not call loginctl or sudo at all."""
+    monitor = _make_container_monitor(
+        tmp_path, runtime="podman", container_runtime="podman",
+        include_user_containers=True, dry_run=True,
+    )
+    log = []
+    monitor._log_message = log.append
+
+    with patch("eneru.shutdown.containers.run_command",
+               side_effect=AssertionError("must not call run_command in dry-run")):
+        monitor._shutdown_podman_user_containers()
+
+    assert any("[DRY-RUN]" in m and "rootless Podman" in m for m in log), log
+
+
+@pytest.mark.unit
+def test_rootless_podman_loginctl_failure_warns_and_returns(tmp_path):
+    """If loginctl exits nonzero we log a warning and bail —
+    don't try to enumerate users from a broken listing."""
+    monitor = _make_container_monitor(
+        tmp_path, runtime="podman", container_runtime="podman",
+        include_user_containers=True,
+    )
+    log = []
+    monitor._log_message = log.append
+
+    with patch("eneru.shutdown.containers.run_command",
+               return_value=(1, "", "loginctl: not authorised")):
+        monitor._shutdown_podman_user_containers()
+
+    assert any("Failed to list users" in m for m in log), log
+
+
+@pytest.mark.unit
+def test_rootless_podman_skips_system_users(tmp_path):
+    """UIDs < 1000 are system users (root, daemon, ...); never run
+    `sudo -u <system-user> podman ps` against them."""
+    monitor = _make_container_monitor(
+        tmp_path, runtime="podman", container_runtime="podman",
+        include_user_containers=True,
+    )
+    monitor._log_message = MagicMock()
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == "loginctl":
+            return (0, "    0 root\n  998 systemd-resolve\n", "")
+        return (0, "", "")
+
+    with patch("eneru.shutdown.containers.run_command", side_effect=fake_run):
+        monitor._shutdown_podman_user_containers()
+
+    # Only loginctl should have run; no sudo invocations
+    assert calls == [["loginctl", "list-users", "--no-legend"]]
+
+
+@pytest.mark.unit
+def test_rootless_podman_stops_user_containers(tmp_path):
+    """Happy path: a regular user has running containers — we run
+    `sudo -u <user> podman ps -q` then `sudo -u <user> podman stop ...`."""
+    monitor = _make_container_monitor(
+        tmp_path, runtime="podman", container_runtime="podman",
+        include_user_containers=True, stop_timeout=15,
+    )
+    log = []
+    monitor._log_message = log.append
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == "loginctl":
+            return (0, "1000 alice\n1001 bob\n", "")
+        if "ps" in cmd and "alice" in cmd:
+            return (0, "abc123\ndef456\n", "")
+        if "ps" in cmd and "bob" in cmd:
+            return (0, "", "")  # bob has no containers
+        if "stop" in cmd:
+            return (0, "", "")
+        return (1, "", "")
+
+    with patch("eneru.shutdown.containers.run_command", side_effect=fake_run):
+        monitor._shutdown_podman_user_containers()
+
+    # Verify the stop call was constructed correctly for alice only
+    stop_calls = [c for c in calls if "stop" in c]
+    assert len(stop_calls) == 1
+    assert stop_calls[0][:3] == ["sudo", "-u", "alice"]
+    assert "podman" in stop_calls[0]
+    assert "abc123" in stop_calls[0]
+    assert "def456" in stop_calls[0]
+    assert "15" in stop_calls[0]  # stop_timeout
+    assert any("user 'alice'" in m for m in log), log
+
+
+@pytest.mark.unit
+def test_rootless_podman_skips_users_with_unparseable_uid(tmp_path):
+    """If loginctl gives back a malformed line (e.g. UID column isn't
+    an integer), skip that row rather than crashing."""
+    monitor = _make_container_monitor(
+        tmp_path, runtime="podman", container_runtime="podman",
+        include_user_containers=True,
+    )
+    monitor._log_message = MagicMock()
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == "loginctl":
+            return (0, "not-a-uid alice\n1000 bob\n", "")
+        return (0, "", "")  # bob has no containers
+
+    with patch("eneru.shutdown.containers.run_command", side_effect=fake_run):
+        monitor._shutdown_podman_user_containers()
+
+    # Only loginctl + the bob ps call should have run; alice was malformed
+    assert any("alice" in str(c) for c in calls) is False
+    # bob's ps must have run
+    assert any("bob" in c for c in calls if "ps" in c)
+
+
+@pytest.mark.unit
+def test_shutdown_containers_routes_to_rootless_when_include_user_containers_true(tmp_path):
+    """The main shutdown path delegates to rootless handling only when
+    runtime=podman AND include_user_containers=True."""
+    monitor = _make_container_monitor(
+        tmp_path, runtime="podman", container_runtime="podman",
+        include_user_containers=True,
+    )
+    monitor._shutdown_podman_user_containers = MagicMock()
+    monitor._log_message = MagicMock()
+
+    with patch("eneru.shutdown.containers.run_command", return_value=(0, "", "")):
+        monitor._shutdown_containers()
+
+    monitor._shutdown_podman_user_containers.assert_called_once()
+
+
+@pytest.mark.unit
+def test_shutdown_containers_skips_rootless_for_docker_runtime(tmp_path):
+    """Docker has no per-user equivalent of rootless Podman; never
+    call _shutdown_podman_user_containers under runtime=docker, even
+    when include_user_containers is somehow True."""
+    monitor = _make_container_monitor(
+        tmp_path, runtime="docker", container_runtime="docker",
+        include_user_containers=True,
+    )
+    monitor._shutdown_podman_user_containers = MagicMock(
+        side_effect=AssertionError("must NOT be called for docker")
+    )
+    monitor._log_message = MagicMock()
+
+    with patch("eneru.shutdown.containers.run_command", return_value=(0, "", "")):
+        monitor._shutdown_containers()
+
+    monitor._shutdown_podman_user_containers.assert_not_called()
+
+
 @pytest.mark.unit
 def test_current_container_ids_handles_missing_cgroup_files(tmp_path):
     """No /proc/self/cgroup (bare metal) → must not raise; hostname-only fallback."""

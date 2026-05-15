@@ -1125,6 +1125,154 @@ ups:
         assert "Backup UPS" in captured.out
         assert "is_local" in captured.out
 
+    @pytest.mark.unit
+    def test_validate_redundancy_groups_section(self, tmp_path, capsys):
+        """Validate prints the redundancy_groups summary block — sources,
+        quorum settings, remote_servers, and local_resources tags."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  - name: "UPS-A"
+    display_name: "UPS A"
+  - name: "UPS-B"
+    display_name: "UPS B"
+redundancy_groups:
+  - name: "rack-a"
+    is_local: true
+    ups_sources: ["UPS-A", "UPS-B"]
+    min_healthy: 1
+    degraded_counts_as: healthy
+    unknown_counts_as: degraded
+    virtual_machines:
+      enabled: true
+    containers:
+      enabled: true
+    remote_servers:
+      - name: "node1"
+        enabled: true
+        host: "node1.lan"
+        user: "ops"
+local_shutdown:
+  enabled: false
+  trigger_on: none
+""")
+
+        with patch.object(sys, "argv", ["eneru", "validate", "-c", str(config_file)]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+
+        out = capsys.readouterr().out
+        assert "Redundancy groups (1)" in out
+        assert "rack-a" in out
+        assert "[is_local]" in out
+        assert "Sources (2): UPS-A, UPS-B" in out
+        assert "min_healthy=1" in out
+        assert "degraded→healthy" in out
+        assert "unknown→degraded" in out
+        assert "Remote servers (1): node1" in out
+        # Local-resources tags fire only because is_local is true
+        assert "Local resources:" in out
+        assert "VMs" in out
+        assert "containers" in out
+
+    @pytest.mark.unit
+    def test_validate_shutdown_sequence_multi_phase_remote(self, tmp_path, capsys):
+        """When remote_servers use shutdown_order phases, the sequence
+        block prints "Remote servers (N, M phases):" and labels each
+        phase with its order key."""
+        config_file = tmp_path / "config.yaml"
+        # In legacy single-UPS layout, remote_servers is a top-level key
+        # (sibling to `ups:`), not nested under it.
+        config_file.write_text("""
+ups:
+  name: "UPS@localhost"
+remote_servers:
+  - name: "early"
+    enabled: true
+    host: "h1.lan"
+    user: "u"
+    shutdown_order: 1
+  - name: "mid"
+    enabled: true
+    host: "h2.lan"
+    user: "u"
+    shutdown_order: 2
+  - name: "late"
+    enabled: true
+    host: "h3.lan"
+    user: "u"
+    shutdown_order: 3
+""")
+
+        with patch.object(sys, "argv", ["eneru", "validate", "-c", str(config_file)]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+
+        out = capsys.readouterr().out
+        # Three explicit phases, three distinct order keys
+        assert "Remote servers (3, 3 phases):" in out
+        assert "Phase 1 (order=1): early" in out
+        assert "Phase 2 (order=2): mid" in out
+        assert "Phase 3 (order=3): late" in out
+
+    @pytest.mark.unit
+    def test_validate_shutdown_sequence_legacy_parallel_sequential(self, tmp_path, capsys):
+        """Legacy `parallel: true/false` flag (without shutdown_order)
+        groups remotes into a sequential phase (negative key) and a
+        parallel phase, labelled accordingly."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  name: "UPS@localhost"
+remote_servers:
+  - name: "first"
+    enabled: true
+    host: "h1.lan"
+    user: "u"
+    parallel: false
+  - name: "second"
+    enabled: true
+    host: "h2.lan"
+    user: "u"
+    parallel: false
+  - name: "third"
+    enabled: true
+    host: "h3.lan"
+    user: "u"
+    parallel: true
+""")
+
+        with patch.object(sys, "argv", ["eneru", "validate", "-c", str(config_file)]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+
+        out = capsys.readouterr().out
+        # Legacy mode labels by execution style, not phase number
+        assert "Sequential:" in out
+        assert "Parallel:" in out
+
+    @pytest.mark.unit
+    def test_validate_handles_unparseable_yaml(self, tmp_path, capsys):
+        """If the config file isn't a YAML mapping at the root, validate
+        exits 1 and surfaces the parse error inline (covers the
+        ConfigValidationLoadError catch in _cmd_validate)."""
+        config_file = tmp_path / "config.yaml"
+        # Top-level list isn't a valid Eneru config root.
+        config_file.write_text("- not\n- a\n- mapping\n")
+
+        with patch.object(sys, "argv", ["eneru", "validate", "-c", str(config_file)]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 1
+
+        out = capsys.readouterr().out
+        # The validate command prints "Configuration is INVALID" on any
+        # exit_code != 0 path.
+        assert "INVALID" in out
+
 
 class TestCLITestNotifications:
     """Test 'eneru test-notifications' subcommand."""

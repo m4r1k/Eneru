@@ -2262,6 +2262,112 @@ class TestWaitForInitialConnection:
         assert any("Failed to connect" in m and "30s" in m for m in log), log
 
 
+class TestStartStats:
+    """`_start_stats` opens the per-UPS stats DB and starts a writer.
+    SQLite failures must be isolated — the daemon continues without
+    persistence rather than crashing."""
+
+    @pytest.mark.unit
+    def test_start_stats_logs_and_continues_when_open_raises(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock(_conn=None)
+        monitor._stats_store.open.side_effect = OSError("disk full")
+        log = []
+        monitor._log_message = log.append
+
+        monitor._start_stats()
+
+        assert monitor._stats_writer is None
+        assert any("stats store open failed" in m and "disk full" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_start_stats_starts_writer_and_logs_daemon_start(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        store = MagicMock(_conn=None)
+        # After open() runs we want _conn to look truthy
+        def fake_open():
+            store._conn = MagicMock()
+        store.open.side_effect = fake_open
+        monitor._stats_store = store
+
+        with patch("eneru.monitor.StatsWriter") as writer_cls:
+            writer_cls.return_value = MagicMock()
+            monitor._start_stats()
+
+        writer_cls.return_value.start.assert_called_once()
+        store.log_event.assert_called_once()
+        # The first arg of log_event should be DAEMON_START
+        assert store.log_event.call_args.args[0] == "DAEMON_START"
+
+
+class TestLogMessageFallback:
+    """`_log_message` must never silently lose output. When no logger
+    is wired (very early init / test harness), fall through to print()."""
+
+    @pytest.mark.unit
+    def test_log_message_prints_with_timestamp_when_no_logger(self, tmp_path, capsys):
+        monitor = make_monitor(tmp_path)
+        monitor.logger = None  # No logger configured yet
+        monitor._log_prefix = ""
+
+        monitor._log_message("hello world")
+
+        captured = capsys.readouterr()
+        assert "hello world" in captured.out
+        # Timestamp like "YYYY-MM-DD HH:MM:SS TZ - hello world"
+        assert " - hello world" in captured.out
+
+
+class TestInitializePathPermissions:
+    """`_initialize` must tolerate read-only state-file / battery-history
+    paths (containers with read-only mounts, dropped privileges) — log a
+    warning and continue rather than crashing."""
+
+    @pytest.mark.unit
+    def test_initialize_swallows_log_file_permission_error(self, tmp_path):
+        from pathlib import Path as P
+        monitor = make_monitor(tmp_path)
+        monitor.config.logging.file = str(tmp_path / "logs" / "eneru.log")
+        # Stub out the heavy collaborators _initialize calls
+        monitor._initialize_notifications = MagicMock()
+        monitor._check_dependencies = MagicMock()
+        monitor._emit_lifecycle_startup_notification = MagicMock()
+        monitor._log_enabled_features = MagicMock()
+        monitor._wait_for_initial_connection = MagicMock()
+        monitor._initialize_voltage_thresholds = MagicMock()
+        monitor._start_stats = MagicMock()
+        monitor._start_remote_health = MagicMock()
+        monitor._start_api_server = MagicMock()
+        monitor._start_mqtt_publisher = MagicMock()
+
+        with patch.object(P, "touch", side_effect=PermissionError("ro fs")), \
+             patch("eneru.monitor.signal.signal"):
+            monitor._initialize()  # Must not raise
+
+    @pytest.mark.unit
+    def test_initialize_logs_warning_on_battery_history_permission_error(self, tmp_path):
+        from pathlib import Path as P
+        monitor = make_monitor(tmp_path)
+        log = []
+        monitor._log_message = log.append
+        monitor._initialize_notifications = MagicMock()
+        monitor._check_dependencies = MagicMock()
+        monitor._emit_lifecycle_startup_notification = MagicMock()
+        monitor._log_enabled_features = MagicMock()
+        monitor._wait_for_initial_connection = MagicMock()
+        monitor._initialize_voltage_thresholds = MagicMock()
+        monitor._start_stats = MagicMock()
+        monitor._start_remote_health = MagicMock()
+        monitor._start_api_server = MagicMock()
+        monitor._start_mqtt_publisher = MagicMock()
+
+        with patch.object(P, "write_text", side_effect=PermissionError("ro fs")), \
+             patch("eneru.monitor.signal.signal"):
+            monitor._initialize()
+
+        assert any("Cannot write to" in m for m in log), log
+
+
 class TestRunFatalErrorPath:
     """`run()` must catch generic exceptions, log FATAL ERROR, write a
     shutdown marker so the next start can emit
@@ -2298,3 +2404,169 @@ class TestRunFatalErrorPath:
              patch("eneru.monitor.write_shutdown_marker", side_effect=OSError("disk full")):
             with pytest.raises(RuntimeError, match="primary"):
                 monitor.run()  # OSError must not surface here
+
+
+class TestExecuteShutdownSequence:
+    """`_execute_shutdown_sequence` is the safety-critical path. Cover
+    the coordinator-mode return, dry-run, and real-execution branches."""
+
+    def _stub_phases(self, monitor):
+        """Stub out every phase method so the sequence is just orchestration."""
+        monitor._shutdown_vms = MagicMock()
+        monitor._shutdown_containers = MagicMock()
+        monitor._sync_filesystems = MagicMock()
+        monitor._unmount_filesystems = MagicMock()
+        monitor._shutdown_remote_servers = MagicMock()
+        monitor._send_notification = MagicMock()
+        monitor._stats_store = MagicMock()
+        return monitor
+
+    @pytest.mark.unit
+    def test_coordinator_mode_invokes_callback_and_returns(self, tmp_path):
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor._coordinator_mode = True
+        callback = MagicMock()
+        monitor._shutdown_callback = callback
+        log = []
+        monitor._log_message = log.append
+
+        with patch("eneru.monitor.write_shutdown_marker") as marker, \
+             patch("eneru.monitor.run_command") as runner:
+            monitor._execute_shutdown_sequence()
+
+        callback.assert_called_once()
+        # Coordinator mode must NOT execute local shutdown or write markers
+        marker.assert_not_called()
+        runner.assert_not_called()
+        assert any("GROUP SHUTDOWN SEQUENCE COMPLETE" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_dry_run_skips_local_shutdown_command(self, tmp_path):
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor._coordinator_mode = False
+        monitor.config.behavior.dry_run = True
+        monitor.config.local_shutdown.enabled = True
+        monitor.config.local_shutdown.command = "/sbin/shutdown -h now"
+        log = []
+        monitor._log_message = log.append
+
+        with patch("eneru.monitor.write_shutdown_marker") as marker, \
+             patch("eneru.monitor.run_command") as runner:
+            monitor._execute_shutdown_sequence()
+
+        # Dry-run: no marker, no shutdown command, but the dry-run preview log line
+        marker.assert_not_called()
+        runner.assert_not_called()
+        assert any("[DRY-RUN] Would execute" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_real_run_writes_marker_and_executes_shutdown_command(self, tmp_path):
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor._coordinator_mode = False
+        monitor.config.behavior.dry_run = False
+        monitor.config.local_shutdown.enabled = True
+        monitor.config.local_shutdown.command = "/sbin/shutdown -h now"
+        monitor.config.local_shutdown.message = "UPS critical"
+
+        with patch("eneru.monitor.write_shutdown_marker") as marker, \
+             patch("eneru.monitor.run_command") as runner:
+            monitor._execute_shutdown_sequence()
+
+        marker.assert_called_once()
+        # Shutdown command runs with the configured message appended
+        runner.assert_called_once()
+        cmd = runner.call_args.args[0]
+        assert cmd[:3] == ["/sbin/shutdown", "-h", "now"]
+        assert "UPS critical" in cmd
+        # Notification was sent before the shutdown command
+        monitor._send_notification.assert_called_once()
+
+    @pytest.mark.unit
+    def test_local_shutdown_disabled_skips_command(self, tmp_path):
+        """When local_shutdown.enabled=False the daemon logs completion
+        but does NOT run the shutdown binary — system stays up."""
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor._coordinator_mode = False
+        monitor.config.behavior.dry_run = False
+        monitor.config.local_shutdown.enabled = False
+        log = []
+        monitor._log_message = log.append
+
+        with patch("eneru.monitor.write_shutdown_marker") as marker, \
+             patch("eneru.monitor.run_command") as runner:
+            monitor._execute_shutdown_sequence()
+
+        marker.assert_not_called()
+        runner.assert_not_called()
+        assert any("local shutdown disabled" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_non_local_group_skips_local_phases(self, tmp_path):
+        """A non-local UPS group must NOT touch local VMs/containers/filesystems
+        (runtime safety: even if validation was bypassed)."""
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor._coordinator_mode = False
+        monitor.config.ups_groups[0].is_local = False
+        monitor.config.local_shutdown.enabled = False
+
+        with patch("eneru.monitor.write_shutdown_marker"), \
+             patch("eneru.monitor.run_command"):
+            monitor._execute_shutdown_sequence()
+
+        # Local phases never invoked
+        monitor._shutdown_vms.assert_not_called()
+        monitor._shutdown_containers.assert_not_called()
+        monitor._sync_filesystems.assert_not_called()
+        monitor._unmount_filesystems.assert_not_called()
+        # Remote phase always runs
+        monitor._shutdown_remote_servers.assert_called_once()
+
+    @pytest.mark.unit
+    def test_wall_broadcast_fires_when_configured_and_not_dry_run(self, tmp_path):
+        """local_shutdown.wall=True triggers a `wall(1)` broadcast before
+        the shutdown phases — but only outside dry-run mode."""
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor._coordinator_mode = False
+        monitor.config.behavior.dry_run = False
+        monitor.config.local_shutdown.wall = True
+        monitor.config.local_shutdown.enabled = False  # Avoid triggering real shutdown
+
+        with patch("eneru.monitor.write_shutdown_marker"), \
+             patch("eneru.monitor.run_command") as runner:
+            monitor._execute_shutdown_sequence()
+
+        # Find the wall call among run_command invocations
+        wall_calls = [c for c in runner.call_args_list
+                      if c.args and c.args[0] and c.args[0][0] == "wall"]
+        assert len(wall_calls) == 1, runner.call_args_list
+
+    @pytest.mark.unit
+    def test_wall_broadcast_skipped_in_dry_run(self, tmp_path):
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor._coordinator_mode = False
+        monitor.config.behavior.dry_run = True
+        monitor.config.local_shutdown.wall = True
+
+        with patch("eneru.monitor.write_shutdown_marker"), \
+             patch("eneru.monitor.run_command") as runner:
+            monitor._execute_shutdown_sequence()
+
+        wall_calls = [c for c in runner.call_args_list
+                      if c.args and c.args[0] and c.args[0][0] == "wall"]
+        assert wall_calls == []
+
+    @pytest.mark.unit
+    def test_stats_log_event_failure_does_not_break_sequence(self, tmp_path):
+        """If logging the SHUTDOWN_SEQUENCE_COMPLETE event fails, the
+        sequence still continues to the local shutdown step."""
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor._coordinator_mode = False
+        monitor.config.behavior.dry_run = False
+        monitor.config.local_shutdown.enabled = False
+        monitor._stats_store.log_event.side_effect = OSError("db locked")
+
+        with patch("eneru.monitor.write_shutdown_marker"), \
+             patch("eneru.monitor.run_command"):
+            monitor._execute_shutdown_sequence()  # Must not raise
+
+        monitor._send_notification.assert_called_once()

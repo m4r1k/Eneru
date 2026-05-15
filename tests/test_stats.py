@@ -1624,3 +1624,96 @@ class TestIsolateStatsDbDirectoryFixture:
         assert cfg.db_directory != "/var/lib/eneru"
         # …and the explicit retention came through.
         assert cfg.retention.raw_hours == 48
+
+
+class TestStatsStoreErrorIsolation:
+    """Stats are diagnostic only — every write/read path swallows
+    sqlite3.Error and OSError, logs once, and returns a safe value.
+    A broken DB must never crash the daemon or block the shutdown
+    path. This locks the contract for every API."""
+
+    def _broken_store(self, tmp_path):
+        store = StatsStore(tmp_path / "default.db")
+        store.open()
+        # Sabotage the connection: every execute() raises
+        broken_conn = type("BrokenConn", (), {
+            "execute": staticmethod(lambda *a, **k: (_ for _ in ()).throw(sqlite3.Error("db locked"))),
+            "close": staticmethod(lambda: None),
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *a: False,
+        })()
+        store._conn = broken_conn
+        return store
+
+    @pytest.mark.unit
+    def test_query_recent_events_returns_empty_on_sqlite_error(self, tmp_path):
+        store = self._broken_store(tmp_path)
+        rows = store.query_recent_events(end_ts=1000, limit=10)
+        assert rows == []
+
+    @pytest.mark.unit
+    def test_query_events_returns_empty_on_sqlite_error(self, tmp_path):
+        store = self._broken_store(tmp_path)
+        rows = store.query_events(start_ts=0, end_ts=1000)
+        assert rows == []
+
+    @pytest.mark.unit
+    def test_find_pending_by_category_returns_empty_on_sqlite_error(self, tmp_path):
+        store = self._broken_store(tmp_path)
+        rows = store.find_pending_by_category("lifecycle")
+        assert rows == []
+
+    @pytest.mark.unit
+    def test_pending_notification_count_returns_zero_on_sqlite_error(self, tmp_path):
+        store = self._broken_store(tmp_path)
+        assert store.pending_notification_count() == 0
+
+    @pytest.mark.unit
+    def test_mark_notification_sent_swallows_sqlite_error(self, tmp_path):
+        store = self._broken_store(tmp_path)
+        store.mark_notification_sent(notification_id=1)  # Must not raise
+
+    @pytest.mark.unit
+    def test_mark_notification_attempt_swallows_sqlite_error(self, tmp_path):
+        store = self._broken_store(tmp_path)
+        store.mark_notification_attempt(notification_id=1)  # Must not raise
+
+    @pytest.mark.unit
+    def test_cancel_notification_swallows_sqlite_error(self, tmp_path):
+        store = self._broken_store(tmp_path)
+        store.cancel_notification(notification_id=1, reason="superseded")  # Must not raise
+
+    @pytest.mark.unit
+    def test_pending_notification_count_with_no_conn_returns_zero(self, tmp_path):
+        """When _conn is None the count must short-circuit to 0 without
+        even trying to access the connection."""
+        store = StatsStore(tmp_path / "default.db")
+        # Never open() — _conn stays None
+        assert store.pending_notification_count() == 0
+
+    @pytest.mark.unit
+    def test_find_pending_by_category_with_no_conn_returns_empty(self, tmp_path):
+        store = StatsStore(tmp_path / "default.db")
+        assert store.find_pending_by_category("lifecycle") == []
+
+    @pytest.mark.unit
+    def test_mark_notification_sent_with_no_conn_is_noop(self, tmp_path):
+        store = StatsStore(tmp_path / "default.db")
+        store.mark_notification_sent(notification_id=1)  # Must not raise
+
+
+class TestStatsHelpers:
+    """Module-level helpers for type coercion."""
+
+    @pytest.mark.unit
+    def test_to_int_returns_int_for_numeric_string(self):
+        from eneru.stats import _to_int
+        assert _to_int("42") == 42
+        assert _to_int("42.7") == 42  # Float gets truncated by int()
+
+    @pytest.mark.unit
+    def test_to_int_returns_none_for_non_numeric(self):
+        from eneru.stats import _to_int
+        assert _to_int("not-a-number") is None
+        assert _to_int(None) is None
+        assert _to_int("") is None
