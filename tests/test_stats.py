@@ -1633,9 +1633,11 @@ class TestStatsStoreErrorIsolation:
     path. This locks the contract for every API."""
 
     def _broken_store(self, tmp_path):
+        # Construct without open() so no real SQLite connection is allocated.
+        # __init__ already initializes _conn=None and _db_lock; we substitute
+        # a sabotaged connection that raises on every execute() so each
+        # public API hits its sqlite3.Error fallback path.
         store = StatsStore(tmp_path / "default.db")
-        store.open()
-        # Sabotage the connection: every execute() raises
         broken_conn = type("BrokenConn", (), {
             "execute": staticmethod(lambda *a, **k: (_ for _ in ()).throw(sqlite3.Error("db locked"))),
             "close": staticmethod(lambda: None),
