@@ -78,10 +78,11 @@ remote_servers:
   - name: host-loopback
     enabled: true
     host: "127.0.0.1"          # works with --network host
-    user: root                  # or any user with sudo NOPASSWD: /sbin/shutdown
+    user: root                  # default; for non-root set use_sudo: true
     is_host_loopback: true
     ssh_key_path: /var/lib/eneru/ssh/id_loopback
     shutdown_command: "shutdown -h now"
+    # use_sudo: true            # non-root plan B with documented sudoers
     # shutdown_order: 999       # runs LAST — host poweroff kills the container
 
 logging:

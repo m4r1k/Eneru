@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.5.0-rc3] - 2026-05-17
+
+### Added
+
+- `remote_servers[].use_sudo` for non-root SSH shutdown targets. When
+  enabled, generated host actions use `sudo -n` and the final
+  `shutdown_command` is wrapped idempotently unless it already starts
+  with `sudo`.
+- E2E loopback coverage for both root and non-root sudo loopback paths,
+  plus negative `/ready` checks for missing machine-id and missing
+  loopback delegate.
+
+### Changed
+
+- Docker/Podman local-host ownership now requires an enabled loopback
+  delegate even when the container process is root. An explicit
+  `is_host_loopback: false` blocks auto-synthesis and produces the
+  missing-loopback startup error.
+- Loopback health probes always run for enabled loopback targets, even
+  when regular `remote_health` checks are disabled. Empty machine-id
+  and forced-command SSH responses now fail closed with direct
+  diagnostics.
+- Docker image healthcheck now targets `/ready`, not `/health`, so
+  orchestration sees whether the configured shutdown contract is
+  achievable.
+- Container runtimes suppress `wall(1)` and the missing `logger(1)`
+  warning; those native-host side channels do not help inside OCI
+  containers.
+- Readiness checks the configured `local_shutdown.command` binary
+  instead of hard-coding `shutdown` or `poweroff`.
+
+### Fixed
+
+- Delegated loopback detection now ignores disabled loopback entries in
+  monitor execution, readiness/status summaries, and generated action
+  injection.
+- Redundancy-group shutdown honors loopback delegation and skips
+  in-process local VM/container/filesystem phases when the generated
+  loopback remote actions own that work.
+- Loopback `shutdown_order` must be later than every other enabled
+  remote in the same group, preventing the host poweroff command from
+  killing earlier remote phases.
+- Documentation no longer recommends `authorized_keys command="..."`
+  for loopback keys. Forced commands break Eneru's identity probe and
+  generated shutdown actions.
+- Remote unmount target serialization now quotes paths and options so
+  spaces, pipes, quotes, and shell metacharacters remain data.
+
 ## [5.5.0-rc1] - 2026-05-17
 
 First v5.5 release candidate. Makes the OCI image first-class for both

@@ -111,7 +111,8 @@ remote_servers:
     enabled: true
     host: 127.0.0.1
     user: eneru-loopback   # dedicated user with sudo NOPASSWD
-    shutdown_command: "sudo shutdown -h now"
+    use_sudo: true
+    shutdown_command: "shutdown -h now"
     ssh_key_path: /var/lib/eneru/ssh/id_loopback
     is_host_loopback: true
 ```
@@ -132,12 +133,27 @@ ssh-keygen -t ed25519 -N '' \
 chmod 600 /srv/eneru/ssh/id_loopback
 ```
 
-Then authorize either via `command=` restriction on root, or via
-sudo NOPASSWD on a dedicated user. The dedicated-user option is
-strongly recommended — it limits blast radius if the container is
-compromised.
+Then authorize either the default root loopback key, or a dedicated
+non-root user with sudo NOPASSWD. Do **not** use `command=` in
+`authorized_keys`: sshd applies that forced command to Eneru's
+identity probe and to every generated VM/container/filesystem action,
+so the loopback health check and delegated shutdown sequence no
+longer mean what Eneru asked them to mean.
 
-### Option A (recommended): dedicated user + sudoers
+### Option A (default): root loopback
+
+```bash
+# On the host:
+mkdir -p /root/.ssh
+cat /srv/eneru/ssh/id_loopback.pub | tee -a /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+```
+
+This matches the synthesized defaults: `user: root`,
+`shutdown_command: "shutdown -h now"`, and key path
+`/var/lib/eneru/ssh/id_loopback`.
+
+### Option B: dedicated user + sudoers
 
 ```bash
 # On the host:
@@ -148,27 +164,25 @@ chmod 600 /home/eneru-loopback/.ssh/authorized_keys
 chown -R eneru-loopback: /home/eneru-loopback/.ssh
 
 cat > /etc/sudoers.d/eneru-loopback <<'EOF'
-eneru-loopback ALL=(root) NOPASSWD: /sbin/shutdown, /sbin/poweroff, /usr/sbin/shutdown, /usr/sbin/poweroff
+eneru-loopback ALL=(root) NOPASSWD: /sbin/shutdown, /usr/sbin/shutdown, /sbin/poweroff, /usr/sbin/poweroff
+eneru-loopback ALL=(root) NOPASSWD: /usr/bin/virsh, /usr/sbin/virsh, /usr/bin/docker, /usr/bin/podman, /bin/umount, /usr/bin/umount
 EOF
 chmod 440 /etc/sudoers.d/eneru-loopback
 ```
 
-Then point the loopback at this user (the config snippet above).
-Eneru's sudo guard validation will warn if you skip the `sudo`
-prefix on `shutdown_command` while using a non-root user.
+Then point the loopback at this user and enable `use_sudo`:
 
-### Option B: root with command + from restriction
-
-```bash
-# Prepend the line in /root/.ssh/authorized_keys with:
-#   command="/sbin/shutdown -h now",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding,from="127.0.0.1"
-# Then paste the public key after.
+```yaml
+remote_servers:
+  - name: host-loopback
+    enabled: true
+    host: 127.0.0.1
+    user: eneru-loopback
+    use_sudo: true
+    shutdown_command: "shutdown -h now"
+    ssh_key_path: /var/lib/eneru/ssh/id_loopback
+    is_host_loopback: true
 ```
-
-This restricts the key to running exactly `shutdown -h now` (no other
-command, no port forwarding, only from `127.0.0.1`). It's a one-line
-config but the key still has root privileges if reused without the
-restriction.
 
 ## `/etc/machine-id` and the host identity guard
 
@@ -255,9 +269,10 @@ within the default AppArmor confinement.
 **The loopback SSH key is, in effect, "shutdown-the-host" capability.**
 Treat it that way:
 
-1. **Restrict the authorized key.** Either `command="/sbin/shutdown -h now"`
-   on root, or a dedicated user with `sudo NOPASSWD: /sbin/shutdown`
-   only. Don't reuse your operator key. Don't let the key get a shell.
+1. **Do not use forced commands.** `authorized_keys command="..."`
+   breaks Eneru because sshd substitutes the identity probe and every
+   generated shutdown action. Use a root key without `command=`, or a
+   dedicated user with `use_sudo: true` and the sudoers stanza above.
 2. **`from="127.0.0.1"`** in `authorized_keys` so even if the key
    leaks, it can't be used remotely without first compromising the
    host.

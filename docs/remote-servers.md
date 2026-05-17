@@ -380,7 +380,8 @@ remote_servers:
     host: 127.0.0.1
     user: eneru-loopback
     is_host_loopback: true
-    shutdown_command: "sudo shutdown -h now"
+    use_sudo: true
+    shutdown_command: "shutdown -h now"
     ssh_key_path: /var/lib/eneru/ssh/id_loopback
 ```
 
@@ -404,8 +405,12 @@ with three additions:
    run AFTER Eneru's generated ones (do-the-work first, then your
    extras).
 
-The full walkthrough — SSH key generation, sudoers, command-
-restricted root key, AppArmor/SELinux notes, dangers — lives in
+Do not use `authorized_keys command="..."` for the loopback key.
+Forced commands make sshd replace Eneru's identity probe and generated
+shutdown actions with that single command, so readiness can no longer
+prove the configured behavior. The full walkthrough — SSH key
+generation, root/default setup, sudoers, AppArmor/SELinux notes, and
+hardening — lives in
 [Containers and Kubernetes](containers-kubernetes.md#ssh-from-container-to-host-walkthrough).
 
 ## Troubleshooting

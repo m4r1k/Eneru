@@ -98,8 +98,9 @@ container):
 - `-v /srv/eneru/ssh:/var/lib/eneru/ssh:ro` — SSH private key for the
   loopback. Defaults to `/var/lib/eneru/ssh/id_loopback` inside the
   container; the host's `authorized_keys` for the matching user holds
-  the public key, ideally restricted with `command=` and `from=` (see
-  [Containers and Kubernetes](containers-kubernetes.md)).
+  the public key. Do not use `authorized_keys command="..."`; it
+  rewrites Eneru's identity probe and generated shutdown actions. See
+  [Containers and Kubernetes](containers-kubernetes.md).
 - A user on the host with shutdown privilege. Either:
   - SSH as `root` (one-line setup, larger blast radius), OR
   - SSH as a dedicated user with sudo NOPASSWD on `/sbin/shutdown`

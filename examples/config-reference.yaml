@@ -355,6 +355,9 @@ remote_servers:
     command_timeout: 30
     # Shutdown command (default: "sudo shutdown -h now")
     shutdown_command: "sudo -i synoshutdown -s"
+    # Prefix generated privileged actions and final shutdown_command with
+    # sudo -n when using a non-root SSH user with NOPASSWD sudo.
+    use_sudo: false
     # Optional private key path. Useful when the key is mounted into a
     # Docker/Podman container or Kubernetes pod. If omitted, OpenSSH
     # defaults and ssh_options are used as before.

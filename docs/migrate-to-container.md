@@ -45,8 +45,7 @@ Before swapping in the container, on the **host** that will run it:
 
 ## Step 1: Generate a dedicated SSH key for the loopback
 
-Don't reuse your operator key. Make a fresh one with a `command=`
-restriction:
+Don't reuse your operator key. Make a fresh one for the loopback:
 
 ```bash
 mkdir -p /srv/eneru/ssh
@@ -57,13 +56,30 @@ chmod 600 /srv/eneru/ssh/id_loopback
 chmod 644 /srv/eneru/ssh/id_loopback.pub
 ```
 
-## Step 2: Authorize the key for shutdown only
+## Step 2: Authorize the key
 
-The most blast-radius-limited option: a dedicated user with sudo
-NOPASSWD on `/sbin/shutdown` and `/sbin/poweroff`. The simpler
-option: root with `command=` restriction. Pick one.
+Default path: authorize the key for root with no forced command. Plan
+B: use a dedicated user with `use_sudo: true`.
 
-### Option A (recommended): dedicated user
+Do **not** use `authorized_keys command="..."`. sshd substitutes that
+forced command for Eneru's identity probe and for every generated
+VM/container/filesystem action, so `/ready` can no longer prove the
+configured shutdown behavior is achievable.
+
+### Option A (default): root
+
+```bash
+# On the host:
+mkdir -p /root/.ssh
+cat /srv/eneru/ssh/id_loopback.pub | tee -a /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+```
+
+Then your config can use the synthesized defaults (no `remote_servers`
+entry needed at all — Eneru auto-creates one because it detects the
+Docker/Podman runtime + your local capabilities).
+
+### Option B: dedicated user
 
 ```bash
 # On the host:
@@ -73,9 +89,9 @@ cat /srv/eneru/ssh/id_loopback.pub | tee -a /home/eneru-loopback/.ssh/authorized
 chmod 600 /home/eneru-loopback/.ssh/authorized_keys
 chown -R eneru-loopback: /home/eneru-loopback/.ssh
 
-# Allow only the shutdown / poweroff commands via sudo:
 cat > /etc/sudoers.d/eneru-loopback <<'EOF'
-eneru-loopback ALL=(root) NOPASSWD: /sbin/shutdown, /sbin/poweroff, /usr/sbin/shutdown, /usr/sbin/poweroff
+eneru-loopback ALL=(root) NOPASSWD: /sbin/shutdown, /usr/sbin/shutdown, /sbin/poweroff, /usr/sbin/poweroff
+eneru-loopback ALL=(root) NOPASSWD: /usr/bin/virsh, /usr/sbin/virsh, /usr/bin/docker, /usr/bin/podman, /bin/umount, /usr/bin/umount
 EOF
 chmod 440 /etc/sudoers.d/eneru-loopback
 ```
@@ -88,22 +104,10 @@ remote_servers:
     enabled: true
     host: 127.0.0.1
     user: eneru-loopback
-    shutdown_command: "sudo shutdown -h now"
+    use_sudo: true
+    shutdown_command: "shutdown -h now"
     is_host_loopback: true
 ```
-
-### Option B (simpler): root with command restriction
-
-```bash
-# On the host's root authorized_keys:
-cat /srv/eneru/ssh/id_loopback.pub | tee -a /root/.ssh/authorized_keys
-# Edit /root/.ssh/authorized_keys and prepend the line with:
-#   command="/sbin/shutdown -h now",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding,from="127.0.0.1"
-```
-
-Then your config can use the synthesized defaults (no `remote_servers`
-entry needed at all — Eneru auto-creates one because it detects the
-Docker/Podman runtime + your local capabilities).
 
 ## Step 3: Stop the native service
 

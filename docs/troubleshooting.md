@@ -313,7 +313,7 @@ see exactly what's wrong without grepping logs.
 | `local_vm_teardown` | `is_local && vms.enabled` | `virsh` on PATH | loopback `remote_health == HEALTHY` |
 | `local_container_teardown` | `is_local && containers.enabled` | `docker` or `podman` on PATH | loopback `remote_health == HEALTHY` |
 | `local_filesystem_unmount` | `is_local && filesystems.unmount.enabled` | `umount` on PATH | loopback `remote_health == HEALTHY` |
-| `local_host_poweroff` | `local_shutdown.enabled` + local owner | `shutdown` or `poweroff` on PATH | loopback `remote_health == HEALTHY` |
+| `local_host_poweroff` | `local_shutdown.enabled` + local owner | Binary from `local_shutdown.command` on PATH | loopback `remote_health == HEALTHY` |
 | `remote_server_shutdown[<name>]` | each enabled non-loopback `remote_servers` entry | that target's `remote_health == HEALTHY` (or `UNKNOWN` if probes disabled) | same |
 
 `/health` always returns 200 while the daemon process is alive — use
@@ -329,6 +329,7 @@ fall into one of these:
 | Symptom in `last_error` | Cause | Fix |
 |---|---|---|
 | `host identity mismatch: probe returned 'X' but expected 'Y'` | `/etc/machine-id` not bind-mounted from host | Add `-v /etc/machine-id:/etc/machine-id:ro,Z` to the `docker run` command (and `,Z` for SELinux hosts) |
+| `authorized_keys command=` | Forced-command SSH key rewrites Eneru's identity probe and generated shutdown actions | Remove `command="..."` from the loopback key. Use the root default or `use_sudo: true` with sudoers. |
 | `Permission denied (publickey,password)` | Loopback SSH key not authorized on the host | The container's `/var/lib/eneru/ssh/id_loopback` public half must be in the host user's `authorized_keys`. See [Containers and Kubernetes](containers-kubernetes.md) for the walkthrough. |
 | `connection refused` | No `sshd` on `127.0.0.1`, OR container isn't on `network_mode: host` | Either start `sshd` on the host, or switch to `--network host`. For bridge networking, override the loopback `host` to the host's bridge IP (`172.17.0.1` on Linux default Docker bridge). |
 | `identity probe failed: timeout after Xs` | `sshd` is up but the probe didn't return — usually host overload or sshd `MaxStartups` reached | Bump `connect_timeout` on the loopback entry; check sshd logs for `MaxStartups` warnings. |

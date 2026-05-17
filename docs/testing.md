@@ -29,8 +29,8 @@ Eneru uses unit tests, package-install tests, and end-to-end tests with real NUT
    ╱─────────────────────────────────────────────╲
 ```
 
-The pyramid is intentionally bottom-heavy. As of the v5.4.0 pass,
-the local pytest suite contains 1483 tests. E2E tests are fewer, but they
+The pyramid is intentionally bottom-heavy. As of the v5.5 rc3 pass,
+the local pytest suite contains 1595 tests. E2E tests are fewer, but they
 exercise the real service boundaries where packaging, NUT, SSH, Docker,
 filesystem, and CLI assumptions meet.
 
@@ -44,7 +44,7 @@ filesystem, and CLI assumptions meet.
 | Release | `.github/workflows/release.yml` | Release package build |
 | PyPI | `.github/workflows/pypi.yml` | PyPI publish from release tags |
 
-The protected `main` branch requires the validate matrix and five E2E matrix jobs.
+The protected `main` branch requires the validate matrix and six E2E matrix jobs.
 
 ## Local test environment
 
@@ -101,7 +101,7 @@ Eneru under test
   -> target containers and test mounts
 ```
 
-The workflow is split into five parallel matrix groups:
+The workflow is split into six parallel matrix groups:
 
 | Group | Focus |
 |-------|-------|
@@ -110,12 +110,13 @@ The workflow is split into five parallel matrix groups:
 | UPS Multi | Independent UPS groups and local-drain policies |
 | Redundancy | Quorum behavior, advisory triggers, and runtime NUT-visibility regressions |
 | Stats | SQLite, graphs, events, notification coalescing |
+| Loopback | Containerized local-host ownership through root and sudo SSH loopback |
 
 The scenario files simulate online, on-battery, low-battery, FSD, brownout, overload, hot-grid, and nominal-voltage-mismatch states.
 
 ### E2E test inventory
 
-The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 46 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
+The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 50 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
 
 | Test | Group | What it proves |
 |------|-------|----------------|
@@ -167,6 +168,10 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 46 numb
 | 44 | UPS Single | An unreachable remote target is reported as a bounded best-effort failure instead of stalling shutdown |
 | 45 | UPS Single | MQTT status publishing reaches the broker and includes power-quality fields |
 | 46 | UPS Single | The OCI image runs against the E2E NUT server with the API enabled only by CLI flags |
+| 47 | Loopback | Containerized local-host ownership delegates through the root loopback path and `/ready` is green |
+| 48 | Loopback | Containerized local-host ownership delegates through a non-root SSH user with `use_sudo: true` |
+| 49 | Loopback | Missing `/etc/machine-id` bind mount keeps `/ready` false with a setup hint |
+| 50 | Loopback | Docker/Podman local capabilities with explicit no-loopback config fail startup |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
 
 Every commit on the protected workflow has to prove the daemon works against real services, not just isolated Python assertions: real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.

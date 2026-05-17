@@ -77,7 +77,7 @@ UPS rows include a stable `groupId` derived from the configured UPS name. Multi-
 
 `/health` returns 200 when the API server can answer.
 
-`/ready` returns 200 only when monitoring has usable UPS data. It returns 503 if the daemon has not published a snapshot yet or UPS visibility is failed.
+`/ready` returns 200 only when monitoring has usable UPS data and every configured shutdown capability is achievable. It returns 503 if UPS visibility is failed, a required local binary is missing on native installs, or a containerized local-host config lacks a healthy loopback delegate.
 
 ## Prometheus
 
