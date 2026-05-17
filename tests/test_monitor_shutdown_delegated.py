@@ -251,6 +251,67 @@ class TestDelegatedShutdownSequence:
         assert calls == ["vms", "containers", "sync", "unmount", "remote"]
 
     @pytest.mark.unit
+    def test_check_dependencies_silent_about_host_binaries_when_delegating(
+        self, tmp_path,
+    ):
+        """rc1 → rc2 fix: in delegated mode, _check_dependencies must not
+        warn about missing host binaries (virsh, docker, podman) — they
+        live on the HOST. The previous behavior emitted misleading
+        WARNING lines AND flipped enabled-flags off, defeating the
+        delegated path."""
+        monitor = _make_delegated_monitor(tmp_path)
+
+        def fake_exists(cmd):
+            # upsc is always required (NUT polling — unrelated to delegation).
+            # ssh is always required (we need to reach the loopback).
+            # Every other binary (virsh, docker, podman, etc.) is "not found"
+            # so we can prove the dep check stays silent about them in
+            # delegated mode.
+            return cmd in ("upsc", "ssh")
+
+        with _patch_runtime("container (Docker)"), \
+             patch("eneru.monitor.command_exists", side_effect=fake_exists):
+            try:
+                monitor._check_dependencies()
+            except SystemExit:
+                pytest.fail("Delegated mode must not exit on missing host binaries")
+
+        # The enabled-flags must STAY enabled — the loopback path
+        # delegates them; flipping them off would break the rendered
+        # shutdown sequence.
+        assert monitor.config.virtual_machines.enabled is True
+        assert monitor.config.containers.enabled is True
+
+        # And no per-binary warning should have been emitted.
+        log_calls = [c.args[0] for c in monitor.logger.log.call_args_list] if hasattr(monitor.logger, 'log') else []
+        # Use _log_message side effect — collected via the monitor's logger mock.
+        # Most tests in this file accept either logger.log() or self._log_message
+        # being a real method calling logger.info/.log; the asserts above on
+        # enabled-flags are the load-bearing checks. Verify ad-hoc:
+        joined = "\n".join(str(c) for c in log_calls)
+        assert "virsh' not found" not in joined
+        assert "No container runtime found" not in joined
+
+    @pytest.mark.unit
+    def test_check_dependencies_native_mode_still_warns(self, tmp_path):
+        """Regression: bare-metal install MUST still warn + disable flags
+        when host binaries are missing (the existing v5.4 behavior)."""
+        monitor = _make_delegated_monitor(tmp_path, loopback=False)
+
+        def fake_exists(cmd):
+            # virsh missing, everything else present.
+            return cmd != "virsh"
+
+        with _patch_runtime("systemd service"), \
+             patch("eneru.monitor.command_exists", side_effect=fake_exists):
+            try:
+                monitor._check_dependencies()
+            except SystemExit:
+                pass  # Don't care for this assertion — focus is on VMs flag.
+
+        assert monitor.config.virtual_machines.enabled is False
+
+    @pytest.mark.unit
     def test_shutdown_sequence_complete_event_still_fires_when_delegated(self, tmp_path):
         """SHUTDOWN_SEQUENCE_COMPLETE describes Eneru's own state; must still
         fire when delegating so the events table stays consistent."""

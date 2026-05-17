@@ -808,13 +808,28 @@ class UPSGroupMonitor(
                 "will be skipped."
             )
 
+        # v5.5: when delegating local-host actions over SSH, the host binaries
+        # (virsh, docker, podman, etc.) live on the HOST, not in the container.
+        # Skip the in-process binary checks AND don't disable the corresponding
+        # features — the loopback's pre_shutdown_commands (already injected by
+        # cli._inject_delegated_actions) handle them on the host. Logging a
+        # warning here would be misleading and would flip enabled-flags off,
+        # creating false negatives in `eneru validate` output.
+        delegating = self._uses_loopback_delegate
+
         # Check optional dependencies based on enabled features
-        if self.config.virtual_machines.enabled and not command_exists("virsh"):
+        if (
+            not delegating
+            and self.config.virtual_machines.enabled
+            and not command_exists("virsh")
+        ):
             self._log_message("⚠️ WARNING: 'virsh' not found but VM shutdown is enabled. VMs will be skipped.")
             self.config.virtual_machines.enabled = False
 
-        # Container runtime detection
-        if self.config.containers.enabled:
+        # Container runtime detection. Skip entirely when delegating — host
+        # owns the runtime decision, and the loopback's stop_containers /
+        # stop_compose templates probe for docker/podman on the remote side.
+        if self.config.containers.enabled and not delegating:
             self._container_runtime = self._detect_container_runtime()
             if self._container_runtime:
                 self._log_message(f"🐳 Container runtime detected: {self._container_runtime}")
