@@ -105,12 +105,14 @@ run_loopback_case() {
   local config="/tmp/e2e-loopback-${label}.yaml"
   local name="eneru-e2e-loopback-${label}"
   local identity="e2e-loopback-${label}"
+  local cid=""
 
   write_loopback_config "$config" "$user" "$use_sudo" "$identity"
 
   cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
   docker rm -f "$name" >/dev/null 2>&1 || true
-  docker run -d --name "$name" \
+  echo "  Starting Eneru container '${name}' as SSH user '${user}' (use_sudo=${use_sudo})"
+  cid=$(docker run -d --name "$name" \
     --network "$NETWORK" \
     -p "127.0.0.1:${port}:9191" \
     -v "$config":/etc/ups-monitor/config.yaml:ro \
@@ -118,7 +120,8 @@ run_loopback_case() {
     eneru:e2e \
     run --config /etc/ups-monitor/config.yaml \
     --api --api-bind 0.0.0.0 --api-port 9191 \
-    --exit-after-shutdown
+    --exit-after-shutdown)
+  echo "  Container started: ${name} (${cid:0:12}); waiting for /ready on 127.0.0.1:${port}"
 
   if ! poll_http_pattern \
       "http://127.0.0.1:${port}/ready" \
@@ -129,7 +132,9 @@ run_loopback_case() {
     docker logs "$name" || true
     exit 1
   fi
+  echo "  PASS: /ready is green for ${label} loopback"
 
+  echo "  Applying low-battery scenario and waiting for delegated dry-run shutdown"
   cp "$E2E_DIR/scenarios/low-battery.dev" "$E2E_DIR/scenarios/apply.dev"
   if [ "$use_sudo" = "true" ]; then
     expected="Would send command 'sudo -n shutdown -h now'"
@@ -141,14 +146,17 @@ run_loopback_case() {
     cat "/tmp/e2e-loopback-${label}.log"
     exit 1
   fi
+  echo "  PASS: delegated shutdown command observed: ${expected}"
 
   docker rm -f "$name" >/dev/null 2>&1 || true
   cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
+  echo "  PASS: ${label} loopback case complete"
 }
 
 negative_missing_machine_id() {
   local config="/tmp/e2e-loopback-missing-machine-id.yaml"
   local name="eneru-e2e-loopback-missing-machine-id"
+  local cid=""
   cat >"$config" <<'YAML'
 ups:
   - name: "TestUPS@nut-server"
@@ -181,7 +189,8 @@ logging:
 YAML
   : >/tmp/e2e-empty-machine-id
   docker rm -f "$name" >/dev/null 2>&1 || true
-  docker run -d --name "$name" \
+  echo "  Starting container with an intentionally empty /etc/machine-id bind mount"
+  cid=$(docker run -d --name "$name" \
     --network "$NETWORK" \
     -p 127.0.0.1:19193:9191 \
     -v "$config":/etc/ups-monitor/config.yaml:ro \
@@ -189,7 +198,8 @@ YAML
     -v /tmp/e2e-empty-machine-id:/etc/machine-id:ro \
     eneru:e2e \
     run --config /etc/ups-monitor/config.yaml \
-    --api --api-bind 0.0.0.0 --api-port 9191
+    --api --api-bind 0.0.0.0 --api-port 9191)
+  echo "  Container started: ${name} (${cid:0:12}); waiting for /ready failure diagnostic"
 
   if ! poll_http_pattern \
       http://127.0.0.1:19193/ready \
@@ -206,6 +216,7 @@ YAML
     docker logs "$name" || true
     exit 1
   fi
+  echo "  PASS: /ready is false and includes systemd-machine-id-setup hint"
   docker rm -f "$name" >/dev/null 2>&1 || true
 }
 
@@ -230,6 +241,7 @@ logging:
   file: null
 YAML
   docker rm -f "$name" >/dev/null 2>&1 || true
+  echo "  Starting container with local capabilities and explicit is_host_loopback: false"
   docker run --name "$name" \
     --network "$NETWORK" \
     -v "$config":/etc/ups-monitor/config.yaml:ro \
@@ -245,9 +257,11 @@ YAML
     cat /tmp/e2e-loopback-missing-loopback.log
     exit 1
   fi
+  echo "  PASS: startup failed with missing enabled loopback delegate diagnostic"
   docker rm -f "$name" >/dev/null 2>&1 || true
 }
 
+echo ">>> Building Eneru OCI image for loopback E2E"
 docker build -t eneru:e2e .
 NETWORK="$(network_name)"
 if [ -z "$NETWORK" ]; then
@@ -255,7 +269,9 @@ if [ -z "$NETWORK" ]; then
   docker network ls
   exit 1
 fi
+echo ">>> Using Docker network: ${NETWORK}"
 prepare_loopback_key
+echo ">>> Prepared loopback private key at /tmp/e2e-loopback-key"
 
 echo ">>> Running: Test 47: E2E Loopback Root"
 run_loopback_case root root false 19191

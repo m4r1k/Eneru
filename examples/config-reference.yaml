@@ -399,8 +399,9 @@ remote_servers:
   #   user: "root"
   #   command_timeout: 30
   #   # Pre-shutdown commands run in order before the final shutdown
-  #   # Predefined actions: stop_containers, stop_vms, stop_proxmox_vms,
-  #   #   stop_proxmox_cts, stop_xcpng_vms, stop_esxi_vms, stop_compose, sync
+  #   # Predefined actions: stop_containers, stop_containers_rootless, stop_vms,
+  #   #   stop_proxmox_vms, stop_proxmox_cts, stop_xcpng_vms, stop_esxi_vms,
+  #   #   stop_compose, sync, unmount_filesystems
   #   pre_shutdown_commands:
   #     - action: "stop_proxmox_vms"
   #       timeout: 120  # Override default timeout
@@ -424,6 +425,58 @@ remote_servers:
   #       timeout: 30
   #     - action: "sync"
   #   shutdown_command: "shutdown -h now"
+
+  # Example: v5.5 container host-loopback delegate (Docker/Podman)
+  # When an OCI container config owns local host capabilities (is_local: true
+  # plus VMs, containers, filesystems, or local_shutdown), Eneru must SSH back
+  # to the host. Docker/Podman deployments auto-synthesize this entry by
+  # default with:
+  #   host: 127.0.0.1
+  #   user: root
+  #   shutdown_command: "shutdown -h now"
+  #   shutdown_order: 999
+  #
+  # To use the default root loopback path, append id_loopback.pub to
+  # /root/.ssh/authorized_keys on the host with no forced command. Do NOT use
+  # authorized_keys command="...": sshd would replace Eneru's identity probe
+  # and generated shutdown actions with that one forced command.
+  #
+  # Write an explicit loopback only when you need to override synthesis. The
+  # loopback shutdown_order must be greater than every other enabled remote in
+  # the same UPS group, because the host must shut down last.
+  # - name: "host-loopback"
+  #   enabled: true
+  #   host: "127.0.0.1"
+  #   user: "root"
+  #   is_host_loopback: true
+  #   ssh_key_path: "/var/lib/eneru/ssh/id_loopback"
+  #   # host_identity_command defaults to "cat /etc/machine-id"; the container
+  #   # should bind-mount the host's /etc/machine-id so expected_host_identity
+  #   # can auto-populate safely.
+  #   # host_identity_command: "cat /etc/machine-id"
+  #   # expected_host_identity: auto-populated from /etc/machine-id
+  #   shutdown_command: "shutdown -h now"
+  #   shutdown_order: 999
+  #
+  # Non-root loopback hardening plan B: create a dedicated host user with
+  # NOPASSWD sudo for shutdown, virsh, docker, podman, umount, and sync, then
+  # enable use_sudo so generated privileged actions and the final shutdown get
+  # sudo -n prefixes. See docs/containers-kubernetes.md for the complete
+  # sudoers stanza.
+  # - name: "host-loopback"
+  #   enabled: true
+  #   host: "127.0.0.1"
+  #   user: "eneru-loopback"
+  #   is_host_loopback: true
+  #   use_sudo: true
+  #   ssh_key_path: "/var/lib/eneru/ssh/id_loopback"
+  #   shutdown_command: "shutdown -h now"
+  #   shutdown_order: 999
+  #
+  # Leave pre_shutdown_commands unset on loopback entries. Eneru generates the
+  # VM, container, compose, rootless Podman, sync, and unmount actions from the
+  # local config. Explicit is_host_loopback: false blocks synthesis and is used
+  # to make missing-loopback startup failures intentional.
 
   # Example: Server with dependency - must shutdown AFTER compute servers
   # - name: "Storage Server"
