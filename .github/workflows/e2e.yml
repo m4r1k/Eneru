@@ -28,14 +28,15 @@ env:
 # its own.
 #
 # OPERATOR ACTION REQUIRED when this PR's branch protection updates:
-# the required checks on `main` are now FIVE E2E jobs (was four).
-# Drop `E2E Redundancy and Stats`; add `E2E Redundancy` and `E2E Stats`.
-# The validate matrix (×6) is unchanged. Total required checks: 11.
+# the required checks on `main` are now SIX E2E jobs. Add `E2E Loopback`
+# alongside the existing five E2E jobs. The validate matrix (×6) is
+# unchanged. Total required checks: 12.
 #   - E2E CLI
 #   - E2E UPS Single
 #   - E2E UPS Multi
 #   - E2E Redundancy
 #   - E2E Stats
+#   - E2E Loopback
 jobs:
   e2e:
     name: "E2E ${{ matrix.label }}"
@@ -50,6 +51,7 @@ jobs:
           - { group: multi-ups,  label: "UPS Multi" }
           - { group: redundancy, label: "Redundancy" }
           - { group: stats,      label: "Stats" }
+          - { group: loopback,   label: "Loopback" }
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -92,6 +94,14 @@ jobs:
           grep -q "Test 44: Unreachable remote shutdown is bounded" tests/e2e/groups/single-ups.sh
           grep -q "Test 45: MQTT status publishes power-quality metrics" tests/e2e/groups/single-ups.sh
           grep -q "Test 46: OCI image runs with API enabled by CLI flags" tests/e2e/groups/single-ups.sh
+
+      - name: Verify v5.5 loopback E2E coverage is wired
+        if: matrix.group == 'loopback'
+        run: |
+          grep -q "run_loopback_case root root false" tests/e2e/groups/loopback.sh
+          grep -q "run_loopback_case sudo testuser true" tests/e2e/groups/loopback.sh
+          grep -q "negative_missing_machine_id" tests/e2e/groups/loopback.sh
+          grep -q "negative_missing_loopback" tests/e2e/groups/loopback.sh
 
       - name: Collect logs on failure
         if: failure()

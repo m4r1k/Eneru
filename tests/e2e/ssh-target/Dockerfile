@@ -24,6 +24,10 @@ RUN mkdir -p /home/testuser/.ssh && \
     chmod 700 /home/testuser/.ssh && \
     chown -R testuser:testuser /home/testuser/.ssh
 
+# Root loopback E2E uses the same generated key. Keep password auth off for
+# root while allowing public-key login, matching the documented default path.
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
+
 # Create a marker file to track if "shutdown" was called
 RUN touch /var/run/server-alive
 
@@ -40,7 +44,7 @@ RUN echo '#!/bin/bash' > /usr/local/bin/fake-shutdown && \
 RUN ln -sf /usr/local/bin/fake-shutdown /usr/local/bin/shutdown
 
 # Configure sshd
-RUN echo "PermitRootLogin no" >> /etc/ssh/sshd_config && \
+RUN echo "PermitRootLogin prohibit-password" >> /etc/ssh/sshd_config && \
     echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config && \
     echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config
 

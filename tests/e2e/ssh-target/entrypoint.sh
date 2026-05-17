@@ -9,7 +9,10 @@ if [ -f /tmp/host-authorized-keys ]; then
     cp /tmp/host-authorized-keys /home/testuser/.ssh/authorized_keys
     chmod 600 /home/testuser/.ssh/authorized_keys
     chown testuser:testuser /home/testuser/.ssh/authorized_keys
-    echo "SSH authorized_keys installed for testuser"
+    cp /tmp/host-authorized-keys /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/authorized_keys
+    chown root:root /root/.ssh/authorized_keys
+    echo "SSH authorized_keys installed for testuser and root"
 fi
 
 # Reset state on startup
