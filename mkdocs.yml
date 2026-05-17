@@ -33,6 +33,7 @@ nav:
   - Overview:
       - Home: index.md
       - Getting started: getting-started.md
+      - Choose your install: install-comparison.md
       - Architecture: architecture.md
   - Configuration:
       - Configuration reference: configuration.md
@@ -42,6 +43,7 @@ nav:
       - Remote servers: remote-servers.md
   - Operations:
       - Containers and Kubernetes: containers-kubernetes.md
+      - Migrate to container: migrate-to-container.md
       - Monitor and graphs: tui-graphs.md
       - Observability and API: observability-api.md
       - Statistics: statistics.md

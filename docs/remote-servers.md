@@ -352,6 +352,62 @@ Only test the final shutdown command when you are prepared for the remote server
 sudo ssh user@remote-server "sudo shutdown -h now"
 ```
 
+## v5.5: host-loopback delegate (container only)
+
+When Eneru runs inside an OCI container with local capabilities
+configured (`is_local: true` + VMs / containers / filesystems /
+local_shutdown), it cannot execute those local actions directly —
+namespace isolation blocks host poweroff and host umount, even with
+`--privileged`. The v5.5 answer: configure one `remote_servers`
+entry that points at `127.0.0.1` (or whatever address inside the
+container reaches the host) and mark it `is_host_loopback: true`.
+Eneru SSHes to that target and lets the host's `sshd` perform the
+privileged work.
+
+For the **Docker/Podman + zero-config** case, Eneru auto-synthesizes
+the loopback entry at startup with the documented defaults. You
+don't need to write a `remote_servers` block at all — your existing
+deb/rpm-shaped config just works. See [Choose your
+install](install-comparison.md) and [Migrate to
+container](migrate-to-container.md).
+
+For the explicit form (overrides synthesis):
+
+```yaml
+remote_servers:
+  - name: host-loopback
+    enabled: true
+    host: 127.0.0.1
+    user: eneru-loopback
+    is_host_loopback: true
+    shutdown_command: "sudo shutdown -h now"
+    ssh_key_path: /var/lib/eneru/ssh/id_loopback
+```
+
+The loopback entry behaves like any other `remote_servers` entry
+with three additions:
+
+1. **`is_host_loopback: true`** — at most one per config; the
+   privilege check accepts non-root in a container when this is
+   present, and the local-host shutdown phases are delegated to it
+   instead of running in-process.
+2. **Host identity guard.** A second probe (`host_identity_command`,
+   default `cat /etc/machine-id`) verifies the SSH target really is
+   this container's host. `expected_host_identity` is auto-populated
+   from the container's `/etc/machine-id` — operators bind-mount the
+   host's value at the same path instead of supplying a literal
+   string. Mismatch marks the loopback FAILED with a clear hint.
+3. **Eneru generates `pre_shutdown_commands` for you.** Don't
+   duplicate VM / container / filesystem actions on the loopback —
+   Eneru translates the local config into the equivalent SSH
+   templates at startup. Any custom `pre_shutdown_commands` you add
+   run AFTER Eneru's generated ones (do-the-work first, then your
+   extras).
+
+The full walkthrough — SSH key generation, sudoers, command-
+restricted root key, AppArmor/SELinux notes, dangers — lives in
+[Containers and Kubernetes](containers-kubernetes.md#ssh-from-container-to-host-walkthrough).
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -362,3 +418,5 @@ sudo ssh user@remote-server "sudo shutdown -h now"
 | `command not found` | Use full command paths or a login shell where the platform requires one |
 | NAS shuts down too early | Use `shutdown_order` instead of legacy `parallel: false` |
 | Host key verification fails | Re-check the host identity before accepting the new key |
+| **v5.5 loopback** `host identity mismatch` | Add `-v /etc/machine-id:/etc/machine-id:ro` (and `,Z` on SELinux) to the container's mounts |
+| **v5.5 loopback** `PermissionError` on SSH key | Container user (uid 10001) can't read the bind-mounted key. Use a dedicated dir with mode 0755 + key mode 0444 |

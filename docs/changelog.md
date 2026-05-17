@@ -7,6 +7,129 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.5.0-rc1] - 2026-05-17
+
+First v5.5 release candidate. Makes the OCI image first-class for both
+remote-only and full local-host ownership via an SSH loopback delegate,
+reversing the v5.4 "container = remote-only" framing. Three-profile
+deployment story: native deb/rpm/pip, OCI image (Docker/Podman),
+Kubernetes (remote-only).
+
+### Added
+
+- **Container loopback host delegation** — a new `is_host_loopback: true`
+  flag on `remote_servers` entries marks one as the host delegate. When
+  Eneru runs inside a Docker/Podman container with local capabilities
+  configured, the privilege check accepts non-root in lieu of root and
+  the shutdown sequence delegates host poweroff, VM teardown, container
+  stop, and filesystem unmount to the host via SSH. The host's `sshd`
+  is the only thing with the privilege to actually power off itself —
+  exactly the right boundary.
+- **Zero-config homelab path** — Eneru auto-synthesizes a default
+  loopback entry at startup when it detects Docker/Podman + local
+  capabilities + no explicit loopback. Defaults: `host: 127.0.0.1`,
+  `user: root`, `shutdown_command: shutdown -h now`,
+  `ssh_key_path: /var/lib/eneru/ssh/id_loopback`. Existing deb/rpm-shaped
+  configs work in the container with no YAML changes.
+- **Host identity guard** — new `host_identity_command` (default
+  `cat /etc/machine-id`) and `expected_host_identity` fields. The latter
+  is auto-populated from the container's `/etc/machine-id` at startup,
+  so operators bind-mount the host's value at the same path. Mismatch
+  marks the loopback FAILED with an actionable hint ("most likely cause:
+  /etc/machine-id is NOT bind-mounted from the host"), emits a loud
+  notification, and makes `/ready` 503. Fails closed by construction.
+- **Kubernetes runtime detection** — `_detect_runtime_context()` now
+  returns `container (Kubernetes)` ahead of generic Docker/Podman, via
+  `KUBERNETES_SERVICE_HOST`, the SA token mount, or the `kubepods`
+  cgroup. K8s + local capabilities emits a startup WARNING (not error)
+  — local-host ownership inside a pod is unusual and not recommended.
+- **`/ready` capability matrix** — `readiness()` now scores each
+  required capability (`nut_polling`, `local_vm_teardown`,
+  `local_container_teardown`, `local_filesystem_unmount`,
+  `local_host_poweroff`, `remote_server_shutdown[name]`) and returns
+  503 when any is unachievable. Native install: scored by host binary
+  presence; container: scored by loopback `remote_health` HEALTHY.
+  Strict — Eneru is defense technology, every probe should surface a
+  broken contract loudly.
+- **New `DELEGATED_SHUTDOWN_INITIATED` event** for dashboards/SIEMs to
+  distinguish container-mediated from native shutdowns.
+- **REMOTE_ACTIONS expansion**: mandatory self-skip on `stop_containers`
+  and `stop_compose` (Eneru's own container is never killed during
+  delegated teardown), new `stop_containers_rootless` template for
+  rootless Podman across users, new `unmount_filesystems` template
+  (was a pre-existing gap — REMOTE_ACTIONS had only `sync` before),
+  parameterized `wait_interval` on `stop_vms`. Centralized
+  `render_action()` and `serialize_umount_targets()` helpers.
+- **New docs**: `docs/install-comparison.md` (three-profile framing +
+  feature × install matrix), `docs/migrate-to-container.md` (step-by-
+  step from deb/rpm install to OCI image with the same config),
+  `examples/config-container-local.yaml` (reference shape).
+  `docs/troubleshooting.md` extended with the ready/503 decision matrix
+  and the loopback FAILED causes table.
+
+### Changed
+
+- **OCI image is slim** — multi-stage Dockerfile drops `docker.io`
+  (~150 MB), `podman` (~80 MB), and `libvirt-clients` (~30 MB). These
+  were only used by the in-process shutdown phases that the loopback
+  contract makes unnecessary inside the container — the host already
+  has them. Realistic image size: ~186 MB (down from 500+ MB).
+  Builder stage uses a wheelhouse so pip never hits PyPI at runtime-
+  stage time.
+- **`wall(1)` is suppressed in delegated mode**. It fired locally on
+  the container's (non-existent) ttys and reached nobody on the host.
+  Use a notification channel (Apprise, MQTT, Discord, Slack) for
+  in-room alerts.
+- **`_check_dependencies` skips the `shutdown` binary requirement
+  when delegating**. The binary lives on the host; the container
+  doesn't need it.
+- **Sudo guard** — config validation emits a startup WARNING for any
+  enabled `remote_servers` entry with `user != "root"` and a
+  `shutdown_command` that doesn't start with `sudo`. Most non-root
+  shutdown setups need sudo NOPASSWD on `/sbin/shutdown`; the warning
+  catches the common omission.
+- **`eneru validate` shows the delegated sequence** when delegation
+  applies (`1. Local actions delegated via loopback SSH: VMs,
+  containers, sync, unmount(N)` + `Local shutdown (host poweroff
+  delegated via loopback SSH)`) instead of the in-process per-phase
+  tree. `eneru shutdown group --dry-run` rehearses the same delegated
+  path the daemon would.
+- **Synthesis + injection runs from every entry point** — `_cmd_run`,
+  `_cmd_validate`, `_cmd_shutdown_group` all share the
+  `_prepare_runtime_config` helper. `run` uses strict key check (exit
+  1 if SSH key missing); `validate` and dry-run use non-strict (warn
+  and proceed so users can inspect their config without the key being
+  materialized yet).
+- **PermissionError on the synthesized SSH key path** is now a clear
+  message naming the cause (parent dir not readable by uid 10001) and
+  three actionable fixes, instead of an uncaught traceback. Common
+  when operators bind-mount `/root/.ssh/` (mode 0700) directly.
+
+### Migration notes
+
+- **Existing deb/rpm/pip installs upgrade without YAML changes.**
+- **Existing v5.4 container deployments** (remote-only) upgrade
+  without YAML changes. The image is smaller but functionally
+  equivalent for the remote-only path.
+- **Migrating from a deb/rpm install to the OCI image**: see
+  [Migrate to container](migrate-to-container.md). Your existing
+  config works as-is provided you bind-mount `/etc/machine-id` and
+  the loopback SSH key. Eneru auto-detects the runtime and synthesizes
+  the loopback entry at startup.
+- **Breaking — slim image**: if you somehow ran `is_local` directly
+  inside the v5.4 OCI image (against the docs), the v5.5 image won't
+  start `eneru run` because the host binaries are gone. Configure the
+  loopback (or auto-let synthesis do it) and you're back in business.
+- **Breaking — `wall` suppression**: container deployments that
+  relied on `wall(1)` for in-room notification need to switch to a
+  notification channel.
+- **Breaking — `/etc/machine-id` bind-mount**: any container
+  deployment that wants the loopback contract MUST bind-mount the
+  host's `/etc/machine-id` read-only. Without it, the identity guard
+  marks the loopback FAILED and `/ready` returns 503.
+
+---
+
 ## [5.4.0] - 2026-05-15
 
 Stable v5.4 release. This release adds the official container deployment path while keeping local host shutdown on native installs.

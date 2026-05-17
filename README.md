@@ -92,7 +92,7 @@ docker run -d --name eneru \
   --api --api-bind 0.0.0.0 --api-port 9191
 ```
 
-Use `ghcr.io/m4r1k/eneru:testing` for pre-release builds. The OCI image is for remote UPS monitoring and SSH shutdown. Use a native host install when Eneru must manage the local host, VMs, containers, or filesystems.
+Use `ghcr.io/m4r1k/eneru:testing` for pre-release builds. v5.5+ makes the OCI image first-class for **both** remote-only and local-host deployments — for full local-host ownership from a container (host poweroff, VM teardown, container stop, filesystem unmount), add `--network host`, `-v /etc/machine-id:/etc/machine-id:ro`, and a loopback SSH key. See [Choose your install](https://eneru.readthedocs.io/latest/install-comparison/) for the three deployment profiles and [Migrate to container](https://eneru.readthedocs.io/latest/migrate-to-container/) for the step-by-step.
 
 **PyPI:**
 ```bash
@@ -178,19 +178,30 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 - Notifications to 100+ services (Discord, Slack, Telegram, ntfy, email) via [Apprise](https://github.com/caronc/apprise/wiki)
 - Power quality monitoring: voltage, AVR, bypass, overload
 - Read-only API, Prometheus metrics, outbound MQTT, JSON/syslog logs, and Grafana dashboard
-- Official OCI image for remote-only Docker, Podman, and Kubernetes deployments
+- Official OCI image — first-class for both remote-only deployments AND full local-host ownership via SSH loopback delegate (v5.5+)
 - Dry-run mode for safe testing
 - Comprehensive test suite across multiple Linux distros, with E2E tests against real NUT, SSH, Docker, and libvirt on every commit
 
 ---
 
-## Systemd daemon and OCI image
+## Three deployment profiles
 
-Eneru still works best as a native systemd daemon when it owns the local host shutdown sequence: stopping local VMs, stopping local Docker/Podman containers, syncing filesystems, and powering off the machine.
+| Install path | Local-host ownership | Remote systems | Recommended for |
+|---|---|---|---|
+| **pip / deb / rpm (native)** | First-class via systemd | Yes | Homelab, single-host professional, end-user-managed enterprise |
+| **OCI image (Docker / Podman)** | First-class via SSH loopback delegate (v5.5+) | Yes | Homelab, professional, enterprise — the v5.5 default for containerized local-host |
+| **Kubernetes** | Not recommended | Yes | Enterprise multi-site fleet monitoring of remote systems |
 
-v5.4 adds an official OCI image for remote-only Docker, Podman, and Kubernetes deployments. Use it when Eneru monitors NUT, exposes API/health endpoints, publishes telemetry, and shuts down remote systems over SSH. Do not use the image for local-host ownership; install Eneru on the host instead.
+v5.5 made the OCI image first-class for the local-host case: the
+container SSHes to the host it runs on so the namespace barrier
+doesn't block the host-poweroff contract. Pick by deployment
+preference, not capability.
 
-See the [container documentation](https://eneru.readthedocs.io/latest/containers-kubernetes/) for Docker, Podman, SELinux/AppArmor, and Kubernetes examples.
+See [Choose your install](https://eneru.readthedocs.io/latest/install-comparison/)
+for the full feature × install matrix and [Containers and
+Kubernetes](https://eneru.readthedocs.io/latest/containers-kubernetes/)
+for Docker, Podman, SELinux/AppArmor, Kubernetes, and the SSH
+walkthrough.
 
 ---
 
