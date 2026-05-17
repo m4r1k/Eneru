@@ -216,17 +216,53 @@ def _find_host_loopback(config: Config):
     """Return the (group_label, server) pair flagged is_host_loopback, or None.
 
     Config validation already enforces at-most-one across the whole config,
-    so the first match is authoritative.
+    so the first enabled match is authoritative. Disabled loopback entries
+    are explicit non-contracts: they should not make delegation, readiness,
+    or status paths look usable.
     """
     for group in config.ups_groups:
         for server in group.remote_servers:
-            if server.is_host_loopback:
+            if server.enabled and server.is_host_loopback:
                 return group.ups.label, server
     for group in config.redundancy_groups:
         for server in group.remote_servers:
-            if server.is_host_loopback:
+            if server.enabled and server.is_host_loopback:
                 return group.name or "(unnamed)", server
     return None
+
+
+def _has_explicit_loopback_opt_out(config: Config) -> bool:
+    """Return True if any YAML entry explicitly set is_host_loopback: false."""
+    for group in config.ups_groups:
+        for server in group.remote_servers:
+            if (
+                getattr(server, "_is_host_loopback_explicit", False)
+                and not server.is_host_loopback
+            ):
+                return True
+    for group in config.redundancy_groups:
+        for server in group.remote_servers:
+            if (
+                getattr(server, "_is_host_loopback_explicit", False)
+                and not server.is_host_loopback
+            ):
+                return True
+    return False
+
+
+def _uses_loopback_delegate(config: Config, group=None) -> bool:
+    """Shared loopback-delegation predicate for monitor and redundancy code."""
+    runtime = _detect_runtime_context()
+    if not _is_container_runtime(runtime):
+        return False
+    if group is None:
+        group = _local_owner_group(config)
+    if group is None or not getattr(group, "is_local", False):
+        return False
+    return any(
+        s.enabled and s.is_host_loopback
+        for s in getattr(group, "remote_servers", [])
+    )
 
 
 def _local_owner_group(config: Config):
@@ -291,6 +327,8 @@ def _synthesize_loopback_if_needed(
     if not _local_capabilities_required(config):
         return
     if _find_host_loopback(config) is not None:
+        return
+    if _has_explicit_loopback_opt_out(config):
         return
 
     # Pick the synthesis target — prefer the explicit local owner. In legacy
@@ -396,6 +434,30 @@ def _synthesize_loopback_if_needed(
     )
 
 
+def _exit_on_missing_loopback_contract(config: Config) -> None:
+    """Fail Docker/Podman local-host ownership when no enabled loopback exists."""
+    runtime = _detect_runtime_context()
+    if not _is_container_runtime(runtime) or _is_kubernetes_runtime(runtime):
+        return
+    if not _local_capabilities_required(config):
+        return
+    if _find_host_loopback(config) is not None:
+        return
+    print(
+        f"ERROR: Eneru detected runtime '{runtime}' with local-host "
+        "capabilities but no enabled is_host_loopback delegate is configured.",
+        file=sys.stderr,
+    )
+    print(
+        "Docker/Podman local-host ownership must delegate host actions "
+        "through a healthy loopback SSH target. Configure "
+        "remote_servers[].is_host_loopback: true, or remove the local "
+        "capabilities from this container config.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def _inject_delegated_actions(config: Config) -> None:
     """Generate the loopback's pre_shutdown_commands from the local config.
 
@@ -429,7 +491,7 @@ def _inject_delegated_actions(config: Config) -> None:
 
     from eneru.config import RemoteCommandConfig
 
-    generated: List = []
+    generated: list[RemoteCommandConfig] = []
     # Order mirrors the in-process sequence in monitor._execute_shutdown_sequence:
     # VMs first (long graceful wait), then containers (compose stacks then
     # leftover container stops), then sync. Filesystem unmount via SSH is a
@@ -444,6 +506,8 @@ def _inject_delegated_actions(config: Config) -> None:
             ))
         if owner.containers.shutdown_all_remaining_containers:
             generated.append(RemoteCommandConfig(action="stop_containers"))
+        if owner.containers.include_user_containers:
+            generated.append(RemoteCommandConfig(action="stop_containers_rootless"))
     if owner.filesystems.sync_enabled:
         generated.append(RemoteCommandConfig(action="sync"))
     # v5.5 (Commit 2): the unmount_filesystems template covers per-mount
@@ -646,6 +710,7 @@ def _cmd_run(args):
     _prepare_runtime_config(config, strict_key_check=True)
 
     _exit_on_config_errors(config, args)
+    _exit_on_missing_loopback_contract(config)
     _exit_on_privilege_errors(config)
 
     if config.multi_ups or config.redundancy_groups:
@@ -662,7 +727,7 @@ def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
     # SKIPPED at run time — the same work is sent over SSH to the host
     # via the loopback's pre_shutdown_commands. Show that explicitly so
     # `eneru validate` reflects what would actually execute.
-    delegated = any(s.is_host_loopback for s in group.remote_servers)
+    delegated = any(s.enabled and s.is_host_loopback for s in group.remote_servers)
     print(f"{prefix}  Shutdown sequence:")
     step = 1
     indent = f"{prefix}    "

@@ -169,6 +169,16 @@ def run_loopback_identity_probe(
             f"identity probe failed: {stderr.strip() or f'exit code {exit_code}'}"
         ), latency_ms
     actual = stdout.strip()
+    lowered_actual = actual.lower()
+    if any(word in lowered_actual for word in ("shutdown", "poweroff", "reboot", "halt")):
+        return False, (
+            "identity probe returned shutdown-control output instead of "
+            "machine-id. Most likely cause: the loopback key in "
+            "authorized_keys uses command=, which makes sshd substitute "
+            "Eneru's identity probe and generated shutdown actions with "
+            "that forced command. Remove authorized_keys command= for "
+            "Eneru loopback keys."
+        ), latency_ms
     expected = (server.expected_host_identity or "").strip()
     if not expected:
         return False, (
@@ -176,7 +186,8 @@ def run_loopback_identity_probe(
             "readable at startup and no explicit expected_host_identity was "
             "configured. Bind-mount the host's /etc/machine-id read-only "
             "(-v /etc/machine-id:/etc/machine-id:ro for Docker; hostPath "
-            "volume for Kubernetes)."
+            "volume for Kubernetes). If /etc/machine-id is empty on the "
+            "host, initialize it with systemd-machine-id-setup."
         ), latency_ms
     if actual != expected:
         return False, (
@@ -257,10 +268,14 @@ class RemoteHealthManager:
             )
             for server in self.servers
         }
+        for server in self.servers:
+            if server.is_host_loopback:
+                self._statuses[self._key(server)].status = REMOTE_HEALTH_UNKNOWN
 
     def start(self) -> None:
         """Start the background healthcheck loop if configured."""
-        if (not self.config.remote_health.enabled) or not self.servers:
+        has_loopback = any(s.is_host_loopback for s in self.servers)
+        if ((not self.config.remote_health.enabled) and not has_loopback) or not self.servers:
             self._write_sidecar()
             return
         if self._thread is not None:
@@ -287,12 +302,15 @@ class RemoteHealthManager:
 
     def check_once(self) -> List[dict]:
         """Run one healthcheck cycle synchronously."""
-        if not self.config.remote_health.enabled:
+        has_loopback = any(s.is_host_loopback for s in self.servers)
+        if not self.config.remote_health.enabled and not has_loopback:
             self._write_sidecar()
             return self.snapshot()
         for server in self.servers:
             if self.stop_event.is_set():
                 break
+            if not self.config.remote_health.enabled and not server.is_host_loopback:
+                continue
             self._check_server(server)
         self._write_sidecar()
         return self.snapshot()
@@ -313,7 +331,15 @@ class RemoteHealthManager:
         self._write_sidecar()
 
         probe = self._validated_probe_command
-        if probe is None:
+        if server.is_host_loopback and not (server.expected_host_identity or "").strip():
+            success, error, latency_ms = False, (
+                "host identity unknown: container-side /etc/machine-id was not "
+                "readable at startup and no explicit expected_host_identity was "
+                "configured. Bind-mount the host's /etc/machine-id read-only. "
+                "If /etc/machine-id is empty on the host, initialize it with "
+                "systemd-machine-id-setup."
+            ), 0
+        elif probe is None:
             success, error, latency_ms = False, "unsafe probe command rejected", 0
         else:
             success, error, latency_ms = run_remote_probe(server, probe)

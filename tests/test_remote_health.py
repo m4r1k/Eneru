@@ -9,11 +9,13 @@ import pytest
 from eneru import Config, RemoteServerConfig
 from eneru.remote_health import (
     REMOTE_HEALTH_DEGRADED,
+    REMOTE_HEALTH_DISABLED,
     REMOTE_HEALTH_FAILED,
     REMOTE_HEALTH_HEALTHY,
     RemoteHealthManager,
     build_ssh_probe_command,
     is_safe_probe_command,
+    run_loopback_identity_probe,
 )
 
 
@@ -600,6 +602,95 @@ def test_loopback_identity_match_keeps_healthy(tmp_path):
                return_value=(True, "", 3)):
         rows = manager.check_once()
     assert rows[0]["status"] == REMOTE_HEALTH_HEALTHY
+
+
+@pytest.mark.unit
+def test_loopback_probe_runs_even_when_remote_health_disabled(tmp_path):
+    """remote_health.enabled=false disables regular remotes, not loopback identity guard."""
+    config = Config()
+    config.remote_health.enabled = False
+    config.remote_health.failure_threshold = 1
+    server = _make_loopback_server()
+
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+    )
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(True, "", 8)) as probe_mock, \
+         patch("eneru.remote_health.run_loopback_identity_probe",
+               return_value=(True, "", 3)) as id_mock:
+        rows = manager.check_once()
+
+    assert rows[0]["status"] == REMOTE_HEALTH_HEALTHY
+    probe_mock.assert_called_once()
+    id_mock.assert_called_once()
+
+
+@pytest.mark.unit
+def test_regular_remote_stays_disabled_when_remote_health_disabled(tmp_path):
+    config = Config()
+    config.remote_health.enabled = False
+    server = RemoteServerConfig(
+        name="nas",
+        enabled=True,
+        host="nas.example",
+        user="root",
+    )
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+    )
+    with patch("eneru.remote_health.run_remote_probe") as probe_mock:
+        rows = manager.check_once()
+
+    assert rows[0]["status"] == REMOTE_HEALTH_DISABLED
+    probe_mock.assert_not_called()
+
+
+@pytest.mark.unit
+def test_empty_machine_id_fails_with_setup_hint(tmp_path):
+    """Missing host identity should point at machine-id setup, not limp through."""
+    config = Config()
+    config.remote_health.enabled = True
+    config.remote_health.failure_threshold = 1
+    server = _make_loopback_server(expected_host_identity=None)
+    with patch("eneru.remote_health._read_container_machine_id", return_value=None):
+        manager = RemoteHealthManager(
+            config=config,
+            group_label="Rack",
+            servers=[server],
+            sidecar_path=tmp_path / "state.remote-health.json",
+            stop_event=threading.Event(),
+            log_fn=lambda msg: None,
+        )
+
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(True, "", 8)):
+        rows = manager.check_once()
+
+    assert rows[0]["status"] == REMOTE_HEALTH_FAILED
+    assert "systemd-machine-id-setup" in rows[0]["last_error"]
+
+
+@pytest.mark.unit
+def test_forced_command_shutdown_response_fails_with_command_hint(tmp_path):
+    """authorized_keys command= rewrites probes; call that out directly."""
+    server = _make_loopback_server(expected_host_identity="abc123")
+    with patch("eneru.remote_health.run_command",
+               return_value=(0, "Shutdown scheduled for Sun 2026-05-17\n", "")):
+        ok, error, _ = run_loopback_identity_probe(server)
+
+    assert ok is False
+    assert "authorized_keys command=" in error
 
 
 @pytest.mark.unit

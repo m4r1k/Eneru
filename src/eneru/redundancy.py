@@ -133,6 +133,12 @@ class RedundancyGroupExecutor(
         self._lock = threading.Lock()
         self._shutdown_done = False
 
+    @property
+    def _uses_loopback_delegate(self) -> bool:
+        """True when this redundancy group's local actions run via loopback SSH."""
+        from eneru.cli import _uses_loopback_delegate
+        return _uses_loopback_delegate(self.config, self.config.ups_groups[0])
+
     # ----- mixin contract: minimum logging + notification primitives -----
 
     def _log_message(self, message: str):
@@ -386,7 +392,8 @@ class RedundancyGroupExecutor(
             self._log_message("🧪 *** DRY-RUN MODE: No actual shutdown will occur ***")
 
         try:
-            if self._group.is_local:
+            delegating = self._uses_loopback_delegate
+            if self._group.is_local and not delegating:
                 self._shutdown_vms()
                 self._shutdown_containers()
                 self._sync_filesystems()
@@ -404,6 +411,7 @@ class RedundancyGroupExecutor(
             # checks dry_run and local_shutdown.enabled.
             if (
                 self._group.is_local
+                and not delegating
                 and self._local_shutdown_callback is not None
             ):
                 self._local_shutdown_callback(

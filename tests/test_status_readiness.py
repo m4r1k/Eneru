@@ -201,6 +201,32 @@ class TestReadinessNativeInstall:
             payload = readiness(source)
         assert payload["ready"] is True
 
+    @pytest.mark.unit
+    def test_local_poweroff_uses_configured_command_binary(self):
+        """Readiness should check /sbin/halt when that is the configured command."""
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"),
+                is_local=True,
+            )],
+            local_shutdown=LocalShutdownConfig(
+                enabled=True,
+                command="/sbin/halt -p",
+                trigger_on="any",
+            ),
+        )
+        source = _make_source(config=config, snapshot=_ok_snapshot())
+
+        def exists(binary):
+            return binary == "/sbin/halt"
+
+        with patch("eneru.status._runtime_context_label",
+                   return_value="systemd service"), \
+             patch("eneru.status.command_exists", side_effect=exists):
+            payload = readiness(source)
+
+        assert payload["ready"] is True
+
 
 class TestReadinessContainerWithLoopback:
     """Container with loopback: local_* achievability = loopback HEALTHY."""
@@ -362,3 +388,27 @@ class TestReadinessLoopbackRuntimePayload:
         assert delegate["configured"] is True
         assert delegate["host"] == "127.0.0.1"
         assert delegate["user"] == "root"
+
+    @pytest.mark.unit
+    def test_disabled_loopback_is_not_reported_as_configured(self):
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"),
+                is_local=True,
+                remote_servers=[
+                    RemoteServerConfig(
+                        name="host-loopback", enabled=False,
+                        host="127.0.0.1", user="root",
+                        is_host_loopback=True,
+                    ),
+                ],
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=True, trigger_on="any"),
+        )
+        source = _make_source(config=config, snapshot=_ok_snapshot())
+        with patch("eneru.status._runtime_context_label",
+                   return_value="container (Docker)"), \
+             patch("eneru.status.live_remote_health", return_value=[]):
+            payload = readiness(source)
+
+        assert payload["runtime"]["loopbackDelegate"] == {"configured": False}

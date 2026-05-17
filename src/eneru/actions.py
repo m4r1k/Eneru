@@ -21,12 +21,16 @@ Render context (always supplied by ``_render_action_context`` in
   loops. Default 1 (matches pre-v5.5 behavior).
 * ``umount_targets`` — newline-separated ``mount_point|options``
   records for ``unmount_filesystems``. Empty disables the action.
+* ``sudo`` — either ``"sudo -n "`` when ``remote_servers[].use_sudo``
+  is enabled, or the empty string. Used only on privileged write-side
+  host actions; rootless Podman keeps its explicit ``sudo -u`` calls.
 
 Placeholders that may contain literal ``{`` / ``}`` characters (awk
 programs, embedded shell ``${var}``) must be doubled to ``{{`` /
 ``}}`` so ``str.format`` leaves them alone.
 """
 
+import shlex
 from typing import Dict, List, Optional, Tuple
 
 # Predefined actions for remote pre-shutdown commands.
@@ -46,9 +50,9 @@ REMOTE_ACTIONS: Dict[str, str] = {
         'BEGIN {{ n = split(skip, a, ","); for (i=1;i<=n;i++) m[substr(a[i],1,12)]=1 }} '
         '!(substr($0,1,12) in m)\'; }}; '
         'command -v docker >/dev/null 2>&1 && '
-        'docker ps -q 2>/dev/null | _filter | xargs -r docker stop -t $t 2>/dev/null; '
+        '{sudo}docker ps -q 2>/dev/null | _filter | xargs -r {sudo}docker stop -t $t 2>/dev/null; '
         'command -v podman >/dev/null 2>&1 && '
-        'podman ps -q 2>/dev/null | _filter | xargs -r podman stop -t $t 2>/dev/null; '
+        '{sudo}podman ps -q 2>/dev/null | _filter | xargs -r {sudo}podman stop -t $t 2>/dev/null; '
         'true'
     ),
 
@@ -79,10 +83,10 @@ REMOTE_ACTIONS: Dict[str, str] = {
     "stop_vms": (
         't={timeout}; '
         'wait={wait_interval}; '
-        'virsh list --name --state-running | xargs -r -n1 virsh shutdown; '
+        '{sudo}virsh list --name --state-running | xargs -r -n1 {sudo}virsh shutdown; '
         'end=$((SECONDS+t)); '
-        'while [ $SECONDS -lt $end ] && virsh list --name --state-running | grep -q .; do sleep $wait; done; '
-        'virsh list --name --state-running | xargs -r -n1 virsh destroy 2>/dev/null; '
+        'while [ $SECONDS -lt $end ] && {sudo}virsh list --name --state-running | grep -q .; do sleep $wait; done; '
+        '{sudo}virsh list --name --state-running | xargs -r -n1 {sudo}virsh destroy 2>/dev/null; '
         'true'
     ),
 
@@ -151,9 +155,9 @@ REMOTE_ACTIONS: Dict[str, str] = {
         'skip="{skip_ids}"; '
         '_compose() {{ '
         '  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then '
-        '    docker compose "$@"; '
+        '    {sudo}docker compose "$@"; '
         '  elif command -v podman >/dev/null 2>&1; then '
-        '    podman compose "$@"; '
+        '    {sudo}podman compose "$@"; '
         '  else return 127; fi; }}; '
         # Detect self-inclusion: if any container in this stack matches
         # a 12-char prefix from skip_ids, abort the stack teardown.
@@ -171,19 +175,22 @@ REMOTE_ACTIONS: Dict[str, str] = {
     # v5.5: NEW template; ``unmount`` was missing from REMOTE_ACTIONS
     # entirely until now (the existing ``sync`` template only flushed
     # caches). Format of ``umount_targets``: newline-separated
-    # ``mount_point|options`` records. Empty options field is fine.
+    # shell-quoted ``mount_point options`` records. Empty options field is fine.
     "unmount_filesystems": (
         't={timeout}; '
-        'targets="{umount_targets}"; '
+        'targets={umount_targets}; '
         '[ -z "$targets" ] && exit 0; '
-        'printf "%s\\n" "$targets" | while IFS="|" read -r mp opts; do '
+        'printf "%s\\n" "$targets" | while IFS= read -r record; do '
+        '  [ -z "$record" ] && continue; '
+        '  eval "set -- $record"; '
+        '  mp=$1; opts=$2; '
         '  [ -z "$mp" ] && continue; '
         '  if [ -n "$opts" ]; then '
-        '    timeout "$t" umount $opts "$mp" 2>/dev/null || '
-        '      timeout "$t" umount -l "$mp" 2>/dev/null || true; '
+        '    timeout "$t" {sudo}umount $opts "$mp" 2>/dev/null || '
+        '      timeout "$t" {sudo}umount -l "$mp" 2>/dev/null || true; '
         '  else '
-        '    timeout "$t" umount "$mp" 2>/dev/null || '
-        '      timeout "$t" umount -l "$mp" 2>/dev/null || true; '
+        '    timeout "$t" {sudo}umount "$mp" 2>/dev/null || '
+        '      timeout "$t" {sudo}umount -l "$mp" 2>/dev/null || true; '
         '  fi; '
         'done; '
         'true'
@@ -199,15 +206,15 @@ REMOTE_ACTIONS: Dict[str, str] = {
 # keys a given template actually needs (and by the parity / drift
 # detector tests to verify every action is wired through the registry).
 REMOTE_ACTION_PLACEHOLDERS: Dict[str, Tuple[str, ...]] = {
-    "stop_containers": ("timeout", "skip_ids"),
+    "stop_containers": ("timeout", "skip_ids", "sudo"),
     "stop_containers_rootless": ("timeout", "skip_ids"),
-    "stop_vms": ("timeout", "wait_interval"),
+    "stop_vms": ("timeout", "wait_interval", "sudo"),
     "stop_proxmox_vms": ("timeout",),
     "stop_proxmox_cts": ("timeout",),
     "stop_xcpng_vms": ("timeout",),
     "stop_esxi_vms": ("timeout",),
-    "stop_compose": ("timeout", "path", "skip_ids"),
-    "unmount_filesystems": ("timeout", "umount_targets"),
+    "stop_compose": ("timeout", "path", "skip_ids", "sudo"),
+    "unmount_filesystems": ("timeout", "umount_targets", "sudo"),
     "sync": (),
 }
 
@@ -220,6 +227,7 @@ def render_action(
     skip_ids: str = "",
     umount_targets: str = "",
     wait_interval: int = 1,
+    use_sudo: bool = False,
 ) -> str:
     """Render a REMOTE_ACTIONS template with the supplied context.
 
@@ -230,12 +238,14 @@ def render_action(
     caller doesn't need to know which template uses which placeholder.
     """
     template = REMOTE_ACTIONS[action_name]
+    sudo = "sudo -n " if use_sudo else ""
     return template.format(
         timeout=timeout,
         path=path,
         skip_ids=skip_ids,
-        umount_targets=umount_targets,
+        umount_targets=shlex.quote(umount_targets),
         wait_interval=wait_interval,
+        sudo=sudo,
     )
 
 
@@ -247,10 +257,9 @@ def serialize_umount_targets(
     Input: list of ``{"path": str, "options": str | None}`` mappings as
     produced by ``ConfigLoader._parse_filesystems_config``.
 
-    Output: newline-separated ``mount_point|options`` records, ready to
-    embed into the rendered shell template. Empty options field is
-    represented as an empty string after the pipe so the shell's
-    ``IFS="|" read`` sees the right number of fields.
+    Output: newline-separated shell-quoted ``mount_point options`` records,
+    ready to embed into the rendered shell template. ``shlex.quote`` keeps
+    paths with spaces, pipes, quotes, or shell metacharacters as data.
     """
     records: List[str] = []
     for m in mounts:
@@ -258,5 +267,5 @@ def serialize_umount_targets(
         if not mp:
             continue
         opts = (m.get("options") or "").strip()
-        records.append(f"{mp}|{opts}")
+        records.append(f"{shlex.quote(mp)} {shlex.quote(opts)}")
     return "\n".join(records)

@@ -801,7 +801,7 @@ class UPSGroupMonitor(
             print(error_msg)
             sys.exit(1)
 
-        if not command_exists("logger"):
+        if not command_exists("logger") and not self._is_container_runtime:
             self._log_message(
                 "⚠️ WARNING: 'logger' not found. Power events will still be "
                 "written to Eneru logs, but the legacy syslog side-channel "
@@ -1014,17 +1014,23 @@ class UPSGroupMonitor(
         skipped — the loopback's pre_shutdown_commands and shutdown_command
         own those host-side effects.
         """
-        # Lazy import: monitor.py is imported very early; cli.py imports it
-        # back via the run command path.
-        from eneru.cli import _detect_runtime_context, _is_container_runtime
-        if not _is_container_runtime(_detect_runtime_context()):
-            return False
+        from eneru.cli import _uses_loopback_delegate
         group = self.config.ups_groups[0] if self.config.ups_groups else None
-        is_local = group.is_local if group else True
-        if not is_local:
-            return False
-        servers = group.remote_servers if group else self.config.remote_servers
-        return any(s.is_host_loopback for s in servers)
+        return _uses_loopback_delegate(self.config, group)
+
+    @property
+    def _is_container_runtime(self) -> bool:
+        """Return True when this daemon is running inside any container runtime."""
+        from eneru.cli import _detect_runtime_context, _is_container_runtime
+        return _is_container_runtime(_detect_runtime_context())
+
+    def _should_fire_wall(self) -> bool:
+        """wall(1) is useful on native ttys, but reaches nobody from containers."""
+        return (
+            self.config.local_shutdown.wall
+            and not self.config.behavior.dry_run
+            and not self._is_container_runtime
+        )
 
     def _execute_shutdown_sequence(self):
         """Execute the controlled shutdown sequence."""
@@ -1057,11 +1063,7 @@ class UPSGroupMonitor(
         # `wall` is an archaic v1/v2 path that reaches users via local ttys.
         # When delegating from a container it reaches nobody on the host, so
         # suppress it entirely rather than firing an empty broadcast.
-        if (
-            self.config.local_shutdown.wall
-            and not self.config.behavior.dry_run
-            and not delegated
-        ):
+        if self._should_fire_wall():
             run_command([
                 "wall",
                 "🚨 CRITICAL: Executing emergency UPS shutdown sequence NOW!"
@@ -1233,7 +1235,7 @@ class UPSGroupMonitor(
             pass  # stats hiccup must not block the safety-critical path
 
         self._log_message(f"🚨 CRITICAL: Triggering immediate shutdown. Reason: {reason}")
-        if self.config.local_shutdown.wall and not self.config.behavior.dry_run:
+        if self._should_fire_wall():
             run_command([
                 "wall",
                 f"🚨 CRITICAL: UPS battery critical! Immediate shutdown initiated! Reason: {reason}"
@@ -1392,7 +1394,7 @@ class UPSGroupMonitor(
                 "ON_BATTERY",
                 f"Battery: {battery_charge}%, Runtime: {battery_runtime} seconds, Load: {ups_load}%"
             )
-            if self.config.local_shutdown.wall and not self.config.behavior.dry_run:
+            if self._should_fire_wall():
                 run_command([
                     "wall",
                     f"⚠️ WARNING: Power failure detected! System running on UPS battery "
@@ -1523,7 +1525,7 @@ class UPSGroupMonitor(
                 f"Battery: {battery_charge}% (Status: {ups_status}), "
                 f"Input: {input_voltage}V, Outage duration: {format_seconds(time_on_battery)}"
             )
-            if self.config.local_shutdown.wall and not self.config.behavior.dry_run:
+            if self._should_fire_wall():
                 run_command([
                     "wall",
                     f"✅ Power has been restored. UPS Status: {ups_status}. "

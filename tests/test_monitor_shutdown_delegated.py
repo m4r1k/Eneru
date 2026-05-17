@@ -102,6 +102,13 @@ class TestUsesLoopbackDelegate:
             assert monitor._uses_loopback_delegate is False
 
     @pytest.mark.unit
+    def test_false_when_loopback_disabled(self, tmp_path):
+        monitor = _make_delegated_monitor(tmp_path)
+        monitor.config.remote_servers[0].enabled = False
+        with _patch_runtime("container (Docker)"):
+            assert monitor._uses_loopback_delegate is False
+
+    @pytest.mark.unit
     def test_false_on_bare_metal(self, tmp_path):
         """Bare-metal install with a loopback entry shouldn't delegate —
         config validation should have prevented that case anyway."""
@@ -507,3 +514,55 @@ class TestInjectDelegatedActions:
         with patch("eneru.cli._detect_runtime_context",
                    return_value="container (Docker)"):
             _inject_delegated_actions(config)
+
+    @pytest.mark.unit
+    def test_disabled_loopback_is_ignored_for_injection(self, tmp_path):
+        """A disabled loopback must not satisfy the delegation contract."""
+        from eneru import ConfigLoader
+        from eneru.cli import _inject_delegated_actions
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "virtual_machines:\n"
+            "  enabled: true\n"
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: false\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+            "    is_host_loopback: true\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _inject_delegated_actions(config)
+
+        assert config.remote_servers[0].pre_shutdown_commands == []
+
+    @pytest.mark.unit
+    def test_explicit_false_blocks_synthesis(self, tmp_path):
+        """is_host_loopback: false means the operator explicitly opted out."""
+        from eneru import ConfigLoader
+        from eneru.cli import _synthesize_loopback_if_needed
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "virtual_machines:\n"
+            "  enabled: true\n"
+            "remote_servers:\n"
+            "  - name: not-loopback\n"
+            "    enabled: true\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+            "    is_host_loopback: false\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _synthesize_loopback_if_needed(config, strict_key_check=False)
+
+        assert [s.name for s in config.remote_servers] == ["not-loopback"]

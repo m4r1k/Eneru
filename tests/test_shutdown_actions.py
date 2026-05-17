@@ -150,6 +150,7 @@ class TestRenderAction:
             assert "{skip_ids}" not in rendered, name
             assert "{umount_targets}" not in rendered, name
             assert "{wait_interval}" not in rendered, name
+            assert "{sudo}" not in rendered, name
 
     @pytest.mark.unit
     def test_placeholders_registry_matches_templates(self):
@@ -163,6 +164,35 @@ class TestRenderAction:
                 assert (
                     "{" + ph + "}" in template
                 ), f"{name} registry claims {{{ph}}} but template doesn't use it"
+
+    @pytest.mark.unit
+    def test_use_sudo_prefixes_privileged_actions(self):
+        """use_sudo renders write-side host actions through sudo -n."""
+        checks = {
+            "stop_vms": "sudo -n virsh",
+            "stop_containers": "sudo -n docker",
+            "stop_compose": "sudo -n docker compose",
+            "unmount_filesystems": "sudo -n umount",
+        }
+        for action, expected in checks.items():
+            rendered = render_action(
+                action,
+                timeout=30,
+                path="/srv/app/docker-compose.yml",
+                umount_targets="/mnt/data|",
+                use_sudo=True,
+            )
+            assert expected in rendered
+
+    @pytest.mark.unit
+    def test_rootless_container_action_does_not_get_outer_sudo(self):
+        rendered = render_action(
+            "stop_containers_rootless",
+            timeout=30,
+            use_sudo=True,
+        )
+        assert "sudo -n" not in rendered
+        assert 'sudo -u "$user" podman' in rendered
 
 
 # -----------------------------------------------------------------------------
@@ -355,7 +385,16 @@ class TestUnmountFilesystems:
             {"path": "", "options": "-l"},  # dropped
             {"path": "/mnt/b", "options": "-l"},
         ])
-        assert out == "/mnt/a|\n/mnt/b|-l"
+        assert out == "/mnt/a ''\n/mnt/b -l"
+
+    @pytest.mark.unit
+    def test_serialize_umount_targets_quotes_shell_metacharacters(self):
+        out = serialize_umount_targets([
+            {"path": "/mnt/a dir/pipe|quote'$(touch x)", "options": "-l -f"},
+        ])
+        assert "'\"'\"'" in out
+        assert "$(touch x)" in out
+        assert out.startswith("'/mnt/a dir/pipe|quote")
 
 
 # -----------------------------------------------------------------------------
@@ -404,28 +443,58 @@ class TestNoDriftBetweenInProcessAndTemplates:
         "mountpoint": None,  # introspection only, no remote analogue
         "loginctl": "stop_containers_rootless",
         "sudo": None,  # transport, not a unique action
+        "ssh": None,  # transport used by RemoteShutdownMixin
     }
 
     @pytest.mark.unit
     def test_every_in_process_binary_has_a_template(self):
-        import re
+        import ast
         shutdown_dir = Path(__file__).parent.parent / "src" / "eneru" / "shutdown"
-        # Grep run_command(["X", ...]) and run_command(["sudo", "-u", "user", "X", ...]).
-        pattern = re.compile(r'run_command\(\s*\[\s*"([^"]+)"')
+
+        def literal_list(node):
+            if not isinstance(node, ast.List):
+                return None
+            values = []
+            for elt in node.elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                    values.append(elt.value)
+                else:
+                    values.append(None)
+            return values
+
+        def command_arg_name(node):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "run_command":
+                if node.args:
+                    return node.args[0]
+            return None
+
         seen_binaries = set()
         for py in shutdown_dir.glob("*.py"):
-            for line in py.read_text().splitlines():
-                m = pattern.search(line)
-                if not m:
+            tree = ast.parse(py.read_text())
+            assignments = {}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    values = literal_list(node.value)
+                    if values is None:
+                        continue
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            assignments[target.id] = values
+                arg = command_arg_name(node)
+                if arg is None:
                     continue
-                binary = m.group(1)
+                values = literal_list(arg)
+                if values is None and isinstance(arg, ast.Name):
+                    values = assignments.get(arg.id)
+                if not values:
+                    continue
+                binary = values[0]
+                if binary is None:
+                    continue
                 if binary == "sudo":
-                    # `sudo -u user podman ...` — find the real binary after sudo.
-                    inner = re.search(
-                        r'"sudo"\s*,\s*"-u"\s*,\s*[^,]+,\s*"([^"]+)"', line
-                    )
-                    if inner:
-                        binary = inner.group(1)
+                    # `sudo -u user podman ...` — classify the real binary after sudo.
+                    if len(values) >= 4 and values[1] == "-u" and values[3]:
+                        binary = values[3]
                 seen_binaries.add(binary)
 
         # Every binary the in-process path uses must be either covered by

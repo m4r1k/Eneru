@@ -55,6 +55,18 @@ class RemoteShutdownResult:
 class RemoteShutdownMixin:
     """Mixin: SSH-based remote-server orchestration and shutdown."""
 
+    @staticmethod
+    def _with_sudo(command: str, use_sudo: bool) -> str:
+        """Prefix a remote command with sudo -n when configured.
+
+        The check is intentionally idempotent so existing configs that
+        already spell out ``sudo shutdown ...`` keep their exact command.
+        """
+        stripped = command.lstrip()
+        if not use_sudo or stripped.startswith("sudo "):
+            return command
+        return f"sudo -n {command}"
+
     def _shutdown_remote_servers(self):
         """Shutdown all enabled remote servers via SSH.
 
@@ -446,6 +458,7 @@ class RemoteShutdownMixin:
                     path=shlex.quote(cmd_config.path or ""),
                     skip_ids=skip_ids,
                     umount_targets=umount_targets,
+                    use_sudo=server.use_sudo,
                 )
                 description = action_name
 
@@ -548,20 +561,24 @@ class RemoteShutdownMixin:
             return result
 
         # Execute final shutdown command
-        self._log_message(f"  🔌 Sending shutdown command: {server.shutdown_command}")
+        shutdown_command = self._with_sudo(
+            server.shutdown_command,
+            server.use_sudo,
+        )
+        self._log_message(f"  🔌 Sending shutdown command: {shutdown_command}")
 
         if self.config.behavior.dry_run:
             result.shutdown_sent = True
             result.dry_run = True
             self._log_message(
-                f"  🧪 [DRY-RUN] Would send command '{server.shutdown_command}' to "
+                f"  🧪 [DRY-RUN] Would send command '{shutdown_command}' to "
                 f"{server.user}@{server.host}"
             )
             return result
 
         success, error_msg = self._run_remote_command(
             server,
-            server.shutdown_command,
+            shutdown_command,
             server.command_timeout,
             "shutdown",
             deadline=deadline,

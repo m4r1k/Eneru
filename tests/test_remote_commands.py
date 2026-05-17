@@ -215,6 +215,49 @@ class TestRemotePreShutdownExecution:
             assert "t=60" in command  # Timeout substituted
 
     @pytest.mark.unit
+    def test_execute_pre_shutdown_with_use_sudo(self, remote_monitor):
+        """use_sudo should render delegated write actions through sudo -n."""
+        server = RemoteServerConfig(
+            name="Loopback",
+            enabled=True,
+            host="127.0.0.1",
+            user="eneru-loopback",
+            use_sudo=True,
+            command_timeout=30,
+            pre_shutdown_commands=[
+                RemoteCommandConfig(action="stop_vms", timeout=60),
+            ],
+        )
+
+        with patch.object(remote_monitor, "_run_remote_command", return_value=(True, "")) as mock_run:
+            remote_monitor._execute_remote_pre_shutdown(server)
+
+        command = mock_run.call_args[0][1]
+        assert "sudo -n virsh" in command
+
+    @pytest.mark.unit
+    def test_shutdown_command_use_sudo_prefix_is_idempotent(self, remote_monitor):
+        """Final shutdown command gets sudo -n unless it already starts with sudo."""
+        server = RemoteServerConfig(
+            name="Loopback",
+            enabled=True,
+            host="127.0.0.1",
+            user="eneru-loopback",
+            use_sudo=True,
+            shutdown_command="shutdown -h now",
+        )
+
+        with patch.object(remote_monitor, "_run_remote_command", return_value=(True, "")) as mock_run:
+            remote_monitor._shutdown_remote_server(server)
+
+        assert mock_run.call_args[0][1] == "sudo -n shutdown -h now"
+
+        server.shutdown_command = "sudo shutdown -h now"
+        with patch.object(remote_monitor, "_run_remote_command", return_value=(True, "")) as mock_run:
+            remote_monitor._shutdown_remote_server(server)
+        assert mock_run.call_args[0][1] == "sudo shutdown -h now"
+
+    @pytest.mark.unit
     def test_execute_pre_shutdown_with_custom_command(self, remote_monitor):
         """Test executing pre-shutdown with custom command."""
         server = RemoteServerConfig(

@@ -1,6 +1,7 @@
 """Shared read-only status models for API, metrics, MQTT, and TUI."""
 
 import time
+import shlex
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -200,7 +201,6 @@ _LOCAL_CAPABILITY_BINARIES: Dict[str, List[str]] = {
     "local_vm_teardown": ["virsh"],
     "local_container_teardown": ["docker", "podman"],  # either works
     "local_filesystem_unmount": ["umount"],
-    "local_host_poweroff": ["shutdown", "poweroff"],  # either works
 }
 
 
@@ -265,6 +265,7 @@ def _capability_achievable(
     nut_ready: bool,
     loopback_status: Optional[str],
     remote_health_by_target: Dict[str, str],
+    local_shutdown_command: str = "",
 ) -> Tuple[bool, str]:
     """Return ``(achievable, reason)`` for one capability under the live state.
 
@@ -302,7 +303,14 @@ def _capability_achievable(
             "cannot be executed on the host"
         )
     # Native install: check binary presence
-    candidates = _LOCAL_CAPABILITY_BINARIES.get(cap, [])
+    if cap == "local_host_poweroff":
+        try:
+            parts = shlex.split(local_shutdown_command)
+        except ValueError:
+            parts = []
+        candidates = [parts[0]] if parts else []
+    else:
+        candidates = _LOCAL_CAPABILITY_BINARIES.get(cap, [])
     if not candidates:
         return True, ""  # no binary needed
     for binary in candidates:
@@ -377,6 +385,7 @@ def readiness(source: Any) -> Dict[str, Any]:
             nut_ready=nut_ready,
             loopback_status=loopback_status,
             remote_health_by_target=remote_health_by_target,
+            local_shutdown_command=config.local_shutdown.command,
         )
         capabilities.append({
             "id": cap,
@@ -410,7 +419,7 @@ def _loopback_runtime_summary(
     configured = None
     for group in config.ups_groups:
         for s in group.remote_servers:
-            if s.is_host_loopback:
+            if s.enabled and s.is_host_loopback:
                 configured = s
                 break
         if configured:
@@ -418,7 +427,7 @@ def _loopback_runtime_summary(
     if configured is None:
         for group in config.redundancy_groups:
             for s in group.remote_servers:
-                if s.is_host_loopback:
+                if s.enabled and s.is_host_loopback:
                     configured = s
                     break
             if configured:

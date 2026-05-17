@@ -280,6 +280,7 @@ class RemoteServerConfig:
     connect_timeout: int = 10
     command_timeout: int = 30
     shutdown_command: str = "sudo shutdown -h now"
+    use_sudo: bool = False
     ssh_key_path: Optional[str] = None
     ssh_options: List[str] = field(default_factory=list)
     pre_shutdown_commands: List[RemoteCommandConfig] = field(default_factory=list)
@@ -304,6 +305,7 @@ class RemoteServerConfig:
     # to control before any destructive action is sent. See docs/install-comparison.md
     # and docs/containers-kubernetes.md.
     is_host_loopback: bool = False
+    _is_host_loopback_explicit: bool = False
     host_identity_command: str = "cat /etc/machine-id"
     expected_host_identity: Optional[str] = None
 
@@ -686,6 +688,7 @@ class ConfigLoader:
                         path=cmd_data.get('path'),
                     ))
             is_loopback = bool(server_data.get('is_host_loopback', False))
+            is_loopback_explicit = 'is_host_loopback' in server_data
             # Loopback entries default host to 127.0.0.1 — with `network_mode: host`
             # (the recommended path for full local ownership) this is the host's sshd.
             default_host = '127.0.0.1' if is_loopback else ''
@@ -697,6 +700,7 @@ class ConfigLoader:
                 connect_timeout=server_data.get('connect_timeout', 10),
                 command_timeout=server_data.get('command_timeout', 30),
                 shutdown_command=server_data.get('shutdown_command', 'sudo shutdown -h now'),
+                use_sudo=server_data.get('use_sudo', False),
                 ssh_key_path=server_data.get('ssh_key_path'),
                 ssh_options=server_data.get('ssh_options', []),
                 pre_shutdown_commands=pre_cmds,
@@ -704,6 +708,7 @@ class ConfigLoader:
                 shutdown_order=server_data.get('shutdown_order'),
                 shutdown_safety_margin=server_data.get('shutdown_safety_margin', 60),
                 is_host_loopback=is_loopback,
+                _is_host_loopback_explicit=is_loopback_explicit,
                 host_identity_command=server_data.get(
                     'host_identity_command', 'cat /etc/machine-id'),
                 expected_host_identity=server_data.get('expected_host_identity'),
@@ -1164,7 +1169,7 @@ class ConfigLoader:
             remote_server_keys = {
                 "name", "enabled", "host", "user", "connect_timeout",
                 "command_timeout", "shutdown_command", "ssh_key_path",
-                "ssh_options", "pre_shutdown_commands", "parallel",
+                "use_sudo", "ssh_options", "pre_shutdown_commands", "parallel",
                 "shutdown_order", "shutdown_safety_margin",
                 "is_host_loopback", "host_identity_command",
                 "expected_host_identity",
@@ -1597,7 +1602,12 @@ class ConfigLoader:
             if not srv.enabled:
                 continue
             user = srv.user.strip().lower()
-            if user and user != "root" and not srv.shutdown_command.strip().startswith("sudo "):
+            if (
+                user
+                and user != "root"
+                and not srv.use_sudo
+                and not srv.shutdown_command.strip().startswith("sudo ")
+            ):
                 where = f"{owner}/{srv.name or srv.host or '(unnamed)'}"
                 messages.append(
                     f"WARNING: remote_server '{where}' user is {srv.user!r} "
@@ -1750,6 +1760,29 @@ class ConfigLoader:
         server_groups = [g.remote_servers for g in config.ups_groups]
         server_groups.extend(g.remote_servers for g in config.redundancy_groups)
         for servers in server_groups:
+            enabled_others = [
+                s for s in servers if s.enabled and not s.is_host_loopback
+            ]
+            for loopback in [s for s in servers if s.enabled and s.is_host_loopback]:
+                if enabled_others and loopback.shutdown_order is None:
+                    messages.append(
+                        f"ERROR: Remote server '{loopback.name or loopback.host}' "
+                        "is_host_loopback must set shutdown_order greater than "
+                        "every other enabled remote server in the same group. "
+                        "The host poweroff delegate must run last."
+                    )
+                    continue
+                other_orders = [
+                    s.shutdown_order if s.shutdown_order is not None else 0
+                    for s in enabled_others
+                ]
+                if other_orders and loopback.shutdown_order <= max(other_orders):
+                    messages.append(
+                        f"ERROR: Remote server '{loopback.name or loopback.host}' "
+                        "is_host_loopback must have shutdown_order greater than "
+                        "every other enabled remote server in the same group. "
+                        "The host poweroff delegate must run last."
+                    )
             for server in servers:
                 display = server.name or server.host
 
@@ -1760,6 +1793,12 @@ class ConfigLoader:
                             f"ERROR: Remote server '{display}': ssh_key_path "
                             "must be a non-empty string when set."
                         )
+
+                if not isinstance(server.use_sudo, bool):
+                    messages.append(
+                        f"ERROR: Remote server '{display}': use_sudo must be "
+                        f"a boolean, got {server.use_sudo!r}"
+                    )
 
                 so = server.shutdown_order
                 so_valid = False
