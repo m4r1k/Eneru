@@ -1,0 +1,110 @@
+# v5.5 reference: containerized Eneru with full local-host ownership
+# via SSH loopback delegation.
+#
+# This config lets the OCI image run on a homelab/single-host box and
+# still drive a real host poweroff, local VM teardown, local container
+# stop, and filesystem sync — without escaping the container's
+# namespaces. Eneru SSHes to the host (127.0.0.1 with `network_mode:
+# host`) and the host's sshd executes the privileged commands.
+#
+# Deploy with:
+#
+#   docker run -d --name eneru \
+#     --network host \
+#     -v /etc/machine-id:/etc/machine-id:ro \
+#     -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro \
+#     -v /srv/eneru/state:/var/lib/eneru \
+#     -v /srv/eneru/run:/var/run/eneru \
+#     -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro \
+#     ghcr.io/m4r1k/eneru:latest \
+#     run --config /etc/ups-monitor/config.yaml \
+#     --api --api-bind 0.0.0.0 --api-port 9191
+#
+# The `/etc/machine-id` bind-mount is REQUIRED: it lets Eneru's loopback
+# identity guard verify the SSH target really is the host running this
+# container. Without the mount the container generates its own machine-id
+# and the identity check fails closed (loopback marked FAILED, /ready 503,
+# loud "under a real power outage..." notification). See
+# docs/containers-kubernetes.md for the full SSH setup walkthrough.
+#
+# See also:
+#   docs/install-comparison.md  — native vs container vs K8s feature matrix
+#   docs/migrate-to-container.md — migrating an existing deb/rpm install
+#   docs/troubleshooting.md      — ready/503 decision matrix
+
+ups:
+  name: "UPS@nut-server"
+  display_name: "Homelab UPS"
+
+triggers:
+  low_battery_threshold: 25
+  critical_runtime_threshold: 600
+
+local_shutdown:
+  enabled: true
+  command: "shutdown -h now"
+  message: "UPS battery critical - emergency shutdown via loopback delegate"
+
+virtual_machines:
+  enabled: true
+  max_wait: 60
+
+containers:
+  enabled: true
+  runtime: auto
+  stop_timeout: 30
+  shutdown_all_remaining_containers: true
+  # Compose stacks that include this Eneru container are auto-skipped — the
+  # host shutdown step will tear them down anyway when it powers off.
+  # compose_files:
+  #   - path: /opt/homelab/docker-compose.yml
+
+filesystems:
+  sync_enabled: true
+  unmount:
+    enabled: false  # add mount points below to enable per-mount umount
+    # mounts:
+    #   - path: /mnt/data
+    #     options: -l
+
+remote_servers:
+  # The single loopback delegate. Note what's NOT here:
+  #   * No expected_host_identity — Eneru auto-populates from /etc/machine-id
+  #     (which is why the bind-mount above is required).
+  #   * No pre_shutdown_commands — Eneru generates them at startup from the
+  #     local config above (virtual_machines, containers, filesystems). You
+  #     don't duplicate local actions here; just declare them once in the
+  #     normal places.
+  - name: host-loopback
+    enabled: true
+    host: "127.0.0.1"          # works with --network host
+    user: root                  # or any user with sudo NOPASSWD: /sbin/shutdown
+    is_host_loopback: true
+    ssh_key_path: /var/lib/eneru/ssh/id_loopback
+    shutdown_command: "shutdown -h now"
+    # shutdown_order: 999       # runs LAST — host poweroff kills the container
+
+logging:
+  # Forensic log file. Mount a volume at /var/log/eneru so this survives
+  # container restarts; set to null to disable file logging entirely.
+  file: "/var/log/eneru/ups-monitor.log"
+  state_file: "/var/run/eneru/ups-monitor.state"
+  battery_history_file: "/var/run/eneru/ups-battery-history"
+  shutdown_flag_file: "/var/run/eneru/ups-shutdown-scheduled"
+
+statistics:
+  db_directory: "/var/lib/eneru"
+
+api:
+  enabled: true
+  bind: "0.0.0.0"
+  port: 9191
+
+remote_health:
+  enabled: true
+  # The loopback gets the standard SSH probe + an extra host-identity probe
+  # (cat /etc/machine-id). Mismatch on the identity probe marks the loopback
+  # FAILED and surfaces a loud notification + /ready 503.
+  probe_command: "id -u"
+  interval: 300
+  failure_threshold: 2

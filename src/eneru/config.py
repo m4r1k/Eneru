@@ -294,6 +294,18 @@ class RemoteServerConfig:
     # starting and SSH closing the channel. Tune higher for servers with battery-backed RAID
     # or large flush windows; tune lower for fast-shutdown VMs. Zero opts out entirely.
     shutdown_safety_margin: int = 60
+    # v5.5: container loopback delegation. When the host running Eneru lives inside an OCI
+    # container and the config declares local-host ownership (is_local + vms/containers/
+    # filesystems/local_shutdown), one remote_servers entry is flagged as the host loopback.
+    # Eneru's privilege check accepts non-root in that case, and the shutdown sequence
+    # delegates every local-host action to this entry over SSH. The host_identity_command
+    # probe and expected_host_identity (auto-populated from /etc/machine-id when the
+    # operator bind-mounts it) prove the SSH target is actually the host Eneru is supposed
+    # to control before any destructive action is sent. See docs/install-comparison.md
+    # and docs/containers-kubernetes.md.
+    is_host_loopback: bool = False
+    host_identity_command: str = "cat /etc/machine-id"
+    expected_host_identity: Optional[str] = None
 
 
 @dataclass
@@ -673,10 +685,14 @@ class ConfigLoader:
                         timeout=cmd_data.get('timeout'),
                         path=cmd_data.get('path'),
                     ))
+            is_loopback = bool(server_data.get('is_host_loopback', False))
+            # Loopback entries default host to 127.0.0.1 — with `network_mode: host`
+            # (the recommended path for full local ownership) this is the host's sshd.
+            default_host = '127.0.0.1' if is_loopback else ''
             servers.append(RemoteServerConfig(
                 name=server_data.get('name', ''),
                 enabled=server_data.get('enabled', False),
-                host=server_data.get('host', ''),
+                host=server_data.get('host') or default_host,
                 user=server_data.get('user', ''),
                 connect_timeout=server_data.get('connect_timeout', 10),
                 command_timeout=server_data.get('command_timeout', 30),
@@ -687,6 +703,10 @@ class ConfigLoader:
                 parallel=server_data.get('parallel'),
                 shutdown_order=server_data.get('shutdown_order'),
                 shutdown_safety_margin=server_data.get('shutdown_safety_margin', 60),
+                is_host_loopback=is_loopback,
+                host_identity_command=server_data.get(
+                    'host_identity_command', 'cat /etc/machine-id'),
+                expected_host_identity=server_data.get('expected_host_identity'),
             ))
         return servers
 
@@ -1146,6 +1166,8 @@ class ConfigLoader:
                 "command_timeout", "shutdown_command", "ssh_key_path",
                 "ssh_options", "pre_shutdown_commands", "parallel",
                 "shutdown_order", "shutdown_safety_margin",
+                "is_host_loopback", "host_identity_command",
+                "expected_host_identity",
             }
             pre_shutdown_keys = {"action", "command", "timeout", "path"}
             depletion_keys = {"window", "critical_rate", "grace_period"}
@@ -1513,6 +1535,75 @@ class ConfigLoader:
                 f"ERROR: Multiple groups marked as is_local: {', '.join(all_local)}. "
                 "At most one group (UPS or redundancy) can power the Eneru host."
             )
+
+        # is_host_loopback uniqueness + per-entry rules. Runtime-context checks
+        # (must be in a container, must have local capabilities) live in cli.py
+        # since they depend on the live process environment.
+        loopback_entries = []
+        for group in config.ups_groups:
+            for server in group.remote_servers:
+                if server.is_host_loopback:
+                    loopback_entries.append((group.ups.label, server))
+        for group in config.redundancy_groups:
+            for server in group.remote_servers:
+                if server.is_host_loopback:
+                    loopback_entries.append((group.name or "(unnamed)", server))
+        # Top-level remote_servers (single-UPS legacy layout) live on the
+        # single UPS group, so they're already covered above.
+
+        if len(loopback_entries) > 1:
+            labels = ", ".join(
+                f"{owner}/{srv.name or srv.host}" for owner, srv in loopback_entries
+            )
+            messages.append(
+                f"ERROR: Multiple remote_servers marked is_host_loopback: {labels}. "
+                "At most one entry across the whole config can be the host loopback."
+            )
+
+        if loopback_entries:
+            from eneru.remote_health import is_safe_probe_command
+            for owner, srv in loopback_entries:
+                where = f"{owner}/{srv.name or srv.host or '(unnamed)'}"
+                if not srv.enabled:
+                    messages.append(
+                        f"ERROR: remote_server '{where}' is is_host_loopback but "
+                        "enabled is false. Loopback must be enabled to function."
+                    )
+                if not srv.user.strip():
+                    messages.append(
+                        f"ERROR: remote_server '{where}' is is_host_loopback but "
+                        "'user' is empty. SSH-to-host needs a user; root is the "
+                        "default, sudo NOPASSWD on /sbin/shutdown is recommended."
+                    )
+                if not is_safe_probe_command(srv.host_identity_command):
+                    messages.append(
+                        f"ERROR: remote_server '{where}' host_identity_command "
+                        f"{srv.host_identity_command!r} contains unsafe shell "
+                        "constructs. Must be a harmless probe like "
+                        "'cat /etc/machine-id'."
+                    )
+
+        # Sudo guard for ALL remote_servers (loopback and otherwise):
+        # non-root user without sudo in shutdown_command is almost always a
+        # misconfiguration. WARNING, not ERROR — operators may have unusual setups.
+        def _all_remote_servers():
+            for g in config.ups_groups:
+                for s in g.remote_servers:
+                    yield g.ups.label, s
+            for g in config.redundancy_groups:
+                for s in g.remote_servers:
+                    yield g.name or "(unnamed)", s
+        for owner, srv in _all_remote_servers():
+            if not srv.enabled:
+                continue
+            user = srv.user.strip().lower()
+            if user and user != "root" and not srv.shutdown_command.strip().startswith("sudo "):
+                where = f"{owner}/{srv.name or srv.host or '(unnamed)'}"
+                messages.append(
+                    f"WARNING: remote_server '{where}' user is {srv.user!r} "
+                    "but shutdown_command does not start with 'sudo'. "
+                    "Non-root users typically need sudo to poweroff the host."
+                )
 
         # --- Redundancy-group validation (Phase 2) ---
         if config.redundancy_groups:

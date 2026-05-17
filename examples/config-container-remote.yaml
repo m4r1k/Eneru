@@ -1,5 +1,11 @@
 # Remote-only container image starter config.
 # Mount your own file at /etc/ups-monitor/config.yaml in production.
+#
+# For full local-host ownership FROM a container (host poweroff, local VM
+# teardown, local container stop, filesystem sync), see
+# examples/config-container-local.yaml and docs/install-comparison.md.
+# That path uses an is_host_loopback SSH delegate so the namespace
+# barrier doesn't block the host-poweroff contract.
 ups:
   - name: "UPS@nut-server"
     display_name: "Container UPS"

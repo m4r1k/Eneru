@@ -980,17 +980,65 @@ class UPSGroupMonitor(
         except Exception:
             pass  # never let stats interfere with monitoring
 
+    @property
+    def _uses_loopback_delegate(self) -> bool:
+        """v5.5: True when this group's local-host actions are delegated to
+        the host over SSH via an is_host_loopback remote_servers entry.
+
+        Condition: running inside a container AND this group is the local
+        owner AND a loopback entry is configured for this group. When True,
+        the in-process VM/container/filesystem/host-poweroff phases are
+        skipped — the loopback's pre_shutdown_commands and shutdown_command
+        own those host-side effects.
+        """
+        # Lazy import: monitor.py is imported very early; cli.py imports it
+        # back via the run command path.
+        from eneru.cli import _detect_runtime_context, _is_container_runtime
+        if not _is_container_runtime(_detect_runtime_context()):
+            return False
+        group = self.config.ups_groups[0] if self.config.ups_groups else None
+        is_local = group.is_local if group else True
+        if not is_local:
+            return False
+        servers = group.remote_servers if group else self.config.remote_servers
+        return any(s.is_host_loopback for s in servers)
+
     def _execute_shutdown_sequence(self):
         """Execute the controlled shutdown sequence."""
         self._shutdown_flag_path.touch()
         sequence_start = time.monotonic()
+
+        delegated = self._uses_loopback_delegate
 
         self._log_message("🚨 INITIATING EMERGENCY SHUTDOWN SEQUENCE")
 
         if self.config.behavior.dry_run:
             self._log_message("🧪 *** DRY-RUN MODE: No actual shutdown will occur ***")
 
-        if self.config.local_shutdown.wall and not self.config.behavior.dry_run:
+        if delegated:
+            # v5.5: emit a distinct event so dashboards / SIEMs can tell
+            # container-mediated shutdowns apart from native ones.
+            try:
+                self._stats_store.log_event(
+                    "DELEGATED_SHUTDOWN_INITIATED",
+                    "host-loopback SSH delegate will execute local actions",
+                )
+            except Exception:
+                pass
+            self._log_message(
+                "🛰️ Container loopback mode: local actions will be delegated "
+                "to the host via SSH (no in-process VM/container/filesystem "
+                "phases, no in-process host poweroff)."
+            )
+
+        # `wall` is an archaic v1/v2 path that reaches users via local ttys.
+        # When delegating from a container it reaches nobody on the host, so
+        # suppress it entirely rather than firing an empty broadcast.
+        if (
+            self.config.local_shutdown.wall
+            and not self.config.behavior.dry_run
+            and not delegated
+        ):
             run_command([
                 "wall",
                 "🚨 CRITICAL: Executing emergency UPS shutdown sequence NOW!"
@@ -999,17 +1047,19 @@ class UPSGroupMonitor(
         # Runtime is_local enforcement: only the local UPS group can
         # manage VMs, containers, and filesystems. Non-local groups skip
         # these even if config validation was somehow bypassed.
+        # v5.5 delegated mode: also skip these in-process phases — the
+        # loopback's generated pre_shutdown_commands run them on the host.
         group = self.config.ups_groups[0] if self.config.ups_groups else None
         is_local = group.is_local if group else True  # legacy single-UPS = local
 
-        if is_local:
+        if is_local and not delegated:
             self._shutdown_vms()
             self._shutdown_containers()
             self._sync_filesystems()
             self._unmount_filesystems()
         self._shutdown_remote_servers()
 
-        if is_local and self.config.filesystems.sync_enabled:
+        if is_local and self.config.filesystems.sync_enabled and not delegated:
             self._log_message("💾 Final filesystem sync...")
             if self.config.behavior.dry_run:
                 self._log_message("  🧪 [DRY-RUN] Would perform final sync")
@@ -1038,7 +1088,7 @@ class UPSGroupMonitor(
         except Exception:
             pass
 
-        if self.config.local_shutdown.enabled:
+        if self.config.local_shutdown.enabled and not delegated:
             self._log_message("🔌 Shutting down local server NOW")
             self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE")
 
@@ -1079,6 +1129,36 @@ class UPSGroupMonitor(
                 if self.config.local_shutdown.message:
                     cmd_parts.append(self.config.local_shutdown.message)
                 run_command(cmd_parts)
+        elif self.config.local_shutdown.enabled and delegated:
+            # v5.5: the loopback's shutdown_command (already executed during
+            # _shutdown_remote_servers) is what actually powers off the host.
+            # The container dies with it. Notify + flush + marker, then exit.
+            self._log_message(
+                "🛰️ Host poweroff delegated to loopback SSH (already sent). "
+                "Container will terminate when the host goes down."
+            )
+            self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE")
+            if self.config.behavior.dry_run:
+                self._log_message(
+                    "🧪 [DRY-RUN] Would have delegated host poweroff to loopback "
+                    "SSH (no actual shutdown performed)."
+                )
+                self._shutdown_flag_path.unlink(missing_ok=True)
+            else:
+                self._send_notification(
+                    f"✅ **Shutdown Sequence Complete** (took {elapsed}s)\n"
+                    f"Host poweroff delegated to loopback SSH.",
+                    self.config.NOTIFY_FAILURE,
+                    category="shutdown_summary",
+                )
+                if self._notification_worker:
+                    self._notification_worker.flush(timeout=5)
+                from pathlib import Path
+                write_shutdown_marker(
+                    Path(self.config.statistics.db_directory),
+                    version=__version__,
+                    reason=REASON_SEQUENCE_COMPLETE,
+                )
         else:
             self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE (local shutdown disabled)")
             self._send_notification(

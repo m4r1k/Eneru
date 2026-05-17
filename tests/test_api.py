@@ -73,7 +73,12 @@ def test_readiness_failed_when_monitor_has_no_fresh_data(monitor):
     monitor.state.latest_update_time = 0
     payload = readiness(monitor)
     assert payload["ready"] is False
-    assert "failed" in payload["reason"]
+    # v5.5: readiness now decomposes per-capability. NUT polling shows up
+    # as its own capability in the reasons list and capabilities array.
+    assert "NUT monitoring not connected" in payload["reason"]
+    assert any("nut_polling" in r for r in payload["reasons"])
+    nut_cap = next(c for c in payload["capabilities"] if c["id"] == "nut_polling")
+    assert nut_cap["achievable"] is False
 
 
 @pytest.mark.unit

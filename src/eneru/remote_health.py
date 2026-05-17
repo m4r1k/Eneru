@@ -56,6 +56,12 @@ class RemoteHealthStatus:
     last_error: str = ""
     latency_ms: int = 0
     consecutive_failures: int = 0
+    # v5.5: loopback delegate flag. When True, the manager runs an additional
+    # host-identity probe and marks the entry FAILED on mismatch (the most
+    # common cause being a missing /etc/machine-id bind-mount). Surfaced in
+    # API/TUI so operators can tell the host-poweroff delegate apart from
+    # regular remote targets.
+    is_host_loopback: bool = False
 
 
 def remote_health_sidecar_path(state_file_path: Path) -> Path:
@@ -141,6 +147,65 @@ def run_remote_probe(server: RemoteServerConfig,
     return False, stderr.strip() or f"exit code {exit_code}", latency_ms
 
 
+def run_loopback_identity_probe(
+    server: RemoteServerConfig,
+) -> Tuple[bool, str, int]:
+    """Run the host-identity probe for a loopback entry.
+
+    Returns ``(matches, error_or_value, latency_ms)``. On success the second
+    element is the empty string; on mismatch it's an operator-actionable
+    error message that names the bind-mount as the most likely cause.
+    """
+    start = time.monotonic()
+    exit_code, stdout, stderr = run_command(
+        build_ssh_probe_command(server, server.host_identity_command),
+        timeout=server.connect_timeout + 10,
+    )
+    latency_ms = int((time.monotonic() - start) * 1000)
+    if exit_code != 0:
+        if exit_code == 124:
+            return False, f"identity probe timed out after {server.connect_timeout}s", latency_ms
+        return False, (
+            f"identity probe failed: {stderr.strip() or f'exit code {exit_code}'}"
+        ), latency_ms
+    actual = stdout.strip()
+    expected = (server.expected_host_identity or "").strip()
+    if not expected:
+        return False, (
+            "host identity unknown: container-side /etc/machine-id was not "
+            "readable at startup and no explicit expected_host_identity was "
+            "configured. Bind-mount the host's /etc/machine-id read-only "
+            "(-v /etc/machine-id:/etc/machine-id:ro for Docker; hostPath "
+            "volume for Kubernetes)."
+        ), latency_ms
+    if actual != expected:
+        return False, (
+            f"host identity mismatch: probe returned {actual!r} but expected "
+            f"{expected!r}. Most likely cause: /etc/machine-id is NOT "
+            "bind-mounted from the host into the container, so Eneru sees a "
+            "different machine-id locally than what the loopback SSH target "
+            "reports. Fix: bind-mount /etc/machine-id from the host "
+            "(-v /etc/machine-id:/etc/machine-id:ro for Docker)."
+        ), latency_ms
+    return True, "", latency_ms
+
+
+def _read_container_machine_id() -> Optional[str]:
+    """Read the container-side /etc/machine-id, or None if unavailable.
+
+    Used to auto-populate ``RemoteServerConfig.expected_host_identity`` on
+    loopback entries. When the operator bind-mounts the host's machine-id
+    at the same path, this value matches what the host's SSH probe will
+    return — the identity guard passes. When the bind-mount is missing,
+    this returns the container's own (random) machine-id and the guard
+    fails closed on the first probe.
+    """
+    try:
+        return Path("/etc/machine-id").read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
 class RemoteHealthManager:
     """Background healthcheck loop for one UPS/redundancy group."""
 
@@ -172,6 +237,15 @@ class RemoteHealthManager:
         self._validated_probe_command = probe if is_safe_probe_command(probe) else None
         self._sidecar_write_failed_paths = set()
         initial = REMOTE_HEALTH_UNKNOWN if config.remote_health.enabled else REMOTE_HEALTH_DISABLED
+        # v5.5: auto-populate expected_host_identity on any loopback entry that
+        # didn't get one from config. Reads /etc/machine-id from the container
+        # filesystem — when the operator bind-mounts the host's machine-id at
+        # the same path, this value matches what the loopback SSH probe will
+        # return. Missing or mismatching → identity probe fails closed with a
+        # clear bind-mount hint.
+        for server in self.servers:
+            if server.is_host_loopback and not server.expected_host_identity:
+                server.expected_host_identity = _read_container_machine_id()
         self._statuses: Dict[str, RemoteHealthStatus] = {
             self._key(server): RemoteHealthStatus(
                 group=group_label,
@@ -179,6 +253,7 @@ class RemoteHealthManager:
                 host=server.host,
                 user=server.user,
                 status=initial,
+                is_host_loopback=server.is_host_loopback,
             )
             for server in self.servers
         }
@@ -242,6 +317,15 @@ class RemoteHealthManager:
             success, error, latency_ms = False, "unsafe probe command rejected", 0
         else:
             success, error, latency_ms = run_remote_probe(server, probe)
+            # v5.5: loopback entries get an extra host-identity step. The
+            # standard probe proves SSH reachability; identity proves we're
+            # actually talking to the host Eneru is meant to control.
+            if success and server.is_host_loopback:
+                id_ok, id_err, id_latency = run_loopback_identity_probe(server)
+                latency_ms += id_latency
+                if not id_ok:
+                    success = False
+                    error = id_err
 
         now = time.time()
         with self._lock:
@@ -281,14 +365,34 @@ class RemoteHealthManager:
                 notification_sent = True
         elif current == REMOTE_HEALTH_FAILED and not self._notified_failed.get(key):
             self._notified_failed[key] = True
-            self.log_fn(f"❌ Remote health failed: {display}: {error}")
-            if self.config.remote_health.notify_on_failure and self.notify_fn:
-                self.notify_fn(
-                    f"❌ **Remote SSH Health Failed:** {display}\n"
-                    f"Host: {server.host}\nError: {error}",
-                    self.config.NOTIFY_FAILURE,
+            if server.is_host_loopback:
+                # v5.5: loud, operator-actionable message — the loopback IS
+                # the host-poweroff contract; if it's broken, Eneru cannot
+                # honor a power-loss shutdown in full.
+                self.log_fn(
+                    f"❌ HOST LOOPBACK FAILED: {display} ({server.host}). "
+                    "Under a real power outage, we cannot shut the system "
+                    f"down. Cause: {error}"
                 )
-                notification_sent = True
+                if self.config.remote_health.notify_on_failure and self.notify_fn:
+                    self.notify_fn(
+                        f"🚨 **Host Loopback FAILED:** {display}\n"
+                        f"Host: {server.host}\n"
+                        "**Under a real power outage, we cannot shut the "
+                        "system down.**\n"
+                        f"Cause: {error}",
+                        self.config.NOTIFY_FAILURE,
+                    )
+                    notification_sent = True
+            else:
+                self.log_fn(f"❌ Remote health failed: {display}: {error}")
+                if self.config.remote_health.notify_on_failure and self.notify_fn:
+                    self.notify_fn(
+                        f"❌ **Remote SSH Health Failed:** {display}\n"
+                        f"Host: {server.host}\nError: {error}",
+                        self.config.NOTIFY_FAILURE,
+                    )
+                    notification_sent = True
         elif not success:
             self.log_fn(f"⚠️ Remote health degraded: {display}: {error}")
         self._record_status_transition(

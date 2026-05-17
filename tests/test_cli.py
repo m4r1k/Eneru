@@ -556,6 +556,138 @@ class TestRuntimeContextDetection:
             assert _detect_runtime_context() == "systemd service"
 
 
+class TestKubernetesRuntimeDetection:
+    """v5.5: K8s pods are a distinct runtime profile from generic Docker/Podman."""
+
+    @pytest.mark.unit
+    def test_kubernetes_service_host_env_var(self):
+        """The canonical kubelet signal — set for every pod by default."""
+        from eneru.cli import _detect_kubernetes, _detect_runtime_context
+
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch("pathlib.Path.read_text", side_effect=OSError), \
+             patch.dict("os.environ", {"KUBERNETES_SERVICE_HOST": "10.0.0.1"}, clear=True):
+            assert _detect_kubernetes() is True
+            assert _detect_runtime_context() == "container (Kubernetes)"
+
+    @pytest.mark.unit
+    def test_kubernetes_service_account_token_mount(self):
+        """Pods with hardened env still expose the SA token mount by default."""
+        from eneru.cli import _detect_kubernetes, _detect_runtime_context
+
+        def fake_exists(self):
+            return str(self) == "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+        with patch("pathlib.Path.exists", new=fake_exists), \
+             patch("pathlib.Path.read_text", side_effect=OSError), \
+             patch.dict("os.environ", {}, clear=True):
+            assert _detect_kubernetes() is True
+            assert _detect_runtime_context() == "container (Kubernetes)"
+
+    @pytest.mark.unit
+    def test_kubernetes_kubepods_cgroup(self):
+        """Legacy cgroup v1 path that surfaces kubelet pod hierarchy."""
+        from eneru.cli import _detect_kubernetes, _detect_runtime_context
+
+        def fake_read(self, *args, **kwargs):
+            if str(self) == "/proc/1/cgroup":
+                return "12:cpu:/kubepods/burstable/pod-abc/container-def\n"
+            raise OSError
+
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch("pathlib.Path.read_text", new=fake_read), \
+             patch.dict("os.environ", {}, clear=True):
+            assert _detect_kubernetes() is True
+            assert _detect_runtime_context() == "container (Kubernetes)"
+
+    @pytest.mark.unit
+    def test_kubernetes_wins_over_dockerenv(self):
+        """Some CNI plugins create /.dockerenv inside K8s pods. K8s must win."""
+        from eneru.cli import _detect_runtime_context
+
+        def fake_exists(self):
+            return str(self) == "/.dockerenv"
+
+        with patch("pathlib.Path.exists", new=fake_exists), \
+             patch.dict("os.environ", {"KUBERNETES_SERVICE_HOST": "10.0.0.1"}, clear=False):
+            assert _detect_runtime_context() == "container (Kubernetes)"
+
+    @pytest.mark.unit
+    def test_no_kubernetes_signals_does_not_classify_as_k8s(self):
+        from eneru.cli import _detect_kubernetes
+
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch("pathlib.Path.read_text", side_effect=OSError), \
+             patch.dict("os.environ", {}, clear=True):
+            assert _detect_kubernetes() is False
+
+
+class TestFindHostLoopback:
+    """v5.5: _find_host_loopback locates the single is_host_loopback entry."""
+
+    def _config_with_loopback(self, tmp_path, *, is_loopback=True, in_group=False):
+        config_file = tmp_path / "config.yaml"
+        if in_group:
+            body = (
+                "ups:\n"
+                "  - name: 'TestUPS@localhost'\n"
+                "    is_local: true\n"
+                "    remote_servers:\n"
+                "      - name: host-loopback\n"
+                "        enabled: true\n"
+                "        host: 127.0.0.1\n"
+                "        user: root\n"
+                f"        is_host_loopback: {'true' if is_loopback else 'false'}\n"
+                "  - name: 'TestUPS2@localhost'\n"
+                "    remote_servers:\n"
+                "      - name: nas\n"
+                "        enabled: true\n"
+                "        host: 10.0.0.5\n"
+                "        user: root\n"
+            )
+        else:
+            body = (
+                "ups:\n"
+                "  name: 'TestUPS@localhost'\n"
+                "remote_servers:\n"
+                "  - name: host-loopback\n"
+                "    enabled: true\n"
+                "    host: 127.0.0.1\n"
+                "    user: root\n"
+                f"    is_host_loopback: {'true' if is_loopback else 'false'}\n"
+            )
+        config_file.write_text(body)
+        return ConfigLoader.load(str(config_file))
+
+    @pytest.mark.unit
+    def test_find_host_loopback_top_level(self, tmp_path):
+        from eneru.cli import _find_host_loopback
+
+        config = self._config_with_loopback(tmp_path)
+        result = _find_host_loopback(config)
+        assert result is not None
+        owner, server = result
+        assert server.is_host_loopback is True
+        assert server.host == "127.0.0.1"
+
+    @pytest.mark.unit
+    def test_find_host_loopback_in_multi_ups_group(self, tmp_path):
+        from eneru.cli import _find_host_loopback
+
+        config = self._config_with_loopback(tmp_path, in_group=True)
+        result = _find_host_loopback(config)
+        assert result is not None
+        _owner, server = result
+        assert server.name == "host-loopback"
+
+    @pytest.mark.unit
+    def test_find_host_loopback_returns_none_when_none_flagged(self, tmp_path):
+        from eneru.cli import _find_host_loopback
+
+        config = self._config_with_loopback(tmp_path, is_loopback=False)
+        assert _find_host_loopback(config) is None
+
+
 class TestCLIManualRemoteShutdown:
     """Manual remote shutdown drill safety gates."""
 
@@ -2063,3 +2195,274 @@ class TestCLIShutdownGroupRehearsal:
         out = capsys.readouterr().out
         assert "WARNING" not in out
         assert "does not fire local poweroff" in out
+
+
+# --- v5.5: container loopback delegation — privilege check + synthesis ---
+
+
+class TestPrivilegeChecksV5_5:
+    """v5.5 added the container-loopback pass-through to _exit_on_privilege_errors."""
+
+    def _container_config_with_loopback(self, tmp_path):
+        """Single-UPS legacy config with local capabilities + an explicit loopback."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "local_shutdown:\n"
+            "  enabled: true\n"
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+            "    is_host_loopback: true\n"
+        )
+        return ConfigLoader.load(str(config_file))
+
+    @pytest.mark.unit
+    def test_container_with_loopback_passes_for_non_root(self, tmp_path, capsys):
+        """Docker/Podman + loopback + non-root → pass with banner."""
+        from eneru.cli import _exit_on_privilege_errors
+
+        config = self._container_config_with_loopback(tmp_path)
+        with patch("eneru.cli.os.geteuid", return_value=1000, create=True), \
+             patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _exit_on_privilege_errors(config)  # Must not raise
+
+        err = capsys.readouterr().err
+        assert "delegated to root@127.0.0.1" in err
+        assert "v5.5" in err
+
+    @pytest.mark.unit
+    def test_kubernetes_with_capabilities_passes_with_warning(self, tmp_path, capsys):
+        """K8s + local capabilities + non-root → start with WARNING (no loopback required)."""
+        from eneru.cli import _exit_on_privilege_errors
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "local_shutdown:\n"
+            "  enabled: true\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+        with patch("eneru.cli.os.geteuid", return_value=1000, create=True), \
+             patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Kubernetes)"):
+            _exit_on_privilege_errors(config)  # Must not raise
+
+        err = capsys.readouterr().err
+        assert "container (Kubernetes)" in err
+        assert "/ready will report 503" in err
+
+    @pytest.mark.unit
+    def test_docker_without_loopback_still_exits_for_non_root(self, tmp_path, capsys):
+        """Container runtime + local caps + NO loopback + non-root → exit with hint."""
+        from eneru.cli import _exit_on_privilege_errors
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "local_shutdown:\n"
+            "  enabled: true\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+
+        with patch("eneru.cli.os.geteuid", return_value=1000, create=True), \
+             patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            with pytest.raises(SystemExit) as exc_info:
+                _exit_on_privilege_errors(config)
+        assert exc_info.value.code == 1
+        out = capsys.readouterr().out
+        assert "loopback SSH delegate" in out
+        assert "config-container-local.yaml" in out
+
+
+class TestSynthesizeLoopback:
+    """v5.5: auto-enable loopback for Docker/Podman + local capabilities."""
+
+    def _local_config_no_loopback(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "local_shutdown:\n"
+            "  enabled: true\n"
+        )
+        return ConfigLoader.load(str(config_file))
+
+    @pytest.mark.unit
+    def test_synthesizes_loopback_on_docker_with_local_caps(self, tmp_path):
+        from eneru.cli import _synthesize_loopback_if_needed, _find_host_loopback
+
+        config = self._local_config_no_loopback(tmp_path)
+        assert _find_host_loopback(config) is None  # baseline
+
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli.Path.exists", return_value=True):  # ssh key present
+            _synthesize_loopback_if_needed(config)
+
+        found = _find_host_loopback(config)
+        assert found is not None
+        _owner, server = found
+        assert server.host == "127.0.0.1"
+        assert server.user == "root"
+        assert server.shutdown_command == "shutdown -h now"
+        assert server.ssh_key_path == "/var/lib/eneru/ssh/id_loopback"
+        # Highest shutdown_order so host poweroff runs LAST.
+        assert server.shutdown_order == 999
+
+    @pytest.mark.unit
+    def test_skipped_on_kubernetes(self, tmp_path):
+        """K8s is the remote-only profile — never auto-enable."""
+        from eneru.cli import _synthesize_loopback_if_needed, _find_host_loopback
+
+        config = self._local_config_no_loopback(tmp_path)
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Kubernetes)"), \
+             patch("eneru.cli.Path.exists", return_value=True):
+            _synthesize_loopback_if_needed(config)
+        assert _find_host_loopback(config) is None
+
+    @pytest.mark.unit
+    def test_skipped_on_bare_metal(self, tmp_path):
+        from eneru.cli import _synthesize_loopback_if_needed, _find_host_loopback
+
+        config = self._local_config_no_loopback(tmp_path)
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="systemd service"), \
+             patch("eneru.cli.Path.exists", return_value=True):
+            _synthesize_loopback_if_needed(config)
+        assert _find_host_loopback(config) is None
+
+    @pytest.mark.unit
+    def test_skipped_when_no_local_capabilities(self, tmp_path):
+        """Remote-only container with no local actions → no synthesis."""
+        from eneru.cli import _synthesize_loopback_if_needed, _find_host_loopback
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "  - name: 'TestUPS@nut'\n"  # not strictly valid YAML; use list form below
+        )
+        # simpler: build the config with no is_local + no local capabilities
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@nut"), is_local=False,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
+        )
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli.Path.exists", return_value=True):
+            _synthesize_loopback_if_needed(config)
+        assert _find_host_loopback(config) is None
+
+    @pytest.mark.unit
+    def test_skipped_when_explicit_loopback_present(self, tmp_path):
+        """User-configured loopback wins; synthesis must not double-inject."""
+        from eneru.cli import _synthesize_loopback_if_needed, _find_host_loopback
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "local_shutdown:\n"
+            "  enabled: true\n"
+            "remote_servers:\n"
+            "  - name: my-loopback\n"
+            "    enabled: true\n"
+            "    host: 172.17.0.1\n"
+            "    user: deploy\n"
+            "    shutdown_command: 'sudo shutdown -h now'\n"
+            "    is_host_loopback: true\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+        before = _find_host_loopback(config)
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli.Path.exists", return_value=True):
+            _synthesize_loopback_if_needed(config)
+        after = _find_host_loopback(config)
+        # Same server entry (no new one synthesized)
+        assert before[1] is after[1]
+        assert after[1].user == "deploy"
+
+    @pytest.mark.unit
+    def test_errors_if_default_ssh_key_missing(self, tmp_path, capsys):
+        """Synthesis fires but the default key path doesn't exist → exit 1 with hint."""
+        from eneru.cli import _synthesize_loopback_if_needed
+
+        config = self._local_config_no_loopback(tmp_path)
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli.Path.exists", return_value=False):
+            with pytest.raises(SystemExit) as exc_info:
+                _synthesize_loopback_if_needed(config)
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "default SSH key for the host-loopback delegate is missing" in err
+        assert "/var/lib/eneru/ssh/id_loopback" in err
+
+
+class TestKubernetesLocalMisuseWarning:
+    """v5.5: K8s + local capabilities → startup WARNING (not error)."""
+
+    @pytest.mark.unit
+    def test_warning_fires_for_k8s_with_local_caps(self, tmp_path, capsys):
+        from eneru.cli import _warn_on_kubernetes_local_misuse
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "local_shutdown:\n"
+            "  enabled: true\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Kubernetes)"):
+            _warn_on_kubernetes_local_misuse(config)
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "Kubernetes" in err
+        assert "install-comparison.md" in err
+
+    @pytest.mark.unit
+    def test_silent_on_docker(self, tmp_path, capsys):
+        from eneru.cli import _warn_on_kubernetes_local_misuse
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "local_shutdown:\n"
+            "  enabled: true\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _warn_on_kubernetes_local_misuse(config)
+        assert capsys.readouterr().err == ""
+
+    @pytest.mark.unit
+    def test_silent_on_k8s_without_local_caps(self, tmp_path, capsys):
+        """Remote-only K8s deployment is the recommended path — no warning."""
+        from eneru.cli import _warn_on_kubernetes_local_misuse
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@nut"), is_local=False,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
+        )
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Kubernetes)"):
+            _warn_on_kubernetes_local_misuse(config)
+        assert capsys.readouterr().err == ""
