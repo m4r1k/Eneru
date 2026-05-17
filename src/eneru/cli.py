@@ -393,6 +393,11 @@ def _inject_delegated_actions(config: Config) -> None:
             generated.append(RemoteCommandConfig(action="stop_containers"))
     if owner.filesystems.sync_enabled:
         generated.append(RemoteCommandConfig(action="sync"))
+    # v5.5 (Commit 2): the unmount_filesystems template covers per-mount
+    # umount with operator-configured options. Skipped when no mounts are
+    # configured — the template no-ops on an empty target list.
+    if owner.filesystems.unmount.enabled and owner.filesystems.unmount.mounts:
+        generated.append(RemoteCommandConfig(action="unmount_filesystems"))
 
     if not generated:
         return

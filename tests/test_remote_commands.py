@@ -105,17 +105,27 @@ class TestRemoteActionTemplates:
 
     @pytest.mark.unit
     def test_timeout_substitution(self):
-        """Test that timeout placeholder is correctly substituted."""
-        template = REMOTE_ACTIONS["stop_containers"]
-        result = template.format(timeout=60)
+        """Test that timeout placeholder is correctly substituted.
+
+        v5.5: templates take additional placeholders (skip_ids,
+        umount_targets, wait_interval) — use the centralized
+        render_action() helper so all required kwargs get defaults.
+        """
+        from eneru.actions import render_action
+        result = render_action("stop_containers", timeout=60)
         assert "t=60" in result
         assert "{timeout}" not in result
+        assert "{skip_ids}" not in result
 
     @pytest.mark.unit
     def test_path_substitution_in_compose(self):
         """Test that path placeholder is correctly substituted in stop_compose."""
-        template = REMOTE_ACTIONS["stop_compose"]
-        result = template.format(timeout=30, path="/opt/app/docker-compose.yml")
+        from eneru.actions import render_action
+        result = render_action(
+            "stop_compose",
+            timeout=30,
+            path="/opt/app/docker-compose.yml",
+        )
         assert "/opt/app/docker-compose.yml" in result
         assert "{path}" not in result
         assert "t=30" in result
@@ -141,11 +151,20 @@ class TestRemoteActionTemplates:
     def test_stop_compose_template_does_not_double_quote_path(self):
         """stop_compose must leave {path} unquoted in the template; quoting
         happens via shlex.quote at the format() call site so $(), backticks,
-        and ${...} cannot expand on the remote host."""
+        and ${...} cannot expand on the remote host.
+
+        v5.5: the template now assigns ``path={path}`` into a shell var
+        once and uses ``$path`` thereafter (still single-quoted by
+        shlex.quote at format time). The placeholder appears exactly
+        once and remains unquoted in the template source.
+        """
         template = REMOTE_ACTIONS["stop_compose"]
         # Bare placeholder, no surrounding double quotes.
         assert '"{path}"' not in template
-        assert "-f {path}" in template
+        # The single assignment site preserves the unquoted-placeholder contract.
+        assert "path={path}" in template
+        # The downstream use is via the shell variable, not the placeholder.
+        assert "-f $path" in template
 
 
 class TestRemotePreShutdownExecution:

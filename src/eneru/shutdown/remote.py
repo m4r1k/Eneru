@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from eneru.actions import REMOTE_ACTIONS
+from eneru.actions import REMOTE_ACTIONS, render_action, serialize_umount_targets
 from eneru.config import RemoteServerConfig
 from eneru.utils import run_command
 
@@ -327,6 +327,38 @@ class RemoteShutdownMixin:
         """Return True when a remote shutdown phase deadline has expired."""
         return deadline is not None and time.monotonic() >= deadline
 
+    def _loopback_skip_ids(self):
+        """Return the set of container IDs the host must skip during a
+        loopback-delegated container/compose shutdown.
+
+        Source of truth is ``ContainerShutdownMixin._current_container_ids``
+        (also mixed into ``UPSGroupMonitor``). When the loopback host runs
+        ``stop_containers`` or ``stop_compose``, these IDs are filtered out
+        so Eneru's own container isn't killed mid-sequence. Returns an
+        empty set on bare-metal (the mixin returns ``set()`` outside a
+        container).
+        """
+        get_ids = getattr(self, "_current_container_ids", None)
+        if get_ids is None:
+            return set()
+        try:
+            return get_ids()
+        except Exception:
+            return set()
+
+    def _loopback_umount_targets(self):
+        """Return the unmount-mounts config for the local owner group.
+
+        Loopback delegation: ``unmount_filesystems`` runs on the host with
+        the operator's per-mount options. We pull the list straight from
+        the local group's filesystems config — the operator declared it
+        once in the normal place.
+        """
+        group = self.config.ups_groups[0] if self.config.ups_groups else None
+        if group is None or not group.filesystems.unmount.enabled:
+            return []
+        return list(group.filesystems.unmount.mounts)
+
     def _execute_remote_pre_shutdown(
         self,
         server: RemoteServerConfig,
@@ -396,10 +428,24 @@ class RemoteShutdownMixin:
                 # directly into the remote shell — without quoting, a
                 # malicious or malformed path could expand $(), `…`, or
                 # ${…} on the remote host.
-                command_template = REMOTE_ACTIONS[action_name]
-                command = command_template.format(
+                # v5.5: loopback delegate gets extra context — the
+                # mandatory self-skip set so 'stop_containers' /
+                # 'stop_compose' don't kill Eneru's own container, and
+                # the umount targets serialized for 'unmount_filesystems'.
+                skip_ids = ""
+                umount_targets = ""
+                if server.is_host_loopback:
+                    skip_ids = ",".join(sorted(self._loopback_skip_ids()))
+                    if action_name == "unmount_filesystems":
+                        umount_targets = serialize_umount_targets(
+                            self._loopback_umount_targets()
+                        )
+                command = render_action(
+                    action_name,
                     timeout=timeout,
-                    path=shlex.quote(cmd_config.path or "")
+                    path=shlex.quote(cmd_config.path or ""),
+                    skip_ids=skip_ids,
+                    umount_targets=umount_targets,
                 )
                 description = action_name
 

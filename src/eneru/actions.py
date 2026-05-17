@@ -1,24 +1,87 @@
-"""Remote action templates for Eneru."""
+"""Remote action templates for Eneru.
 
-from typing import Dict
+Each entry is a shell snippet rendered with ``str.format(**ctx)`` and
+shipped over SSH (or executed locally) by ``RemoteShutdownMixin``. The
+templates are the **single source of truth** for what each action does
+on the remote host — see ``shutdown/CONTRACT.md``-equivalent comments
+inline.
 
-# Predefined actions for remote pre-shutdown commands
-# {timeout} is replaced with the command timeout in seconds
-# {path} is replaced with the compose file path (for stop_compose)
+Render context (always supplied by ``_render_action_context`` in
+``shutdown/remote.py``; missing keys would KeyError at format time):
+
+* ``timeout`` — int seconds; per-command timeout. Honored by the
+  templates' graceful-wait loops and by ``timeout(1)`` invocations.
+* ``path`` — ``shlex.quote``d compose-file path for ``stop_compose``;
+  empty string otherwise.
+* ``skip_ids`` — comma-separated list of container ID prefixes
+  (12-char truncations are matched). Mandatory self-skip for the v5.5
+  container loopback delegate so the host doesn't kill Eneru's own
+  container mid-sequence. Empty when no skipping is required.
+* ``wait_interval`` — int seconds; poll interval inside graceful-wait
+  loops. Default 1 (matches pre-v5.5 behavior).
+* ``umount_targets`` — newline-separated ``mount_point|options``
+  records for ``unmount_filesystems``. Empty disables the action.
+
+Placeholders that may contain literal ``{`` / ``}`` characters (awk
+programs, embedded shell ``${var}``) must be doubled to ``{{`` /
+``}}`` so ``str.format`` leaves them alone.
+"""
+
+from typing import Dict, List, Optional, Tuple
+
+# Predefined actions for remote pre-shutdown commands.
 REMOTE_ACTIONS: Dict[str, str] = {
-    # Stop all Docker/Podman containers
+    # Stop all Docker/Podman containers.
+    # v5.5: ``skip_ids`` filter is **mandatory** for the loopback path —
+    # Eneru must never stop its own container. The container loopback
+    # delegate computes the skip set from the in-container's detected IDs
+    # (hostname / cgroup / mountinfo) and embeds it here. For regular
+    # remote targets the skip set is empty and the filter is a no-op.
     "stop_containers": (
         't={timeout}; '
-        'docker ps -q | xargs -r docker stop -t $t 2>/dev/null; '
-        'podman ps -q | xargs -r podman stop -t $t 2>/dev/null; '
+        'skip="{skip_ids}"; '
+        # Filter by 12-char prefix in both directions so short IDs from
+        # `docker ps -q` match full IDs in the skip set and vice versa.
+        '_filter() {{ awk -v skip="$skip" \''
+        'BEGIN {{ n = split(skip, a, ","); for (i=1;i<=n;i++) m[substr(a[i],1,12)]=1 }} '
+        '!(substr($0,1,12) in m)\'; }}; '
+        'command -v docker >/dev/null 2>&1 && '
+        'docker ps -q 2>/dev/null | _filter | xargs -r docker stop -t $t 2>/dev/null; '
+        'command -v podman >/dev/null 2>&1 && '
+        'podman ps -q 2>/dev/null | _filter | xargs -r podman stop -t $t 2>/dev/null; '
         'true'
     ),
 
-    # Stop libvirt/KVM VMs with graceful shutdown, then force destroy
+    # Stop rootless Podman containers across every non-system user.
+    # v5.5: separate action so it can be omitted on hosts without
+    # rootless Podman (cheap on a Linux server, but skips the loginctl
+    # call on hosts where it would error). Same mandatory skip set as
+    # ``stop_containers``.
+    "stop_containers_rootless": (
+        't={timeout}; '
+        'skip="{skip_ids}"; '
+        '_filter() {{ awk -v skip="$skip" \''
+        'BEGIN {{ n = split(skip, a, ","); for (i=1;i<=n;i++) m[substr(a[i],1,12)]=1 }} '
+        '!(substr($0,1,12) in m)\'; }}; '
+        'command -v loginctl >/dev/null 2>&1 || exit 0; '
+        'loginctl list-users --no-legend 2>/dev/null | '
+        'awk \'$1+0 >= 1000 {{print $2}}\' | '
+        'while read -r user; do '
+        '  sudo -u "$user" podman ps -q 2>/dev/null | _filter | '
+        '  xargs -r sudo -u "$user" podman stop -t $t 2>/dev/null; '
+        'done; '
+        'true'
+    ),
+
+    # Stop libvirt/KVM VMs with graceful shutdown, then force destroy.
+    # v5.5: ``wait_interval`` parameterized so the in-process and
+    # delegated paths can share timing.
     "stop_vms": (
+        't={timeout}; '
+        'wait={wait_interval}; '
         'virsh list --name --state-running | xargs -r -n1 virsh shutdown; '
-        'end=$((SECONDS+{timeout})); '
-        'while [ $SECONDS -lt $end ] && virsh list --name --state-running | grep -q .; do sleep 1; done; '
+        'end=$((SECONDS+t)); '
+        'while [ $SECONDS -lt $end ] && virsh list --name --state-running | grep -q .; do sleep $wait; done; '
         'virsh list --name --state-running | xargs -r -n1 virsh destroy 2>/dev/null; '
         'true'
     ),
@@ -60,7 +123,7 @@ REMOTE_ACTIONS: Dict[str, str] = {
         'true'
     ),
 
-    # Stop VMware ESXi VMs with graceful shutdown, then force power-off
+    # Stop VMware ESXi VMs with graceful shutdown, then force power-off.
     "stop_esxi_vms": (
         'for i in $(vim-cmd vmsvc/getallvms 2>/dev/null | awk \'NR>1 {{print $1}}\'); do '
         'vim-cmd vmsvc/power.shutdown $i 2>/dev/null; done; '
@@ -75,19 +138,125 @@ REMOTE_ACTIONS: Dict[str, str] = {
     ),
 
     # Stop docker/podman compose stack.
-    # {path} is shell-quoted at the format() call site (see
-    # RemoteShutdownMixin._execute_remote_pre_shutdown) — leaving the
-    # placeholder bare here so shlex.quote provides the only quoting
-    # boundary; double-quoting wouldn't block $(), backticks, or ${...}.
+    # ``path`` is shell-quoted at the format() call site so shlex.quote
+    # provides the only quoting boundary; double-quoting wouldn't block
+    # $(), backticks, or ${...}.
+    # v5.5: self-skip — if this compose stack contains any container in
+    # ``skip_ids`` (the loopback delegate's own container ID set), the
+    # stack is left alone so the host shutdown doesn't kill Eneru
+    # mid-sequence.
     "stop_compose": (
         't={timeout}; '
-        'if command -v docker &>/dev/null && docker compose version &>/dev/null; then '
-        'docker compose -f {path} down -t $t; '
-        'elif command -v podman &>/dev/null; then '
-        'podman compose -f {path} down -t $t; fi; '
+        'path={path}; '
+        'skip="{skip_ids}"; '
+        '_compose() {{ '
+        '  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then '
+        '    docker compose "$@"; '
+        '  elif command -v podman >/dev/null 2>&1; then '
+        '    podman compose "$@"; '
+        '  else return 127; fi; }}; '
+        # Detect self-inclusion: if any container in this stack matches
+        # a 12-char prefix from skip_ids, abort the stack teardown.
+        'if [ -n "$skip" ]; then '
+        '  hit=$(_compose -f $path ps -q 2>/dev/null | awk -v skip="$skip" '
+        '\'BEGIN {{ n = split(skip, a, ","); for (i=1;i<=n;i++) m[substr(a[i],1,12)]=1 }} '
+        'substr($0,1,12) in m {{ print; exit }}\'); '
+        '  if [ -n "$hit" ]; then exit 0; fi; '
+        'fi; '
+        '_compose -f $path down -t $t; '
+        'true'
+    ),
+
+    # Unmount filesystems with configurable per-mount options.
+    # v5.5: NEW template; ``unmount`` was missing from REMOTE_ACTIONS
+    # entirely until now (the existing ``sync`` template only flushed
+    # caches). Format of ``umount_targets``: newline-separated
+    # ``mount_point|options`` records. Empty options field is fine.
+    "unmount_filesystems": (
+        't={timeout}; '
+        'targets="{umount_targets}"; '
+        '[ -z "$targets" ] && exit 0; '
+        'printf "%s\\n" "$targets" | while IFS="|" read -r mp opts; do '
+        '  [ -z "$mp" ] && continue; '
+        '  if [ -n "$opts" ]; then '
+        '    timeout "$t" umount $opts "$mp" 2>/dev/null || '
+        '      timeout "$t" umount -l "$mp" 2>/dev/null || true; '
+        '  else '
+        '    timeout "$t" umount "$mp" 2>/dev/null || '
+        '      timeout "$t" umount -l "$mp" 2>/dev/null || true; '
+        '  fi; '
+        'done; '
         'true'
     ),
 
     # Sync filesystems
     "sync": 'sync; sync; sleep 2',
 }
+
+
+# v5.5: which placeholders each template requires. Used by
+# ``_render_action_context`` in shutdown/remote.py to only supply the
+# keys a given template actually needs (and by the parity / drift
+# detector tests to verify every action is wired through the registry).
+REMOTE_ACTION_PLACEHOLDERS: Dict[str, Tuple[str, ...]] = {
+    "stop_containers": ("timeout", "skip_ids"),
+    "stop_containers_rootless": ("timeout", "skip_ids"),
+    "stop_vms": ("timeout", "wait_interval"),
+    "stop_proxmox_vms": ("timeout",),
+    "stop_proxmox_cts": ("timeout",),
+    "stop_xcpng_vms": ("timeout",),
+    "stop_esxi_vms": ("timeout",),
+    "stop_compose": ("timeout", "path", "skip_ids"),
+    "unmount_filesystems": ("timeout", "umount_targets"),
+    "sync": (),
+}
+
+
+def render_action(
+    action_name: str,
+    *,
+    timeout: int,
+    path: str = "",
+    skip_ids: str = "",
+    umount_targets: str = "",
+    wait_interval: int = 1,
+) -> str:
+    """Render a REMOTE_ACTIONS template with the supplied context.
+
+    Centralizes the format() call so callers (the SSH path in
+    ``RemoteShutdownMixin._execute_remote_pre_shutdown`` and any future
+    local executor) can't accidentally pass an incomplete context. All
+    keyword args default to safe empty/no-op values so a non-loopback
+    caller doesn't need to know which template uses which placeholder.
+    """
+    template = REMOTE_ACTIONS[action_name]
+    return template.format(
+        timeout=timeout,
+        path=path,
+        skip_ids=skip_ids,
+        umount_targets=umount_targets,
+        wait_interval=wait_interval,
+    )
+
+
+def serialize_umount_targets(
+    mounts: List[Dict[str, Optional[str]]],
+) -> str:
+    """Serialize unmount config entries into the ``unmount_filesystems`` format.
+
+    Input: list of ``{"path": str, "options": str | None}`` mappings as
+    produced by ``ConfigLoader._parse_filesystems_config``.
+
+    Output: newline-separated ``mount_point|options`` records, ready to
+    embed into the rendered shell template. Empty options field is
+    represented as an empty string after the pipe so the shell's
+    ``IFS="|" read`` sees the right number of fields.
+    """
+    records: List[str] = []
+    for m in mounts:
+        mp = (m.get("path") or "").strip()
+        if not mp:
+            continue
+        opts = (m.get("options") or "").strip()
+        records.append(f"{mp}|{opts}")
+    return "\n".join(records)

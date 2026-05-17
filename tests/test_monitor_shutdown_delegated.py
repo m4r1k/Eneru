@@ -313,6 +313,72 @@ class TestInjectDelegatedActions:
         ]
 
     @pytest.mark.unit
+    def test_prepends_unmount_filesystems_when_configured(self, tmp_path):
+        """v5.5 Commit 2: filesystem unmount delegation closes the parity gap."""
+        from eneru import ConfigLoader
+        from eneru.cli import _inject_delegated_actions, _find_host_loopback
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "filesystems:\n"
+            "  sync_enabled: true\n"
+            "  unmount:\n"
+            "    enabled: true\n"
+            "    mounts:\n"
+            "      - path: /mnt/data\n"
+            "        options: '-l'\n"
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+            "    is_host_loopback: true\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _inject_delegated_actions(config)
+
+        _owner, server = _find_host_loopback(config)
+        action_names = [c.action for c in server.pre_shutdown_commands]
+        # sync runs first (flushes caches), then unmount (releases the mount).
+        assert "sync" in action_names
+        assert "unmount_filesystems" in action_names
+        assert action_names.index("sync") < action_names.index("unmount_filesystems")
+
+    @pytest.mark.unit
+    def test_skips_unmount_when_no_mounts_configured(self, tmp_path):
+        """unmount.enabled=true with empty mounts list = nothing to do.
+        Don't synthesize a no-op action."""
+        from eneru import ConfigLoader
+        from eneru.cli import _inject_delegated_actions, _find_host_loopback
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "filesystems:\n"
+            "  unmount:\n"
+            "    enabled: true\n"
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+            "    is_host_loopback: true\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _inject_delegated_actions(config)
+
+        _owner, server = _find_host_loopback(config)
+        action_names = [c.action for c in server.pre_shutdown_commands]
+        assert "unmount_filesystems" not in action_names
+
+    @pytest.mark.unit
     def test_preserves_existing_user_pre_shutdown_commands(self, tmp_path):
         """User-defined pre_shutdown_commands must survive; generated actions
         prepend (do-the-work first, then user-extras)."""
