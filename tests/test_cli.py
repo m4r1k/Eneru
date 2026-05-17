@@ -2410,6 +2410,47 @@ class TestSynthesizeLoopback:
         assert "default SSH key for the host-loopback delegate is missing" in err
         assert "/var/lib/eneru/ssh/id_loopback" in err
 
+    @pytest.mark.unit
+    def test_unreadable_ssh_key_path_distinguishes_perm_error(self, tmp_path, capsys):
+        """Path.exists() raises PermissionError when the parent dir isn't
+        readable — common when operators bind-mount /root/.ssh/ (0700)
+        into the container running as eneru (uid 10001). Treat as
+        'not usable' with a perm-specific actionable error rather than
+        an uncaught traceback."""
+        from eneru.cli import _synthesize_loopback_if_needed
+
+        config = self._local_config_no_loopback(tmp_path)
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli.Path.exists",
+                   side_effect=PermissionError("Permission denied")):
+            with pytest.raises(SystemExit) as exc_info:
+                _synthesize_loopback_if_needed(config)
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "not readable by the container user" in err
+        assert "uid 10001 (eneru)" in err
+        assert "PermissionError" in err
+
+    @pytest.mark.unit
+    def test_unreadable_ssh_key_warns_in_non_strict_mode(self, tmp_path, capsys):
+        """validate / dry-run rehearsals get a WARNING and proceed so the
+        user can still inspect the delegated sequence even before fixing
+        the perm issue."""
+        from eneru.cli import _synthesize_loopback_if_needed, _find_host_loopback
+
+        config = self._local_config_no_loopback(tmp_path)
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli.Path.exists",
+                   side_effect=PermissionError("Permission denied")):
+            _synthesize_loopback_if_needed(config, strict_key_check=False)
+        # Synthesis still happens — loopback entry was injected.
+        assert _find_host_loopback(config) is not None
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "not readable by the container user" in err
+
 
 class TestKubernetesLocalMisuseWarning:
     """v5.5: K8s + local capabilities → startup WARNING (not error)."""

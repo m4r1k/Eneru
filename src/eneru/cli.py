@@ -302,27 +302,67 @@ def _synthesize_loopback_if_needed(
         # validation error already.
         return
 
-    if not Path(_LOOPBACK_DEFAULT_SSH_KEY_PATH).exists():
+    # Path.exists() raises PermissionError (NOT False) when the parent dir
+    # is unreadable by the container user — common when operators bind-mount
+    # /root/.ssh/ (mode 0700) into the container running as eneru (uid 10001).
+    # Treat unreadable as "not usable" with a clearer error than a traceback.
+    try:
+        key_present = Path(_LOOPBACK_DEFAULT_SSH_KEY_PATH).exists()
+        permission_error = False
+    except OSError as exc:
+        key_present = False
+        permission_error = isinstance(exc, PermissionError)
+
+    if not key_present:
         level = "ERROR" if strict_key_check else "WARNING"
-        print(
-            f"{level}: Eneru detected runtime '{runtime}' with local capabilities "
-            "but the default SSH key for the host-loopback delegate is missing:",
-            file=sys.stderr,
-        )
-        print(
-            f"  expected at: {_LOOPBACK_DEFAULT_SSH_KEY_PATH}", file=sys.stderr,
-        )
-        print(
-            "Options:\n"
-            f"  1. Generate the key and bind-mount it read-only "
-            f"({_LOOPBACK_DEFAULT_SSH_KEY_PATH}).\n"
-            "  2. Configure a remote_servers entry explicitly with "
-            "is_host_loopback: true and a custom ssh_key_path.\n"
-            "  3. Switch to the deb/rpm install if you want native host "
-            "ownership without SSH delegation.\n"
-            "See docs/containers-kubernetes.md for the walkthrough.",
-            file=sys.stderr,
-        )
+        if permission_error:
+            print(
+                f"{level}: Eneru detected runtime '{runtime}' with local "
+                "capabilities but the default SSH key for the host-loopback "
+                "delegate is not readable by the container user:",
+                file=sys.stderr,
+            )
+            print(
+                f"  expected at: {_LOOPBACK_DEFAULT_SSH_KEY_PATH}",
+                file=sys.stderr,
+            )
+            print(
+                "  cause: PermissionError — the parent directory inside the "
+                "container is not readable by uid 10001 (eneru). This is "
+                "common when bind-mounting host paths like /root/.ssh/ "
+                "(mode 0700) directly. Fixes:\n"
+                "  1. Mount a dedicated directory with mode 0755 + the key "
+                "file mode 0444 (or chgrp to a gid the eneru user can read).\n"
+                "  2. Run the container as root with `--user 0:0` (works "
+                "but defeats the non-root design).\n"
+                "  3. Configure a remote_servers entry with an explicit "
+                "ssh_key_path pointing at a readable location.\n"
+                "See docs/containers-kubernetes.md for the recommended "
+                "walkthrough using a dedicated /srv/eneru/ssh/ directory.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"{level}: Eneru detected runtime '{runtime}' with local "
+                "capabilities but the default SSH key for the host-loopback "
+                "delegate is missing:",
+                file=sys.stderr,
+            )
+            print(
+                f"  expected at: {_LOOPBACK_DEFAULT_SSH_KEY_PATH}",
+                file=sys.stderr,
+            )
+            print(
+                "Options:\n"
+                f"  1. Generate the key and bind-mount it read-only "
+                f"({_LOOPBACK_DEFAULT_SSH_KEY_PATH}).\n"
+                "  2. Configure a remote_servers entry explicitly with "
+                "is_host_loopback: true and a custom ssh_key_path.\n"
+                "  3. Switch to the deb/rpm install if you want native host "
+                "ownership without SSH delegation.\n"
+                "See docs/containers-kubernetes.md for the walkthrough.",
+                file=sys.stderr,
+            )
         if strict_key_check:
             sys.exit(1)
         # Non-strict: synthesize anyway so validate/dry-run can show the
