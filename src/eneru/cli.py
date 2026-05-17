@@ -261,7 +261,9 @@ def _local_capabilities_required(config: Config) -> bool:
 _LOOPBACK_DEFAULT_SSH_KEY_PATH = "/var/lib/eneru/ssh/id_loopback"
 
 
-def _synthesize_loopback_if_needed(config: Config) -> None:
+def _synthesize_loopback_if_needed(
+    config: Config, *, strict_key_check: bool = True,
+) -> None:
     """Inject a default is_host_loopback entry for the zero-config homelab case.
 
     Conditions to synthesize: runtime is Docker/Podman (NOT Kubernetes — that
@@ -269,9 +271,15 @@ def _synthesize_loopback_if_needed(config: Config) -> None:
     configured AND no existing remote_servers entry is already flagged.
 
     The synthesized entry uses 127.0.0.1 + root + shutdown -h now, with the
-    documented default SSH key path. If the key file is missing at startup
-    we error early with a clear remediation pointer rather than letting the
-    daemon limp toward a guaranteed loopback FAILED state.
+    documented default SSH key path.
+
+    ``strict_key_check``:
+    * True (``run``) — missing default SSH key is a fatal error; the
+      daemon can't honor the contract without it.
+    * False (``validate``, ``shutdown group --dry-run``) — missing key
+      becomes a WARNING and synthesis proceeds with the default
+      ssh_key_path. The user is diagnosing config or rehearsing; the
+      key may legitimately not exist yet.
     """
     runtime = _detect_runtime_context()
     if not _is_container_runtime(runtime):
@@ -295,8 +303,9 @@ def _synthesize_loopback_if_needed(config: Config) -> None:
         return
 
     if not Path(_LOOPBACK_DEFAULT_SSH_KEY_PATH).exists():
+        level = "ERROR" if strict_key_check else "WARNING"
         print(
-            f"ERROR: Eneru detected runtime '{runtime}' with local capabilities "
+            f"{level}: Eneru detected runtime '{runtime}' with local capabilities "
             "but the default SSH key for the host-loopback delegate is missing:",
             file=sys.stderr,
         )
@@ -314,7 +323,11 @@ def _synthesize_loopback_if_needed(config: Config) -> None:
             "See docs/containers-kubernetes.md for the walkthrough.",
             file=sys.stderr,
         )
-        sys.exit(1)
+        if strict_key_check:
+            sys.exit(1)
+        # Non-strict: synthesize anyway so validate/dry-run can show the
+        # delegated sequence. Real shutdown would fail at SSH time, but
+        # the user is diagnosing config, not running production.
 
     from eneru.config import RemoteServerConfig
     synthesized = RemoteServerConfig(
@@ -561,20 +574,36 @@ def _exit_on_config_errors(config, args):
     sys.exit(1)
 
 
+def _prepare_runtime_config(config: Config, *, strict_key_check: bool = True) -> None:
+    """v5.5 startup preparation: auto-enable loopback, inject delegated
+    actions, surface K8s warnings.
+
+    All subcommands that act on a config (run, validate, shutdown group,
+    shutdown remote) call this so the in-memory config reflects what
+    would actually execute. Without it, ``eneru validate`` in a
+    container shows the in-process shutdown sequence even when
+    delegation would apply, and dry-run rehearsals miss the loopback
+    entry entirely.
+
+    ``strict_key_check`` controls how synthesis treats a missing default
+    SSH key path:
+    * True (default; used by ``run``) — error and exit 1. The daemon
+      can't honor the contract without the key.
+    * False (used by ``validate`` / ``shutdown group --dry-run``) —
+      warn and proceed. The user is diagnosing or rehearsing; the key
+      may legitimately not exist yet.
+    """
+    _synthesize_loopback_if_needed(config, strict_key_check=strict_key_check)
+    _warn_on_kubernetes_local_misuse(config)
+    _inject_delegated_actions(config)
+
+
 def _cmd_run(args):
     """Start the monitoring daemon."""
     config = _load_config(args)
     _apply_run_overrides(config, args)
 
-    # v5.5: auto-enable host-loopback for Docker/Podman + local capabilities
-    # before validation so the synthesized entry gets validated too. K8s gets
-    # a warning instead — explicit opt-in only.
-    _synthesize_loopback_if_needed(config)
-    _warn_on_kubernetes_local_misuse(config)
-    # Translate the local config (vms, containers, sync) into REMOTE_ACTIONS
-    # the loopback will execute on the host. Single source of truth: the
-    # local config the user already wrote.
-    _inject_delegated_actions(config)
+    _prepare_runtime_config(config, strict_key_check=True)
 
     _exit_on_config_errors(config, args)
     _exit_on_privilege_errors(config)
@@ -589,11 +618,16 @@ def _cmd_run(args):
 
 def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
     """Print the shutdown sequence tree for a UPS group."""
+    # v5.5: when a loopback is configured, in-process local phases are
+    # SKIPPED at run time — the same work is sent over SSH to the host
+    # via the loopback's pre_shutdown_commands. Show that explicitly so
+    # `eneru validate` reflects what would actually execute.
+    delegated = any(s.is_host_loopback for s in group.remote_servers)
     print(f"{prefix}  Shutdown sequence:")
     step = 1
     indent = f"{prefix}    "
 
-    if has_local:
+    if has_local and not delegated:
         if group.virtual_machines.enabled:
             print(f"{indent}{step}. Virtual machines")
             step += 1
@@ -614,6 +648,26 @@ def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
                 mount_count = len(group.filesystems.unmount.mounts)
                 parts.append(f"unmount {mount_count} mount(s)")
             print(f"{indent}{step}. Filesystem {' + '.join(parts)}")
+            step += 1
+    elif has_local and delegated:
+        # Build a brief summary of what will be delegated to the loopback.
+        delegated_parts = []
+        if group.virtual_machines.enabled:
+            delegated_parts.append("VMs")
+        if group.containers.enabled:
+            delegated_parts.append("containers")
+        if group.filesystems.sync_enabled:
+            delegated_parts.append("sync")
+        if group.filesystems.unmount.enabled:
+            delegated_parts.append(
+                f"unmount({len(group.filesystems.unmount.mounts)})"
+            )
+        if delegated_parts:
+            summary = ", ".join(delegated_parts)
+            print(
+                f"{indent}{step}. Local actions delegated via loopback SSH: "
+                f"{summary}"
+            )
             step += 1
 
     if enabled_servers:
@@ -651,7 +705,13 @@ def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
         print(f"{indent}(no remote servers)")
 
     if has_local:
-        print(f"{indent}{step}. Local shutdown")
+        if delegated:
+            print(
+                f"{indent}{step}. Local shutdown (host poweroff "
+                "delegated via loopback SSH)"
+            )
+        else:
+            print(f"{indent}{step}. Local shutdown")
 
 
 def _print_group_summary(group, idx, multi_ups):
@@ -675,6 +735,12 @@ def _print_group_summary(group, idx, multi_ups):
 def _cmd_validate(args):
     """Validate configuration and print overview."""
     config = _load_config(args)
+    # v5.5: run synthesis + injection so the validate output reflects what
+    # would actually execute (the delegated shutdown sequence in a
+    # container, not the in-process one). Non-strict — a missing default
+    # SSH key downgrades to a warning so users can still inspect their
+    # config without first generating the key.
+    _prepare_runtime_config(config, strict_key_check=False)
     exit_code = 0
 
     print(f"Eneru v{__version__}")
@@ -1124,6 +1190,11 @@ def _cmd_shutdown_group(args):
     import threading
 
     config = _load_config(args)
+    # v5.5: synthesize loopback + inject delegated actions so the
+    # rehearsal exercises the same shutdown path the daemon would. Use
+    # strict_key_check=False so dry-run rehearsals work even if the SSH
+    # key isn't materialized yet (the dry-run never actually SSHes).
+    _prepare_runtime_config(config, strict_key_check=False)
     _exit_on_config_errors(config, args)
 
     if not args.dry_run and not args.confirm:

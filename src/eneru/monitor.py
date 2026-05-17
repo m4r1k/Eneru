@@ -782,7 +782,15 @@ class UPSGroupMonitor(
         required_cmds = ["upsc"]
         group = self.config.ups_groups[0] if self.config.ups_groups else None
         is_local = group.is_local if group else True
-        if is_local and self.config.local_shutdown.enabled:
+        # v5.5: when delegating local-host actions to the host via the
+        # loopback SSH entry, the host-poweroff binary lives on the host,
+        # NOT in the container. Skip the local-binary requirement in that
+        # case; the loopback's shutdown_command runs over SSH instead.
+        if (
+            is_local
+            and self.config.local_shutdown.enabled
+            and not self._uses_loopback_delegate
+        ):
             shutdown_cmd = str(self.config.local_shutdown.command).split()
             if shutdown_cmd:
                 required_cmds.append(shutdown_cmd[0])
