@@ -97,8 +97,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `~/.ssh/id_rsa` is not visible from the eneru user. See
   [docs/migrate-to-container.md Step 2b](migrate-to-container.md#step-2b-migrate-existing-remote-server-ssh-keys).
 - Bind-mounted SSH keys must be readable by uid 10001 inside the
-  container. Either `chown 10001:10001` the file or relax it to mode
-  `0644` for the public key.
+  container. Hand the private key to uid 10001 with `chown 10001:10001`
+  and keep it at `0400` or `0600`; the matching `.pub` can stay `0644`.
+  Loosening the private key to `0644` to "make it work" exposes it to
+  every local user on the host and isn't worth the convenience.
 - To carry forward existing TUI graphs, event log, and notification
   history, copy `/var/lib/eneru/*.db` to the bind-mount source for
   `/var/lib/eneru` (e.g. `/srv/eneru/state/`) and `chown 10001:10001`

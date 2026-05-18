@@ -2646,7 +2646,7 @@ class TestQueryEventsForDisplayCloseException:
 class TestQueryMetricSeriesEdges:
     """Extra paths in the SQLite + deque blend helper."""
 
-    def _config(self, tmp_path):
+    def _config(self, tmp_path: Path):
         from eneru import (
             Config, UPSConfig, UPSGroupConfig, StatsConfig,
             BehaviorConfig, LoggingConfig, NotificationsConfig,
@@ -3006,6 +3006,13 @@ class TestRenderLogsPanelNoAvailableSpace:
                 win, y_start=0, y_end=2, width=80,
                 events=["evt"], show_more=False,
             )
+        # The single supplied event string must NOT appear anywhere in
+        # the cell buffer — if available <= 0 the helper has to skip
+        # event rows entirely (the title row is fine, but no "evt").
+        painted = "".join(
+            ch for (_y, _x), (ch, _attr) in win.cells.items()
+        )
+        assert "evt" not in painted
 
 
 class TestRobustBoundsEmpty:
@@ -3108,7 +3115,7 @@ class TestRenderGraphPanelEdges:
 class TestRunTuiLogFallbackAndMove:
     """Coverage for the log-fallback events path and the move() guard."""
 
-    def _group_data(self, group, _config):
+    def _group_data(self, group: UPSGroupConfig, _config: Config) -> dict:
         return {
             "label": group.ups.label,
             "name": group.ups.name,

@@ -3136,7 +3136,7 @@ class TestEmitLifecycleStartupCoordinatorMode:
         del_up.assert_not_called()
 
 
-def monitor_mod_version():
+def monitor_mod_version() -> str:
     """Helper to read the package __version__ without polluting imports."""
     from eneru.version import __version__
     return __version__

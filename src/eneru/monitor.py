@@ -1187,6 +1187,12 @@ class UPSGroupMonitor(
                     self.config.NOTIFY_FAILURE,
                     category="shutdown_summary",
                 )
+                # Clear the re-entry flag so future triggers can retry the
+                # delegated shutdown. In the success branch below the flag
+                # stays touched because the container is going down with
+                # the host; here the container stays up, so any subsequent
+                # trigger has to be allowed through.
+                self._shutdown_flag_path.unlink(missing_ok=True)
                 return
             record_sequence_complete()
             self._log_message(

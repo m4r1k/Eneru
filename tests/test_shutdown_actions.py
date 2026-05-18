@@ -500,9 +500,38 @@ class TestNoDriftBetweenInProcessAndTemplates:
                 if binary is None:
                     continue
                 if binary == "sudo":
-                    # `sudo -u user podman ...` — classify the real binary after sudo.
-                    if len(values) >= 4 and values[1] == "-u" and values[3]:
-                        binary = values[3]
+                    # Classify the real binary behind sudo regardless of
+                    # the flag form. Walks past sudo's option flags
+                    # (`-n`, `-u user`, `-g group`, `--`, etc.) and picks
+                    # the first non-flag token. CodeRabbit #11: the old
+                    # `-u user` only path missed `sudo -n virsh ...` and
+                    # similar non-`-u` invocations.
+                    sudo_flags_with_arg = {
+                        "-u", "--user",
+                        "-g", "--group",
+                        "-h", "--host",
+                        "-p", "--prompt",
+                        "-r", "--role",
+                        "-t", "--type",
+                        "-C", "--close-from",
+                        "-D", "--chdir",
+                    }
+                    idx = 1
+                    while idx < len(values):
+                        token = values[idx]
+                        if token is None:
+                            break
+                        if token == "--":
+                            idx += 1
+                            break
+                        if not token.startswith("-"):
+                            break
+                        if token in sudo_flags_with_arg and idx + 1 < len(values):
+                            idx += 2
+                        else:
+                            idx += 1
+                    if idx < len(values) and values[idx]:
+                        binary = values[idx]
                 seen_binaries.add(binary)
 
         # Every binary the in-process path uses must be either covered by

@@ -565,7 +565,7 @@ def test_api_history_route_returns_rows(minimal_config, monitor, monkeypatch):
     handler.api_config = minimal_config
     handler.api_source = monitor
 
-    status, content_type, payload = handler._route()
+    status, _content_type, payload = handler._route()
     assert status == 200
     assert payload["ups"] == "TestUPS@localhost"
     assert payload["metric"] == "charge"

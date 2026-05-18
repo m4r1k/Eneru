@@ -666,7 +666,7 @@ class TestFindHostLoopback:
         config = self._config_with_loopback(tmp_path)
         result = _find_host_loopback(config)
         assert result is not None
-        owner, server = result
+        _owner, server = result
         assert server.is_host_loopback is True
         assert server.host == "127.0.0.1"
 
@@ -3241,7 +3241,7 @@ class TestSelectRemoteServerGroupFilter:
         )
         # `--group rack-a` must pick only the UPS-A row; UPS-B's nas is
         # filtered out at line 1168.
-        owner_label, owner_name, server = _select_remote_server(
+        owner_label, _owner_name, server = _select_remote_server(
             config, "nas", group_ref="rack-a",
         )
         assert owner_label == "rack-a"
@@ -3532,3 +3532,31 @@ class TestLegacyContainerPathRewrite:
              patch("eneru.cli.Path.stat"):
             _prepare_runtime_config(config, strict_key_check=False)
         assert config.logging.file == "/var/log/eneru/ups-monitor.log"
+
+
+class TestFindHostLoopbackLegacyAccessor:
+    """Sanity: a single-UPS legacy config (top-level YAML keys like
+    ``remote_servers:`` directly under root) is exposed via
+    ``Config.remote_servers``'s property, which returns the first
+    group's remote_servers. The existing ups_groups scan covers it."""
+
+    @pytest.mark.unit
+    def test_find_host_loopback_on_single_ups_legacy(self, tmp_path):
+        from eneru.cli import _find_host_loopback
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+            "    is_host_loopback: true\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+        result = _find_host_loopback(config)
+        assert result is not None
+        _owner, server = result
+        assert server.is_host_loopback is True
+        assert server.host == "127.0.0.1"

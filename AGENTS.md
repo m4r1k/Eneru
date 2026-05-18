@@ -180,6 +180,10 @@ README.md                       # Project overview
   - 💾 Filesystem sync
   - 📤 Unmounting filesystems (section header)
   - 🔌 Shutdown commands (local and remote)
+  - 🛰️ Container loopback delegation (v5.5+: local host actions
+    delegated to the host's sshd over 127.0.0.1; distinct from the
+    🌐 used for ordinary remote_servers so the loopback path is
+    visually unambiguous in logs and notifications)
 
   **Actions & Progress:**
   - ⏳ Starting a wait / initial wait state

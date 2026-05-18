@@ -219,6 +219,12 @@ def _find_host_loopback(config: Config):
     so the first enabled match is authoritative. Disabled loopback entries
     are explicit non-contracts: they should not make delegation, readiness,
     or status paths look usable.
+
+    Note: ``Config.remote_servers`` is a property that returns the first
+    UPS group's remote_servers — there is no separate top-level list,
+    so the loop over ``config.ups_groups`` already covers single-UPS
+    legacy configs and any synthesized entries that land on the first
+    group via ``_synthesize_loopback_if_needed``'s owner-attach path.
     """
     for group in config.ups_groups:
         for server in group.remote_servers:

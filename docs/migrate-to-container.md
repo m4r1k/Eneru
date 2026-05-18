@@ -54,13 +54,15 @@ mkdir -p /srv/eneru/ssh
 ssh-keygen -t ed25519 -N '' \
     -f /srv/eneru/ssh/id_loopback \
     -C "eneru-loopback@$(hostname)"
-chmod 600 /srv/eneru/ssh/id_loopback
-chmod 644 /srv/eneru/ssh/id_loopback.pub
 # Eneru runs as uid 10001 inside the container. The bind mount maps host
-# uids through 1:1, so a key owned by root with mode 0600 is unreadable
-# from the container. Either chown to 10001:10001 (recommended), or relax
-# to mode 0644 if you're comfortable with a world-readable file on disk.
+# uids 1:1, so a key owned by root with mode 0600 is unreadable from
+# the container. Hand the private key to uid 10001 and keep the
+# permission bits tight (0400 or 0600); the public key can be 0644.
+# Do NOT loosen the private key to 0644 just to make the container
+# happy — it would be readable by every local user on the host.
 chown 10001:10001 /srv/eneru/ssh/id_loopback /srv/eneru/ssh/id_loopback.pub
+chmod 0400 /srv/eneru/ssh/id_loopback
+chmod 0644 /srv/eneru/ssh/id_loopback.pub
 ```
 
 `/srv/eneru/` follows the FHS site-specific data convention. Use

@@ -1552,11 +1552,35 @@ class ConfigLoader:
         for group in config.ups_groups:
             for server in group.remote_servers:
                 if server.is_host_loopback is True:
+                    where = (
+                        f"{group.ups.label}/"
+                        f"{server.name or server.host or '(unnamed)'}"
+                    )
+                    if not group.is_local:
+                        messages.append(
+                            f"ERROR: remote_server '{where}' is_host_loopback: "
+                            "true but the owning UPS group is not is_local. "
+                            "The loopback delegate only makes sense on the "
+                            "single group that owns the host."
+                        )
+                        continue
                     loopback_entries.append((group.ups.label, server))
         for group in config.redundancy_groups:
             for server in group.remote_servers:
                 if server.is_host_loopback is True:
-                    loopback_entries.append((group.name or "(unnamed)", server))
+                    label = group.name or "(unnamed)"
+                    where = (
+                        f"{label}/{server.name or server.host or '(unnamed)'}"
+                    )
+                    if not group.is_local:
+                        messages.append(
+                            f"ERROR: remote_server '{where}' is_host_loopback: "
+                            "true but the owning redundancy group is not "
+                            "is_local. The loopback delegate only makes sense "
+                            "on the single group that owns the host."
+                        )
+                        continue
+                    loopback_entries.append((label, server))
         # Top-level remote_servers (single-UPS legacy layout) live on the
         # single UPS group, so they're already covered above.
 

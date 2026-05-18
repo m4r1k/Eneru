@@ -664,6 +664,63 @@ class TestCapabilityAchievableEmptyCommand:
         exists.assert_not_called()
 
 
+class TestCapabilityAchievableSudoParsing:
+    """CodeRabbit #1: the local_host_poweroff candidate scanner must look
+    through every sudo option form, not just `sudo -n`."""
+
+    @pytest.mark.unit
+    def test_sudo_dash_u_user_picks_real_binary(self):
+        """`sudo -u root shutdown -h now` must score `shutdown`, not `-u`."""
+        with patch("eneru.status.command_exists") as exists:
+            exists.return_value = True
+            achievable, _ = _capability_achievable(
+                "local_host_poweroff",
+                runtime_label="systemd service",
+                nut_ready=True,
+                loopback_status=None,
+                remote_health_by_target={},
+                local_shutdown_command="sudo -u root shutdown -h now",
+            )
+        assert achievable is True
+        # The exists() check must have been called with `shutdown`, not
+        # with `-u` (the old code's misclassification).
+        called_with = {c.args[0] for c in exists.call_args_list}
+        assert "shutdown" in called_with
+        assert "-u" not in called_with
+
+    @pytest.mark.unit
+    def test_sudo_dash_n_still_works(self):
+        """Sanity: the original `sudo -n shutdown` form still resolves
+        to `shutdown`."""
+        with patch("eneru.status.command_exists") as exists:
+            exists.return_value = True
+            achievable, _ = _capability_achievable(
+                "local_host_poweroff",
+                runtime_label="systemd service",
+                nut_ready=True,
+                loopback_status=None,
+                remote_health_by_target={},
+                local_shutdown_command="sudo -n shutdown -h now",
+            )
+        assert achievable is True
+        assert "shutdown" in {c.args[0] for c in exists.call_args_list}
+
+    @pytest.mark.unit
+    def test_sudo_double_dash_terminator_stops_flag_scan(self):
+        """`sudo -- shutdown` must treat `--` as the end of flags."""
+        with patch("eneru.status.command_exists") as exists:
+            exists.return_value = True
+            _capability_achievable(
+                "local_host_poweroff",
+                runtime_label="systemd service",
+                nut_ready=True,
+                loopback_status=None,
+                remote_health_by_target={},
+                local_shutdown_command="sudo -- shutdown -h now",
+            )
+        assert "shutdown" in {c.args[0] for c in exists.call_args_list}
+
+
 class TestLoopbackRuntimeSummaryRedundancy:
     """A loopback configured on a redundancy group must surface in /ready."""
 

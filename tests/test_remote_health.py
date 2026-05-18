@@ -701,6 +701,22 @@ def test_forced_command_shutdown_response_fails_with_command_hint(
 
 
 @pytest.mark.unit
+def test_loopback_identity_probe_rejects_unsafe_command():
+    """CodeRabbit #2: host_identity_command must pass the same
+    is_safe_probe_command() safety check the regular probe uses.
+    A command with shell metacharacters is rejected without ever
+    invoking run_command."""
+    server = _make_loopback_server(expected_host_identity="abc123")
+    server.host_identity_command = "cat /etc/machine-id; rm -rf /"
+    with patch("eneru.remote_health.run_command") as run:
+        ok, error, _ = run_loopback_identity_probe(server)
+    assert ok is False
+    assert "identity probe rejected" in error
+    assert "safe single-token command" in error
+    run.assert_not_called()
+
+
+@pytest.mark.unit
 def test_loopback_identity_probe_timeout_reports_identity_context(tmp_path):
     server = _make_loopback_server(expected_host_identity="abc123")
     with patch("eneru.remote_health.run_command",

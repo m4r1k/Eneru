@@ -157,6 +157,16 @@ def run_loopback_identity_probe(
     error message that names the bind-mount as the most likely cause.
     """
     start = time.monotonic()
+    # Defense in depth: the regular remote-health probe rejects unsafe
+    # commands via is_safe_probe_command() before sending over SSH.
+    # Apply the same safety check to host_identity_command so a
+    # malicious or accidentally-pipelined value can't slip through.
+    if not is_safe_probe_command(server.host_identity_command):
+        latency_ms = int((time.monotonic() - start) * 1000)
+        return False, (
+            "identity probe rejected: host_identity_command is not a "
+            "safe single-token command (no shell metacharacters allowed)"
+        ), latency_ms
     exit_code, stdout, stderr = run_command(
         build_ssh_probe_command(server, server.host_identity_command),
         timeout=server.connect_timeout + 10,

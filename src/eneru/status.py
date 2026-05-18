@@ -332,10 +332,38 @@ def _capability_achievable(
             parts = shlex.split(local_shutdown_command)
         except ValueError as exc:
             return False, f"invalid local shutdown command: {exc}"
-        if parts and parts[0] == "sudo":
-            parts = parts[1:]
-            if parts and parts[0] == "-n":
-                parts = parts[1:]
+        # Strip sudo and its option flags so the candidate is the real
+        # privileged binary. Stripping only `sudo -n` (CodeRabbit #2)
+        # caused `sudo -u root shutdown` to score `-u` as the binary
+        # and report a false 503. The flag set covers every sudo
+        # option that takes a separate argument; the loop bails at
+        # `--` or at the first non-flag token.
+        if parts and parts[0] in ("sudo", "/usr/bin/sudo"):
+            sudo_flags_with_arg = {
+                "-u", "--user",
+                "-g", "--group",
+                "-h", "--host",
+                "-p", "--prompt",
+                "-r", "--role",
+                "-t", "--type",
+                "-C", "--close-from",
+                "-D", "--chdir",
+                "-T", "--command-timeout",
+                "-U", "--other-user",
+            }
+            idx = 1
+            while idx < len(parts):
+                token = parts[idx]
+                if token == "--":
+                    idx += 1
+                    break
+                if not token.startswith("-"):
+                    break
+                if token in sudo_flags_with_arg and idx + 1 < len(parts):
+                    idx += 2
+                else:
+                    idx += 1
+            parts = parts[idx:]
         candidates = [parts[0]] if parts else []
     else:
         candidates = _LOCAL_CAPABILITY_BINARIES.get(cap, [])
@@ -415,6 +443,8 @@ def readiness(source: Any) -> Dict[str, Any]:
 
     nut_ready = nut_visible_any and not nut_failed_any
     runtime_label = _runtime_context_label()
+    # Local import (same cycle reason as _capability_achievable above).
+    from eneru.cli import _is_container_runtime
 
     capabilities: List[Dict[str, Any]] = []
     reasons: List[str] = []
@@ -443,7 +473,12 @@ def readiness(source: Any) -> Dict[str, Any]:
         "reasons": reasons,
         "runtime": {
             "context": runtime_label,
-            "container": runtime_label.startswith("container"),
+            # Use the canonical container predicate so the runtime
+            # flag stays consistent with the capability scoring above
+            # (which already uses _is_container_runtime). A bare
+            # startswith("container") could disagree on non-Docker
+            # container labels.
+            "container": _is_container_runtime(runtime_label),
             "loopbackDelegate": _loopback_runtime_summary(config, loopback_row),
         },
         "capabilities": capabilities,

@@ -1016,6 +1016,10 @@ class TestHostLoopbackValidation:
 
     @pytest.mark.unit
     def test_multiple_loopbacks_rejected(self, temp_config_file):
+        # Both loopback entries on the SAME is_local owner so the
+        # owner-enforcement check (introduced after CodeRabbit's review)
+        # doesn't short-circuit the multi-loopback uniqueness check.
+        # An is_local group with two loopback servers is still rejected.
         temp_config_file.write_text(
             "ups:\n"
             "  - name: 'UPS-A@localhost'\n"
@@ -1026,8 +1030,6 @@ class TestHostLoopbackValidation:
             "        host: 127.0.0.1\n"
             "        user: root\n"
             "        is_host_loopback: true\n"
-            "  - name: 'UPS-B@localhost'\n"
-            "    remote_servers:\n"
             "      - name: lb-b\n"
             "        enabled: true\n"
             "        host: 127.0.0.2\n"
@@ -1041,6 +1043,57 @@ class TestHostLoopbackValidation:
             if m.startswith("ERROR:") and "is_host_loopback" in m
         ]
         assert any("Multiple remote_servers" in m for m in loopback_errors)
+
+    @pytest.mark.unit
+    def test_loopback_on_non_local_ups_group_is_error(self, temp_config_file):
+        """is_host_loopback only makes sense on the single is_local owner.
+        Declaring it under a non-local UPS group is rejected with a clear
+        message (CodeRabbit #4)."""
+        temp_config_file.write_text(
+            "ups:\n"
+            "  - name: 'UPS-A@localhost'\n"
+            "    is_local: true\n"
+            "  - name: 'UPS-B@localhost'\n"
+            "    remote_servers:\n"
+            "      - name: stray-loopback\n"
+            "        enabled: true\n"
+            "        host: 127.0.0.1\n"
+            "        user: root\n"
+            "        is_host_loopback: true\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        messages = ConfigLoader.validate_config(config)
+        assert any(
+            m.startswith("ERROR:") and "is_host_loopback" in m
+            and "is not is_local" in m and "stray-loopback" in m
+            for m in messages
+        ), messages
+
+    @pytest.mark.unit
+    def test_loopback_on_non_local_redundancy_group_is_error(self, temp_config_file):
+        """Same rule applies to redundancy groups."""
+        temp_config_file.write_text(
+            "ups:\n"
+            "  - name: 'UPS-A@localhost'\n"
+            "    is_local: true\n"
+            "  - name: 'UPS-B@localhost'\n"
+            "redundancy_groups:\n"
+            "  - name: rack-1\n"
+            "    ups_sources: ['UPS-A@localhost', 'UPS-B@localhost']\n"
+            "    remote_servers:\n"
+            "      - name: stray-redundancy-loopback\n"
+            "        enabled: true\n"
+            "        host: 127.0.0.1\n"
+            "        user: root\n"
+            "        is_host_loopback: true\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        messages = ConfigLoader.validate_config(config)
+        assert any(
+            m.startswith("ERROR:") and "is_host_loopback" in m
+            and "is not is_local" in m and "redundancy" in m
+            for m in messages
+        ), messages
 
     @pytest.mark.unit
     def test_loopback_disabled_is_error(self, temp_config_file):
@@ -1145,7 +1198,8 @@ class TestHostLoopbackValidation:
             "    nonsense_key: 'foo'\n"
         )
         config = ConfigLoader.load(str(temp_config_file))
-        raw = yaml.safe_load(open(temp_config_file))
+        with open(temp_config_file) as f:
+            raw = yaml.safe_load(f)
         messages = ConfigLoader.validate_config(config, raw_data=raw)
         assert any(
             m.startswith("ERROR:") and "nonsense_key" in m for m in messages

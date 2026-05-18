@@ -4,11 +4,18 @@
 set -e
 
 # Copy authorized_keys from mount point and set correct permissions
-# (bind-mounted files have host UID which SSH rejects)
+# (bind-mounted files have host UID which SSH rejects). Defensive
+# mkdir on both .ssh dirs so set -e doesn't abort if the Dockerfile
+# layer didn't create them.
 if [ -f /tmp/host-authorized-keys ]; then
+    mkdir -p /home/testuser/.ssh
+    chmod 700 /home/testuser/.ssh
+    chown testuser:testuser /home/testuser/.ssh
     cp /tmp/host-authorized-keys /home/testuser/.ssh/authorized_keys
     chmod 600 /home/testuser/.ssh/authorized_keys
     chown testuser:testuser /home/testuser/.ssh/authorized_keys
+    mkdir -p /root/.ssh
+    chmod 700 /root/.ssh
     cp /tmp/host-authorized-keys /root/.ssh/authorized_keys
     chmod 600 /root/.ssh/authorized_keys
     chown root:root /root/.ssh/authorized_keys

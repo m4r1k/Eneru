@@ -251,19 +251,26 @@ logging:
 YAML
   docker rm -f "$name" >/dev/null 2>&1 || true
   echo "  Starting container with local capabilities and explicit is_host_loopback: false"
-  docker run --name "$name" \
+  # Run detached + bounded wait so CI doesn't hang if the daemon ever
+  # starts successfully (the failure mode for this negative test).
+  docker run -d --name "$name" \
     --network "$NETWORK" \
     -v "$config":/etc/ups-monitor/config.yaml:ro \
     eneru:e2e \
-    run --config /etc/ups-monitor/config.yaml \
-    >/tmp/e2e-loopback-missing-loopback.log 2>&1 && {
-      echo "FAIL: missing loopback config started successfully"
-      cat /tmp/e2e-loopback-missing-loopback.log
-      exit 1
-    }
+    run --config /etc/ups-monitor/config.yaml >/dev/null
+  sleep 3
+  if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = "true" ]; then
+    echo "FAIL: missing loopback config started successfully and is still running"
+    docker logs "$name" >/tmp/e2e-loopback-missing-loopback.log 2>&1 || true
+    cat /tmp/e2e-loopback-missing-loopback.log
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    exit 1
+  fi
+  docker logs "$name" >/tmp/e2e-loopback-missing-loopback.log 2>&1 || true
   if ! grep -q "no enabled is_host_loopback delegate" /tmp/e2e-loopback-missing-loopback.log; then
     echo "FAIL: missing loopback error did not explain the contract"
     cat /tmp/e2e-loopback-missing-loopback.log
+    docker rm -f "$name" >/dev/null 2>&1 || true
     exit 1
   fi
   echo "  PASS: startup failed with missing enabled loopback delegate diagnostic"

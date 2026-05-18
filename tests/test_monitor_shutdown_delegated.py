@@ -385,6 +385,33 @@ class TestDelegatedShutdownSequence:
         events_seen = [c.args[0] for c in event_log.call_args_list]
         assert "SHUTDOWN_SEQUENCE_COMPLETE" not in events_seen
 
+    @pytest.mark.unit
+    def test_delegated_shutdown_failure_clears_shutdown_flag(self, tmp_path):
+        """CodeRabbit #3: when the delegated host poweroff fails, the
+        re-entry flag must be cleared so subsequent triggers aren't
+        suppressed (the container stays up and may need to retry)."""
+        monitor = _make_delegated_monitor(tmp_path, dry_run=False)
+        monitor._shutdown_remote_servers = lambda: [
+            RemoteShutdownResult(
+                server="host-loopback",
+                host="127.0.0.1",
+                shutdown_sent=False,
+                error="ssh failed",
+            )
+        ]
+        # _trigger_immediate_shutdown touches the flag before calling
+        # _execute_shutdown_sequence; simulate that pre-existing state.
+        monitor._shutdown_flag_path.touch()
+        assert monitor._shutdown_flag_path.exists()
+
+        with _patch_runtime("container (Docker)"), \
+             patch("eneru.monitor.run_command"), \
+             patch("eneru.monitor.write_shutdown_marker"):
+            monitor._execute_shutdown_sequence()
+
+        # Flag must be gone so the next trigger can run.
+        assert not monitor._shutdown_flag_path.exists()
+
 
 class TestInjectDelegatedActions:
     """v5.5: _inject_delegated_actions translates local config into
