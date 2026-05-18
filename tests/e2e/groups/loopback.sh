@@ -82,26 +82,26 @@ ups:
         expected_host_identity: "$identity"
         shutdown_command: "shutdown -h now"
         shutdown_order: 999
-virtual_machines:
-  enabled: true
-  stop_timeout: 2
-containers:
-  enabled: true
-  runtime: docker
-  stop_timeout: 2
-  shutdown_all_remaining_containers: true
-  include_user_containers: true
-  compose_files:
-    - path: "/opt/e2e/docker-compose.yml"
+    virtual_machines:
+      enabled: true
+      max_wait: 2
+    containers:
+      enabled: true
+      runtime: docker
       stop_timeout: 2
-filesystems:
-  sync_enabled: true
-  unmount:
-    enabled: true
-    timeout: 2
-    mounts:
-      - path: "/mnt/e2e-loopback"
-        options: "-l"
+      shutdown_all_remaining_containers: true
+      include_user_containers: true
+      compose_files:
+        - path: "/opt/e2e/docker-compose.yml"
+          stop_timeout: 2
+    filesystems:
+      sync_enabled: true
+      unmount:
+        enabled: true
+        timeout: 2
+        mounts:
+          - path: "/mnt/e2e-loopback"
+            options: "-l"
 behavior:
   dry_run: true
 local_shutdown:
@@ -121,6 +121,23 @@ statistics:
 YAML
 }
 
+assert_loopback_config_shape() {
+  local config="$1"
+  local key
+  for key in virtual_machines containers filesystems; do
+    if grep -Eq "^${key}:" "$config"; then
+      echo "FAIL: loopback E2E config has top-level '${key}', expected it under the local ups entry"
+      cat "$config"
+      exit 1
+    fi
+    if ! grep -Eq "^[[:space:]]{4}${key}:" "$config"; then
+      echo "FAIL: loopback E2E config is missing nested '${key}' under the local ups entry"
+      cat "$config"
+      exit 1
+    fi
+  done
+}
+
 run_loopback_case() {
   local label="$1" user="$2" use_sudo="$3" port="$4"
   local config="/tmp/e2e-loopback-${label}.yaml"
@@ -129,6 +146,7 @@ run_loopback_case() {
   local cid=""
 
   write_loopback_config "$config" "$user" "$use_sudo" "$identity"
+  assert_loopback_config_shape "$config"
 
   cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
   docker rm -f "$name" >/dev/null 2>&1 || true

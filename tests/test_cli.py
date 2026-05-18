@@ -3020,6 +3020,61 @@ class TestInjectDelegatedActions:
         actions = [c.action for c in loopback.pre_shutdown_commands]
         assert "stop_containers_rootless" in actions
 
+    @pytest.mark.unit
+    def test_multi_ups_local_sections_generate_full_loopback_action_set(self, tmp_path):
+        """The loopback E2E config uses the multi-UPS list shape, so local
+        resources must live under the local ``ups`` entry."""
+        from eneru.cli import _inject_delegated_actions
+
+        config_file = tmp_path / "loopback.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  - name: TestUPS@nut-server\n"
+            "    is_local: true\n"
+            "    remote_servers:\n"
+            "      - name: host-loopback\n"
+            "        enabled: true\n"
+            "        host: ssh-target\n"
+            "        user: root\n"
+            "        is_host_loopback: true\n"
+            "    virtual_machines:\n"
+            "      enabled: true\n"
+            "      max_wait: 2\n"
+            "    containers:\n"
+            "      enabled: true\n"
+            "      runtime: docker\n"
+            "      shutdown_all_remaining_containers: true\n"
+            "      include_user_containers: true\n"
+            "      compose_files:\n"
+            "        - path: /opt/e2e/docker-compose.yml\n"
+            "          stop_timeout: 2\n"
+            "    filesystems:\n"
+            "      sync_enabled: true\n"
+            "      unmount:\n"
+            "        enabled: true\n"
+            "        mounts:\n"
+            "          - path: /mnt/e2e-loopback\n"
+            "            options: -l\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _inject_delegated_actions(config)
+
+        actions = [
+            c.action
+            for c in config.ups_groups[0].remote_servers[0].pre_shutdown_commands
+        ]
+        assert actions == [
+            "stop_vms",
+            "stop_compose",
+            "stop_containers",
+            "stop_containers_rootless",
+            "sync",
+            "unmount_filesystems",
+        ]
+
 
 class TestPrintShutdownSequenceDelegated:
     """Cover the delegated-loopback summary lines in `_print_shutdown_sequence`

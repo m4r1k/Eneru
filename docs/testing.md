@@ -77,7 +77,7 @@ done
 
 | Area | Coverage |
 |------|----------|
-| Config loading and validation | YAML parsing, defaults, enum validation, multi-UPS inheritance, local ownership, redundancy rules |
+| Config loading and validation | YAML parsing, defaults, enum validation, multi-UPS inheritance, local ownership, loopback delegation config shape, redundancy rules |
 | Monitor state machine | OL/OB transitions, FSD, failsafe, shutdown trigger order, dry-run behavior |
 | Shutdown mixins | VMs, containers, compose files, filesystem sync and unmounts, remote SSH phases, remote pre-shutdown action rendering |
 | Multi-UPS coordinator | Group routing, `is_local`, drain policy, local shutdown locking, signal handling |
