@@ -115,10 +115,35 @@ def _root_required_reasons(config: Config) -> list[str]:
     return sorted(set(reasons))
 
 
+def _detect_kubernetes() -> bool:
+    """Return True when this process is running inside a Kubernetes pod.
+
+    Three independent signals; any one is sufficient. The env var alone is
+    enough for ~all real deployments (kubelet injects it for every pod by
+    default across vanilla K8s, k3s, OpenShift, EKS/GKE/AKS), but the SA
+    token mount and cgroup checks catch hardened pods that explicitly
+    unset env vars.
+    """
+    if os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return True
+    if Path("/var/run/secrets/kubernetes.io/serviceaccount/token").exists():
+        return True
+    try:
+        cgroup_text = Path("/proc/1/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        cgroup_text = ""
+    if "kubepods" in cgroup_text:
+        return True
+    return False
+
+
 def _detect_runtime_context() -> str:
     """Best-effort runtime-context label for the current process.
 
     Returns one of:
+      - ``"container (Kubernetes)"`` when running inside a K8s pod. Evaluated
+        FIRST so K8s wins over generic Docker/Podman even when ``/.dockerenv``
+        also exists (some CNI plugins / sidecars create it).
       - ``"container (Docker)"`` when ``/.dockerenv`` exists.
       - ``"container (Podman)"`` when ``/run/.containerenv`` exists.
       - ``"container"`` for other OCI runtimes (lxc, systemd-nspawn, etc.)
@@ -130,8 +155,14 @@ def _detect_runtime_context() -> str:
 
     Container detection takes precedence: a systemd unit running inside
     a container is reported as a container, since that is the user-visible
-    fact when troubleshooting.
+    fact when troubleshooting. K8s detection takes precedence over generic
+    container branches because the v5.5 three-profile framing treats K8s
+    as a distinct deployment profile (remote-only by recommendation;
+    local-host ownership is not a fit).
     """
+    if _detect_kubernetes():
+        return "container (Kubernetes)"
+
     if Path("/.dockerenv").exists():
         return "container (Docker)"
     if Path("/run/.containerenv").exists():
@@ -171,8 +202,371 @@ def _detect_runtime_context() -> str:
     return "bare process"
 
 
+def _is_container_runtime(label: str) -> bool:
+    """True for any container-runtime label returned by _detect_runtime_context."""
+    return label.startswith("container")
+
+
+def _is_kubernetes_runtime(label: str) -> bool:
+    """True only for the Kubernetes-specific container label."""
+    return label == "container (Kubernetes)"
+
+
+def _find_host_loopback(config: Config):
+    """Return the (group_label, server) pair flagged is_host_loopback, or None.
+
+    Config validation already enforces at-most-one across the whole config,
+    so the first enabled match is authoritative. Disabled loopback entries
+    are explicit non-contracts: they should not make delegation, readiness,
+    or status paths look usable.
+
+    Note: ``Config.remote_servers`` is a property that returns the first
+    UPS group's remote_servers — there is no separate top-level list,
+    so the loop over ``config.ups_groups`` already covers single-UPS
+    legacy configs and any synthesized entries that land on the first
+    group via ``_synthesize_loopback_if_needed``'s owner-attach path.
+    """
+    for group in config.ups_groups:
+        for server in group.remote_servers:
+            if server.enabled and server.is_host_loopback is True:
+                return group.ups.label, server
+    for group in config.redundancy_groups:
+        for server in group.remote_servers:
+            if server.enabled and server.is_host_loopback is True:
+                return group.name or "(unnamed)", server
+    return None
+
+
+def _has_explicit_loopback_opt_out(config: Config) -> bool:
+    """Return True if any YAML entry explicitly set is_host_loopback: false."""
+    for group in config.ups_groups:
+        for server in group.remote_servers:
+            if (
+                getattr(server, "_is_host_loopback_explicit", False)
+                and server.is_host_loopback is False
+            ):
+                return True
+    for group in config.redundancy_groups:
+        for server in group.remote_servers:
+            if (
+                getattr(server, "_is_host_loopback_explicit", False)
+                and server.is_host_loopback is False
+            ):
+                return True
+    return False
+
+
+def _uses_loopback_delegate(config: Config, group=None) -> bool:
+    """Shared loopback-delegation predicate for monitor and redundancy code."""
+    runtime = _detect_runtime_context()
+    if not _is_container_runtime(runtime):
+        return False
+    if group is None:
+        group = _local_owner_group(config)
+    if group is None or not getattr(group, "is_local", False):
+        return False
+    return any(
+        s.enabled and s.is_host_loopback is True
+        for s in getattr(group, "remote_servers", [])
+    )
+
+
+def _local_owner_group(config: Config):
+    """Return the group (UPS or redundancy) flagged is_local, or None.
+
+    Single-UPS legacy mode is always is_local=True via _parse_legacy_ups,
+    so this finds the implicit owner too.
+    """
+    for group in config.ups_groups:
+        if group.is_local:
+            return group
+    for group in config.redundancy_groups:
+        if group.is_local:
+            return group
+    if not config.ups_groups and not config.redundancy_groups:
+        return None  # the "implicit single-UPS local-host" mode
+    return None
+
+
+def _local_capabilities_required(config: Config) -> bool:
+    """True iff the config declares any local action that needs a loopback.
+
+    Mirrors _root_required_reasons() but boolean — VMs, containers,
+    filesystem unmount, or local_shutdown effectively configured.
+    """
+    return bool(_root_required_reasons(config))
+
+
+# v5.5: synthesized loopback defaults (auto-enabled for Docker/Podman + local
+# capabilities + no explicit entry). The SSH key path is the documented
+# container convention; the user mounts it as a read-only volume.
+_LOOPBACK_DEFAULT_SSH_KEY_PATH = "/var/lib/eneru/ssh/id_loopback"
+
+
+def _synthesize_loopback_if_needed(
+    config: Config, *, strict_key_check: bool = True,
+) -> None:
+    """Inject a default is_host_loopback entry for the zero-config homelab case.
+
+    Conditions to synthesize: runtime is Docker/Podman (NOT Kubernetes — that
+    profile is remote-only by recommendation) AND local capabilities are
+    configured AND no existing remote_servers entry is already flagged.
+
+    The synthesized entry uses 127.0.0.1 + root + shutdown -h now, with the
+    documented default SSH key path.
+
+    ``strict_key_check``:
+    * True (``run``) — missing default SSH key is a fatal error; the
+      daemon can't honor the contract without it.
+    * False (``validate``, ``shutdown group --dry-run``) — missing key
+      becomes a WARNING and synthesis proceeds with the default
+      ssh_key_path. The user is diagnosing config or rehearsing; the
+      key may legitimately not exist yet.
+    """
+    runtime = _detect_runtime_context()
+    if not _is_container_runtime(runtime):
+        return
+    if _is_kubernetes_runtime(runtime):
+        # Kubernetes is the remote-only profile per the v5.5 three-profile
+        # framing; never auto-enable local-host delegation there.
+        return
+    if not _local_capabilities_required(config):
+        return
+    if _find_host_loopback(config) is not None:
+        return
+    if _has_explicit_loopback_opt_out(config):
+        return
+
+    # Pick the synthesis target — prefer the explicit local owner. In legacy
+    # single-UPS mode `_parse_legacy_ups` already created an is_local group;
+    # in implicit-no-groups mode we have nothing to attach to, so we error.
+    owner = _local_owner_group(config)
+    if owner is None and config.ups_groups:
+        # No owner flagged but groups exist — defensive; should be a
+        # validation error already.
+        return
+
+    # Use stat() instead of exists(): Python 3.14 Path.exists() suppresses
+    # OSError subclasses, but PermissionError is the operator-actionable case
+    # we need to distinguish from a genuinely missing key.
+    try:
+        Path(_LOOPBACK_DEFAULT_SSH_KEY_PATH).stat()
+        key_present = True
+        permission_error = False
+    except OSError as exc:
+        key_present = False
+        permission_error = isinstance(exc, PermissionError)
+
+    if not key_present:
+        level = "ERROR" if strict_key_check else "WARNING"
+        if permission_error:
+            print(
+                f"{level}: Eneru detected runtime '{runtime}' with local "
+                "capabilities but the default SSH key for the host-loopback "
+                "delegate is not readable by the container user:",
+                file=sys.stderr,
+            )
+            print(
+                f"  expected at: {_LOOPBACK_DEFAULT_SSH_KEY_PATH}",
+                file=sys.stderr,
+            )
+            print(
+                "  cause: PermissionError — the parent directory inside the "
+                "container is not readable by uid 10001 (eneru). This is "
+                "common when bind-mounting host paths like /root/.ssh/ "
+                "(mode 0700) directly. Fixes:\n"
+                "  1. Mount a dedicated directory with mode 0755 + the key "
+                "file mode 0400 or 0600 owned by uid 10001, or grant uid "
+                "10001 read access with an ACL.\n"
+                "  2. Run the container as root with `--user 0:0` (works "
+                "but defeats the non-root design).\n"
+                "  3. Configure a remote_servers entry with an explicit "
+                "ssh_key_path pointing at a readable location.\n"
+                "See docs/containers-kubernetes.md for the recommended "
+                "walkthrough using a dedicated /srv/eneru/ssh/ directory.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"{level}: Eneru detected runtime '{runtime}' with local "
+                "capabilities but the default SSH key for the host-loopback "
+                "delegate is missing:",
+                file=sys.stderr,
+            )
+            print(
+                f"  expected at: {_LOOPBACK_DEFAULT_SSH_KEY_PATH}",
+                file=sys.stderr,
+            )
+            print(
+                "Options:\n"
+                f"  1. Generate the key and bind-mount it read-only "
+                f"({_LOOPBACK_DEFAULT_SSH_KEY_PATH}).\n"
+                "  2. Configure a remote_servers entry explicitly with "
+                "is_host_loopback: true and a custom ssh_key_path.\n"
+                "  3. Switch to the deb/rpm install if you want native host "
+                "ownership without SSH delegation.\n"
+                "See docs/containers-kubernetes.md for the walkthrough.",
+                file=sys.stderr,
+            )
+        if strict_key_check:
+            sys.exit(1)
+        # Non-strict: synthesize anyway so validate/dry-run can show the
+        # delegated sequence. Real shutdown would fail at SSH time, but
+        # the user is diagnosing config, not running production.
+
+    from eneru.config import RemoteServerConfig
+    synthesized = RemoteServerConfig(
+        name="host-loopback",
+        enabled=True,
+        host="127.0.0.1",
+        user="root",
+        shutdown_command="shutdown -h now",
+        ssh_key_path=_LOOPBACK_DEFAULT_SSH_KEY_PATH,
+        # Eneru runs as uid 10001 inside the container with no
+        # ~/.ssh/known_hosts. The MITM surface on 127.0.0.1 is zero
+        # (sshd is the same kernel namespace), so skip strict host-key
+        # checking — otherwise the first probe fails with
+        # "Host key verification failed" and /ready stays 503.
+        ssh_options=[
+            "StrictHostKeyChecking=no",
+            "UserKnownHostsFile=/dev/null",
+        ],
+        is_host_loopback=True,
+        # Highest shutdown_order so the host poweroff runs LAST — anything
+        # earlier would be killed by the loopback's shutdown_command.
+        shutdown_order=999,
+    )
+    if owner is not None:
+        owner.remote_servers.append(synthesized)
+    else:
+        # Implicit single-UPS mode with no groups — attach to top-level.
+        config.remote_servers.append(synthesized)
+
+    print(
+        f"v5.5: auto-enabled host-loopback delegate (127.0.0.1, root, "
+        f"key={_LOOPBACK_DEFAULT_SSH_KEY_PATH}) for {runtime} with local "
+        "capabilities. Configure a remote_servers entry explicitly to override.",
+        file=sys.stderr,
+    )
+
+
+def _exit_on_missing_loopback_contract(config: Config) -> None:
+    """Fail Docker/Podman local-host ownership when no enabled loopback exists."""
+    runtime = _detect_runtime_context()
+    if not _is_container_runtime(runtime) or _is_kubernetes_runtime(runtime):
+        return
+    if not _local_capabilities_required(config):
+        return
+    if _find_host_loopback(config) is not None:
+        return
+    print(
+        f"ERROR: Eneru detected runtime '{runtime}' with local-host "
+        "capabilities but no enabled is_host_loopback delegate is configured.",
+        file=sys.stderr,
+    )
+    print(
+        "Docker/Podman local-host ownership must delegate host actions "
+        "through a healthy loopback SSH target. Configure "
+        "remote_servers[].is_host_loopback: true, or remove the local "
+        "capabilities from this container config.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _inject_delegated_actions(config: Config) -> None:
+    """Generate the loopback's pre_shutdown_commands from the local config.
+
+    When a loopback delegate is configured, the operator does NOT write
+    pre_shutdown_commands themselves — Eneru translates the already-declared
+    local phases (VMs, containers, sync, etc.) into REMOTE_ACTIONS templates
+    and prepends them to the loopback entry. The host's sshd then executes
+    them in the same order the in-process path would have used.
+
+    Idempotent within a single process: call once at startup, after
+    ``_synthesize_loopback_if_needed`` and before validation. Any user
+    pre_shutdown_commands on the loopback are preserved and run after the
+    generated ones.
+    """
+    # Avoid acting on configurations that won't actually delegate. Same
+    # condition as monitor's ``_uses_loopback_delegate``.
+    if not _is_container_runtime(_detect_runtime_context()):
+        return
+    found = _find_host_loopback(config)
+    if found is None:
+        return
+
+    # Locate the local owner group whose capabilities we delegate. In
+    # multi-UPS this is the is_local group; in legacy single-UPS the only
+    # group is implicitly local. We only delegate the local owner's
+    # local-host actions — non-local groups' remote_servers shutdowns are
+    # unaffected.
+    owner = _local_owner_group(config)
+    if owner is None:
+        return
+
+    from eneru.config import RemoteCommandConfig
+
+    generated: list[RemoteCommandConfig] = []
+    # Order mirrors the in-process sequence in monitor._execute_shutdown_sequence:
+    # VMs first (long graceful wait), then containers (compose stacks then
+    # leftover container stops), then filesystem sync and unmount.
+    if owner.virtual_machines.enabled:
+        generated.append(RemoteCommandConfig(action="stop_vms"))
+    if owner.containers.enabled:
+        for compose in owner.containers.compose_files:
+            generated.append(RemoteCommandConfig(
+                action="stop_compose", path=compose.path,
+            ))
+        if owner.containers.shutdown_all_remaining_containers:
+            generated.append(RemoteCommandConfig(action="stop_containers"))
+        if owner.containers.include_user_containers:
+            generated.append(RemoteCommandConfig(action="stop_containers_rootless"))
+    if owner.filesystems.sync_enabled:
+        generated.append(RemoteCommandConfig(action="sync"))
+    # v5.5 (Commit 2): the unmount_filesystems template covers per-mount
+    # umount with operator-configured options. Skipped when no mounts are
+    # configured — the template no-ops on an empty target list.
+    if owner.filesystems.unmount.enabled and owner.filesystems.unmount.mounts:
+        generated.append(RemoteCommandConfig(action="unmount_filesystems"))
+
+    if not generated:
+        return
+
+    _owner_label, server = found
+    # PREPEND so generated actions (the actual local-host work) run BEFORE
+    # any user-defined pre_shutdown_commands on the loopback entry.
+    server.pre_shutdown_commands = generated + list(server.pre_shutdown_commands)
+
+
+def _warn_on_kubernetes_local_misuse(config: Config) -> None:
+    """K8s + local capabilities is supported but not recommended.
+
+    Per the v5.5 three-profile framing, Kubernetes is for remote monitoring
+    of remote systems; local-host ownership in K8s is unusual. Emit a
+    startup WARNING (not ERROR) pointing operators at the right doc.
+    """
+    if not _is_kubernetes_runtime(_detect_runtime_context()):
+        return
+    if not _local_capabilities_required(config):
+        return
+    print(
+        "WARNING: Kubernetes runtime detected with local-host capabilities "
+        "configured. K8s is the remote-only profile per the v5.5 framing — "
+        "local-host ownership inside a pod is unusual and not recommended. "
+        "See docs/install-comparison.md for the three deployment profiles.",
+        file=sys.stderr,
+    )
+
+
 def _exit_on_privilege_errors(config: Config) -> None:
     """Refuse non-root startup when config declares local-host ownership.
+
+    v5.5 adds the container-loopback acceptance path: when running inside a
+    container runtime (Docker, Podman, or Kubernetes) and a remote_servers
+    entry is flagged ``is_host_loopback: true``, the privilege check passes
+    because the actual host actions will be delegated over SSH to the host's
+    sshd (which is what's privileged, not Eneru).
 
     The ``ENERU_SKIP_PRIVILEGE_CHECK`` env var (``1`` or ``true``) downgrades
     the check to a printed warning. Intended for E2E suites and developers
@@ -188,6 +582,29 @@ def _exit_on_privilege_errors(config: Config) -> None:
     if not reasons:
         return
 
+    runtime = _detect_runtime_context()
+
+    # v5.5: container + loopback configured → delegate over SSH, no root needed.
+    # No banner: the synthesis (or operator-declared) loopback entry already
+    # printed its own line, and root vs non-root container is purely cosmetic
+    # in v5.5 — both code paths end up SSH-delegating through the loopback.
+    if _is_container_runtime(runtime) and _find_host_loopback(config) is not None:
+        return
+
+    # v5.5: K8s + local capabilities + no loopback → start anyway (the warning
+    # from _warn_on_kubernetes_local_misuse already fired). The daemon will
+    # report 503 on /ready because capabilities aren't achievable, but it
+    # stays up so it can still notify on power events from remote UPSes.
+    if _is_kubernetes_runtime(runtime):
+        print(
+            f"v5.5: running non-root inside {runtime} with local capabilities "
+            "but no host-loopback delegate configured. /ready will report 503 "
+            "until either a loopback is configured or the local config is "
+            "removed. See docs/install-comparison.md.",
+            file=sys.stderr,
+        )
+        return
+
     if os.environ.get("ENERU_SKIP_PRIVILEGE_CHECK", "").strip().lower() in ("1", "true"):
         print(
             "WARNING: ENERU_SKIP_PRIVILEGE_CHECK is set; running non-root despite "
@@ -201,10 +618,20 @@ def _exit_on_privilege_errors(config: Config) -> None:
     print("ERROR: Eneru must run as root for local-host orchestration.")
     for reason in reasons:
         print(f"  - {reason}")
-    print(
-        "For remote-only container/Kubernetes deployments, use multi-UPS "
-        "configuration with is_local: false and set local_shutdown.enabled: false."
-    )
+    if _is_container_runtime(runtime):
+        # Docker/Podman + capabilities + no loopback usually means the user
+        # disabled the auto-synthesis or explicitly set is_host_loopback: false.
+        print(
+            "v5.5: this container runtime supports a loopback SSH delegate. "
+            "Configure a remote_servers entry with is_host_loopback: true "
+            "(see examples/config-container-local.yaml and "
+            "docs/containers-kubernetes.md)."
+        )
+    else:
+        print(
+            "For remote-only container/Kubernetes deployments, use multi-UPS "
+            "configuration with is_local: false and set local_shutdown.enabled: false."
+        )
     print(
         "To bypass for testing/dry-run, set ENERU_SKIP_PRIVILEGE_CHECK=1 "
         "(downgrades the check to a warning)."
@@ -260,12 +687,77 @@ def _exit_on_config_errors(config, args):
     sys.exit(1)
 
 
+# v5.5: legacy logging/runtime paths predate the /var/{log,run}/eneru/
+# convention and only worked on the native install because the daemon ran
+# as root. Inside the OCI image eneru runs as uid 10001 and cannot write
+# to /var/log/ or /var/run/ directly. When a container-runtime user keeps
+# the dataclass defaults (the migration-guide "no required YAML changes"
+# case), transparently rewrite to the eneru-owned subdir so the existing
+# native config keeps working. See docs/migrate-to-container.md.
+_LEGACY_CONTAINER_PATH_REWRITES = {
+    "file": ("/var/log/ups-monitor.log", "/var/log/eneru/ups-monitor.log"),
+    "state_file": ("/var/run/ups-monitor.state", "/var/run/eneru/ups-monitor.state"),
+    "battery_history_file": (
+        "/var/run/ups-battery-history",
+        "/var/run/eneru/ups-battery-history",
+    ),
+    "shutdown_flag_file": (
+        "/var/run/ups-shutdown-scheduled",
+        "/var/run/eneru/ups-shutdown-scheduled",
+    ),
+}
+
+
+def _rewrite_legacy_paths_for_container(config: Config) -> None:
+    """Auto-rewrite legacy native-install paths to /var/{log,run}/eneru/ inside containers.
+
+    Silent — the rewrite is documented in docs/migrate-to-container.md
+    and printing a banner on every container restart was noise. The
+    rewrite still only fires when (a) runtime is Docker/Podman/Kubernetes
+    AND (b) the current value still matches the dataclass default; an
+    operator who sets explicit paths in the config opts out completely.
+    """
+    if not _is_container_runtime(_detect_runtime_context()):
+        return
+    for attr, (legacy, replacement) in _LEGACY_CONTAINER_PATH_REWRITES.items():
+        if getattr(config.logging, attr, None) == legacy:
+            setattr(config.logging, attr, replacement)
+
+
+def _prepare_runtime_config(config: Config, *, strict_key_check: bool = True) -> None:
+    """v5.5 startup preparation: auto-enable loopback, inject delegated
+    actions, surface K8s warnings.
+
+    All subcommands that act on a config (run, validate, shutdown group,
+    shutdown remote) call this so the in-memory config reflects what
+    would actually execute. Without it, ``eneru validate`` in a
+    container shows the in-process shutdown sequence even when
+    delegation would apply, and dry-run rehearsals miss the loopback
+    entry entirely.
+
+    ``strict_key_check`` controls how synthesis treats a missing default
+    SSH key path:
+    * True (default; used by ``run``) — error and exit 1. The daemon
+      can't honor the contract without the key.
+    * False (used by ``validate`` / ``shutdown group --dry-run``) —
+      warn and proceed. The user is diagnosing or rehearsing; the key
+      may legitimately not exist yet.
+    """
+    _rewrite_legacy_paths_for_container(config)
+    _synthesize_loopback_if_needed(config, strict_key_check=strict_key_check)
+    _warn_on_kubernetes_local_misuse(config)
+    _inject_delegated_actions(config)
+
+
 def _cmd_run(args):
     """Start the monitoring daemon."""
     config = _load_config(args)
     _apply_run_overrides(config, args)
 
+    _prepare_runtime_config(config, strict_key_check=True)
+
     _exit_on_config_errors(config, args)
+    _exit_on_missing_loopback_contract(config)
     _exit_on_privilege_errors(config)
 
     if config.multi_ups or config.redundancy_groups:
@@ -278,11 +770,16 @@ def _cmd_run(args):
 
 def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
     """Print the shutdown sequence tree for a UPS group."""
+    # v5.5: when a loopback is configured, in-process local phases are
+    # SKIPPED at run time — the same work is sent over SSH to the host
+    # via the loopback's pre_shutdown_commands. Show that explicitly so
+    # `eneru validate` reflects what would actually execute.
+    delegated = any(s.enabled and s.is_host_loopback is True for s in group.remote_servers)
     print(f"{prefix}  Shutdown sequence:")
     step = 1
     indent = f"{prefix}    "
 
-    if has_local:
+    if has_local and not delegated:
         if group.virtual_machines.enabled:
             print(f"{indent}{step}. Virtual machines")
             step += 1
@@ -303,6 +800,26 @@ def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
                 mount_count = len(group.filesystems.unmount.mounts)
                 parts.append(f"unmount {mount_count} mount(s)")
             print(f"{indent}{step}. Filesystem {' + '.join(parts)}")
+            step += 1
+    elif has_local and delegated:
+        # Build a brief summary of what will be delegated to the loopback.
+        delegated_parts = []
+        if group.virtual_machines.enabled:
+            delegated_parts.append("VMs")
+        if group.containers.enabled:
+            delegated_parts.append("containers")
+        if group.filesystems.sync_enabled:
+            delegated_parts.append("sync")
+        if group.filesystems.unmount.enabled:
+            delegated_parts.append(
+                f"unmount({len(group.filesystems.unmount.mounts)})"
+            )
+        if delegated_parts:
+            summary = ", ".join(delegated_parts)
+            print(
+                f"{indent}{step}. Local actions delegated via loopback SSH: "
+                f"{summary}"
+            )
             step += 1
 
     if enabled_servers:
@@ -340,7 +857,13 @@ def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
         print(f"{indent}(no remote servers)")
 
     if has_local:
-        print(f"{indent}{step}. Local shutdown")
+        if delegated:
+            print(
+                f"{indent}{step}. Local shutdown (host poweroff "
+                "delegated via loopback SSH)"
+            )
+        else:
+            print(f"{indent}{step}. Local shutdown")
 
 
 def _print_group_summary(group, idx, multi_ups):
@@ -364,6 +887,12 @@ def _print_group_summary(group, idx, multi_ups):
 def _cmd_validate(args):
     """Validate configuration and print overview."""
     config = _load_config(args)
+    # v5.5: run synthesis + injection so the validate output reflects what
+    # would actually execute (the delegated shutdown sequence in a
+    # container, not the in-process one). Non-strict — a missing default
+    # SSH key downgrades to a warning so users can still inspect their
+    # config without first generating the key.
+    _prepare_runtime_config(config, strict_key_check=False)
     exit_code = 0
 
     print(f"Eneru v{__version__}")
@@ -813,6 +1342,11 @@ def _cmd_shutdown_group(args):
     import threading
 
     config = _load_config(args)
+    # v5.5: synthesize loopback + inject delegated actions so the
+    # rehearsal exercises the same shutdown path the daemon would. Use
+    # strict only for real shutdown. Dry-run rehearsals still work before
+    # the default loopback key is materialized because they never SSH.
+    _prepare_runtime_config(config, strict_key_check=not args.dry_run)
     _exit_on_config_errors(config, args)
 
     if not args.dry_run and not args.confirm:

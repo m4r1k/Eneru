@@ -339,3 +339,85 @@ class TestPlotXWindow:
         right = "".join(row[15:] for row in rows)
         assert any(ch != _BLANK for ch in left)
         assert any(ch != _BLANK for ch in right)
+
+
+# ===========================================================================
+# Defensive branches: locale failure, all-None data, non-numeric x_values,
+# zero-dimension render_to_window, y_axis_label addnstr failure
+# ===========================================================================
+
+class TestDefensiveBranches:
+    """Cover the small but distinct exception/edge paths in graph.py."""
+
+    @pytest.mark.unit
+    def test_supported_swallows_locale_lookup_failure(self, monkeypatch):
+        """If ``locale.getpreferredencoding`` raises, the helper must not
+        crash -- it falls back to "encoding == ''" so supported() returns
+        False (graph.py lines 62-63)."""
+        monkeypatch.setenv("LANG", "en_US.UTF-8")
+        with patch(
+            "eneru.graph.locale.getpreferredencoding",
+            side_effect=RuntimeError("locale module misbehaving"),
+        ):
+            assert BrailleGraph.supported() is False
+
+    @pytest.mark.unit
+    def test_plot_with_all_non_numeric_data_returns_blank_grid(self):
+        """When auto-scale runs and ``data`` has no numeric values, the
+        function returns a blank grid rather than crashing on min/max
+        (graph.py line 133)."""
+        rows = BrailleGraph.plot(
+            [None, "x", "N/A"], width=4, height=2,
+        )
+        assert rows == ["    ", "    "]
+
+    @pytest.mark.unit
+    def test_plot_x_window_skips_non_numeric_x_values(self):
+        """``x_values`` entries that fail float() coercion must be skipped
+        without aborting the whole plot (graph.py lines 177-178)."""
+        rows = BrailleGraph.plot(
+            [10.0, 20.0, 30.0],
+            x_values=[0.0, "bad", 10.0],
+            x_min=0.0, x_max=10.0,
+            width=8, height=2,
+            y_min=0, y_max=100,
+            force_fallback=True,
+        )
+        assert len(rows) == 2
+        # Both numeric x values still rendered something on the grid.
+        assert any(any(c != " " for c in r) for r in rows)
+
+    @pytest.mark.unit
+    def test_render_to_window_with_zero_dimensions_is_noop(self):
+        """``height`` or ``width`` <= 0 makes render_to_window a no-op
+        and must not touch the window (graph.py line 252)."""
+        class TouchedWin:
+            def __init__(self):
+                self.calls = 0
+            def addnstr(self, *a, **k):
+                self.calls += 1
+
+        win = TouchedWin()
+        BrailleGraph.render_to_window(win, 0, 0, height=0, width=10, data=[1])
+        BrailleGraph.render_to_window(win, 0, 0, height=2, width=0, data=[1])
+        assert win.calls == 0
+
+    @pytest.mark.unit
+    def test_render_to_window_swallows_y_axis_label_error(self):
+        """If addnstr raises specifically on the y-axis label, the renderer
+        must continue silently (graph.py lines 267-268)."""
+        calls = []
+
+        class SelectiveWin:
+            def addnstr(self, y, x, text, n, attr=0):
+                calls.append((y, text))
+                # Fail only on the label row (y + height = 2 + 2 = 4).
+                if text == "label-here":
+                    raise RuntimeError("label blew up")
+
+        BrailleGraph.render_to_window(
+            SelectiveWin(), 2, 0, height=2, width=4,
+            data=[1, 2, 3], y_axis_label="label-here",
+        )
+        # The label call was made (and swallowed); other rows still rendered.
+        assert any(text == "label-here" for _, text in calls)

@@ -2,6 +2,11 @@
 
 Start with the logs and validation output. Most Eneru failures are configuration, NUT connectivity, SSH permissions, or stale shutdown flags from testing.
 
+For container deployments, see also [Choose your install](install-comparison.md)
+and [Migrate to container](migrate-to-container.md). Most v5.5 container
+issues are SSH wiring or the `/etc/machine-id` bind-mount — covered in
+the readiness section below.
+
 ## Quick checks
 
 Package install:
@@ -284,3 +289,111 @@ Open a GitHub issue with:
 - `eneru validate` output.
 - Relevant `journalctl -u eneru.service` lines.
 - NUT output from `upsc <ups@host>`.
+
+## v5.5: container loopback delegation
+
+The OCI image needs three things to do local-host shutdown via the
+SSH loopback delegate: the host's `sshd` reachable, the SSH key
+mounted, and `/etc/machine-id` bind-mounted so the host-identity
+guard can verify the SSH target really is this container's host.
+When any of those is wrong the loopback's `remote_health` goes
+FAILED, the loud "under a real power outage..." notification fires,
+and `/ready` returns 503.
+
+### `/ready` vs 503 decision matrix
+
+v5.5 readiness is strict: ANY required capability that's
+unachievable fails the probe. The `/ready` JSON payload lists every
+capability with `achievable: true|false` and a `reason` so you can
+see exactly what's wrong without grepping logs.
+
+| Capability | Required when | Achievable check (native install) | Achievable check (container + loopback) |
+|---|---|---|---|
+| `nut_polling` | always | NUT connection state is `OK` and last update is fresh | same |
+| `local_vm_teardown` | `is_local && vms.enabled` | `virsh` on PATH | loopback `remote_health == HEALTHY` |
+| `local_container_teardown` | `is_local && containers.enabled` | `docker` or `podman` on PATH | loopback `remote_health == HEALTHY` |
+| `local_filesystem_unmount` | `is_local && filesystems.unmount.enabled` | `umount` on PATH | loopback `remote_health == HEALTHY` |
+| `local_host_poweroff` | `local_shutdown.enabled` + local owner | Binary from `local_shutdown.command` on PATH | loopback `remote_health == HEALTHY` |
+| `remote_server_shutdown[<name>]` | each enabled non-loopback `remote_servers` entry | that target's `remote_health == HEALTHY` (or `UNKNOWN` if probes disabled) | same |
+
+`/health` always returns 200 while the daemon process is alive — use
+it for liveness, `/ready` for "the shutdown contract can be honored
+in full."
+
+### Loopback FAILED — common causes
+
+When the loopback's `remote_health` is FAILED, check the cause in
+`/api/v1/remote-health` (or the API status payload). Most failures
+fall into one of these:
+
+| Symptom in `last_error` | Cause | Fix |
+|---|---|---|
+| `host identity mismatch: probe returned 'X' but expected 'Y'` | `/etc/machine-id` not bind-mounted from host | Add `-v /etc/machine-id:/etc/machine-id:ro` to the `docker run` command (append `,Z` on SELinux hosts) |
+| `authorized_keys command=` | Forced-command SSH key rewrites Eneru's identity probe and generated shutdown actions | Remove `command="..."` from the loopback key. Use the root default or `use_sudo: true` with sudoers. |
+| `Permission denied (publickey,password)` | Loopback SSH key not authorized on the host | The container's `/var/lib/eneru/ssh/id_loopback` public half must be in the host user's `authorized_keys`. See [Containers and Kubernetes](containers-kubernetes.md) for the walkthrough. |
+| `connection refused` | No `sshd` on `127.0.0.1`, OR container isn't on `network_mode: host` | Either start `sshd` on the host, or switch to `--network host`. For bridge networking, override the loopback `host` to the host's bridge IP (`172.17.0.1` on Linux default Docker bridge). |
+| `identity probe failed: timeout after Xs` | `sshd` is up but the probe didn't return — usually host overload or sshd `MaxStartups` reached | Bump `connect_timeout` on the loopback entry; check sshd logs for `MaxStartups` warnings. |
+| `unsafe probe command rejected` | `host_identity_command` contains shell metacharacters | Use a plain command like `cat /etc/machine-id` (the default). The safety check in `remote_health.py` blocks pipes, redirects, command substitution. |
+
+### `eneru validate` shows the in-process sequence, not the delegated one
+
+Symptom: in a container, `validate` output lists
+`1. Virtual machines`, `2. Containers`, `3. Filesystem ...` instead
+of `1. Local actions delegated via loopback SSH: ...`.
+
+Cause: the synthesis or detection didn't kick in. Most likely either
+the runtime detection misfired (the container env isn't recognizable
+as `container (Docker)` / `container (Podman)`) or the local
+capabilities aren't actually configured.
+
+Check:
+
+```bash
+docker run --rm <args> eneru:<version> validate --config <path>
+# Look for: "Runtime context: container (Docker)" (or Podman / Kubernetes)
+```
+
+If the runtime is `container (Kubernetes)`, Eneru does NOT
+auto-synthesize a loopback — K8s is the remote-only profile per the
+v5.5 framing. Set `is_host_loopback: true` explicitly on a
+remote_servers entry if you really want local-host ownership from a
+pod.
+
+### `FATAL ERROR: Missing required commands: shutdown`
+
+Symptom: `shutdown group` or `run` aborts with this error inside the
+container.
+
+Cause: the loopback wasn't synthesized (or was explicitly disabled),
+so Eneru thinks the in-process shutdown path will run and requires
+the `shutdown` binary on PATH — which the slim image doesn't have.
+
+Fix: confirm the loopback is configured (either auto-synthesized or
+explicit). Run `eneru validate` and look for the `1. Local actions
+delegated via loopback SSH: ...` line. If it's missing, either:
+
+* The runtime isn't detected as a container (check the `Runtime
+  context:` line at the top of `validate` output), OR
+* The local capabilities aren't configured (so synthesis doesn't
+  fire), OR
+* `is_host_loopback: false` was set explicitly somewhere.
+
+### Synthesis WARNING about missing SSH key
+
+Symptom (during `validate` or `shutdown group --dry-run`):
+
+```text
+WARNING: Eneru detected runtime 'container (Docker)' with local capabilities
+but the default SSH key for the host-loopback delegate is missing:
+  expected at: /var/lib/eneru/ssh/id_loopback
+```
+
+In dry-run / validate this is intentionally non-fatal so you can
+inspect the config without first generating the key. In `eneru run`
+the same situation is a fatal error (the daemon can't honor the
+shutdown contract without the key).
+
+Fix: generate the key with the expected name (see
+[Migrate to container](migrate-to-container.md#step-1-generate-a-dedicated-ssh-key-for-the-loopback))
+or set `ssh_key_path:` explicitly in a `remote_servers` entry with
+`is_host_loopback: true`.

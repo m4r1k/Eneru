@@ -1550,6 +1550,26 @@ class TestQueryEventsForDisplay:
         assert all("DAEMON_START" not in line for line in lines)
 
     @pytest.mark.unit
+    def test_slow_response_events_are_diagnostics(self, tmp_path):
+        """Slow NUT/SSH response rows surface at Diagnostics verbosity."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 20, "SLOW_NUT_RESPONSE", "nut"),
+            (now - 10, "REMOTE_SSH_SLOW_RESPONSE", "ssh"),
+        ])
+
+        default_lines = query_events_for_display(config)
+        verbose_lines = query_events_for_display(config, verbosity=1)
+
+        assert all("SLOW_NUT_RESPONSE" not in line for line in default_lines)
+        assert all("REMOTE_SSH_SLOW_RESPONSE" not in line for line in default_lines)
+        assert any("SLOW_NUT_RESPONSE" in line for line in verbose_lines)
+        assert any("REMOTE_SSH_SLOW_RESPONSE" in line for line in verbose_lines)
+
+    @pytest.mark.unit
     def test_double_verbose_includes_all_tiers(self, tmp_path):
         """``-vv`` includes Power, Diagnostics, and Lifecycle."""
         from eneru.tui import query_events_for_display
@@ -2497,3 +2517,801 @@ class TestSummarizeRemoteHealth:
         assert result.index("1 healthy") < result.index("1 degraded")
         assert result.index("1 degraded") < result.index("1 failed")
         assert result.index("1 failed") < result.index("1 disabled")
+
+
+# ====================================================================
+# Coverage-gap fillers: edge cases for helpers, renderers, and run_tui
+# ====================================================================
+
+
+class TestFmtRuntimeSeconds:
+    """``_fmt_runtime_seconds`` powers the runtime graph axis labels."""
+
+    @pytest.mark.unit
+    def test_hours_and_minutes(self):
+        from eneru.tui import _fmt_runtime_seconds
+        # 3700s -> 1h 1m (2700//60 = 1, so 3700%3600=100 -> 100//60=1)
+        assert _fmt_runtime_seconds(3700) == "1h 1m"
+
+    @pytest.mark.unit
+    def test_minutes_and_seconds(self):
+        from eneru.tui import _fmt_runtime_seconds
+        assert _fmt_runtime_seconds(125) == "2m 5s"
+
+    @pytest.mark.unit
+    def test_invalid_input_returns_placeholder(self):
+        from eneru.tui import _fmt_runtime_seconds
+        # Non-numeric -> ValueError -> "?"
+        assert _fmt_runtime_seconds("not-a-number") == "?"
+
+
+class TestCoerceFloat:
+    """``_coerce_float`` defends ``update_live_buffer`` against bad input."""
+
+    @pytest.mark.unit
+    def test_none_returns_none(self):
+        from eneru.tui import _coerce_float
+        assert _coerce_float(None) is None
+
+    @pytest.mark.unit
+    def test_empty_string_returns_none(self):
+        from eneru.tui import _coerce_float
+        assert _coerce_float("") is None
+
+    @pytest.mark.unit
+    def test_non_numeric_string_returns_none(self):
+        from eneru.tui import _coerce_float
+        assert _coerce_float("abc") is None
+
+
+class TestUpdateLiveBufferAllNonFloat:
+    """When every state-file value parses as non-numeric, no sample is pushed."""
+
+    @pytest.mark.unit
+    def test_state_file_with_only_strings_does_not_push_sample(self, tmp_path):
+        from eneru.tui import (
+            update_live_buffer, _live_buffers, clear_live_buffers,
+            state_file_path_for, _buffer_key,
+        )
+        from eneru import (
+            Config, UPSConfig, UPSGroupConfig, StatsConfig,
+            LoggingConfig, BehaviorConfig, NotificationsConfig,
+            LocalShutdownConfig,
+        )
+        clear_live_buffers()
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="TestUPS@localhost"),
+                is_local=True,
+            )],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "flag"),
+                file=None,
+            ),
+            notifications=NotificationsConfig(enabled=False),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+            statistics=StatsConfig(db_directory=str(tmp_path)),
+        )
+        group = config.ups_groups[0]
+        # State file has KEY=value lines but all values parse as non-numeric,
+        # so the sample stays empty and the helper returns without appending.
+        state_file_path_for(group, config).write_text(
+            "BATTERY=?\nRUNTIME=?\nLOAD=?\n"
+            "INPUT_VOLTAGE=\nOUTPUT_VOLTAGE=?\n"
+        )
+        update_live_buffer(group, config)
+        buf = _live_buffers.get(_buffer_key(group, config))
+        assert buf is None or len(buf) == 0
+
+
+class TestParseStateFileException:
+    """Unexpected read errors return None rather than propagate."""
+
+    @pytest.mark.unit
+    def test_unreadable_path_returns_none(self, tmp_path):
+        from eneru.tui import parse_state_file
+        # Patch Path.read_text to raise so the except branch fires.
+        bad = tmp_path / "state"
+        bad.write_text("BATTERY=85\n")
+        with patch("eneru.tui.Path.read_text",
+                   side_effect=PermissionError("nope")):
+            assert parse_state_file(bad) is None
+
+
+class TestEventsDbAvailableCloseException:
+    """A close() exception during the DB-availability probe must not crash."""
+
+    @pytest.mark.unit
+    def test_close_exception_does_not_propagate(self, tmp_path):
+        from eneru.tui import events_db_available
+        from eneru import Config, UPSConfig, UPSGroupConfig
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@h"))],
+        )
+        bad_conn = MagicMock()
+        bad_conn.close.side_effect = RuntimeError("close failed")
+        with patch("eneru.tui.StatsStore.open_readonly",
+                   return_value=bad_conn):
+            assert events_db_available(config) is True
+        bad_conn.close.assert_called_once()
+
+
+class TestQueryEventsForDisplayCloseException:
+    """Close errors during the events query are swallowed."""
+
+    @pytest.mark.unit
+    def test_close_exception_during_events_query_is_swallowed(self):
+        from eneru.tui import query_events_for_display
+        from eneru import Config, UPSConfig, UPSGroupConfig
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@h"))],
+        )
+        bad_conn = MagicMock()
+        bad_conn.close.side_effect = RuntimeError("close failed")
+        # Patch the whole class so both ``open_readonly`` and the
+        # constructor route through the same mock.
+        fake_store = MagicMock()
+        fake_store.query_events.return_value = []
+        store_cls = MagicMock(return_value=fake_store)
+        store_cls.open_readonly.return_value = bad_conn
+        with patch("eneru.tui.StatsStore", store_cls):
+            lines = query_events_for_display(config)
+        assert lines == []
+        bad_conn.close.assert_called_once()
+
+
+class TestQueryMetricSeriesEdges:
+    """Extra paths in the SQLite + deque blend helper."""
+
+    def _config(self, tmp_path: Path):
+        from eneru import (
+            Config, UPSConfig, UPSGroupConfig, StatsConfig,
+            BehaviorConfig, LoggingConfig, NotificationsConfig,
+            LocalShutdownConfig,
+        )
+        return Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="TestUPS@localhost"),
+                is_local=True,
+            )],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "flag"),
+                file=None,
+            ),
+            notifications=NotificationsConfig(enabled=False),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+            statistics=StatsConfig(db_directory=str(tmp_path)),
+        )
+
+    @pytest.mark.unit
+    def test_skips_deque_samples_missing_the_requested_column(self, tmp_path):
+        """A deque entry without the column key must be silently skipped."""
+        from eneru.tui import (
+            query_metric_series, _live_buffer_for, clear_live_buffers,
+        )
+        clear_live_buffers()
+        config = self._config(tmp_path)
+        group = config.ups_groups[0]
+        now = int(time.time())
+        buf = _live_buffer_for(group, config)
+        # First sample has no battery_charge → skipped (line 364).
+        buf.append((now - 5, {"input_voltage": 230.0}))
+        merged = query_metric_series(config, group, "charge", 60)
+        assert merged == []
+
+    @pytest.mark.unit
+    def test_close_exception_during_metric_query_swallowed(self):
+        """A close() exception on the readonly conn must not propagate."""
+        from eneru.tui import query_metric_series
+        from eneru import Config, UPSConfig, UPSGroupConfig
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@h"))],
+        )
+        bad_conn = MagicMock()
+        bad_conn.close.side_effect = RuntimeError("close failed")
+        # The store wrapper just needs to return an empty series so we
+        # exercise the close() branch deterministically. Patch the whole
+        # class so both ``open_readonly`` and the constructor are
+        # intercepted by the same mock.
+        fake_store = MagicMock()
+        fake_store.query_range.return_value = []
+        store_cls = MagicMock(return_value=fake_store)
+        store_cls.open_readonly.return_value = bad_conn
+        with patch("eneru.tui.StatsStore", store_cls):
+            # No live buffer either → returns sqlite_series (empty).
+            result = query_metric_series(
+                config, config.ups_groups[0], "charge", 60,
+            )
+        assert result == []
+        bad_conn.close.assert_called_once()
+
+
+class TestRenderLogsPanelGroupedBreak:
+    """Grouped output stops adding sections once the cap leaves <2 rows."""
+
+    @pytest.mark.unit
+    def test_grouped_break_when_only_one_row_remains(self, tmp_path):
+        from eneru.tui import query_events_for_display
+        config = _events_config(tmp_path)
+        now = int(time.time())
+        # 1 power + 1 lifecycle. Cap = 3: Power Events header + ON_BATTERY
+        # row uses 2 rows; only 1 slot remains for Lifecycle — not enough
+        # for a header + row, so the loop breaks.
+        _seed_events(config, config.ups_groups[0], [
+            (now - 60, "ON_BATTERY", "outage"),
+            (now - 30, "DAEMON_START", "boot"),
+        ])
+        out = query_events_for_display(
+            config, max_events=3, verbosity=2, grouped=True,
+        )
+        # Header + power row only; Lifecycle section never appears.
+        assert "Power Events" in out
+        assert any("ON_BATTERY" in line for line in out)
+        assert "Lifecycle" not in out
+        assert all("DAEMON_START" not in line for line in out)
+
+
+class TestCollectGroupDataResources:
+    """``collect_group_data`` summarises the local + remote resource surface."""
+
+    @pytest.mark.unit
+    def test_vms_containers_compose_and_remote_listed(self, tmp_path):
+        from eneru import (
+            Config, UPSConfig, UPSGroupConfig, VMConfig, ContainersConfig,
+            FilesystemsConfig, UnmountConfig, RemoteServerConfig,
+            StatsConfig, LoggingConfig, BehaviorConfig,
+            NotificationsConfig, LocalShutdownConfig,
+        )
+        from eneru.tui import collect_group_data
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@h"),
+                is_local=True,
+                virtual_machines=VMConfig(enabled=True),
+                containers=ContainersConfig(
+                    enabled=True,
+                    compose_files=["a.yml", "b.yml"],
+                ),
+                filesystems=FilesystemsConfig(
+                    sync_enabled=True,
+                    unmount=UnmountConfig(enabled=False),
+                ),
+                remote_servers=[
+                    RemoteServerConfig(
+                        name="nas", enabled=True,
+                        host="10.0.0.1", user="root",
+                    ),
+                ],
+            )],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "flag"),
+                file=None,
+            ),
+            notifications=NotificationsConfig(enabled=False),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+            statistics=StatsConfig(db_directory=str(tmp_path)),
+        )
+        data = collect_group_data(config.ups_groups[0], config)
+        # Compose file count is reported as "<n> compose"; VMs listed too.
+        assert "VMs" in data["resources"]
+        assert "2 compose" in data["resources"]
+        assert "1 remote server" in data["resources"]
+
+    @pytest.mark.unit
+    def test_containers_without_compose_says_containers(self, tmp_path):
+        """ContainersConfig.enabled but no compose_files → "containers"."""
+        from eneru import (
+            Config, UPSConfig, UPSGroupConfig, ContainersConfig,
+            StatsConfig, LoggingConfig, BehaviorConfig,
+            NotificationsConfig, LocalShutdownConfig,
+        )
+        from eneru.tui import collect_group_data
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@h"),
+                is_local=True,
+                containers=ContainersConfig(enabled=True, compose_files=[]),
+            )],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "flag"),
+                file=None,
+            ),
+            notifications=NotificationsConfig(enabled=False),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+            statistics=StatsConfig(db_directory=str(tmp_path)),
+        )
+        data = collect_group_data(config.ups_groups[0], config)
+        assert "containers" in data["resources"]
+        assert "compose" not in data["resources"]
+
+    @pytest.mark.unit
+    def test_multiple_remote_servers_use_plural(self, tmp_path):
+        from eneru import (
+            Config, UPSConfig, UPSGroupConfig, RemoteServerConfig,
+            StatsConfig, LoggingConfig, BehaviorConfig,
+            NotificationsConfig, LocalShutdownConfig,
+        )
+        from eneru.tui import collect_group_data
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@h"),
+                is_local=True,
+                remote_servers=[
+                    RemoteServerConfig(
+                        name="nas-a", enabled=True,
+                        host="10.0.0.1", user="root",
+                    ),
+                    RemoteServerConfig(
+                        name="nas-b", enabled=True,
+                        host="10.0.0.2", user="root",
+                    ),
+                ],
+            )],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "flag"),
+                file=None,
+            ),
+            notifications=NotificationsConfig(enabled=False),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+            statistics=StatsConfig(db_directory=str(tmp_path)),
+        )
+        data = collect_group_data(config.ups_groups[0], config)
+        assert "2 remote servers" in data["resources"]
+
+
+class TestDisplayWidthNul:
+    """Width helper ignores the NUL byte (invisible terminal code point)."""
+
+    @pytest.mark.unit
+    def test_nul_does_not_count_as_a_cell(self):
+        from eneru.tui import display_width
+        assert display_width("ab\x00c") == 3
+
+
+class TestSafeAddstrBoundaries:
+    """``safe_addstr`` clips writes to keep curses from raising."""
+
+    @pytest.mark.unit
+    def test_out_of_range_y_is_a_no_op(self):
+        from eneru.tui import safe_addstr
+        win = _FakeWin(height=5, width=20)
+        safe_addstr(win, y=99, x=0, text="hello", attr=0)
+        assert win.cells == {}
+
+    @pytest.mark.unit
+    def test_zero_available_cells_is_a_no_op(self):
+        """Writing at the rightmost column has zero cells available — skip."""
+        from eneru.tui import safe_addstr
+        win = _FakeWin(height=5, width=20)
+        safe_addstr(win, y=0, x=19, text="x", attr=0)
+        # x=19 leaves max_x - x - 1 = 0 cells available → no write.
+        assert win.cells == {}
+
+    @pytest.mark.unit
+    def test_truncated_to_empty_is_a_no_op(self):
+        """A multi-cell first char that doesn't fit yields an empty truncate."""
+        from eneru.tui import safe_addstr
+        win = _FakeWin(height=5, width=20)
+        # Only 1 cell available; the emoji needs 2 cells → truncate empty.
+        safe_addstr(win, y=0, x=18, text="🔋", attr=0)
+        assert win.cells == {}
+
+    @pytest.mark.unit
+    def test_swallows_curses_error_from_underlying_win(self):
+        """If addnstr raises, safe_addstr returns silently."""
+        from eneru.tui import safe_addstr
+
+        class BadWin:
+            def getmaxyx(self):
+                return (10, 40)
+            def addnstr(self, *args, **kwargs):
+                raise curses.error("simulated curses failure")
+
+        # Must not raise.
+        safe_addstr(BadWin(), y=1, x=1, text="hi", attr=0)
+
+
+class TestFillRowBoundaries:
+    """``fill_row`` defends against curses raising on edge writes."""
+
+    @pytest.mark.unit
+    def test_y_out_of_range_is_a_no_op(self):
+        from eneru.tui import fill_row
+        win = _FakeWin(height=5, width=20)
+        fill_row(win, y=99, attr=0)
+        assert win.cells == {}
+
+    @pytest.mark.unit
+    def test_zero_width_window_is_a_no_op(self):
+        from eneru.tui import fill_row
+        win = _FakeWin(height=5, width=0)
+        fill_row(win, y=0, attr=0)
+        assert win.cells == {}
+
+    @pytest.mark.unit
+    def test_addnstr_failure_does_not_propagate(self):
+        """If addnstr raises, the helper continues into insch silently."""
+        from eneru.tui import fill_row
+
+        calls = []
+
+        class BadWin:
+            def getmaxyx(self):
+                return (10, 40)
+            def addnstr(self, *args, **kwargs):
+                calls.append(("addnstr", args))
+                raise curses.error("simulated")
+            def insch(self, *args, **kwargs):
+                calls.append(("insch", args))
+                raise curses.error("simulated too")
+
+        # Must not raise — both branches are wrapped in try/except.
+        fill_row(BadWin(), y=0, attr=0)
+        assert calls[0][0] == "addnstr"
+        assert calls[-1][0] == "insch"
+
+
+class TestRenderConfigPanelEarlyBreaks:
+    """When y_end is small, the renderer should bail out instead of overflowing."""
+
+    def _data(self):
+        return [{
+            "label": "Rack",
+            "name": "Rack",  # equal to label → no extra "( )"
+            "is_local": False,
+            "state": {
+                "STATUS": "OL",
+                "BATTERY": "100",
+                "RUNTIME": "1800",
+                "LOAD": "20",
+                "INPUT_VOLTAGE": "230",
+                "OUTPUT_VOLTAGE": "230",
+                "TIMESTAMP": "2026-05-15 12:00:00",
+            },
+            "resources": "VMs",
+            "remote_health_summary": "1 healthy",
+        }]
+
+    @pytest.mark.unit
+    def test_break_at_loop_start_when_y_end_is_two(self):
+        """y_start=0, y_end=2 → y=1, loop condition y >= y_end-1 ⇒ break."""
+        from eneru.tui import render_config_panel
+        win = _FakeWin(height=4, width=80)
+        with patch.object(curses, "color_pair", lambda n: n):
+            render_config_panel(win, 0, 2, 80, self._data())
+        # Nothing past the gray fill was painted — loop broke at line 913.
+        assert not any(("Rack" in win.cells.get((y, 0), (" ", 0))[0])
+                       for y in range(4))
+
+    @pytest.mark.unit
+    def test_break_after_each_y_increment(self):
+        """A panel just one row taller hits the break after writing y+=1."""
+        from eneru.tui import render_config_panel
+        # Run the renderer with progressively larger y_end values so each
+        # intermediate `if y >= y_end: break` (lines 939, 955, 963) is
+        # exercised at least once.
+        for y_end in (3, 4, 5):
+            win = _FakeWin(height=10, width=80)
+            with patch.object(curses, "color_pair", lambda n: n):
+                # Must not raise even when the panel is too small to fit.
+                render_config_panel(win, 0, y_end, 80, self._data())
+
+
+class TestRenderLogsPanelNoAvailableSpace:
+    """When the panel has no room for events the helper records nothing."""
+
+    @pytest.mark.unit
+    def test_zero_available_makes_display_events_empty(self):
+        from eneru.tui import render_logs_panel
+        win = _FakeWin(height=10, width=80)
+        # y_start=0, y_end=2 leaves only the title row; no room for events
+        # (available = y_end - y - footer_lines = 2 - 2 - 2 = -2 ≤ 0).
+        with patch.object(curses, "color_pair", lambda n: n):
+            render_logs_panel(
+                win, y_start=0, y_end=2, width=80,
+                events=["evt"], show_more=False,
+            )
+        # The single supplied event string must NOT appear anywhere in
+        # the cell buffer — if available <= 0 the helper has to skip
+        # event rows entirely (the title row is fine, but no "evt").
+        painted = "".join(
+            ch for (_y, _x), (ch, _attr) in win.cells.items()
+        )
+        assert "evt" not in painted
+
+
+class TestRobustBoundsEmpty:
+    """The defensive empty-list branch never crashes."""
+
+    @pytest.mark.unit
+    def test_empty_values_returns_zero_zero(self):
+        from eneru.tui import _robust_bounds
+        assert _robust_bounds([]) == (0.0, 0.0)
+
+
+class TestRenderGraphPanelEdges:
+    """``render_graph_panel`` defensive branches when inputs misbehave."""
+
+    @pytest.mark.unit
+    def test_one_row_panel_returns_immediately(self):
+        from eneru.tui import render_graph_panel
+        win = _FakeWin(height=10, width=80)
+        cfg = MagicMock()
+        cfg.statistics.db_directory = "/tmp"
+        cfg.multi_ups = False
+        group = MagicMock()
+        group.ups.label = "UPS"
+        group.ups.name = "UPS@h"
+        with patch.object(curses, "color_pair", lambda n: n):
+            render_graph_panel(
+                win, y_start=0, y_end=1, width=80,
+                config=cfg, group=group,
+                graph_mode="charge", time_range="1h",
+            )
+        # panel_h == 1 → early return before any fill_row was issued.
+        assert win.cells == {}
+
+    @pytest.mark.unit
+    def test_unknown_metric_shows_placeholder_and_returns(self):
+        from eneru.tui import render_graph_panel
+        win = _FakeWin(height=10, width=80)
+        cfg = MagicMock()
+        cfg.statistics.db_directory = "/tmp"
+        cfg.multi_ups = False
+        group = MagicMock()
+        group.ups.label = "UPS"
+        group.ups.name = "UPS@h"
+        with patch.object(curses, "color_pair", lambda n: n):
+            render_graph_panel(
+                win, y_start=0, y_end=8, width=80,
+                config=cfg, group=group,
+                graph_mode="nonsense", time_range="1h",
+            )
+        row1 = "".join(
+            win.cells.get((1, x), (" ", 0))[0] for x in range(80)
+        )
+        assert "(unknown metric)" in row1
+
+    @pytest.mark.unit
+    def test_no_data_shows_placeholder_and_returns(self):
+        from eneru.tui import render_graph_panel
+        win = _FakeWin(height=10, width=80)
+        cfg = MagicMock()
+        cfg.statistics.db_directory = "/tmp"
+        cfg.multi_ups = False
+        group = MagicMock()
+        group.ups.label = "UPS"
+        group.ups.name = "UPS@h"
+        with patch.object(curses, "color_pair", lambda n: n), \
+             patch("eneru.tui.query_metric_series", return_value=[]):
+            render_graph_panel(
+                win, y_start=0, y_end=8, width=80,
+                config=cfg, group=group,
+                graph_mode="charge", time_range="1h",
+            )
+        row1 = "".join(
+            win.cells.get((1, x), (" ", 0))[0] for x in range(80)
+        )
+        assert "(no data yet)" in row1
+
+    @pytest.mark.unit
+    def test_flat_voltage_pads_min_and_max(self):
+        """Constant voltage series → y_max == y_min → pad branch fires."""
+        from eneru.tui import render_graph_panel
+        win = _FakeWin(height=20, width=120)
+        cfg = MagicMock()
+        cfg.statistics.db_directory = "/tmp"
+        cfg.multi_ups = False
+        group = MagicMock()
+        group.ups.label = "UPS"
+        group.ups.name = "UPS@h"
+        # All-same voltage so _robust_bounds returns equal hi/lo → pad.
+        series = [(1000 + i, 230.0) for i in range(25)]
+        with patch.object(curses, "color_pair", lambda n: n), \
+             patch("eneru.tui.query_metric_series", return_value=series):
+            # Must not raise; just renders the flat band with padding.
+            render_graph_panel(
+                win, y_start=0, y_end=10, width=120,
+                config=cfg, group=group,
+                graph_mode="voltage", time_range="1h",
+            )
+
+
+class TestRunTuiLogFallbackAndMove:
+    """Coverage for the log-fallback events path and the move() guard."""
+
+    def _group_data(self, group: UPSGroupConfig, _config: Config) -> dict:
+        return {
+            "label": group.ups.label,
+            "name": group.ups.name,
+            "is_local": False,
+            "state": None,
+            "resources": "none",
+            "remote_health_summary": "",
+        }
+
+    @pytest.mark.unit
+    def test_falls_back_to_parse_log_events_when_no_db(self, tmp_path):
+        """No DB available → run_tui must call parse_log_events()."""
+        from eneru import tui as tui_mod
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@h"),
+                is_local=False,
+            )],
+            logging=LoggingConfig(state_file=str(tmp_path / "state"),
+                                  file=str(tmp_path / "log")),
+        )
+        screen = _FakeTuiScreen(height=30, width=120, keys=[ord("q")])
+
+        def wrapper(callback):
+            callback(screen)
+
+        with patch.object(tui_mod.curses, "wrapper", side_effect=wrapper), \
+             patch.object(tui_mod.curses, "COLORS", 256, create=True), \
+             patch.object(tui_mod.curses, "start_color", lambda: None), \
+             patch.object(tui_mod.curses, "init_pair", lambda *args: None), \
+             patch.object(tui_mod.curses, "color_pair", lambda n: n), \
+             patch.object(tui_mod.curses, "curs_set", lambda _value: None), \
+             patch.object(tui_mod, "collect_group_data",
+                          side_effect=self._group_data), \
+             patch.object(tui_mod, "update_live_buffer"), \
+             patch.object(tui_mod, "query_events_for_display",
+                          return_value=[]), \
+             patch.object(tui_mod, "events_db_available",
+                          return_value=False), \
+             patch.object(tui_mod, "parse_log_events",
+                          return_value=["fallback row"]) as plog:
+            tui_mod.run_tui(config)
+        plog.assert_called()
+
+    @pytest.mark.unit
+    def test_move_curses_error_is_swallowed(self, tmp_path):
+        """A move() that raises curses.error must not crash the loop."""
+        from eneru import tui as tui_mod
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@h"),
+                is_local=False,
+            )],
+            logging=LoggingConfig(state_file=str(tmp_path / "state")),
+        )
+
+        class _MoveErrScreen(_FakeTuiScreen):
+            def move(self, y, x):
+                raise curses.error("bottom-right move blocked")
+
+        screen = _MoveErrScreen(height=30, width=120, keys=[ord("q")])
+
+        def wrapper(callback):
+            callback(screen)
+
+        with patch.object(tui_mod.curses, "wrapper", side_effect=wrapper), \
+             patch.object(tui_mod.curses, "COLORS", 256, create=True), \
+             patch.object(tui_mod.curses, "start_color", lambda: None), \
+             patch.object(tui_mod.curses, "init_pair", lambda *args: None), \
+             patch.object(tui_mod.curses, "color_pair", lambda n: n), \
+             patch.object(tui_mod.curses, "curs_set", lambda _value: None), \
+             patch.object(tui_mod, "collect_group_data",
+                          side_effect=self._group_data), \
+             patch.object(tui_mod, "update_live_buffer"), \
+             patch.object(tui_mod, "query_events_for_display",
+                          return_value=["x"]):
+            # If the curses.error escaped, this would raise.
+            tui_mod.run_tui(config)
+        # Loop ran at least one refresh before quitting.
+        assert screen.refreshes == 1
+
+    @pytest.mark.unit
+    def test_handles_page_up_home_and_down_arrow(self, tmp_path):
+        """KEY_PPAGE / KEY_HOME / KEY_DOWN all reach their scroll handlers."""
+        from eneru import tui as tui_mod
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@h"),
+                is_local=False,
+            )],
+            logging=LoggingConfig(state_file=str(tmp_path / "state")),
+        )
+        screen = _FakeTuiScreen(
+            height=30, width=120,
+            keys=[
+                curses.KEY_PPAGE,
+                curses.KEY_HOME,
+                curses.KEY_DOWN,
+                ord("q"),
+            ],
+        )
+
+        def wrapper(callback):
+            callback(screen)
+
+        events = [f"event-{i}" for i in range(50)]
+        with patch.object(tui_mod.curses, "wrapper", side_effect=wrapper), \
+             patch.object(tui_mod.curses, "COLORS", 256, create=True), \
+             patch.object(tui_mod.curses, "start_color", lambda: None), \
+             patch.object(tui_mod.curses, "init_pair", lambda *args: None), \
+             patch.object(tui_mod.curses, "color_pair", lambda n: n), \
+             patch.object(tui_mod.curses, "curs_set", lambda _value: None), \
+             patch.object(tui_mod, "collect_group_data",
+                          side_effect=self._group_data), \
+             patch.object(tui_mod, "update_live_buffer"), \
+             patch.object(tui_mod, "query_events_for_display",
+                          return_value=events):
+            tui_mod.run_tui(config)
+        # 4 keystrokes consumed → 4 refreshes.
+        assert screen.refreshes == 4
+
+
+class TestRenderGraphTextUnboundedAxis:
+    """Voltage / runtime metrics have no configured y_min / y_max."""
+
+    @pytest.mark.unit
+    def test_voltage_axis_label_uses_unit_when_unbounded(self, tmp_path):
+        from eneru.tui import render_graph_text
+        from eneru import (
+            Config, UPSConfig, UPSGroupConfig, StatsConfig,
+            BehaviorConfig, LoggingConfig, NotificationsConfig,
+            LocalShutdownConfig,
+        )
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@h"),
+                is_local=True,
+            )],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "flag"),
+                file=None,
+            ),
+            notifications=NotificationsConfig(enabled=False),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+            statistics=StatsConfig(db_directory=str(tmp_path)),
+        )
+        # No DB → no data; we just need the header path to compute the
+        # axis label from the unit alone (line 1513).
+        lines = render_graph_text(
+            config, config.ups_groups[0], "voltage", "1h",
+        )
+        # Header contains the bare unit when y_min/y_max are unbounded.
+        assert "(V)" in lines[0]
+
+
+class TestRunOnceDisplayName:
+    """When display_name differs from name, --once prefixes the raw name."""
+
+    @pytest.mark.unit
+    def test_display_name_shows_alongside_raw_name(self, tmp_path, capsys):
+        from eneru.tui import run_once
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(
+                    name="ups-a@host",
+                    display_name="Rack A",
+                ),
+                is_local=True,
+            )],
+            logging=LoggingConfig(state_file=str(tmp_path / "nonexistent")),
+        )
+        run_once(config)
+        out = capsys.readouterr().out
+        # Header line: "Rack A  (ups-a@host)  [is_local]  --  daemon not running"
+        assert "Rack A" in out
+        assert "(ups-a@host)" in out

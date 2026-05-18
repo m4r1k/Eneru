@@ -92,6 +92,98 @@ remote_servers:
         assert server.ssh_options == ["StrictHostKeyChecking=yes"]
 
     @pytest.mark.unit
+    def test_remote_server_use_sudo(self, temp_config_file):
+        """use_sudo is parsed for any remote server, not just loopback."""
+        config_data = """
+remote_servers:
+  - name: "NAS"
+    enabled: true
+    host: "192.168.1.50"
+    user: "ups"
+    use_sudo: true
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        assert config.remote_servers[0].use_sudo is True
+
+    @pytest.mark.unit
+    def test_use_sudo_is_not_reported_as_unknown_key(self, temp_config_file):
+        """The validation allow-list must include the new remote key."""
+        raw = {
+            "remote_servers": [{
+                "name": "NAS",
+                "enabled": True,
+                "host": "192.168.1.50",
+                "user": "ups",
+                "use_sudo": True,
+            }]
+        }
+        temp_config_file.write_text(yaml.safe_dump(raw))
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config, raw_data=raw)
+
+        assert not any("use_sudo" in m and "Unknown" in m for m in messages)
+
+    @pytest.mark.unit
+    def test_non_root_without_use_sudo_warns(self, temp_config_file):
+        """Non-root servers warn unless use_sudo covers all generated actions."""
+        raw = {
+            "remote_servers": [{
+                "name": "NAS",
+                "enabled": True,
+                "host": "192.168.1.50",
+                "user": "ups",
+                "shutdown_command": "shutdown -h now",
+            }]
+        }
+        temp_config_file.write_text(yaml.safe_dump(raw))
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config, raw_data=raw)
+
+        assert any("Non-root users typically need use_sudo: true" in m for m in messages)
+
+    @pytest.mark.unit
+    def test_non_root_with_sudo_command_still_warns_without_use_sudo(self, temp_config_file):
+        """A sudo final command does not cover generated pre-shutdown actions."""
+        raw = {
+            "remote_servers": [{
+                "name": "NAS",
+                "enabled": True,
+                "host": "192.168.1.50",
+                "user": "ups",
+                "shutdown_command": "sudo shutdown -h now",
+            }]
+        }
+        temp_config_file.write_text(yaml.safe_dump(raw))
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config, raw_data=raw)
+
+        assert any("use_sudo: true" in m for m in messages)
+
+    @pytest.mark.unit
+    def test_non_root_with_use_sudo_does_not_warn(self, temp_config_file):
+        raw = {
+            "remote_servers": [{
+                "name": "NAS",
+                "enabled": True,
+                "host": "192.168.1.50",
+                "user": "ups",
+                "shutdown_command": "shutdown -h now",
+                "use_sudo": True,
+            }]
+        }
+        temp_config_file.write_text(yaml.safe_dump(raw))
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config, raw_data=raw)
+
+        assert not any("Non-root users typically need use_sudo: true" in m for m in messages)
+
+    @pytest.mark.unit
     def test_pre_shutdown_commands_with_actions(self, temp_config_file):
         """Test pre_shutdown_commands with predefined actions."""
         config_data = """
@@ -185,6 +277,56 @@ remote_servers:
         assert cmd.timeout == 120
 
     @pytest.mark.unit
+    def test_pre_shutdown_unmount_filesystems_mounts(self, temp_config_file):
+        """Remote unmount_filesystems parses its per-command mount list."""
+        config_data = """
+remote_servers:
+  - name: "Storage Server"
+    enabled: true
+    host: "192.168.1.90"
+    user: "root"
+    pre_shutdown_commands:
+      - action: "unmount_filesystems"
+        timeout: 20
+        mounts:
+          - "/mnt/media"
+          - path: "/mnt/backup disk"
+            options: "-l"
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        cmd = config.remote_servers[0].pre_shutdown_commands[0]
+        assert cmd.action == "unmount_filesystems"
+        assert cmd.timeout == 20
+        assert cmd.mounts == [
+            {"path": "/mnt/media", "options": ""},
+            {"path": "/mnt/backup disk", "options": "-l"},
+        ]
+
+    @pytest.mark.unit
+    def test_pre_shutdown_mounts_is_not_unknown_key(self, temp_config_file):
+        raw = {
+            "remote_servers": [{
+                "name": "Storage Server",
+                "enabled": True,
+                "host": "192.168.1.90",
+                "user": "root",
+                "pre_shutdown_commands": [{
+                    "action": "unmount_filesystems",
+                    "mounts": ["/mnt/media"],
+                }],
+            }]
+        }
+        temp_config_file.write_text(yaml.safe_dump(raw))
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config, raw_data=raw)
+
+        assert not any("mounts" in m and "unknown config key" in m for m in messages)
+
+    @pytest.mark.unit
     def test_pre_shutdown_commands_mixed(self, temp_config_file):
         """Test pre_shutdown_commands with mixed actions and commands."""
         config_data = """
@@ -255,6 +397,87 @@ remote_servers:
 
         server = config.remote_servers[0]
         assert server.pre_shutdown_commands == []
+
+    @pytest.mark.unit
+    def test_loopback_shutdown_order_must_be_last(self, temp_config_file):
+        """A loopback host poweroff must run after every other enabled remote."""
+        config_data = """
+remote_servers:
+  - name: "host-loopback"
+    enabled: true
+    host: "127.0.0.1"
+    user: "root"
+    is_host_loopback: true
+    shutdown_order: 1
+  - name: "NAS"
+    enabled: true
+    host: "192.168.1.50"
+    user: "root"
+    shutdown_order: 2
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(
+            config, raw_data=yaml.safe_load(config_data),
+        )
+
+        assert any("is_host_loopback" in m and "shutdown_order" in m for m in messages)
+
+    @pytest.mark.unit
+    def test_loopback_invalid_shutdown_order_reports_type_error_only(self, temp_config_file):
+        """Invalid loopback order must not crash the last-order comparison."""
+        config_data = """
+remote_servers:
+  - name: "host-loopback"
+    enabled: true
+    host: "127.0.0.1"
+    user: "root"
+    is_host_loopback: true
+    shutdown_order: "last"
+  - name: "NAS"
+    enabled: true
+    host: "192.168.1.50"
+    user: "root"
+    shutdown_order: 2
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(
+            config, raw_data=yaml.safe_load(config_data),
+        )
+
+        assert any(
+            "host-loopback" in m and "shutdown_order must be a positive integer" in m
+            for m in messages
+        )
+
+    @pytest.mark.unit
+    def test_loopback_shutdown_order_can_equal_disabled_remote(self, temp_config_file):
+        """Disabled remotes do not constrain the host-loopback order."""
+        config_data = """
+remote_servers:
+  - name: "host-loopback"
+    enabled: true
+    host: "127.0.0.1"
+    user: "root"
+    is_host_loopback: true
+    shutdown_order: 1
+  - name: "NAS"
+    enabled: false
+    host: "192.168.1.50"
+    user: "root"
+    shutdown_order: 2
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(
+            config, raw_data=yaml.safe_load(config_data),
+        )
+
+        assert not any("is_host_loopback" in m and "shutdown_order" in m for m in messages)
 
     @pytest.mark.unit
     def test_parallel_option_default_none(self, temp_config_file):
@@ -753,3 +976,281 @@ remote_servers:
         ]
         assert len(error_msgs) == 1
         assert "non-negative integer" in error_msgs[0]
+
+
+class TestHostLoopback:
+    """v5.5: is_host_loopback marks a remote_server as the container's host delegate."""
+
+    @pytest.mark.unit
+    def test_defaults_off(self, temp_config_file):
+        """Existing configs without the flag default to is_host_loopback=False."""
+        temp_config_file.write_text(
+            "remote_servers:\n"
+            "  - name: nas\n"
+            "    enabled: true\n"
+            "    host: 10.0.0.5\n"
+            "    user: root\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        assert config.remote_servers[0].is_host_loopback is False
+        assert config.remote_servers[0].host_identity_command == "cat /etc/machine-id"
+        assert config.remote_servers[0].expected_host_identity is None
+
+    @pytest.mark.unit
+    def test_loopback_defaults_host_to_127_0_0_1(self, temp_config_file):
+        """When is_host_loopback: true and host is omitted, default to 127.0.0.1
+        — works out of the box with `network_mode: host`."""
+        temp_config_file.write_text(
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    user: root\n"
+            "    is_host_loopback: true\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        srv = config.remote_servers[0]
+        assert srv.is_host_loopback is True
+        assert srv.host == "127.0.0.1"
+
+    @pytest.mark.unit
+    def test_loopback_string_false_is_invalid_not_truthy(self, temp_config_file):
+        """YAML strings like 'false' must not become an enabled loopback."""
+        temp_config_file.write_text(
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    user: root\n"
+            "    is_host_loopback: 'false'\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        srv = config.remote_servers[0]
+        assert srv.is_host_loopback == "false"
+        assert srv.host == ""
+
+        messages = ConfigLoader.validate_config(config)
+        assert any("is_host_loopback must be a boolean" in m for m in messages)
+
+    @pytest.mark.unit
+    def test_loopback_explicit_host_override_kept(self, temp_config_file):
+        """Operators on Docker bridge / k8s override host to the host-reachable IP."""
+        temp_config_file.write_text(
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    host: 172.17.0.1\n"
+            "    user: root\n"
+            "    is_host_loopback: true\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        assert config.remote_servers[0].host == "172.17.0.1"
+
+    @pytest.mark.unit
+    def test_custom_host_identity_command_parsed(self, temp_config_file):
+        temp_config_file.write_text(
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    user: root\n"
+            "    is_host_loopback: true\n"
+            "    host_identity_command: 'cat /opt/marker'\n"
+            "    expected_host_identity: 'eneru-host-1'\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        srv = config.remote_servers[0]
+        assert srv.host_identity_command == "cat /opt/marker"
+        assert srv.expected_host_identity == "eneru-host-1"
+
+
+class TestHostLoopbackValidation:
+    """v5.5: configuration-time validation of is_host_loopback entries."""
+
+    @pytest.mark.unit
+    def test_multiple_loopbacks_rejected(self, temp_config_file):
+        # Both loopback entries on the SAME is_local owner so the
+        # owner-enforcement check (introduced after CodeRabbit's review)
+        # doesn't short-circuit the multi-loopback uniqueness check.
+        # An is_local group with two loopback servers is still rejected.
+        temp_config_file.write_text(
+            "ups:\n"
+            "  - name: 'UPS-A@localhost'\n"
+            "    is_local: true\n"
+            "    remote_servers:\n"
+            "      - name: lb-a\n"
+            "        enabled: true\n"
+            "        host: 127.0.0.1\n"
+            "        user: root\n"
+            "        is_host_loopback: true\n"
+            "      - name: lb-b\n"
+            "        enabled: true\n"
+            "        host: 127.0.0.2\n"
+            "        user: root\n"
+            "        is_host_loopback: true\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        messages = ConfigLoader.validate_config(config)
+        loopback_errors = [
+            m for m in messages
+            if m.startswith("ERROR:") and "is_host_loopback" in m
+        ]
+        assert any("Multiple remote_servers" in m for m in loopback_errors)
+
+    @pytest.mark.unit
+    def test_loopback_on_non_local_ups_group_is_error(self, temp_config_file):
+        """is_host_loopback only makes sense on the single is_local owner.
+        Declaring it under a non-local UPS group is rejected with a clear
+        message (CodeRabbit #4)."""
+        temp_config_file.write_text(
+            "ups:\n"
+            "  - name: 'UPS-A@localhost'\n"
+            "    is_local: true\n"
+            "  - name: 'UPS-B@localhost'\n"
+            "    remote_servers:\n"
+            "      - name: stray-loopback\n"
+            "        enabled: true\n"
+            "        host: 127.0.0.1\n"
+            "        user: root\n"
+            "        is_host_loopback: true\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        messages = ConfigLoader.validate_config(config)
+        assert any(
+            m.startswith("ERROR:") and "is_host_loopback" in m
+            and "is not is_local" in m and "stray-loopback" in m
+            for m in messages
+        ), messages
+
+    @pytest.mark.unit
+    def test_loopback_on_non_local_redundancy_group_is_error(self, temp_config_file):
+        """Same rule applies to redundancy groups."""
+        temp_config_file.write_text(
+            "ups:\n"
+            "  - name: 'UPS-A@localhost'\n"
+            "    is_local: true\n"
+            "  - name: 'UPS-B@localhost'\n"
+            "redundancy_groups:\n"
+            "  - name: rack-1\n"
+            "    ups_sources: ['UPS-A@localhost', 'UPS-B@localhost']\n"
+            "    remote_servers:\n"
+            "      - name: stray-redundancy-loopback\n"
+            "        enabled: true\n"
+            "        host: 127.0.0.1\n"
+            "        user: root\n"
+            "        is_host_loopback: true\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        messages = ConfigLoader.validate_config(config)
+        assert any(
+            m.startswith("ERROR:") and "is_host_loopback" in m
+            and "is not is_local" in m and "redundancy" in m
+            for m in messages
+        ), messages
+
+    @pytest.mark.unit
+    def test_loopback_disabled_is_error(self, temp_config_file):
+        temp_config_file.write_text(
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: false\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+            "    is_host_loopback: true\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        messages = ConfigLoader.validate_config(config)
+        assert any(
+            m.startswith("ERROR:") and "is_host_loopback" in m and "enabled is false" in m
+            for m in messages
+        )
+
+    @pytest.mark.unit
+    def test_loopback_empty_user_is_error(self, temp_config_file):
+        temp_config_file.write_text(
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    host: 127.0.0.1\n"
+            "    user: ''\n"
+            "    is_host_loopback: true\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        messages = ConfigLoader.validate_config(config)
+        assert any(
+            m.startswith("ERROR:") and "is_host_loopback" in m and "'user' is empty" in m
+            for m in messages
+        )
+
+    @pytest.mark.unit
+    def test_loopback_unsafe_identity_command_rejected(self, temp_config_file):
+        """A probe that could chain into a destructive command is rejected."""
+        temp_config_file.write_text(
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+            "    is_host_loopback: true\n"
+            "    host_identity_command: 'cat /etc/machine-id; shutdown -h now'\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        messages = ConfigLoader.validate_config(config)
+        assert any(
+            m.startswith("ERROR:") and "host_identity_command" in m and "unsafe" in m
+            for m in messages
+        )
+
+    @pytest.mark.unit
+    def test_loopback_non_root_user_without_sudo_warns(self, temp_config_file):
+        """Per-plan sudo guard: non-root user + no sudo prefix → WARNING."""
+        temp_config_file.write_text(
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    host: 127.0.0.1\n"
+            "    user: eneru\n"
+            "    shutdown_command: 'shutdown -h now'\n"
+            "    is_host_loopback: true\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        messages = ConfigLoader.validate_config(config)
+        assert any(
+            m.startswith("WARNING:") and "user is 'eneru'" in m and "sudo" in m
+            for m in messages
+        )
+
+    @pytest.mark.unit
+    def test_sudo_guard_applies_to_non_loopback_servers_too(self, temp_config_file):
+        """The sudo warning fires for any non-root remote_server, not just loopback."""
+        temp_config_file.write_text(
+            "remote_servers:\n"
+            "  - name: nas\n"
+            "    enabled: true\n"
+            "    host: 10.0.0.5\n"
+            "    user: deploy\n"
+            "    shutdown_command: 'shutdown -h now'\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        messages = ConfigLoader.validate_config(config)
+        assert any(
+            m.startswith("WARNING:") and "user is 'deploy'" in m and "sudo" in m
+            for m in messages
+        )
+
+    @pytest.mark.unit
+    def test_unknown_key_rejection_intact_for_remote_servers(self, temp_config_file):
+        """Unknown keys still rejected; new keys accepted."""
+        temp_config_file.write_text(
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+            "    is_host_loopback: true\n"
+            "    nonsense_key: 'foo'\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        with open(temp_config_file) as f:
+            raw = yaml.safe_load(f)
+        messages = ConfigLoader.validate_config(config, raw_data=raw)
+        assert any(
+            m.startswith("ERROR:") and "nonsense_key" in m for m in messages
+        )

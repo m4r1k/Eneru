@@ -180,6 +180,10 @@ README.md                       # Project overview
   - 💾 Filesystem sync
   - 📤 Unmounting filesystems (section header)
   - 🔌 Shutdown commands (local and remote)
+  - 🛰️ Container loopback delegation (v5.5+: local host actions
+    delegated to the host's sshd over 127.0.0.1; distinct from the
+    🌐 used for ordinary remote_servers so the loopback path is
+    visually unambiguous in logs and notifications)
 
   **Actions & Progress:**
   - ⏳ Starting a wait / initial wait state
@@ -199,8 +203,9 @@ README.md                       # Project overview
 - Config validation before any changes to config handling
 - Always test with `--dry-run` before real shutdown logic changes
 - When adding new config feature flags, add them to `examples/config-reference.yaml` AND to the relevant table in `docs/configuration.md` (key, default, one-line description). The two surfaces drift apart fast otherwise — pip users land on the rendered docs first; package users grep the example file first; both must agree
-- When adding or removing tests, update `docs/testing.md` (test counts in pyramid/table, per-file breakdown, E2E test case table)
+- When adding or removing tests, update `docs/testing.md` (per-file breakdown, E2E test case table). The pyramid summary intentionally says "thousands of tests" — no specific count to keep in sync.
 - **New features require both synthetic AND end-to-end tests.** Any new feature must ship with (a) unit/integration tests in `tests/` covering the logic with maximum reasonable coverage, **and** (b) a corresponding step in `.github/workflows/e2e.yml` that exercises the feature end-to-end against the Docker Compose environment in `tests/e2e/`. Synthetic tests catch logic bugs; the E2E step proves the feature actually works against real NUT/SSH/Docker. PRs that add a feature without matching E2E coverage should be sent back for it.
+- **Coverage bar: ≥95% per file.** Every file under `src/eneru/` must stay at or above 95% line+branch coverage. When adding a new module or extending an existing one, write tests for the new code path AND for the defensive branches (error logging, swallowed exceptions, edge cases) that the feature introduces. Verify with `pytest -m unit --cov=src/eneru --cov-report=term-missing` before pushing. Files that fall below 95% should be brought back up in the same PR; carrying the regression forward turns into a long tail of dead branches later.
 - **OCI image changes:** update `Dockerfile`, `.dockerignore`, `docs/containers-kubernetes.md`, the Kubernetes samples under `deploy/kubernetes/`, and the OCI smoke checks in `.github/workflows/integration.yml` / `.github/workflows/release.yml`. The official image is one Python 3.12 image, non-root by default, published to GHCR by `release.yml`, and must work under both Docker and Podman. Remote-only configs must run without root; any config that sets `is_local: true` or local-host orchestration must fail at startup unless the container runs as root. Document SELinux bind mounts with `:Z`/`:z` and do not advise disabling AppArmor for remote-only use.
 - **Adding a new file under `src/eneru/`?** Also add a matching `contents:` entry in `nfpm.yaml`. The deb/rpm builds enumerate every module file explicitly — they do NOT glob. The pip path uses pyproject.toml autodiscovery, so a missing entry passes pip CI silently and only fails at deb/rpm install time with `ModuleNotFoundError`. Triple-checking via the isolated-interpreter package-layout simulation (see `src/eneru/AGENTS.md`) before push is the way to catch this.
 - **Adding state to the SQLite stats DB?** Bump `SCHEMA_VERSION` in `src/eneru/stats.py` and add an idempotent `ALTER TABLE` migration in `_init_schema._migrate_schema` keyed off `meta.schema_version`. Migrations are append-only — never modify a previous version's block. Every `ALTER` is wrapped via `_safe_alter` so duplicate-column errors are benign. The version is bumped *after* the migration succeeds, so a crash mid-migration is replayed safely. See `src/eneru/AGENTS.md` "Stats schema evolution" for the full pattern + when-to-add-a-column guidance. New event types (rows in `events`) do NOT need a schema bump — only new columns or tables do.
@@ -218,7 +223,7 @@ This repo deliberately keeps individual files small (`monitor.py` is now ~830 li
 `main` is protected. All changes go through feature branches and pull requests.
 
 **Branch protection on `main`:**
-- Required CI checks before merge: `validate` (Python 3.9-3.14, 6 jobs) + 5 parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy`, `E2E Stats`) — **11 checks total**
+- Required CI checks before merge: `validate` (Python 3.9-3.14, 6 jobs) + 6 parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy`, `E2E Stats`, `E2E Loopback`) — **12 checks total**
 - Strict mode: branch must be up-to-date with main before merge
 - Enforce admins: maintainers follow the same rules
 - No force pushes, no branch deletion
@@ -238,7 +243,7 @@ This repo deliberately keeps individual files small (`monitor.py` is now ~830 li
    slice / logical unit of work) — NOT one commit per push (CI flood,
    AI-reviewer quota burn) and NOT "20 commits → finally open PR" (single
    huge CI run, hard to bisect when something breaks)
-6. CI checks must pass (all 11) before merge
+6. CI checks must pass (all 12) before merge
 7. Merge via GitHub (branch auto-deletes)
 ```
 
@@ -263,7 +268,7 @@ This repo uses **three layers of AI review**: a pre-push review via the `agent-s
 **Why manual:**
 - **CodeRabbit** free tier allows one review per 45 minutes. Per-commit auto-review burns the quota fast and produces noisy partial reviews against intermediate diffs.
 - **cubic.dev** free tier allows 40 reviews per month. Same problem.
-- We deliberately push commits early so the GitHub Actions E2E suite (`E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy`, `E2E Stats`) gates work-in-progress and gives feedback fast on real-world scenarios. That CI feedback loop must stay cheap; AI review should not bottleneck it.
+- We deliberately push commits early so the GitHub Actions E2E suite (`E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy`, `E2E Stats`, `E2E Loopback`) gates work-in-progress and gives feedback fast on real-world scenarios. That CI feedback loop must stay cheap; AI review should not bottleneck it.
 
 **Pre-push: spawn `agent-skills:code-reviewer` as a SUBAGENT**
 
@@ -298,7 +303,7 @@ Two reasons:
 - Single-line typo fixes
 - Pure dependency upgrades with no code changes
 
-For trivial PRs the CI gates (validate × 6 + E2E × 5) are sufficient. Saves quota for substantive changes.
+For trivial PRs the CI gates (validate × 6 + E2E × 6) are sufficient. Saves quota for substantive changes.
 
 **Configuration:**
 - **CodeRabbit:** `.coderabbit.yaml` at repo root sets `reviews.auto_review.enabled: false`. The file also documents the manual-trigger phrase.

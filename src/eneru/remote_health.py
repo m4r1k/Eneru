@@ -21,6 +21,10 @@ REMOTE_HEALTH_CHECKING = "CHECKING"
 REMOTE_HEALTH_HEALTHY = "HEALTHY"
 REMOTE_HEALTH_DEGRADED = "DEGRADED"
 REMOTE_HEALTH_FAILED = "FAILED"
+SLOW_REMOTE_SSH_LOG_THRESHOLD_MS = 2_000
+SLOW_REMOTE_SSH_LOG_RATE_LIMIT_SECONDS = 300.0
+SLOW_REMOTE_SSH_NOTIFY_THRESHOLD_MS = 10_000
+SLOW_REMOTE_SSH_NOTIFY_CONSECUTIVE_CHECKS = 3
 
 DANGEROUS_PROBE_WORDS = (
     "shutdown", "poweroff", "reboot", "halt", "init 0",
@@ -56,6 +60,12 @@ class RemoteHealthStatus:
     last_error: str = ""
     latency_ms: int = 0
     consecutive_failures: int = 0
+    # v5.5: loopback delegate flag. When True, the manager runs an additional
+    # host-identity probe and marks the entry FAILED on mismatch (the most
+    # common cause being a missing /etc/machine-id bind-mount). Surfaced in
+    # API/TUI so operators can tell the host-poweroff delegate apart from
+    # regular remote targets.
+    is_host_loopback: bool = False
 
 
 def remote_health_sidecar_path(state_file_path: Path) -> Path:
@@ -141,6 +151,94 @@ def run_remote_probe(server: RemoteServerConfig,
     return False, stderr.strip() or f"exit code {exit_code}", latency_ms
 
 
+def run_loopback_identity_probe(
+    server: RemoteServerConfig,
+) -> Tuple[bool, str, int]:
+    """Run the host-identity probe for a loopback entry.
+
+    Returns ``(matches, error_or_value, latency_ms)``. On success the second
+    element is the empty string; on mismatch it's an operator-actionable
+    error message that names the bind-mount as the most likely cause.
+    """
+    start = time.monotonic()
+    # Defense in depth: the regular remote-health probe rejects unsafe
+    # commands via is_safe_probe_command() before sending over SSH.
+    # Apply the same safety check to host_identity_command so a
+    # malicious or accidentally-pipelined value can't slip through.
+    if not is_safe_probe_command(server.host_identity_command):
+        latency_ms = int((time.monotonic() - start) * 1000)
+        return False, (
+            "identity probe rejected: host_identity_command is not a "
+            "safe single-token command (no shell metacharacters allowed)"
+        ), latency_ms
+    exit_code, stdout, stderr = run_command(
+        build_ssh_probe_command(server, server.host_identity_command),
+        timeout=server.connect_timeout + 10,
+    )
+    latency_ms = int((time.monotonic() - start) * 1000)
+    if exit_code != 0:
+        if exit_code == 124:
+            return False, f"identity probe timed out after {server.connect_timeout}s", latency_ms
+        return False, (
+            f"identity probe failed: {stderr.strip() or f'exit code {exit_code}'}"
+        ), latency_ms
+    actual = stdout.strip()
+    lowered_actual = actual.lower()
+    shutdown_markers = (
+        "shutdown",
+        "poweroff",
+        "reboot",
+        "halt",
+        "broadcast message",
+        "system is going down",
+    )
+    if any(marker in lowered_actual for marker in shutdown_markers):
+        return False, (
+            "identity probe returned shutdown-control output instead of "
+            "machine-id. Most likely cause: the loopback key in "
+            "authorized_keys uses command=, which makes sshd substitute "
+            "Eneru's identity probe and generated shutdown actions with "
+            "that forced command. Remove authorized_keys command= for "
+            "Eneru loopback keys."
+        ), latency_ms
+    expected = (server.expected_host_identity or "").strip()
+    if not expected:
+        return False, (
+            "host identity unknown: container-side /etc/machine-id was not "
+            "readable at startup and no explicit expected_host_identity was "
+            "configured. Bind-mount the host's /etc/machine-id read-only "
+            "(-v /etc/machine-id:/etc/machine-id:ro for Docker; hostPath "
+            "volume for Kubernetes). If /etc/machine-id is empty on the "
+            "host, initialize it with systemd-machine-id-setup."
+        ), latency_ms
+    if actual != expected:
+        return False, (
+            f"host identity mismatch: probe returned {actual!r} but expected "
+            f"{expected!r}. Most likely cause: /etc/machine-id is NOT "
+            "bind-mounted from the host into the container, so Eneru sees a "
+            "different machine-id locally than what the loopback SSH target "
+            "reports. Fix: bind-mount /etc/machine-id from the host "
+            "(-v /etc/machine-id:/etc/machine-id:ro for Docker)."
+        ), latency_ms
+    return True, "", latency_ms
+
+
+def _read_container_machine_id() -> Optional[str]:
+    """Read the container-side /etc/machine-id, or None if unavailable.
+
+    Used to auto-populate ``RemoteServerConfig.expected_host_identity`` on
+    loopback entries. When the operator bind-mounts the host's machine-id
+    at the same path, this value matches what the host's SSH probe will
+    return — the identity guard passes. When the bind-mount is missing,
+    this returns the container's own (random) machine-id and the guard
+    fails closed on the first probe.
+    """
+    try:
+        return Path("/etc/machine-id").read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
 class RemoteHealthManager:
     """Background healthcheck loop for one UPS/redundancy group."""
 
@@ -167,11 +265,29 @@ class RemoteHealthManager:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._notified_failed: Dict[str, bool] = {}
+        self._last_slow_ssh_log_time: Dict[str, float] = {}
+        self._slow_ssh_check_streak: Dict[str, int] = {}
+        self._slow_ssh_notified: Dict[str, bool] = {}
+        self._slow_ssh_log_threshold_ms = SLOW_REMOTE_SSH_LOG_THRESHOLD_MS
+        self._slow_ssh_log_rate_limit_seconds = SLOW_REMOTE_SSH_LOG_RATE_LIMIT_SECONDS
+        self._slow_ssh_notify_threshold_ms = SLOW_REMOTE_SSH_NOTIFY_THRESHOLD_MS
+        self._slow_ssh_notify_consecutive_checks = (
+            SLOW_REMOTE_SSH_NOTIFY_CONSECUTIVE_CHECKS
+        )
         self._event_fn_logged_failure = False
         probe = config.remote_health.probe_command
         self._validated_probe_command = probe if is_safe_probe_command(probe) else None
         self._sidecar_write_failed_paths = set()
         initial = REMOTE_HEALTH_UNKNOWN if config.remote_health.enabled else REMOTE_HEALTH_DISABLED
+        # v5.5: auto-populate expected_host_identity on any loopback entry that
+        # didn't get one from config. Reads /etc/machine-id from the container
+        # filesystem — when the operator bind-mounts the host's machine-id at
+        # the same path, this value matches what the loopback SSH probe will
+        # return. Missing or mismatching → identity probe fails closed with a
+        # clear bind-mount hint.
+        for server in self.servers:
+            if server.is_host_loopback is True and not server.expected_host_identity:
+                server.expected_host_identity = _read_container_machine_id()
         self._statuses: Dict[str, RemoteHealthStatus] = {
             self._key(server): RemoteHealthStatus(
                 group=group_label,
@@ -179,13 +295,18 @@ class RemoteHealthManager:
                 host=server.host,
                 user=server.user,
                 status=initial,
+                is_host_loopback=server.is_host_loopback is True,
             )
             for server in self.servers
         }
+        for server in self.servers:
+            if server.is_host_loopback is True:
+                self._statuses[self._key(server)].status = REMOTE_HEALTH_UNKNOWN
 
     def start(self) -> None:
         """Start the background healthcheck loop if configured."""
-        if (not self.config.remote_health.enabled) or not self.servers:
+        has_loopback = any(s.is_host_loopback is True for s in self.servers)
+        if ((not self.config.remote_health.enabled) and not has_loopback) or not self.servers:
             self._write_sidecar()
             return
         if self._thread is not None:
@@ -212,12 +333,15 @@ class RemoteHealthManager:
 
     def check_once(self) -> List[dict]:
         """Run one healthcheck cycle synchronously."""
-        if not self.config.remote_health.enabled:
+        has_loopback = any(s.is_host_loopback is True for s in self.servers)
+        if not self.config.remote_health.enabled and not has_loopback:
             self._write_sidecar()
             return self.snapshot()
         for server in self.servers:
             if self.stop_event.is_set():
                 break
+            if not self.config.remote_health.enabled and server.is_host_loopback is not True:
+                continue
             self._check_server(server)
         self._write_sidecar()
         return self.snapshot()
@@ -238,10 +362,27 @@ class RemoteHealthManager:
         self._write_sidecar()
 
         probe = self._validated_probe_command
-        if probe is None:
+        if server.is_host_loopback is True and not (server.expected_host_identity or "").strip():
+            success, error, latency_ms = False, (
+                "host identity unknown: container-side /etc/machine-id was not "
+                "readable at startup and no explicit expected_host_identity was "
+                "configured. Bind-mount the host's /etc/machine-id read-only. "
+                "If /etc/machine-id is empty on the host, initialize it with "
+                "systemd-machine-id-setup."
+            ), 0
+        elif probe is None:
             success, error, latency_ms = False, "unsafe probe command rejected", 0
         else:
             success, error, latency_ms = run_remote_probe(server, probe)
+            # v5.5: loopback entries get an extra host-identity step. The
+            # standard probe proves SSH reachability; identity proves we're
+            # actually talking to the host Eneru is meant to control.
+            if success and server.is_host_loopback is True:
+                id_ok, id_err, id_latency = run_loopback_identity_probe(server)
+                latency_ms += id_latency
+                if not id_ok:
+                    success = False
+                    error = id_err
 
         now = time.time()
         with self._lock:
@@ -281,20 +422,113 @@ class RemoteHealthManager:
                 notification_sent = True
         elif current == REMOTE_HEALTH_FAILED and not self._notified_failed.get(key):
             self._notified_failed[key] = True
-            self.log_fn(f"❌ Remote health failed: {display}: {error}")
-            if self.config.remote_health.notify_on_failure and self.notify_fn:
-                self.notify_fn(
-                    f"❌ **Remote SSH Health Failed:** {display}\n"
-                    f"Host: {server.host}\nError: {error}",
-                    self.config.NOTIFY_FAILURE,
+            if server.is_host_loopback is True:
+                # v5.5: loud, operator-actionable message — the loopback IS
+                # the host-poweroff contract; if it's broken, Eneru cannot
+                # honor a power-loss shutdown in full.
+                self.log_fn(
+                    f"❌ HOST LOOPBACK FAILED: {display} ({server.host}). "
+                    "Under a real power outage, we cannot shut the system "
+                    f"down. Cause: {error}"
                 )
-                notification_sent = True
+                if self.config.remote_health.notify_on_failure and self.notify_fn:
+                    self.notify_fn(
+                        f"🚨 **Host Loopback FAILED:** {display}\n"
+                        f"Host: {server.host}\n"
+                        "**Under a real power outage, we cannot shut the "
+                        "system down.**\n"
+                        f"Cause: {error}",
+                        self.config.NOTIFY_FAILURE,
+                    )
+                    notification_sent = True
+            else:
+                self.log_fn(f"❌ Remote health failed: {display}: {error}")
+                if self.config.remote_health.notify_on_failure and self.notify_fn:
+                    self.notify_fn(
+                        f"❌ **Remote SSH Health Failed:** {display}\n"
+                        f"Host: {server.host}\nError: {error}",
+                        self.config.NOTIFY_FAILURE,
+                    )
+                    notification_sent = True
         elif not success:
             self.log_fn(f"⚠️ Remote health degraded: {display}: {error}")
+        self._record_slow_ssh_response(
+            key, display, server.host, latency_ms, success, now,
+        )
         self._record_status_transition(
             previous, current, display, server.host, row.last_error,
             notification_sent,
         )
+
+    def _record_slow_ssh_response(
+        self,
+        key: str,
+        display: str,
+        host: str,
+        latency_ms: int,
+        success: bool,
+        now: float,
+    ) -> None:
+        """Record successful-but-slow SSH health probes as diagnostics."""
+        if not success:
+            self._slow_ssh_check_streak[key] = 0
+            self._slow_ssh_notified[key] = False
+            return
+        if latency_ms >= self._slow_ssh_log_threshold_ms:
+            last_log = self._last_slow_ssh_log_time.get(key, 0.0)
+            if (
+                last_log == 0.0
+                or now - last_log >= self._slow_ssh_log_rate_limit_seconds
+            ):
+                detail = (
+                    f"{self.group_label}/{display} ({host}) slow SSH "
+                    f"response: {latency_ms} ms"
+                )
+                self.log_fn(
+                    f"⚠️ Slow remote SSH response from {display} "
+                    f"({host}): {latency_ms} ms"
+                )
+                self._record_event(
+                    "REMOTE_SSH_SLOW_RESPONSE", detail, notification_sent=False,
+                )
+                self._last_slow_ssh_log_time[key] = now
+
+        if latency_ms >= self._slow_ssh_notify_threshold_ms:
+            self._slow_ssh_check_streak[key] = (
+                self._slow_ssh_check_streak.get(key, 0) + 1
+            )
+        else:
+            self._slow_ssh_check_streak[key] = 0
+            self._slow_ssh_notified[key] = False
+            return
+
+        if (
+            not self._slow_ssh_notified.get(key, False)
+            and self._slow_ssh_check_streak[key]
+            >= self._slow_ssh_notify_consecutive_checks
+        ):
+            if self.notify_fn:
+                self.notify_fn(
+                    f"⚠️ **Sustained slow remote SSH responses:** {display}\n"
+                    f"Host: {host}\n"
+                    f"Latest probe took {latency_ms / 1000:.1f}s. "
+                    f"Threshold: {self._slow_ssh_notify_threshold_ms / 1000:.1f}s "
+                    f"for {self._slow_ssh_notify_consecutive_checks} "
+                    "consecutive checks.",
+                    self.config.NOTIFY_WARNING,
+                )
+            detail = (
+                f"{self.group_label}/{display} ({host}) sustained slow SSH "
+                f"responses: latest {latency_ms} ms; threshold "
+                f"{self._slow_ssh_notify_threshold_ms} ms for "
+                f"{self._slow_ssh_notify_consecutive_checks} consecutive checks"
+            )
+            self._record_event(
+                "REMOTE_SSH_SLOW_RESPONSE",
+                detail,
+                notification_sent=self.notify_fn is not None,
+            )
+            self._slow_ssh_notified[key] = True
 
     def _record_status_transition(
         self,
@@ -320,9 +554,24 @@ class RemoteHealthManager:
         )
         if error:
             detail = f"{detail}: {error}"
+        self._record_event(
+            f"REMOTE_HEALTH_{current}",
+            detail,
+            notification_sent,
+        )
+
+    def _record_event(
+        self,
+        event_type: str,
+        detail: str,
+        notification_sent: bool,
+    ) -> None:
+        """Record a remote-health diagnostic event without affecting probes."""
+        if self.event_fn is None:
+            return
         try:
             self.event_fn(
-                f"REMOTE_HEALTH_{current}",
+                event_type,
                 detail,
                 notification_sent,
             )

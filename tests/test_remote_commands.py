@@ -10,6 +10,8 @@ from eneru import (
     RemoteCommandConfig,
     MonitorState,
     REMOTE_ACTIONS,
+    FilesystemsConfig,
+    UnmountConfig,
 )
 from eneru.shutdown.remote import RemoteShutdownResult
 
@@ -105,18 +107,28 @@ class TestRemoteActionTemplates:
 
     @pytest.mark.unit
     def test_timeout_substitution(self):
-        """Test that timeout placeholder is correctly substituted."""
-        template = REMOTE_ACTIONS["stop_containers"]
-        result = template.format(timeout=60)
+        """Test that timeout placeholder is correctly substituted.
+
+        v5.5: templates take additional placeholders (skip_ids,
+        umount_targets, wait_interval) — use the centralized
+        render_action() helper so all required kwargs get defaults.
+        """
+        from eneru.actions import render_action
+        result = render_action("stop_containers", timeout=60)
         assert "t=60" in result
         assert "{timeout}" not in result
+        assert "{skip_ids}" not in result
 
     @pytest.mark.unit
     def test_path_substitution_in_compose(self):
-        """Test that path placeholder is correctly substituted in stop_compose."""
-        template = REMOTE_ACTIONS["stop_compose"]
-        result = template.format(timeout=30, path="/opt/app/docker-compose.yml")
-        assert "/opt/app/docker-compose.yml" in result
+        """stop_compose path is shell-quoted by render_action."""
+        from eneru.actions import render_action
+        result = render_action(
+            "stop_compose",
+            timeout=30,
+            path="/opt/app/docker compose.yml",
+        )
+        assert "'/opt/app/docker compose.yml'" in result
         assert "{path}" not in result
         assert "t=30" in result
 
@@ -138,14 +150,12 @@ class TestRemoteActionTemplates:
         assert "uuid=2" not in rendered  # not joined with the next arg either
 
     @pytest.mark.unit
-    def test_stop_compose_template_does_not_double_quote_path(self):
-        """stop_compose must leave {path} unquoted in the template; quoting
-        happens via shlex.quote at the format() call site so $(), backticks,
-        and ${...} cannot expand on the remote host."""
+    def test_stop_compose_template_quotes_path_variable_at_use_sites(self):
+        """stop_compose quotes "$path" when invoking compose so spaces survive."""
         template = REMOTE_ACTIONS["stop_compose"]
-        # Bare placeholder, no surrounding double quotes.
-        assert '"{path}"' not in template
-        assert "-f {path}" in template
+        assert "path={path}" in template
+        assert '-f "$path" ps -q' in template
+        assert '-f "$path" down -t "$t"' in template
 
 
 class TestRemotePreShutdownExecution:
@@ -194,6 +204,49 @@ class TestRemotePreShutdownExecution:
             command = call_args[0][1]  # Second positional arg is the command
             assert "docker" in command or "podman" in command
             assert "t=60" in command  # Timeout substituted
+
+    @pytest.mark.unit
+    def test_execute_pre_shutdown_with_use_sudo(self, remote_monitor):
+        """use_sudo should render delegated write actions through sudo -n."""
+        server = RemoteServerConfig(
+            name="Loopback",
+            enabled=True,
+            host="127.0.0.1",
+            user="eneru-loopback",
+            use_sudo=True,
+            command_timeout=30,
+            pre_shutdown_commands=[
+                RemoteCommandConfig(action="stop_vms", timeout=60),
+            ],
+        )
+
+        with patch.object(remote_monitor, "_run_remote_command", return_value=(True, "")) as mock_run:
+            remote_monitor._execute_remote_pre_shutdown(server)
+
+        command = mock_run.call_args[0][1]
+        assert "sudo -n virsh" in command
+
+    @pytest.mark.unit
+    def test_shutdown_command_use_sudo_prefix_is_idempotent(self, remote_monitor):
+        """Final shutdown command gets sudo -n unless it already starts with sudo."""
+        server = RemoteServerConfig(
+            name="Loopback",
+            enabled=True,
+            host="127.0.0.1",
+            user="eneru-loopback",
+            use_sudo=True,
+            shutdown_command="shutdown -h now",
+        )
+
+        with patch.object(remote_monitor, "_run_remote_command", return_value=(True, "")) as mock_run:
+            remote_monitor._shutdown_remote_server(server)
+
+        assert mock_run.call_args[0][1] == "sudo -n shutdown -h now"
+
+        server.shutdown_command = "sudo shutdown -h now"
+        with patch.object(remote_monitor, "_run_remote_command", return_value=(True, "")) as mock_run:
+            remote_monitor._shutdown_remote_server(server)
+        assert mock_run.call_args[0][1] == "sudo shutdown -h now"
 
     @pytest.mark.unit
     def test_execute_pre_shutdown_with_custom_command(self, remote_monitor):
@@ -606,6 +659,105 @@ class TestRemotePreShutdownExecution:
         assert mock_run.call_count == 1
         assert mock_run.call_args.args[3] == "sleep 999"
 
+    @pytest.mark.unit
+    def test_loopback_pre_shutdown_supplies_skip_ids_and_umount_targets(
+        self, remote_monitor
+    ):
+        """Loopback actions get host-side context rendered into templates."""
+        remote_monitor.config.ups_groups[0].filesystems = FilesystemsConfig(
+            sync_enabled=True,
+            unmount=UnmountConfig(
+                enabled=True,
+                mounts=["/mnt/media", {"path": "/mnt/usb disk", "options": "-l"}],
+            ),
+        )
+        server = RemoteServerConfig(
+            name="host-loopback",
+            enabled=True,
+            host="127.0.0.1",
+            user="root",
+            is_host_loopback=True,
+            pre_shutdown_commands=[
+                RemoteCommandConfig(action="stop_containers"),
+                RemoteCommandConfig(action="unmount_filesystems"),
+            ],
+        )
+
+        with patch.object(remote_monitor, "_current_container_ids",
+                          return_value={"def456", "abc123"}), \
+             patch.object(remote_monitor, "_run_remote_command",
+                          return_value=(True, "")) as mock_run:
+            remote_monitor._execute_remote_pre_shutdown(server)
+
+        stop_cmd = mock_run.call_args_list[0].args[1]
+        umount_cmd = mock_run.call_args_list[1].args[1]
+        assert 'skip="abc123,def456"' in stop_cmd
+        assert "/mnt/media" in umount_cmd
+        assert "/mnt/usb disk" in umount_cmd
+
+    @pytest.mark.unit
+    def test_regular_remote_unmount_uses_command_mounts(self, remote_monitor):
+        """Regular remote servers must provide mounts on the command itself."""
+        server = RemoteServerConfig(
+            name="Storage",
+            enabled=True,
+            host="192.168.1.90",
+            user="root",
+            command_timeout=30,
+            pre_shutdown_commands=[
+                RemoteCommandConfig(
+                    action="unmount_filesystems",
+                    timeout=20,
+                    mounts=[
+                        {"path": "/mnt/media", "options": ""},
+                        {"path": "/mnt/backup disk", "options": "-l"},
+                    ],
+                ),
+            ],
+        )
+
+        with patch.object(remote_monitor, "_run_remote_command",
+                          return_value=(True, "")) as mock_run:
+            remote_monitor._execute_remote_pre_shutdown(server)
+
+        command = mock_run.call_args.args[1]
+        assert "/mnt/media" in command
+        assert "/mnt/backup disk" in command
+        assert "umount -l" in command
+
+    @pytest.mark.unit
+    def test_regular_remote_unmount_without_mounts_is_skipped(self, remote_monitor):
+        server = RemoteServerConfig(
+            name="Storage",
+            enabled=True,
+            host="192.168.1.90",
+            user="root",
+            pre_shutdown_commands=[
+                RemoteCommandConfig(action="unmount_filesystems"),
+            ],
+        )
+
+        with patch.object(remote_monitor, "_run_remote_command") as mock_run:
+            result = remote_monitor._execute_remote_pre_shutdown(
+                server, collect_result=True,
+            )
+
+        mock_run.assert_not_called()
+        assert result.failed == 1
+
+    @pytest.mark.unit
+    def test_loopback_helpers_fail_closed_to_empty_context(self, remote_monitor):
+        """Helper failures should remove optional context, not abort shutdown."""
+        with patch.object(remote_monitor, "_current_container_ids",
+                          side_effect=RuntimeError("docker unavailable")):
+            assert remote_monitor._loopback_skip_ids() == set()
+
+        remote_monitor.config.ups_groups[0].filesystems = FilesystemsConfig(
+            sync_enabled=True,
+            unmount=UnmountConfig(enabled=False, mounts=["/mnt/media"]),
+        )
+        assert remote_monitor._loopback_umount_targets() == []
+
 
 class TestRunRemoteCommand:
     """Test the _run_remote_command helper method."""
@@ -758,3 +910,34 @@ class TestRunRemoteCommand:
             # run_command should be called with timeout + 30 buffer
             call_kwargs = mock_run.call_args[1]
             assert call_kwargs["timeout"] == 60  # 30 + 30 buffer
+
+    @pytest.mark.unit
+    def test_run_remote_command_deadline_already_expired(self, ssh_monitor):
+        """Expired phase deadlines fail before opening a new SSH command."""
+        server = RemoteServerConfig(host="192.168.1.50", user="root")
+
+        with patch("eneru.shutdown.remote.time.monotonic", return_value=20.0), \
+             patch("eneru.shutdown.remote.run_command") as mock_run:
+            success, error = ssh_monitor._run_remote_command(
+                server, "shutdown -h now", 30, "shutdown", deadline=10.0,
+            )
+
+        assert success is False
+        assert error == "remote shutdown deadline exceeded"
+        mock_run.assert_not_called()
+
+    @pytest.mark.unit
+    def test_run_remote_command_reports_deadline_capped_timeout(self, ssh_monitor):
+        """Timeout messages should show when the phase deadline shortened them."""
+        server = RemoteServerConfig(host="192.168.1.50", user="root")
+
+        with patch("eneru.shutdown.remote.time.monotonic", return_value=9.1), \
+             patch("eneru.shutdown.remote.run_command",
+                   return_value=(124, "", "timed out")) as mock_run:
+            success, error = ssh_monitor._run_remote_command(
+                server, "sync", 30, "sync", deadline=11.0,
+            )
+
+        assert success is False
+        assert "capped by phase deadline" in error
+        assert mock_run.call_args.kwargs["timeout"] == 1

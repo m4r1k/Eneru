@@ -7,6 +7,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.5.0] - 2026-05-18
+
+### Added
+
+- Containerized local-host ownership for Docker and Podman through a
+  host-loopback SSH delegate. Eneru can now run as the slim non-root
+  container while still shutting down the host, VMs, containers, compose
+  stacks, and configured filesystems on the host.
+- Zero-config root loopback synthesis for Docker/Podman local configs:
+  `host: 127.0.0.1`, `user: root`,
+  `ssh_key_path: /var/lib/eneru/ssh/id_loopback`, and
+  `shutdown_command: "shutdown -h now"`.
+- `remote_servers[].use_sudo` for non-root SSH users. It prefixes
+  generated privileged actions and the final shutdown command with
+  `sudo -n` when needed.
+- `remote_servers[].pre_shutdown_commands[].mounts` for the
+  `unmount_filesystems` action, so ordinary remote servers can unmount
+  specific filesystems before their final shutdown command. Loopback
+  delegates still derive mounts from the local `filesystems.unmount`
+  config.
+- Loopback host identity validation using `/etc/machine-id`, surfaced in
+  remote health and `/ready`.
+- SQLite diagnostics events for slow NUT polls and successful but slow
+  remote SSH health probes. These now appear in the TUI/API event stream at
+  Diagnostics verbosity instead of only in journal/container logs.
+- E2E coverage for root loopback, non-root sudo loopback, missing
+  machine-id readiness, missing-loopback startup failure, and the generated
+  VM/container/sync/unmount loopback action list.
+
+### Changed
+
+- The OCI image is now slim and relies on the host loopback path for
+  local host actions instead of shipping Docker, Podman, and libvirt
+  clients inside the container.
+- Docker image healthchecks now target `/ready`, so orchestration checks
+  the configured shutdown contract rather than only API liveness.
+- `/ready` now evaluates shutdown capabilities, including native host
+  binaries, remote SSH health, and loopback health for containerized
+  local ownership.
+- Container runtimes suppress `wall(1)` and the missing `logger(1)`
+  warning because those native host side channels are not useful inside
+  OCI containers.
+- Kubernetes remains the remote-only container profile by default; local
+  ownership in a pod requires an explicit loopback delegate.
+
+### Fixed
+
+- Synthesized host-loopback delegate now ships with
+  `StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null`. Without
+  these the first SSH probe to `127.0.0.1` failed with
+  "Host key verification failed" because the non-root container user has
+  no `~/.ssh/known_hosts`.
+- Legacy native-install paths (`/var/log/ups-monitor.log`,
+  `/var/run/ups-monitor.state`, `/var/run/ups-battery-history`,
+  `/var/run/ups-shutdown-scheduled`) now auto-rewrite to
+  `/var/{log,run}/eneru/` equivalents under container runtime when the
+  config still matches the dataclass default. Preserves the
+  "no required YAML changes" migration promise for default configs.
+  Operator-set paths are untouched. See
+  [docs/migrate-to-container.md](migrate-to-container.md#legacy-logrun-dir-auto-rewrite)
+  for opt-out.
+- `docs/migrate-to-container.md` Step 6 had three bind mounts written
+  as `,Z` (comma) instead of `:Z` (colon). On SELinux hosts Docker
+  parsed the destination as the literal path `/var/lib/eneru,Z` and
+  the real `/var/lib/eneru` inside the container stayed unmounted — so
+  the carried-over stats DB at `/srv/eneru/state/default.db` was never
+  reachable and the daemon created a fresh empty DB in the image's
+  default directory instead. Corrected to `:Z`.
+- Removed the per-startup "v5.5: running non-root inside <runtime>;
+  local-host actions will be delegated to <user>@<host> via SSH" banner.
+  In v5.5 the loopback path is taken regardless of euid, so the
+  non-root vs root distinction was cosmetic and the banner spammed
+  the logs on every restart. The privilege check still passes silently
+  for the same scenario.
+- Removed the legacy-path auto-rewrite banner entirely. The rewrite
+  still fires (it preserves the migration promise), but it re-runs
+  in-memory on every container restart and the banner was log noise.
+  Behavior is documented in `docs/migrate-to-container.md`.
+- Shortened the non-loopback API security warning to a single line:
+  `API bound to <addr> with no authentication (RBAC planned for
+  v6.0); restrict network access before exposing beyond trusted
+  hosts.` The long enumeration of what `/api/v1/config` exposes was
+  exposition that belonged in the docs, not in the daemon log on
+  every restart.
+
+### Migration notes
+
+- Native deb/rpm/pip installs upgrade without YAML changes.
+- Existing remote-only container deployments upgrade without YAML
+  changes.
+- Docker/Podman containers that own local host actions must provide a
+  working loopback SSH path and bind-mount the host `/etc/machine-id`
+  read-only.
+- Containers that drive **other** remote targets (NAS, secondary hosts)
+  must add an explicit `ssh_key_path` to each `remote_servers` entry and
+  bind-mount the operator SSH key into the container — root's
+  `~/.ssh/id_rsa` is not visible from the eneru user. See
+  [docs/migrate-to-container.md Step 2b](migrate-to-container.md#step-2b-migrate-existing-remote-server-ssh-keys).
+- Bind-mounted SSH keys must be readable by uid 10001 inside the
+  container. Hand the private key to uid 10001 with `chown 10001:10001`
+  and keep it at `0400` or `0600`; the matching `.pub` can stay `0644`.
+  Loosening the private key to `0644` to "make it work" exposes it to
+  every local user on the host and isn't worth the convenience.
+- To carry forward existing TUI graphs, event log, and notification
+  history, copy `/var/lib/eneru/*.db` to the bind-mount source for
+  `/var/lib/eneru` (e.g. `/srv/eneru/state/`) and `chown 10001:10001`
+  the files before starting the container. Skip if a clean history
+  is acceptable. See
+  [docs/migrate-to-container.md Step 3b](migrate-to-container.md#step-3b-carry-forward-the-existing-stats-db-optional).
+- To remove the deb/rpm package after the container is healthy, copy
+  `/etc/ups-monitor/config.yaml` to `/srv/eneru/config.yaml` and point
+  the container's bind mount at the copy. Decouples the daemon's
+  configuration from the package's file ownership. See
+  [docs/migrate-to-container.md Step 3c](migrate-to-container.md#step-3c-detach-the-config-file-from-the-package).
+- Do not use `authorized_keys command="..."` for loopback keys; it
+  replaces Eneru's identity probe and generated shutdown actions.
+- Non-root loopback users should set `use_sudo: true` and use the
+  documented NOPASSWD sudoers stanza for all enabled delegated actions.
+
+---
+
 ## [5.4.0] - 2026-05-15
 
 Stable v5.4 release. This release adds the official container deployment path while keeping local host shutdown on native installs.

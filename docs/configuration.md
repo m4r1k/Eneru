@@ -291,6 +291,11 @@ Eneru writes one SQLite database per UPS. The writer is best effort; stats failu
 
 See [Statistics](statistics.md) for schema and queries.
 
+Slow-response diagnostics are event rows too. Rate-limited slow NUT polls
+use `SLOW_NUT_RESPONSE`; successful but slow remote SSH health probes use
+`REMOTE_SSH_SLOW_RESPONSE`. They are hidden from the default Power Events
+view and appear in the TUI/API events list at Diagnostics verbosity (`-v`).
+
 ## Logging and behavior
 
 | Key | Default | Description |
@@ -416,17 +421,41 @@ mounts:
 |-----|---------|-------------|
 | `name` | required | Display name |
 | `enabled` | `false` | Enable this remote server |
-| `host` | required | Hostname or IP |
+| `host` | required (or `127.0.0.1` when `is_host_loopback: true`) | Hostname or IP |
 | `user` | required | SSH username |
 | `connect_timeout` | `10` | SSH connection timeout |
 | `command_timeout` | `30` | Default timeout for remote commands |
 | `shutdown_command` | `sudo shutdown -h now` | Final shutdown command |
+| `use_sudo` | `false` | Prefix generated privileged actions and non-sudo final shutdown commands with `sudo -n`. Useful for non-root loopback or remote users with NOPASSWD sudo |
 | `ssh_key_path` | `null` | Optional SSH private-key path, useful for container/Kubernetes volume mounts |
 | `ssh_options` | `[]` | Extra SSH options. Avoid disabling host-key checks in production |
-| `pre_shutdown_commands` | `[]` | Pre-shutdown actions or commands |
+| `pre_shutdown_commands` | `[]` | Pre-shutdown actions or commands. For loopback entries Eneru generates these from the local config — don't duplicate |
+| `pre_shutdown_commands[].mounts` | `[]` | Mounts for `action: unmount_filesystems` on ordinary remote servers. Loopback entries derive mounts from `filesystems.unmount.mounts` |
 | `shutdown_order` | unset | Explicit phase. Same value runs in parallel; higher values run later |
 | `parallel` | unset | Legacy mode. `false` runs before the default parallel batch. Mutually exclusive with `shutdown_order` |
 | `shutdown_safety_margin` | `60` | Extra wait budget for parallel server threads |
+| `is_host_loopback` | `false` | **v5.5.** Mark this entry as the host-loopback delegate for the containerized OCI deployment. See [Remote servers](remote-servers.md#v55-host-loopback-delegate-container-only) |
+| `host_identity_command` | `cat /etc/machine-id` | **v5.5.** Safe SSH probe used to verify the loopback target is really this container's host. Only used when `is_host_loopback: true` |
+| `expected_host_identity` | auto-populated from `/etc/machine-id` inside the container | **v5.5.** Expected output of `host_identity_command`. Auto-populated at startup so operators bind-mount `/etc/machine-id` instead of supplying a value |
+
+### Pre-shutdown action templates
+
+Eneru ships a registry of SSH-side templates under predefined `action`
+names. Use them in `pre_shutdown_commands[].action` for regular remote
+servers (the loopback gets them auto-injected by Eneru from the local
+config — don't write them manually there).
+
+| `action` | What it does |
+|---|---|
+| `sync` | `sync; sync; sleep 2` — flushes filesystem caches |
+| `stop_containers` | Stops all running Docker and Podman containers. v5.5: honors mandatory self-skip for the Eneru container when delegated |
+| `stop_containers_rootless` | **v5.5 (new).** Same as `stop_containers` but iterates rootless Podman per non-system user via `loginctl` + `sudo -u` |
+| `stop_compose` | Compose `down` for the given `path`. v5.5: skips stacks that include the Eneru container when delegated |
+| `stop_vms` | Graceful `virsh shutdown` of all running libvirt VMs, then force-destroy after the configured timeout |
+| `unmount_filesystems` | **v5.5 (new).** Iterates per-mount `umount` with configurable options. Regular remotes provide `pre_shutdown_commands[].mounts`; loopback derives mounts from the local filesystem config |
+| `stop_proxmox_vms` / `stop_proxmox_cts` | Proxmox QEMU VM and LXC container teardown via `qm` / `pct` (sudo) |
+| `stop_xcpng_vms` | XCP-ng / XenServer VMs via `xe` |
+| `stop_esxi_vms` | VMware ESXi VMs via `vim-cmd` |
 
 See [Remote servers](remote-servers.md) for SSH keys, sudoers, predefined actions, and ordering examples.
 

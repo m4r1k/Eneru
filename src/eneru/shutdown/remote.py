@@ -5,13 +5,12 @@ Owns the multi-server orchestration (sequential vs parallel batching by
 followed by the final shutdown command.
 """
 
-import shlex
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from eneru.actions import REMOTE_ACTIONS
+from eneru.actions import REMOTE_ACTIONS, render_action, serialize_umount_targets
 from eneru.config import RemoteServerConfig
 from eneru.utils import run_command
 
@@ -55,7 +54,19 @@ class RemoteShutdownResult:
 class RemoteShutdownMixin:
     """Mixin: SSH-based remote-server orchestration and shutdown."""
 
-    def _shutdown_remote_servers(self):
+    @staticmethod
+    def _with_sudo(command: str, use_sudo: bool) -> str:
+        """Prefix a remote command with sudo -n when configured.
+
+        The check is intentionally idempotent so existing configs that
+        already spell out ``sudo shutdown ...`` keep their exact command.
+        """
+        stripped = command.lstrip()
+        if not use_sudo or stripped.startswith("sudo "):
+            return command
+        return f"sudo -n {command}"
+
+    def _shutdown_remote_servers(self) -> List[RemoteShutdownResult]:
         """Shutdown all enabled remote servers via SSH.
 
         Servers are grouped by their effective shutdown order and processed
@@ -75,7 +86,7 @@ class RemoteShutdownMixin:
         enabled_servers = [s for s in self.config.remote_servers if s.enabled]
 
         if not enabled_servers:
-            return
+            return []
 
         # Group servers by effective shutdown order
         ordered = compute_effective_order(enabled_servers)
@@ -124,6 +135,7 @@ class RemoteShutdownMixin:
         if crashed:
             details.append(f"{crashed} crashed")
         self._log_message(f"  {icon} Remote shutdown complete ({', '.join(details)})")
+        return results
 
     def _shutdown_servers_parallel(
         self, servers: List[RemoteServerConfig]
@@ -327,6 +339,38 @@ class RemoteShutdownMixin:
         """Return True when a remote shutdown phase deadline has expired."""
         return deadline is not None and time.monotonic() >= deadline
 
+    def _loopback_skip_ids(self):
+        """Return the set of container IDs the host must skip during a
+        loopback-delegated container/compose shutdown.
+
+        Source of truth is ``ContainerShutdownMixin._current_container_ids``
+        (also mixed into ``UPSGroupMonitor``). When the loopback host runs
+        ``stop_containers`` or ``stop_compose``, these IDs are filtered out
+        so Eneru's own container isn't killed mid-sequence. Returns an
+        empty set on bare-metal (the mixin returns ``set()`` outside a
+        container).
+        """
+        get_ids = getattr(self, "_current_container_ids", None)
+        if get_ids is None:
+            return set()
+        try:
+            return get_ids()
+        except Exception:
+            return set()
+
+    def _loopback_umount_targets(self):
+        """Return the unmount-mounts config for the local owner group.
+
+        Loopback delegation: ``unmount_filesystems`` runs on the host with
+        the operator's per-mount options. We pull the list straight from
+        the local group's filesystems config — the operator declared it
+        once in the normal place.
+        """
+        group = self.config.ups_groups[0] if self.config.ups_groups else None
+        if group is None or not group.filesystems.unmount.enabled:
+            return []
+        return list(group.filesystems.unmount.mounts)
+
     def _execute_remote_pre_shutdown(
         self,
         server: RemoteServerConfig,
@@ -381,9 +425,8 @@ class RemoteShutdownMixin:
 
                 # Validate stop_compose has path BEFORE rendering the
                 # template; otherwise the precondition warning becomes
-                # dead code (shlex.quote("") would happily produce ''
-                # and a future template change might let the bad command
-                # slip through).
+                # dead code; a future template change might let the bad
+                # command slip through.
                 if action_name == "stop_compose" and not cmd_config.path:
                     self._log_message(
                         f"    ⚠️ [{idx}/{cmd_count}] stop_compose requires 'path' parameter (skipping)"
@@ -392,14 +435,36 @@ class RemoteShutdownMixin:
                     continue
 
                 # Get command template and substitute placeholders.
-                # `path` is shlex-quoted because the template embeds it
-                # directly into the remote shell — without quoting, a
-                # malicious or malformed path could expand $(), `…`, or
-                # ${…} on the remote host.
-                command_template = REMOTE_ACTIONS[action_name]
-                command = command_template.format(
+                # render_action() owns shell quoting for path-bearing
+                # templates before they enter the remote shell.
+                # v5.5: loopback delegate gets extra context — the
+                # mandatory self-skip set so 'stop_containers' /
+                # 'stop_compose' don't kill Eneru's own container, and
+                # the umount targets serialized for 'unmount_filesystems'.
+                skip_ids = ""
+                umount_targets = ""
+                if server.is_host_loopback is True:
+                    skip_ids = ",".join(sorted(self._loopback_skip_ids()))
+                    if action_name == "unmount_filesystems":
+                        umount_targets = serialize_umount_targets(
+                            self._loopback_umount_targets()
+                        )
+                elif action_name == "unmount_filesystems":
+                    umount_targets = serialize_umount_targets(cmd_config.mounts)
+                    if not umount_targets:
+                        self._log_message(
+                            f"    ⚠️ [{idx}/{cmd_count}] unmount_filesystems "
+                            "requires 'mounts' on regular remote servers (skipping)"
+                        )
+                        result.failed += 1
+                        continue
+                command = render_action(
+                    action_name,
                     timeout=timeout,
-                    path=shlex.quote(cmd_config.path or "")
+                    path=cmd_config.path or "",
+                    skip_ids=skip_ids,
+                    umount_targets=umount_targets,
+                    use_sudo=server.use_sudo,
                 )
                 description = action_name
 
@@ -502,20 +567,24 @@ class RemoteShutdownMixin:
             return result
 
         # Execute final shutdown command
-        self._log_message(f"  🔌 Sending shutdown command: {server.shutdown_command}")
+        shutdown_command = self._with_sudo(
+            server.shutdown_command,
+            server.use_sudo,
+        )
+        self._log_message(f"  🔌 Sending shutdown command: {shutdown_command}")
 
         if self.config.behavior.dry_run:
             result.shutdown_sent = True
             result.dry_run = True
             self._log_message(
-                f"  🧪 [DRY-RUN] Would send command '{server.shutdown_command}' to "
+                f"  🧪 [DRY-RUN] Would send command '{shutdown_command}' to "
                 f"{server.user}@{server.host}"
             )
             return result
 
         success, error_msg = self._run_remote_command(
             server,
-            server.shutdown_command,
+            shutdown_command,
             server.command_timeout,
             "shutdown",
             deadline=deadline,
