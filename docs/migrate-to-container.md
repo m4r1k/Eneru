@@ -373,6 +373,15 @@ the daemon can write as uid 10001. The rewrite only fires when the
 config still matches the exact legacy default; setting any other value
 in your `logging:` block opts out and your value wins.
 
+The rewrite applies on every config load, so the daemon (`run`) and
+every read-only subcommand (`validate`, `monitor` / `tui`, `shutdown
+group`, `remote list`, …) all observe the same effective paths. If
+`docker exec -it eneru eneru tui` reports "daemon not running" while
+`docker logs eneru` shows the daemon happily polling, you're on a build
+that predates this fix — upgrade to v5.5.0-rc8 or newer, or set the
+four `logging.*` paths explicitly to their `/var/{log,run}/eneru/...`
+values in your config to bypass the auto-rewrite entirely.
+
 ### Where state lives across container restarts
 
 | Bind mount | What it holds |

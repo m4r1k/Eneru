@@ -1,5 +1,6 @@
 """Tests for CLI argument handling and validation commands."""
 
+import argparse
 import pytest
 import runpy
 import sys
@@ -3576,17 +3577,51 @@ class TestLegacyContainerPathRewrite:
         assert capsys.readouterr().err == ""
 
     @pytest.mark.unit
-    def test_prepare_runtime_config_invokes_rewrite(self, tmp_path, capsys):
-        """The rewrite must run as part of _prepare_runtime_config so every
-        subcommand (run/validate/shutdown group) gets the same behavior."""
-        from eneru.cli import _prepare_runtime_config
+    def test_load_config_invokes_rewrite(self, tmp_path):
+        """v5.5: the rewrite runs inside ``_load_config`` so every
+        subcommand — including read-only ones like ``monitor``/``tui``
+        that never call ``_prepare_runtime_config`` — sees the rewritten
+        paths. Regression for the bug where ``eneru tui`` in a container
+        with native-install defaults showed "daemon not running" because
+        the TUI's ``parse_state_file`` looked at the unrewritten
+        ``/var/run/ups-monitor.state`` while the daemon wrote to
+        ``/var/run/eneru/ups-monitor.state``.
+        """
+        from eneru.cli import _load_config
 
-        config = self._default_config(tmp_path)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("ups:\n  name: 'TestUPS@localhost'\n")
+        args = argparse.Namespace(config=str(config_file))
+
         with patch("eneru.cli._detect_runtime_context",
-                   return_value="container (Docker)"), \
-             patch("eneru.cli.Path.stat"):
-            _prepare_runtime_config(config, strict_key_check=False)
+                   return_value="container (Docker)"):
+            config = _load_config(args)
+
         assert config.logging.file == "/var/log/eneru/ups-monitor.log"
+        assert config.logging.state_file == "/var/run/eneru/ups-monitor.state"
+        assert config.logging.battery_history_file == "/var/run/eneru/ups-battery-history"
+        assert config.logging.shutdown_flag_file == "/var/run/eneru/ups-shutdown-scheduled"
+
+    @pytest.mark.unit
+    def test_load_config_skips_rewrite_on_bare_process(self, tmp_path):
+        """Native install path stays untouched — rewrite is gated on
+        container runtime detection."""
+        from eneru.cli import _load_config
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("ups:\n  name: 'TestUPS@localhost'\n")
+        args = argparse.Namespace(config=str(config_file))
+
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="bare process"):
+            config = _load_config(args)
+
+        # Native defaults survive — the daemon runs as root and writes
+        # to /var/run/ + /var/log/ directly.
+        assert config.logging.file == "/var/log/ups-monitor.log"
+        assert config.logging.state_file == "/var/run/ups-monitor.state"
+        assert config.logging.battery_history_file == "/var/run/ups-battery-history"
+        assert config.logging.shutdown_flag_file == "/var/run/ups-shutdown-scheduled"
 
 
 class TestFindHostLoopbackLegacyAccessor:

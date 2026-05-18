@@ -57,8 +57,18 @@ def _port_int(value: str) -> int:
 
 
 def _load_config(args):
-    """Load configuration from the --config path."""
-    return ConfigLoader.load(getattr(args, 'config', None))
+    """Load configuration from the --config path.
+
+    v5.5: applies the container-runtime legacy-path rewrite
+    (`_rewrite_legacy_paths_for_container`) on every load so all
+    subcommands — `run`, `validate`, `monitor`/`tui`, `shutdown group`,
+    etc. — see the same effective `logging.*` paths the daemon writes to.
+    The rewrite is pure and idempotent (only fires when a value matches
+    the exact native-install default), so loading repeatedly is safe.
+    """
+    config = ConfigLoader.load(getattr(args, 'config', None))
+    _rewrite_legacy_paths_for_container(config)
+    return config
 
 
 def _apply_run_overrides(config: Config, args: argparse.Namespace) -> None:
@@ -742,8 +752,11 @@ def _prepare_runtime_config(config: Config, *, strict_key_check: bool = True) ->
     * False (used by ``validate`` / ``shutdown group --dry-run``) —
       warn and proceed. The user is diagnosing or rehearsing; the key
       may legitimately not exist yet.
+
+    The legacy container-path rewrite runs upstream in ``_load_config``
+    so every subcommand (including read-only ones like ``monitor``/``tui``
+    that don't call this function) sees the rewritten paths.
     """
-    _rewrite_legacy_paths_for_container(config)
     _synthesize_loopback_if_needed(config, strict_key_check=strict_key_check)
     _warn_on_kubernetes_local_misuse(config)
     _inject_delegated_actions(config)
