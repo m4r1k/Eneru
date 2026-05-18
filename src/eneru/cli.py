@@ -1223,6 +1223,12 @@ def _build_remote_list_rows_for_group(group, group_name: str, kind: str) -> tupl
 def _cmd_remote_list(args):
     """List configured remote shutdown targets across all groups."""
     config = _load_config(args)
+    # v5.5: same reason as _cmd_shutdown_remote — without the prep step
+    # an auto-synthesized host-loopback delegate never appears in the
+    # listing, so `remote list` silently disagrees with what the daemon
+    # and `validate` see. strict_key_check=False since this is a
+    # read-only inspection (no SSH actions taken).
+    _prepare_runtime_config(config, strict_key_check=False)
     _exit_on_config_errors(config, args)
 
     # Stable per-group ordering so users see related rows next to each

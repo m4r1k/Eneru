@@ -130,9 +130,18 @@ class RemoteShutdownMixin:
             self._log_message(
                 f"🌐 Shutting down {server_count} remote {server_word} in {num_phases} phases..."
             )
-        elif server_count > 1:
+        elif server_count > 1 and regulars:
+            # "in parallel" is only honest when at least one regular is
+            # in the batch — _shutdown_servers_parallel actually threads
+            # them. A multi-loopback-only batch (rare, K8s-only) runs
+            # Phase C with a plain for-loop over loopbacks, so don't
+            # advertise parallelism that won't happen.
             self._log_message(
                 f"🌐 Shutting down {server_count} remote servers in parallel..."
+            )
+        elif server_count > 1:
+            self._log_message(
+                f"🌐 Shutting down {server_count} remote servers..."
             )
         else:
             self._log_message("🌐 Shutting down 1 remote server...")

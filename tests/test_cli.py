@@ -3285,6 +3285,46 @@ class TestCLIPartitioningOfLoopback:
         assert "NAS" in out
 
 
+class TestRemoteListAppliesRuntimePrep:
+    """v5.5: `_cmd_remote_list` must call `_prepare_runtime_config` so
+    an auto-synthesized loopback delegate appears in the printed table.
+    Without prep, `eneru remote list` silently disagrees with what the
+    daemon and `eneru validate` would see — the loopback row is
+    missing entirely. Sibling fix to `_cmd_shutdown_remote`."""
+
+    @pytest.mark.unit
+    def test_remote_list_runs_prepare_runtime_config(self, tmp_path):
+        from eneru.cli import _cmd_remote_list
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "  is_local: true\n"
+            "local_shutdown:\n"
+            "  enabled: true\n"
+            "remote_servers:\n"
+            "  - name: NAS\n"
+            "    enabled: true\n"
+            "    host: 10.0.0.10\n"
+            "    user: root\n"
+        )
+        args = argparse.Namespace(config=str(config_file))
+
+        with patch("eneru.cli._prepare_runtime_config") as mock_prep, \
+             patch("eneru.cli._exit_on_config_errors"):
+            try:
+                _cmd_remote_list(args)
+            except SystemExit as exc:
+                assert exc.code in (None, 0), f"unexpected SystemExit code: {exc.code}"
+
+        mock_prep.assert_called_once()
+        # Read-only inspection — non-strict so a missing key warns
+        # instead of hard-erroring.
+        _args, kwargs = mock_prep.call_args
+        assert kwargs.get("strict_key_check") is False
+
+
 class TestShutdownRemoteAppliesRuntimePrep:
     """v5.5: `_cmd_shutdown_remote` (the manual one-server drill) must
     call `_prepare_runtime_config` so an explicit OR synthesized
@@ -3332,8 +3372,13 @@ class TestShutdownRemoteAppliesRuntimePrep:
             )
             try:
                 _cmd_shutdown_remote(args)
-            except SystemExit:
-                pass
+            except SystemExit as exc:
+                # Drill must exit cleanly (0) or via the dry-run early
+                # return (None). Swallowing every code would mask a
+                # regression where the command exits 1 or 2 right
+                # after the prep call — `assert_called_once` would
+                # still pass and the test would lie.
+                assert exc.code in (None, 0), f"unexpected SystemExit code: {exc.code}"
 
         mock_prep.assert_called_once()
         # Dry-run drills use strict_key_check=False so a missing key

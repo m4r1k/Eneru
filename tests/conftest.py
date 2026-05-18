@@ -112,7 +112,7 @@ def isolate_stats_db_directory(request, tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def block_journal_side_channels(monkeypatch):
+def block_journal_side_channels(request, monkeypatch):
     """Stop unit tests from leaking ``logger(1)`` / ``wall(1)`` output
     into the host's systemd journal and the ttys of every logged-in
     user on the dev box.
@@ -137,17 +137,9 @@ def block_journal_side_channels(monkeypatch):
     ``@pytest.mark.no_journal_isolation`` if a test needs to assert the
     real logger/wall shell-out path.
     """
-    if monkeypatch is None:  # pragma: no cover - belt and braces
+    if request.node.get_closest_marker("no_journal_isolation"):
         yield
         return
-
-    request = None
-    try:
-        # request_obj is implicit when fixture name is `request`; here
-        # we need to grab the closest marker via the implicit context.
-        request = None
-    except Exception:
-        pass
 
     from eneru import utils as _utils_module
     real_run_command = _utils_module.run_command
