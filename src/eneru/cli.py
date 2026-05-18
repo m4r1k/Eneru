@@ -785,12 +785,28 @@ def _cmd_run(args):
 
 
 def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
-    """Print the shutdown sequence tree for a UPS group."""
+    """Print the shutdown sequence tree for a UPS group.
+
+    v5.5: ``is_host_loopback`` delegates do NOT participate in normal
+    ``shutdown_order`` phases — the runtime brackets them around the
+    regulars (see ``RemoteShutdownMixin._shutdown_remote_servers``).
+    Loopbacks are surfaced here via the "Local actions delegated via
+    loopback SSH" step (their ``pre_shutdown_commands``) and the final
+    "Local shutdown (host poweroff delegated)" step (their
+    ``shutdown_command``). Including them again in the per-order
+    "Remote server" tree would print phantom phases that never run.
+    """
     # v5.5: when a loopback is configured, in-process local phases are
     # SKIPPED at run time — the same work is sent over SSH to the host
     # via the loopback's pre_shutdown_commands. Show that explicitly so
     # `eneru validate` reflects what would actually execute.
     delegated = any(s.enabled and s.is_host_loopback is True for s in group.remote_servers)
+    # Filter loopbacks out of the per-order tree. They're already covered
+    # by the delegated-actions step (Phase A) and the host-poweroff step
+    # (Phase C) — including them in the middle row would double-count.
+    regular_enabled_servers = [
+        s for s in enabled_servers if s.is_host_loopback is not True
+    ]
     print(f"{prefix}  Shutdown sequence:")
     step = 1
     indent = f"{prefix}    "
@@ -838,8 +854,8 @@ def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
             )
             step += 1
 
-    if enabled_servers:
-        ordered = compute_effective_order(enabled_servers)
+    if regular_enabled_servers:
+        ordered = compute_effective_order(regular_enabled_servers)
         phases = {}
         for effective, server in ordered:
             phases.setdefault(effective, []).append(server)
@@ -847,16 +863,24 @@ def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
         num_phases = len(sorted_keys)
 
         # Detect legacy mode: no server has explicit shutdown_order
-        is_legacy = all(s.shutdown_order is None for s in enabled_servers)
+        is_legacy = all(
+            s.shutdown_order is None for s in regular_enabled_servers
+        )
 
         if num_phases == 1:
-            names = ", ".join(s.name or s.host for s in enabled_servers)
-            if len(enabled_servers) == 1:
+            names = ", ".join(s.name or s.host for s in regular_enabled_servers)
+            if len(regular_enabled_servers) == 1:
                 print(f"{indent}{step}. Remote server: {names}")
             else:
-                print(f"{indent}{step}. Remote servers ({len(enabled_servers)}): {names}")
+                print(
+                    f"{indent}{step}. Remote servers "
+                    f"({len(regular_enabled_servers)}): {names}"
+                )
         else:
-            print(f"{indent}{step}. Remote servers ({len(enabled_servers)}, {num_phases} phases):")
+            print(
+                f"{indent}{step}. Remote servers "
+                f"({len(regular_enabled_servers)}, {num_phases} phases):"
+            )
             for phase_idx, key in enumerate(sorted_keys, 1):
                 phase_servers = phases[key]
                 names = ", ".join(s.name or s.host for s in phase_servers)
@@ -869,7 +893,8 @@ def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
                 else:
                     print(f"{indent}   Phase {phase_idx} (order={key}): {names}")
         step += 1
-    else:
+    elif not delegated:
+        # No regulars AND no loopback delegate to surface elsewhere.
         print(f"{indent}(no remote servers)")
 
     if has_local:
@@ -1155,22 +1180,35 @@ def _build_remote_list_rows_for_group(group, group_name: str, kind: str) -> tupl
     where the column showed ``name (label)`` but ``--group`` only
     accepted the raw token.
 
-    Effective order is computed on ``enabled`` servers only so the
-    printed ORDER matches what the daemon would actually use during
-    shutdown (the daemon also filters before computing). Disabled rows
-    show ``—`` since they don't participate in the rotation at all.
+    Effective order is computed on ``enabled`` non-loopback servers
+    only, so the printed ORDER matches what the daemon would actually
+    use during shutdown (the daemon also filters before computing).
+    Disabled rows show ``—`` since they don't participate at all.
+
+    v5.5: ``is_host_loopback`` entries display ``loopback`` in the
+    ORDER column. The runtime brackets them around the regulars
+    regardless of ``shutdown_order`` (Phase A pre-actions, Phase C
+    poweroff — see ``RemoteShutdownMixin._shutdown_remote_servers``),
+    so feeding them through ``compute_effective_order`` would print a
+    phase number the runtime ignores.
     """
     enabled_servers = [s for s in group.remote_servers if s.enabled]
+    regular_enabled_servers = [
+        s for s in enabled_servers if s.is_host_loopback is not True
+    ]
     order_by_id = {
-        id(s): effective for effective, s in compute_effective_order(enabled_servers)
+        id(s): effective
+        for effective, s in compute_effective_order(regular_enabled_servers)
     }
     rows = []
     for server in group.remote_servers:
         host = f"{server.user}@{server.host}" if server.user else server.host
-        if server.enabled:
-            order_text = str(order_by_id[id(server)])
-        else:
+        if not server.enabled:
             order_text = "—"
+        elif server.is_host_loopback is True:
+            order_text = "loopback"
+        else:
+            order_text = str(order_by_id[id(server)])
         rows.append((
             server.name or server.host,
             group_name,
@@ -1243,6 +1281,15 @@ def _select_remote_server(config, server_ref: str, group_ref: str = None):
 def _cmd_shutdown_remote(args):
     """Run a manual one-server remote shutdown drill."""
     config = _load_config(args)
+    # v5.5: a drill against an explicit OR synthesized is_host_loopback
+    # target must execute the same plan the daemon would — including the
+    # auto-synthesized loopback delegate and its injected pre-actions
+    # (stop_vms, stop_containers, sync, unmount_filesystems). Without
+    # the prep step the drill silently runs ONLY the user-typed entry
+    # and misses the generated work, defeating the purpose of a drill.
+    # strict_key_check follows the dry-run/live split (matches
+    # _cmd_shutdown_group at cli.py:_cmd_shutdown_group).
+    _prepare_runtime_config(config, strict_key_check=not args.dry_run)
     _exit_on_config_errors(config, args)
 
     if not args.dry_run and not args.confirm:

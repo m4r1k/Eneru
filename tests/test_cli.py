@@ -3170,6 +3170,178 @@ class TestPrintShutdownSequenceDelegated:
         assert "Remote servers (3):" in out
 
 
+class TestCLIPartitioningOfLoopback:
+    """v5.5: CLI inspection paths (validate, remote list, shutdown remote)
+    must partition is_host_loopback delegates out of compute_effective_order
+    so their output matches the runtime bracketing (Phase A / regulars /
+    Phase C). Without the partition, `eneru validate` lists a phantom
+    `Remote server: host-loopback` step and `eneru remote list` prints a
+    misleading numeric ORDER for the loopback row.
+    """
+
+    def _docker_config_with_loopback_and_nas(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "  is_local: true\n"
+            "local_shutdown:\n"
+            "  enabled: true\n"
+            "virtual_machines:\n"
+            "  enabled: true\n"
+            "remote_servers:\n"
+            "  - name: NAS\n"
+            "    enabled: true\n"
+            "    host: 10.0.0.10\n"
+            "    user: root\n"
+            "    shutdown_order: 5\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+            "    is_host_loopback: true\n"
+        )
+        return config_file
+
+    @pytest.mark.unit
+    def test_validate_no_phantom_remote_loopback_row(self, tmp_path, capsys):
+        """`eneru validate` must NOT print `Remote server: host-loopback`
+        — the loopback is surfaced via the delegated-actions step and the
+        host-poweroff step, never as a peer-remote phase."""
+        config_file = self._docker_config_with_loopback_and_nas(tmp_path)
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli.Path.stat"), \
+             patch.object(sys, "argv", [
+                "eneru", "validate", "-c", str(config_file),
+             ]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        # Delegated-actions step + NAS-only remote row + host-poweroff step.
+        assert "Local actions delegated via loopback SSH" in out
+        assert "Remote server: NAS" in out
+        # Phantom must be gone — never as a peer remote.
+        assert "Remote server: host-loopback" not in out
+        assert "Remote servers (2)" not in out
+        # Final host-poweroff line still delegated.
+        assert "host poweroff delegated via loopback SSH" in out
+
+    @pytest.mark.unit
+    def test_validate_loopback_only_no_remote_row(self, tmp_path, capsys):
+        """Loopback-only setup (no peer remotes) must not print a `(no
+        remote servers)` line either — the loopback covers Phase A and C."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "  is_local: true\n"
+            "local_shutdown:\n"
+            "  enabled: true\n"
+            "virtual_machines:\n"
+            "  enabled: true\n"
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+            "    is_host_loopback: true\n"
+        )
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli.Path.stat"), \
+             patch.object(sys, "argv", [
+                "eneru", "validate", "-c", str(config_file),
+             ]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        assert "Local actions delegated via loopback SSH" in out
+        assert "host poweroff delegated via loopback SSH" in out
+        # No misleading peer-remote row or empty-list placeholder.
+        assert "Remote server" not in out  # neither singular nor "Remote servers"
+        assert "(no remote servers)" not in out
+
+    @pytest.mark.unit
+    def test_remote_list_loopback_row_shows_loopback_order(self, tmp_path, capsys):
+        """`eneru remote list` must show the loopback's ORDER as `loopback`,
+        not a numeric phase that the runtime ignores."""
+        config_file = self._docker_config_with_loopback_and_nas(tmp_path)
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli.Path.stat"), \
+             patch.object(sys, "argv", [
+                "eneru", "remote", "list", "-c", str(config_file),
+             ]):
+            # `eneru remote list` returns normally on success (no sys.exit).
+            main()
+        out = capsys.readouterr().out
+        # Loopback row exists with ORDER=loopback.
+        assert "host-loopback" in out
+        assert "loopback" in out
+        # NAS row keeps its numeric order.
+        assert "NAS" in out
+
+
+class TestShutdownRemoteAppliesRuntimePrep:
+    """v5.5: `_cmd_shutdown_remote` (the manual one-server drill) must
+    call `_prepare_runtime_config` so an explicit OR synthesized
+    is_host_loopback target picks up the auto-synthesized delegate plus
+    the generated VM/container/sync/unmount pre-actions. Without prep
+    the drill silently runs only the user-typed entry and misses the
+    generated work — defeating the purpose of a drill."""
+
+    @pytest.mark.unit
+    def test_shutdown_remote_drill_runs_prepare_runtime_config(self, tmp_path):
+        from eneru.cli import _cmd_shutdown_remote
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "  is_local: true\n"
+            "local_shutdown:\n"
+            "  enabled: true\n"
+            "virtual_machines:\n"
+            "  enabled: true\n"
+            "remote_servers:\n"
+            "  - name: NAS\n"
+            "    enabled: true\n"
+            "    host: 10.0.0.10\n"
+            "    user: root\n"
+        )
+        args = argparse.Namespace(
+            config=str(config_file),
+            server="NAS",
+            group=None,
+            dry_run=True,
+            confirm=False,
+            connectivity_check=False,
+            host_keys=None,
+            log_file=None,
+        )
+
+        with patch("eneru.cli._prepare_runtime_config") as mock_prep, \
+             patch("eneru.cli._exit_on_config_errors"), \
+             patch("eneru.cli.UPSGroupMonitor") as mock_monitor_cls:
+            mock_monitor = mock_monitor_cls.return_value
+            mock_monitor._shutdown_remote_server.return_value = MagicMock(
+                success=True, shutdown_sent=True, error="",
+            )
+            try:
+                _cmd_shutdown_remote(args)
+            except SystemExit:
+                pass
+
+        mock_prep.assert_called_once()
+        # Dry-run drills use strict_key_check=False so a missing key
+        # warns instead of hard-erroring (operator is diagnosing).
+        _args, kwargs = mock_prep.call_args
+        assert kwargs.get("strict_key_check") is False
+
+
 class TestValidateNotificationFormatting:
     """Cover lines 913, 917, 919 — URL-without-scheme truncation,
     Title:(none), and avatar_url branch."""
