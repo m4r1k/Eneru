@@ -241,7 +241,7 @@ On SELinux hosts, label **eneru-owned** bind mounts (the
 `:z` when multiple containers share the same source. **Never** add
 `:Z` or `:z` to `/etc/machine-id` or any other host file that other
 system services also read — see
-[install-comparison.md](install-comparison.md#never-use-z-or-z-on-etcmachine-id-or-any-other-shared-host-file)
+[install-comparison.md](install-comparison.md#selinux-note)
 for the failure mode (broken dbus-broker, dead NetworkManager, host
 locked out at next reboot):
 
