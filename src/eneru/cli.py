@@ -416,6 +416,15 @@ def _synthesize_loopback_if_needed(
         user="root",
         shutdown_command="shutdown -h now",
         ssh_key_path=_LOOPBACK_DEFAULT_SSH_KEY_PATH,
+        # Eneru runs as uid 10001 inside the container with no
+        # ~/.ssh/known_hosts. The MITM surface on 127.0.0.1 is zero
+        # (sshd is the same kernel namespace), so skip strict host-key
+        # checking — otherwise the first probe fails with
+        # "Host key verification failed" and /ready stays 503.
+        ssh_options=[
+            "StrictHostKeyChecking=no",
+            "UserKnownHostsFile=/dev/null",
+        ],
         is_host_loopback=True,
         # Highest shutdown_order so the host poweroff runs LAST — anything
         # earlier would be killed by the loopback's shutdown_command.
@@ -679,6 +688,60 @@ def _exit_on_config_errors(config, args):
     sys.exit(1)
 
 
+# v5.5: legacy logging/runtime paths predate the /var/{log,run}/eneru/
+# convention and only worked on the native install because the daemon ran
+# as root. Inside the OCI image eneru runs as uid 10001 and cannot write
+# to /var/log/ or /var/run/ directly. When a container-runtime user keeps
+# the dataclass defaults (the migration-guide "no required YAML changes"
+# case), transparently rewrite to the eneru-owned subdir so the existing
+# native config keeps working. See docs/migrate-to-container.md.
+_LEGACY_CONTAINER_PATH_REWRITES = {
+    "file": ("/var/log/ups-monitor.log", "/var/log/eneru/ups-monitor.log"),
+    "state_file": ("/var/run/ups-monitor.state", "/var/run/eneru/ups-monitor.state"),
+    "battery_history_file": (
+        "/var/run/ups-battery-history",
+        "/var/run/eneru/ups-battery-history",
+    ),
+    "shutdown_flag_file": (
+        "/var/run/ups-shutdown-scheduled",
+        "/var/run/eneru/ups-shutdown-scheduled",
+    ),
+}
+
+
+def _rewrite_legacy_paths_for_container(config: Config) -> None:
+    """Auto-rewrite legacy native-install paths to /var/{log,run}/eneru/ inside containers.
+
+    Only rewrites when (a) runtime is Docker/Podman/Kubernetes AND (b) the
+    current value still matches the dataclass default. Explicit operator
+    paths — including paths that happen to match the legacy default — are
+    NOT rewritten when the operator wants to keep the legacy layout they
+    can set the explicit path in their config.
+    """
+    if not _is_container_runtime(_detect_runtime_context()):
+        return
+    rewritten = []
+    for attr, (legacy, replacement) in _LEGACY_CONTAINER_PATH_REWRITES.items():
+        current = getattr(config.logging, attr, None)
+        if current == legacy:
+            setattr(config.logging, attr, replacement)
+            rewritten.append(f"{attr}: {legacy} -> {replacement}")
+    if not rewritten:
+        return
+    print(
+        "v5.5: container runtime detected; rewrote legacy native-install "
+        "paths to /var/{log,run}/eneru/ for the non-root eneru user:",
+        file=sys.stderr,
+    )
+    for line in rewritten:
+        print(f"  {line}", file=sys.stderr)
+    print(
+        "Set explicit paths in your config's logging: block to opt out "
+        "(see docs/migrate-to-container.md).",
+        file=sys.stderr,
+    )
+
+
 def _prepare_runtime_config(config: Config, *, strict_key_check: bool = True) -> None:
     """v5.5 startup preparation: auto-enable loopback, inject delegated
     actions, surface K8s warnings.
@@ -698,6 +761,7 @@ def _prepare_runtime_config(config: Config, *, strict_key_check: bool = True) ->
       warn and proceed. The user is diagnosing or rehearsing; the key
       may legitimately not exist yet.
     """
+    _rewrite_legacy_paths_for_container(config)
     _synthesize_loopback_if_needed(config, strict_key_check=strict_key_check)
     _warn_on_kubernetes_local_misuse(config)
     _inject_delegated_actions(config)

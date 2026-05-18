@@ -54,7 +54,16 @@ ssh-keygen -t ed25519 -N '' \
     -C "eneru-loopback@$(hostname)"
 chmod 600 /srv/eneru/ssh/id_loopback
 chmod 644 /srv/eneru/ssh/id_loopback.pub
+# Eneru runs as uid 10001 inside the container — the bind mount maps host
+# uids through 1:1, so a key owned by root mode 0600 is unreadable from the
+# container. Either chown to 10001:10001, or relax to 0644 if you're
+# comfortable with a world-readable file on disk.
+chown 10001:10001 /srv/eneru/ssh/id_loopback /srv/eneru/ssh/id_loopback.pub
 ```
+
+(`/srv/eneru/` follows the FHS site-specific data convention. Pick a different
+prefix — e.g. `/opt/eneru/` — if your distribution's policy prefers it; just
+update the bind-mount source in Step 6 to match.)
 
 ## Step 2: Authorize the key
 
@@ -109,6 +118,39 @@ remote_servers:
     is_host_loopback: true
 ```
 
+## Step 2b: Migrate existing remote-server SSH keys
+
+If your native config already drives **other** remote targets (a NAS, a
+secondary host, etc.), those entries currently rely on `~root/.ssh/id_rsa`
+implicitly. Eneru inside the container doesn't have access to root's
+home, so each entry needs an explicit `ssh_key_path` pointing at a file
+the container can read.
+
+```bash
+# On the host — copy the operator key into the same bind-mount tree as
+# the loopback key so a single -v mount covers both.
+cp /root/.ssh/id_rsa /srv/eneru/ssh/id_rsa
+cp /root/.ssh/id_rsa.pub /srv/eneru/ssh/id_rsa.pub
+chown 10001:10001 /srv/eneru/ssh/id_rsa /srv/eneru/ssh/id_rsa.pub
+chmod 0400 /srv/eneru/ssh/id_rsa
+```
+
+Then add `ssh_key_path` to each existing `remote_servers` entry in your
+config:
+
+```yaml
+remote_servers:
+  - name: "Synology NAS"
+    enabled: true
+    host: 192.168.x.y
+    user: nas-admin
+    ssh_key_path: /var/lib/eneru/ssh/id_rsa   # ADD THIS
+    shutdown_command: "shutdown -h now"
+```
+
+The container-side path `/var/lib/eneru/ssh/id_rsa` resolves to the host
+file via the `-v /srv/eneru/ssh:/var/lib/eneru/ssh:ro` mount in Step 6.
+
 ## Step 3: Stop the native service
 
 ```bash
@@ -118,6 +160,32 @@ sudo systemctl disable eneru.service
 
 Leave the package installed for now — easy rollback if something is
 off.
+
+## Step 3b: Carry forward the existing stats DB (optional)
+
+Eneru's per-UPS SQLite stats database lives at
+`/var/lib/eneru/<sanitized-ups-name>.db`. It stores sample history (the
+TUI graphs), event log, and notification rows (the notification
+history). **A fresh container with an empty `/srv/eneru/state` bind
+mount starts with no history** — the graphs and notification list will
+be empty until new data accumulates.
+
+If you want continuity, copy the existing DB(s) over after stopping the
+service:
+
+```bash
+sudo mkdir -p /srv/eneru/state
+sudo cp -a /var/lib/eneru/*.db /srv/eneru/state/
+sudo chown -R 10001:10001 /srv/eneru/state/
+```
+
+Sanitization rule: `@`, `:`, `/` in the UPS name become `-`. So
+`UPS@192.168.178.11` is stored as
+`/var/lib/eneru/UPS-192.168.178.11.db`. Copy every `.db` file in
+`/var/lib/eneru/` — `cp -a *.db` handles them in one shot.
+
+Skip this step entirely if you don't care about graph/notification
+history; the daemon happily starts on an empty stats dir.
 
 ## Step 4: Pre-flight the container
 
@@ -272,3 +340,60 @@ remote_servers:
   returns 503. Most commonly: the loopback's `remote_health` is
   FAILED (SSH not reachable, or `/etc/machine-id` mismatch — see
   Troubleshooting).
+
+## Legacy log/run-dir auto-rewrite
+
+The native-install defaults (`/var/log/ups-monitor.log`,
+`/var/run/ups-monitor.state`, `/var/run/ups-battery-history`,
+`/var/run/ups-shutdown-scheduled`) predate the `/var/{log,run}/eneru/`
+convention and are only writable by root. Eneru inside the container runs
+as uid 10001 and cannot write to `/var/log/` or `/var/run/` directly.
+
+To preserve the "no required YAML changes" promise above, on startup
+inside a container runtime, Eneru auto-rewrites these four paths IF AND
+ONLY IF they still match the dataclass defaults:
+
+| Legacy default | Container rewrite |
+|---|---|
+| `/var/log/ups-monitor.log` | `/var/log/eneru/ups-monitor.log` |
+| `/var/run/ups-monitor.state` | `/var/run/eneru/ups-monitor.state` |
+| `/var/run/ups-battery-history` | `/var/run/eneru/ups-battery-history` |
+| `/var/run/ups-shutdown-scheduled` | `/var/run/eneru/ups-shutdown-scheduled` |
+
+A one-line banner on stderr lists every rewrite that fired. Operator
+paths — anything that doesn't match the legacy default exactly — are
+left untouched.
+
+### How to disable the auto-rewrite
+
+The rewrite is opt-out, not opt-in. To revert to the legacy paths (e.g.
+because you bind-mount a persistent volume at `/var/log/ups-monitor.log`
+directly), set explicit values in the `logging:` block of your config —
+the rewrite only acts on values that still equal the dataclass default:
+
+```yaml
+logging:
+  file: "/var/log/ups-monitor.log"          # exactly the legacy path → still rewritten
+  file: "/var/log/ups-monitor.log "         # any non-equal string → preserved as-is
+  # Recommended: be explicit about where you want the daemon to write.
+  file: "/var/log/eneru/ups-monitor.log"
+  state_file: "/var/run/eneru/ups-monitor.state"
+  battery_history_file: "/var/run/eneru/ups-battery-history"
+  shutdown_flag_file: "/var/run/eneru/ups-shutdown-scheduled"
+```
+
+The first two lines above are the same value in `equals == legacy`
+detection terms; the comparison is exact-string. The recommended pattern
+is the third block — explicit `/var/{log,run}/eneru/` paths that survive
+any future change to the defaults.
+
+### Where state lives across container restarts
+
+The Step 6 bind mounts cover every writable path the daemon needs:
+
+| Bind mount | What it holds |
+|---|---|
+| `-v /srv/eneru/state:/var/lib/eneru` | SQLite stats DB (samples, events, notifications), notification-worker state, lifecycle classifier state. **Persistent across container restarts/upgrades — do not skip.** |
+| `-v /srv/eneru/run:/var/run/eneru` | Per-run state (battery history, shutdown flag, monitor state file). Safe to wipe on restart, but persisting it avoids losing one cycle of battery-depletion history on restart. |
+| `-v /srv/eneru/logs:/var/log/eneru` | Forensic log file. |
+| `-v /srv/eneru/ssh:/var/lib/eneru/ssh:ro` | Loopback + operator SSH keys (read-only). |

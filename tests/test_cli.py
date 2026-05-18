@@ -3396,3 +3396,131 @@ class TestMonitorOnceBranch:
         # Sanity: interval is forwarded as a positional/keyword arg.
         kwargs = mock_tui.call_args.kwargs
         assert kwargs.get("interval") == 1
+
+
+class TestSynthesizedLoopbackSSHOptions:
+    """v5.5: the synthesized loopback ships with StrictHostKeyChecking=no
+    and UserKnownHostsFile=/dev/null. Without these, the first SSH probe
+    from inside the container fails with "Host key verification failed"
+    because the eneru user (uid 10001) has no ~/.ssh/known_hosts."""
+
+    @pytest.mark.unit
+    def test_synthesized_entry_has_loopback_ssh_options(self, tmp_path):
+        from eneru.cli import _synthesize_loopback_if_needed, _find_host_loopback
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n  name: 'TestUPS@localhost'\n"
+            "local_shutdown:\n  enabled: true\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli.Path.stat"):
+            _synthesize_loopback_if_needed(config)
+        _owner, server = _find_host_loopback(config)
+        assert "StrictHostKeyChecking=no" in server.ssh_options
+        assert "UserKnownHostsFile=/dev/null" in server.ssh_options
+
+
+class TestLegacyContainerPathRewrite:
+    """v5.5: legacy /var/log/ups-monitor.log + /var/run/ups-* defaults are
+    only writable by root. In container runtime we transparently rewrite
+    to /var/{log,run}/eneru/ so the migration guide's "no required YAML
+    changes" promise actually holds."""
+
+    def _default_config(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("ups:\n  name: 'TestUPS@localhost'\n")
+        return ConfigLoader.load(str(config_file))
+
+    @pytest.mark.unit
+    def test_rewrites_all_four_defaults_in_docker(self, tmp_path, capsys):
+        from eneru.cli import _rewrite_legacy_paths_for_container
+
+        config = self._default_config(tmp_path)
+        # Sanity: dataclass defaults are the legacy paths.
+        assert config.logging.file == "/var/log/ups-monitor.log"
+        assert config.logging.state_file == "/var/run/ups-monitor.state"
+        assert config.logging.battery_history_file == "/var/run/ups-battery-history"
+        assert config.logging.shutdown_flag_file == "/var/run/ups-shutdown-scheduled"
+
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _rewrite_legacy_paths_for_container(config)
+
+        assert config.logging.file == "/var/log/eneru/ups-monitor.log"
+        assert config.logging.state_file == "/var/run/eneru/ups-monitor.state"
+        assert config.logging.battery_history_file == "/var/run/eneru/ups-battery-history"
+        assert config.logging.shutdown_flag_file == "/var/run/eneru/ups-shutdown-scheduled"
+
+        err = capsys.readouterr().err
+        assert "container runtime detected" in err
+        assert "/var/log/eneru/ups-monitor.log" in err
+
+    @pytest.mark.unit
+    def test_no_op_on_native_runtime(self, tmp_path, capsys):
+        from eneru.cli import _rewrite_legacy_paths_for_container
+
+        config = self._default_config(tmp_path)
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="systemd service"):
+            _rewrite_legacy_paths_for_container(config)
+        # Untouched.
+        assert config.logging.file == "/var/log/ups-monitor.log"
+        assert capsys.readouterr().err == ""
+
+    @pytest.mark.unit
+    def test_explicit_non_default_paths_are_not_rewritten(self, tmp_path, capsys):
+        from eneru.cli import _rewrite_legacy_paths_for_container
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n  name: 'TestUPS@localhost'\n"
+            "logging:\n"
+            "  file: /custom/path/eneru.log\n"
+            "  state_file: /custom/path/state\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _rewrite_legacy_paths_for_container(config)
+        # Operator-set values survive — only the two unset fields (battery
+        # history + shutdown flag) get the rewrite.
+        assert config.logging.file == "/custom/path/eneru.log"
+        assert config.logging.state_file == "/custom/path/state"
+        assert config.logging.battery_history_file == "/var/run/eneru/ups-battery-history"
+        assert config.logging.shutdown_flag_file == "/var/run/eneru/ups-shutdown-scheduled"
+
+    @pytest.mark.unit
+    def test_silent_when_nothing_to_rewrite(self, tmp_path, capsys):
+        """All four paths set explicitly to non-legacy values → no banner."""
+        from eneru.cli import _rewrite_legacy_paths_for_container
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n  name: 'TestUPS@localhost'\n"
+            "logging:\n"
+            "  file: /var/log/eneru/ups-monitor.log\n"
+            "  state_file: /var/run/eneru/ups-monitor.state\n"
+            "  battery_history_file: /var/run/eneru/ups-battery-history\n"
+            "  shutdown_flag_file: /var/run/eneru/ups-shutdown-scheduled\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _rewrite_legacy_paths_for_container(config)
+        assert capsys.readouterr().err == ""
+
+    @pytest.mark.unit
+    def test_prepare_runtime_config_invokes_rewrite(self, tmp_path, capsys):
+        """The rewrite must run as part of _prepare_runtime_config so every
+        subcommand (run/validate/shutdown group) gets the same behavior."""
+        from eneru.cli import _prepare_runtime_config
+
+        config = self._default_config(tmp_path)
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli.Path.stat"):
+            _prepare_runtime_config(config, strict_key_check=False)
+        assert config.logging.file == "/var/log/eneru/ups-monitor.log"

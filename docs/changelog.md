@@ -43,6 +43,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Kubernetes remains the remote-only container profile by default; local
   ownership in a pod requires an explicit loopback delegate.
 
+### Fixed
+
+- Synthesized host-loopback delegate now ships with
+  `StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null`. Without
+  these the first SSH probe to `127.0.0.1` failed with
+  "Host key verification failed" because the non-root container user has
+  no `~/.ssh/known_hosts`.
+- Legacy native-install paths (`/var/log/ups-monitor.log`,
+  `/var/run/ups-monitor.state`, `/var/run/ups-battery-history`,
+  `/var/run/ups-shutdown-scheduled`) now auto-rewrite to
+  `/var/{log,run}/eneru/` equivalents under container runtime when the
+  config still matches the dataclass default. Preserves the
+  "no required YAML changes" migration promise for default configs.
+  Operator-set paths are untouched. See
+  [docs/migrate-to-container.md](migrate-to-container.md#legacy-logrun-dir-auto-rewrite)
+  for opt-out.
+
 ### Migration notes
 
 - Native deb/rpm/pip installs upgrade without YAML changes.
@@ -51,6 +68,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docker/Podman containers that own local host actions must provide a
   working loopback SSH path and bind-mount the host `/etc/machine-id`
   read-only.
+- Containers that drive **other** remote targets (NAS, secondary hosts)
+  must add an explicit `ssh_key_path` to each `remote_servers` entry and
+  bind-mount the operator SSH key into the container — root's
+  `~/.ssh/id_rsa` is not visible from the eneru user. See
+  [docs/migrate-to-container.md Step 2b](migrate-to-container.md#step-2b-migrate-existing-remote-server-ssh-keys).
+- Bind-mounted SSH keys must be readable by uid 10001 inside the
+  container. Either `chown 10001:10001` the file or relax it to mode
+  `0644` for the public key.
+- To carry forward existing TUI graphs, event log, and notification
+  history, copy `/var/lib/eneru/*.db` to the bind-mount source for
+  `/var/lib/eneru` (e.g. `/srv/eneru/state/`) and `chown 10001:10001`
+  the files before starting the container. Skip if a clean history
+  is acceptable. See
+  [docs/migrate-to-container.md Step 3b](migrate-to-container.md#step-3b-carry-forward-the-existing-stats-db-optional).
 - Do not use `authorized_keys command="..."` for loopback keys; it
   replaces Eneru's identity probe and generated shutdown actions.
 - Non-root loopback users should set `use_sudo: true` and use the

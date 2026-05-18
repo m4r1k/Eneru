@@ -82,6 +82,12 @@ remote_servers:
     is_host_loopback: true
     ssh_key_path: /var/lib/eneru/ssh/id_loopback
     shutdown_command: "shutdown -h now"
+    # Eneru inside the container has no ~/.ssh/known_hosts. The MITM
+    # surface on 127.0.0.1 is zero (same kernel namespace), so the
+    # loopback explicitly disables strict host-key checking.
+    ssh_options:
+      - "StrictHostKeyChecking=no"
+      - "UserKnownHostsFile=/dev/null"
     # use_sudo: true            # non-root plan B with documented sudoers
     # shutdown_order: 999       # runs LAST — host poweroff kills the container
 
