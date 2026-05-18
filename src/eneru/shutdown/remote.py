@@ -124,15 +124,18 @@ class RemoteShutdownMixin:
         )
 
         server_count = len(enabled_servers)
+        server_word = "server" if server_count == 1 else "servers"
 
         if num_phases > 1:
             self._log_message(
-                f"🌐 Shutting down {server_count} remote server(s) in {num_phases} phases..."
+                f"🌐 Shutting down {server_count} remote {server_word} in {num_phases} phases..."
             )
         elif server_count > 1:
-            self._log_message(f"🌐 Shutting down {server_count} remote server(s) in parallel...")
+            self._log_message(
+                f"🌐 Shutting down {server_count} remote servers in parallel..."
+            )
         else:
-            self._log_message(f"🌐 Shutting down 1 remote server...")
+            self._log_message("🌐 Shutting down 1 remote server...")
 
         # Pre-allocate one result per loopback so the pre-phase and the
         # post-phase write back into the same record (pre_commands +
@@ -150,14 +153,16 @@ class RemoteShutdownMixin:
 
         # Phase A: loopback pre-actions — drain local state while peers live.
         if has_loopback_pre:
+            # has_loopback_pre implies loopbacks exist, which implies
+            # has_loopback_post is True, which means num_phases ≥ 2 by
+            # construction. No need to gate the Phase header.
             phase_idx += 1
             names = ", ".join(
                 lb.name or lb.host for lb in loopbacks if lb.pre_shutdown_commands
             )
-            if num_phases > 1:
-                self._log_message(
-                    f"  📋 Phase {phase_idx}/{num_phases} (loopback pre-actions): {names}"
-                )
+            self._log_message(
+                f"  📋 Phase {phase_idx}/{num_phases} (loopback pre-actions): {names}"
+            )
             for lb in loopbacks:
                 if not lb.pre_shutdown_commands:
                     continue
@@ -169,9 +174,25 @@ class RemoteShutdownMixin:
                 # best-effort and the per-command timeouts already cap
                 # each step. A hung NFS unmount must not abort the
                 # later peer-remote phase.
-                loopback_results[id(lb)].pre_commands = (
-                    self._execute_remote_pre_shutdown(lb, collect_result=True)
-                )
+                #
+                # try/except mirrors the thread-level guard in
+                # _shutdown_servers_parallel: a bubbling Python
+                # exception (SSH lib OOM, AttributeError, etc.) must
+                # NOT skip the host poweroff in Phase C. Worst case
+                # the operator loses the local drain on that loopback;
+                # the host still goes down cleanly.
+                try:
+                    loopback_results[id(lb)].pre_commands = (
+                        self._execute_remote_pre_shutdown(lb, collect_result=True)
+                    )
+                except Exception as exc:
+                    self._log_message(
+                        f"  ❌ Loopback pre-actions thread for {display} crashed: {exc}"
+                    )
+                    result = loopback_results[id(lb)]
+                    result.pre_commands.error = str(exc)
+                    result.pre_commands.failed += 1
+                    result.crashed = True
 
         # Phase B: non-loopback remotes (existing parallel phased path).
         for key in sorted_regular_keys:
@@ -193,7 +214,19 @@ class RemoteShutdownMixin:
                     f"  📋 Phase {phase_idx}/{num_phases} (loopback poweroff): {names}"
                 )
             for lb in loopbacks:
-                self._shutdown_loopback_command(lb, loopback_results[id(lb)])
+                # Same try/except discipline as Phase A: a crash in one
+                # loopback's poweroff must not skip the others (rare,
+                # but possible in K8s multi-pod with several loopbacks).
+                display = lb.name or lb.host
+                try:
+                    self._shutdown_loopback_command(lb, loopback_results[id(lb)])
+                except Exception as exc:
+                    self._log_message(
+                        f"  ❌ Loopback poweroff thread for {display} crashed: {exc}"
+                    )
+                    result = loopback_results[id(lb)]
+                    result.error = str(exc)
+                    result.crashed = True
 
         results: List[RemoteShutdownResult] = (
             list(loopback_results.values()) + regular_results
@@ -227,10 +260,36 @@ class RemoteShutdownMixin:
         defers the host poweroff to this final phase. This helper
         completes the pre-allocated result record with the poweroff
         outcome.
+
+        Why mutate the caller-provided ``result`` instead of returning
+        a fresh one: a loopback's lifecycle spans two phases (A:
+        pre-actions, C: poweroff) but produces ONE summary row in
+        ``Remote shutdown complete (N/M succeeded)``. The caller
+        pre-allocates ``result`` before Phase A so ``pre_commands`` and
+        ``shutdown_sent`` land on the same object; returning a fresh
+        partial here would split the record across two rows and
+        confuse the summary. Mirror for regular remotes:
+        ``_shutdown_remote_server`` does both pre and poweroff in a
+        single call, so it can return its own result.
         """
         display = server.name or server.host
         self._log_message(
             f"🌐 Initiating loopback poweroff: {display} ({server.host})..."
+        )
+
+        # Fire the per-server notification BEFORE issuing the SSH
+        # command. Symmetry with regular remotes (see
+        # _shutdown_remote_server) and — critically for the loopback
+        # case — the notification has to leave the host before the
+        # host powers off. Notification recipients (Discord, Slack,
+        # PagerDuty, …) live outside the host, so they receive it just
+        # fine; the only thing they would miss is a notification fired
+        # AFTER the kernel halt syscall.
+        self._send_notification(
+            f"🌐 **Remote Shutdown Starting:** {display}\n"
+            f"Host: {server.host}",
+            self.config.NOTIFY_INFO,
+            category="shutdown",
         )
 
         shutdown_command = self._with_sudo(server.shutdown_command, server.use_sudo)

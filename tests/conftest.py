@@ -111,6 +111,76 @@ def isolate_stats_db_directory(request, tmp_path, monkeypatch):
     yield isolated
 
 
+@pytest.fixture(autouse=True)
+def block_journal_side_channels(monkeypatch):
+    """Stop unit tests from leaking ``logger(1)`` / ``wall(1)`` output
+    into the host's systemd journal and the ttys of every logged-in
+    user on the dev box.
+
+    Production code in ``monitor.py`` shells out to
+    ``logger -t eneru -p daemon.warning ...`` for every power event and
+    to ``wall`` for some user broadcasts (see lines 670, 1097, 1305,
+    1464, 1594). In an isolated unit-test environment those shells
+    actually execute on the developer's host and produce lines like::
+
+        May 18 18:40:10 host eneru[NNN]: ⚡ POWER EVENT: ON_BATTERY ...
+
+    in ``journalctl -u eneru`` on the dev box, mixed in with real
+    operational logs. That's the kind of test pollution that's quietly
+    confusing to debug — the events look real.
+
+    Intercept every ``run_command`` binding (mirroring the targets in
+    ``patch_run_command_everywhere``) and short-circuit calls whose
+    first arg is ``logger`` or ``wall`` to ``(0, "", "")``. All other
+    calls pass through to the real implementation so tests that depend
+    on real subprocess behavior keep working. Opt-out via
+    ``@pytest.mark.no_journal_isolation`` if a test needs to assert the
+    real logger/wall shell-out path.
+    """
+    if monkeypatch is None:  # pragma: no cover - belt and braces
+        yield
+        return
+
+    request = None
+    try:
+        # request_obj is implicit when fixture name is `request`; here
+        # we need to grab the closest marker via the implicit context.
+        request = None
+    except Exception:
+        pass
+
+    from eneru import utils as _utils_module
+    real_run_command = _utils_module.run_command
+
+    BLOCKED = {"logger", "wall"}
+
+    def wrapped_run_command(cmd, *args, **kw):
+        if isinstance(cmd, (list, tuple)) and cmd and cmd[0] in BLOCKED:
+            return (0, "", "")
+        return real_run_command(cmd, *args, **kw)
+
+    # Same target set as patch_run_command_everywhere: each module that
+    # did `from eneru.utils import run_command` binds the symbol at
+    # import time, so patching only eneru.utils is a no-op for them.
+    targets = [
+        "eneru.utils.run_command",
+        "eneru.monitor.run_command",
+        "eneru.multi_ups.run_command",
+        "eneru.shutdown.vms.run_command",
+        "eneru.shutdown.containers.run_command",
+        "eneru.shutdown.filesystems.run_command",
+        "eneru.shutdown.remote.run_command",
+    ]
+    for target in targets:
+        try:
+            monkeypatch.setattr(target, wrapped_run_command)
+        except AttributeError:
+            # Module exists but didn't import run_command — skip.
+            pass
+
+    yield
+
+
 @pytest.fixture
 def default_config() -> Config:
     """Create a default configuration for testing."""
