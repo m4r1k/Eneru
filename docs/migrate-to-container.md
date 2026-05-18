@@ -136,7 +136,7 @@ docker run --rm \
 
 Expected output highlights:
 
-```
+```text
 Runtime context: container (Docker)
 UPS: ... [is_local]
   Shutdown sequence:
@@ -233,30 +233,30 @@ walkthrough above.
 Override only when you want different defaults. Example: dedicated
 user with sudo:
 
-```diff
- # /etc/ups-monitor/config.yaml
- ups:
-   name: "UPS@nut-server"
- local_shutdown:
-   enabled: true
- virtual_machines:
-   enabled: true
- containers:
-   enabled: true
- filesystems:
-   sync_enabled: true
-+
-+# v5.5 OCI deployment: explicit loopback overrides the synthesized defaults.
-+# Uncomment if you set up the dedicated user from Step 2 (Option A) instead
-+# of letting Eneru auto-enable root + the default key path.
-+remote_servers:
-+  - name: host-loopback
-+    enabled: true
-+    host: 127.0.0.1
-+    user: eneru-loopback
-+    shutdown_command: "sudo shutdown -h now"
-+    ssh_key_path: /var/lib/eneru/ssh/id_loopback
-+    is_host_loopback: true
+```yaml
+# /etc/ups-monitor/config.yaml
+ups:
+  name: "UPS@nut-server"
+local_shutdown:
+  enabled: true
+virtual_machines:
+  enabled: true
+containers:
+  enabled: true
+filesystems:
+  sync_enabled: true
+
+# v5.5 OCI deployment: explicit loopback overrides the synthesized defaults.
+# Uncomment if you set up the dedicated user from Step 2 (Option B) instead
+# of letting Eneru auto-enable root + the default key path.
+remote_servers:
+  - name: host-loopback
+    enabled: true
+    host: 127.0.0.1
+    user: eneru-loopback
+    shutdown_command: "sudo shutdown -h now"
+    ssh_key_path: /var/lib/eneru/ssh/id_loopback
+    is_host_loopback: true
 ```
 
 ## What you'll see differently in operation

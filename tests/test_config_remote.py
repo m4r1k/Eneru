@@ -128,7 +128,7 @@ remote_servers:
 
     @pytest.mark.unit
     def test_non_root_without_use_sudo_warns(self, temp_config_file):
-        """Non-root servers still warn unless use_sudo or an explicit sudo command is set."""
+        """Non-root servers warn unless use_sudo covers all generated actions."""
         raw = {
             "remote_servers": [{
                 "name": "NAS",
@@ -143,7 +143,26 @@ remote_servers:
 
         messages = ConfigLoader.validate_config(config, raw_data=raw)
 
-        assert any("Non-root users typically need sudo" in m for m in messages)
+        assert any("Non-root users typically need use_sudo: true" in m for m in messages)
+
+    @pytest.mark.unit
+    def test_non_root_with_sudo_command_still_warns_without_use_sudo(self, temp_config_file):
+        """A sudo final command does not cover generated pre-shutdown actions."""
+        raw = {
+            "remote_servers": [{
+                "name": "NAS",
+                "enabled": True,
+                "host": "192.168.1.50",
+                "user": "ups",
+                "shutdown_command": "sudo shutdown -h now",
+            }]
+        }
+        temp_config_file.write_text(yaml.safe_dump(raw))
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config, raw_data=raw)
+
+        assert any("use_sudo: true" in m for m in messages)
 
     @pytest.mark.unit
     def test_non_root_with_use_sudo_does_not_warn(self, temp_config_file):
@@ -162,7 +181,7 @@ remote_servers:
 
         messages = ConfigLoader.validate_config(config, raw_data=raw)
 
-        assert not any("Non-root users typically need sudo" in m for m in messages)
+        assert not any("Non-root users typically need use_sudo: true" in m for m in messages)
 
     @pytest.mark.unit
     def test_pre_shutdown_commands_with_actions(self, temp_config_file):
@@ -354,6 +373,35 @@ remote_servers:
         )
 
         assert any("is_host_loopback" in m and "shutdown_order" in m for m in messages)
+
+    @pytest.mark.unit
+    def test_loopback_invalid_shutdown_order_reports_type_error_only(self, temp_config_file):
+        """Invalid loopback order must not crash the last-order comparison."""
+        config_data = """
+remote_servers:
+  - name: "host-loopback"
+    enabled: true
+    host: "127.0.0.1"
+    user: "root"
+    is_host_loopback: true
+    shutdown_order: "last"
+  - name: "NAS"
+    enabled: true
+    host: "192.168.1.50"
+    user: "root"
+    shutdown_order: 2
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(
+            config, raw_data=yaml.safe_load(config_data),
+        )
+
+        assert any(
+            "host-loopback" in m and "shutdown_order must be a positive integer" in m
+            for m in messages
+        )
 
     @pytest.mark.unit
     def test_loopback_shutdown_order_can_equal_disabled_remote(self, temp_config_file):
@@ -913,6 +961,24 @@ class TestHostLoopback:
         srv = config.remote_servers[0]
         assert srv.is_host_loopback is True
         assert srv.host == "127.0.0.1"
+
+    @pytest.mark.unit
+    def test_loopback_string_false_is_invalid_not_truthy(self, temp_config_file):
+        """YAML strings like 'false' must not become an enabled loopback."""
+        temp_config_file.write_text(
+            "remote_servers:\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    user: root\n"
+            "    is_host_loopback: 'false'\n"
+        )
+        config = ConfigLoader.load(str(temp_config_file))
+        srv = config.remote_servers[0]
+        assert srv.is_host_loopback == "false"
+        assert srv.host == ""
+
+        messages = ConfigLoader.validate_config(config)
+        assert any("is_host_loopback must be a boolean" in m for m in messages)
 
     @pytest.mark.unit
     def test_loopback_explicit_host_override_kept(self, temp_config_file):

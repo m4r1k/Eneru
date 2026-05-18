@@ -5,7 +5,6 @@ Owns the multi-server orchestration (sequential vs parallel batching by
 followed by the final shutdown command.
 """
 
-import shlex
 import threading
 import time
 from dataclasses import dataclass, field
@@ -67,7 +66,7 @@ class RemoteShutdownMixin:
             return command
         return f"sudo -n {command}"
 
-    def _shutdown_remote_servers(self):
+    def _shutdown_remote_servers(self) -> List[RemoteShutdownResult]:
         """Shutdown all enabled remote servers via SSH.
 
         Servers are grouped by their effective shutdown order and processed
@@ -87,7 +86,7 @@ class RemoteShutdownMixin:
         enabled_servers = [s for s in self.config.remote_servers if s.enabled]
 
         if not enabled_servers:
-            return
+            return []
 
         # Group servers by effective shutdown order
         ordered = compute_effective_order(enabled_servers)
@@ -136,6 +135,7 @@ class RemoteShutdownMixin:
         if crashed:
             details.append(f"{crashed} crashed")
         self._log_message(f"  {icon} Remote shutdown complete ({', '.join(details)})")
+        return results
 
     def _shutdown_servers_parallel(
         self, servers: List[RemoteServerConfig]
@@ -425,9 +425,8 @@ class RemoteShutdownMixin:
 
                 # Validate stop_compose has path BEFORE rendering the
                 # template; otherwise the precondition warning becomes
-                # dead code (shlex.quote("") would happily produce ''
-                # and a future template change might let the bad command
-                # slip through).
+                # dead code; a future template change might let the bad
+                # command slip through.
                 if action_name == "stop_compose" and not cmd_config.path:
                     self._log_message(
                         f"    ⚠️ [{idx}/{cmd_count}] stop_compose requires 'path' parameter (skipping)"
@@ -436,17 +435,15 @@ class RemoteShutdownMixin:
                     continue
 
                 # Get command template and substitute placeholders.
-                # `path` is shlex-quoted because the template embeds it
-                # directly into the remote shell — without quoting, a
-                # malicious or malformed path could expand $(), `…`, or
-                # ${…} on the remote host.
+                # render_action() owns shell quoting for path-bearing
+                # templates before they enter the remote shell.
                 # v5.5: loopback delegate gets extra context — the
                 # mandatory self-skip set so 'stop_containers' /
                 # 'stop_compose' don't kill Eneru's own container, and
                 # the umount targets serialized for 'unmount_filesystems'.
                 skip_ids = ""
                 umount_targets = ""
-                if server.is_host_loopback:
+                if server.is_host_loopback is True:
                     skip_ids = ",".join(sorted(self._loopback_skip_ids()))
                     if action_name == "unmount_filesystems":
                         umount_targets = serialize_umount_targets(
@@ -455,7 +452,7 @@ class RemoteShutdownMixin:
                 command = render_action(
                     action_name,
                     timeout=timeout,
-                    path=shlex.quote(cmd_config.path or ""),
+                    path=cmd_config.path or "",
                     skip_ids=skip_ids,
                     umount_targets=umount_targets,
                     use_sudo=server.use_sudo,

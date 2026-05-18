@@ -328,7 +328,7 @@ fall into one of these:
 
 | Symptom in `last_error` | Cause | Fix |
 |---|---|---|
-| `host identity mismatch: probe returned 'X' but expected 'Y'` | `/etc/machine-id` not bind-mounted from host | Add `-v /etc/machine-id:/etc/machine-id:ro,Z` to the `docker run` command (and `,Z` for SELinux hosts) |
+| `host identity mismatch: probe returned 'X' but expected 'Y'` | `/etc/machine-id` not bind-mounted from host | Add `-v /etc/machine-id:/etc/machine-id:ro` to the `docker run` command (append `,Z` on SELinux hosts) |
 | `authorized_keys command=` | Forced-command SSH key rewrites Eneru's identity probe and generated shutdown actions | Remove `command="..."` from the loopback key. Use the root default or `use_sudo: true` with sudoers. |
 | `Permission denied (publickey,password)` | Loopback SSH key not authorized on the host | The container's `/var/lib/eneru/ssh/id_loopback` public half must be in the host user's `authorized_keys`. See [Containers and Kubernetes](containers-kubernetes.md) for the walkthrough. |
 | `connection refused` | No `sshd` on `127.0.0.1`, OR container isn't on `network_mode: host` | Either start `sshd` on the host, or switch to `--network host`. For bridge networking, override the loopback `host` to the host's bridge IP (`172.17.0.1` on Linux default Docker bridge). |
@@ -382,7 +382,7 @@ delegated via loopback SSH: ...` line. If it's missing, either:
 
 Symptom (during `validate` or `shutdown group --dry-run`):
 
-```
+```text
 WARNING: Eneru detected runtime 'container (Docker)' with local capabilities
 but the default SSH key for the host-loopback delegate is missing:
   expected at: /var/lib/eneru/ssh/id_loopback

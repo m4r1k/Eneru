@@ -2167,6 +2167,34 @@ class TestCLIShutdownGroupRehearsal:
         assert drill_config.behavior.dry_run is True
 
     @pytest.mark.unit
+    def test_real_shutdown_group_uses_strict_loopback_key_check(self, tmp_path, capsys):
+        """Real manual shutdown must fail fast when a synthesized loopback key is absent."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "  display_name: rack-a\n"
+            "  is_local: true\n"
+            "local_shutdown:\n"
+            "  enabled: true\n"
+        )
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli._LOOPBACK_DEFAULT_SSH_KEY_PATH",
+                   str(tmp_path / "missing-id-loopback")), \
+             patch.object(sys, "argv", [
+                "eneru", "shutdown", "group",
+                "-c", str(config_file), "--group", "rack-a",
+                "--i-really-want-to-proceed-with-group-shutdown",
+             ]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 1
+        assert "default SSH key for the host-loopback delegate is missing" in (
+            capsys.readouterr().err
+        )
+
+    @pytest.mark.unit
     def test_redundancy_group_routes_through_executor(self, tmp_path, capsys):
         config_file = self._redundancy_config(tmp_path)
         with patch(
@@ -2355,7 +2383,7 @@ class TestSynthesizeLoopback:
 
         with patch("eneru.cli._detect_runtime_context",
                    return_value="container (Docker)"), \
-             patch("eneru.cli.Path.exists", return_value=True):  # ssh key present
+             patch("eneru.cli.Path.stat"):  # ssh key present
             _synthesize_loopback_if_needed(config)
 
         found = _find_host_loopback(config)
@@ -2438,7 +2466,7 @@ class TestSynthesizeLoopback:
         before = _find_host_loopback(config)
         with patch("eneru.cli._detect_runtime_context",
                    return_value="container (Docker)"), \
-             patch("eneru.cli.Path.exists", return_value=True):
+             patch("eneru.cli.Path.stat"):
             _synthesize_loopback_if_needed(config)
         after = _find_host_loopback(config)
         # Same server entry (no new one synthesized)
@@ -2453,7 +2481,7 @@ class TestSynthesizeLoopback:
         config = self._local_config_no_loopback(tmp_path)
         with patch("eneru.cli._detect_runtime_context",
                    return_value="container (Docker)"), \
-             patch("eneru.cli.Path.exists", return_value=False):
+             patch("eneru.cli.Path.stat", side_effect=FileNotFoundError):
             with pytest.raises(SystemExit) as exc_info:
                 _synthesize_loopback_if_needed(config)
         assert exc_info.value.code == 1
@@ -2463,7 +2491,7 @@ class TestSynthesizeLoopback:
 
     @pytest.mark.unit
     def test_unreadable_ssh_key_path_distinguishes_perm_error(self, tmp_path, capsys):
-        """Path.exists() raises PermissionError when the parent dir isn't
+        """Path.stat() raises PermissionError when the parent dir isn't
         readable — common when operators bind-mount /root/.ssh/ (0700)
         into the container running as eneru (uid 10001). Treat as
         'not usable' with a perm-specific actionable error rather than
@@ -2473,7 +2501,7 @@ class TestSynthesizeLoopback:
         config = self._local_config_no_loopback(tmp_path)
         with patch("eneru.cli._detect_runtime_context",
                    return_value="container (Docker)"), \
-             patch("eneru.cli.Path.exists",
+             patch("eneru.cli.Path.stat",
                    side_effect=PermissionError("Permission denied")):
             with pytest.raises(SystemExit) as exc_info:
                 _synthesize_loopback_if_needed(config)
@@ -2493,7 +2521,7 @@ class TestSynthesizeLoopback:
         config = self._local_config_no_loopback(tmp_path)
         with patch("eneru.cli._detect_runtime_context",
                    return_value="container (Docker)"), \
-             patch("eneru.cli.Path.exists",
+             patch("eneru.cli.Path.stat",
                    side_effect=PermissionError("Permission denied")):
             _synthesize_loopback_if_needed(config, strict_key_check=False)
         # Synthesis still happens — loopback entry was injected.

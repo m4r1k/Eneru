@@ -77,7 +77,7 @@ Multi-UPS mode runs the same sequence per UPS group. Redundancy groups use the s
 3. Choose your shutdown policy: [Configuration reference](configuration.md).
 4. Tune the shutdown thresholds: [Shutdown triggers](triggers.md).
 5. Add remote systems if needed: [Remote servers](remote-servers.md).
-6. Containerized deployment (Docker, Podman, or Kubernetes): [Containers and Kubernetes](containers-kubernetes.md). Migrating from deb/rpm: [Migrate to container](migrate-to-container.md).
+6. If you are deploying in containers, use [Containers and Kubernetes](containers-kubernetes.md). Migrating from deb/rpm: [Migrate to container](migrate-to-container.md).
 7. Test in dry-run mode before relying on it: [Troubleshooting](troubleshooting.md#safe-dry-run-test).
 
 ## Installation style in these docs

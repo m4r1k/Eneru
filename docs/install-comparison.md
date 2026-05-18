@@ -101,10 +101,11 @@ container):
   the public key. Do not use `authorized_keys command="..."`; it
   rewrites Eneru's identity probe and generated shutdown actions. See
   [Containers and Kubernetes](containers-kubernetes.md).
-- A user on the host with shutdown privilege. Either:
+- A user on the host with the privileges needed for every delegated action. Either:
   - SSH as `root` (one-line setup, larger blast radius), OR
-  - SSH as a dedicated user with sudo NOPASSWD on `/sbin/shutdown`
-    and `/sbin/poweroff` (recommended).
+  - SSH as a dedicated user with `use_sudo: true` and sudo NOPASSWD for
+    every enabled delegated action (`shutdown`, `virsh`, `docker`,
+    `podman`, `umount`, and any other configured host-side command).
 
 See [Migrate to container](migrate-to-container.md) for a step-by-step
 walk through.

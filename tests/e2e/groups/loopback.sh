@@ -47,12 +47,13 @@ poll_log() {
 }
 
 network_name() {
-  docker network ls --format '{{.Name}}' | grep '_eneru-e2e$' | head -1
+  docker network ls --format '{{.Name}}' | awk '/_eneru-e2e$/ { print; exit }'
 }
 
 prepare_loopback_key() {
   cp /tmp/e2e-ssh-key /tmp/e2e-loopback-key
-  chmod 0444 /tmp/e2e-loopback-key
+  chown 10001:10001 /tmp/e2e-loopback-key
+  chmod 0400 /tmp/e2e-loopback-key
 }
 
 write_loopback_config() {
@@ -133,6 +134,9 @@ run_loopback_case() {
     exit 1
   fi
   echo "  PASS: /ready is green for ${label} loopback"
+  echo "  /ready payload:"
+  cat "/tmp/e2e-loopback-${label}-ready.json"
+  echo
 
   echo "  Applying low-battery scenario and waiting for delegated dry-run shutdown"
   cp "$E2E_DIR/scenarios/low-battery.dev" "$E2E_DIR/scenarios/apply.dev"
@@ -147,6 +151,8 @@ run_loopback_case() {
     exit 1
   fi
   echo "  PASS: delegated shutdown command observed: ${expected}"
+  echo "  Matching shutdown log line:"
+  grep "$expected" "/tmp/e2e-loopback-${label}.log" | tail -1
 
   docker rm -f "$name" >/dev/null 2>&1 || true
   cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
@@ -217,6 +223,9 @@ YAML
     exit 1
   fi
   echo "  PASS: /ready is false and includes systemd-machine-id-setup hint"
+  echo "  /ready payload:"
+  cat /tmp/e2e-loopback-missing-machine-id-ready.json
+  echo
   docker rm -f "$name" >/dev/null 2>&1 || true
 }
 

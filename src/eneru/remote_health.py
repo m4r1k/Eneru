@@ -263,7 +263,7 @@ class RemoteHealthManager:
         # return. Missing or mismatching → identity probe fails closed with a
         # clear bind-mount hint.
         for server in self.servers:
-            if server.is_host_loopback and not server.expected_host_identity:
+            if server.is_host_loopback is True and not server.expected_host_identity:
                 server.expected_host_identity = _read_container_machine_id()
         self._statuses: Dict[str, RemoteHealthStatus] = {
             self._key(server): RemoteHealthStatus(
@@ -272,17 +272,17 @@ class RemoteHealthManager:
                 host=server.host,
                 user=server.user,
                 status=initial,
-                is_host_loopback=server.is_host_loopback,
+                is_host_loopback=server.is_host_loopback is True,
             )
             for server in self.servers
         }
         for server in self.servers:
-            if server.is_host_loopback:
+            if server.is_host_loopback is True:
                 self._statuses[self._key(server)].status = REMOTE_HEALTH_UNKNOWN
 
     def start(self) -> None:
         """Start the background healthcheck loop if configured."""
-        has_loopback = any(s.is_host_loopback for s in self.servers)
+        has_loopback = any(s.is_host_loopback is True for s in self.servers)
         if ((not self.config.remote_health.enabled) and not has_loopback) or not self.servers:
             self._write_sidecar()
             return
@@ -310,14 +310,14 @@ class RemoteHealthManager:
 
     def check_once(self) -> List[dict]:
         """Run one healthcheck cycle synchronously."""
-        has_loopback = any(s.is_host_loopback for s in self.servers)
+        has_loopback = any(s.is_host_loopback is True for s in self.servers)
         if not self.config.remote_health.enabled and not has_loopback:
             self._write_sidecar()
             return self.snapshot()
         for server in self.servers:
             if self.stop_event.is_set():
                 break
-            if not self.config.remote_health.enabled and not server.is_host_loopback:
+            if not self.config.remote_health.enabled and server.is_host_loopback is not True:
                 continue
             self._check_server(server)
         self._write_sidecar()
@@ -339,7 +339,7 @@ class RemoteHealthManager:
         self._write_sidecar()
 
         probe = self._validated_probe_command
-        if server.is_host_loopback and not (server.expected_host_identity or "").strip():
+        if server.is_host_loopback is True and not (server.expected_host_identity or "").strip():
             success, error, latency_ms = False, (
                 "host identity unknown: container-side /etc/machine-id was not "
                 "readable at startup and no explicit expected_host_identity was "
@@ -354,7 +354,7 @@ class RemoteHealthManager:
             # v5.5: loopback entries get an extra host-identity step. The
             # standard probe proves SSH reachability; identity proves we're
             # actually talking to the host Eneru is meant to control.
-            if success and server.is_host_loopback:
+            if success and server.is_host_loopback is True:
                 id_ok, id_err, id_latency = run_loopback_identity_probe(server)
                 latency_ms += id_latency
                 if not id_ok:
@@ -399,7 +399,7 @@ class RemoteHealthManager:
                 notification_sent = True
         elif current == REMOTE_HEALTH_FAILED and not self._notified_failed.get(key):
             self._notified_failed[key] = True
-            if server.is_host_loopback:
+            if server.is_host_loopback is True:
                 # v5.5: loud, operator-actionable message — the loopback IS
                 # the host-poweroff contract; if it's broken, Eneru cannot
                 # honor a power-loss shutdown in full.

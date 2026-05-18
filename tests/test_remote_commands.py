@@ -121,14 +121,14 @@ class TestRemoteActionTemplates:
 
     @pytest.mark.unit
     def test_path_substitution_in_compose(self):
-        """Test that path placeholder is correctly substituted in stop_compose."""
+        """stop_compose path is shell-quoted by render_action."""
         from eneru.actions import render_action
         result = render_action(
             "stop_compose",
             timeout=30,
-            path="/opt/app/docker-compose.yml",
+            path="/opt/app/docker compose.yml",
         )
-        assert "/opt/app/docker-compose.yml" in result
+        assert "'/opt/app/docker compose.yml'" in result
         assert "{path}" not in result
         assert "t=30" in result
 
@@ -150,23 +150,12 @@ class TestRemoteActionTemplates:
         assert "uuid=2" not in rendered  # not joined with the next arg either
 
     @pytest.mark.unit
-    def test_stop_compose_template_does_not_double_quote_path(self):
-        """stop_compose must leave {path} unquoted in the template; quoting
-        happens via shlex.quote at the format() call site so $(), backticks,
-        and ${...} cannot expand on the remote host.
-
-        v5.5: the template now assigns ``path={path}`` into a shell var
-        once and uses ``$path`` thereafter (still single-quoted by
-        shlex.quote at format time). The placeholder appears exactly
-        once and remains unquoted in the template source.
-        """
+    def test_stop_compose_template_quotes_path_variable_at_use_sites(self):
+        """stop_compose quotes "$path" when invoking compose so spaces survive."""
         template = REMOTE_ACTIONS["stop_compose"]
-        # Bare placeholder, no surrounding double quotes.
-        assert '"{path}"' not in template
-        # The single assignment site preserves the unquoted-placeholder contract.
         assert "path={path}" in template
-        # The downstream use is via the shell variable, not the placeholder.
-        assert "-f $path" in template
+        assert '-f "$path" ps -q' in template
+        assert '-f "$path" down -t "$t"' in template
 
 
 class TestRemotePreShutdownExecution:

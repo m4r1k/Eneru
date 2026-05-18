@@ -21,6 +21,7 @@ from eneru import (
     RemoteServerConfig, LocalShutdownConfig, MonitorState,
 )
 from eneru.monitor import UPSGroupMonitor
+from eneru.shutdown.remote import RemoteShutdownResult
 
 
 def _make_delegated_monitor(
@@ -141,7 +142,17 @@ class TestDelegatedShutdownSequence:
         monitor._shutdown_containers = lambda: calls.append("containers")
         monitor._sync_filesystems = lambda: calls.append("sync")
         monitor._unmount_filesystems = lambda: calls.append("unmount")
-        monitor._shutdown_remote_servers = lambda: calls.append("remote")
+        def remote_spy():
+            calls.append("remote")
+            return [
+                RemoteShutdownResult(
+                    server="host-loopback",
+                    host="127.0.0.1",
+                    shutdown_sent=True,
+                    dry_run=monitor.config.behavior.dry_run,
+                )
+            ]
+        monitor._shutdown_remote_servers = remote_spy
         return calls
 
     @pytest.mark.unit
@@ -330,6 +341,49 @@ class TestDelegatedShutdownSequence:
             monitor._execute_shutdown_sequence()
         events_seen = [c.args[0] for c in event_log.call_args_list]
         assert "SHUTDOWN_SEQUENCE_COMPLETE" in events_seen
+
+    @pytest.mark.unit
+    def test_missing_ssh_is_fatal_when_delegating(self, tmp_path):
+        monitor = _make_delegated_monitor(tmp_path)
+
+        def fake_exists(cmd):
+            return cmd != "ssh"
+
+        with _patch_runtime("container (Docker)"), \
+             patch("eneru.monitor.command_exists", side_effect=fake_exists):
+            with pytest.raises(SystemExit) as exc_info:
+                monitor._check_dependencies()
+
+        assert exc_info.value.code == 1
+
+    @pytest.mark.unit
+    def test_delegated_shutdown_failure_does_not_mark_sequence_complete(self, tmp_path):
+        monitor = _make_delegated_monitor(tmp_path, dry_run=False)
+        calls = []
+        monitor._shutdown_vms = lambda: calls.append("vms")
+        monitor._shutdown_containers = lambda: calls.append("containers")
+        monitor._sync_filesystems = lambda: calls.append("sync")
+        monitor._unmount_filesystems = lambda: calls.append("unmount")
+        monitor._shutdown_remote_servers = lambda: [
+            RemoteShutdownResult(
+                server="host-loopback",
+                host="127.0.0.1",
+                shutdown_sent=False,
+                error="ssh failed",
+            )
+        ]
+        event_log = MagicMock()
+        monitor._stats_store.log_event = event_log
+
+        with _patch_runtime("container (Docker)"), \
+             patch("eneru.monitor.run_command") as run_cmd, \
+             patch("eneru.monitor.write_shutdown_marker") as marker:
+            monitor._execute_shutdown_sequence()
+
+        run_cmd.assert_not_called()
+        marker.assert_not_called()
+        events_seen = [c.args[0] for c in event_log.call_args_list]
+        assert "SHUTDOWN_SEQUENCE_COMPLETE" not in events_seen
 
 
 class TestInjectDelegatedActions:

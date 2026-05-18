@@ -222,11 +222,11 @@ def _find_host_loopback(config: Config):
     """
     for group in config.ups_groups:
         for server in group.remote_servers:
-            if server.enabled and server.is_host_loopback:
+            if server.enabled and server.is_host_loopback is True:
                 return group.ups.label, server
     for group in config.redundancy_groups:
         for server in group.remote_servers:
-            if server.enabled and server.is_host_loopback:
+            if server.enabled and server.is_host_loopback is True:
                 return group.name or "(unnamed)", server
     return None
 
@@ -237,14 +237,14 @@ def _has_explicit_loopback_opt_out(config: Config) -> bool:
         for server in group.remote_servers:
             if (
                 getattr(server, "_is_host_loopback_explicit", False)
-                and not server.is_host_loopback
+                and server.is_host_loopback is False
             ):
                 return True
     for group in config.redundancy_groups:
         for server in group.remote_servers:
             if (
                 getattr(server, "_is_host_loopback_explicit", False)
-                and not server.is_host_loopback
+                and server.is_host_loopback is False
             ):
                 return True
     return False
@@ -260,7 +260,7 @@ def _uses_loopback_delegate(config: Config, group=None) -> bool:
     if group is None or not getattr(group, "is_local", False):
         return False
     return any(
-        s.enabled and s.is_host_loopback
+        s.enabled and s.is_host_loopback is True
         for s in getattr(group, "remote_servers", [])
     )
 
@@ -340,12 +340,12 @@ def _synthesize_loopback_if_needed(
         # validation error already.
         return
 
-    # Path.exists() raises PermissionError (NOT False) when the parent dir
-    # is unreadable by the container user — common when operators bind-mount
-    # /root/.ssh/ (mode 0700) into the container running as eneru (uid 10001).
-    # Treat unreadable as "not usable" with a clearer error than a traceback.
+    # Use stat() instead of exists(): Python 3.14 Path.exists() suppresses
+    # OSError subclasses, but PermissionError is the operator-actionable case
+    # we need to distinguish from a genuinely missing key.
     try:
-        key_present = Path(_LOOPBACK_DEFAULT_SSH_KEY_PATH).exists()
+        Path(_LOOPBACK_DEFAULT_SSH_KEY_PATH).stat()
+        key_present = True
         permission_error = False
     except OSError as exc:
         key_present = False
@@ -370,7 +370,8 @@ def _synthesize_loopback_if_needed(
                 "common when bind-mounting host paths like /root/.ssh/ "
                 "(mode 0700) directly. Fixes:\n"
                 "  1. Mount a dedicated directory with mode 0755 + the key "
-                "file mode 0444 (or chgrp to a gid the eneru user can read).\n"
+                "file mode 0400 or 0600 owned by uid 10001, or grant uid "
+                "10001 read access with an ACL.\n"
                 "  2. Run the container as root with `--user 0:0` (works "
                 "but defeats the non-root design).\n"
                 "  3. Configure a remote_servers entry with an explicit "
@@ -727,7 +728,7 @@ def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
     # SKIPPED at run time — the same work is sent over SSH to the host
     # via the loopback's pre_shutdown_commands. Show that explicitly so
     # `eneru validate` reflects what would actually execute.
-    delegated = any(s.enabled and s.is_host_loopback for s in group.remote_servers)
+    delegated = any(s.enabled and s.is_host_loopback is True for s in group.remote_servers)
     print(f"{prefix}  Shutdown sequence:")
     step = 1
     indent = f"{prefix}    "
@@ -1297,9 +1298,9 @@ def _cmd_shutdown_group(args):
     config = _load_config(args)
     # v5.5: synthesize loopback + inject delegated actions so the
     # rehearsal exercises the same shutdown path the daemon would. Use
-    # strict_key_check=False so dry-run rehearsals work even if the SSH
-    # key isn't materialized yet (the dry-run never actually SSHes).
-    _prepare_runtime_config(config, strict_key_check=False)
+    # strict only for real shutdown. Dry-run rehearsals still work before
+    # the default loopback key is materialized because they never SSH.
+    _prepare_runtime_config(config, strict_key_check=not args.dry_run)
     _exit_on_config_errors(config, args)
 
     if not args.dry_run and not args.confirm:

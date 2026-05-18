@@ -232,14 +232,22 @@ def _required_capabilities(config: Config) -> List[str]:
         has_local or not config.ups_groups or config.local_shutdown.trigger_on == "any"
     ):
         caps.append("local_host_poweroff")
+    remote_targets: List[Tuple[str, str]] = []
     for group in config.ups_groups:
         for s in group.remote_servers:
-            if s.enabled and not s.is_host_loopback:
-                caps.append(f"remote_server_shutdown[{s.name or s.host}]")
+            if s.enabled and s.is_host_loopback is not True:
+                remote_targets.append((group.ups.label, s.name or s.host))
     for group in config.redundancy_groups:
         for s in group.remote_servers:
-            if s.enabled and not s.is_host_loopback:
-                caps.append(f"remote_server_shutdown[{s.name or s.host}]")
+            if s.enabled and s.is_host_loopback is not True:
+                remote_targets.append((group.name, s.name or s.host))
+    target_counts: Dict[str, int] = {}
+    for _group_label, target in remote_targets:
+        target_counts[target] = target_counts.get(target, 0) + 1
+    for group_label, target in remote_targets:
+        caps.append(
+            f"remote_server_shutdown[{_remote_capability_target(group_label, target, target_counts)}]"
+        )
     # Deduplicate while preserving order
     seen = set()
     deduped = []
@@ -248,6 +256,22 @@ def _required_capabilities(config: Config) -> List[str]:
             seen.add(c)
             deduped.append(c)
     return deduped
+
+
+def _remote_capability_target(
+    group_label: str,
+    target: str,
+    target_counts: Dict[str, int],
+) -> str:
+    """Return the public readiness target id for a remote server.
+
+    Unique names keep the historic ``remote_server_shutdown[nas]`` shape.
+    Duplicate names are scoped with the owning group so one failed ``nas``
+    cannot be hidden by another healthy ``nas`` in a different group.
+    """
+    if target_counts.get(target, 0) <= 1:
+        return target
+    return f"{group_label}/{target}"
 
 
 def _loopback_health_row(remote_health_rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -308,6 +332,10 @@ def _capability_achievable(
             parts = shlex.split(local_shutdown_command)
         except ValueError as exc:
             return False, f"invalid local shutdown command: {exc}"
+        if parts and parts[0] == "sudo":
+            parts = parts[1:]
+            if parts and parts[0] == "-n":
+                parts = parts[1:]
         candidates = [parts[0]] if parts else []
     else:
         candidates = _LOCAL_CAPABILITY_BINARIES.get(cap, [])
@@ -364,6 +392,14 @@ def readiness(source: Any) -> Dict[str, Any]:
     health_rows = live_remote_health(source, config)
     loopback_row = _loopback_health_row(health_rows)
     loopback_status = loopback_row.get("status") if loopback_row else None
+    health_targets = [
+        (row.get("group") or "", row.get("server") or row.get("host"))
+        for row in health_rows
+        if not row.get("is_host_loopback") and (row.get("server") or row.get("host"))
+    ]
+    health_counts: Dict[str, int] = {}
+    for _group_label, target in health_targets:
+        health_counts[target] = health_counts.get(target, 0) + 1
     remote_health_by_target: Dict[str, str] = {}
     for row in health_rows:
         if row.get("is_host_loopback"):
@@ -372,6 +408,10 @@ def readiness(source: Any) -> Dict[str, Any]:
         status = row.get("status")
         if name and status:
             remote_health_by_target[name] = status
+            group_name = row.get("group") or ""
+            remote_health_by_target[
+                _remote_capability_target(group_name, name, health_counts)
+            ] = status
 
     nut_ready = nut_visible_any and not nut_failed_any
     runtime_label = _runtime_context_label()
@@ -419,7 +459,7 @@ def _loopback_runtime_summary(
     configured = None
     for group in config.ups_groups:
         for s in group.remote_servers:
-            if s.enabled and s.is_host_loopback:
+            if s.enabled and s.is_host_loopback is True:
                 configured = s
                 break
         if configured:
@@ -427,7 +467,7 @@ def _loopback_runtime_summary(
     if configured is None:
         for group in config.redundancy_groups:
             for s in group.remote_servers:
-                if s.enabled and s.is_host_loopback:
+                if s.enabled and s.is_host_loopback is True:
                     configured = s
                     break
             if configured:

@@ -116,6 +116,34 @@ class TestRequiredCapabilities:
         assert "remote_server_shutdown[db]" in caps
 
     @pytest.mark.unit
+    def test_duplicate_remote_names_are_scoped_by_group(self):
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(
+                    ups=UPSConfig(name="UPS-A@host", display_name="rack-a"),
+                    remote_servers=[
+                        RemoteServerConfig(
+                            name="nas", enabled=True, host="10.0.0.1", user="root"
+                        ),
+                    ],
+                ),
+                UPSGroupConfig(
+                    ups=UPSConfig(name="UPS-B@host", display_name="rack-b"),
+                    remote_servers=[
+                        RemoteServerConfig(
+                            name="nas", enabled=True, host="10.0.0.2", user="root"
+                        ),
+                    ],
+                ),
+            ],
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
+        )
+        caps = _required_capabilities(config)
+        assert "remote_server_shutdown[rack-a/nas]" in caps
+        assert "remote_server_shutdown[rack-b/nas]" in caps
+        assert "remote_server_shutdown[nas]" not in caps
+
+    @pytest.mark.unit
     def test_loopback_entries_not_listed_as_remote_targets(self):
         """The loopback is the host-poweroff transport, not a separately
         scored remote target."""
@@ -212,6 +240,31 @@ class TestReadinessNativeInstall:
             local_shutdown=LocalShutdownConfig(
                 enabled=True,
                 command="/sbin/halt -p",
+                trigger_on="any",
+            ),
+        )
+        source = _make_source(config=config, snapshot=_ok_snapshot())
+
+        def exists(binary):
+            return binary == "/sbin/halt"
+
+        with patch("eneru.status._runtime_context_label",
+                   return_value="systemd service"), \
+             patch("eneru.status.command_exists", side_effect=exists):
+            payload = readiness(source)
+
+        assert payload["ready"] is True
+
+    @pytest.mark.unit
+    def test_local_poweroff_skips_leading_sudo_when_checking_binary(self):
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"),
+                is_local=True,
+            )],
+            local_shutdown=LocalShutdownConfig(
+                enabled=True,
+                command="sudo -n /sbin/halt -p",
                 trigger_on="any",
             ),
         )
@@ -365,6 +418,55 @@ class TestReadinessContainerWithLoopback:
 
         assert achievable is False
         assert "nas" in reason
+
+    @pytest.mark.unit
+    def test_duplicate_remote_health_rows_do_not_mask_each_other(self):
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(
+                    ups=UPSConfig(name="UPS-A@host", display_name="rack-a"),
+                    remote_servers=[
+                        RemoteServerConfig(
+                            name="nas", enabled=True, host="10.0.0.1", user="root"
+                        ),
+                    ],
+                ),
+                UPSGroupConfig(
+                    ups=UPSConfig(name="UPS-B@host", display_name="rack-b"),
+                    remote_servers=[
+                        RemoteServerConfig(
+                            name="nas", enabled=True, host="10.0.0.2", user="root"
+                        ),
+                    ],
+                ),
+            ],
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
+        )
+        source = _make_source(config=config, snapshot=_ok_snapshot())
+        with patch("eneru.status._runtime_context_label",
+                   return_value="container (Docker)"), \
+             patch("eneru.status.live_remote_health",
+                   return_value=[
+                       {"group": "rack-a", "server": "nas", "host": "10.0.0.1",
+                        "status": "FAILED", "is_host_loopback": False},
+                       {"group": "rack-b", "server": "nas", "host": "10.0.0.2",
+                        "status": "HEALTHY", "is_host_loopback": False},
+                       {"group": "rack-a", "server": "host-loopback", "host": "127.0.0.1",
+                        "status": "HEALTHY", "is_host_loopback": True},
+                   ]):
+            payload = readiness(source)
+
+        assert payload["ready"] is False
+        rack_a = next(
+            c for c in payload["capabilities"]
+            if c["id"] == "remote_server_shutdown[rack-a/nas]"
+        )
+        rack_b = next(
+            c for c in payload["capabilities"]
+            if c["id"] == "remote_server_shutdown[rack-b/nas]"
+        )
+        assert rack_a["achievable"] is False
+        assert rack_b["achievable"] is True
 
 
 class TestReadinessContainerNoLoopback:

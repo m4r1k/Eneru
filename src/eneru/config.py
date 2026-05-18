@@ -687,11 +687,15 @@ class ConfigLoader:
                         timeout=cmd_data.get('timeout'),
                         path=cmd_data.get('path'),
                     ))
-            is_loopback = bool(server_data.get('is_host_loopback', False))
             is_loopback_explicit = 'is_host_loopback' in server_data
+            is_loopback = (
+                server_data.get('is_host_loopback', False)
+                if is_loopback_explicit
+                else False
+            )
             # Loopback entries default host to 127.0.0.1 — with `network_mode: host`
             # (the recommended path for full local ownership) this is the host's sshd.
-            default_host = '127.0.0.1' if is_loopback else ''
+            default_host = '127.0.0.1' if is_loopback is True else ''
             servers.append(RemoteServerConfig(
                 name=server_data.get('name', ''),
                 enabled=server_data.get('enabled', False),
@@ -1547,11 +1551,11 @@ class ConfigLoader:
         loopback_entries = []
         for group in config.ups_groups:
             for server in group.remote_servers:
-                if server.is_host_loopback:
+                if server.is_host_loopback is True:
                     loopback_entries.append((group.ups.label, server))
         for group in config.redundancy_groups:
             for server in group.remote_servers:
-                if server.is_host_loopback:
+                if server.is_host_loopback is True:
                     loopback_entries.append((group.name or "(unnamed)", server))
         # Top-level remote_servers (single-UPS legacy layout) live on the
         # single UPS group, so they're already covered above.
@@ -1606,13 +1610,13 @@ class ConfigLoader:
                 user
                 and user != "root"
                 and not srv.use_sudo
-                and not srv.shutdown_command.strip().startswith("sudo ")
             ):
                 where = f"{owner}/{srv.name or srv.host or '(unnamed)'}"
                 messages.append(
                     f"WARNING: remote_server '{where}' user is {srv.user!r} "
-                    "but shutdown_command does not start with 'sudo'. "
-                    "Non-root users typically need sudo to poweroff the host."
+                    "but use_sudo is false. Non-root users typically need "
+                    "use_sudo: true so generated pre-shutdown actions and "
+                    "the final shutdown command run with sudo."
                 )
 
         # --- Redundancy-group validation (Phase 2) ---
@@ -1760,10 +1764,13 @@ class ConfigLoader:
         server_groups = [g.remote_servers for g in config.ups_groups]
         server_groups.extend(g.remote_servers for g in config.redundancy_groups)
         for servers in server_groups:
+            def _valid_order(value: Optional[int]) -> bool:
+                return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
             enabled_others = [
-                s for s in servers if s.enabled and not s.is_host_loopback
+                s for s in servers if s.enabled and s.is_host_loopback is not True
             ]
-            for loopback in [s for s in servers if s.enabled and s.is_host_loopback]:
+            for loopback in [s for s in servers if s.enabled and s.is_host_loopback is True]:
                 if enabled_others and loopback.shutdown_order is None:
                     messages.append(
                         f"ERROR: Remote server '{loopback.name or loopback.host}' "
@@ -1772,9 +1779,12 @@ class ConfigLoader:
                         "The host poweroff delegate must run last."
                     )
                     continue
+                if enabled_others and not _valid_order(loopback.shutdown_order):
+                    continue
                 other_orders = [
                     s.shutdown_order if s.shutdown_order is not None else 0
                     for s in enabled_others
+                    if _valid_order(s.shutdown_order) or s.shutdown_order is None
                 ]
                 if other_orders and loopback.shutdown_order <= max(other_orders):
                     messages.append(
@@ -1798,6 +1808,12 @@ class ConfigLoader:
                     messages.append(
                         f"ERROR: Remote server '{display}': use_sudo must be "
                         f"a boolean, got {server.use_sudo!r}"
+                    )
+
+                if not isinstance(server.is_host_loopback, bool):
+                    messages.append(
+                        f"ERROR: Remote server '{display}': is_host_loopback "
+                        f"must be a boolean, got {server.is_host_loopback!r}"
                     )
 
                 so = server.shutdown_order

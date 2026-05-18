@@ -142,9 +142,9 @@ REMOTE_ACTIONS: Dict[str, str] = {
     ),
 
     # Stop docker/podman compose stack.
-    # ``path`` is shell-quoted at the format() call site so shlex.quote
-    # provides the only quoting boundary; double-quoting wouldn't block
-    # $(), backticks, or ${...}.
+    # ``path`` is shell-quoted by render_action before it is assigned into
+    # the shell variable. Every later use still double-quotes "$path" so
+    # spaces survive the shell's word-splitting pass.
     # v5.5: self-skip — if this compose stack contains any container in
     # ``skip_ids`` (the loopback delegate's own container ID set), the
     # stack is left alone so the host shutdown doesn't kill Eneru
@@ -154,7 +154,7 @@ REMOTE_ACTIONS: Dict[str, str] = {
         'path={path}; '
         'skip="{skip_ids}"; '
         '_compose() {{ '
-        '  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then '
+        '  if command -v docker >/dev/null 2>&1 && {sudo}docker compose version >/dev/null 2>&1; then '
         '    {sudo}docker compose "$@"; '
         '  elif command -v podman >/dev/null 2>&1; then '
         '    {sudo}podman compose "$@"; '
@@ -162,12 +162,12 @@ REMOTE_ACTIONS: Dict[str, str] = {
         # Detect self-inclusion: if any container in this stack matches
         # a 12-char prefix from skip_ids, abort the stack teardown.
         'if [ -n "$skip" ]; then '
-        '  hit=$(_compose -f $path ps -q 2>/dev/null | awk -v skip="$skip" '
+        '  hit=$(_compose -f "$path" ps -q 2>/dev/null | awk -v skip="$skip" '
         '\'BEGIN {{ n = split(skip, a, ","); for (i=1;i<=n;i++) m[substr(a[i],1,12)]=1 }} '
         'substr($0,1,12) in m {{ print; exit }}\'); '
         '  if [ -n "$hit" ]; then exit 0; fi; '
         'fi; '
-        '_compose -f $path down -t $t; '
+        '_compose -f "$path" down -t "$t"; '
         'true'
     ),
 
@@ -239,9 +239,10 @@ def render_action(
     """
     template = REMOTE_ACTIONS[action_name]
     sudo = "sudo -n " if use_sudo else ""
+    rendered_path = shlex.quote(path) if action_name == "stop_compose" else path
     return template.format(
         timeout=timeout,
-        path=path,
+        path=rendered_path,
         skip_ids=skip_ids,
         umount_targets=shlex.quote(umount_targets),
         wait_interval=wait_interval,

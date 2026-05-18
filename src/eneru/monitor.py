@@ -794,6 +794,8 @@ class UPSGroupMonitor(
             shutdown_cmd = str(self.config.local_shutdown.command).split()
             if shutdown_cmd:
                 required_cmds.append(shutdown_cmd[0])
+        if self._uses_loopback_delegate:
+            required_cmds.append("ssh")
         missing = [cmd for cmd in required_cmds if not command_exists(cmd)]
 
         if missing:
@@ -1082,7 +1084,7 @@ class UPSGroupMonitor(
             self._shutdown_containers()
             self._sync_filesystems()
             self._unmount_filesystems()
-        self._shutdown_remote_servers()
+        remote_results = self._shutdown_remote_servers() or []
 
         if is_local and self.config.filesystems.sync_enabled and not delegated:
             self._log_message("💾 Final filesystem sync...")
@@ -1102,18 +1104,19 @@ class UPSGroupMonitor(
 
         elapsed = int(time.monotonic() - sequence_start)
 
-        # Mirror the sequence completion into the events table (regardless
-        # of local_shutdown.enabled) so the TUI's --events-only view
-        # carries the elapsed-time row between EMERGENCY_SHUTDOWN_INITIATED
-        # and the next start's DAEMON_RECOVERED.
-        try:
-            self._stats_store.log_event(
-                "SHUTDOWN_SEQUENCE_COMPLETE", f"elapsed: {elapsed}s",
-            )
-        except Exception:
-            pass
+        def record_sequence_complete() -> None:
+            # Mirror true sequence completion into the events table so the
+            # TUI's --events-only view carries the elapsed-time row between
+            # EMERGENCY_SHUTDOWN_INITIATED and DAEMON_RECOVERED.
+            try:
+                self._stats_store.log_event(
+                    "SHUTDOWN_SEQUENCE_COMPLETE", f"elapsed: {elapsed}s",
+                )
+            except Exception:
+                pass
 
         if self.config.local_shutdown.enabled and not delegated:
+            record_sequence_complete()
             self._log_message("🔌 Shutting down local server NOW")
             self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE")
 
@@ -1158,6 +1161,34 @@ class UPSGroupMonitor(
             # v5.5: the loopback's shutdown_command (already executed during
             # _shutdown_remote_servers) is what actually powers off the host.
             # The container dies with it. Notify + flush + marker, then exit.
+            loopback_results = [
+                r for r in remote_results
+                if any(
+                    s.enabled
+                    and s.is_host_loopback is True
+                    and (s.name or s.host) == r.server
+                    and s.host == r.host
+                    for s in self.config.remote_servers
+                )
+            ]
+            if not loopback_results or not all(r.success for r in loopback_results):
+                details = "; ".join(
+                    r.error or "shutdown command was not sent"
+                    for r in loopback_results
+                    if not r.success
+                ) or "loopback shutdown result missing"
+                self._log_message(
+                    "❌ Delegated host poweroff failed; shutdown sequence "
+                    f"is incomplete: {details}"
+                )
+                self._send_notification(
+                    f"❌ **Shutdown Sequence Incomplete** (took {elapsed}s)\n"
+                    f"Host poweroff delegation failed: {details}",
+                    self.config.NOTIFY_FAILURE,
+                    category="shutdown_summary",
+                )
+                return
+            record_sequence_complete()
             self._log_message(
                 "🛰️ Host poweroff delegated to loopback SSH (already sent). "
                 "Container will terminate when the host goes down."
@@ -1185,6 +1216,7 @@ class UPSGroupMonitor(
                     reason=REASON_SEQUENCE_COMPLETE,
                 )
         else:
+            record_sequence_complete()
             self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE (local shutdown disabled)")
             self._send_notification(
                 f"✅ **Shutdown Sequence Complete** (took {elapsed}s)\n"

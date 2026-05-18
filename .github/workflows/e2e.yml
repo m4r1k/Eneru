@@ -98,10 +98,10 @@ jobs:
       - name: Verify v5.5 loopback E2E coverage is wired
         if: matrix.group == 'loopback'
         run: |
-          grep -q "run_loopback_case root root false" tests/e2e/groups/loopback.sh
-          grep -q "run_loopback_case sudo testuser true" tests/e2e/groups/loopback.sh
-          grep -q "negative_missing_machine_id" tests/e2e/groups/loopback.sh
-          grep -q "negative_missing_loopback" tests/e2e/groups/loopback.sh
+          grep -Eq "^[[:space:]]*run_loopback_case[[:space:]]+root[[:space:]]+root[[:space:]]+false[[:space:]]+19191[[:space:]]*$" tests/e2e/groups/loopback.sh
+          grep -Eq "^[[:space:]]*run_loopback_case[[:space:]]+sudo[[:space:]]+testuser[[:space:]]+true[[:space:]]+19192[[:space:]]*$" tests/e2e/groups/loopback.sh
+          grep -Eq "^[[:space:]]*negative_missing_machine_id[[:space:]]*$" tests/e2e/groups/loopback.sh
+          grep -Eq "^[[:space:]]*negative_missing_loopback[[:space:]]*$" tests/e2e/groups/loopback.sh
 
       - name: Collect logs on failure
         if: failure()

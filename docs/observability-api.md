@@ -25,7 +25,7 @@ Endpoints:
 | Endpoint | Purpose | Status codes |
 |----------|---------|--------------|
 | `/health` | API process is alive | 200 |
-| `/ready` | Monitoring has usable UPS visibility | 200 ready / 503 not ready |
+| `/ready` | Monitoring has usable UPS visibility and every configured shutdown capability is achievable | 200 ready / 503 not ready |
 | `/api/v1` | API endpoint index | 200 |
 | `/api/v1/ups` | Current UPS/group status | 200 |
 | `/api/v1/ups/<name>` | One UPS status | 200 / 404 |
