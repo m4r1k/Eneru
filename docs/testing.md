@@ -29,10 +29,10 @@ Eneru uses unit tests, package-install tests, and end-to-end tests with real NUT
    ╱─────────────────────────────────────────────╲
 ```
 
-The pyramid is intentionally bottom-heavy. As of the v5.5.0-rc4 pass,
-the local pytest suite contains 1620 tests. E2E tests are fewer, but they
-exercise the real service boundaries where packaging, NUT, SSH, Docker,
-filesystem, and CLI assumptions meet.
+The pyramid is intentionally bottom-heavy. The local pytest suite contains
+thousands of tests, all gated at ≥95% per-file line+branch coverage. E2E
+tests are fewer, but they exercise the real service boundaries where
+packaging, NUT, SSH, Docker, filesystem, and CLI assumptions meet.
 
 ## CI layout
 
