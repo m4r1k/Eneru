@@ -399,8 +399,14 @@ remote_servers:
         assert server.pre_shutdown_commands == []
 
     @pytest.mark.unit
-    def test_loopback_shutdown_order_must_be_last(self, temp_config_file):
-        """A loopback host poweroff must run after every other enabled remote."""
+    def test_loopback_shutdown_order_is_not_validated(self, temp_config_file):
+        """v5.5: a loopback's shutdown_order is ignored at execution time
+        (the runtime brackets every is_host_loopback delegate around the
+        regular remotes — see RemoteShutdownMixin._shutdown_remote_servers
+        and TestLoopbackShutdownOrdering in test_remote_commands.py).
+        The config validator therefore no longer enforces a "loopback >
+        max(others)" rule. This used to error in v5.5.0-rc7 and earlier;
+        the rule is moot once the runtime guarantees the ordering."""
         config_data = """
 remote_servers:
   - name: "host-loopback"
@@ -422,7 +428,12 @@ remote_servers:
             config, raw_data=yaml.safe_load(config_data),
         )
 
-        assert any("is_host_loopback" in m and "shutdown_order" in m for m in messages)
+        # No "is_host_loopback ... shutdown_order ... must run last"
+        # error — the runtime owns this invariant now.
+        assert not any(
+            "is_host_loopback" in m and "shutdown_order" in m and "last" in m
+            for m in messages
+        )
 
     @pytest.mark.unit
     def test_loopback_invalid_shutdown_order_reports_type_error_only(self, temp_config_file):

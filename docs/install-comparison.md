@@ -112,18 +112,26 @@ walk through.
 
 ## SELinux note
 
-On RHEL / CentOS / Rocky / Alma hosts, bind-mounted files need the
-correct SELinux label or the container user can't read them. Use the
-`:Z` mount option to relabel:
+On RHEL / CentOS / Rocky / Alma hosts, **eneru-owned** bind-mount
+sources need the correct SELinux label or the container user can't
+read them. Use `:Z` to relabel:
 
 ```bash
--v /etc/machine-id:/etc/machine-id:ro,Z
 -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z
 -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z
+-v /srv/eneru/state:/var/lib/eneru:Z
 ```
 
 Use `:z` (lowercase) only when multiple containers share the same
-mount source.
+source.
+
+**Do not** add `:Z` or `:z` to `/etc/machine-id` (plain `:ro` only).
+The relabel persists on disk and would break `dbus-broker` /
+`NetworkManager` / `systemd-logind` on the next host reboot. The
+default targeted policy already grants `container_t` read access to
+`machineid_t`. Same rule for any other host file shared with system
+services (`/etc/localtime`, `/etc/resolv.conf`, anything under
+`/run`).
 
 ## Privilege model
 

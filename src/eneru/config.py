@@ -1799,38 +1799,17 @@ class ConfigLoader:
 
         # Validate SSH options, shutdown_order, shutdown_safety_margin,
         # and the mutual-exclusion of shutdown_order vs parallel.
+        #
+        # v5.5: is_host_loopback delegates no longer need shutdown_order
+        # > max(others). The runtime now brackets every loopback around
+        # the regular remotes (pre-actions first, poweroff last) in
+        # RemoteShutdownMixin._shutdown_remote_servers. Any
+        # shutdown_order set on a loopback entry is ignored at execution
+        # time — kept here for backward compatibility with explicit YAML
+        # but not validated.
         server_groups = [g.remote_servers for g in config.ups_groups]
         server_groups.extend(g.remote_servers for g in config.redundancy_groups)
         for servers in server_groups:
-            def _valid_order(value: Optional[int]) -> bool:
-                return isinstance(value, int) and not isinstance(value, bool) and value >= 1
-
-            enabled_others = [
-                s for s in servers if s.enabled and s.is_host_loopback is not True
-            ]
-            for loopback in [s for s in servers if s.enabled and s.is_host_loopback is True]:
-                if enabled_others and loopback.shutdown_order is None:
-                    messages.append(
-                        f"ERROR: Remote server '{loopback.name or loopback.host}' "
-                        "is_host_loopback must set shutdown_order greater than "
-                        "every other enabled remote server in the same group. "
-                        "The host poweroff delegate must run last."
-                    )
-                    continue
-                if enabled_others and not _valid_order(loopback.shutdown_order):
-                    continue
-                other_orders = [
-                    s.shutdown_order if s.shutdown_order is not None else 0
-                    for s in enabled_others
-                    if _valid_order(s.shutdown_order) or s.shutdown_order is None
-                ]
-                if other_orders and loopback.shutdown_order <= max(other_orders):
-                    messages.append(
-                        f"ERROR: Remote server '{loopback.name or loopback.host}' "
-                        "is_host_loopback must have shutdown_order greater than "
-                        "every other enabled remote server in the same group. "
-                        "The host poweroff delegate must run last."
-                    )
             for server in servers:
                 display = server.name or server.host
 

@@ -94,7 +94,7 @@ yourself.
 docker run -d --name eneru \
     --restart unless-stopped \
     --network host \
-    -v /etc/machine-id:/etc/machine-id:ro,Z \
+    -v /etc/machine-id:/etc/machine-id:ro \
     -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
     -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z \
     -v /srv/eneru/state:/var/lib/eneru:Z \
@@ -103,11 +103,17 @@ docker run -d --name eneru \
     ghcr.io/m4r1k/eneru:latest
 ```
 
-On RHEL/Alma/Rocky the `:Z` SELinux relabel is required. Use `:Z`
-(colon) for writable mounts and `:ro,Z` (comma, with Z as the second
-option) for read-only ones. A bare `,Z` on a writable mount is parsed
-by Docker as part of the destination path, and the mount silently
-lands at the wrong place.
+On RHEL/Alma/Rocky the `:Z` SELinux relabel is required for the four
+**eneru-owned** mount sources (`/srv/eneru/...`). Use `:Z` (colon) for
+writable mounts and `:ro,Z` (comma, with Z as the second option) for
+read-only ones. A bare `,Z` on a writable mount is parsed by Docker as
+part of the destination path, and the mount silently lands at the
+wrong place.
+
+The `/etc/machine-id` mount stays plain `:ro` — never `:Z` or `:z`.
+The relabel persists on disk and would break dbus-broker /
+NetworkManager / logind on the next host reboot. See the SELinux note
+in [Choose your install](install-comparison.md#selinux-note).
 
 If you prefer a versioned manifest, the same setup expresses as a
 compose file:
@@ -120,7 +126,7 @@ services:
     restart: unless-stopped
     network_mode: host
     volumes:
-      - /etc/machine-id:/etc/machine-id:ro,Z
+      - /etc/machine-id:/etc/machine-id:ro   # NEVER :Z — shared host file (see install-comparison.md)
       - /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z
       - /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z
       - /srv/eneru/state:/var/lib/eneru:Z

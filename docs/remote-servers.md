@@ -442,5 +442,5 @@ hardening — lives in
 | `command not found` | Use full command paths or a login shell where the platform requires one |
 | NAS shuts down too early | Use `shutdown_order` instead of legacy `parallel: false` |
 | Host key verification fails | Re-check the host identity before accepting the new key |
-| **v5.5 loopback** `host identity mismatch` | Add `-v /etc/machine-id:/etc/machine-id:ro` (and `,Z` on SELinux) to the container's mounts |
+| **v5.5 loopback** `host identity mismatch` | Add `-v /etc/machine-id:/etc/machine-id:ro` (plain `:ro` only — never `:Z` or `:z`; relabel persists on disk and breaks dbus-broker on the next reboot). |
 | **v5.5 loopback** `PermissionError` on SSH key | Container user (uid 10001) can't read the bind-mounted key. Use a dedicated dir with mode 0755, set the key to mode 0400 or 0600, and make uid 10001 the owner or grant it an ACL |

@@ -84,6 +84,78 @@ What mixins MUST do when adding a new module file:
    convention (root `AGENTS.md`): every feature ships with both synthetic
    tests in `tests/` AND an E2E step.
 
+## Loopback ordering (v5.5+)
+
+Think of shutdown as closing a kitchen at night. **Take pots off the
+stove** before you **turn off the fridge** (the NAS) before you **kill
+the kitchen lights** (host poweroff). Skip a step or do them out of
+order and food cooking on the stove gets ruined — in our world that's
+a dirty NFS unmount hanging for 32s because the NAS is already
+powering off. v5.5 introduced a delegation path that almost broke this
+ordering; this section explains why and how the runtime keeps the
+three-act order intact.
+
+Eneru's pre-v5.5 shutdown sequence had a fixed three-act order: **(1)
+drain local state** (stop VMs/containers, sync, unmount filesystems),
+**(2) shut down peer remotes** (NAS, secondary hosts), **(3) poweroff
+the eneru host**. Local drain before peers because a local app or NFS
+mount might depend on a peer being alive. Host poweroff last because
+eneru itself is running on it.
+
+v5.5 added container-native local-host ownership through a
+`is_host_loopback: true` SSH delegate. The local drain (act 1) and the
+host poweroff (act 3) both happen via SSH to `127.0.0.1` because
+nothing privileged can run inside the non-root container. Mechanically,
+both got bundled into a single `remote_servers` entry — and that broke
+the ordering invariant, because the remote loop sorts by one
+`shutdown_order` integer per entry and "first AND last" can't be one
+integer. v5.5.0-rc7 shipped with the loopback at `shutdown_order=999`,
+which put the whole bundle AFTER configured peer remotes. Real test
+2026-05-18: NAS shutdown sent first, NFS unmount of NAS mounts hung
+32s after the NAS was already powering off. Held back 5.5.0 stable.
+
+**The fix lives in `src/eneru/shutdown/remote.py`,
+`RemoteShutdownMixin._shutdown_remote_servers`.** The runtime now
+partitions enabled remotes into `loopbacks` and `regulars`, then runs:
+
+1. **Phase A** — every loopback's `pre_shutdown_commands`. Synchronous
+   (loopbacks are usually one, sometimes a few in K8s; parallelism
+   doesn't pay).
+2. **Phase B** — regulars, grouped by `shutdown_order` and run in
+   parallel within a phase. **This is the v5.4 code path, unchanged.**
+3. **Phase C** — every loopback's `shutdown_command`.
+
+Each loopback's `RemoteShutdownResult` is pre-allocated before Phase A
+and updated in both A and C, so the summary log still reports one
+success/fail row per server.
+
+**Invariants the runtime guarantees:**
+
+- A loopback's pre-actions always run **before** any non-loopback remote.
+- A loopback's shutdown command always runs **after** every non-loopback
+  remote.
+- `shutdown_order` on a loopback entry is **ignored** at execution time.
+  We keep the field schema-valid for backward compatibility with explicit
+  YAML, but the auto-synthesizer no longer sets it (see
+  `_synthesize_loopback_if_needed` in `cli.py`).
+- Remote-only configs (no `is_host_loopback: true` anywhere) take the
+  Phase B path only and are bit-for-bit equivalent to v5.4 behavior.
+
+**When you touch this code:**
+
+- Keep Phase B independent of loopback state — if you find yourself
+  threading `is_host_loopback` checks through `compute_effective_order`
+  or `_shutdown_servers_parallel`, you're undoing the partition.
+- If you add a new field that mutates the loopback's execution
+  semantics (custom `shutdown_command_per_phase`, deadlines, etc.),
+  update this section and add a regression test covering the
+  `[loopback, regular@-1]` shape — that's the exact configuration the
+  rc7 bug hit.
+- The `print_shutdown_sequence` tree in `cli.py` shows local-delegated
+  step 1, remotes step 2, host poweroff step 3. After this fix the
+  print output and the runtime execution finally agree; if you change
+  one, change the other.
+
 ## Stats schema evolution (when to add a column)
 
 The SQLite stats DB (`src/eneru/stats.py`) ships a `SCHEMA_VERSION`
