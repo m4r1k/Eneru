@@ -442,9 +442,12 @@ def _synthesize_loopback_if_needed(
             "UserKnownHostsFile=/dev/null",
         ],
         is_host_loopback=True,
-        # Highest shutdown_order so the host poweroff runs LAST — anything
-        # earlier would be killed by the loopback's shutdown_command.
-        shutdown_order=999,
+        # shutdown_order intentionally unset. v5.5 runtime brackets every
+        # is_host_loopback delegate around the regular remotes (pre-actions
+        # before, poweroff after) regardless of this field — see
+        # RemoteShutdownMixin._shutdown_remote_servers in
+        # src/eneru/shutdown/remote.py and the "Loopback ordering" section
+        # in src/eneru/AGENTS.md.
     )
     if owner is not None:
         owner.remote_servers.append(synthesized)

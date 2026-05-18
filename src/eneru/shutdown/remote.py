@@ -69,15 +69,30 @@ class RemoteShutdownMixin:
     def _shutdown_remote_servers(self) -> List[RemoteShutdownResult]:
         """Shutdown all enabled remote servers via SSH.
 
-        Servers are grouped by their effective shutdown order and processed
-        in ascending order.  All servers within a group run in parallel.
-        A server alone in its group effectively runs sequentially.
+        v5.5: ``is_host_loopback: true`` delegates always **bracket** the
+        other remotes regardless of their ``shutdown_order``:
 
-        When shutdown_order is not set, the legacy parallel flag determines
-        effective order:
+        1. Loopback ``pre_shutdown_commands`` (stop local VMs/containers,
+           sync, unmount NFS that targets a peer remote) run FIRST so the
+           local drain finishes while peer remotes are still alive.
+        2. Non-loopback remotes (NAS, secondary host, …) run in the middle,
+           grouped by ``shutdown_order`` exactly as in v5.4.
+        3. Loopback ``shutdown_command`` (host poweroff) runs LAST so the
+           eneru host outlives every remote it might have depended on.
+
+        Why intrinsic and not user-configurable: pre-v5.5 the local-host
+        phases (VMs/containers/sync/unmount) ran before any remote and the
+        host poweroff ran after. v5.5 collapses the local work into a
+        single loopback ``remote_servers`` entry; honouring its
+        ``shutdown_order`` like a regular remote would mean the local
+        drain races the peer remote shutdowns — that bug ate the v5.5.0-rc7
+        controlled test on 2026-05-18 (NFS unmount hung 32s while the NAS
+        was already powering off). See AGENTS.md "Loopback ordering".
+
+        Non-loopback remotes follow v5.4 ordering: ``shutdown_order``
+        ascending, ties broken by the legacy ``parallel`` flag:
         - parallel: true  (default) -> effective order 0
         - parallel: false -> unique negative orders (run before order 0)
-        This preserves exact backward compatibility with existing configs.
         """
         # Imported lazily to avoid a circular import (monitor.py imports
         # this mixin).
@@ -88,15 +103,27 @@ class RemoteShutdownMixin:
         if not enabled_servers:
             return []
 
-        # Group servers by effective shutdown order
-        ordered = compute_effective_order(enabled_servers)
-        phases: Dict[int, List[RemoteServerConfig]] = {}
-        for effective, server in ordered:
-            phases.setdefault(effective, []).append(server)
-        sorted_keys = sorted(phases.keys())
+        # Partition: loopback delegates bracket the regulars.
+        loopbacks = [s for s in enabled_servers if s.is_host_loopback is True]
+        regulars = [s for s in enabled_servers if s.is_host_loopback is not True]
+
+        # Phase plan for the header log.
+        regular_phases: Dict[int, List[RemoteServerConfig]] = {}
+        if regulars:
+            ordered = compute_effective_order(regulars)
+            for effective, server in ordered:
+                regular_phases.setdefault(effective, []).append(server)
+        sorted_regular_keys = sorted(regular_phases.keys())
+
+        has_loopback_pre = any(lb.pre_shutdown_commands for lb in loopbacks)
+        has_loopback_post = bool(loopbacks)
+        num_phases = (
+            (1 if has_loopback_pre else 0)
+            + len(sorted_regular_keys)
+            + (1 if has_loopback_post else 0)
+        )
 
         server_count = len(enabled_servers)
-        num_phases = len(sorted_keys)
 
         if num_phases > 1:
             self._log_message(
@@ -107,19 +134,70 @@ class RemoteShutdownMixin:
         else:
             self._log_message(f"🌐 Shutting down 1 remote server...")
 
-        results: List[RemoteShutdownResult] = []
+        # Pre-allocate one result per loopback so the pre-phase and the
+        # post-phase write back into the same record (pre_commands +
+        # shutdown_sent live on the same object).
+        loopback_results: Dict[int, RemoteShutdownResult] = {}
+        for lb in loopbacks:
+            loopback_results[id(lb)] = RemoteShutdownResult(
+                server=lb.name or lb.host,
+                host=lb.host,
+                pre_commands=RemotePreShutdownResult(),
+            )
 
-        for phase_idx, key in enumerate(sorted_keys, 1):
-            phase_servers = phases[key]
-            names = ", ".join(s.name or s.host for s in phase_servers)
+        phase_idx = 0
+        regular_results: List[RemoteShutdownResult] = []
 
+        # Phase A: loopback pre-actions — drain local state while peers live.
+        if has_loopback_pre:
+            phase_idx += 1
+            names = ", ".join(
+                lb.name or lb.host for lb in loopbacks if lb.pre_shutdown_commands
+            )
             if num_phases > 1:
-                self._log_message(f"  📋 Phase {phase_idx}/{num_phases} (order={key}): {names}")
+                self._log_message(
+                    f"  📋 Phase {phase_idx}/{num_phases} (loopback pre-actions): {names}"
+                )
+            for lb in loopbacks:
+                if not lb.pre_shutdown_commands:
+                    continue
+                display = lb.name or lb.host
+                self._log_message(
+                    f"🌐 Initiating loopback pre-actions: {display} ({lb.host})..."
+                )
+                # No phase-deadline here: loopback pre-actions are
+                # best-effort and the per-command timeouts already cap
+                # each step. A hung NFS unmount must not abort the
+                # later peer-remote phase.
+                loopback_results[id(lb)].pre_commands = (
+                    self._execute_remote_pre_shutdown(lb, collect_result=True)
+                )
 
-            # Use the same deadline-based thread path for one server and
-            # many servers. A single unreachable host must not stall the
-            # whole shutdown sequence longer than its configured budget.
-            results.extend(self._shutdown_servers_parallel(phase_servers))
+        # Phase B: non-loopback remotes (existing parallel phased path).
+        for key in sorted_regular_keys:
+            phase_idx += 1
+            phase_servers = regular_phases[key]
+            names = ", ".join(s.name or s.host for s in phase_servers)
+            if num_phases > 1:
+                self._log_message(
+                    f"  📋 Phase {phase_idx}/{num_phases} (order={key}): {names}"
+                )
+            regular_results.extend(self._shutdown_servers_parallel(phase_servers))
+
+        # Phase C: loopback poweroff — host goes down LAST.
+        if has_loopback_post:
+            phase_idx += 1
+            names = ", ".join(lb.name or lb.host for lb in loopbacks)
+            if num_phases > 1:
+                self._log_message(
+                    f"  📋 Phase {phase_idx}/{num_phases} (loopback poweroff): {names}"
+                )
+            for lb in loopbacks:
+                self._shutdown_loopback_command(lb, loopback_results[id(lb)])
+
+        results: List[RemoteShutdownResult] = (
+            list(loopback_results.values()) + regular_results
+        )
 
         # Log summary
         succeeded = sum(1 for result in results if result.success)
@@ -136,6 +214,57 @@ class RemoteShutdownMixin:
             details.append(f"{crashed} crashed")
         self._log_message(f"  {icon} Remote shutdown complete ({', '.join(details)})")
         return results
+
+    def _shutdown_loopback_command(
+        self,
+        server: RemoteServerConfig,
+        result: RemoteShutdownResult,
+    ) -> None:
+        """Execute ONLY the loopback's shutdown_command (no pre-actions).
+
+        v5.5 loopback orchestration runs pre_shutdown_commands in an
+        earlier phase (so peer remotes can outlive the local drain) and
+        defers the host poweroff to this final phase. This helper
+        completes the pre-allocated result record with the poweroff
+        outcome.
+        """
+        display = server.name or server.host
+        self._log_message(
+            f"🌐 Initiating loopback poweroff: {display} ({server.host})..."
+        )
+
+        shutdown_command = self._with_sudo(server.shutdown_command, server.use_sudo)
+        self._log_message(f"  🔌 Sending shutdown command: {shutdown_command}")
+
+        if self.config.behavior.dry_run:
+            result.shutdown_sent = True
+            result.dry_run = True
+            self._log_message(
+                f"  🧪 [DRY-RUN] Would send command '{shutdown_command}' to "
+                f"{server.user}@{server.host}"
+            )
+            return
+
+        success, error_msg = self._run_remote_command(
+            server,
+            shutdown_command,
+            server.command_timeout,
+            "shutdown",
+        )
+
+        if success:
+            result.shutdown_sent = True
+            self._log_message(f"  ✅ {display} shutdown command sent successfully")
+        else:
+            result.error = error_msg
+            self._log_message(
+                f"  ❌ WARNING: Failed to execute shutdown command on {display}: {error_msg}"
+            )
+            self._send_notification(
+                f"❌ **Remote Shutdown Failed:** {display}\nError: {error_msg}",
+                self.config.NOTIFY_FAILURE,
+                category="shutdown",
+            )
 
     def _shutdown_servers_parallel(
         self, servers: List[RemoteServerConfig]

@@ -759,6 +759,245 @@ class TestRemotePreShutdownExecution:
         assert remote_monitor._loopback_umount_targets() == []
 
 
+class TestLoopbackShutdownOrdering:
+    """v5.5 loopback ordering invariant: an ``is_host_loopback: true``
+    delegate ALWAYS brackets the non-loopback remotes.
+
+    Pre-actions (sync, unmount, stop local VMs/containers) run BEFORE
+    any peer remote so the local drain finishes while peer remotes are
+    still alive. Host poweroff runs AFTER every peer so the eneru host
+    outlives every remote it might have depended on. The loopback's
+    ``shutdown_order`` field is ignored at execution time.
+
+    Regression for the v5.5.0-rc7 test on 2026-05-18 where NAS
+    shutdown was sent first and the host NFS unmount of NAS mounts
+    hung 32s afterward.
+    """
+
+    @pytest.fixture
+    def remote_monitor(self, minimal_config, tmp_path):
+        minimal_config.logging.state_file = str(tmp_path / "state")
+        minimal_config.logging.battery_history_file = str(tmp_path / "history")
+        minimal_config.logging.shutdown_flag_file = str(tmp_path / "flag")
+        minimal_config.logging.file = None
+        minimal_config.behavior.dry_run = False
+
+        monitor = UPSGroupMonitor(minimal_config)
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+        monitor._notification_worker = MagicMock()
+        return monitor
+
+    @staticmethod
+    def _record_calls(monitor):
+        """Patch _run_remote_command to record (host, command) in order."""
+        calls: list[tuple[str, str]] = []
+
+        def fake_run(server, command, timeout, description, **kwargs):
+            calls.append((server.host, command))
+            return (True, "")
+
+        return calls, patch.object(monitor, "_run_remote_command", side_effect=fake_run)
+
+    @pytest.mark.unit
+    def test_loopback_pre_runs_before_regular_remote(self, remote_monitor):
+        """Loopback pre_shutdown_commands MUST run before a peer remote's
+        shutdown_command. The rc7 bug had this reversed."""
+        loopback = RemoteServerConfig(
+            name="host-loopback",
+            enabled=True,
+            host="127.0.0.1",
+            user="root",
+            is_host_loopback=True,
+            shutdown_command="shutdown -h now",
+            pre_shutdown_commands=[
+                RemoteCommandConfig(command="echo drain-local"),
+            ],
+        )
+        nas = RemoteServerConfig(
+            name="NAS",
+            enabled=True,
+            host="10.0.0.10",
+            user="root",
+            shutdown_order=1,
+            shutdown_command="poweroff",
+        )
+        remote_monitor.config.ups_groups[0].remote_servers = [loopback, nas]
+
+        calls, run_patch = self._record_calls(remote_monitor)
+        with run_patch:
+            remote_monitor._shutdown_remote_servers()
+
+        # Expected ordering: loopback pre-action, NAS shutdown, loopback shutdown
+        hosts = [host for host, _ in calls]
+        assert hosts == ["127.0.0.1", "10.0.0.10", "127.0.0.1"]
+
+        # And the loopback's drain comes from its pre_shutdown_commands,
+        # not its final shutdown_command.
+        assert calls[0][1] == "echo drain-local"
+        assert calls[1][1] == "poweroff"
+        assert calls[2][1] == "shutdown -h now"
+
+    @pytest.mark.unit
+    def test_loopback_pre_runs_before_lower_ordered_regular(self, remote_monitor):
+        """Even when a regular remote has a very low shutdown_order
+        (e.g. -1, which would sort first under the v5.4 algorithm),
+        the loopback pre-actions still run first."""
+        loopback = RemoteServerConfig(
+            name="host-loopback",
+            enabled=True,
+            host="127.0.0.1",
+            user="root",
+            is_host_loopback=True,
+            shutdown_command="shutdown -h now",
+            pre_shutdown_commands=[
+                RemoteCommandConfig(command="echo drain"),
+            ],
+        )
+        # parallel=False on a single regular yields a unique negative order
+        # via compute_effective_order — the very pattern that produced
+        # the rc7 misordering when the loopback had order=999.
+        nas = RemoteServerConfig(
+            name="NAS",
+            enabled=True,
+            host="10.0.0.10",
+            user="root",
+            parallel=False,
+            shutdown_command="poweroff",
+        )
+        remote_monitor.config.ups_groups[0].remote_servers = [loopback, nas]
+
+        calls, run_patch = self._record_calls(remote_monitor)
+        with run_patch:
+            remote_monitor._shutdown_remote_servers()
+
+        hosts = [host for host, _ in calls]
+        assert hosts == ["127.0.0.1", "10.0.0.10", "127.0.0.1"]
+
+    @pytest.mark.unit
+    def test_loopback_shutdown_order_field_is_ignored(self, remote_monitor):
+        """A loopback entry with shutdown_order=1 (would normally run
+        first) still has its poweroff deferred to the end."""
+        loopback = RemoteServerConfig(
+            name="host-loopback",
+            enabled=True,
+            host="127.0.0.1",
+            user="root",
+            is_host_loopback=True,
+            shutdown_order=1,  # explicitly low; runtime must ignore
+            shutdown_command="shutdown -h now",
+            pre_shutdown_commands=[
+                RemoteCommandConfig(command="echo drain"),
+            ],
+        )
+        nas = RemoteServerConfig(
+            name="NAS",
+            enabled=True,
+            host="10.0.0.10",
+            user="root",
+            shutdown_order=50,  # explicitly higher than the loopback
+            shutdown_command="poweroff",
+        )
+        remote_monitor.config.ups_groups[0].remote_servers = [loopback, nas]
+
+        calls, run_patch = self._record_calls(remote_monitor)
+        with run_patch:
+            remote_monitor._shutdown_remote_servers()
+
+        hosts = [host for host, _ in calls]
+        # Loopback pre first, NAS shutdown second, loopback poweroff last —
+        # NOT loopback-then-NAS as the shutdown_order field would suggest.
+        assert hosts == ["127.0.0.1", "10.0.0.10", "127.0.0.1"]
+
+    @pytest.mark.unit
+    def test_remote_only_setup_unchanged_by_partition(self, remote_monitor):
+        """Remote-only configs (no loopback anywhere) MUST execute exactly
+        as in v5.4: phases derived from shutdown_order, ascending."""
+        nas = RemoteServerConfig(
+            name="NAS",
+            enabled=True,
+            host="10.0.0.10",
+            user="root",
+            shutdown_order=5,
+            shutdown_command="poweroff",
+        )
+        backup = RemoteServerConfig(
+            name="Backup",
+            enabled=True,
+            host="10.0.0.11",
+            user="root",
+            shutdown_order=10,
+            shutdown_command="poweroff",
+        )
+        remote_monitor.config.ups_groups[0].remote_servers = [nas, backup]
+
+        calls, run_patch = self._record_calls(remote_monitor)
+        with run_patch:
+            remote_monitor._shutdown_remote_servers()
+
+        hosts = [host for host, _ in calls]
+        # order=5 before order=10, both shutdown_commands only (no pre).
+        assert hosts == ["10.0.0.10", "10.0.0.11"]
+
+    @pytest.mark.unit
+    def test_loopback_without_pre_skips_phase_a(self, remote_monitor):
+        """A loopback with no pre_shutdown_commands skips Phase A
+        entirely — only the host poweroff runs in Phase C."""
+        loopback = RemoteServerConfig(
+            name="host-loopback",
+            enabled=True,
+            host="127.0.0.1",
+            user="root",
+            is_host_loopback=True,
+            shutdown_command="shutdown -h now",
+            pre_shutdown_commands=[],
+        )
+        nas = RemoteServerConfig(
+            name="NAS",
+            enabled=True,
+            host="10.0.0.10",
+            user="root",
+            shutdown_command="poweroff",
+        )
+        remote_monitor.config.ups_groups[0].remote_servers = [loopback, nas]
+
+        calls, run_patch = self._record_calls(remote_monitor)
+        with run_patch:
+            remote_monitor._shutdown_remote_servers()
+
+        hosts = [host for host, _ in calls]
+        assert hosts == ["10.0.0.10", "127.0.0.1"]
+
+    @pytest.mark.unit
+    def test_loopback_result_aggregates_pre_and_post(self, remote_monitor):
+        """The single loopback RemoteShutdownResult must reflect BOTH
+        the pre-actions outcome and the final shutdown command outcome."""
+        loopback = RemoteServerConfig(
+            name="host-loopback",
+            enabled=True,
+            host="127.0.0.1",
+            user="root",
+            is_host_loopback=True,
+            shutdown_command="shutdown -h now",
+            pre_shutdown_commands=[
+                RemoteCommandConfig(command="echo drain"),
+            ],
+        )
+        remote_monitor.config.ups_groups[0].remote_servers = [loopback]
+
+        _calls, run_patch = self._record_calls(remote_monitor)
+        with run_patch:
+            results = remote_monitor._shutdown_remote_servers()
+
+        assert len(results) == 1
+        lb_result = results[0]
+        assert lb_result.server == "host-loopback"
+        assert lb_result.shutdown_sent is True
+        assert lb_result.pre_commands.attempted == 1
+        assert lb_result.pre_commands.failed == 0
+        assert lb_result.success is True
+
+
 class TestRunRemoteCommand:
     """Test the _run_remote_command helper method."""
 

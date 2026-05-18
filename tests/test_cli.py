@@ -2400,8 +2400,12 @@ class TestSynthesizeLoopback:
         assert server.user == "root"
         assert server.shutdown_command == "shutdown -h now"
         assert server.ssh_key_path == "/var/lib/eneru/ssh/id_loopback"
-        # Highest shutdown_order so host poweroff runs LAST.
-        assert server.shutdown_order == 999
+        # v5.5: shutdown_order intentionally unset on the synthesized
+        # loopback. The runtime brackets is_host_loopback delegates
+        # around the regular remotes regardless of this field; the
+        # ordering invariant is enforced by RemoteShutdownMixin
+        # (see TestLoopbackShutdownOrdering in test_remote_commands.py).
+        assert server.shutdown_order is None
 
     @pytest.mark.unit
     def test_skipped_on_kubernetes(self, tmp_path):
