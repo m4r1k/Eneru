@@ -86,6 +86,15 @@ What mixins MUST do when adding a new module file:
 
 ## Loopback ordering (v5.5+)
 
+Think of shutdown as closing a kitchen at night. **Take pots off the
+stove** before you **turn off the fridge** (the NAS) before you **kill
+the kitchen lights** (host poweroff). Skip a step or do them out of
+order and food cooking on the stove gets ruined — in our world that's
+a dirty NFS unmount hanging for 32s because the NAS is already
+powering off. v5.5 introduced a delegation path that almost broke this
+ordering; this section explains why and how the runtime keeps the
+three-act order intact.
+
 Eneru's pre-v5.5 shutdown sequence had a fixed three-act order: **(1)
 drain local state** (stop VMs/containers, sync, unmount filesystems),
 **(2) shut down peer remotes** (NAS, secondary hosts), **(3) poweroff
