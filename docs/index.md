@@ -94,7 +94,14 @@ PyPI installs expose the `eneru` command:
 eneru run --config /etc/ups-monitor/config.yaml
 ```
 
-Package commands in these docs use the package path where root/systemd behavior matters. PyPI examples use `eneru` when the context is developer or user-managed execution.
+OCI container examples use `docker run`, `podman run`, or Kubernetes YAML
+and keep the same `eneru` entry point inside the image. Remote-only containers
+can run as non-root. Containerized local-host ownership, including local VM,
+Docker/Podman, compose, sync, unmount, and host shutdown actions, uses the
+v5.5 SSH loopback delegate; see [Containers and Kubernetes](containers-kubernetes.md)
+for the required mounts, SSH key, and security model.
+
+Package commands in these docs use the package path where root/systemd behavior matters. PyPI and in-container examples use `eneru` when the context is developer or user-managed execution.
 
 ## Support the project
 

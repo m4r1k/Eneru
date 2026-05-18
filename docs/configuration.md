@@ -291,6 +291,11 @@ Eneru writes one SQLite database per UPS. The writer is best effort; stats failu
 
 See [Statistics](statistics.md) for schema and queries.
 
+Slow-response diagnostics are event rows too. Rate-limited slow NUT polls
+use `SLOW_NUT_RESPONSE`; successful but slow remote SSH health probes use
+`REMOTE_SSH_SLOW_RESPONSE`. They are hidden from the default Power Events
+view and appear in the TUI/API events list at Diagnostics verbosity (`-v`).
+
 ## Logging and behavior
 
 | Key | Default | Description |

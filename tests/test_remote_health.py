@@ -269,6 +269,79 @@ def test_remote_health_records_only_status_transitions(tmp_path, remote_server):
 
 
 @pytest.mark.unit
+def test_slow_remote_ssh_probe_records_diagnostics_event(tmp_path, remote_server):
+    config = Config()
+    config.remote_health.enabled = True
+    events = []
+    logs = []
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[remote_server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=logs.append,
+        event_fn=lambda etype, detail, notified: events.append(
+            (etype, detail, notified)
+        ),
+    )
+
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(True, "", 2_500)):
+        manager.check_once()
+
+    assert any("Slow remote SSH response" in line for line in logs)
+    assert events == [(
+        "REMOTE_SSH_SLOW_RESPONSE",
+        "Rack/nas (nas.example) slow SSH response: 2500 ms",
+        False,
+    )]
+
+
+@pytest.mark.unit
+def test_sustained_slow_remote_ssh_probe_notifies_once(tmp_path, remote_server):
+    config = Config()
+    config.remote_health.enabled = True
+    events = []
+    notifications = []
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[remote_server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+        notify_fn=lambda body, typ: notifications.append((body, typ)),
+        event_fn=lambda etype, detail, notified: events.append(
+            (etype, detail, notified)
+        ),
+    )
+    manager._slow_ssh_log_threshold_ms = 99_000
+    manager._slow_ssh_notify_threshold_ms = 1_000
+    manager._slow_ssh_notify_consecutive_checks = 3
+
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(True, "", 2_500)):
+        manager.check_once()
+        manager.check_once()
+        manager.check_once()
+        manager.check_once()
+
+    assert len(notifications) == 1
+    body, notify_type = notifications[0]
+    assert "Sustained slow remote SSH responses" in body
+    assert notify_type == config.NOTIFY_WARNING
+    assert events == [(
+        "REMOTE_SSH_SLOW_RESPONSE",
+        (
+            "Rack/nas (nas.example) sustained slow SSH responses: latest "
+            "2500 ms; threshold 1000 ms for 3 consecutive checks"
+        ),
+        True,
+    )]
+
+
+@pytest.mark.unit
 def test_remote_health_does_not_record_initial_healthy_baseline(tmp_path, remote_server):
     config = Config()
     config.remote_health.enabled = True

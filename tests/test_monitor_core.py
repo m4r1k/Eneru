@@ -154,6 +154,7 @@ class TestNUTLatencyVisibility:
     @pytest.mark.unit
     def test_slow_upsc_logs_once_per_rate_limit_window(self, tmp_path):
         monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
         monitor._slow_nut_log_threshold_seconds = 2.0
         monitor._slow_nut_log_rate_limit_seconds = 300.0
 
@@ -172,6 +173,12 @@ class TestNUTLatencyVisibility:
             if "Slow NUT response" in str(c)
         ]
         assert len(slow_logs) == 2
+        assert monitor._stats_store.log_event.call_count == 2
+        assert all(
+            call_args.args[0] == "SLOW_NUT_RESPONSE"
+            and call_args.kwargs["notification_sent"] is False
+            for call_args in monitor._stats_store.log_event.call_args_list
+        )
 
     @pytest.mark.unit
     def test_brief_slow_poll_does_not_notify(self, tmp_path):
@@ -195,6 +202,7 @@ class TestNUTLatencyVisibility:
     @pytest.mark.unit
     def test_sustained_slow_polling_notifies_once(self, tmp_path):
         monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
         monitor._slow_nut_log_threshold_seconds = 99.0
         monitor._slow_nut_notify_threshold_seconds = 1.0
         monitor._slow_nut_notify_consecutive_polls = 3
@@ -214,6 +222,11 @@ class TestNUTLatencyVisibility:
         assert monitor._notification_worker.send.call_count == 1
         body = monitor._notification_worker.send.call_args.kwargs["body"]
         assert "Sustained slow NUT responses" in body
+        monitor._stats_store.log_event.assert_called_once()
+        event = monitor._stats_store.log_event.call_args
+        assert event.args[0] == "SLOW_NUT_RESPONSE"
+        assert "sustained slow NUT responses" in event.args[1]
+        assert event.kwargs["notification_sent"] is True
 
 
 # ==============================================================================

@@ -110,7 +110,7 @@ The workflow is split into six parallel matrix groups:
 | UPS Multi | Independent UPS groups and local-drain policies |
 | Redundancy | Quorum behavior, advisory triggers, and runtime NUT-visibility regressions |
 | Stats | SQLite, graphs, events, notification coalescing |
-| Loopback | Containerized local-host ownership through root and sudo SSH loopback |
+| Loopback | Containerized local-host ownership through root and sudo SSH loopback, including generated local VM/container/sync/unmount actions |
 
 The scenario files simulate online, on-battery, low-battery, FSD, brownout, overload, hot-grid, and nominal-voltage-mismatch states.
 
@@ -168,8 +168,8 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 50 numb
 | 44 | UPS Single | An unreachable remote target is reported as a bounded best-effort failure instead of stalling shutdown |
 | 45 | UPS Single | MQTT status publishing reaches the broker and includes power-quality fields |
 | 46 | UPS Single | The OCI image runs against the E2E NUT server with the API enabled only by CLI flags |
-| 47 | Loopback | Containerized local-host ownership delegates through the root loopback path and `/ready` is green |
-| 48 | Loopback | Containerized local-host ownership delegates through a non-root SSH user with `use_sudo: true` |
+| 47 | Loopback | Containerized local-host ownership delegates VM, compose/container, sync, unmount, and host shutdown actions through the root loopback path and `/ready` is green |
+| 48 | Loopback | Containerized local-host ownership delegates the same action set through a non-root SSH user with `use_sudo: true` |
 | 49 | Loopback | Missing `/etc/machine-id` bind mount keeps `/ready` false with a setup hint |
 | 50 | Loopback | Docker/Podman local capabilities with explicit no-loopback config fail startup |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |

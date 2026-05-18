@@ -1550,6 +1550,26 @@ class TestQueryEventsForDisplay:
         assert all("DAEMON_START" not in line for line in lines)
 
     @pytest.mark.unit
+    def test_slow_response_events_are_diagnostics(self, tmp_path):
+        """Slow NUT/SSH response rows surface at Diagnostics verbosity."""
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0], [
+            (now - 20, "SLOW_NUT_RESPONSE", "nut"),
+            (now - 10, "REMOTE_SSH_SLOW_RESPONSE", "ssh"),
+        ])
+
+        default_lines = query_events_for_display(config)
+        verbose_lines = query_events_for_display(config, verbosity=1)
+
+        assert all("SLOW_NUT_RESPONSE" not in line for line in default_lines)
+        assert all("REMOTE_SSH_SLOW_RESPONSE" not in line for line in default_lines)
+        assert any("SLOW_NUT_RESPONSE" in line for line in verbose_lines)
+        assert any("REMOTE_SSH_SLOW_RESPONSE" in line for line in verbose_lines)
+
+    @pytest.mark.unit
     def test_double_verbose_includes_all_tiers(self, tmp_path):
         """``-vv`` includes Power, Diagnostics, and Lifecycle."""
         from eneru.tui import query_events_for_display

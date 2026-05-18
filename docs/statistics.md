@@ -59,7 +59,7 @@ These intervals come from `StatsWriter` defaults in `src/eneru/stats.py`: `flush
 | `samples` | Raw poll samples, typically 1 Hz |
 | `agg_5min` | Five-minute aggregate buckets |
 | `agg_hourly` | Hourly aggregate buckets |
-| `events` | Power, health, lifecycle, remote-health transition, and shutdown events |
+| `events` | Power, health, lifecycle, slow-response diagnostics, remote-health transition, and shutdown events |
 | `notifications` | Persistent notification queue and delivery history |
 | `meta` | Schema version and lifecycle metadata |
 
@@ -126,6 +126,11 @@ Recent events:
 sqlite3 /var/lib/eneru/UPS-192-168-1-100.db \
   "SELECT datetime(ts, 'unixepoch'), event_type, detail FROM events ORDER BY ts DESC LIMIT 20;"
 ```
+
+Slow NUT and remote SSH probes are stored as diagnostics events
+(`SLOW_NUT_RESPONSE` and `REMOTE_SSH_SLOW_RESPONSE`). They show in the TUI
+and `/api/v1/events` when event verbosity includes Diagnostics (`-v` /
+`verbosity=1`).
 
 Muted events:
 

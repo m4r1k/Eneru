@@ -906,6 +906,18 @@ class UPSGroupMonitor(
                     f"⚠️ Slow NUT response from {self.config.ups.name}: "
                     f"{elapsed:.1f}s for {' '.join(cmd)}"
                 )
+                try:
+                    self._stats_store.log_event(
+                        "SLOW_NUT_RESPONSE",
+                        (
+                            f"{self.config.ups.name} slow NUT response: "
+                            f"{elapsed:.1f}s for {' '.join(cmd)}"
+                        ),
+                        notification_sent=False,
+                    )
+                except Exception:
+                    # SQLite diagnostics must never affect polling or shutdown.
+                    pass
                 self._last_slow_nut_log_time = now
 
         if not full_poll:
@@ -939,6 +951,21 @@ class UPSGroupMonitor(
                 self.config.NOTIFY_WARNING,
                 category="health",
             )
+            try:
+                self._stats_store.log_event(
+                    "SLOW_NUT_RESPONSE",
+                    (
+                        f"{self.config.ups.name} sustained slow NUT "
+                        f"responses: latest {elapsed:.1f}s; threshold "
+                        f"{self._slow_nut_notify_threshold_seconds:.1f}s "
+                        f"for {self._slow_nut_notify_consecutive_polls} "
+                        "consecutive polls"
+                    ),
+                    notification_sent=True,
+                )
+            except Exception:
+                # SQLite diagnostics must never mask notifications.
+                pass
             self._slow_nut_poll_notified = True
 
     def _wait_for_initial_connection(self):

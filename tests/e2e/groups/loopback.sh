@@ -82,6 +82,26 @@ ups:
         expected_host_identity: "$identity"
         shutdown_command: "shutdown -h now"
         shutdown_order: 999
+virtual_machines:
+  enabled: true
+  stop_timeout: 2
+containers:
+  enabled: true
+  runtime: docker
+  stop_timeout: 2
+  shutdown_all_remaining_containers: true
+  include_user_containers: true
+  compose_files:
+    - path: "/opt/e2e/docker-compose.yml"
+      stop_timeout: 2
+filesystems:
+  sync_enabled: true
+  unmount:
+    enabled: true
+    timeout: 2
+    mounts:
+      - path: "/mnt/e2e-loopback"
+        options: "-l"
 behavior:
   dry_run: true
 local_shutdown:
@@ -153,6 +173,21 @@ run_loopback_case() {
   echo "  PASS: delegated shutdown command observed: ${expected}"
   echo "  Matching shutdown log line:"
   grep "$expected" "/tmp/e2e-loopback-${label}.log" | tail -1
+  for action in \
+    stop_vms \
+    stop_compose \
+    stop_containers \
+    stop_containers_rootless \
+    sync \
+    unmount_filesystems
+  do
+    if ! grep -q "$action" "/tmp/e2e-loopback-${label}.log"; then
+      echo "FAIL: loopback ${label} did not dry-run delegated action '${action}'"
+      cat "/tmp/e2e-loopback-${label}.log"
+      exit 1
+    fi
+  done
+  echo "  PASS: delegated local action list observed for ${label}"
 
   docker rm -f "$name" >/dev/null 2>&1 || true
   cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"

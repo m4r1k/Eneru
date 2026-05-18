@@ -29,8 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   config.
 - Loopback host identity validation using `/etc/machine-id`, surfaced in
   remote health and `/ready`.
+- SQLite diagnostics events for slow NUT polls and successful but slow
+  remote SSH health probes. These now appear in the TUI/API event stream at
+  Diagnostics verbosity instead of only in journal/container logs.
 - E2E coverage for root loopback, non-root sudo loopback, missing
-  machine-id readiness, and missing-loopback startup failure.
+  machine-id readiness, missing-loopback startup failure, and the generated
+  VM/container/sync/unmount loopback action list.
 
 ### Changed
 

@@ -236,6 +236,8 @@ def test_query_events_honors_verbosity(minimal_config, tmp_path):
         store.log_event("ON_BATTERY", "power", ts=100)
         store.log_event("SERVICE_STARTED", "start", ts=101)
         store.log_event("REMOTE_HEALTH_FAILED", "ssh", ts=102)
+        store.log_event("SLOW_NUT_RESPONSE", "nut", ts=103)
+        store.log_event("REMOTE_SSH_SLOW_RESPONSE", "slow ssh", ts=104)
     finally:
         store.close()
 
@@ -247,11 +249,15 @@ def test_query_events_honors_verbosity(minimal_config, tmp_path):
     assert [row["eventType"] for row in diagnostics] == [
         "ON_BATTERY",
         "REMOTE_HEALTH_FAILED",
+        "SLOW_NUT_RESPONSE",
+        "REMOTE_SSH_SLOW_RESPONSE",
     ]
     assert [row["eventType"] for row in all_events] == [
         "ON_BATTERY",
         "SERVICE_STARTED",
         "REMOTE_HEALTH_FAILED",
+        "SLOW_NUT_RESPONSE",
+        "REMOTE_SSH_SLOW_RESPONSE",
     ]
 
 

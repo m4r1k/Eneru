@@ -21,6 +21,10 @@ REMOTE_HEALTH_CHECKING = "CHECKING"
 REMOTE_HEALTH_HEALTHY = "HEALTHY"
 REMOTE_HEALTH_DEGRADED = "DEGRADED"
 REMOTE_HEALTH_FAILED = "FAILED"
+SLOW_REMOTE_SSH_LOG_THRESHOLD_MS = 2_000
+SLOW_REMOTE_SSH_LOG_RATE_LIMIT_SECONDS = 300.0
+SLOW_REMOTE_SSH_NOTIFY_THRESHOLD_MS = 10_000
+SLOW_REMOTE_SSH_NOTIFY_CONSECUTIVE_CHECKS = 3
 
 DANGEROUS_PROBE_WORDS = (
     "shutdown", "poweroff", "reboot", "halt", "init 0",
@@ -261,6 +265,15 @@ class RemoteHealthManager:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._notified_failed: Dict[str, bool] = {}
+        self._last_slow_ssh_log_time: Dict[str, float] = {}
+        self._slow_ssh_check_streak: Dict[str, int] = {}
+        self._slow_ssh_notified: Dict[str, bool] = {}
+        self._slow_ssh_log_threshold_ms = SLOW_REMOTE_SSH_LOG_THRESHOLD_MS
+        self._slow_ssh_log_rate_limit_seconds = SLOW_REMOTE_SSH_LOG_RATE_LIMIT_SECONDS
+        self._slow_ssh_notify_threshold_ms = SLOW_REMOTE_SSH_NOTIFY_THRESHOLD_MS
+        self._slow_ssh_notify_consecutive_checks = (
+            SLOW_REMOTE_SSH_NOTIFY_CONSECUTIVE_CHECKS
+        )
         self._event_fn_logged_failure = False
         probe = config.remote_health.probe_command
         self._validated_probe_command = probe if is_safe_probe_command(probe) else None
@@ -439,10 +452,83 @@ class RemoteHealthManager:
                     notification_sent = True
         elif not success:
             self.log_fn(f"⚠️ Remote health degraded: {display}: {error}")
+        self._record_slow_ssh_response(
+            key, display, server.host, latency_ms, success, now,
+        )
         self._record_status_transition(
             previous, current, display, server.host, row.last_error,
             notification_sent,
         )
+
+    def _record_slow_ssh_response(
+        self,
+        key: str,
+        display: str,
+        host: str,
+        latency_ms: int,
+        success: bool,
+        now: float,
+    ) -> None:
+        """Record successful-but-slow SSH health probes as diagnostics."""
+        if not success:
+            self._slow_ssh_check_streak[key] = 0
+            self._slow_ssh_notified[key] = False
+            return
+        if latency_ms >= self._slow_ssh_log_threshold_ms:
+            last_log = self._last_slow_ssh_log_time.get(key, 0.0)
+            if (
+                last_log == 0.0
+                or now - last_log >= self._slow_ssh_log_rate_limit_seconds
+            ):
+                detail = (
+                    f"{self.group_label}/{display} ({host}) slow SSH "
+                    f"response: {latency_ms} ms"
+                )
+                self.log_fn(
+                    f"⚠️ Slow remote SSH response from {display} "
+                    f"({host}): {latency_ms} ms"
+                )
+                self._record_event(
+                    "REMOTE_SSH_SLOW_RESPONSE", detail, notification_sent=False,
+                )
+                self._last_slow_ssh_log_time[key] = now
+
+        if latency_ms >= self._slow_ssh_notify_threshold_ms:
+            self._slow_ssh_check_streak[key] = (
+                self._slow_ssh_check_streak.get(key, 0) + 1
+            )
+        else:
+            self._slow_ssh_check_streak[key] = 0
+            self._slow_ssh_notified[key] = False
+            return
+
+        if (
+            not self._slow_ssh_notified.get(key, False)
+            and self._slow_ssh_check_streak[key]
+            >= self._slow_ssh_notify_consecutive_checks
+        ):
+            if self.notify_fn:
+                self.notify_fn(
+                    f"⚠️ **Sustained slow remote SSH responses:** {display}\n"
+                    f"Host: {host}\n"
+                    f"Latest probe took {latency_ms / 1000:.1f}s. "
+                    f"Threshold: {self._slow_ssh_notify_threshold_ms / 1000:.1f}s "
+                    f"for {self._slow_ssh_notify_consecutive_checks} "
+                    "consecutive checks.",
+                    self.config.NOTIFY_WARNING,
+                )
+            detail = (
+                f"{self.group_label}/{display} ({host}) sustained slow SSH "
+                f"responses: latest {latency_ms} ms; threshold "
+                f"{self._slow_ssh_notify_threshold_ms} ms for "
+                f"{self._slow_ssh_notify_consecutive_checks} consecutive checks"
+            )
+            self._record_event(
+                "REMOTE_SSH_SLOW_RESPONSE",
+                detail,
+                notification_sent=self.notify_fn is not None,
+            )
+            self._slow_ssh_notified[key] = True
 
     def _record_status_transition(
         self,
@@ -468,9 +554,24 @@ class RemoteHealthManager:
         )
         if error:
             detail = f"{detail}: {error}"
+        self._record_event(
+            f"REMOTE_HEALTH_{current}",
+            detail,
+            notification_sent,
+        )
+
+    def _record_event(
+        self,
+        event_type: str,
+        detail: str,
+        notification_sent: bool,
+    ) -> None:
+        """Record a remote-health diagnostic event without affecting probes."""
+        if self.event_fn is None:
+            return
         try:
             self.event_fn(
-                f"REMOTE_HEALTH_{current}",
+                event_type,
                 detail,
                 notification_sent,
             )
