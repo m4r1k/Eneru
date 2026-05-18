@@ -682,15 +682,44 @@ def test_empty_machine_id_fails_with_setup_hint(tmp_path):
 
 
 @pytest.mark.unit
-def test_forced_command_shutdown_response_fails_with_command_hint(tmp_path):
+@pytest.mark.parametrize("probe_output", [
+    "Shutdown scheduled for Sun 2026-05-17\n",
+    "Broadcast message from root@host\n",
+    "The system is going down for poweroff NOW!\n",
+])
+def test_forced_command_shutdown_response_fails_with_command_hint(
+    tmp_path, probe_output
+):
     """authorized_keys command= rewrites probes; call that out directly."""
     server = _make_loopback_server(expected_host_identity="abc123")
     with patch("eneru.remote_health.run_command",
-               return_value=(0, "Shutdown scheduled for Sun 2026-05-17\n", "")):
+               return_value=(0, probe_output, "")):
         ok, error, _ = run_loopback_identity_probe(server)
 
     assert ok is False
     assert "authorized_keys command=" in error
+
+
+@pytest.mark.unit
+def test_loopback_identity_probe_timeout_reports_identity_context(tmp_path):
+    server = _make_loopback_server(expected_host_identity="abc123")
+    with patch("eneru.remote_health.run_command",
+               return_value=(124, "", "timed out")):
+        ok, error, _ = run_loopback_identity_probe(server)
+
+    assert ok is False
+    assert "identity probe timed out" in error
+
+
+@pytest.mark.unit
+def test_loopback_identity_probe_nonzero_exit_reports_stderr(tmp_path):
+    server = _make_loopback_server(expected_host_identity="abc123")
+    with patch("eneru.remote_health.run_command",
+               return_value=(255, "", "permission denied")):
+        ok, error, _ = run_loopback_identity_probe(server)
+
+    assert ok is False
+    assert "permission denied" in error
 
 
 @pytest.mark.unit

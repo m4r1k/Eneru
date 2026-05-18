@@ -170,7 +170,15 @@ def run_loopback_identity_probe(
         ), latency_ms
     actual = stdout.strip()
     lowered_actual = actual.lower()
-    if any(word in lowered_actual for word in ("shutdown", "poweroff", "reboot", "halt")):
+    shutdown_markers = (
+        "shutdown",
+        "poweroff",
+        "reboot",
+        "halt",
+        "broadcast message",
+        "system is going down",
+    )
+    if any(marker in lowered_actual for marker in shutdown_markers):
         return False, (
             "identity probe returned shutdown-control output instead of "
             "machine-id. Most likely cause: the loopback key in "

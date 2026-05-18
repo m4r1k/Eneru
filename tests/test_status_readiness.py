@@ -21,7 +21,7 @@ from eneru import (
     VMConfig, ContainersConfig, FilesystemsConfig, UnmountConfig,
     RemoteServerConfig, LocalShutdownConfig, MonitorState,
 )
-from eneru.status import readiness, _required_capabilities
+from eneru.status import readiness, _capability_achievable, _required_capabilities
 
 
 def _make_source(*, config, snapshot):
@@ -227,6 +227,22 @@ class TestReadinessNativeInstall:
 
         assert payload["ready"] is True
 
+    @pytest.mark.unit
+    def test_malformed_local_shutdown_command_is_not_ready(self):
+        with patch("eneru.status.command_exists") as exists:
+            achievable, reason = _capability_achievable(
+                "local_host_poweroff",
+                runtime_label="systemd service",
+                nut_ready=True,
+                loopback_status=None,
+                remote_health_by_target={},
+                local_shutdown_command="'unterminated",
+            )
+
+        assert achievable is False
+        assert "invalid local shutdown command" in reason
+        exists.assert_not_called()
+
 
 class TestReadinessContainerWithLoopback:
     """Container with loopback: local_* achievability = loopback HEALTHY."""
@@ -320,6 +336,35 @@ class TestReadinessContainerWithLoopback:
             if c["id"] == "remote_server_shutdown[nas]"
         )
         assert nas_cap["achievable"] is True
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("health_status", ["UNKNOWN", "DISABLED"])
+    def test_regular_remote_unknown_or_disabled_is_still_achievable(
+        self, health_status
+    ):
+        achievable, reason = _capability_achievable(
+            "remote_server_shutdown[nas]",
+            runtime_label="container (Docker)",
+            nut_ready=True,
+            loopback_status="HEALTHY",
+            remote_health_by_target={"nas": health_status},
+        )
+
+        assert achievable is True
+        assert reason == ""
+
+    @pytest.mark.unit
+    def test_regular_remote_failed_blocks_readiness(self):
+        achievable, reason = _capability_achievable(
+            "remote_server_shutdown[nas]",
+            runtime_label="container (Docker)",
+            nut_ready=True,
+            loopback_status="HEALTHY",
+            remote_health_by_target={"nas": "FAILED"},
+        )
+
+        assert achievable is False
+        assert "nas" in reason
 
 
 class TestReadinessContainerNoLoopback:

@@ -306,8 +306,8 @@ def _capability_achievable(
     if cap == "local_host_poweroff":
         try:
             parts = shlex.split(local_shutdown_command)
-        except ValueError:
-            parts = []
+        except ValueError as exc:
+            return False, f"invalid local shutdown command: {exc}"
         candidates = [parts[0]] if parts else []
     else:
         candidates = _LOCAL_CAPABILITY_BINARIES.get(cap, [])

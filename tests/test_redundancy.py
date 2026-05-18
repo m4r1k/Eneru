@@ -1011,6 +1011,54 @@ class TestExecutorShutdown:
         assert calls == ["vms", "containers", "sync", "unmount", "remote"]
 
     @pytest.mark.unit
+    def test_loopback_delegate_skips_local_phases_and_callback(self, tmp_path):
+        """Containerized local redundancy groups delegate host work to SSH.
+
+        The remote phase must still run because that is where the loopback
+        executes generated VM/container/filesystem actions. The in-process
+        local phases and local shutdown callback would duplicate host work.
+        """
+        callback = MagicMock()
+        group = _redundancy_group(
+            is_local=True,
+            virtual_machines=VMConfig(enabled=True),
+            containers=ContainersConfig(enabled=True),
+            filesystems=FilesystemsConfig(
+                sync_enabled=True,
+                unmount=UnmountConfig(enabled=True),
+            ),
+            remote_servers=[RemoteServerConfig(
+                name="host-loopback",
+                enabled=True,
+                host="127.0.0.1",
+                user="root",
+                is_host_loopback=True,
+            )],
+        )
+        ex = RedundancyGroupExecutor(
+            group,
+            base_config=_base_config(tmp_path=tmp_path),
+            local_shutdown_callback=callback,
+        )
+
+        with pytest.MonkeyPatch.context() as mp:
+            calls = []
+            mp.setattr("eneru.cli._detect_runtime_context",
+                       lambda: "container (Docker)")
+            mp.setattr(ex, "_shutdown_vms", lambda: calls.append("vms"))
+            mp.setattr(ex, "_shutdown_containers",
+                       lambda: calls.append("containers"))
+            mp.setattr(ex, "_sync_filesystems", lambda: calls.append("sync"))
+            mp.setattr(ex, "_unmount_filesystems",
+                       lambda: calls.append("unmount"))
+            mp.setattr(ex, "_shutdown_remote_servers",
+                       lambda: calls.append("remote"))
+            assert ex.shutdown(reason="x") is True
+
+        assert calls == ["remote"]
+        callback.assert_not_called()
+
+    @pytest.mark.unit
     def test_logging_uses_prefix(self, tmp_path):
         ex, _ = self._make(tmp_path=tmp_path)
         ex.logger = MagicMock()

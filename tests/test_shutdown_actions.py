@@ -388,6 +388,14 @@ class TestUnmountFilesystems:
         assert out == "/mnt/a ''\n/mnt/b -l"
 
     @pytest.mark.unit
+    def test_serialize_umount_targets_accepts_string_mount_entries(self):
+        out = serialize_umount_targets([
+            "/mnt/media",
+            {"path": "/mnt/backup", "options": "-l"},
+        ])
+        assert out == "/mnt/media ''\n/mnt/backup -l"
+
+    @pytest.mark.unit
     def test_serialize_umount_targets_quotes_shell_metacharacters(self):
         out = serialize_umount_targets([
             {"path": "/mnt/a dir/pipe|quote'$(touch x)", "options": "-l -f"},

@@ -10,6 +10,8 @@ from eneru import (
     RemoteCommandConfig,
     MonitorState,
     REMOTE_ACTIONS,
+    FilesystemsConfig,
+    UnmountConfig,
 )
 from eneru.shutdown.remote import RemoteShutdownResult
 
@@ -668,6 +670,55 @@ class TestRemotePreShutdownExecution:
         assert mock_run.call_count == 1
         assert mock_run.call_args.args[3] == "sleep 999"
 
+    @pytest.mark.unit
+    def test_loopback_pre_shutdown_supplies_skip_ids_and_umount_targets(
+        self, remote_monitor
+    ):
+        """Loopback actions get host-side context rendered into templates."""
+        remote_monitor.config.ups_groups[0].filesystems = FilesystemsConfig(
+            sync_enabled=True,
+            unmount=UnmountConfig(
+                enabled=True,
+                mounts=["/mnt/media", {"path": "/mnt/usb disk", "options": "-l"}],
+            ),
+        )
+        server = RemoteServerConfig(
+            name="host-loopback",
+            enabled=True,
+            host="127.0.0.1",
+            user="root",
+            is_host_loopback=True,
+            pre_shutdown_commands=[
+                RemoteCommandConfig(action="stop_containers"),
+                RemoteCommandConfig(action="unmount_filesystems"),
+            ],
+        )
+
+        with patch.object(remote_monitor, "_current_container_ids",
+                          return_value={"def456", "abc123"}), \
+             patch.object(remote_monitor, "_run_remote_command",
+                          return_value=(True, "")) as mock_run:
+            remote_monitor._execute_remote_pre_shutdown(server)
+
+        stop_cmd = mock_run.call_args_list[0].args[1]
+        umount_cmd = mock_run.call_args_list[1].args[1]
+        assert 'skip="abc123,def456"' in stop_cmd
+        assert "/mnt/media" in umount_cmd
+        assert "/mnt/usb disk" in umount_cmd
+
+    @pytest.mark.unit
+    def test_loopback_helpers_fail_closed_to_empty_context(self, remote_monitor):
+        """Helper failures should remove optional context, not abort shutdown."""
+        with patch.object(remote_monitor, "_current_container_ids",
+                          side_effect=RuntimeError("docker unavailable")):
+            assert remote_monitor._loopback_skip_ids() == set()
+
+        remote_monitor.config.ups_groups[0].filesystems = FilesystemsConfig(
+            sync_enabled=True,
+            unmount=UnmountConfig(enabled=False, mounts=["/mnt/media"]),
+        )
+        assert remote_monitor._loopback_umount_targets() == []
+
 
 class TestRunRemoteCommand:
     """Test the _run_remote_command helper method."""
@@ -820,3 +871,34 @@ class TestRunRemoteCommand:
             # run_command should be called with timeout + 30 buffer
             call_kwargs = mock_run.call_args[1]
             assert call_kwargs["timeout"] == 60  # 30 + 30 buffer
+
+    @pytest.mark.unit
+    def test_run_remote_command_deadline_already_expired(self, ssh_monitor):
+        """Expired phase deadlines fail before opening a new SSH command."""
+        server = RemoteServerConfig(host="192.168.1.50", user="root")
+
+        with patch("eneru.shutdown.remote.time.monotonic", return_value=20.0), \
+             patch("eneru.shutdown.remote.run_command") as mock_run:
+            success, error = ssh_monitor._run_remote_command(
+                server, "shutdown -h now", 30, "shutdown", deadline=10.0,
+            )
+
+        assert success is False
+        assert error == "remote shutdown deadline exceeded"
+        mock_run.assert_not_called()
+
+    @pytest.mark.unit
+    def test_run_remote_command_reports_deadline_capped_timeout(self, ssh_monitor):
+        """Timeout messages should show when the phase deadline shortened them."""
+        server = RemoteServerConfig(host="192.168.1.50", user="root")
+
+        with patch("eneru.shutdown.remote.time.monotonic", return_value=9.1), \
+             patch("eneru.shutdown.remote.run_command",
+                   return_value=(124, "", "timed out")) as mock_run:
+            success, error = ssh_monitor._run_remote_command(
+                server, "sync", 30, "sync", deadline=11.0,
+            )
+
+        assert success is False
+        assert "capped by phase deadline" in error
+        assert mock_run.call_args.kwargs["timeout"] == 1

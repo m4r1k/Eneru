@@ -11,7 +11,7 @@ from unittest.mock import patch, MagicMock
 from eneru import (
     main, ConfigLoader, __version__, Config, UPSConfig, UPSGroupConfig, MonitorState,
     APIConfig, BehaviorConfig, LoggingConfig, LocalShutdownConfig, VMConfig, ContainersConfig,
-    FilesystemsConfig, UnmountConfig, RedundancyGroupConfig,
+    FilesystemsConfig, UnmountConfig, RedundancyGroupConfig, RemoteServerConfig,
 )
 from test_constants import (
     TEST_DISCORD_APPRISE_URL,
@@ -686,6 +686,57 @@ class TestFindHostLoopback:
 
         config = self._config_with_loopback(tmp_path, is_loopback=False)
         assert _find_host_loopback(config) is None
+
+    @pytest.mark.unit
+    def test_find_host_loopback_ignores_disabled_entries(self, tmp_path):
+        from eneru.cli import _find_host_loopback
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"),
+                is_local=True,
+                remote_servers=[RemoteServerConfig(
+                    name="disabled-loopback",
+                    enabled=False,
+                    host="127.0.0.1",
+                    user="root",
+                    is_host_loopback=True,
+                )],
+            )],
+        )
+
+        assert _find_host_loopback(config) is None
+
+    @pytest.mark.unit
+    def test_uses_loopback_delegate_requires_container_local_and_enabled(self):
+        from eneru.cli import _uses_loopback_delegate
+
+        group = UPSGroupConfig(
+            ups=UPSConfig(name="UPS@host"),
+            is_local=True,
+            remote_servers=[RemoteServerConfig(
+                name="host-loopback",
+                enabled=True,
+                host="127.0.0.1",
+                user="root",
+                is_host_loopback=True,
+            )],
+        )
+        config = Config(ups_groups=[group])
+
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            assert _uses_loopback_delegate(config, group) is True
+
+        group.remote_servers[0].enabled = False
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            assert _uses_loopback_delegate(config, group) is False
+
+        group.remote_servers[0].enabled = True
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="systemd service"):
+            assert _uses_loopback_delegate(config, group) is False
 
 
 class TestCLIManualRemoteShutdown:

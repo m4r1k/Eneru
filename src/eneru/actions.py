@@ -19,7 +19,7 @@ Render context (always supplied by ``_render_action_context`` in
   container mid-sequence. Empty when no skipping is required.
 * ``wait_interval`` — int seconds; poll interval inside graceful-wait
   loops. Default 1 (matches pre-v5.5 behavior).
-* ``umount_targets`` — newline-separated ``mount_point|options``
+* ``umount_targets`` — newline-separated ``mount_point options``
   records for ``unmount_filesystems``. Empty disables the action.
 * ``sudo`` — either ``"sudo -n "`` when ``remote_servers[].use_sudo``
   is enabled, or the empty string. Used only on privileged write-side
@@ -31,7 +31,7 @@ programs, embedded shell ``${var}``) must be doubled to ``{{`` /
 """
 
 import shlex
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 # Predefined actions for remote pre-shutdown commands.
 REMOTE_ACTIONS: Dict[str, str] = {
@@ -250,12 +250,12 @@ def render_action(
 
 
 def serialize_umount_targets(
-    mounts: List[Dict[str, Optional[str]]],
+    mounts: List[Union[str, Dict[str, Optional[str]]]],
 ) -> str:
     """Serialize unmount config entries into the ``unmount_filesystems`` format.
 
-    Input: list of ``{"path": str, "options": str | None}`` mappings as
-    produced by ``ConfigLoader._parse_filesystems_config``.
+    Input: list of mount path strings or ``{"path": str, "options": str | None}``
+    mappings, matching the public filesystems config shape.
 
     Output: newline-separated shell-quoted ``mount_point options`` records,
     ready to embed into the rendered shell template. ``shlex.quote`` keeps
@@ -263,9 +263,13 @@ def serialize_umount_targets(
     """
     records: List[str] = []
     for m in mounts:
-        mp = (m.get("path") or "").strip()
+        if isinstance(m, str):
+            mp = m.strip()
+            opts = ""
+        else:
+            mp = (m.get("path") or "").strip()
+            opts = (m.get("options") or "").strip()
         if not mp:
             continue
-        opts = (m.get("options") or "").strip()
         records.append(f"{shlex.quote(mp)} {shlex.quote(opts)}")
     return "\n".join(records)
