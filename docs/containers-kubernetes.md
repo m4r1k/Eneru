@@ -236,13 +236,20 @@ would return 503 before any destructive command is sent.
 
 ## Podman and SELinux
 
-On SELinux hosts, label bind mounts for container access. Use `:Z` for private mounts and `:z` for shared mounts:
+On SELinux hosts, label **eneru-owned** bind mounts (the
+`/srv/eneru/...` sources) with `:Z` for container-private access, or
+`:z` when multiple containers share the same source. **Never** add
+`:Z` or `:z` to `/etc/machine-id` or any other host file that other
+system services also read — see
+[install-comparison.md](install-comparison.md#never-use-z-or-z-on-etcmachine-id-or-any-other-shared-host-file)
+for the failure mode (broken dbus-broker, dead NetworkManager, host
+locked out at next reboot):
 
 ```bash
 podman run -d --name eneru \
   --replace \
   --network host \
-  -v /etc/machine-id:/etc/machine-id:ro,Z \
+  -v /etc/machine-id:/etc/machine-id:ro \
   -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
   -v /srv/eneru/state:/var/lib/eneru:Z \
   -v /srv/eneru/run:/var/run/eneru:Z \

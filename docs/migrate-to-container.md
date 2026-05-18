@@ -233,12 +233,14 @@ else changes.
 ## Step 4: Pre-flight the container
 
 Run `validate` against your existing config from inside the new
-image. Add `:Z` to every bind mount on SELinux hosts (RHEL/Alma/Rocky):
+image. Add `:Z` to the **eneru-owned** bind mounts on SELinux hosts
+(RHEL/Alma/Rocky), but NEVER on `/etc/machine-id` — see the warning
+just below Step 6:
 
 ```bash
 docker run --rm \
     --network host \
-    -v /etc/machine-id:/etc/machine-id:ro,Z \
+    -v /etc/machine-id:/etc/machine-id:ro \
     -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
     -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z \
     ghcr.io/m4r1k/eneru:latest \
@@ -267,7 +269,7 @@ Rehearse the full sequence without firing any destructive command:
 ```bash
 docker run --rm \
     --network host \
-    -v /etc/machine-id:/etc/machine-id:ro,Z \
+    -v /etc/machine-id:/etc/machine-id:ro \
     -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
     -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z \
     ghcr.io/m4r1k/eneru:latest \
@@ -284,7 +286,7 @@ prints every command it would have sent. No host action is performed.
 docker run -d --name eneru \
     --restart unless-stopped \
     --network host \
-    -v /etc/machine-id:/etc/machine-id:ro,Z \
+    -v /etc/machine-id:/etc/machine-id:ro \
     -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
     -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z \
     -v /srv/eneru/state:/var/lib/eneru:Z \
@@ -292,6 +294,16 @@ docker run -d --name eneru \
     -v /srv/eneru/logs:/var/log/eneru:Z \
     ghcr.io/m4r1k/eneru:latest
 ```
+
+The `/etc/machine-id` mount stays plain `:ro` (no `:Z`, no `:z`). `:Z`
+rewrites the on-disk SELinux label of the source file and the change
+persists across reboots, which breaks dbus-broker / NetworkManager /
+logind on the next host boot. The default targeted policy already
+grants `container_t` read access. Same rule for any other host file
+shared with system services (`/etc/localtime`, `/etc/resolv.conf`,
+anything under `/run`). If you already ran the container with `:Z` on
+`/etc/machine-id`, see [Troubleshooting](#recover-from-z-on-etcmachine-id)
+before the next reboot.
 
 Tail the logs to confirm the loopback comes up HEALTHY on the first
 healthcheck:
@@ -322,7 +334,7 @@ services:
     restart: unless-stopped
     network_mode: host        # daemon polls NUT and reaches the loopback
     volumes:
-      - /etc/machine-id:/etc/machine-id:ro,Z
+      - /etc/machine-id:/etc/machine-id:ro   # NEVER :Z — see warning above
       - /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z
       - /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z
       - /srv/eneru/state:/var/lib/eneru:Z
@@ -330,8 +342,10 @@ services:
       - /srv/eneru/logs:/var/log/eneru:Z
 ```
 
-The same `:Z` rule applies: colon (not comma) for writable mounts,
-`:ro,Z` for read-only ones.
+The same `:Z` rule applies to the eneru-owned mounts: colon (not
+comma) for writable, `:ro,Z` for read-only. The `/etc/machine-id`
+entry MUST stay plain `:ro` — no relabel suffix. See the warning under
+Step 6.
 
 ## Step 7: Hit `/health` and `/ready`
 
@@ -391,3 +405,26 @@ values in your config to bypass the auto-rewrite entirely.
 | `-v /srv/eneru/run:/var/run/eneru` | Per-run state (battery history, shutdown flag, monitor state file). |
 | `-v /srv/eneru/logs:/var/log/eneru` | Forensic log file. |
 | `-v /srv/eneru/ssh:/var/lib/eneru/ssh:ro` | Loopback + operator SSH keys (read-only). |
+
+## Troubleshooting
+
+### Recover from `:Z` on `/etc/machine-id`
+
+Only relevant if you tested a v5.5.0-rc image whose docs recommended
+`:Z` on the `/etc/machine-id` mount (rc7 and earlier). The relabel
+persists on disk, so the host will fail to boot dbus-broker /
+NetworkManager / logind on the next reboot until you restore the
+default label:
+
+```bash
+docker stop eneru
+sudo restorecon -Fv /etc/machine-id    # -F is required; plain restorecon
+                                       # refuses with "not reset as customized by admin"
+ls -lZ /etc/machine-id                 # expect system_u:object_r:machineid_t:s0
+```
+
+Then drop `:Z` from the `/etc/machine-id` line in your compose /
+`docker run` (plain `:ro` only — see the note under Step 6) and start
+eneru again. If the host is already locked out at boot, recover from a
+physical console: `setenforce 0` → finish booting → `restorecon -Fv
+/etc/machine-id` → `setenforce 1` → fix the mount → restart eneru.
