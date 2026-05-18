@@ -91,6 +91,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hosts.` The long enumeration of what `/api/v1/config` exposes was
   exposition that belonged in the docs, not in the daemon log on
   every restart.
+- TUI (`eneru tui` / `eneru monitor`) now sees the same legacy-path
+  auto-rewrite as the daemon inside a container. `_cmd_monitor` used to
+  skip `_prepare_runtime_config`, so the TUI kept reading
+  `/var/run/ups-monitor.state` while the daemon wrote to
+  `/var/run/eneru/ups-monitor.state`, surfacing as "daemon not running"
+  + "No data available" on the main UPS panel even though events,
+  graphs, REST API, and Prometheus all worked. Moved the rewrite into
+  `_load_config` so every subcommand inherits it without needing to
+  remember a prepare call.
 
 ### Migration notes
 
