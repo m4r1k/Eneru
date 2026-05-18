@@ -1,9 +1,9 @@
 # Install: Docker (quick start)
 
-Stand Eneru up in a container on a host you control in under five minutes,
-with full local-host ownership delegated through an SSH loopback. This
-guide is for fresh installs — if you already run the deb/rpm/pip native
-service and want to switch over, follow
+Stand Eneru up in a container on a host you control, with full
+local-host ownership delegated through an SSH loopback. This guide is
+for fresh installs. If you already run the deb/rpm/pip native service
+and want to switch over, follow
 [Migrate to container](migrate-to-container.md) instead so your existing
 config and stats history carry forward.
 
@@ -11,8 +11,9 @@ config and stats history carry forward.
 
 - Linux host with Docker (or Podman) installed.
 - A working NUT server (`upsc <UPS@host>` must answer).
-- `/etc/machine-id` populated on the host (true on every modern systemd
-  distro; if empty run `sudo systemd-machine-id-setup`).
+- `/etc/machine-id` populated on the host. Most systemd distros put
+  one there at first boot; if `cat /etc/machine-id` returns empty,
+  run `sudo systemd-machine-id-setup`.
 - Root access on the host long enough to authorize the loopback SSH key
   and create the writable directories below.
 
@@ -21,7 +22,7 @@ config and stats history carry forward.
 Eneru runs as uid 10001 inside the container and delegates host actions
 (VM teardown, container stop, filesystem sync, poweroff) to the host's
 `sshd` over a 127.0.0.1 SSH loopback. Generate a dedicated key for that
-delegate — never reuse an operator key:
+delegate. Don't reuse your operator key:
 
 ```bash
 sudo mkdir -p /srv/eneru/ssh
@@ -34,9 +35,9 @@ sudo chmod 0400 /srv/eneru/ssh/id_loopback
 
 ## Step 2: Authorize the key on the host
 
-Default path: authorize the key for `root` with no forced command. (For
-a non-root sudo alternative, see
-[Migrate to container Step 2 Option B](migrate-to-container.md#option-b-dedicated-user).)
+Default path: authorize the key for `root` with no forced command.
+For a non-root sudo alternative, see
+[Migrate to container Step 2 Option B](migrate-to-container.md#option-b-dedicated-user).
 
 ```bash
 sudo mkdir -p /root/.ssh
@@ -72,7 +73,7 @@ ups:
 local_shutdown:
   enabled: true
 
-# Optional — uncomment when you want to wire any of these in.
+# Optional. Uncomment when you want to wire any of these in.
 # virtual_machines: { enabled: true }
 # containers:       { enabled: true }
 # filesystems:      { sync_enabled: true }
@@ -102,11 +103,11 @@ docker run -d --name eneru \
     ghcr.io/m4r1k/eneru:latest
 ```
 
-On RHEL/Alma/Rocky the `:Z` SELinux relabel is required. **Use `:Z`
-(colon) for writable mounts and `:ro,Z` (comma — Z as the second
-option) for read-only ones.** A bare `,Z` on a writable mount is parsed
-by Docker as part of the destination path and the mount silently lands
-at the wrong place.
+On RHEL/Alma/Rocky the `:Z` SELinux relabel is required. Use `:Z`
+(colon) for writable mounts and `:ro,Z` (comma, with Z as the second
+option) for read-only ones. A bare `,Z` on a writable mount is parsed
+by Docker as part of the destination path, and the mount silently
+lands at the wrong place.
 
 If you prefer a versioned manifest, the same setup expresses as a
 compose file:
@@ -143,21 +144,23 @@ curl http://127.0.0.1:9191/ready
 docker exec -it eneru eneru tui
 ```
 
-If `/ready` returns 503, the JSON body lists every required capability
-with `achievable: true|false` and a reason — see
-[Troubleshooting](troubleshooting.md#ready-vs-503-decision-matrix).
+If `/ready` returns 503, the JSON body lists every required
+capability with `achievable: true|false` and a reason. See the
+[Troubleshooting decision matrix](troubleshooting.md#ready-vs-503-decision-matrix).
 
 ## Next steps
 
-- **Add remote servers to shut down** (NAS, secondary hosts):
-  [Remote servers](remote-servers.md) — make sure each entry sets
-  `ssh_key_path` to a key path readable by uid 10001 inside the
-  container (root's `~/.ssh/id_rsa` is not visible from `eneru`).
-- **Tune triggers** (battery thresholds, brownout sensitivity):
-  [Shutdown triggers](triggers.md).
-- **Container/Kubernetes-specific notes** (Podman, K8s,
-  unprivileged-runtime caveats):
-  [Containers and Kubernetes](containers-kubernetes.md).
-- **Migrate an existing native install**:
-  [Migrate to container](migrate-to-container.md) — handles config
-  carryover, stats DB carryover, and the rollback path.
+To shut down other targets (NAS, secondary hosts) alongside the local
+host, see [Remote servers](remote-servers.md). Each entry needs an
+explicit `ssh_key_path` pointing at a key readable by uid 10001 inside
+the container; root's `~/.ssh/id_rsa` is not visible from the
+`eneru` user.
+
+For battery thresholds, brownout sensitivity, and the other
+power-event knobs, see [Shutdown triggers](triggers.md). Runtime
+notes for Podman, Kubernetes, and unprivileged-runtime caveats live
+in [Containers and Kubernetes](containers-kubernetes.md).
+
+If you're switching over from an existing native install,
+[Migrate to container](migrate-to-container.md) covers config
+carryover, stats DB carryover, and the rollback path.

@@ -2,8 +2,9 @@
 
 This guide walks you from a working deb/rpm/pip install of Eneru to
 the same setup running inside the OCI image. Your existing
-configuration keeps working — there are no required YAML changes
-unless you want to override the synthesized loopback defaults.
+configuration keeps working. The only YAML you need to touch is the
+loopback override, and only if you don't want the synthesized
+defaults.
 
 If you're new here, start at [Choose your install](install-comparison.md)
 to confirm the OCI image is the right profile for your deployment.
@@ -16,7 +17,7 @@ to confirm the OCI image is the right profile for your deployment.
 | Local actions run via | Direct kernel calls / local subprocess | SSH to host's `sshd` (loopback delegate) |
 | Config file location | `/etc/ups-monitor/config.yaml` | Bind-mounted into container at the same path |
 | State files | `/var/lib/eneru`, `/var/run/eneru`, `/var/log/eneru` | Persistent volumes mounted at the same paths |
-| Host poweroff binary | Required on PATH | Lives on the host — container doesn't need it |
+| Host poweroff binary | Required on PATH | Lives on the host; the container doesn't need it |
 | `wall(1)` broadcast | Fires when configured | Silently suppressed (reaches nobody from container) |
 
 ## Pre-migration checklist
@@ -30,8 +31,8 @@ Before swapping in the container, on the **host** that will run it:
    ```bash
    ssh -o BatchMode=yes -o ConnectTimeout=3 root@127.0.0.1 true
    ```
-   Most likely you'll get `Permission denied (publickey)` on a fresh
-   host — that's fine, the key wiring is the next step.
+   On a fresh host you'll usually get `Permission denied (publickey)`.
+   That's expected. The key wiring is the next step.
 
 3. **`/etc/machine-id` exists.** This is true on every modern systemd
    host. Quick check:
@@ -40,8 +41,9 @@ Before swapping in the container, on the **host** that will run it:
    ```
    If empty, run `systemd-machine-id-setup`.
 
-4. **Notification URLs, NUT credentials, etc.** carry over unchanged
-   — they're in the config file you'll bind-mount.
+4. Notification URLs, NUT credentials, and everything else from your
+   YAML carry over unchanged. They live in the config file you'll
+   bind-mount.
 
 ## Step 1: Generate a dedicated SSH key for the loopback
 
@@ -54,16 +56,16 @@ ssh-keygen -t ed25519 -N '' \
     -C "eneru-loopback@$(hostname)"
 chmod 600 /srv/eneru/ssh/id_loopback
 chmod 644 /srv/eneru/ssh/id_loopback.pub
-# Eneru runs as uid 10001 inside the container — the bind mount maps host
-# uids through 1:1, so a key owned by root mode 0600 is unreadable from the
-# container. Either chown to 10001:10001, or relax to 0644 if you're
-# comfortable with a world-readable file on disk.
+# Eneru runs as uid 10001 inside the container. The bind mount maps host
+# uids through 1:1, so a key owned by root with mode 0600 is unreadable
+# from the container. Either chown to 10001:10001 (recommended), or relax
+# to mode 0644 if you're comfortable with a world-readable file on disk.
 chown 10001:10001 /srv/eneru/ssh/id_loopback /srv/eneru/ssh/id_loopback.pub
 ```
 
-(`/srv/eneru/` follows the FHS site-specific data convention. Pick a different
-prefix — e.g. `/opt/eneru/` — if your distribution's policy prefers it; just
-update the bind-mount source in Step 6 to match.)
+`/srv/eneru/` follows the FHS site-specific data convention. Use
+`/opt/eneru/` (or anything else) if your distribution policy prefers
+it; just update the bind-mount source in Step 6 to match.
 
 ## Step 2: Authorize the key
 
@@ -79,9 +81,9 @@ cat /srv/eneru/ssh/id_loopback.pub | tee -a /root/.ssh/authorized_keys
 chmod 600 /root/.ssh/authorized_keys
 ```
 
-Then your config can use the synthesized defaults (no `remote_servers`
-entry needed at all — Eneru auto-creates one because it detects the
-Docker/Podman runtime + your local capabilities).
+Your config can now use the synthesized defaults. No `remote_servers`
+entry is needed; Eneru auto-creates one when it detects a Docker or
+Podman runtime alongside local capabilities.
 
 ### Option B: dedicated user
 
@@ -115,14 +117,14 @@ remote_servers:
 
 ## Step 2b: Migrate existing remote-server SSH keys
 
-If your native config already drives **other** remote targets (a NAS, a
-secondary host, etc.), those entries currently rely on `/root/.ssh/id_rsa`
-implicitly. Eneru inside the container doesn't have access to root's
-home, so each entry needs an explicit `ssh_key_path` pointing at a file
-the container can read.
+If your native config already drives other remote targets (a NAS, a
+secondary host, anything else), those entries currently rely on
+`/root/.ssh/id_rsa` implicitly. Eneru inside the container doesn't have
+access to root's home, so each entry needs an explicit `ssh_key_path`
+pointing at a file the container can read.
 
 ```bash
-# On the host — copy the operator key into the same bind-mount tree as
+# On the host. Copy the operator key into the same bind-mount tree as
 # the loopback key so a single -v mount covers both.
 cp /root/.ssh/id_rsa /srv/eneru/ssh/id_rsa
 cp /root/.ssh/id_rsa.pub /srv/eneru/ssh/id_rsa.pub
@@ -153,7 +155,7 @@ sudo systemctl stop eneru.service
 sudo systemctl disable eneru.service
 ```
 
-Leave the package installed for now — easy rollback if something is
+Leave the package installed for now. Easy rollback if something is
 off.
 
 ## Step 3b: Create the writable host dirs and carry forward the stats DB
@@ -168,12 +170,12 @@ sudo mkdir -p /srv/eneru/{state,run,logs}
 sudo chown 10001:10001 /srv/eneru/{state,run,logs}
 ```
 
-**Carry forward the stats DB (optional).** The DB stores sample history
-(TUI graphs), event log, and notification rows. A fresh container with
-an empty `/srv/eneru/state` starts with no history. To preserve it,
-copy every `.db` file BEFORE the container starts (the daemon must not
-be running on either side during the copy — SQLite WAL files make hot
-copies unreliable):
+**Carry forward the stats DB (optional).** The DB stores sample
+history (TUI graphs), event log, and notification rows. A fresh
+container with an empty `/srv/eneru/state` starts with no history. To
+preserve it, copy every `.db` file before the container starts. The
+daemon must not be running on either side during the copy: SQLite WAL
+files make hot copies unreliable.
 
 ```bash
 # Native service is already stopped from Step 3.
@@ -181,8 +183,8 @@ sudo cp -a /var/lib/eneru/*.db /srv/eneru/state/
 sudo chown 10001:10001 /srv/eneru/state/*.db
 ```
 
-Filename conventions (informational — `cp -a *.db` handles both
-without you having to think about it):
+Filename conventions, in case you need to know what to look for. The
+`cp -a *.db` above handles both cases without you having to pick:
 
 | Mode | DB filename |
 |---|---|
@@ -190,8 +192,8 @@ without you having to think about it):
 | Multi-UPS (`ups:` is a list) | `<sanitized-ups-name>.db` where `@`, `:`, `/` in the UPS name become `-` (e.g. `UPS@192.168.178.11` → `UPS-192.168.178.11.db`) |
 
 If you already started the container against an empty
-`/srv/eneru/state` and then copied the DB, **stop the container first
-and restart it** so the daemon picks up the imported file:
+`/srv/eneru/state` and then copied the DB, stop the container before
+recopying so the daemon picks up the imported file:
 
 ```bash
 docker stop eneru
@@ -200,8 +202,8 @@ sudo chown -R 10001:10001 /srv/eneru/state/
 docker start eneru
 ```
 
-Skip this step entirely if you don't care about graph/notification
-history — the daemon happily starts on an empty stats dir.
+Skip this step entirely if you don't care about graph or notification
+history. The daemon starts fine on an empty stats dir.
 
 ## Step 3c: Detach the config file from the package
 
@@ -217,14 +219,14 @@ anything:
 ```bash
 sudo cp /etc/ups-monitor/config.yaml /srv/eneru/config.yaml
 # Read-only mount inside the container, so root ownership on the host
-# is fine — no chown needed.
+# is fine. No chown required.
 ```
 
-The Steps 4, 5, and 6 `docker run` examples below all source the
-config from `/srv/eneru/config.yaml`. If you'd rather keep editing in
-`/etc/ups-monitor/config.yaml` (e.g. because the package is staying
-around as a rollback path), swap that one bind-mount source back —
-nothing else changes.
+The Steps 4, 5, and 6 `docker run` examples below all source the config
+from `/srv/eneru/config.yaml`. If you'd rather keep editing in
+`/etc/ups-monitor/config.yaml` (because the package is staying around
+as a rollback path, say), swap that one bind-mount source back. Nothing
+else changes.
 
 ## Step 4: Pre-flight the container
 
@@ -296,8 +298,8 @@ healthcheck:
 docker logs -f eneru
 ```
 
-You should see (when a loopback is synthesized — explicit-loopback
-configs skip the synthesis line):
+When a loopback is synthesized (explicit-loopback configs skip this
+line) you should see:
 
 * `v5.5: auto-enabled host-loopback delegate (127.0.0.1, root, ...)`
 
@@ -326,8 +328,8 @@ services:
       - /srv/eneru/logs:/var/log/eneru:Z
 ```
 
-Same `:Z` rule applies (colon, not comma — the writable mounts use
-`:Z`, the read-only ones use `:ro,Z`).
+The same `:Z` rule applies: colon (not comma) for writable mounts,
+`:ro,Z` for read-only ones.
 
 ## Step 7: Hit `/health` and `/ready`
 
@@ -350,7 +352,7 @@ docker rm eneru
 sudo systemctl enable --now eneru.service
 ```
 
-Step 3c only **copied** the config to `/srv/eneru/config.yaml`; the
+Step 3c only copied the config to `/srv/eneru/config.yaml`; the
 original `/etc/ups-monitor/config.yaml` is still on disk, and the
 native unit reads it as-is. If you already removed the deb/rpm
 package, restore the file first:
@@ -373,8 +375,8 @@ in your `logging:` block opts out and your value wins.
 
 | Bind mount | What it holds |
 |---|---|
-| `-v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro` | Daemon configuration (decoupled from the package — see Step 3c). |
-| `-v /srv/eneru/state:/var/lib/eneru` | SQLite stats DB (samples, events, notifications). **Persistent — do not skip.** |
+| `-v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro` | Daemon configuration; decoupled from the package (see Step 3c). |
+| `-v /srv/eneru/state:/var/lib/eneru` | SQLite stats DB (samples, events, notifications). Persistent; do not skip. |
 | `-v /srv/eneru/run:/var/run/eneru` | Per-run state (battery history, shutdown flag, monitor state file). |
 | `-v /srv/eneru/logs:/var/log/eneru` | Forensic log file. |
 | `-v /srv/eneru/ssh:/var/lib/eneru/ssh:ro` | Loopback + operator SSH keys (read-only). |
