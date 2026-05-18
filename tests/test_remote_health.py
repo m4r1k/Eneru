@@ -809,3 +809,176 @@ def test_non_loopback_server_skips_identity_probe(tmp_path):
          patch("eneru.remote_health.run_loopback_identity_probe") as id_mock:
         manager.check_once()
         id_mock.assert_not_called()
+
+
+# ====================================================================
+# Defensive branches / direct-function paths not exercised above
+# ====================================================================
+
+
+@pytest.mark.unit
+def test_run_remote_probe_success_returns_true_empty_error(remote_server):
+    """Successful run_remote_probe returns (True, '', latency_ms) — the
+    canonical happy path (remote_health.py line 144)."""
+    from eneru.remote_health import run_remote_probe
+    with patch("eneru.remote_health.run_command",
+               return_value=(0, "ok", "")):
+        ok, err, latency = run_remote_probe(remote_server, "true")
+    assert ok is True
+    assert err == ""
+    assert latency >= 0
+
+
+@pytest.mark.unit
+def test_identity_probe_match_returns_true(tmp_path):
+    """When the probe output matches expected_host_identity, the function
+    returns (True, '', latency) (remote_health.py line 209)."""
+    server = _make_loopback_server(expected_host_identity="abc123")
+    with patch("eneru.remote_health.run_command",
+               return_value=(0, "abc123\n", "")):
+        ok, err, latency = run_loopback_identity_probe(server)
+    assert ok is True
+    assert err == ""
+    assert latency >= 0
+
+
+@pytest.mark.unit
+def test_identity_probe_missing_expected_identity_reports_setup_hint(tmp_path):
+    """If expected_host_identity is empty/unset, the probe fails with the
+    bind-mount setup hint (remote_health.py lines 190-199)."""
+    server = _make_loopback_server(expected_host_identity="")
+    with patch("eneru.remote_health.run_command",
+               return_value=(0, "host-machine-id-abc", "")):
+        ok, err, _ = run_loopback_identity_probe(server)
+    assert ok is False
+    assert "host identity unknown" in err
+    assert "bind-mount" in err.lower() or "Bind-mount" in err
+
+
+@pytest.mark.unit
+def test_identity_probe_mismatch_reports_bind_mount_hint(tmp_path):
+    """Mismatch returns the long-form bind-mount diagnostic
+    (remote_health.py lines 200-208)."""
+    server = _make_loopback_server(expected_host_identity="abc123")
+    with patch("eneru.remote_health.run_command",
+               return_value=(0, "different-machine-id\n", "")):
+        ok, err, _ = run_loopback_identity_probe(server)
+    assert ok is False
+    assert "host identity mismatch" in err
+    assert "abc123" in err
+    assert "different-machine-id" in err
+    assert "bind-mount" in err.lower() or "Bind-mount" in err
+
+
+@pytest.mark.unit
+def test_read_container_machine_id_returns_value_when_readable(monkeypatch):
+    """When /etc/machine-id is readable, _read_container_machine_id
+    returns its stripped contents (remote_health.py lines 222-223)."""
+    from eneru import remote_health as rh
+    fake_value = "machine-id-from-bind-mount\n"
+
+    class _FakePath:
+        def __init__(self, p): self.p = p
+        def read_text(self, encoding="utf-8"):
+            return fake_value
+
+    monkeypatch.setattr(rh, "Path", _FakePath)
+    assert rh._read_container_machine_id() == "machine-id-from-bind-mount"
+
+
+@pytest.mark.unit
+def test_read_container_machine_id_returns_none_on_oserror(monkeypatch):
+    """OSError reading /etc/machine-id yields None
+    (remote_health.py lines 224-225)."""
+    from eneru import remote_health as rh
+
+    class _FakePath:
+        def __init__(self, p): self.p = p
+        def read_text(self, encoding="utf-8"):
+            raise OSError("file not found")
+
+    monkeypatch.setattr(rh, "Path", _FakePath)
+    assert rh._read_container_machine_id() is None
+
+
+@pytest.mark.unit
+def test_check_once_breaks_when_stop_event_fires_mid_iteration(tmp_path):
+    """If the stop_event is set between iterations of the server loop,
+    the remaining servers must not be probed (remote_health.py line 319)."""
+    config = Config()
+    config.remote_health.enabled = True
+    config.remote_health.failure_threshold = 1
+    stop_event = threading.Event()
+    stop_event.set()  # already set so the loop breaks on the first iteration
+    server_a = RemoteServerConfig(
+        name="nas-a", enabled=True, host="a.lan", user="ups", connect_timeout=3,
+    )
+    server_b = RemoteServerConfig(
+        name="nas-b", enabled=True, host="b.lan", user="ups", connect_timeout=3,
+    )
+    manager = RemoteHealthManager(
+        config=config, group_label="Rack",
+        servers=[server_a, server_b],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=stop_event,
+        log_fn=lambda msg: None,
+    )
+    with patch("eneru.remote_health.run_remote_probe") as probe_mock:
+        manager.check_once()
+    probe_mock.assert_not_called()
+
+
+@pytest.mark.unit
+def test_check_once_skips_non_loopback_when_disabled(tmp_path):
+    """remote_health.enabled=False with a mixed server list: loopback
+    runs, regular remotes are skipped (remote_health.py line 321)."""
+    config = Config()
+    config.remote_health.enabled = False
+    config.remote_health.failure_threshold = 1
+    loopback = _make_loopback_server()
+    regular = RemoteServerConfig(
+        name="nas", enabled=True, host="nas.example", user="ups",
+        connect_timeout=3, is_host_loopback=False,
+    )
+    manager = RemoteHealthManager(
+        config=config, group_label="Rack",
+        servers=[loopback, regular],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+    )
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(True, "", 1)) as probe_mock, \
+         patch("eneru.remote_health.run_loopback_identity_probe",
+               return_value=(True, "", 1)):
+        manager.check_once()
+    # Probe should have run for loopback only.
+    assert probe_mock.call_count == 1
+    called_server = probe_mock.call_args.args[0]
+    assert called_server.is_host_loopback is True
+
+
+@pytest.mark.unit
+def test_check_server_rejects_unsafe_probe_command(tmp_path):
+    """When the validated probe command is None (probe rejected as
+    unsafe at startup), _check_server records that without calling
+    run_remote_probe (remote_health.py line 351)."""
+    config = Config()
+    config.remote_health.enabled = True
+    config.remote_health.failure_threshold = 1
+    config.remote_health.probe_command = "shutdown -h now"  # rejected by safety check
+    server = RemoteServerConfig(
+        name="nas", enabled=True, host="nas.example", user="ups",
+        connect_timeout=3,
+    )
+    manager = RemoteHealthManager(
+        config=config, group_label="Rack", servers=[server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+    )
+    with patch("eneru.remote_health.run_remote_probe") as probe_mock:
+        rows = manager.check_once()
+    probe_mock.assert_not_called()
+    assert rows[0]["status"] == REMOTE_HEALTH_FAILED
+    assert "unsafe probe command" in rows[0]["last_error"]

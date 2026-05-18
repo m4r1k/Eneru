@@ -150,6 +150,59 @@ class TestAssessHealthGroupTriggers:
         assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.DEGRADED
 
     @pytest.mark.unit
+    def test_group_thresholds_past_stabilization_ignore_nonnumeric(self):
+        """After stabilization delay, non-numeric battery/runtime must be
+        treated as missing rather than crashing -- covers the
+        ``int(float(...))`` TypeError/ValueError guards (health_model.py
+        lines 181-186)."""
+        triggers = TriggersConfig(
+            low_battery_threshold=50,
+            critical_runtime_threshold=1200,
+            on_battery_stabilization_delay=0,
+            extended_time=ExtendedTimeConfig(enabled=False, threshold=900),
+        )
+        snap = _snap(
+            status="OB",
+            battery_charge="bad",
+            runtime="bad",
+            time_on_battery=300,
+        )
+        # battery=None, runtime=None -> none of the CRITICAL checks fire,
+        # depletion default rate=0.0, extended_time disabled -> DEGRADED.
+        assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.DEGRADED
+
+    @pytest.mark.unit
+    def test_non_numeric_stabilization_delay_falls_back_to_zero(self):
+        """A triggers object exposing a non-int ``on_battery_stabilization_delay``
+        must not crash -- the guard coerces it to 0 (health_model.py
+        lines 175-176).
+
+        Uses a duck-typed stand-in because ``TriggersConfig`` itself enforces
+        ``int`` at construction; the guard exists for redundancy-group
+        callers that pass arbitrary attribute holders.
+        """
+        class _DuckTriggers:
+            on_battery_stabilization_delay = "not-an-int"
+            low_battery_threshold = 1
+            critical_runtime_threshold = 0
+            depletion = None
+            extended_time = ExtendedTimeConfig(enabled=False, threshold=900)
+
+        snap = _snap(
+            status="OB",
+            battery_charge="100",
+            runtime="9999",
+            time_on_battery=0,
+        )
+        # stabilization_delay coerced to 0; time_on_battery (0) NOT < 0, so
+        # the function proceeds past the early-return and lands on DEGRADED
+        # (no CRITICAL threshold trips).
+        assert (
+            assess_health(snap, _DuckTriggers(), 1, now=NOW)
+            == UPSHealth.DEGRADED
+        )
+
+    @pytest.mark.unit
     def test_group_depletion_waits_for_grace_period(self):
         triggers = TriggersConfig(
             low_battery_threshold=1,

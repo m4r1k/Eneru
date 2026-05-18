@@ -2102,3 +2102,389 @@ ups:
         )
 
         good_a.log_event.assert_called_once()
+
+
+# ==============================================================================
+# DEFENSIVE-BRANCH COVERAGE FOR MULTI_UPS COORDINATOR
+# ==============================================================================
+
+
+class TestCoordinatorRunKeyboardInterrupt:
+    """`MultiUPSCoordinator.run` catches KeyboardInterrupt and routes to
+    `_handle_signal(SIGINT, None)` rather than propagating."""
+
+    @pytest.mark.unit
+    def test_keyboard_interrupt_during_initialize_calls_handle_signal(self, tmp_path):
+        import signal as _signal
+
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._initialize = MagicMock(side_effect=KeyboardInterrupt())
+        coord._handle_signal = MagicMock()
+
+        coord.run()
+
+        coord._handle_signal.assert_called_once_with(_signal.SIGINT, None)
+
+
+class TestCoordinatorInitializeLogPermission:
+    """When the configured log-file path is unwritable, `_initialize` must
+    swallow the PermissionError (line 99-100)."""
+
+    @pytest.mark.unit
+    def test_initialize_swallows_permission_error_on_log_touch(self, tmp_path):
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+
+        original_touch = Path.touch
+
+        def raising_touch(self, *args, **kwargs):
+            # Raise only for the configured log file; let every other Path
+            # (state, flag, stats DB) keep its real behavior so we don't
+            # produce side-effects elsewhere in _initialize.
+            if str(self) == config.logging.file:
+                raise PermissionError("read-only")
+            return original_touch(self, *args, **kwargs)
+
+        with patch("eneru.multi_ups.signal.signal"), \
+             patch.object(Path, "touch", new=raising_touch):
+            # Must not raise.
+            coord._initialize()
+
+
+class TestCoordinatorCancelPrevPendingSweepFailures:
+    """`_cancel_prev_pending_lifecycle_rows` logs and continues on SQLite
+    and OSError failures, both for the main sweep and the finally-close."""
+
+    @pytest.mark.unit
+    def test_sqlite_error_during_sweep_is_logged_not_raised(self, tmp_path):
+        from eneru import ConfigLoader
+        from eneru.stats import StatsStore
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("ups:\n  - name: UPS-A\n")
+        config = ConfigLoader.load(str(config_file))
+        config.statistics.db_directory = str(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        log = []
+        coord._log = log.append
+
+        # Pre-create the DB so the sweep loop reaches the store.open() path.
+        sanitized = "UPS-A"
+        db_path = tmp_path / f"{sanitized}.db"
+        db_path.touch()
+
+        # Stub StatsStore so open() succeeds but the query raises.
+        bad_store = MagicMock()
+        import sqlite3 as _sqlite3
+        bad_store.find_pending_by_category.side_effect = _sqlite3.OperationalError(
+            "db is locked"
+        )
+        with patch("eneru.multi_ups.StatsStore", return_value=bad_store):
+            coord._cancel_prev_pending_lifecycle_rows(tmp_path)
+
+        assert any("Lifecycle sweep skipped" in m for m in log), log
+        # close() was still called in finally.
+        bad_store.close.assert_called_once()
+
+    @pytest.mark.unit
+    def test_close_failure_in_finally_is_logged_not_raised(self, tmp_path):
+        from eneru import ConfigLoader
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("ups:\n  - name: UPS-A\n")
+        config = ConfigLoader.load(str(config_file))
+        config.statistics.db_directory = str(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        log = []
+        coord._log = log.append
+
+        sanitized = "UPS-A"
+        db_path = tmp_path / f"{sanitized}.db"
+        db_path.touch()
+
+        good_store = MagicMock()
+        good_store.find_pending_by_category.return_value = []
+        good_store.close.side_effect = OSError("disk gone")
+        with patch("eneru.multi_ups.StatsStore", return_value=good_store):
+            coord._cancel_prev_pending_lifecycle_rows(tmp_path)
+
+        assert any("Failed to close stats DB" in m for m in log), log
+
+
+class TestCoordinatorRedundancyRemoteHealthDisabled:
+    """`_start_redundancy_remote_health` removes the stale sidecar when
+    all servers are disabled — and swallows OSError if the unlink fails."""
+
+    def _config_with_redundancy(self, tmp_path):
+        from eneru import RedundancyGroupConfig
+        return _coord_config(
+            tmp_path,
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS1@h"), is_local=False),
+                UPSGroupConfig(ups=UPSConfig(name="UPS2@h"), is_local=False),
+            ],
+            redundancy_groups=[
+                RedundancyGroupConfig(
+                    name="rack-1",
+                    ups_sources=["UPS1@h", "UPS2@h"],
+                    min_healthy=1,
+                ),
+            ],
+        )
+
+    @pytest.mark.unit
+    def test_unlink_oserror_is_swallowed(self, tmp_path):
+        config = self._config_with_redundancy(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+
+        with patch("eneru.multi_ups.remote_health_sidecar_path") as sidecar:
+            stale_path = MagicMock()
+            stale_path.unlink.side_effect = OSError("EACCES")
+            sidecar.return_value = stale_path
+            # Must not raise.
+            coord._start_redundancy_remote_health(
+                config.redundancy_groups[0], monitors_by_name={},
+            )
+
+    @pytest.mark.unit
+    def test_notify_fn_routes_to_notification_worker(self, tmp_path):
+        """When a notification worker exists, the redundancy
+        remote-health notify_fn closure dispatches via worker.send."""
+        config = self._config_with_redundancy(tmp_path)
+        config.redundancy_groups[0].remote_servers = [
+            RemoteServerConfig(
+                name="nas", enabled=True, host="10.0.0.10", user="root",
+            ),
+        ]
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+        worker = MagicMock()
+        coord._notification_worker = worker
+
+        with patch("eneru.multi_ups.RemoteHealthManager") as mgr_cls:
+            mgr_cls.return_value = MagicMock()
+            coord._start_redundancy_remote_health(
+                config.redundancy_groups[0], monitors_by_name={},
+            )
+
+        notify_fn = mgr_cls.call_args.kwargs["notify_fn"]
+        notify_fn("alert body", "warning")
+        worker.send.assert_called_once()
+        # Category for redundancy remote-health alerts is "health".
+        assert worker.send.call_args.kwargs["category"] == "health"
+
+
+class TestCoordinatorStartServersIdempotent:
+    """The API server and MQTT publisher starters are idempotent — calling
+    them again when one is already running is a no-op."""
+
+    @pytest.mark.unit
+    def test_start_api_server_no_op_when_already_started(self, tmp_path):
+        coord = MultiUPSCoordinator(_coord_config(tmp_path))
+        sentinel = MagicMock()
+        coord._api_server = sentinel
+        with patch("eneru.multi_ups.EneruAPIServer") as cls:
+            coord._start_api_server()
+        cls.assert_not_called()
+        assert coord._api_server is sentinel
+
+    @pytest.mark.unit
+    def test_start_mqtt_publisher_no_op_when_already_started(self, tmp_path):
+        coord = MultiUPSCoordinator(_coord_config(tmp_path))
+        sentinel = MagicMock()
+        coord._mqtt_publisher = sentinel
+        with patch("eneru.multi_ups.MQTTPublisher") as cls:
+            coord._start_mqtt_publisher()
+        cls.assert_not_called()
+        assert coord._mqtt_publisher is sentinel
+
+
+class TestRunMonitorCrashStoreSelection:
+    """`_run_monitor`'s crash-notify path passes `store=None` when the
+    monitor's stats store never opened — protecting the worker from a
+    half-initialized store (line 470)."""
+
+    @pytest.mark.unit
+    def test_unopened_store_normalized_to_none(self, tmp_path):
+        coord = MultiUPSCoordinator(_coord_config(tmp_path))
+        coord._log = MagicMock()
+        worker = MagicMock()
+        coord._notification_worker = worker
+
+        monitor = MagicMock()
+        # Store object exists but `_conn` is None — never opened.
+        unopened_store = MagicMock()
+        unopened_store._conn = None
+        monitor._stats_store = unopened_store
+        monitor.run.side_effect = RuntimeError("crash")
+
+        group = MagicMock()
+        group.ups.label = "UPS-X"
+
+        coord._run_monitor(monitor, group)
+
+        # Worker.send was called with store=None (unopened store filtered).
+        assert worker.send.call_args.kwargs["store"] is None
+
+
+class TestOnGroupShutdownEdgeCases:
+    """`_on_group_shutdown` has three branches today: group=None early
+    return, the local-shutdown handoff, and the non-local
+    --exit-after-shutdown handoff."""
+
+    @pytest.mark.unit
+    def test_none_group_is_no_op(self, tmp_path):
+        coord = MultiUPSCoordinator(_coord_config(tmp_path))
+        coord._handle_local_shutdown = MagicMock()
+        coord._on_group_shutdown(None)
+        coord._handle_local_shutdown.assert_not_called()
+
+    @pytest.mark.unit
+    def test_nonlocal_with_exit_after_shutdown_sets_stop_event(self, tmp_path):
+        """A non-local group whose shutdown completes triggers stop_event.set()
+        when --exit-after-shutdown is enabled."""
+        config = _coord_config(
+            tmp_path,
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS1@h"), is_local=False),
+            ],
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="local_only"),
+        )
+        coord = MultiUPSCoordinator(config, exit_after_shutdown=True)
+        coord._log = MagicMock()
+        coord._handle_local_shutdown = MagicMock()
+        coord._stop_event = MagicMock()
+
+        group = config.ups_groups[0]
+        coord._on_group_shutdown(group)
+
+        coord._handle_local_shutdown.assert_not_called()
+        coord._stop_event.set.assert_called_once()
+
+
+class TestHandleLocalShutdownLockReentry:
+    """The defense-in-depth lock makes a second `_handle_local_shutdown`
+    call a no-op when the first one is still in flight (line 538-539)."""
+
+    @pytest.mark.unit
+    def test_second_call_returns_after_lock_check(self, tmp_path):
+        coord = MultiUPSCoordinator(_coord_config(tmp_path))
+        coord._log = MagicMock()
+        # Simulate the first call having already set the lock.
+        coord._local_shutdown_initiated = True
+
+        # The global flag should NOT be touched on the re-entry path.
+        assert not coord._global_shutdown_flag.exists()
+        coord._handle_local_shutdown("UPS-A")
+        assert not coord._global_shutdown_flag.exists()
+
+
+class TestHandleLocalShutdownDrainLog:
+    """The drain branch logs `⏳ Draining...` before delegating to
+    `_drain_all_groups` (lines 548-549)."""
+
+    @pytest.mark.unit
+    def test_drain_is_invoked_when_configured(self, tmp_path):
+        config = _coord_config(tmp_path)
+        config.local_shutdown.drain_on_local_shutdown = True
+        coord = MultiUPSCoordinator(config)
+        log = []
+        coord._log = log.append
+        coord._drain_all_groups = MagicMock()
+
+        coord._handle_local_shutdown("UPS-A")
+
+        coord._drain_all_groups.assert_called_once()
+        assert any("Draining all UPS groups" in m for m in log), log
+
+
+class TestWaitForCompletionKeyboardInterrupt:
+    """`_wait_for_completion` catches KeyboardInterrupt from
+    `self._stop_event.wait` and delegates to `_handle_signal`."""
+
+    @pytest.mark.unit
+    def test_keyboard_interrupt_routes_to_handle_signal(self, tmp_path):
+        import signal as _signal
+
+        coord = MultiUPSCoordinator(_coord_config(tmp_path))
+        coord._handle_signal = MagicMock()
+
+        # One alive thread so the wait() is actually entered, then KbI.
+        alive_thread = MagicMock()
+        alive_thread.is_alive.return_value = True
+        coord._threads = [alive_thread]
+        coord._evaluator_threads = []
+
+        # Stop event: not set on the first check, then raises on wait().
+        stop = MagicMock()
+        stop.is_set.return_value = False
+        stop.wait.side_effect = KeyboardInterrupt()
+        coord._stop_event = stop
+
+        coord._wait_for_completion()
+
+        coord._handle_signal.assert_called_once_with(_signal.SIGINT, None)
+
+
+class TestHandleSignalDeferredScheduling:
+    """Cover the deferred-scheduling and eager-fallback branches of
+    `_handle_signal` (lines 707-727)."""
+
+    @pytest.mark.unit
+    def test_schedule_called_when_store_and_notif_id_present(self, tmp_path):
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+        coord._threads = []
+        coord._evaluator_threads = []
+        coord._redundancy_remote_health_managers = []
+
+        worker = MagicMock()
+        worker.send.return_value = 42  # notif_id
+        store = MagicMock()
+        store.db_path = tmp_path / "fake.db"
+        # The handler walks worker._stores under worker._stores_lock.
+        worker._stores_lock = threading.Lock()
+        worker._stores = [store]
+        coord._notification_worker = worker
+
+        with patch("eneru.multi_ups.read_upgrade_marker", return_value=None), \
+             patch("eneru.multi_ups.read_shutdown_marker", return_value=None), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.schedule_deferred_stop_or_eager_send") as sched, \
+             pytest.raises(SystemExit):
+            coord._handle_signal(15, None)
+
+        sched.assert_called_once()
+        kw = sched.call_args.kwargs
+        assert kw["notification_id"] == 42
+        assert kw["db_path"] == store.db_path
+
+    @pytest.mark.unit
+    def test_eager_apprise_fallback_swallows_exception(self, tmp_path):
+        """When `_send_via_apprise` raises in the no-store fallback path,
+        the handler swallows the exception (lines 726-727)."""
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+        coord._threads = []
+        coord._evaluator_threads = []
+        coord._redundancy_remote_health_managers = []
+
+        worker = MagicMock()
+        worker.send.return_value = None  # No stores registered → returns None
+        worker._stores_lock = threading.Lock()
+        worker._stores = []
+        worker._send_via_apprise.side_effect = RuntimeError("apprise gone")
+        coord._notification_worker = worker
+
+        with patch("eneru.multi_ups.read_upgrade_marker", return_value=None), \
+             patch("eneru.multi_ups.read_shutdown_marker", return_value=None), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.schedule_deferred_stop_or_eager_send") as sched, \
+             pytest.raises(SystemExit):
+            coord._handle_signal(15, None)
+
+        sched.assert_not_called()
+        # Eager fallback was attempted (and its exception swallowed).
+        worker._send_via_apprise.assert_called_once()

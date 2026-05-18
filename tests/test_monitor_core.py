@@ -2973,3 +2973,781 @@ class TestPowerRestoredCallback:
         monitor._handle_on_line(ups_data)
 
         assert any("power_restored_callback raised" in m for m in log), log
+
+
+# ==============================================================================
+# DEFENSIVE BRANCH COVERAGE (gap-closing tests for monitor.py)
+# ==============================================================================
+
+
+class TestRunKeyboardInterrupt:
+    """`UPSGroupMonitor.run` catches KeyboardInterrupt and delegates to
+    `_cleanup_and_exit` rather than letting the exception propagate. The
+    fatal-Exception branch is already covered; this pins the SIGINT path."""
+
+    @pytest.mark.unit
+    def test_keyboard_interrupt_routes_to_cleanup(self, tmp_path):
+        import signal as _signal
+
+        monitor = make_monitor(tmp_path)
+        monitor._initialize = MagicMock()
+        monitor._main_loop = MagicMock(side_effect=KeyboardInterrupt())
+        monitor._cleanup_and_exit = MagicMock()
+
+        monitor.run()
+
+        monitor._cleanup_and_exit.assert_called_once_with(_signal.SIGINT, None)
+
+
+class TestGetAllUpsDataFailurePaths:
+    """`_get_all_ups_data` has two early-return paths (non-zero exit code
+    and stale-data marker in stdout/stderr) that don't have a dedicated
+    test today — they're exercised implicitly elsewhere, but a direct
+    test pins the contract."""
+
+    @pytest.mark.unit
+    def test_nonzero_exit_returns_failure_with_stderr(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        with patch.object(monitor, "_run_upsc",
+                          return_value=(1, "", "no such ups")):
+            success, data, err = monitor._get_all_ups_data()
+        assert success is False
+        assert data == {}
+        assert err == "no such ups"
+
+    @pytest.mark.unit
+    def test_stale_data_marker_returns_failure(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        with patch.object(monitor, "_run_upsc",
+                          return_value=(0, "Data stale\n", "")):
+            success, data, err = monitor._get_all_ups_data()
+        assert success is False
+        assert data == {}
+        assert err == "Data stale"
+
+
+class TestRecordRemoteHealthEvent:
+    """`_record_remote_health_event` mirrors RemoteHealthManager events
+    into the per-UPS stats DB (best-effort)."""
+
+    @pytest.mark.unit
+    def test_writes_event_with_notification_flag(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        monitor._record_remote_health_event(
+            "REMOTE_HEALTH_FAILED", "ssh timeout", notification_sent=True,
+        )
+        monitor._stats_store.log_event.assert_called_once_with(
+            "REMOTE_HEALTH_FAILED", "ssh timeout", notification_sent=True,
+        )
+
+
+class TestInitializeNotificationsStoreOpenFailure:
+    """When `_stats_store.open()` raises during `_initialize_notifications`,
+    the daemon logs a warning and continues without persistence."""
+
+    @pytest.mark.unit
+    def test_open_failure_logs_warning_and_continues(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.notifications.enabled = False  # skip worker path
+        monitor._notification_worker = None
+        store = MagicMock()
+        store._conn = None
+        store.open.side_effect = RuntimeError("disk full")
+        monitor._stats_store = store
+        log = []
+        monitor._log_message = log.append
+
+        monitor._initialize_notifications()
+
+        assert any("stats store open failed" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_pre_worker_lifecycle_sweep_swallows_sqlite_error(self, tmp_path):
+        """The pre-worker lifecycle sweep wraps SQLite/OS errors so a
+        transient DB hiccup doesn't break startup. The late-cancel block
+        in `_emit_lifecycle_startup_notification` still has a chance to
+        catch up later."""
+        import sqlite3 as _sqlite3
+
+        monitor = make_monitor(tmp_path)
+        monitor.config.notifications.enabled = False
+        monitor._notification_worker = None
+        store = MagicMock()
+        store._conn = object()  # already open — skip the open() branch
+        store.find_pending_by_category.side_effect = _sqlite3.OperationalError(
+            "disk I/O error"
+        )
+        monitor._stats_store = store
+        log = []
+        monitor._log_message = log.append
+
+        # Must not raise.
+        monitor._initialize_notifications()
+
+        assert any("pre-worker lifecycle sweep failed" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_register_store_called_when_worker_starts_and_store_open(self, tmp_path):
+        """Happy-path: after NotificationWorker.start() returns True and
+        the per-UPS stats store has an open `_conn`, register the store
+        so the worker can persist messages across restarts."""
+        monitor = make_monitor(tmp_path)
+        monitor.config.notifications.enabled = True
+        monitor._notification_worker = None
+        store = MagicMock()
+        store._conn = object()
+        store.find_pending_by_category.return_value = []
+        monitor._stats_store = store
+
+        fake_worker = MagicMock()
+        fake_worker.start.return_value = True
+        fake_worker.get_service_count.return_value = 1
+
+        with patch("eneru.monitor.APPRISE_AVAILABLE", True), \
+             patch("eneru.monitor.NotificationWorker", return_value=fake_worker):
+            monitor._initialize_notifications()
+
+        fake_worker.register_store.assert_called_once_with(store)
+
+
+class TestEmitLifecycleStartupCoordinatorMode:
+    """The lifecycle classifier short-circuits in coordinator mode
+    (the multi_ups path emits the single classified notification)."""
+
+    @pytest.mark.unit
+    def test_coordinator_mode_returns_after_meta_update(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._coordinator_mode = True
+        store = MagicMock()
+        store._conn = object()
+        store.get_meta.return_value = None
+        monitor._stats_store = store
+
+        with patch("eneru.monitor.read_shutdown_marker") as read_sh, \
+             patch("eneru.monitor.delete_shutdown_marker") as del_sh, \
+             patch("eneru.monitor.delete_upgrade_marker") as del_up:
+            monitor._emit_lifecycle_startup_notification()
+
+        # Meta updated, then early return — markers never consulted/deleted.
+        store.set_meta.assert_called_once_with("last_seen_version", monitor_mod_version())
+        read_sh.assert_not_called()
+        del_sh.assert_not_called()
+        del_up.assert_not_called()
+
+
+def monitor_mod_version():
+    """Helper to read the package __version__ without polluting imports."""
+    from eneru.version import __version__
+    return __version__
+
+
+class TestEmitLifecycleStartupExceptionalPaths:
+    """Cover the defensive corners of `_emit_lifecycle_startup_notification`."""
+
+    @pytest.mark.unit
+    def test_log_event_failure_does_not_mask_notification(self, tmp_path):
+        """When the events-table mirror raises, swallow the error and
+        still send the startup notification."""
+        from eneru.lifecycle import REASON_SEQUENCE_COMPLETE
+        from eneru.version import __version__
+
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = object()
+        store.get_meta.return_value = __version__
+        store.log_event.side_effect = RuntimeError("table missing")
+        store.find_pending_by_category.return_value = []
+        monitor._stats_store = store
+        monitor._send_notification = MagicMock()
+
+        marker = {"shutdown_at": 1000, "version": __version__,
+                  "reason": REASON_SEQUENCE_COMPLETE}
+        with patch("eneru.monitor.read_shutdown_marker", return_value=marker), \
+             patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("eneru.monitor.delete_upgrade_marker"), \
+             patch("eneru.monitor.coalesce_recovered_with_prev_shutdown",
+                   return_value=None):
+            # Must not raise.
+            monitor._emit_lifecycle_startup_notification()
+
+        monitor._send_notification.assert_called_once()
+
+    @pytest.mark.unit
+    def test_cancels_prior_pending_lifecycle_rows(self, tmp_path):
+        """When the late-cancel block runs, it walks the pending lifecycle
+        rows and cancels each as 'superseded'."""
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = object()
+        store.get_meta.return_value = None
+        store.find_pending_by_category.return_value = [(7,), (9,)]
+        monitor._stats_store = store
+        monitor._send_notification = MagicMock()
+
+        with patch("eneru.monitor.read_shutdown_marker", return_value=None), \
+             patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("eneru.monitor.delete_upgrade_marker"):
+            monitor._emit_lifecycle_startup_notification()
+
+        store.cancel_notification.assert_any_call(7, "superseded")
+        store.cancel_notification.assert_any_call(9, "superseded")
+        assert store.cancel_notification.call_count == 2
+
+    @pytest.mark.unit
+    def test_corrupted_shutdown_at_falls_back_to_zero(self, tmp_path):
+        """A non-numeric ``shutdown_at`` in the marker must not crash —
+        the TypeError/ValueError handler resets to 0 so the coalesce
+        still runs (with a zero downtime)."""
+        from eneru.lifecycle import REASON_SEQUENCE_COMPLETE
+        from eneru.version import __version__
+
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = object()
+        store.get_meta.return_value = __version__
+        store.find_pending_by_category.return_value = []
+        monitor._stats_store = store
+        monitor._send_notification = MagicMock()
+
+        marker = {"shutdown_at": "garbage", "version": __version__,
+                  "reason": REASON_SEQUENCE_COMPLETE}
+        with patch("eneru.monitor.read_shutdown_marker", return_value=marker), \
+             patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("eneru.monitor.delete_upgrade_marker"), \
+             patch("eneru.monitor.coalesce_recovered_with_prev_shutdown",
+                   return_value=None) as coalesce:
+            monitor._emit_lifecycle_startup_notification()
+
+        # Coalesce was still invoked — proves the bad marker didn't
+        # propagate as an exception.
+        coalesce.assert_called_once()
+
+    @pytest.mark.unit
+    def test_coalesced_body_overrides_classification_body(self, tmp_path):
+        """When the coalescer returns a non-None body, the lifecycle
+        notification ships that richer message instead of the bare
+        classification."""
+        from eneru.lifecycle import REASON_SEQUENCE_COMPLETE
+        from eneru.version import __version__
+
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = object()
+        store.get_meta.return_value = __version__
+        store.find_pending_by_category.return_value = []
+        monitor._stats_store = store
+        monitor._send_notification = MagicMock()
+
+        marker = {"shutdown_at": 1000, "version": __version__,
+                  "reason": REASON_SEQUENCE_COMPLETE}
+        with patch("eneru.monitor.read_shutdown_marker", return_value=marker), \
+             patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("eneru.monitor.delete_upgrade_marker"), \
+             patch("eneru.monitor.coalesce_recovered_with_prev_shutdown",
+                   return_value="🪄 coalesced summary"):
+            monitor._emit_lifecycle_startup_notification()
+
+        sent_body = monitor._send_notification.call_args.args[0]
+        assert sent_body == "🪄 coalesced summary"
+
+
+class TestLogEnabledFeaturesExplicitRuntime:
+    """`_log_enabled_features` formats the runtime/compose string
+    differently for runtime="auto" vs an explicit runtime; cover the
+    explicit-runtime-with-no-compose case (line 556)."""
+
+    @pytest.mark.unit
+    def test_explicit_runtime_no_compose(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.ups_groups[0].containers = ContainersConfig(
+            enabled=True,
+            runtime="podman",
+            compose_files=[],
+        )
+        log = []
+        monitor._log_message = log.append
+        monitor._log_enabled_features()
+        joined = " ".join(log)
+        assert "Containers (podman)" in joined
+        # Make sure we did NOT mistakenly tag a compose count.
+        assert "compose" not in joined
+
+
+class TestLogMessagePrefixGroupExtra:
+    """When `_log_prefix` is set, `_log_message` derives a `group` field
+    from the prefix (line 591). That feeds JSON pipelines so they can
+    group per-UPS rows without parsing the message text."""
+
+    @pytest.mark.unit
+    def test_prefix_populates_group_extra(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._log_prefix = "[Main UPS] "
+        monitor.logger = MagicMock()
+        monitor._log_message("hello", category="test")
+        assert monitor.logger.log.call_args.kwargs["group"] == "Main UPS"
+
+    @pytest.mark.unit
+    def test_explicit_group_extra_is_preserved(self, tmp_path):
+        """Caller-supplied `group` wins over the auto-derived one."""
+        monitor = make_monitor(tmp_path)
+        monitor._log_prefix = "[Main UPS] "
+        monitor.logger = MagicMock()
+        monitor._log_message("hi", group="explicit")
+        assert monitor.logger.log.call_args.kwargs["group"] == "explicit"
+
+
+class TestLogPowerEventDefensiveBranches:
+    """`_log_power_event` has two defensive branches: the syslog
+    side-channel swallows exceptions (lines 673-674), the stats
+    persistence swallows exceptions (lines 753-754), and unmapped
+    event names fall through to the generic INFO notification (line 762)."""
+
+    @pytest.mark.unit
+    def test_syslog_failure_is_swallowed(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        monitor._shutdown_flag_path.unlink(missing_ok=True)
+
+        with patch("eneru.monitor.run_command",
+                   side_effect=OSError("logger missing")):
+            # Must not raise even though run_command blew up.
+            monitor._log_power_event("ON_BATTERY", "test")
+
+        # The event still landed in stats and the notification still
+        # dispatched — only the legacy syslog mirror failed.
+        monitor._stats_store.log_event.assert_called_once()
+        monitor._notification_worker.send.assert_called_once()
+
+    @pytest.mark.unit
+    def test_stats_log_event_failure_is_swallowed(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store.log_event.side_effect = RuntimeError("DB locked")
+        monitor._stats_store = store
+        monitor._shutdown_flag_path.unlink(missing_ok=True)
+
+        with patch("eneru.monitor.run_command", return_value=(0, "", "")):
+            # Must not raise even though log_event blew up.
+            monitor._log_power_event("ON_BATTERY", "test")
+
+        # Notification still fires — stats hiccup must not block alerts.
+        monitor._notification_worker.send.assert_called_once()
+
+    @pytest.mark.unit
+    def test_unmapped_event_uses_generic_info_notification(self, tmp_path):
+        """An event name not in the per-event mapping falls through to
+        the generic `⚡ **Event:** ...` body with NOTIFY_INFO."""
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        monitor._shutdown_flag_path.unlink(missing_ok=True)
+
+        with patch("eneru.monitor.run_command", return_value=(0, "", "")):
+            monitor._log_power_event("CUSTOM_TELEMETRY", "value=42")
+
+        send_kwargs = monitor._notification_worker.send.call_args.kwargs
+        assert "⚡ **Event:** CUSTOM_TELEMETRY" in send_kwargs["body"]
+        assert send_kwargs["category"] == "power_event"
+
+
+class TestSaveStateDefensive:
+    """`_save_state` writes the per-UPS state file and buffers a stats
+    sample, both wrapped so write failures don't crash the poll loop."""
+
+    @pytest.mark.unit
+    def test_state_file_write_failure_is_swallowed(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        # Point state_file_path at a location that can't be written
+        # (parent doesn't exist + write_text throws).
+        bogus = tmp_path / "does-not-exist" / "state-file"
+        monitor._state_file_path = bogus
+
+        # Must not raise.
+        monitor._save_state({"ups.status": "OL", "battery.charge": "100"})
+
+    @pytest.mark.unit
+    def test_stats_buffer_failure_is_swallowed(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store.buffer_sample.side_effect = RuntimeError("ring full")
+        monitor._stats_store = store
+
+        # Must not raise.
+        monitor._save_state({"ups.status": "OL", "battery.charge": "100"})
+
+        # The state file was still written even though buffering blew up.
+        assert monitor._state_file_path.exists()
+
+
+class TestExecuteShutdownSequenceDelegatedStatsEvent:
+    """In delegated mode, `_execute_shutdown_sequence` logs a
+    DELEGATED_SHUTDOWN_INITIATED event — and swallows any stats failure
+    on that write so the safety-critical path keeps going."""
+
+    @pytest.mark.unit
+    def test_delegated_event_log_failure_is_swallowed(self, tmp_path):
+        from eneru.shutdown.remote import RemoteShutdownResult
+
+        monitor = make_monitor(
+            tmp_path,
+            remote_servers=[RemoteServerConfig(
+                name="host-loopback",
+                enabled=True,
+                host="127.0.0.1",
+                user="root",
+                shutdown_command="shutdown -h now",
+                is_host_loopback=True,
+            )],
+        )
+        monitor._coordinator_mode = False
+        monitor.config.local_shutdown.enabled = True
+        store = MagicMock()
+        store.log_event.side_effect = RuntimeError("DB gone")
+        monitor._stats_store = store
+        monitor._send_notification = MagicMock()
+        monitor._shutdown_vms = MagicMock()
+        monitor._shutdown_containers = MagicMock()
+        monitor._sync_filesystems = MagicMock()
+        monitor._unmount_filesystems = MagicMock()
+        monitor._shutdown_remote_servers = MagicMock(return_value=[
+            RemoteShutdownResult(
+                server="host-loopback",
+                host="127.0.0.1",
+                shutdown_sent=True,
+                dry_run=True,
+            )
+        ])
+
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            # Must not raise.
+            monitor._execute_shutdown_sequence()
+
+
+class TestCleanupAndExitDefensive:
+    """Defensive corners of `_cleanup_and_exit`."""
+
+    @pytest.mark.unit
+    def test_daemon_stop_log_event_failure_is_swallowed(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = MagicMock()
+        store.log_event.side_effect = RuntimeError("DB locked")
+        monitor._stats_store = store
+        monitor._stop_stats = MagicMock()
+        monitor._notification_worker = MagicMock()
+        monitor._send_notification = MagicMock(return_value=1)
+        monitor._shutdown_flag_path.unlink(missing_ok=True)
+
+        with patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.read_shutdown_marker", return_value=None), \
+             patch("eneru.monitor.write_shutdown_marker"), \
+             patch("eneru.monitor.schedule_deferred_stop_or_eager_send"):
+            # Must not raise even though log_event blew up.
+            with pytest.raises(SystemExit):
+                monitor._cleanup_and_exit(15, None)
+
+    @pytest.mark.unit
+    def test_eager_apprise_fallback_swallows_apprise_exception(self, tmp_path):
+        """When the eager Apprise fallback also blows up, swallow it —
+        nothing more we can do at this point in shutdown."""
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = None  # DB never opened
+        monitor._stats_store = store
+        monitor._stop_stats = MagicMock()
+        worker = MagicMock()
+        worker._send_via_apprise.side_effect = RuntimeError("apprise gone")
+        monitor._notification_worker = worker
+        monitor._send_notification = MagicMock(return_value=None)
+        monitor._shutdown_flag_path.unlink(missing_ok=True)
+
+        with patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.read_shutdown_marker", return_value=None), \
+             patch("eneru.monitor.write_shutdown_marker"), \
+             patch("eneru.monitor.schedule_deferred_stop_or_eager_send"):
+            with pytest.raises(SystemExit):
+                monitor._cleanup_and_exit(15, None)
+
+        worker._send_via_apprise.assert_called_once()
+
+
+class TestHandleOnBatteryDefensive:
+    """Cover the non-numeric battery_charge warning and the per-5s status
+    log inside `_handle_on_battery`."""
+
+    @pytest.mark.unit
+    def test_non_numeric_battery_charge_warns(self, tmp_path):
+        monitor = make_monitor(
+            tmp_path,
+            triggers=TriggersConfig(on_battery_stabilization_delay=0),
+        )
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.on_battery_start_time = int(time.time()) - 10
+        log = []
+        monitor._log_message = log.append
+
+        ups_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "N/A",
+            "battery.runtime": "1200",
+            "ups.load": "30",
+        }
+        with patch.object(monitor, "_calculate_depletion_rate",
+                          return_value=0.0):
+            monitor._handle_on_battery(ups_data)
+
+        assert any("non-numeric battery charge value" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_status_log_every_five_seconds(self, tmp_path):
+        """At ``int(time.time()) % 5 == 0`` the handler emits the
+        periodic `🔋 On battery` heartbeat line."""
+        monitor = make_monitor(
+            tmp_path,
+            triggers=TriggersConfig(on_battery_stabilization_delay=0),
+        )
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.on_battery_start_time = 1000
+        log = []
+        monitor._log_message = log.append
+
+        ups_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "80",
+            "battery.runtime": "1200",
+            "ups.load": "30",
+        }
+        # Fix time.time() so the modulo branch is deterministic.
+        with patch("eneru.monitor.time.time", return_value=1500.0), \
+             patch.object(monitor, "_calculate_depletion_rate",
+                          return_value=1.5):
+            monitor._handle_on_battery(ups_data)
+
+        assert any(m.startswith("🔋 On battery:") for m in log), log
+
+
+class TestMainLoopBranchCoverage:
+    """Cover the remaining `_main_loop` branches:
+    - failsafe trigger while NOT on battery routes to `_handle_connection_failure`
+    - FAILED → OK recovery clears the advisory trigger when in a redundancy group
+    - "OB" status routes through `_handle_on_battery`
+    """
+
+    @pytest.mark.unit
+    def test_failsafe_when_not_on_battery_uses_grace_period(self, tmp_path):
+        """Connection failure while NOT on battery feeds into
+        `_handle_connection_failure` (which applies the grace period
+        when enabled)."""
+        monitor = make_monitor(tmp_path)
+        monitor.state.previous_status = "OL CHRG"
+        monitor._handle_connection_failure = MagicMock()
+        monitor._execute_shutdown_sequence = MagicMock()
+
+        _run_one_iteration(monitor,
+                           (False, {}, "connection refused"))
+
+        monitor._handle_connection_failure.assert_called_once()
+        monitor._execute_shutdown_sequence.assert_not_called()
+
+    @pytest.mark.unit
+    def test_failed_to_ok_clears_advisory_in_redundancy(self, tmp_path):
+        """FAILED → OK recovery: when the monitor belongs to a redundancy
+        group, the advisory trigger must be cleared so the group
+        evaluator sees this UPS as healthy."""
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = True
+        monitor._clear_advisory_trigger = MagicMock()
+        monitor.state.connection_state = "FAILED"
+        monitor.state.previous_status = "OL CHRG"
+
+        _run_one_iteration(monitor, (True, {
+            "ups.status": "OL CHRG",
+            "battery.charge": "100",
+            "battery.runtime": "3600",
+        }, ""))
+
+        monitor._clear_advisory_trigger.assert_called_once()
+
+    @pytest.mark.unit
+    def test_ob_status_routes_to_on_battery_handler(self, tmp_path):
+        """The OB-status branch in `_main_loop` calls `_handle_on_battery`."""
+        monitor = make_monitor(tmp_path)
+        monitor._handle_on_battery = MagicMock()
+        monitor._handle_on_line = MagicMock()
+        monitor.state.previous_status = "OL CHRG"
+        monitor.state.connection_state = "OK"
+
+        _run_one_iteration(monitor, (True, {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "85",
+            "battery.runtime": "1200",
+            "ups.load": "30",
+        }, ""))
+
+        monitor._handle_on_battery.assert_called_once()
+        monitor._handle_on_line.assert_not_called()
+
+
+class TestT3DepletionRateBranches:
+    """Cover the T3 depletion-rate branches: ignored during stabilization,
+    ignored during grace period, and the actual trigger after grace."""
+
+    @pytest.mark.unit
+    def test_high_depletion_ignored_during_stabilization(self, tmp_path):
+        monitor = make_monitor(
+            tmp_path,
+            triggers=TriggersConfig(
+                on_battery_stabilization_delay=60,
+                low_battery_threshold=20,
+                critical_runtime_threshold=60,
+                depletion=DepletionConfig(
+                    window=300, critical_rate=10.0, grace_period=90,
+                ),
+                extended_time=ExtendedTimeConfig(enabled=False, threshold=900),
+            ),
+        )
+        monitor.state.previous_status = "OB DISCHRG"
+        # Within stabilization window (10s < 60s)
+        monitor.state.on_battery_start_time = int(time.time()) - 10
+        log = []
+        monitor._log_message = log.append
+
+        ups_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "80",      # Above T1
+            "battery.runtime": "1200",   # Above T2
+            "ups.load": "30",
+        }
+        with patch.object(monitor, "_trigger_immediate_shutdown") as fire, \
+             patch.object(monitor, "_calculate_depletion_rate",
+                          return_value=25.0):
+            monitor._handle_on_battery(ups_data)
+            fire.assert_not_called()
+
+        assert any("High depletion rate" in m and "stabilization" in m
+                   for m in log), log
+
+    @pytest.mark.unit
+    def test_high_depletion_ignored_during_grace_period(self, tmp_path):
+        monitor = make_monitor(
+            tmp_path,
+            triggers=TriggersConfig(
+                on_battery_stabilization_delay=0,
+                low_battery_threshold=20,
+                critical_runtime_threshold=60,
+                depletion=DepletionConfig(
+                    window=300, critical_rate=10.0, grace_period=120,
+                ),
+                extended_time=ExtendedTimeConfig(enabled=False, threshold=900),
+            ),
+        )
+        monitor.state.previous_status = "OB DISCHRG"
+        # After stabilization (50s > 0), but within grace (50s < 120s)
+        monitor.state.on_battery_start_time = int(time.time()) - 50
+        log = []
+        monitor._log_message = log.append
+
+        ups_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "80",
+            "battery.runtime": "1200",
+            "ups.load": "30",
+        }
+        with patch.object(monitor, "_trigger_immediate_shutdown") as fire, \
+             patch.object(monitor, "_calculate_depletion_rate",
+                          return_value=25.0):
+            monitor._handle_on_battery(ups_data)
+            fire.assert_not_called()
+
+        assert any("High depletion rate" in m and "grace period" in m
+                   for m in log), log
+
+    @pytest.mark.unit
+    def test_extended_time_ignored_during_stabilization(self, tmp_path):
+        """T4: extended-time exceedance during the stabilization window
+        logs the `🕒 INFO` stabilization line rather than triggering."""
+        monitor = make_monitor(
+            tmp_path,
+            triggers=TriggersConfig(
+                on_battery_stabilization_delay=120,
+                low_battery_threshold=0,
+                critical_runtime_threshold=0,
+                depletion=DepletionConfig(
+                    window=300, critical_rate=99.0, grace_period=0,
+                ),
+                extended_time=ExtendedTimeConfig(enabled=True, threshold=30),
+            ),
+        )
+        monitor.state.previous_status = "OB DISCHRG"
+        # Within stabilization (60s < 120s), but past extended-time (60s > 30s)
+        monitor.state.on_battery_start_time = int(time.time()) - 60
+        log = []
+        monitor._log_message = log.append
+
+        ups_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "80",
+            "battery.runtime": "1200",
+            "ups.load": "30",
+        }
+        with patch.object(monitor, "_trigger_immediate_shutdown") as fire, \
+             patch.object(monitor, "_calculate_depletion_rate",
+                          return_value=0.0):
+            monitor._handle_on_battery(ups_data)
+            fire.assert_not_called()
+
+        assert any("Extended-time trigger ignored" in m and "stabilization" in m
+                   for m in log), log
+
+
+class TestStartRemoteHealthHappyPath:
+    """`_start_remote_health` constructs the manager and calls .start()
+    when none exists yet."""
+
+    @pytest.mark.unit
+    def test_creates_manager_and_starts(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._remote_health_manager = None
+
+        fake_mgr = MagicMock()
+        with patch("eneru.monitor.RemoteHealthManager",
+                   return_value=fake_mgr) as mgr_cls:
+            monitor._start_remote_health()
+
+        mgr_cls.assert_called_once()
+        fake_mgr.start.assert_called_once()
+        assert monitor._remote_health_manager is fake_mgr
+
+
+class TestStopStatsDefensive:
+    """`_stop_stats` is safe to call multiple times: it clears the writer
+    handle and swallows close() exceptions."""
+
+    @pytest.mark.unit
+    def test_writer_cleared_and_close_called(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._stats_writer = MagicMock()  # truthy
+        store = MagicMock()
+        monitor._stats_store = store
+
+        monitor._stop_stats()
+
+        assert monitor._stats_writer is None
+        store.close.assert_called_once()
+
+    @pytest.mark.unit
+    def test_close_failure_is_swallowed(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._stats_writer = None  # already cleared
+        store = MagicMock()
+        store.close.side_effect = RuntimeError("disk gone")
+        monitor._stats_store = store
+
+        # Must not raise.
+        monitor._stop_stats()

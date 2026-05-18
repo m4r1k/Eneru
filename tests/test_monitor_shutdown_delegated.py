@@ -620,3 +620,112 @@ class TestInjectDelegatedActions:
             _synthesize_loopback_if_needed(config, strict_key_check=False)
 
         assert [s.name for s in config.remote_servers] == ["not-loopback"]
+
+
+# ==============================================================================
+# DEFENSIVE-BRANCH COVERAGE FOR DELEGATED REAL-RUN AND NATIVE FINAL-SYNC
+# ==============================================================================
+
+
+class TestDelegatedRealRunPath:
+    """Covers the dry_run=False branches of the delegated shutdown
+    sequence — sending the summary notification, flushing the
+    notification worker, and writing the shutdown marker."""
+
+    def _spy_phases_with_success(self, monitor):
+        """Spy phases that return a successful loopback result."""
+        calls = []
+        monitor._shutdown_vms = lambda: calls.append("vms")
+        monitor._shutdown_containers = lambda: calls.append("containers")
+        monitor._sync_filesystems = lambda: calls.append("sync")
+        monitor._unmount_filesystems = lambda: calls.append("unmount")
+
+        def remote_spy():
+            calls.append("remote")
+            return [
+                RemoteShutdownResult(
+                    server="host-loopback",
+                    host="127.0.0.1",
+                    shutdown_sent=True,  # success=True
+                )
+            ]
+        monitor._shutdown_remote_servers = remote_spy
+        return calls
+
+    @pytest.mark.unit
+    def test_real_run_sends_summary_and_writes_marker(self, tmp_path):
+        monitor = _make_delegated_monitor(tmp_path, dry_run=False)
+        self._spy_phases_with_success(monitor)
+        monitor._stats_store = MagicMock()
+        monitor._send_notification = MagicMock()
+
+        with _patch_runtime("container (Docker)"), \
+             patch("eneru.monitor.run_command") as run_cmd, \
+             patch("eneru.monitor.write_shutdown_marker") as marker:
+            monitor._execute_shutdown_sequence()
+
+        # Summary notification fires (success path, line 1204-1209).
+        bodies = [c.args[0] for c in monitor._send_notification.call_args_list]
+        assert any("Shutdown Sequence Complete" in b for b in bodies), bodies
+        # Worker flush happens at line 1210-1211.
+        monitor._notification_worker.flush.assert_called_once_with(timeout=5)
+        # Marker written at line 1213-1217.
+        marker.assert_called_once()
+        # No inline shutdown command — the loopback already sent it.
+        for call in run_cmd.call_args_list:
+            assert "shutdown" not in call.args[0][0]
+
+
+class TestNativeFinalSyncBranch:
+    """Native (non-delegated) shutdown logs the `💾 Final filesystem sync...`
+    line and either runs `os.sync()` or prints the dry-run preview."""
+
+    @pytest.mark.unit
+    def test_final_sync_logs_dry_run_preview(self, tmp_path):
+        monitor = _make_delegated_monitor(
+            tmp_path, loopback=False, dry_run=True,
+        )
+        # Stub all the phase methods so we only exercise the orchestration.
+        monitor._shutdown_vms = MagicMock()
+        monitor._shutdown_containers = MagicMock()
+        monitor._sync_filesystems = MagicMock()
+        monitor._unmount_filesystems = MagicMock()
+        monitor._shutdown_remote_servers = MagicMock(return_value=[])
+        monitor._stats_store = MagicMock()
+        log = []
+        original_log = monitor._log_message
+        monitor._log_message = lambda msg, **kw: log.append(msg)
+
+        with _patch_runtime("systemd service"), \
+             patch("eneru.monitor.os.sync") as sync_mock:
+            monitor._execute_shutdown_sequence()
+
+        assert any("Final filesystem sync" in m for m in log), log
+        # Dry-run: no actual os.sync call.
+        sync_mock.assert_not_called()
+        assert any("[DRY-RUN] Would perform final sync" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_final_sync_invokes_os_sync_in_real_mode(self, tmp_path):
+        monitor = _make_delegated_monitor(
+            tmp_path,
+            loopback=False,
+            dry_run=False,
+            local_shutdown_enabled=False,  # skip the local-shutdown branch
+        )
+        monitor._shutdown_vms = MagicMock()
+        monitor._shutdown_containers = MagicMock()
+        monitor._sync_filesystems = MagicMock()
+        monitor._unmount_filesystems = MagicMock()
+        monitor._shutdown_remote_servers = MagicMock(return_value=[])
+        monitor._stats_store = MagicMock()
+        monitor._send_notification = MagicMock()
+        log = []
+        monitor._log_message = lambda msg, **kw: log.append(msg)
+
+        with _patch_runtime("systemd service"), \
+             patch("eneru.monitor.os.sync") as sync_mock:
+            monitor._execute_shutdown_sequence()
+
+        sync_mock.assert_called_once()
+        assert any("Final sync complete" in m for m in log), log

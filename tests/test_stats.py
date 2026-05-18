@@ -4,6 +4,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -1719,3 +1720,269 @@ class TestStatsHelpers:
         assert _to_int("not-a-number") is None
         assert _to_int(None) is None
         assert _to_int("") is None
+
+
+# ====================================================================
+# Defensive branches: closed-connection guards + sqlite error handling
+# ====================================================================
+
+
+class TestClosedConnectionGuards:
+    """Every public method must handle ``_conn is None`` without raising.
+
+    A common operational case: the daemon shuts down, but a background
+    thread fires one last call into the store. These guards keep the
+    daemon's shutdown clean (lines 607, 649, 677, 747, 766, 849, 884,
+    899)."""
+
+    def _closed(self, tmp_path):
+        s = StatsStore(tmp_path / "n.db")
+        # Never opened -- ``_conn`` is None.
+        return s
+
+    @pytest.mark.unit
+    def test_query_recent_events_returns_empty_when_closed(self, tmp_path):
+        s = self._closed(tmp_path)
+        assert s.query_recent_events(end_ts=0, limit=10) == []
+
+    @pytest.mark.unit
+    def test_enqueue_notification_returns_none_when_closed(self, tmp_path):
+        s = self._closed(tmp_path)
+        assert s.enqueue_notification("b", "info", "x") is None
+
+    @pytest.mark.unit
+    def test_next_pending_notifications_returns_empty_when_closed(self, tmp_path):
+        s = self._closed(tmp_path)
+        assert s.next_pending_notifications() == []
+
+    @pytest.mark.unit
+    def test_mark_notification_attempt_no_ops_when_closed(self, tmp_path):
+        s = self._closed(tmp_path)
+        # Must not raise.
+        s.mark_notification_attempt(1)
+
+    @pytest.mark.unit
+    def test_cancel_notification_no_ops_when_closed(self, tmp_path):
+        s = self._closed(tmp_path)
+        s.cancel_notification(1, "any")
+
+    @pytest.mark.unit
+    def test_prune_returns_zero_zero_when_closed(self, tmp_path):
+        s = self._closed(tmp_path)
+        assert s.prune_old_notifications(7, 30) == (0, 0)
+
+    @pytest.mark.unit
+    def test_get_meta_returns_none_when_closed(self, tmp_path):
+        s = self._closed(tmp_path)
+        assert s.get_meta("k") is None
+
+    @pytest.mark.unit
+    def test_set_meta_no_ops_when_closed(self, tmp_path):
+        s = self._closed(tmp_path)
+        s.set_meta("k", "v")
+
+
+class TestStatsOpenErrors:
+    """``open()`` must surface a clear log when the parent mkdir fails
+    (stats.py lines 184-186)."""
+
+    @pytest.mark.unit
+    def test_open_logs_and_raises_when_mkdir_fails(self, monkeypatch, tmp_path):
+        target = tmp_path / "nested" / "n.db"
+        store = StatsStore(target)
+        logged = []
+        store._log_error_once = lambda msg: logged.append(msg)
+
+        from pathlib import Path as _P
+        real_mkdir = _P.mkdir
+
+        def boom(self, *a, **kw):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(_P, "mkdir", boom)
+        try:
+            with pytest.raises(OSError):
+                store.open()
+        finally:
+            monkeypatch.setattr(_P, "mkdir", real_mkdir)
+        assert any("stats: mkdir" in m for m in logged)
+
+
+class TestSafeAlterIdempotent:
+    """``_safe_alter`` swallows duplicate-column OperationalError
+    (stats.py lines 399-401)."""
+
+    @pytest.mark.unit
+    def test_safe_alter_swallows_duplicate_column(self, tmp_path):
+        s = StatsStore(tmp_path / "n.db")
+        s.open()
+        try:
+            # First ALTER should succeed (or be a no-op if already there);
+            # the second ALTER definitely raises OperationalError, which
+            # _safe_alter must swallow.
+            s._safe_alter("notifications", "new_col_a TEXT")
+            s._safe_alter("notifications", "new_col_a TEXT")  # duplicate
+        finally:
+            s.close()
+
+
+class TestMigrationCorruptSchemaVersion:
+    """When the ``schema_version`` meta value is corrupt, migrations must
+    fall back to v1 (stats.py lines 335-336)."""
+
+    @pytest.mark.unit
+    def test_corrupt_schema_version_falls_back_to_v1(self, tmp_path):
+        import sqlite3 as _sql
+        path = tmp_path / "broken.db"
+        # Hand-craft a v1-shaped DB with a non-numeric schema_version so
+        # `int(cur[0])` raises ValueError and the guard sets current=1,
+        # which causes every later migration to run.
+        conn = _sql.connect(str(path))
+        conn.executescript(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);"
+            "INSERT INTO meta(key, value) VALUES ('schema_version', 'oops');"
+            "CREATE TABLE samples (ts INTEGER);"
+            "CREATE TABLE events (ts INTEGER);"
+            "CREATE TABLE agg_5min (ts INTEGER);"
+            "CREATE TABLE agg_hourly (ts INTEGER);"
+        )
+        conn.commit()
+        conn.close()
+
+        store = StatsStore(path)
+        store.open()
+        try:
+            # Migration must have proceeded; events table should now have
+            # the v3-added column and notifications table must exist.
+            cur = store._conn.execute("PRAGMA table_info(events)")
+            cols = {row[1] for row in cur.fetchall()}
+            assert "notification_sent" in cols
+            cur = store._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='notifications'"
+            )
+            assert cur.fetchone() is not None
+        finally:
+            store.close()
+
+
+class _BrokenConn:
+    """A sqlite3.Connection-shaped stand-in whose ``execute`` always raises.
+
+    The real ``sqlite3.Connection`` has read-only attributes so we can't
+    monkeypatch ``.execute`` on a live connection. Swapping the whole
+    ``_conn`` for this stub exercises the broad ``except sqlite3.Error``
+    branches without needing a real broken DB.
+    """
+    def __init__(self, exc):
+        self._exc = exc
+
+    def execute(self, *a, **kw):
+        raise self._exc
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def commit(self):
+        return None
+
+    def close(self):
+        return None
+
+
+class TestNotificationSQLiteErrorPaths:
+    """SQLite errors during notification CRUD must be logged once + return
+    a safe default (lines 660-662, 687-691, 827-831, 872-873, 892-894,
+    906-907)."""
+
+    def _open(self, tmp_path):
+        s = StatsStore(tmp_path / "n.db")
+        s.open()
+        return s
+
+    def _swap_conn(self, store):
+        real = store._conn
+        store._conn = _BrokenConn(sqlite3.Error("simulated disk error"))
+        return real
+
+    @pytest.mark.unit
+    def test_enqueue_notification_swallows_sqlite_error(self, tmp_path):
+        s = self._open(tmp_path)
+        logged = []
+        s._log_error_once = lambda m: logged.append(m)
+        real = self._swap_conn(s)
+        try:
+            assert s.enqueue_notification("x", "info", "lifecycle") is None
+            assert any("enqueue_notification failed" in m for m in logged)
+        finally:
+            s._conn = real
+            s.close()
+
+    @pytest.mark.unit
+    def test_next_pending_notifications_swallows_sqlite_error(self, tmp_path):
+        s = self._open(tmp_path)
+        logged = []
+        s._log_error_once = lambda m: logged.append(m)
+        real = self._swap_conn(s)
+        try:
+            assert s.next_pending_notifications() == []
+            assert any("next_pending_notifications failed" in m for m in logged)
+        finally:
+            s._conn = real
+            s.close()
+
+    @pytest.mark.unit
+    def test_cap_pending_swallows_sqlite_error(self, tmp_path):
+        s = self._open(tmp_path)
+        logged = []
+        s._log_error_once = lambda m: logged.append(m)
+        real = self._swap_conn(s)
+        try:
+            assert s.cap_pending_notifications(max_pending=5) == 0
+            assert any("cap_pending_notifications failed" in m for m in logged)
+        finally:
+            s._conn = real
+            s.close()
+
+    @pytest.mark.unit
+    def test_prune_swallows_sqlite_error(self, tmp_path):
+        s = self._open(tmp_path)
+        logged = []
+        s._log_error_once = lambda m: logged.append(m)
+        real = self._swap_conn(s)
+        try:
+            deleted, expired = s.prune_old_notifications(7, 30)
+            assert (deleted, expired) == (0, 0)
+            assert any("prune_old_notifications failed" in m for m in logged)
+        finally:
+            s._conn = real
+            s.close()
+
+    @pytest.mark.unit
+    def test_get_meta_swallows_sqlite_error(self, tmp_path):
+        s = self._open(tmp_path)
+        logged = []
+        s._log_error_once = lambda m: logged.append(m)
+        real = self._swap_conn(s)
+        try:
+            assert s.get_meta("k") is None
+            assert any("get_meta failed" in m for m in logged)
+        finally:
+            s._conn = real
+            s.close()
+
+    @pytest.mark.unit
+    def test_set_meta_swallows_sqlite_error(self, tmp_path):
+        s = self._open(tmp_path)
+        logged = []
+        s._log_error_once = lambda m: logged.append(m)
+        real = self._swap_conn(s)
+        try:
+            s.set_meta("k", "v")  # must not raise
+            assert any("set_meta failed" in m for m in logged)
+        finally:
+            s._conn = real
+            s.close()

@@ -447,6 +447,168 @@ def test_api_history_404_includes_endpoint_index(minimal_config):
 
 
 @pytest.mark.unit
+def test_api_do_get_returns_400_on_api_bad_request(minimal_config):
+    """When _route raises APIBadRequest, do_GET should send a 400 JSON
+    response rather than propagating (api.py line 140)."""
+    handler = object.__new__(EneruAPIHandler)
+    handler.api_config = minimal_config
+    handler.api_source = MagicMock()
+    handler.path = "/api/v1/events?limit=abc"  # triggers APIBadRequest
+
+    headers = []
+    handler.send_response = lambda status: headers.append(("status", status))
+    handler.send_header = lambda k, v: headers.append((k, v))
+    handler.end_headers = lambda: None
+    handler.wfile = BytesIO()
+
+    handler.do_GET()
+    assert ("status", 400) in headers
+    body = json.loads(handler.wfile.getvalue())
+    assert body["error"]["code"] == "INVALID_REQUEST"
+
+
+@pytest.mark.unit
+def test_api_do_get_returns_500_on_unexpected_exception(minimal_config):
+    """An unexpected exception in _route should be caught and surfaced as
+    a 500 INTERNAL_ERROR response (covers the broad except in do_GET)."""
+    handler = object.__new__(EneruAPIHandler)
+    handler.api_config = minimal_config
+    handler.api_source = MagicMock()
+    handler.path = "/api/v1/ups"
+
+    def boom():
+        raise RuntimeError("explode")
+
+    handler._route = boom
+    headers = []
+    handler.send_response = lambda status: headers.append(("status", status))
+    handler.send_header = lambda k, v: headers.append((k, v))
+    handler.end_headers = lambda: None
+    handler.wfile = BytesIO()
+
+    handler.do_GET()
+    assert ("status", 500) in headers
+    body = json.loads(handler.wfile.getvalue())
+    assert body["error"]["code"] == "INTERNAL_ERROR"
+
+
+@pytest.mark.unit
+def test_api_do_get_uses_text_plain_header_for_text_route(minimal_config, monitor):
+    """When _route returns content_type 'text/plain' (literal), do_GET
+    must emit 'text/plain; charset=utf-8' (api.py line 158)."""
+    handler = object.__new__(EneruAPIHandler)
+    handler.api_config = minimal_config
+    handler.api_source = monitor
+    handler._route = lambda: (200, "text/plain", "eneru_up 1\n")
+    headers = []
+    handler.send_response = lambda status: headers.append(("status", status))
+    handler.send_header = lambda k, v: headers.append((k, v))
+    handler.end_headers = lambda: None
+    handler.wfile = BytesIO()
+
+    handler.do_GET()
+    assert ("Content-Type", "text/plain; charset=utf-8") in headers
+
+
+@pytest.mark.unit
+def test_api_handler_log_message_is_noop():
+    """The overridden log_message must silently drop stdlib's BaseHTTPRequestHandler
+    access-log spam (api.py line 168)."""
+    handler = object.__new__(EneruAPIHandler)
+    # Should not raise, not return anything truthy.
+    assert handler.log_message("%s %d", "GET", 200) is None
+
+
+@pytest.mark.unit
+def test_api_metrics_route_returns_prometheus_text(minimal_config, monitor):
+    """When prometheus is enabled, /metrics returns text/plain rendered
+    metrics (api.py line 185)."""
+    minimal_config.prometheus.enabled = True
+    handler = object.__new__(EneruAPIHandler)
+    handler.path = "/metrics"
+    handler.api_config = minimal_config
+    handler.api_source = monitor
+
+    status, content_type, body = handler._route()
+    assert status == 200
+    assert content_type == "text/plain"
+    assert "eneru_up" in body
+
+
+@pytest.mark.unit
+def test_api_config_route_returns_summary(minimal_config):
+    """`/api/v1/config` returns config_summary (api.py line 232)."""
+    handler = object.__new__(EneruAPIHandler)
+    handler.path = "/api/v1/config"
+    handler.api_config = minimal_config
+    handler.api_source = MagicMock()
+
+    status, content_type, payload = handler._route()
+    assert status == 200
+    assert content_type == "application/json"
+    assert "notifications" in payload
+
+
+@pytest.mark.unit
+def test_api_history_route_returns_rows(minimal_config, monitor, monkeypatch):
+    """A successful history query returns the rows payload (api.py
+    line 215)."""
+    monkeypatch.setattr(
+        "eneru.api.query_history",
+        lambda config, ups, metric, start, end: [
+            {"ts": 1, "value": 90.0},
+            {"ts": 2, "value": 89.0},
+        ],
+    )
+    handler = object.__new__(EneruAPIHandler)
+    handler.path = "/api/v1/ups/TestUPS%40localhost/history?metric=charge&from=0&to=10"
+    handler.api_config = minimal_config
+    handler.api_source = monitor
+
+    status, content_type, payload = handler._route()
+    assert status == 200
+    assert payload["ups"] == "TestUPS@localhost"
+    assert payload["metric"] == "charge"
+    assert payload["data"] == [
+        {"ts": 1, "value": 90.0},
+        {"ts": 2, "value": 89.0},
+    ]
+
+
+@pytest.mark.unit
+def test_api_parse_int_param_rejects_below_minimum(minimal_config):
+    """`?limit=0` violates the minimum=1 floor and raises
+    APIBadRequest with the >= message (api.py line 283)."""
+    from eneru.api import APIBadRequest, _parse_int_param
+    with pytest.raises(APIBadRequest, match="limit must be >= 1"):
+        _parse_int_param({"limit": ["0"]}, "limit", 100, minimum=1, maximum=10)
+
+
+@pytest.mark.unit
+def test_api_prometheus_metrics_include_remote_health_per_ups(minimal_config, monitor):
+    """When a UPS has a remote-health manager exposing servers, the
+    metrics endpoint must emit per-server status + consecutive_failures
+    series (api.py lines 463-473)."""
+    minimal_config.prometheus.enabled = True
+    # Inject a remote-health manager so collect_status reports a server.
+    manager = MagicMock()
+    manager.snapshot.return_value = [{
+        "group": "TestUPS@localhost",
+        "server": "nas-01",
+        "host": "nas-01.lan",
+        "user": "ups",
+        "status": "HEALTHY",
+        "consecutive_failures": 0,
+    }]
+    monitor._remote_health_manager = manager
+
+    text = render_prometheus_metrics(monitor)
+    assert "eneru_remote_health_status" in text
+    assert 'server="nas-01"' in text
+    assert "eneru_remote_health_consecutive_failures" in text
+
+
+@pytest.mark.unit
 def test_json_formatter_adds_group_and_redacts_secrets():
     formatter = JSONFormatter()
     record = logging.LogRecord(
@@ -1410,6 +1572,202 @@ def test_mqtt_on_disconnect_clean_does_not_set_reconnect(minimal_config):
 
 
 @pytest.mark.unit
+def test_mqtt_on_disconnect_handles_non_int_rc(minimal_config):
+    """A reason object whose .value can't be coerced to int (e.g. weird
+    paho ReasonCode subclass in a future release) must fall back to
+    bool(rc) rather than crashing the callback (mqtt.py lines 265-266)."""
+    import threading
+    log = []
+    pub = MQTTPublisher(MagicMock(), minimal_config,
+                        stop_event=threading.Event(), log_fn=log.append)
+
+    class _WeirdReason:
+        value = "not-an-int"
+
+    pub._on_disconnect(client=None, userdata=None, rc=_WeirdReason())
+    # Truthy object -> unexpected; reconnect flagged.
+    assert pub._needs_reconnect.is_set()
+
+
+@pytest.mark.unit
+def test_mqtt_wait_long_timeout_returns_true_when_local_stop_fires_midloop(
+    minimal_config,
+):
+    """Inside the slicing loop, a local stop set between slices must
+    return True immediately (mqtt.py line 93)."""
+    import threading
+    pub = MQTTPublisher(
+        MagicMock(), minimal_config, stop_event=threading.Event(),
+    )
+
+    real_wait = pub.stop_event.wait
+    call_count = {"n": 0}
+
+    def wait_then_set(timeout):
+        call_count["n"] += 1
+        # After the first slice elapses, simulate publisher.stop() landing.
+        pub._local_stop.set()
+        return real_wait(timeout)
+
+    pub.stop_event.wait = wait_then_set
+    with patch.object(pub, "_LOCAL_STOP_POLL_SECONDS", 0.001):
+        assert pub._wait(timeout=0.01) is True
+    assert call_count["n"] >= 1
+
+
+@pytest.mark.unit
+def test_mqtt_wait_long_timeout_returns_true_when_stop_event_set_midloop(
+    minimal_config,
+):
+    """Inside the slicing loop, the stop_event firing during a slice
+    causes wait() to return True and propagate True (mqtt.py line 99)."""
+    import threading
+    daemon_stop = threading.Event()
+    pub = MQTTPublisher(MagicMock(), minimal_config, stop_event=daemon_stop)
+
+    def wait_signals_stop(timeout):
+        daemon_stop.set()
+        return True
+
+    pub.stop_event.wait = wait_signals_stop
+    with patch.object(pub, "_LOCAL_STOP_POLL_SECONDS", 0.001):
+        assert pub._wait(timeout=0.01) is True
+
+
+@pytest.mark.unit
+def test_mqtt_stop_clears_thread_when_join_completes(minimal_config):
+    """After join() the thread reference must be cleared so a subsequent
+    start() can spin a fresh one (mqtt.py line 120)."""
+    import threading
+    pub = MQTTPublisher(
+        MagicMock(), minimal_config, stop_event=threading.Event(),
+    )
+    # Install a dummy thread that's already finished. Use a real Thread
+    # so .is_alive() returns False after the body exits.
+    t = threading.Thread(target=lambda: None)
+    t.start()
+    t.join()
+    pub._thread = t
+    pub.stop(timeout=1)
+    assert pub._thread is None
+
+
+@pytest.mark.unit
+def test_mqtt_run_swallows_on_disconnect_assignment_failure(minimal_config):
+    """Detaching the on_disconnect callback at teardown is best-effort:
+    if assignment raises (paho replaced the attribute), the outer loop
+    must continue cleanup (mqtt.py lines 148-149)."""
+    import threading
+    daemon_stop = threading.Event()
+    pub = MQTTPublisher(
+        MagicMock(), minimal_config, stop_event=daemon_stop,
+    )
+
+    # A fake client whose `on_disconnect` setter raises and whose
+    # loop_stop/disconnect are no-ops.
+    class _PickyClient:
+        def loop_stop(self): pass
+        def disconnect(self): pass
+
+        @property
+        def on_disconnect(self): return None
+
+        @on_disconnect.setter
+        def on_disconnect(self, value):
+            raise RuntimeError("cannot reassign callback")
+
+    fake_client = _PickyClient()
+
+    # Patch _connect_with_backoff to hand back our fake, and
+    # _publish_loop to exit immediately. After one iteration, set the
+    # daemon stop so _run exits cleanly.
+    def fake_connect(): return fake_client
+
+    def fake_loop(client): daemon_stop.set()
+
+    pub._connect_with_backoff = fake_connect
+    pub._publish_loop = fake_loop
+    # Must not raise even though on_disconnect setter blows up.
+    pub._run()
+
+
+@pytest.mark.unit
+def test_mqtt_run_exits_when_stop_requested_after_teardown(minimal_config):
+    """After teardown, if stop was requested during the loop we must
+    return from _run (mqtt.py line 159)."""
+    import threading
+    daemon_stop = threading.Event()
+    pub = MQTTPublisher(
+        MagicMock(), minimal_config, stop_event=daemon_stop,
+    )
+
+    client = MagicMock()
+
+    def fake_loop(c):
+        # Simulate the publish loop returning and then a stop landing.
+        pub._local_stop.set()
+
+    pub._connect_with_backoff = lambda: client
+    pub._publish_loop = fake_loop
+    pub._run()
+    # No second connect attempt occurred (would raise because
+    # _connect_with_backoff returns the same MagicMock each time and
+    # we'd recurse). Verifying via no exception + immediate return.
+
+
+@pytest.mark.unit
+def test_mqtt_connect_with_backoff_returns_none_on_stop(minimal_config):
+    """If stop is requested while the backoff loop is sleeping between
+    failed connect attempts, _connect_with_backoff exits with None
+    (mqtt.py line 204 via the `_wait` short-circuit)."""
+    import threading
+    daemon_stop = threading.Event()
+    pub = MQTTPublisher(
+        MagicMock(), minimal_config, stop_event=daemon_stop,
+    )
+    minimal_config.mqtt.enabled = True
+    minimal_config.mqtt.broker = "mqtt://broker.invalid:1883"
+    daemon_stop.set()  # Force the while-not-stopping guard to fail first time.
+    assert pub._connect_with_backoff() is None
+
+
+@pytest.mark.unit
+def test_mqtt_publish_loop_returns_when_needs_reconnect_set(minimal_config):
+    """The publish loop checks _needs_reconnect each tick and exits
+    cleanly so the outer loop can re-establish the client (mqtt.py
+    line 221)."""
+    import threading
+    pub = MQTTPublisher(
+        MagicMock(), minimal_config, stop_event=threading.Event(),
+    )
+    minimal_config.mqtt.enabled = True
+    minimal_config.mqtt.publish_interval = 1
+    pub._needs_reconnect.set()
+    # Should return immediately without touching the client.
+    fake_client = MagicMock()
+    pub._publish_loop(fake_client)
+    fake_client.publish.assert_not_called()
+
+
+@pytest.mark.unit
+def test_mqtt_publish_loop_returns_when_publish_one_fails(minimal_config):
+    """When _publish_one returns False the loop must return so the outer
+    reconnect logic kicks in (mqtt.py line 234)."""
+    import threading
+    pub = MQTTPublisher(
+        MagicMock(), minimal_config, stop_event=threading.Event(),
+    )
+    minimal_config.mqtt.enabled = True
+    minimal_config.mqtt.publish_interval = 1
+    # Make collect_status return something deterministic so the loop
+    # decides to publish on the very first tick.
+    with patch("eneru.mqtt.collect_status", return_value={"x": 1}), \
+         patch.object(pub, "_publish_one", return_value=False) as p1:
+        pub._publish_loop(MagicMock())
+    p1.assert_called_once()
+
+
+@pytest.mark.unit
 def test_mqtt_wait_short_timeout_uses_stop_event_directly(minimal_config):
     """For timeouts <= LOCAL_STOP_POLL_SECONDS (5s), `_wait` waits on the
     daemon-wide stop_event in one shot — no slicing loop needed."""
@@ -1597,6 +1955,64 @@ def test_ups_logger_init_clears_stale_handlers(minimal_config):
     # match the first run, not be doubled.
     second = UPSLogger(None, minimal_config)
     assert len(second.logger.handlers) == handler_count_first
+
+
+@pytest.mark.unit
+def test_ups_logger_uses_json_formatter_when_configured(minimal_config):
+    """`logging.format == "json"` must pick JSONFormatter for every handler
+    (logger.py line 129)."""
+    from eneru.logger import UPSLogger, JSONFormatter
+    minimal_config.logging.format = "json"
+    ups_logger = UPSLogger(None, minimal_config)
+    assert any(
+        isinstance(h.formatter, JSONFormatter)
+        for h in ups_logger.logger.handlers
+    )
+
+
+@pytest.mark.unit
+def test_ups_logger_clears_stale_handlers_swallows_close_error(
+    minimal_config, monkeypatch,
+):
+    """Re-init must keep cleaning up even when a stale handler's close()
+    raises (logger.py lines 121-122)."""
+    import logging as _logging
+    from eneru.logger import UPSLogger
+
+    # Seed the module-level logger with a handler whose .close() blows up.
+    bad = _logging.NullHandler()
+    monkeypatch.setattr(
+        bad, "close", lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    _logging.getLogger("ups-monitor").addHandler(bad)
+
+    # Must not raise: the except clause swallows the close() failure.
+    UPSLogger(None, minimal_config)
+
+
+@pytest.mark.unit
+def test_ups_logger_attaches_syslog_handler_on_success(minimal_config):
+    """When SysLogHandler initialises cleanly it must be registered
+    against the logger (logger.py lines 158-159)."""
+    import logging.handlers as _handlers
+    from unittest.mock import MagicMock
+    from eneru.logger import UPSLogger
+
+    minimal_config.logging.syslog.enabled = True
+    minimal_config.logging.syslog.address = "127.0.0.1"
+    minimal_config.logging.syslog.port = 514
+    minimal_config.logging.syslog.facility = "user"
+
+    # Build a stand-in handler class that records the constructor call and
+    # behaves like a real logging.Handler for setFormatter/addHandler.
+    fake_handler = _handlers.MemoryHandler(capacity=1)
+    with patch(
+        "eneru.logger.logging.handlers.SysLogHandler",
+        return_value=fake_handler,
+    ) as syslog_cls:
+        ups_logger = UPSLogger(None, minimal_config)
+        syslog_cls.assert_called_once()
+    assert fake_handler in ups_logger.logger.handlers
 
 
 @pytest.mark.unit

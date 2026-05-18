@@ -171,6 +171,19 @@ class TestDetectSystemdStopIntent:
             assert _detect_systemd_stop_intent() is True
 
     @pytest.mark.unit
+    def test_short_lines_in_list_jobs_output_are_skipped(self):
+        """A malformed/short line (e.g. footer leakage) must be skipped,
+        not crash the parser (deferred_delivery.py line 149)."""
+        result = MagicMock(
+            returncode=0,
+            stdout=(b"too short\n"
+                    b"12345 eneru.service stop running\n"),
+        )
+        with patch("eneru.deferred_delivery.subprocess.run",
+                   return_value=result):
+            assert _detect_systemd_stop_intent() is True
+
+    @pytest.mark.unit
     def test_invocation_forces_lang_c(self):
         """Localized environments could translate the column header,
         breaking the parser. We force LANG=C / LC_ALL=C in the
@@ -738,6 +751,198 @@ class TestDeliverPendingStop:
         finally:
             store.close()
         assert row == ("pending", None)
+
+
+class TestDeliverPendingStopErrorBranches:
+    """Error-path coverage for deliver_pending_stop's finally + revert blocks."""
+
+    def _make_config(self, urls=None):
+        from eneru.config import Config, NotificationsConfig
+        cfg = Config()
+        cfg.notifications = NotificationsConfig()
+        cfg.notifications.urls = urls or ["json://192.0.2.1/x"]
+        return cfg
+
+    def _make_pending_row(self, db_path):
+        store = StatsStore(db_path)
+        store.open()
+        try:
+            return store.enqueue_notification(
+                body="🛑 Stopped", notify_type="warning",
+                category="lifecycle", ts=1000,
+            )
+        finally:
+            store.close()
+
+    class _ProxyConn:
+        """Wraps a sqlite3.Connection and intercepts UPDATE statements
+        matching ``intercept_prefix``; everything else is passed through."""
+        def __init__(self, real_conn, intercept_prefix, action):
+            self._real = real_conn
+            self._prefix = intercept_prefix.upper()
+            self._action = action  # callable(sql, params) -> cursor-like, or raises
+            self._db_lock = None  # unused; just keeps shape
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def execute(self, sql, params=()):
+            if sql.strip().upper().startswith(self._prefix):
+                return self._action(sql, params)
+            return self._real.execute(sql, params)
+
+        def commit(self):
+            return self._real.commit()
+
+    @pytest.mark.unit
+    def test_returns_zero_when_atomic_claim_loses_race(self, tmp_path):
+        """If the UPDATE...WHERE status='pending' affects 0 rows (classifier
+        cancelled between our SELECT and UPDATE), exit without delivering
+        (deferred_delivery.py line 372)."""
+        db_path = tmp_path / "ups.db"
+        row_id = self._make_pending_row(db_path)
+
+        real_open = StatsStore.open
+
+        class _ZeroRowCursor:
+            rowcount = 0
+
+        def fake_open(self):
+            real_open(self)
+            real_conn = self._conn
+            # Intercept only the atomic-claim UPDATE; everything else hits
+            # the real connection so the SELECT still finds the pending row.
+            self._conn = TestDeliverPendingStopErrorBranches._ProxyConn(
+                real_conn,
+                "UPDATE NOTIFICATIONS SET STATUS='SENT'",
+                lambda sql, params: _ZeroRowCursor(),
+            )
+
+        cfg = self._make_config()
+        with patch.object(StatsStore, "open", fake_open), \
+             patch("eneru.notifications.NotificationWorker") as Worker:
+            worker = Worker.return_value
+            worker.start.return_value = True
+            rc = deliver_pending_stop(
+                notification_id=row_id, db_path=db_path, config=cfg,
+            )
+        assert rc == 0
+        worker._send_via_apprise.assert_not_called()
+
+    @pytest.mark.unit
+    def test_revert_swallows_sqlite_error_when_worker_cannot_start(
+        self, tmp_path,
+    ):
+        """If the revert-after-worker.start()-fails revert itself errors,
+        we must still return 0 (deferred_delivery.py lines 391-392)."""
+        import sqlite3
+        db_path = tmp_path / "ups.db"
+        row_id = self._make_pending_row(db_path)
+        real_open = StatsStore.open
+
+        def _boom(sql, params):
+            raise sqlite3.Error("simulated revert failure")
+
+        def fake_open(self):
+            real_open(self)
+            real_conn = self._conn
+            self._conn = TestDeliverPendingStopErrorBranches._ProxyConn(
+                real_conn,
+                "UPDATE NOTIFICATIONS SET STATUS='PENDING'",
+                _boom,
+            )
+
+        cfg = self._make_config()
+        with patch.object(StatsStore, "open", fake_open), \
+             patch("eneru.notifications.NotificationWorker") as Worker:
+            worker = Worker.return_value
+            worker.start.return_value = False
+            rc = deliver_pending_stop(
+                notification_id=row_id, db_path=db_path, config=cfg,
+            )
+        assert rc == 0
+        worker._send_via_apprise.assert_not_called()
+
+    @pytest.mark.unit
+    def test_revert_swallows_sqlite_error_when_apprise_rejects(
+        self, tmp_path,
+    ):
+        """Same revert-error path but after _send_via_apprise returns False
+        (deferred_delivery.py lines 406-407)."""
+        import sqlite3
+        db_path = tmp_path / "ups.db"
+        row_id = self._make_pending_row(db_path)
+        real_open = StatsStore.open
+
+        def _boom(sql, params):
+            raise sqlite3.Error("simulated revert failure")
+
+        def fake_open(self):
+            real_open(self)
+            real_conn = self._conn
+            self._conn = TestDeliverPendingStopErrorBranches._ProxyConn(
+                real_conn,
+                "UPDATE NOTIFICATIONS SET STATUS='PENDING'",
+                _boom,
+            )
+
+        cfg = self._make_config()
+        with patch.object(StatsStore, "open", fake_open), \
+             patch("eneru.notifications.NotificationWorker") as Worker:
+            worker = Worker.return_value
+            worker.start.return_value = True
+            worker._send_via_apprise.return_value = False
+            rc = deliver_pending_stop(
+                notification_id=row_id, db_path=db_path, config=cfg,
+            )
+        assert rc == 0
+        worker._send_via_apprise.assert_called_once()
+
+    @pytest.mark.unit
+    def test_outer_sqlite_error_returns_zero(self, tmp_path):
+        """An unexpected SQLite/OS error anywhere inside the try block is
+        caught and returns 0 (deferred_delivery.py lines 410-411)."""
+        import sqlite3
+        db_path = tmp_path / "ups.db"
+        # Pre-create the DB file so deliver_pending_stop doesn't bail at
+        # the .exists() guard before reaching the try-block.
+        self._make_pending_row(db_path)
+
+        cfg = self._make_config()
+        with patch.object(
+            StatsStore, "open", side_effect=sqlite3.Error("disk gone"),
+        ):
+            rc = deliver_pending_stop(
+                notification_id=1, db_path=db_path, config=cfg,
+            )
+        assert rc == 0
+
+    @pytest.mark.unit
+    def test_close_failure_in_finally_is_swallowed(self, tmp_path):
+        """If StatsStore.close() raises during cleanup, the failure must
+        not propagate (deferred_delivery.py lines 415-416)."""
+        import sqlite3
+        db_path = tmp_path / "ups.db"
+        row_id = self._make_pending_row(db_path)
+
+        real_close = StatsStore.close
+
+        def close_then_raise(self):
+            # Release the underlying sqlite handle before raising so the
+            # test doesn't leak a ResourceWarning across the suite.
+            real_close(self)
+            raise sqlite3.Error("close blew up")
+
+        cfg = self._make_config()
+        with patch("eneru.notifications.NotificationWorker") as Worker, \
+             patch.object(StatsStore, "close", close_then_raise):
+            worker = Worker.return_value
+            worker.start.return_value = True
+            worker._send_via_apprise.return_value = True
+            rc = deliver_pending_stop(
+                notification_id=row_id, db_path=db_path, config=cfg,
+            )
+        assert rc == 0
 
 
 class TestEagerSendMarkSentFailure:

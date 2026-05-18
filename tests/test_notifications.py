@@ -849,3 +849,270 @@ class TestNotificationWorkerStartEarlyReturns:
 
         out = capsys.readouterr().out
         assert "Failed to add notification URL" in out or "No valid notification URLs" in out
+
+
+# ====================================================================
+# Defensive branches: register_store edge cases, drain/coalesce
+# exception swallowing, apprise instance error paths, accessor returns
+# ====================================================================
+
+
+class TestRegisterStoreEdgeCases:
+    """``register_store`` guards: None argument + duplicate registration."""
+
+    @pytest.mark.unit
+    def test_register_store_ignores_none(self, notification_config):
+        """A ``None`` store must be a no-op (notifications.py line 172).
+
+        Some startup paths call register_store from a try/except wrapper
+        that may pass None when stats opening fails; the worker must
+        accept that without bookkeeping the bogus entry.
+        """
+        worker = NotificationWorker(notification_config)
+        worker.register_store(None)
+        # Stores list still empty.
+        with worker._stores_lock:
+            assert worker._stores == []
+
+    @pytest.mark.unit
+    def test_register_store_ignores_duplicate(self, notification_config):
+        """Registering the same store twice must not add a second entry
+        (notifications.py line 175)."""
+        worker = NotificationWorker(notification_config)
+        store = MagicMock()
+        store.enqueue_notification.return_value = 1
+        store.cap_pending_notifications.return_value = 0
+        store.pending_notification_count.return_value = 0
+        worker.register_store(store)
+        worker.register_store(store)
+        with worker._stores_lock:
+            assert worker._stores == [store]
+
+
+class TestDrainAndCoalesceExceptionPaths:
+    """The worker thread must never die: drain + coalesce errors are
+    swallowed so future notifications still ship (notifications.py
+    lines 330-333 and 359-360)."""
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_worker_loop_swallows_drain_exception(
+        self, mock_apprise, notification_config,
+    ):
+        """If _drain_once raises, the outer loop catches it and continues
+        (lines 330-333)."""
+        _patch_apprise(mock_apprise, succeed=True)
+        worker = NotificationWorker(notification_config)
+        calls = {"n": 0}
+
+        def boom():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # Signal another iteration so the loop runs again quickly.
+                worker._wakeup_event.set()
+                raise RuntimeError("drain blew up")
+
+        worker._drain_once = boom
+        worker._maybe_prune = lambda: None
+        worker.start()
+        try:
+            # Wake immediately so the first iteration runs without the
+            # 1 s tick.
+            worker._wakeup_event.set()
+            assert _wait_until(lambda: calls["n"] >= 2, timeout=3.0), (
+                "worker thread should have looped past the exception"
+            )
+        finally:
+            worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_drain_continues_when_coalesce_raises(
+        self, mock_apprise, notification_config,
+    ):
+        """_coalesce_pending_outages errors must not block delivery
+        (lines 359-360)."""
+        _patch_apprise(mock_apprise, succeed=True)
+        worker = NotificationWorker(notification_config)
+        # Replace coalesce with one that always raises so the except
+        # clause is hit on every drain iteration.
+        worker._coalesce_pending_outages = MagicMock(
+            side_effect=RuntimeError("coalesce blew up"),
+        )
+
+        store = MagicMock()
+        store.cap_pending_notifications.return_value = 0
+        store.pending_notification_count.return_value = 0
+        store.enqueue_notification.return_value = 1
+        # No candidates due so the drain loop exits after the coalesce
+        # exception is swallowed.
+        worker._next_due_candidate = lambda: None
+        worker.register_store(store)
+        # Should not raise even though every iteration triggers the
+        # coalesce exception.
+        worker._drain_once()
+
+
+class TestCoalesceLineIndexBranches:
+    """Coalesce skipping logic when on_line rows are older than the
+    earliest on_battery or when enqueue of the summary fails."""
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_coalesce_skips_older_on_line_rows(
+        self, mock_apprise, notification_config,
+    ):
+        """An on_line row with ts < the earliest on_battery is skipped so
+        we don't pair it with a later outage (notifications.py line 412).
+        """
+        _patch_apprise(mock_apprise, succeed=True)
+        worker = NotificationWorker(notification_config)
+
+        store = MagicMock()
+        # OB at t=100; OL rows at t=50 (older, must be skipped) and
+        # t=200 (the real partner).
+        store.find_pending_by_category.side_effect = lambda cat: {
+            "power_event_on_battery": [(1, 100, "body-ob", "info")],
+            "power_event_on_line": [
+                (2, 50, "body-old-ol", "info"),
+                (3, 200, "body-ol", "info"),
+            ],
+        }[cat]
+        store.enqueue_notification.return_value = 99
+
+        pairs = worker._coalesce_pending_outages(store)
+        assert pairs == 1
+        # The summary was enqueued exactly once...
+        assert store.enqueue_notification.call_count == 1
+        # ...and only the genuine pair was cancelled (ids 1 and 3, not 2).
+        cancelled_ids = sorted(
+            c.args[0] for c in store.cancel_notification.call_args_list
+        )
+        assert cancelled_ids == [1, 3]
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_coalesce_breaks_when_on_line_exhausted(
+        self, mock_apprise, notification_config,
+    ):
+        """Multiple on_battery rows with not enough on_line partners: we
+        break out of the loop on the unpaired tail (line 414)."""
+        _patch_apprise(mock_apprise, succeed=True)
+        worker = NotificationWorker(notification_config)
+
+        store = MagicMock()
+        store.find_pending_by_category.side_effect = lambda cat: {
+            "power_event_on_battery": [
+                (1, 100, "body-ob1", "info"),
+                (2, 300, "body-ob2", "info"),  # unpaired tail
+            ],
+            "power_event_on_line": [(3, 200, "body-ol", "info")],
+        }[cat]
+        store.enqueue_notification.return_value = 99
+
+        # Should pair the first OB with the OL and stop; second OB has
+        # no partner.
+        pairs = worker._coalesce_pending_outages(store)
+        assert pairs == 1
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_coalesce_skips_pair_when_summary_enqueue_fails(
+        self, mock_apprise, notification_config,
+    ):
+        """If the summary row fails to persist, the OB/OL pair must NOT
+        be cancelled — they ship individually (notifications.py lines
+        436-437)."""
+        _patch_apprise(mock_apprise, succeed=True)
+        worker = NotificationWorker(notification_config)
+
+        store = MagicMock()
+        store.find_pending_by_category.side_effect = lambda cat: {
+            "power_event_on_battery": [(1, 100, "body-ob", "info")],
+            "power_event_on_line": [(2, 200, "body-ol", "info")],
+        }[cat]
+        # Enqueue returns None → simulated SQLite hiccup.
+        store.enqueue_notification.return_value = None
+
+        pairs = worker._coalesce_pending_outages(store)
+        assert pairs == 0
+        # Critical: no cancellations -- both originals stay pending.
+        store.cancel_notification.assert_not_called()
+
+
+class TestSendViaAppriseEdgeCases:
+
+    @pytest.mark.unit
+    def test_send_via_apprise_returns_false_without_instance(
+        self, notification_config,
+    ):
+        """When the apprise instance hasn't been initialized (start()
+        not called), _send_via_apprise must reject the message rather
+        than crashing on None (notifications.py line 514)."""
+        worker = NotificationWorker(notification_config)
+        assert worker._apprise_instance is None
+        assert worker._send_via_apprise("hi", "info") is False
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_send_via_apprise_swallows_notify_exception(
+        self, mock_apprise, notification_config,
+    ):
+        """apprise.notify() raising (DNS, ssl, ...) must surface as False
+        so the row stays pending and gets retried (lines 535-536)."""
+        _patch_apprise(
+            mock_apprise, side_effect=RuntimeError("network blew up"),
+        )
+        worker = NotificationWorker(notification_config)
+        worker.start()
+        try:
+            assert worker._send_via_apprise("body", "info") is False
+        finally:
+            worker.stop()
+
+
+class TestAccessorEdgeCases:
+
+    @pytest.mark.unit
+    def test_get_service_count_zero_without_instance(self, notification_config):
+        """Without an Apprise instance, service count is 0
+        (notifications.py line 566)."""
+        worker = NotificationWorker(notification_config)
+        assert worker._apprise_instance is None
+        assert worker.get_service_count() == 0
+
+    @pytest.mark.unit
+    def test_get_pending_count_sums_across_stores(self, notification_config):
+        """get_pending_count must sum pending across every registered
+        store (notifications.py lines 572-573)."""
+        worker = NotificationWorker(notification_config)
+        a = MagicMock()
+        a.pending_notification_count.return_value = 4
+        a.enqueue_notification.return_value = 1
+        a.cap_pending_notifications.return_value = 0
+        b = MagicMock()
+        b.pending_notification_count.return_value = 7
+        b.enqueue_notification.return_value = 1
+        b.cap_pending_notifications.return_value = 0
+        worker.register_store(a)
+        worker.register_store(b)
+        assert worker.get_pending_count() == 11
+
+
+@pytest.mark.unit
+def test_module_records_apprise_available_flag_matches_import_state():
+    """The ImportError fallback constants (lines 33-35) must keep the
+    module importable when apprise isn't installed. We can't uninstall
+    apprise in the test environment, but we can assert the constants
+    exist and are consistent with the actual import."""
+    import eneru.notifications as notif_mod
+    if notif_mod.apprise is None:
+        assert notif_mod.APPRISE_AVAILABLE is False
+    else:
+        assert notif_mod.APPRISE_AVAILABLE is True

@@ -2586,3 +2586,813 @@ class TestKubernetesLocalMisuseWarning:
                    return_value="container (Kubernetes)"):
             _warn_on_kubernetes_local_misuse(config)
         assert capsys.readouterr().err == ""
+
+
+# --- Coverage uplift: branches missed by the existing suite ---
+
+
+class TestApplyRunOverridesDryRun:
+    """Cover the dry_run=True branch in `_apply_run_overrides` (line 67)."""
+
+    @pytest.mark.unit
+    def test_dry_run_flag_flips_config_to_true(self):
+        from argparse import Namespace
+        from eneru.cli import _apply_run_overrides
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@host"))],
+            behavior=BehaviorConfig(dry_run=False),
+        )
+        args = Namespace(dry_run=True, api=False, api_bind=None, api_port=None)
+
+        _apply_run_overrides(config, args)
+
+        assert config.behavior.dry_run is True
+
+
+class TestLoopbackHelpersRedundancyPaths:
+    """Cover redundancy_groups branches in the loopback helpers
+    (`_find_host_loopback`, `_has_explicit_loopback_opt_out`,
+    `_local_owner_group`, `_uses_loopback_delegate`)."""
+
+    @pytest.mark.unit
+    def test_find_host_loopback_in_redundancy_group(self):
+        from eneru.cli import _find_host_loopback
+        from eneru import RedundancyGroupConfig
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"), is_local=False,
+            )],
+            redundancy_groups=[RedundancyGroupConfig(
+                name="rack-a",
+                remote_servers=[RemoteServerConfig(
+                    name="host-loopback",
+                    enabled=True,
+                    host="127.0.0.1",
+                    user="root",
+                    is_host_loopback=True,
+                )],
+            )],
+        )
+        found = _find_host_loopback(config)
+        assert found is not None
+        owner_label, server = found
+        assert owner_label == "rack-a"
+        assert server.is_host_loopback is True
+
+    @pytest.mark.unit
+    def test_find_host_loopback_redundancy_unnamed_group_label(self):
+        from eneru.cli import _find_host_loopback
+        from eneru import RedundancyGroupConfig
+
+        rg = RedundancyGroupConfig(
+            remote_servers=[RemoteServerConfig(
+                name="lb", enabled=True, host="127.0.0.1", user="root",
+                is_host_loopback=True,
+            )],
+        )
+        # Force-clear the name to exercise the "(unnamed)" fallback.
+        rg.name = ""
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"), is_local=False,
+            )],
+            redundancy_groups=[rg],
+        )
+        found = _find_host_loopback(config)
+        assert found is not None
+        owner_label, _ = found
+        assert owner_label == "(unnamed)"
+
+    @pytest.mark.unit
+    def test_has_explicit_opt_out_in_ups_group(self):
+        from eneru.cli import _has_explicit_loopback_opt_out
+
+        server = RemoteServerConfig(
+            name="not-loopback", enabled=True, host="127.0.0.1", user="root",
+            is_host_loopback=False,
+        )
+        # Mark the field as explicitly set in YAML.
+        server._is_host_loopback_explicit = True
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"),
+                is_local=True,
+                remote_servers=[server],
+            )],
+        )
+        assert _has_explicit_loopback_opt_out(config) is True
+
+    @pytest.mark.unit
+    def test_has_explicit_opt_out_in_redundancy_group(self):
+        from eneru.cli import _has_explicit_loopback_opt_out
+        from eneru import RedundancyGroupConfig
+
+        server = RemoteServerConfig(
+            name="not-loopback", enabled=True, host="127.0.0.1", user="root",
+            is_host_loopback=False,
+        )
+        server._is_host_loopback_explicit = True
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"), is_local=False,
+            )],
+            redundancy_groups=[RedundancyGroupConfig(
+                name="rack-a",
+                remote_servers=[server],
+            )],
+        )
+        assert _has_explicit_loopback_opt_out(config) is True
+
+    @pytest.mark.unit
+    def test_local_owner_group_finds_redundancy_is_local(self):
+        from eneru.cli import _local_owner_group
+        from eneru import RedundancyGroupConfig
+
+        rg = RedundancyGroupConfig(name="rack-a", is_local=True)
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"), is_local=False,
+            )],
+            redundancy_groups=[rg],
+        )
+        assert _local_owner_group(config) is rg
+
+    @pytest.mark.unit
+    def test_uses_loopback_delegate_early_return_when_explicit_group_passed(self):
+        """Passing `group=` skips the `_local_owner_group` lookup (line 259)."""
+        from eneru.cli import _uses_loopback_delegate
+
+        group = UPSGroupConfig(
+            ups=UPSConfig(name="UPS@host"),
+            is_local=True,
+            remote_servers=[RemoteServerConfig(
+                name="host-loopback", enabled=True, host="127.0.0.1",
+                user="root", is_host_loopback=True,
+            )],
+        )
+        config = Config(ups_groups=[group])
+
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli._local_owner_group") as mock_owner:
+            # Passing group explicitly means _local_owner_group must NOT
+            # be consulted — that's the whole point of the bypass.
+            assert _uses_loopback_delegate(config, group=group) is True
+            mock_owner.assert_not_called()
+
+
+class TestSynthesizeLoopbackDefensiveReturn:
+    """Cover the defensive `return` at line 341 — `owner is None` but
+    `config.ups_groups` is non-empty (no group marked is_local)."""
+
+    @pytest.mark.unit
+    def test_no_owner_with_existing_groups_returns_without_synth(self):
+        from eneru.cli import _synthesize_loopback_if_needed, _find_host_loopback
+
+        # ups_groups present but none is_local; redundancy group requires
+        # local capabilities so synthesis would otherwise proceed.
+        from eneru import RedundancyGroupConfig
+
+        rg = RedundancyGroupConfig(
+            name="rack-a",
+            # NOT is_local; capability comes from a separate path.
+        )
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"), is_local=False,
+                virtual_machines=VMConfig(enabled=True),
+            )],
+            redundancy_groups=[rg],
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
+        )
+        # Sanity: local capabilities are declared so we get past the
+        # `_local_capabilities_required` guard.
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli.Path.stat"):
+            _synthesize_loopback_if_needed(config)
+        # No owner was identified → defensive return path; no loopback
+        # was injected.
+        assert _find_host_loopback(config) is None
+
+
+class TestSynthesizeLoopbackImplicitMode:
+    """Cover line 428 — synthesized loopback attaches to `config.remote_servers`
+    in implicit single-UPS mode (no ups_groups, no redundancy_groups)."""
+
+    @pytest.mark.unit
+    def test_implicit_mode_attaches_to_top_level_remote_servers(self, capsys):
+        from eneru.cli import _synthesize_loopback_if_needed
+
+        # Implicit single-UPS local-host mode → no ups_groups at all.
+        # `_local_owner_group` returns None for this shape, and synthesis
+        # falls through the `owner is None and config.ups_groups` guard
+        # (ups_groups is empty), hitting the top-level append branch at
+        # line 428.
+        config = Config(
+            ups_groups=[],
+            local_shutdown=LocalShutdownConfig(enabled=True),
+        )
+        assert _local_owner_group_module_safe(config) is None
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli.Path.stat"):
+            _synthesize_loopback_if_needed(config)
+        # The synthesis path printed its banner — proves we reached the
+        # `config.remote_servers.append(synthesized)` line (line 428)
+        # before the banner at lines 430-435.
+        err = capsys.readouterr().err
+        assert "auto-enabled host-loopback delegate" in err
+
+
+def _local_owner_group_module_safe(config):
+    """Helper that mirrors `_local_owner_group` so we can sanity-check
+    setup without importing through unittest.mock interference."""
+    from eneru.cli import _local_owner_group
+    return _local_owner_group(config)
+
+
+class TestExitOnMissingLoopbackContract:
+    """Cover lines 443-459 — container + local caps + no loopback exits 1."""
+
+    @pytest.mark.unit
+    def test_container_local_caps_without_loopback_exits(self, capsys):
+        from eneru.cli import _exit_on_missing_loopback_contract
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"), is_local=True,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=True),
+        )
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            with pytest.raises(SystemExit) as exc_info:
+                _exit_on_missing_loopback_contract(config)
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "ERROR" in err
+        assert "no enabled is_host_loopback delegate is configured" in err
+
+    @pytest.mark.unit
+    def test_bare_metal_is_noop(self):
+        from eneru.cli import _exit_on_missing_loopback_contract
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"), is_local=True,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=True),
+        )
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="systemd service"):
+            _exit_on_missing_loopback_contract(config)  # Must not raise
+
+    @pytest.mark.unit
+    def test_kubernetes_is_noop(self):
+        from eneru.cli import _exit_on_missing_loopback_contract
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"), is_local=True,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=True),
+        )
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Kubernetes)"):
+            _exit_on_missing_loopback_contract(config)  # Must not raise
+
+    @pytest.mark.unit
+    def test_container_without_local_caps_is_noop(self):
+        from eneru.cli import _exit_on_missing_loopback_contract
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@nut"), is_local=False,
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
+        )
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _exit_on_missing_loopback_contract(config)  # Must not raise
+
+    @pytest.mark.unit
+    def test_existing_loopback_is_noop(self):
+        from eneru.cli import _exit_on_missing_loopback_contract
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"),
+                is_local=True,
+                remote_servers=[RemoteServerConfig(
+                    name="host-loopback", enabled=True, host="127.0.0.1",
+                    user="root", is_host_loopback=True,
+                )],
+            )],
+            local_shutdown=LocalShutdownConfig(enabled=True),
+        )
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _exit_on_missing_loopback_contract(config)  # Must not raise
+
+
+class TestInjectDelegatedActions:
+    """Cover `_inject_delegated_actions` branches: owner=None early return
+    (line 491), include_user_containers add (line 511), no-generated-actions
+    early return (line 521), and the generation/prepend path."""
+
+    @pytest.mark.unit
+    def test_returns_when_not_a_container_runtime(self):
+        from eneru.cli import _inject_delegated_actions
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"),
+                is_local=True,
+                remote_servers=[RemoteServerConfig(
+                    name="host-loopback", enabled=True, host="127.0.0.1",
+                    user="root", is_host_loopback=True,
+                )],
+            )],
+        )
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="systemd service"):
+            _inject_delegated_actions(config)
+        # Nothing was generated.
+        assert config.ups_groups[0].remote_servers[0].pre_shutdown_commands == []
+
+    @pytest.mark.unit
+    def test_returns_when_no_loopback_present(self):
+        from eneru.cli import _inject_delegated_actions
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"), is_local=True,
+            )],
+        )
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _inject_delegated_actions(config)  # Must not raise
+
+    @pytest.mark.unit
+    def test_returns_when_no_local_owner_group(self):
+        """Loopback exists but no group is is_local → owner is None → return."""
+        from eneru.cli import _inject_delegated_actions
+
+        loopback = RemoteServerConfig(
+            name="host-loopback", enabled=True, host="127.0.0.1",
+            user="root", is_host_loopback=True,
+        )
+        # is_local=False everywhere, but the loopback IS present — exercises
+        # the owner=None early return at line 491.
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"), is_local=False,
+                remote_servers=[loopback],
+            )],
+        )
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _inject_delegated_actions(config)
+        assert loopback.pre_shutdown_commands == []
+
+    @pytest.mark.unit
+    def test_no_local_capabilities_returns_without_prepending(self):
+        """Loopback + is_local but zero capability flags → no generated
+        actions → line 521 early return; pre_shutdown_commands stays empty."""
+        from eneru.cli import _inject_delegated_actions
+
+        loopback = RemoteServerConfig(
+            name="host-loopback", enabled=True, host="127.0.0.1",
+            user="root", is_host_loopback=True,
+        )
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"),
+                is_local=True,
+                virtual_machines=VMConfig(enabled=False),
+                containers=ContainersConfig(enabled=False),
+                filesystems=FilesystemsConfig(
+                    sync_enabled=False,
+                    unmount=UnmountConfig(enabled=False),
+                ),
+                remote_servers=[loopback],
+            )],
+        )
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _inject_delegated_actions(config)
+        assert loopback.pre_shutdown_commands == []
+
+    @pytest.mark.unit
+    def test_include_user_containers_adds_rootless_action(self):
+        """Cover line 511 — `include_user_containers` adds the rootless
+        delegated action."""
+        from eneru.cli import _inject_delegated_actions
+
+        loopback = RemoteServerConfig(
+            name="host-loopback", enabled=True, host="127.0.0.1",
+            user="root", is_host_loopback=True,
+        )
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS@host"),
+                is_local=True,
+                containers=ContainersConfig(
+                    enabled=True,
+                    shutdown_all_remaining_containers=False,
+                    include_user_containers=True,
+                ),
+                remote_servers=[loopback],
+            )],
+        )
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _inject_delegated_actions(config)
+        actions = [c.action for c in loopback.pre_shutdown_commands]
+        assert "stop_containers_rootless" in actions
+
+
+class TestPrintShutdownSequenceDelegated:
+    """Cover the delegated-loopback summary lines in `_print_shutdown_sequence`
+    (760-777, 795, 815) via `eneru validate`."""
+
+    @pytest.mark.unit
+    def test_validate_shows_delegated_summary_and_host_poweroff(self, tmp_path, capsys):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "  is_local: true\n"
+            "local_shutdown:\n"
+            "  enabled: true\n"
+            "virtual_machines:\n"
+            "  enabled: true\n"
+            "containers:\n"
+            "  enabled: true\n"
+            "filesystems:\n"
+            "  sync_enabled: true\n"
+            "  unmount:\n"
+            "    enabled: true\n"
+            "    mounts:\n"
+            "      - /mnt/data\n"
+            "remote_servers:\n"
+            "  - name: nas-a\n"
+            "    enabled: true\n"
+            "    host: nas-a.lan\n"
+            "    user: root\n"
+            "  - name: nas-b\n"
+            "    enabled: true\n"
+            "    host: nas-b.lan\n"
+            "    user: root\n"
+            "  - name: host-loopback\n"
+            "    enabled: true\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+            "    is_host_loopback: true\n"
+            "    shutdown_order: 999\n"
+        )
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.cli.Path.stat"), \
+             patch.object(sys, "argv", ["eneru", "validate", "-c", str(config_file)]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        # Line 773-776: delegated summary names every local action that
+        # was delegated, including the unmount(N) suffix.
+        assert "Local actions delegated via loopback SSH" in out
+        assert "VMs" in out
+        assert "containers" in out
+        assert "sync" in out
+        assert "unmount(1)" in out
+        # Line 815: delegated host poweroff line.
+        assert "host poweroff delegated via loopback SSH" in out
+
+    @pytest.mark.unit
+    def test_validate_multi_server_single_phase_line(self, tmp_path, capsys):
+        """Cover line 795 — multiple remote servers, all in the same phase."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "remote_servers:\n"
+            "  - name: nas-a\n"
+            "    enabled: true\n"
+            "    host: nas-a.lan\n"
+            "    user: root\n"
+            "  - name: nas-b\n"
+            "    enabled: true\n"
+            "    host: nas-b.lan\n"
+            "    user: root\n"
+            "  - name: nas-c\n"
+            "    enabled: true\n"
+            "    host: nas-c.lan\n"
+            "    user: root\n"
+        )
+        with patch.object(sys, "argv", [
+            "eneru", "validate", "-c", str(config_file),
+        ]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        # Line 795 — multi-server, single phase.
+        assert "Remote servers (3):" in out
+
+
+class TestValidateNotificationFormatting:
+    """Cover lines 913, 917, 919 — URL-without-scheme truncation,
+    Title:(none), and avatar_url branch."""
+
+    @pytest.mark.unit
+    def test_validate_truncates_url_without_scheme(self, tmp_path, capsys):
+        # ConfigLoader normalizes notification URLs; we patch APPRISE_AVAILABLE
+        # and inject a no-scheme URL via the loaded Config object directly
+        # by writing a YAML with a no-scheme entry.
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "notifications:\n"
+            "  urls:\n"
+            "    - 'no-scheme-here-just-bare-text-1234567890abcdef'\n"
+        )
+        with patch.object(sys, "argv", [
+            "eneru", "validate", "-c", str(config_file)
+        ]), patch("eneru.cli.APPRISE_AVAILABLE", True):
+            with pytest.raises(SystemExit):
+                main()
+        out = capsys.readouterr().out
+        # Line 913: no `://` → first 20 chars + ellipsis.
+        assert "no-scheme-here-just-" in out
+        assert "..." in out
+
+    @pytest.mark.unit
+    def test_validate_no_title_prints_none(self, tmp_path, capsys):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(f"""
+ups:
+  name: "TestUPS@localhost"
+notifications:
+  urls:
+    - "{TEST_DISCORD_APPRISE_URL}"
+""")
+        with patch.object(sys, "argv", [
+            "eneru", "validate", "-c", str(config_file)
+        ]), patch("eneru.cli.APPRISE_AVAILABLE", True):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        # Line 917: title empty → "Title: (none)".
+        assert "Title: (none)" in out
+
+    @pytest.mark.unit
+    def test_validate_prints_avatar_url_when_set(self, tmp_path, capsys):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(f"""
+ups:
+  name: "TestUPS@localhost"
+notifications:
+  title: "Alert"
+  avatar_url: "https://example.com/avatar.png"
+  urls:
+    - "{TEST_DISCORD_APPRISE_URL}"
+""")
+        with patch.object(sys, "argv", [
+            "eneru", "validate", "-c", str(config_file)
+        ]), patch("eneru.cli.APPRISE_AVAILABLE", True):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        # Line 919: avatar_url present → prints truncated avatar line.
+        assert "Avatar URL: https://example.com/avatar.png" in out
+
+
+class TestTestNotificationsAvatarBranch:
+    """Cover line 990 — `_cmd_test_notifications` prints avatar when set."""
+
+    @pytest.mark.unit
+    def test_test_notifications_prints_avatar(self, tmp_path, capsys):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(f"""
+ups:
+  name: "TestUPS@localhost"
+notifications:
+  title: "Test Title"
+  avatar_url: "https://example.com/avatar.png"
+  urls:
+    - "{TEST_JSON_WEBHOOK_URL}"
+""")
+        mock_apprise = MagicMock()
+        mock_inst = MagicMock()
+        mock_apprise.Apprise.return_value = mock_inst
+        mock_inst.add.return_value = True
+        mock_inst.notify.return_value = True
+        mock_apprise.NotifyType.INFO = "info"
+
+        with patch.object(sys, "argv", [
+            "eneru", "test-notifications", "-c", str(config_file)
+        ]), patch("eneru.cli.APPRISE_AVAILABLE", True), \
+             patch.dict(sys.modules, {"apprise": mock_apprise}), \
+             patch("eneru.cli.apprise", mock_apprise):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        # Line 990: Avatar line prints when avatar_url is set.
+        assert "Avatar: https://example.com/avatar.png" in out
+
+
+class TestSelectRemoteServerGroupFilter:
+    """Cover line 1168 — `_select_remote_server` filters out matches whose
+    owner group doesn't match the `--group` filter."""
+
+    @pytest.mark.unit
+    def test_group_ref_skips_non_matching_owner(self):
+        from eneru.cli import _select_remote_server
+
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(
+                    ups=UPSConfig(name="UPS-A", display_name="rack-a"),
+                    remote_servers=[RemoteServerConfig(
+                        name="nas", enabled=True, host="10.0.0.10", user="root",
+                    )],
+                ),
+                UPSGroupConfig(
+                    ups=UPSConfig(name="UPS-B", display_name="rack-b"),
+                    remote_servers=[RemoteServerConfig(
+                        name="nas", enabled=True, host="10.0.0.11", user="root",
+                    )],
+                ),
+            ],
+        )
+        # `--group rack-a` must pick only the UPS-A row; UPS-B's nas is
+        # filtered out at line 1168.
+        owner_label, owner_name, server = _select_remote_server(
+            config, "nas", group_ref="rack-a",
+        )
+        assert owner_label == "rack-a"
+        assert server.host == "10.0.0.10"
+
+
+class TestShutdownRemoteConnectivityCheck:
+    """Cover lines 1206 and 1212 — `--connectivity-check` unsafe-probe
+    skip and failed-probe branch."""
+
+    def _drill_config(self, tmp_path, probe_command="echo ok"):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+            "remote_servers:\n"
+            "  - name: nas\n"
+            "    enabled: true\n"
+            "    host: 127.0.0.1\n"
+            "    user: root\n"
+            "    shutdown_command: 'sudo shutdown -h now'\n"
+            f"remote_health:\n"
+            f"  probe_command: '{probe_command}'\n"
+        )
+        return config_file
+
+    @pytest.mark.unit
+    def test_unsafe_probe_command_is_skipped(self, tmp_path, capsys):
+        # `is_safe_probe_command` returns False for shell metacharacters
+        # like `;` and `&&`. We patch it directly to simulate that.
+        config_file = self._drill_config(tmp_path)
+        with patch("eneru.cli.is_safe_probe_command", return_value=False), \
+             patch("eneru.shutdown.remote.RemoteShutdownMixin._run_remote_command"), \
+             patch.object(sys, "argv", [
+                "eneru", "shutdown", "remote",
+                "-c", str(config_file), "--server", "nas", "--dry-run",
+                "--connectivity-check",
+             ]):
+            main()
+        out = capsys.readouterr().out
+        # Line 1206 was reached.
+        assert "skipped (unsafe probe command rejected)" in out
+
+    @pytest.mark.unit
+    def test_failed_probe_is_reported(self, tmp_path, capsys):
+        config_file = self._drill_config(tmp_path)
+        with patch("eneru.cli.run_remote_probe",
+                   return_value=(False, "connection refused", 0)), \
+             patch("eneru.shutdown.remote.RemoteShutdownMixin._run_remote_command"), \
+             patch.object(sys, "argv", [
+                "eneru", "shutdown", "remote",
+                "-c", str(config_file), "--server", "nas", "--dry-run",
+                "--connectivity-check",
+             ]):
+            main()
+        out = capsys.readouterr().out
+        # Line 1212 was reached — failed-probe line printed.
+        assert "Connectivity check: FAILED" in out
+        assert "connection refused" in out
+
+
+class TestResolveGroupAmbiguous:
+    """Cover lines 1279-1283 — `_resolve_group_for_rehearsal` ambiguous
+    match (same name in ups_groups and redundancy_groups)."""
+
+    @pytest.mark.unit
+    def test_ambiguous_group_name_across_kinds_raises(self):
+        from eneru.cli import _resolve_group_for_rehearsal
+        from eneru import RedundancyGroupConfig
+
+        config = Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="rack-a", display_name="rack-a"),
+            )],
+            redundancy_groups=[RedundancyGroupConfig(
+                name="rack-a",
+            )],
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            _resolve_group_for_rehearsal(config, "rack-a")
+        msg = str(exc_info.value)
+        assert "matches multiple groups" in msg
+        assert "(ups)" in msg
+        assert "(redundancy)" in msg
+
+
+class TestCompletionMissingFile:
+    """Cover lines 1430-1433 — `_cmd_completion` FileNotFoundError path."""
+
+    @pytest.mark.unit
+    def test_missing_completion_file_exits_with_hint(self, capsys):
+        import importlib.resources
+
+        # Patch `importlib.resources.files` so the inner read_text() raises
+        # FileNotFoundError — exercises the except branch at line 1430.
+        class _FakeRef:
+            def __truediv__(self, _other):
+                return self
+
+            def read_text(self):
+                raise FileNotFoundError("missing")
+
+        with patch.object(importlib.resources, "files", return_value=_FakeRef()), \
+             patch.object(sys, "argv", ["eneru", "completion", "bash"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "completion script for 'bash' not found" in err
+
+
+class TestDeliverStopSubcommand:
+    """Cover lines 1452-1456 — internal `_deliver-stop` subcommand."""
+
+    @pytest.mark.unit
+    def test_deliver_stop_invokes_deferred_delivery(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: 'TestUPS@localhost'\n"
+        )
+        db_path = tmp_path / "events.db"
+        with patch("eneru.deferred_delivery.deliver_pending_stop",
+                   return_value=0) as mock_deliver, \
+             patch.object(sys, "argv", [
+                 "eneru", "_deliver-stop",
+                 "--notification-id", "42",
+                 "--db-path", str(db_path),
+                 "-c", str(config_file),
+             ]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 0
+        mock_deliver.assert_called_once()
+        kwargs = mock_deliver.call_args.kwargs
+        assert kwargs["notification_id"] == 42
+        assert str(kwargs["db_path"]) == str(db_path)
+
+
+class TestMonitorOnceBranch:
+    """Cover line 1479 — `_cmd_monitor` with `--once` calls `run_once`
+    (already covered) AND the non-once branch routes to `run_tui`."""
+
+    @pytest.mark.unit
+    def test_monitor_without_once_routes_to_run_tui(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n  name: 'TestUPS@localhost'\n"
+            "behavior:\n  dry_run: true\n"
+        )
+        with patch("eneru.tui.run_tui") as mock_tui, \
+             patch.object(sys, "argv", [
+                 "eneru", "monitor", "-c", str(config_file),
+                 "--interval", "1",
+             ]):
+            main()
+        mock_tui.assert_called_once()
+        # Sanity: interval is forwarded as a positional/keyword arg.
+        kwargs = mock_tui.call_args.kwargs
+        assert kwargs.get("interval") == 1
