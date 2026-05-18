@@ -1303,9 +1303,17 @@ def test_api_server_start_warns_on_non_loopback_bind(minimal_config):
         server.start()
 
     try:
-        # The bind announcement comes first, then the security warning
+        # The bind announcement comes first, then the security warning.
+        # rc6: warning was compressed to one line — assert on the stable
+        # substrings (bind address, "no authentication", and the RBAC
+        # forward-pointer).
         assert any("API server listening on 0.0.0.0" in m for m in log), log
-        assert any("non-loopback" in m and "no authentication" in m for m in log), log
+        assert any(
+            "API bound to 0.0.0.0" in m
+            and "no authentication" in m
+            and "RBAC planned for v6.0" in m
+            for m in log
+        ), log
     finally:
         server.stop()
 

@@ -59,6 +59,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Operator-set paths are untouched. See
   [docs/migrate-to-container.md](migrate-to-container.md#legacy-logrun-dir-auto-rewrite)
   for opt-out.
+- `docs/migrate-to-container.md` Step 6 had three bind mounts written
+  as `,Z` (comma) instead of `:Z` (colon). On SELinux hosts Docker
+  parsed the destination as the literal path `/var/lib/eneru,Z` and
+  the real `/var/lib/eneru` inside the container stayed unmounted — so
+  the carried-over stats DB at `/srv/eneru/state/default.db` was never
+  reachable and the daemon created a fresh empty DB in the image's
+  default directory instead. Corrected to `:Z`.
+- Removed the per-startup "v5.5: running non-root inside <runtime>;
+  local-host actions will be delegated to <user>@<host> via SSH" banner.
+  In v5.5 the loopback path is taken regardless of euid, so the
+  non-root vs root distinction was cosmetic and the banner spammed
+  the logs on every restart. The privilege check still passes silently
+  for the same scenario.
+- Removed the legacy-path auto-rewrite banner entirely. The rewrite
+  still fires (it preserves the migration promise), but it re-runs
+  in-memory on every container restart and the banner was log noise.
+  Behavior is documented in `docs/migrate-to-container.md`.
+- Shortened the non-loopback API security warning to a single line:
+  `API bound to <addr> with no authentication (RBAC planned for
+  v6.0); restrict network access before exposing beyond trusted
+  hosts.` The long enumeration of what `/api/v1/config` exposes was
+  exposition that belonged in the docs, not in the daemon log on
+  every restart.
 
 ### Migration notes
 
@@ -82,6 +105,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the files before starting the container. Skip if a clean history
   is acceptable. See
   [docs/migrate-to-container.md Step 3b](migrate-to-container.md#step-3b-carry-forward-the-existing-stats-db-optional).
+- To remove the deb/rpm package after the container is healthy, copy
+  `/etc/ups-monitor/config.yaml` to `/srv/eneru/config.yaml` and point
+  the container's bind mount at the copy. Decouples the daemon's
+  configuration from the package's file ownership. See
+  [docs/migrate-to-container.md Step 3c](migrate-to-container.md#step-3c-detach-the-config-file-from-the-package).
 - Do not use `authorized_keys command="..."` for loopback keys; it
   replaces Eneru's identity probe and generated shutdown actions.
 - Non-root loopback users should set `use_sudo: true` and use the

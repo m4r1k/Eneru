@@ -581,15 +581,10 @@ def _exit_on_privilege_errors(config: Config) -> None:
     runtime = _detect_runtime_context()
 
     # v5.5: container + loopback configured → delegate over SSH, no root needed.
-    loopback = _find_host_loopback(config)
-    if _is_container_runtime(runtime) and loopback is not None:
-        owner, server = loopback
-        print(
-            f"v5.5: running non-root inside {runtime}; local-host actions "
-            f"will be delegated to {server.user}@{server.host} via SSH "
-            f"(loopback owned by '{owner}').",
-            file=sys.stderr,
-        )
+    # No banner: the synthesis (or operator-declared) loopback entry already
+    # printed its own line, and root vs non-root container is purely cosmetic
+    # in v5.5 — both code paths end up SSH-delegating through the loopback.
+    if _is_container_runtime(runtime) and _find_host_loopback(config) is not None:
         return
 
     # v5.5: K8s + local capabilities + no loopback → start anyway (the warning
@@ -712,34 +707,17 @@ _LEGACY_CONTAINER_PATH_REWRITES = {
 def _rewrite_legacy_paths_for_container(config: Config) -> None:
     """Auto-rewrite legacy native-install paths to /var/{log,run}/eneru/ inside containers.
 
-    Only rewrites when (a) runtime is Docker/Podman/Kubernetes AND (b) the
-    current value still matches the dataclass default. Explicit operator
-    paths — including paths that happen to match the legacy default — are
-    NOT rewritten when the operator wants to keep the legacy layout they
-    can set the explicit path in their config.
+    Silent — the rewrite is documented in docs/migrate-to-container.md
+    and printing a banner on every container restart was noise. The
+    rewrite still only fires when (a) runtime is Docker/Podman/Kubernetes
+    AND (b) the current value still matches the dataclass default; an
+    operator who sets explicit paths in the config opts out completely.
     """
     if not _is_container_runtime(_detect_runtime_context()):
         return
-    rewritten = []
     for attr, (legacy, replacement) in _LEGACY_CONTAINER_PATH_REWRITES.items():
-        current = getattr(config.logging, attr, None)
-        if current == legacy:
+        if getattr(config.logging, attr, None) == legacy:
             setattr(config.logging, attr, replacement)
-            rewritten.append(f"{attr}: {legacy} -> {replacement}")
-    if not rewritten:
-        return
-    print(
-        "v5.5: container runtime detected; rewrote legacy native-install "
-        "paths to /var/{log,run}/eneru/ for the non-root eneru user:",
-        file=sys.stderr,
-    )
-    for line in rewritten:
-        print(f"  {line}", file=sys.stderr)
-    print(
-        "Set explicit paths in your config's logging: block to opt out "
-        "(see docs/migrate-to-container.md).",
-        file=sys.stderr,
-    )
 
 
 def _prepare_runtime_config(config: Config, *, strict_key_check: bool = True) -> None:

@@ -2301,7 +2301,14 @@ class TestPrivilegeChecksV5_5:
 
     @pytest.mark.unit
     def test_container_with_loopback_passes_for_non_root(self, tmp_path, capsys):
-        """Docker/Podman + loopback + non-root → pass with banner."""
+        """Docker/Podman + loopback + non-root → silent pass.
+
+        The privilege check returns without raising AND without printing a
+        banner. (rc6: removed the "delegated to root@127.0.0.1 via SSH"
+        line — root vs non-root container is cosmetic in v5.5 since both
+        paths SSH-delegate through the loopback, so the banner was just
+        noise on every restart.)
+        """
         from eneru.cli import _exit_on_privilege_errors
 
         config = self._container_config_with_loopback(tmp_path)
@@ -2310,9 +2317,8 @@ class TestPrivilegeChecksV5_5:
                    return_value="container (Docker)"):
             _exit_on_privilege_errors(config)  # Must not raise
 
-        err = capsys.readouterr().err
-        assert "delegated to root@127.0.0.1" in err
-        assert "v5.5" in err
+        # Silent — no banner.
+        assert capsys.readouterr().err == ""
 
     @pytest.mark.unit
     def test_kubernetes_with_capabilities_passes_with_warning(self, tmp_path, capsys):
@@ -3454,9 +3460,11 @@ class TestLegacyContainerPathRewrite:
         assert config.logging.battery_history_file == "/var/run/eneru/ups-battery-history"
         assert config.logging.shutdown_flag_file == "/var/run/eneru/ups-shutdown-scheduled"
 
-        err = capsys.readouterr().err
-        assert "container runtime detected" in err
-        assert "/var/log/eneru/ups-monitor.log" in err
+        # rc6: rewrite is silent. The behavior change is documented in
+        # docs/migrate-to-container.md; printing a banner on every
+        # container restart was log noise (the rewrite re-runs in-memory
+        # at every startup since it doesn't persist to disk).
+        assert capsys.readouterr().err == ""
 
     @pytest.mark.unit
     def test_no_op_on_native_runtime(self, tmp_path, capsys):

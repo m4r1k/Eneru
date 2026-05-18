@@ -96,20 +96,14 @@ class EneruAPIServer:
         )
         self._thread.start()
         self.log_fn(f"📊 API server listening on {addr[0]}:{addr[1]}")
-        # The API ships with no auth in v5.3 by design (read-only,
-        # localhost-by-default). If the user opted in to a non-loopback
-        # bind, surface that /api/v1/config exposes server hostnames,
-        # SSH-options-configured flags, and pre-shutdown command
-        # templates to anyone who can reach this socket.
+        # Single-line warning when bound off-loopback: the current API
+        # ships no authentication, so any caller that can reach the
+        # socket can read /api/v1/config. RBAC is planned for v6.0.
         if not _is_loopback_bind(self.config.api.bind):
             self.log_fn(
-                f"⚠️ API bound to {addr[0]} (non-loopback). v5.3 ships "
-                f"no authentication; /api/v1/config will expose remote "
-                f"server hostnames, SSH usernames, shutdown ordering, "
-                f"and presence flags for SSH options and pre-shutdown "
-                f"commands to any client that can reach this socket. "
-                f"Restrict network access (firewall, reverse proxy with "
-                f"auth) before exposing this beyond trusted hosts."
+                f"⚠️ API bound to {addr[0]} with no authentication "
+                "(RBAC planned for v6.0); restrict network access before "
+                "exposing beyond trusted hosts."
             )
 
     def stop(self) -> None:
