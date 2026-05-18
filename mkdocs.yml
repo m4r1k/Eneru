@@ -34,6 +34,7 @@ nav:
       - Home: index.md
       - Getting started: getting-started.md
       - Choose your install: install-comparison.md
+      - Install (Docker quick start): install-docker.md
       - Architecture: architecture.md
   - Configuration:
       - Configuration reference: configuration.md
