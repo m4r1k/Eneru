@@ -52,8 +52,8 @@ network_name() {
 
 prepare_loopback_key() {
   cp /tmp/e2e-ssh-key /tmp/e2e-loopback-key
-  chown 10001:10001 /tmp/e2e-loopback-key
-  chmod 0400 /tmp/e2e-loopback-key
+  sudo chown 10001:10001 /tmp/e2e-loopback-key
+  sudo chmod 0400 /tmp/e2e-loopback-key
 }
 
 write_loopback_config() {
