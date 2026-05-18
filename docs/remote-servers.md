@@ -31,11 +31,18 @@ remote_servers:
         timeout: 180
       - action: "stop_proxmox_cts"
         timeout: 60
+      - action: "unmount_filesystems"
+        timeout: 20
+        mounts:
+          - path: "/mnt/backup"
+            options: "-l"
       - action: "sync"
     shutdown_command: "shutdown -h now"
 ```
 
-Pre-shutdown commands are best effort. Eneru logs failures and continues to the final shutdown command.
+Pre-shutdown commands run in the order listed, before the final `shutdown_command`.
+They are best effort: Eneru logs failures and continues to the final shutdown
+command unless the remote phase deadline is exhausted.
 
 | Action | What it does |
 |--------|--------------|
@@ -46,6 +53,7 @@ Pre-shutdown commands are best effort. Eneru logs failures and continues to the 
 | `stop_xcpng_vms` | Stop XCP-ng or XenServer VMs |
 | `stop_esxi_vms` | Stop VMware ESXi VMs |
 | `stop_compose` | Stop a compose stack. Requires `path` |
+| `unmount_filesystems` | Unmount the command's `mounts` list with optional `options` |
 | `sync` | Flush remote filesystems |
 
 Custom commands are also allowed:
@@ -57,8 +65,19 @@ pre_shutdown_commands:
     timeout: 120
   - command: "systemctl stop my-critical-service"
     timeout: 30
+  - action: "unmount_filesystems"
+    timeout: 20
+    mounts:
+      - "/mnt/media"
+      - path: "/mnt/backup disk"
+        options: "-l"
   - action: "sync"
 ```
+
+For ordinary remote servers, `unmount_filesystems` uses the mounts listed on
+that command. For the v5.5 host-loopback delegate, leave `mounts` unset:
+Eneru derives them from the local `filesystems.unmount.mounts` config so the
+host's local mounts are declared once.
 
 ## Ordering
 

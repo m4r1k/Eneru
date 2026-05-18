@@ -696,6 +696,56 @@ class TestRemotePreShutdownExecution:
         assert "/mnt/usb disk" in umount_cmd
 
     @pytest.mark.unit
+    def test_regular_remote_unmount_uses_command_mounts(self, remote_monitor):
+        """Regular remote servers must provide mounts on the command itself."""
+        server = RemoteServerConfig(
+            name="Storage",
+            enabled=True,
+            host="192.168.1.90",
+            user="root",
+            command_timeout=30,
+            pre_shutdown_commands=[
+                RemoteCommandConfig(
+                    action="unmount_filesystems",
+                    timeout=20,
+                    mounts=[
+                        {"path": "/mnt/media", "options": ""},
+                        {"path": "/mnt/backup disk", "options": "-l"},
+                    ],
+                ),
+            ],
+        )
+
+        with patch.object(remote_monitor, "_run_remote_command",
+                          return_value=(True, "")) as mock_run:
+            remote_monitor._execute_remote_pre_shutdown(server)
+
+        command = mock_run.call_args.args[1]
+        assert "/mnt/media" in command
+        assert "/mnt/backup disk" in command
+        assert "umount -l" in command
+
+    @pytest.mark.unit
+    def test_regular_remote_unmount_without_mounts_is_skipped(self, remote_monitor):
+        server = RemoteServerConfig(
+            name="Storage",
+            enabled=True,
+            host="192.168.1.90",
+            user="root",
+            pre_shutdown_commands=[
+                RemoteCommandConfig(action="unmount_filesystems"),
+            ],
+        )
+
+        with patch.object(remote_monitor, "_run_remote_command") as mock_run:
+            result = remote_monitor._execute_remote_pre_shutdown(
+                server, collect_result=True,
+            )
+
+        mock_run.assert_not_called()
+        assert result.failed == 1
+
+    @pytest.mark.unit
     def test_loopback_helpers_fail_closed_to_empty_context(self, remote_monitor):
         """Helper failures should remove optional context, not abort shutdown."""
         with patch.object(remote_monitor, "_current_container_ids",

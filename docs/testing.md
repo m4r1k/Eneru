@@ -79,7 +79,7 @@ done
 |------|----------|
 | Config loading and validation | YAML parsing, defaults, enum validation, multi-UPS inheritance, local ownership, redundancy rules |
 | Monitor state machine | OL/OB transitions, FSD, failsafe, shutdown trigger order, dry-run behavior |
-| Shutdown mixins | VMs, containers, compose files, filesystem sync and unmounts, remote SSH phases |
+| Shutdown mixins | VMs, containers, compose files, filesystem sync and unmounts, remote SSH phases, remote pre-shutdown action rendering |
 | Multi-UPS coordinator | Group routing, `is_local`, drain policy, local shutdown locking, signal handling |
 | Redundancy runtime | Quorum evaluation, advisory triggers, connection-grace handling, idempotent group execution |
 | Health monitoring | Voltage thresholds, AVR, bypass, overload, battery anomaly filtering |

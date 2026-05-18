@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `remote_servers[].use_sudo` for non-root SSH users. It prefixes
   generated privileged actions and the final shutdown command with
   `sudo -n` when needed.
+- `remote_servers[].pre_shutdown_commands[].mounts` for the
+  `unmount_filesystems` action, so ordinary remote servers can unmount
+  specific filesystems before their final shutdown command. Loopback
+  delegates still derive mounts from the local `filesystems.unmount`
+  config.
 - Loopback host identity validation using `/etc/machine-id`, surfaced in
   remote health and `/ready`.
 - E2E coverage for root loopback, non-root sudo loopback, missing

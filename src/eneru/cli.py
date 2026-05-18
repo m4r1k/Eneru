@@ -510,9 +510,7 @@ def _inject_delegated_actions(config: Config) -> None:
     generated: list[RemoteCommandConfig] = []
     # Order mirrors the in-process sequence in monitor._execute_shutdown_sequence:
     # VMs first (long graceful wait), then containers (compose stacks then
-    # leftover container stops), then sync. Filesystem unmount via SSH is a
-    # known gap in this commit; Commit 2 adds the unmount_filesystems
-    # template and the matching delegated action.
+    # leftover container stops), then filesystem sync and unmount.
     if owner.virtual_machines.enabled:
         generated.append(RemoteCommandConfig(action="stop_vms"))
     if owner.containers.enabled:

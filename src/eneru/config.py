@@ -268,6 +268,10 @@ class RemoteCommandConfig:
     command: Optional[str] = None  # custom command
     timeout: Optional[int] = None  # per-command timeout (None = use server default)
     path: Optional[str] = None  # for stop_compose action
+    # For the unmount_filesystems action on ordinary remote servers.
+    # Loopback delegates ignore this field and derive mounts from the local
+    # filesystems.unmount config so operators declare local mounts once.
+    mounts: List[Dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -681,11 +685,21 @@ class ConfigLoader:
             pre_cmds = []
             for cmd_data in pre_cmds_raw:
                 if isinstance(cmd_data, dict):
+                    mounts = []
+                    for mount in cmd_data.get('mounts', []) or []:
+                        if isinstance(mount, str):
+                            mounts.append({'path': mount, 'options': ''})
+                        elif isinstance(mount, dict):
+                            mounts.append({
+                                'path': mount.get('path', ''),
+                                'options': mount.get('options', ''),
+                            })
                     pre_cmds.append(RemoteCommandConfig(
                         action=cmd_data.get('action'),
                         command=cmd_data.get('command'),
                         timeout=cmd_data.get('timeout'),
                         path=cmd_data.get('path'),
+                        mounts=mounts,
                     ))
             is_loopback_explicit = 'is_host_loopback' in server_data
             is_loopback = (
@@ -1178,7 +1192,7 @@ class ConfigLoader:
                 "is_host_loopback", "host_identity_command",
                 "expected_host_identity",
             }
-            pre_shutdown_keys = {"action", "command", "timeout", "path"}
+            pre_shutdown_keys = {"action", "command", "timeout", "path", "mounts"}
             depletion_keys = {"window", "critical_rate", "grace_period"}
             extended_time_keys = {"enabled", "threshold"}
             messages.extend(cls._unknown_key_errors(

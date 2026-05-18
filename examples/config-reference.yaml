@@ -407,6 +407,13 @@ remote_servers:
   #       timeout: 120  # Override default timeout
   #     - action: "stop_proxmox_cts"
   #       timeout: 60
+  #     # Optional: unmount remote filesystems before the final host shutdown.
+  #     # Commands run in the exact order listed here.
+  #     - action: "unmount_filesystems"
+  #       timeout: 20
+  #       mounts:
+  #         - path: "/mnt/backup"
+  #           options: "-l"
   #     - action: "sync"
   #   shutdown_command: "shutdown -h now"
 

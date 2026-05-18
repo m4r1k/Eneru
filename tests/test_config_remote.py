@@ -277,6 +277,56 @@ remote_servers:
         assert cmd.timeout == 120
 
     @pytest.mark.unit
+    def test_pre_shutdown_unmount_filesystems_mounts(self, temp_config_file):
+        """Remote unmount_filesystems parses its per-command mount list."""
+        config_data = """
+remote_servers:
+  - name: "Storage Server"
+    enabled: true
+    host: "192.168.1.90"
+    user: "root"
+    pre_shutdown_commands:
+      - action: "unmount_filesystems"
+        timeout: 20
+        mounts:
+          - "/mnt/media"
+          - path: "/mnt/backup disk"
+            options: "-l"
+    shutdown_command: "shutdown -h now"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+
+        cmd = config.remote_servers[0].pre_shutdown_commands[0]
+        assert cmd.action == "unmount_filesystems"
+        assert cmd.timeout == 20
+        assert cmd.mounts == [
+            {"path": "/mnt/media", "options": ""},
+            {"path": "/mnt/backup disk", "options": "-l"},
+        ]
+
+    @pytest.mark.unit
+    def test_pre_shutdown_mounts_is_not_unknown_key(self, temp_config_file):
+        raw = {
+            "remote_servers": [{
+                "name": "Storage Server",
+                "enabled": True,
+                "host": "192.168.1.90",
+                "user": "root",
+                "pre_shutdown_commands": [{
+                    "action": "unmount_filesystems",
+                    "mounts": ["/mnt/media"],
+                }],
+            }]
+        }
+        temp_config_file.write_text(yaml.safe_dump(raw))
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config, raw_data=raw)
+
+        assert not any("mounts" in m and "unknown config key" in m for m in messages)
+
+    @pytest.mark.unit
     def test_pre_shutdown_commands_mixed(self, temp_config_file):
         """Test pre_shutdown_commands with mixed actions and commands."""
         config_data = """

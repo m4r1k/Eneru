@@ -425,6 +425,7 @@ mounts:
 | `ssh_key_path` | `null` | Optional SSH private-key path, useful for container/Kubernetes volume mounts |
 | `ssh_options` | `[]` | Extra SSH options. Avoid disabling host-key checks in production |
 | `pre_shutdown_commands` | `[]` | Pre-shutdown actions or commands. For loopback entries Eneru generates these from the local config — don't duplicate |
+| `pre_shutdown_commands[].mounts` | `[]` | Mounts for `action: unmount_filesystems` on ordinary remote servers. Loopback entries derive mounts from `filesystems.unmount.mounts` |
 | `shutdown_order` | unset | Explicit phase. Same value runs in parallel; higher values run later |
 | `parallel` | unset | Legacy mode. `false` runs before the default parallel batch. Mutually exclusive with `shutdown_order` |
 | `shutdown_safety_margin` | `60` | Extra wait budget for parallel server threads |
@@ -446,7 +447,7 @@ config — don't write them manually there).
 | `stop_containers_rootless` | **v5.5 (new).** Same as `stop_containers` but iterates rootless Podman per non-system user via `loginctl` + `sudo -u` |
 | `stop_compose` | Compose `down` for the given `path`. v5.5: skips stacks that include the Eneru container when delegated |
 | `stop_vms` | Graceful `virsh shutdown` of all running libvirt VMs, then force-destroy after the configured timeout |
-| `unmount_filesystems` | **v5.5 (new).** Iterates per-mount `umount` with configurable options. Used by the loopback path; for regular remotes it's available but rarely needed |
+| `unmount_filesystems` | **v5.5 (new).** Iterates per-mount `umount` with configurable options. Regular remotes provide `pre_shutdown_commands[].mounts`; loopback derives mounts from the local filesystem config |
 | `stop_proxmox_vms` / `stop_proxmox_cts` | Proxmox QEMU VM and LXC container teardown via `qm` / `pct` (sudo) |
 | `stop_xcpng_vms` | XCP-ng / XenServer VMs via `xe` |
 | `stop_esxi_vms` | VMware ESXi VMs via `vim-cmd` |

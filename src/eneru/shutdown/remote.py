@@ -449,6 +449,15 @@ class RemoteShutdownMixin:
                         umount_targets = serialize_umount_targets(
                             self._loopback_umount_targets()
                         )
+                elif action_name == "unmount_filesystems":
+                    umount_targets = serialize_umount_targets(cmd_config.mounts)
+                    if not umount_targets:
+                        self._log_message(
+                            f"    ⚠️ [{idx}/{cmd_count}] unmount_filesystems "
+                            "requires 'mounts' on regular remote servers (skipping)"
+                        )
+                        result.failed += 1
+                        continue
                 command = render_action(
                     action_name,
                     timeout=timeout,
