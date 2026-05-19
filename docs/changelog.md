@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.5.1] - 2026-05-19
+
+### Fixed
+
+- Container restarts and image upgrades now send one lifecycle
+  notification instead of "Service Stopped" followed by
+  Restarted/Upgraded. Container SIGTERM is like one doorbell wired to
+  several doors: Eneru cannot tell stop from upgrade, so it leaves the
+  stop row pending for the next container to supersede.
+- Added regression coverage for explicit legacy logging paths so
+  migrated configs keep rewriting to `/var/{log,run}/eneru/...` inside
+  containers.
+
+---
+
 ## [5.5.0] - 2026-05-18
 
 ### Added

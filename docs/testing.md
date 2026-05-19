@@ -80,11 +80,11 @@ done
 | Config loading and validation | YAML parsing, defaults, enum validation, multi-UPS inheritance, local ownership, loopback delegation config shape, redundancy rules |
 | Monitor state machine | OL/OB transitions, FSD, failsafe, shutdown trigger order, dry-run behavior |
 | Shutdown mixins | VMs, containers, compose files, filesystem sync and unmounts, remote SSH phases, remote pre-shutdown action rendering, loopback delegate bracketing (Phase A pre-actions → regulars → Phase C poweroff), exception isolation across phases, dry-run + per-server notification paths |
-| CLI inspection vs runtime | `eneru validate` shutdown-sequence tree, `eneru remote list` ORDER column, `eneru shutdown remote` drill — all partition `is_host_loopback` delegates out of `compute_effective_order` and invoke `_prepare_runtime_config` so the inspection output matches what the daemon would execute |
+| CLI inspection vs runtime | `python -m eneru validate` shutdown-sequence tree, `python -m eneru remote list` ORDER column, `python -m eneru shutdown remote` drill, container legacy-path rewrite — all partition `is_host_loopback` delegates out of `compute_effective_order` and invoke `_prepare_runtime_config` / `_load_config` so the inspection output matches what the daemon would execute |
 | Multi-UPS coordinator | Group routing, `is_local`, drain policy, local shutdown locking, signal handling |
 | Redundancy runtime | Quorum evaluation, advisory triggers, connection-grace handling, idempotent group execution |
 | Health monitoring | Voltage thresholds, AVR, bypass, overload, battery anomaly filtering |
-| Notifications | Formatting, retry queue, lifecycle classification, coalescing, suppression rules |
+| Notifications | Formatting, retry queue, lifecycle classification, coalescing, suppression rules, container restart/upgrade stop-row deferral |
 | Statistics and TUI | SQLite schema, aggregation, event tier filtering, TUI grouping, graphs, one-shot monitor output |
 | Observability | API routing, readiness, Prometheus escaping, power-quality metrics, remote-health sidecars, MQTT publishing |
 | Packaging | nFPM file list, package install paths, wrapper execution, OCI image smoke tests |

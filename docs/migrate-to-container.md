@@ -384,8 +384,9 @@ Eneru silently rewrites the four native-install defaults
 `/var/run/ups-battery-history`, `/var/run/ups-shutdown-scheduled`) to
 their `/var/{log,run}/eneru/` equivalents inside container runtimes so
 the daemon can write as uid 10001. The rewrite only fires when the
-config still matches the exact legacy default; setting any other value
-in your `logging:` block opts out and your value wins.
+config still matches the exact legacy value, whether that value came
+from the dataclass default or was written explicitly in your
+`logging:` block. Setting any other value opts out and your value wins.
 
 The rewrite applies on every config load, so the daemon (`run`) and
 every read-only subcommand (`validate`, `monitor` / `tui`, `shutdown
@@ -395,6 +396,22 @@ group`, `remote list`, …) all observe the same effective paths. If
 that predates this fix — upgrade to v5.5.0-rc8 or newer, or set the
 four `logging.*` paths explicitly to their `/var/{log,run}/eneru/...`
 values in your config to bypass the auto-rewrite entirely.
+
+## Lifecycle notifications during container upgrades
+
+Docker sends Eneru the same SIGTERM for `docker stop`, `docker restart`,
+and image replacement. Think of it like one doorbell wired to three
+doors: from inside the house, Eneru hears the bell but cannot see which
+door was used. To avoid sending "Service Stopped" followed by
+"Upgraded" during a container upgrade, containerized Eneru leaves the
+stop notification pending in SQLite. If a replacement container starts,
+its lifecycle sweep cancels that pending stop and sends the single
+Restarted/Upgraded message that matters.
+
+The practical tradeoff is that a final `docker stop eneru` without a
+replacement container may not send a standalone stop notification. The
+daemon still writes the shutdown marker and exits cleanly; the pending
+row is folded by the next start.
 
 ### Where state lives across container restarts
 
