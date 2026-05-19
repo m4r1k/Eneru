@@ -3778,6 +3778,38 @@ class TestLegacyContainerPathRewrite:
         assert config.logging.shutdown_flag_file == "/var/run/eneru/ups-shutdown-scheduled"
 
     @pytest.mark.unit
+    def test_explicit_legacy_paths_are_rewritten(self, tmp_path, capsys):
+        """Migration-guide contract: a native config that explicitly
+        spells the old defaults still gets the container-safe paths.
+
+        Like replacing a narrow pipe with a wider one: whether the old
+        pipe was installed by default or named in the plan, it still
+        has to be swapped before water can flow under the new pressure.
+        Here the "pressure" is uid 10001 in the OCI image, which cannot
+        write directly under /var/log or /var/run.
+        """
+        from eneru.cli import _rewrite_legacy_paths_for_container
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n  name: 'TestUPS@localhost'\n"
+            "logging:\n"
+            "  file: /var/log/ups-monitor.log\n"
+            "  state_file: /var/run/ups-monitor.state\n"
+            "  battery_history_file: /var/run/ups-battery-history\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+        with patch("eneru.cli._detect_runtime_context",
+                   return_value="container (Docker)"):
+            _rewrite_legacy_paths_for_container(config)
+
+        assert config.logging.file == "/var/log/eneru/ups-monitor.log"
+        assert config.logging.state_file == "/var/run/eneru/ups-monitor.state"
+        assert config.logging.battery_history_file == "/var/run/eneru/ups-battery-history"
+        assert config.logging.shutdown_flag_file == "/var/run/eneru/ups-shutdown-scheduled"
+        assert capsys.readouterr().err == ""
+
+    @pytest.mark.unit
     def test_silent_when_nothing_to_rewrite(self, tmp_path, capsys):
         """All four paths set explicitly to non-legacy values → no banner."""
         from eneru.cli import _rewrite_legacy_paths_for_container

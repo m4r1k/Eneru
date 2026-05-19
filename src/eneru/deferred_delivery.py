@@ -30,11 +30,14 @@ When the timer fires:
   sends the row, and marks it ``sent``. The user gets a single
   ``🛑 Service Stopped`` notification.
 
-Fallback path: when ``systemd-run`` isn't available (non-systemd
-containers, frozen-pristine sandboxes), the helper falls back to
-shipping the stop synchronously via the worker's Apprise instance.
-This loses the restart-coalescing benefit on those hosts but at least
-the user always sees a notification.
+Fallback path: when ``systemd-run`` isn't available in a foreground
+non-container run, the helper falls back to shipping the stop
+synchronously via the worker's Apprise instance. Containers are the
+exception: Docker/Podman/Kubernetes send the same SIGTERM for a plain
+stop and for an upgrade/restart, and there is no service-manager timer
+outside the container to arbitrate intent. In that environment Eneru
+leaves the stop row pending so the replacement container can supersede
+it with one Restarted/Upgraded lifecycle notification.
 """
 
 from __future__ import annotations
@@ -88,10 +91,10 @@ def _eneru_invocation_args() -> Optional[list]:
 # entry points (`schedule_deferred_stop_or_eager_send` and
 # `deliver_pending_stop`) can stay as-is — the systemd-specific paths
 # are gated by `_running_under_systemd()` below, so non-systemd
-# environments naturally take the eager path with no code changes.
-# Anything more sophisticated for K8s (e.g., a sidecar that delivers
-# the row when the pod terminates) is a future-release concern, not
-# a v5.2.1 one.
+# environments need their own branch. A detached in-container helper
+# cannot reliably survive PID 1 exit / container removal, so Docker
+# restart coalescing is handled by leaving the stop row pending for the
+# next container's startup sweep.
 # ============================================================================
 
 def _running_under_systemd() -> bool:
@@ -103,6 +106,41 @@ def _running_under_systemd() -> bool:
     from a shell), and under most CI test environments.
     """
     return bool(os.environ.get("INVOCATION_ID"))
+
+
+def _running_in_container() -> bool:
+    """Best-effort container runtime check used before eager stop sends.
+
+    Kept local to this module instead of importing ``eneru.cli`` because
+    ``monitor.py`` imports this helper during module import, and ``cli.py``
+    imports ``monitor.py``. A shared runtime-detection module would be
+    cleaner eventually; this small detector covers the stop-notification
+    decision without introducing that cycle.
+    """
+    if Path("/.dockerenv").exists() or Path("/run/.containerenv").exists():
+        return True
+    if os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return True
+    if os.environ.get("container", "").strip():
+        return True
+
+    try:
+        cgroup_text = Path("/proc/1/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        cgroup_text = ""
+    if any(marker in cgroup_text for marker in (
+        "docker", "kubepods", "containerd", "lxc",
+    )):
+        return True
+
+    try:
+        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+    except OSError:
+        mountinfo = ""
+    return (
+        "/docker/containers/" in mountinfo
+        or "/containers/storage/overlay-containers/" in mountinfo
+    )
 
 
 def _detect_systemd_stop_intent() -> bool:
@@ -177,11 +215,18 @@ def schedule_deferred_stop_or_eager_send(
     # v5.2.1: short-circuit to eager send in two cases — both produce
     # an INSTANT 🛑 Stopped notification with no 15-second wait.
     #
-    # 1. Not running under systemd (containers, K8s pods, manual
-    #    `eneru run` from a shell, CI tests). The defer-then-ship
-    #    mechanism only makes sense when there's a service manager
-    #    that will or won't restart us. See the ROADMAP NOTE above.
+    # 1. Not running under systemd. Foreground non-container runs get an
+    #    eager stop because no replacement manager exists. Containers
+    #    keep the row pending because Docker/Podman/K8s use the same
+    #    SIGTERM shape for stop and upgrade/restart; the next daemon's
+    #    lifecycle sweep cancels it before delivery.
     if not _running_under_systemd():
+        if _running_in_container():
+            log_fn(
+                "📤 Container runtime without systemd — leaving stop "
+                "notification pending so the next daemon can supersede it"
+            )
+            return
         log_fn(
             "📤 Not running under systemd — shipping stop notification "
             "eagerly via Apprise"

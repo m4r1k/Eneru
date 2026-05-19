@@ -12,6 +12,7 @@ from eneru.deferred_delivery import (
     _detect_systemd_stop_intent,
     _eager_send,
     _eneru_invocation_args,
+    _running_in_container,
     _running_under_systemd,
     deliver_pending_stop,
     schedule_deferred_stop_or_eager_send,
@@ -66,6 +67,35 @@ class TestRunningUnderSystemd:
     def test_false_when_invocation_id_empty(self):
         with patch.dict("os.environ", {"INVOCATION_ID": ""}, clear=False):
             assert _running_under_systemd() is False
+
+
+# ==============================================================================
+# _running_in_container
+# ==============================================================================
+
+class TestRunningInContainer:
+
+    @pytest.mark.unit
+    def test_true_when_dockerenv_exists(self):
+        def fake_exists(self):
+            return str(self) == "/.dockerenv"
+
+        with patch("pathlib.Path.exists", new=fake_exists), \
+             patch.dict("os.environ", {}, clear=True):
+            assert _running_in_container() is True
+
+    @pytest.mark.unit
+    def test_true_when_container_env_set(self):
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch.dict("os.environ", {"container": "docker"}, clear=True):
+            assert _running_in_container() is True
+
+    @pytest.mark.unit
+    def test_false_when_no_container_signal(self):
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch("pathlib.Path.read_text", side_effect=OSError), \
+             patch.dict("os.environ", {}, clear=True):
+            assert _running_in_container() is False
 
 
 # ==============================================================================
@@ -384,13 +414,14 @@ class TestScheduleDeferred:
 
 class TestScheduleShortCircuits:
     """The instant-eager paths added in v5.2.1 to drop the 15-second
-    notification latency on `systemctl stop` and in non-systemd
-    contexts (containers, K8s, manual `eneru run`)."""
+    notification latency on `systemctl stop` and in foreground
+    non-systemd contexts. Containers keep the row pending so the next
+    container can supersede it on restart/upgrade."""
 
     @pytest.mark.unit
-    def test_short_circuit_when_not_under_systemd(self, tmp_path):
+    def test_short_circuit_when_foreground_not_under_systemd(self, tmp_path):
         """No INVOCATION_ID env var → eager send, no systemd-run call,
-        no Job query. This is the K8s / Docker / foreground path."""
+        no Job query. This is the foreground `eneru run` path."""
         log = MagicMock()
         worker = MagicMock()
         worker._send_via_apprise.return_value = True
@@ -398,6 +429,8 @@ class TestScheduleShortCircuits:
         env = {k: v for k, v in __import__("os").environ.items()
                if k != "INVOCATION_ID"}
         with patch.dict("os.environ", env, clear=True), \
+             patch("eneru.deferred_delivery._running_in_container",
+                   return_value=False), \
              patch("eneru.deferred_delivery.subprocess.run") as run, \
              patch("eneru.stats.StatsStore.open"), \
              patch("eneru.stats.StatsStore.mark_notification_sent"), \
@@ -412,6 +445,33 @@ class TestScheduleShortCircuits:
         run.assert_not_called()
         worker._send_via_apprise.assert_called_once_with("🛑 stop", "warning")
         assert any("Not running under systemd" in c.args[0]
+                   for c in log.call_args_list)
+
+    @pytest.mark.unit
+    def test_container_without_systemd_leaves_stop_pending(self, tmp_path):
+        """Docker/Podman upgrades send SIGTERM like a plain stop. Since
+        there is no systemd-run timer outside the container, eager-send
+        would produce stop + upgraded. Leave the row pending so the next
+        daemon's lifecycle sweep can cancel it."""
+        log = MagicMock()
+        worker = MagicMock()
+        env = {k: v for k, v in __import__("os").environ.items()
+               if k != "INVOCATION_ID"}
+        with patch.dict("os.environ", env, clear=True), \
+             patch("eneru.deferred_delivery._running_in_container",
+                   return_value=True), \
+             patch("eneru.deferred_delivery.subprocess.run") as run:
+            schedule_deferred_stop_or_eager_send(
+                notification_id=1,
+                db_path=tmp_path / "ups.db",
+                config_path="/etc/cfg.yaml",
+                body="🛑 stop", notify_type="warning",
+                worker=worker, log_fn=log,
+            )
+        run.assert_not_called()
+        worker._send_via_apprise.assert_not_called()
+        assert any("container runtime" in c.args[0].lower()
+                   and "pending" in c.args[0].lower()
                    for c in log.call_args_list)
 
     @pytest.mark.unit
