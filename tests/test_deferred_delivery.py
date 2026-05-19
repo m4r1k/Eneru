@@ -85,9 +85,58 @@ class TestRunningInContainer:
             assert _running_in_container() is True
 
     @pytest.mark.unit
+    def test_true_when_containerenv_exists(self):
+        def fake_exists(self):
+            return str(self) == "/run/.containerenv"
+
+        with patch("pathlib.Path.exists", new=fake_exists), \
+             patch.dict("os.environ", {}, clear=True):
+            assert _running_in_container() is True
+
+    @pytest.mark.unit
+    def test_true_when_kubernetes_env_set(self):
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch.dict("os.environ",
+                        {"KUBERNETES_SERVICE_HOST": "10.0.0.1"},
+                        clear=True):
+            assert _running_in_container() is True
+
+    @pytest.mark.unit
     def test_true_when_container_env_set(self):
         with patch("pathlib.Path.exists", return_value=False), \
              patch.dict("os.environ", {"container": "docker"}, clear=True):
+            assert _running_in_container() is True
+
+    @pytest.mark.unit
+    def test_true_when_cgroup_contains_container_marker(self):
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch("pathlib.Path.read_text",
+                   return_value="12:cpuset:/docker/abc123\n"), \
+             patch.dict("os.environ", {}, clear=True):
+            assert _running_in_container() is True
+
+    @pytest.mark.unit
+    def test_true_when_mountinfo_contains_docker_path(self):
+        def fake_read_text(self, encoding="utf-8"):
+            if str(self) == "/proc/1/cgroup":
+                return ""
+            return "123 /var/lib/docker/containers/abc123/merged\n"
+
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch("pathlib.Path.read_text", new=fake_read_text), \
+             patch.dict("os.environ", {}, clear=True):
+            assert _running_in_container() is True
+
+    @pytest.mark.unit
+    def test_true_when_mountinfo_contains_podman_path(self):
+        def fake_read_text(self, encoding="utf-8"):
+            if str(self) == "/proc/1/cgroup":
+                return ""
+            return "123 /containers/storage/overlay-containers/abc/userdata\n"
+
+        with patch("pathlib.Path.exists", return_value=False), \
+             patch("pathlib.Path.read_text", new=fake_read_text), \
+             patch.dict("os.environ", {}, clear=True):
             assert _running_in_container() is True
 
     @pytest.mark.unit
