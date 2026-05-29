@@ -1054,16 +1054,19 @@ class ConfigLoader:
         if 'nut_control' in data:
             raw_nc = data.get('nut_control')
             nc_data = raw_nc if isinstance(raw_nc, dict) else {}
+            # Coerce allowlists defensively: a scalar (``allowed_commands:
+            # load.off``) or ``null`` must not crash _parse_config or become a
+            # character list — validate_config reports the malformed type cleanly.
+            def _as_list(value):
+                return [str(v) for v in value] if isinstance(value, list) else []
             config.nut_control = NutControlConfig(
                 enabled=nc_data.get('enabled', config.nut_control.enabled),
                 username=nc_data.get('username', config.nut_control.username),
                 password=nc_data.get('password', config.nut_control.password),
-                allowed_commands=list(
-                    nc_data.get('allowed_commands',
-                                config.nut_control.allowed_commands)),
-                allowed_variables=list(
-                    nc_data.get('allowed_variables',
-                                config.nut_control.allowed_variables)),
+                allowed_commands=_as_list(nc_data.get(
+                    'allowed_commands', config.nut_control.allowed_commands)),
+                allowed_variables=_as_list(nc_data.get(
+                    'allowed_variables', config.nut_control.allowed_variables)),
                 timeout=nc_data.get('timeout', config.nut_control.timeout),
             )
 
@@ -1291,6 +1294,14 @@ class ConfigLoader:
                 {"enabled", "username", "password", "allowed_commands",
                  "allowed_variables", "timeout"},
             ))
+            raw_nc = raw_data.get("nut_control", {})
+            if isinstance(raw_nc, dict):
+                for list_key in ("allowed_commands", "allowed_variables"):
+                    val = raw_nc.get(list_key)
+                    # null/absent is fine (treated as empty); a scalar is not.
+                    if val is not None and not isinstance(val, list):
+                        messages.append(
+                            f"ERROR: nut_control.{list_key} must be a list")
             logging_raw = raw_data.get("logging", {})
             messages.extend(cls._unknown_key_errors(
                 "logging",
@@ -1952,6 +1963,18 @@ class ConfigLoader:
                 f"ERROR: local_shutdown.trigger_on must be 'any' or 'none', "
                 f"got '{config.local_shutdown.trigger_on}'"
             )
+
+        # api.auth.session_ttl and nut_control.timeout are coerced with int()
+        # downstream (SessionManager, subprocess timeouts) — validate here so a
+        # bad value surfaces as a config error, not a runtime crash.
+        ttl = config.api.auth.session_ttl
+        if isinstance(ttl, bool) or not isinstance(ttl, int) or ttl < 1:
+            messages.append(
+                f"ERROR: api.auth.session_ttl must be an integer >= 1, got {ttl!r}")
+        nct = config.nut_control.timeout
+        if isinstance(nct, bool) or not isinstance(nct, int) or nct < 1:
+            messages.append(
+                f"ERROR: nut_control.timeout must be an integer >= 1, got {nct!r}")
 
         # Fail-closed: UPS control is a write surface, so it must never be
         # reachable without authentication. "Auth disabled" means read-only,

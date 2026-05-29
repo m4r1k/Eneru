@@ -49,10 +49,16 @@ def load_and_validate(path: Optional[str]) -> Tuple[Optional[Config], List[str]]
         raw = {}
     if not isinstance(raw, dict):
         return None, ["config root must be a YAML mapping"]
-    cfg = ConfigLoader._parse_config(raw)
-    cfg.config_path = path
-    errors = [m for m in ConfigLoader.validate_config(cfg, raw)
-              if "ERROR" in m]
+    # A malformed section type (e.g. ``triggers: 5``) can make _parse_config /
+    # validate_config raise instead of returning a clean error. Catch it so a
+    # bad reload is reported, never propagated into the signal handler / API.
+    try:
+        cfg = ConfigLoader._parse_config(raw)
+        cfg.config_path = path
+        errors = [m for m in ConfigLoader.validate_config(cfg, raw)
+                  if "ERROR" in m]
+    except Exception as exc:  # defensive: malformed structure
+        return None, [f"invalid config: {exc}"]
     if errors:
         return None, errors
     return cfg, []
@@ -120,6 +126,24 @@ def perform_reload(primary: Config, monitor_configs: List[Config],
     report["reloaded"] = True
     report["errors"] = []
     return report
+
+
+def format_report(report: Dict) -> List[str]:
+    """Render a reload report into log lines (shared by monitor + coordinator)."""
+    if not report.get("reloaded"):
+        lines = ["⚠️ Config reload failed; keeping running config:"]
+        lines += [f"   {e}" for e in report.get("errors", [])]
+        return lines
+    applied = report.get("applied") or []
+    restart = report.get("restartRequired") or []
+    lines = []
+    if applied:
+        lines.append(f"✅ Config reloaded; applied live: {', '.join(applied)}")
+    if restart:
+        lines.append(f"ℹ️ Config changes that need a restart: {', '.join(restart)}")
+    if not applied and not restart:
+        lines.append("ℹ️ Config reload: no changes detected")
+    return lines
 
 
 def _add(items: List[str], value: str) -> None:

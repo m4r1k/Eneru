@@ -178,6 +178,12 @@ class AuthStore:
             conn.close()
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        # Always re-assert owner-only permissions, even when the schema is
+        # already current — a pre-existing world-readable auth.db (e.g. created
+        # by an older version, or with a loose umask) must be tightened too, not
+        # only on the migration path. Cheap (a couple of chmods, once per
+        # instance via the _schema_ready latch in _session).
+        self._restrict_permissions()
         # Gate on PRAGMA user_version so an already-initialized DB is a pure read
         # (no write) — important because the API auth path reads this store on
         # every request. Only a brand-new (or older-schema) DB takes the write.
@@ -207,11 +213,6 @@ class AuthStore:
             )
             # PRAGMA can't be parameterized; SCHEMA_VERSION is our own int.
             conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
-        # Lock the store down like /etc/shadow: it holds password + API-key
-        # digests, so keep it owner-only. Best-effort — some filesystems reject
-        # chmod. WAL sidecars carry the same rows transiently, so tighten them
-        # too when present.
-        self._restrict_permissions()
 
     def _restrict_permissions(self) -> None:
         for suffix in ("", "-wal", "-shm"):
@@ -310,6 +311,10 @@ class AuthStore:
         label = (label or "").strip()
         if not label:
             raise AuthError("API key label must not be empty")
+        # Reject control characters: the label is echoed into the audit log
+        # (as the principal), so a newline/CR could forge log lines.
+        if any(ord(c) < 0x20 or ord(c) == 0x7f for c in label):
+            raise AuthError("API key label must not contain control characters")
         now = int(time.time())
         key = generate_api_key()
         with self._session() as conn:
@@ -363,10 +368,11 @@ def _validate_username(username: str) -> str:
         raise AuthError("username must not be empty")
     if len(username) > 64:
         raise AuthError("username must be 64 characters or fewer")
-    # Keep it filesystem/URL/log friendly and unambiguous.
-    if not all(c.isalnum() or c in "._-@" for c in username):
+    # ASCII letters/digits only (plus . _ - @): keeps names filesystem/URL/log
+    # friendly and avoids visually-confusable Unicode look-alike accounts.
+    if not all(c.isascii() and (c.isalnum() or c in "._-@") for c in username):
         raise AuthError(
-            "username may contain only letters, digits, and the characters . _ - @"
+            "username may contain only ASCII letters, digits, and . _ - @"
         )
     return username
 

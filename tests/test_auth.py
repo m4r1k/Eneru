@@ -177,10 +177,18 @@ def test_empty_api_key_label_raises(store):
 # ----- validation -----
 
 @pytest.mark.unit
-@pytest.mark.parametrize("bad", ["", "  ", "has space", "weird!", "x" * 65])
+@pytest.mark.parametrize("bad", ["", "  ", "has space", "weird!", "x" * 65,
+                                 "naïve", "аdmin"])  # last two: non-ASCII look-alikes
 def test_invalid_username_raises(store, bad):
     with pytest.raises(AuthError):
         store.create_user(bad, "pw")
+
+
+@pytest.mark.unit
+def test_api_key_label_rejects_control_chars(store):
+    # The label is echoed into the audit log; a newline could forge log lines.
+    with pytest.raises(AuthError):
+        store.create_api_key("evil\nINJECTED")
 
 
 @pytest.mark.unit
@@ -219,6 +227,18 @@ def test_db_file_is_owner_only(tmp_path):
     db = tmp_path / "auth.db"
     AuthStore(db).create_user("alice", "pw")
     # Store holds password/API-key digests — keep it owner-only like /etc/shadow.
+    assert (db.stat().st_mode & 0o777) == 0o600
+
+
+@pytest.mark.unit
+def test_existing_db_permissions_re_tightened(tmp_path):
+    import os
+    db = tmp_path / "auth.db"
+    AuthStore(db).create_user("alice", "pw")          # schema now current
+    os.chmod(db, 0o644)                                # loosen out-of-band
+    # A fresh store over the same (already-current) DB must re-harden it, not
+    # skip because the schema is already up to date.
+    AuthStore(db).get_user("alice")
     assert (db.stat().st_mode & 0o777) == 0o600
 
 

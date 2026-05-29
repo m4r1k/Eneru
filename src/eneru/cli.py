@@ -1538,6 +1538,25 @@ def _resolve_auth_store(args):
     auth_db = getattr(args, "auth_db", None)
     if auth_db:
         return auth.AuthStore(auth_db)
+    cfg_path = getattr(args, "config", None)
+    if cfg_path:
+        # An explicit --config must load cleanly. _load_config() falls back to
+        # defaults on a missing/malformed file, which would silently point auth
+        # mutations at the DEFAULT /var/lib/eneru/auth.db instead of the store
+        # the operator intended. Parse it strictly here instead.
+        import yaml
+        path = Path(cfg_path)
+        if not path.exists():
+            raise SystemExit(f"ERROR: config file not found: {cfg_path}")
+        try:
+            with open(path, "r") as handle:
+                raw = yaml.safe_load(handle)
+        except (OSError, yaml.YAMLError) as exc:
+            raise SystemExit(f"ERROR: cannot read config {cfg_path}: {exc}")
+        if raw is not None and not isinstance(raw, dict):
+            raise SystemExit(f"ERROR: config root must be a mapping: {cfg_path}")
+        parsed = ConfigLoader._parse_config(raw or {})
+        return auth.AuthStore(parsed.api.auth.db_path)
     config = _load_config(args)
     return auth.AuthStore(config.api.auth.db_path)
 
@@ -1879,11 +1898,14 @@ def main():
 
     def _add_password_source(p):
         # No `--password VALUE`: it would leak into shell history and `ps`.
-        p.add_argument("--generate", action="store_true",
-                       help="Generate a strong random password and print it once")
-        p.add_argument("--password-stdin", dest="password_stdin",
-                       action="store_true",
-                       help="Read the password from stdin (for automation)")
+        # --generate and --password-stdin are mutually exclusive so a caller
+        # never silently has one path ignored.
+        grp = p.add_mutually_exclusive_group()
+        grp.add_argument("--generate", action="store_true",
+                         help="Generate a strong random password and print it once")
+        grp.add_argument("--password-stdin", dest="password_stdin",
+                         action="store_true",
+                         help="Read the password from stdin (for automation)")
 
     user_parser = subparsers.add_parser(
         "user", help="Manage local API user accounts")

@@ -662,24 +662,17 @@ class MultiUPSCoordinator:
         return report
 
     def _handle_sighup(self, signum, frame):
-        """SIGHUP -> hot-reload config across all groups."""
+        """SIGHUP -> hot-reload config across all groups (never crashes on error)."""
         self._log("🔄 SIGHUP received — reloading configuration")
-        self.reload_config()
+        try:
+            self.reload_config()
+        except Exception as exc:  # pragma: no cover - defensive
+            self._log(f"⚠️ Config reload error (ignored): {exc}")
 
     def _log_reload_report(self, report: dict) -> None:
-        if not report.get("reloaded"):
-            self._log("⚠️ Config reload failed; keeping running config:")
-            for err in report.get("errors", []):
-                self._log(f"   {err}")
-            return
-        applied = report.get("applied") or []
-        restart = report.get("restartRequired") or []
-        if applied:
-            self._log(f"✅ Config reloaded; applied live: {', '.join(applied)}")
-        if restart:
-            self._log(f"ℹ️ Config changes that need a restart: {', '.join(restart)}")
-        if not applied and not restart:
-            self._log("ℹ️ Config reload: no changes detected")
+        from eneru.reload import format_report
+        for line in format_report(report):
+            self._log(line)
 
     def _handle_signal(self, signum: int, frame):
         """Handle SIGTERM/SIGINT for clean shutdown."""

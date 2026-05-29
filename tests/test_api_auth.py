@@ -110,9 +110,23 @@ def test_authorize_with_valid_session(minimal_config):
 def test_bearer_token_sources(minimal_config):
     assert _handler(minimal_config,
                     headers={"Authorization": "Bearer abc"})._bearer_token() == "abc"
+    # Scheme is case-insensitive (RFC 7235).
+    assert _handler(minimal_config,
+                    headers={"Authorization": "bearer abc"})._bearer_token() == "abc"
     assert _handler(minimal_config,
                     headers={"X-API-Key": "xyz"})._bearer_token() == "xyz"
     assert _handler(minimal_config)._bearer_token() is None
+
+
+@pytest.mark.unit
+def test_session_create_purges_expired():
+    mgr = SessionManager(3600)
+    t1 = mgr.create({"username": "a", "kind": "user"})
+    principal, _ = mgr._sessions[t1]
+    mgr._sessions[t1] = (principal, time.time() - 1)  # force-expire
+    t2 = mgr.create({"username": "b", "kind": "user"})
+    assert t1 not in mgr._sessions  # purged on the next create
+    assert t2 in mgr._sessions
 
 
 @pytest.mark.unit
@@ -174,6 +188,7 @@ def test_login_success_and_token_usable(minimal_config, tmp_path):
     status, _, payload = h._route_post()
     assert status == 200
     assert payload["tokenType"] == "bearer"
+    assert payload["expiresIn"] == sessions.ttl  # reports the effective TTL
     assert sessions.validate(payload["token"])["username"] == "alice"
 
 

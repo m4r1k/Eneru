@@ -171,6 +171,28 @@ def test_apikey_create_invalid_role_errors(db):
 # ----- store resolution from config -----
 
 @pytest.mark.unit
+def test_resolve_auth_store_rejects_missing_config(tmp_path):
+    with pytest.raises(SystemExit):
+        cli._cmd_user_list(_ns(config=str(tmp_path / "nope.yaml")))
+
+
+@pytest.mark.unit
+def test_resolve_auth_store_rejects_bad_yaml(tmp_path):
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("ups: [unclosed\n")
+    with pytest.raises(SystemExit):
+        cli._cmd_user_list(_ns(config=str(bad)))
+
+
+@pytest.mark.unit
+def test_resolve_auth_store_rejects_non_mapping(tmp_path):
+    lst = tmp_path / "list.yaml"
+    lst.write_text("- a\n- b\n")
+    with pytest.raises(SystemExit):
+        cli._cmd_user_list(_ns(config=str(lst)))
+
+
+@pytest.mark.unit
 def test_resolve_auth_store_from_config(tmp_path, capsys):
     cfg = tmp_path / "config.yaml"
     custom_db = tmp_path / "custom-auth.db"

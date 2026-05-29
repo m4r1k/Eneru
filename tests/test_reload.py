@@ -56,6 +56,27 @@ def test_load_and_validate_success(tmp_path):
     assert cfg is not None and errors == []
 
 
+@pytest.mark.unit
+def test_load_and_validate_malformed_section_type(tmp_path):
+    # `triggers: 5` makes _parse_config raise; must surface as a reload error,
+    # not propagate into the signal handler.
+    p = _write(tmp_path / "c.yaml", "ups:\n  name: U@h\ntriggers: 5\n")
+    cfg, errors = reloadmod.load_and_validate(p)
+    assert cfg is None and errors
+
+
+@pytest.mark.unit
+def test_format_report_variants():
+    assert reloadmod.format_report(
+        {"reloaded": False, "errors": ["boom"]})[0].startswith("⚠️")
+    assert any("no changes" in line for line in reloadmod.format_report(
+        {"reloaded": True, "applied": [], "restartRequired": []}))
+    lines = reloadmod.format_report(
+        {"reloaded": True, "applied": ["triggers:U@h"], "restartRequired": ["api"]})
+    assert any("applied live" in s for s in lines)
+    assert any("restart" in s for s in lines)
+
+
 # ----- apply_reload -----
 
 @pytest.mark.unit
@@ -194,13 +215,16 @@ def test_monitor_reload_config_and_logging(tmp_path):
 @pytest.mark.unit
 def test_monitor_handle_sighup_invokes_reload(tmp_path):
     p = tmp_path / "a.yaml"
-    cfg = _load(_write(p, "ups:\n  name: U@h\n"))
+    cfg = _load(_write(p, "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 20\n"))
     mon = object.__new__(UPSGroupMonitor)
     mon.config = cfg
     logs = []
     mon._log_message = logs.append
+    _write(p, "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 33\n")
     mon._handle_sighup(1, None)
     assert any("SIGHUP" in line for line in logs)
+    # The handler actually performed the reload, not just logged.
+    assert cfg.triggers.low_battery_threshold == 33
 
 
 @pytest.mark.unit
@@ -230,14 +254,18 @@ def test_coordinator_reload_config(tmp_path):
     cfg = _load(_write(p, "ups:\n  - name: U1@h\n    triggers:\n      low_battery_threshold: 20\n"))
     coord = object.__new__(MultiUPSCoordinator)
     coord.config = cfg
-    # one fake monitor sharing the same group config object
+    # The monitor holds a DISTINCT Config object (as it does at runtime), so the
+    # test fails if reload_config() stops propagating to per-monitor configs.
     monitor = object.__new__(UPSGroupMonitor)
-    monitor.config = cfg
+    monitor.config = _load(_write(
+        tmp_path / "mon.yaml",
+        "ups:\n  - name: U1@h\n    triggers:\n      low_battery_threshold: 20\n"))
     coord._monitors = [monitor]
     logs = []
     coord._log = logs.append
     _write(p, "ups:\n  - name: U1@h\n    triggers:\n      low_battery_threshold: 45\n")
     report = coord.reload_config()
     assert report["reloaded"]
-    assert cfg.ups_groups[0].triggers.low_battery_threshold == 45
+    assert coord.config.ups_groups[0].triggers.low_battery_threshold == 45
+    assert monitor.config.ups_groups[0].triggers.low_battery_threshold == 45
     assert any("reloaded" in line for line in logs)

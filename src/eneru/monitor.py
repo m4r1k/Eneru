@@ -1324,26 +1324,21 @@ class UPSGroupMonitor(
         return report
 
     def _handle_sighup(self, signum, frame):
-        """SIGHUP -> hot-reload config (systemctl reload / docker kill -s HUP)."""
+        """SIGHUP -> hot-reload config (systemctl reload / docker kill -s HUP).
+
+        Defensive: a reload must never crash the daemon via the signal handler,
+        so any unexpected error is logged and swallowed.
+        """
         self._log_message("🔄 SIGHUP received — reloading configuration")
-        self.reload_config()
+        try:
+            self.reload_config()
+        except Exception as exc:  # pragma: no cover - defensive
+            self._log_message(f"⚠️ Config reload error (ignored): {exc}")
 
     def _log_reload_report(self, report: dict) -> None:
-        if not report.get("reloaded"):
-            self._log_message("⚠️ Config reload failed; keeping running config:")
-            for err in report.get("errors", []):
-                self._log_message(f"   {err}")
-            return
-        applied = report.get("applied") or []
-        restart = report.get("restartRequired") or []
-        if applied:
-            self._log_message(
-                f"✅ Config reloaded; applied live: {', '.join(applied)}")
-        if restart:
-            self._log_message(
-                f"ℹ️ Config changes that need a restart: {', '.join(restart)}")
-        if not applied and not restart:
-            self._log_message("ℹ️ Config reload: no changes detected")
+        from eneru.reload import format_report
+        for line in format_report(report):
+            self._log_message(line)
 
     def _cleanup_and_exit(self, signum: int, frame):
         """Handle clean exit on signals."""

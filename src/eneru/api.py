@@ -92,10 +92,21 @@ class SessionManager:
         self._sessions: Dict[str, Tuple[Dict[str, Any], float]] = {}
         self._lock = threading.Lock()
 
+    @property
+    def ttl(self) -> int:
+        """The effective session lifetime in seconds (clamped to >= 1)."""
+        return self._ttl
+
     def create(self, principal: Dict[str, Any]) -> str:
         token = secrets.token_urlsafe(32)
-        expiry = time.time() + self._ttl
+        now = time.time()
+        expiry = now + self._ttl
         with self._lock:
+            # Opportunistically drop expired entries so repeated logins don't
+            # grow the table unbounded (they're only otherwise reaped on reuse).
+            expired = [t for t, (_p, e) in self._sessions.items() if e < now]
+            for t in expired:
+                del self._sessions[t]
             self._sessions[token] = (principal, expiry)
         return token
 
@@ -196,12 +207,14 @@ class EneruAPIServer:
         except OSError as exc:
             self.log_fn(f"⚠️ API server failed to bind {addr[0]}:{addr[1]}: {exc}")
             return
-        # Mark per-request worker threads as daemon. ThreadingHTTPServer's
-        # ``server_close()`` only stops the accept loop; in-flight worker
-        # threads keep running. With daemon_threads=True a hung handler
-        # cannot keep the daemon process alive past shutdown — this is
-        # acceptable here because every endpoint is read-only and idempotent.
-        self._httpd.daemon_threads = True
+        # v6.0: worker threads are NON-daemon. The API now has non-idempotent
+        # write endpoints (control commands, config reload), so a worker must
+        # not be cut off mid-request on shutdown — that would leave a caller
+        # unsure whether a command actually ran. ``stop()`` calls
+        # ``shutdown()`` + ``server_close()`` to drain in-flight handlers
+        # gracefully. Handlers are bounded (subprocess timeouts on control
+        # calls), so this can't hang shutdown indefinitely.
+        self._httpd.daemon_threads = False
         self._thread = threading.Thread(
             target=self._httpd.serve_forever,
             name="eneru-api",
@@ -334,8 +347,9 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     def _bearer_token(self) -> Optional[str]:
         """Return the credential from Authorization: Bearer or X-API-Key."""
         header = self.headers.get("Authorization", "") or ""
-        if header.startswith("Bearer "):
-            return header[len("Bearer "):].strip() or None
+        # The auth scheme is case-insensitive per RFC 7235 ("Bearer"/"bearer").
+        if header[:7].lower() == "bearer ":
+            return header[7:].strip() or None
         api_key = self.headers.get("X-API-Key")
         return api_key.strip() if api_key else None
 
@@ -544,7 +558,9 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         return 200, "application/json", {
             "token": token,
             "tokenType": "bearer",
-            "expiresIn": int(auth_cfg.session_ttl),
+            # Report the manager's effective TTL (clamped), not the raw config,
+            # so the client's expiry matches the server's.
+            "expiresIn": self.api_sessions.ttl,
         }
 
     def _handle_logout(self) -> Tuple[int, str, Any]:
