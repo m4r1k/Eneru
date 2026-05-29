@@ -665,11 +665,6 @@ class MultiUPSCoordinator:
 
     def _apply_subsystem_reload(self, subsystems: list) -> None:
         """Re-init live subsystems across the coordinator (best-effort)."""
-        if "notifications" in subsystems and self._notification_worker is not None:
-            try:
-                self._notification_worker.apply_reload(self.config)
-            except Exception as exc:  # pragma: no cover - defensive
-                self._log(f"⚠️ notifications reload failed: {exc}")
         if "statistics" in subsystems:
             for mon in self._monitors:
                 store = getattr(mon, "_stats_store", None)

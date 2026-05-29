@@ -834,9 +834,18 @@ if ! grep -Eq '"ready"[[:space:]]*:[[:space:]]*true' /tmp/test46-ready.json; the
   exit 1
 fi
 
+# The dashboard is served by the embedded API (from the eneru.web package).
+DASH_HTML="$(curl -fsS http://127.0.0.1:19191/ 2>/dev/null || true)"
+case "$DASH_HTML" in
+  *"<title>Eneru</title>"*) echo "PASS (46b): dashboard served from OCI image" ;;
+  *) echo "FAIL: dashboard not served by OCI image"; docker logs eneru-e2e-under-test || true; exit 1 ;;
+esac
+curl -fsS http://127.0.0.1:19191/app.js >/dev/null 2>&1 \
+  || { echo "FAIL: dashboard app.js not served by OCI image"; exit 1; }
+
 cleanup_container
 trap - EXIT
-echo "PASS: OCI image responded with CLI-enabled API"
+echo "PASS: OCI image responded with CLI-enabled API + dashboard"
 )
 
 # ======================================================================

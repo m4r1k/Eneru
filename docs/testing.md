@@ -173,7 +173,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 55 numb
 | 43 | UPS Single | `/health`, `/ready`, `/metrics`, `/api/v1`, and JSON 404 endpoint discovery respond from the embedded API |
 | 44 | UPS Single | An unreachable remote target is reported as a bounded best-effort failure instead of stalling shutdown |
 | 45 | UPS Single | MQTT status publishing reaches the broker and includes power-quality fields |
-| 46 | UPS Single | The OCI image runs against the E2E NUT server with the API enabled only by CLI flags |
+| 46 | UPS Single | The OCI image runs against the E2E NUT server with the API enabled only by CLI flags, and serves the browser dashboard (`/`, `/app.js`) |
 | 47 | Loopback | Containerized local-host ownership delegates VM, compose/container, sync, unmount, and host shutdown actions through the root loopback path and `/ready` is green |
 | 48 | Loopback | Containerized local-host ownership delegates the same action set through a non-root SSH user with `use_sudo: true` |
 | 49 | Loopback | Missing `/etc/machine-id` bind mount keeps `/ready` false with a setup hint |

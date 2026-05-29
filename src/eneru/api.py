@@ -739,10 +739,17 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         "config": "CONFIG_RELOAD",
     }
 
+    @staticmethod
+    def _scrub(text: str) -> str:
+        """Strip control characters so audit values can't forge log/event lines."""
+        return "".join(c for c in str(text)
+                       if ord(c) >= 0x20 and ord(c) != 0x7f)
+
     def _audit(self, principal, kind: str, target: str, result: str) -> None:
         """Record a control action to the daemon log AND the SQLite events table
         (v7.0 adds a tamper-evident audit log; this is the groundwork)."""
-        label = self._principal_label(principal)
+        label = self._scrub(self._principal_label(principal))
+        target = self._scrub(target)
         line = f"🔌 control: {label} {kind} {target} -> {result}"
         if self.api_log is not None:
             try:
@@ -751,7 +758,9 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 pass
         source = self.api_source
         if hasattr(source, "record_control_event"):
-            ups = target.split(":", 1)[0] if ":" in target else ""
+            # target is "{ups}:{command_or_var}"; the UPS NUT name itself can
+            # contain a colon (e.g. UPS@host:3493), so split on the LAST one.
+            ups = target.rsplit(":", 1)[0] if ":" in target else ""
             event_type = self._AUDIT_EVENT_TYPES.get(kind, "CONTROL")
             try:
                 source.record_control_event(ups, event_type,
@@ -776,15 +785,26 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         }
 
     def _available_endpoints(self) -> List[Dict[str, Any]]:
-        # Don't advertise /metrics when Prometheus is disabled — the route
-        # genuinely returns 404 in that mode, so listing it would mislead
-        # clients that read availableEndpoints to discover what to call.
+        # Only advertise endpoints that are actually reachable in the active
+        # config — listing a route that returns 404/403 would mislead clients
+        # discovering the API via availableEndpoints.
         prometheus_enabled = bool(getattr(self.api_config.prometheus, "enabled", False))
-        return [
-            dict(endpoint)
-            for endpoint in API_ENDPOINTS
-            if endpoint["path"] != "/metrics" or prometheus_enabled
-        ]
+        auth_enabled = bool(getattr(getattr(self.api_config.api, "auth", None),
+                                    "enabled", False))
+        nut_enabled = bool(getattr(getattr(self.api_config, "nut_control", None),
+                                   "enabled", False))
+
+        def _visible(path: str) -> bool:
+            if path == "/metrics":
+                return prometheus_enabled
+            if path.startswith("/api/v1/auth/") or path == "/api/v1/config/reload":
+                return auth_enabled
+            if path.startswith("/api/v1/ups/{name}/command") or \
+                    path.startswith("/api/v1/ups/{name}/variables"):
+                return nut_enabled
+            return True
+
+        return [dict(e) for e in API_ENDPOINTS if _visible(e["path"])]
 
 
 def _parse_int_param(

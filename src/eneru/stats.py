@@ -212,9 +212,12 @@ class StatsStore:
         needs a restart). Returns True.
         """
         r = stats_config.retention
-        self.retention_raw_hours = max(1, int(r.raw_hours))
-        self.retention_5min_days = max(1, int(r.agg_5min_days))
-        self.retention_hourly_days = max(1, int(r.agg_hourly_days))
+        # Hold the store lock so the purge thread doesn't read a half-updated
+        # set of the three retention windows.
+        with self._db_lock:
+            self.retention_raw_hours = max(1, int(r.raw_hours))
+            self.retention_5min_days = max(1, int(r.agg_5min_days))
+            self.retention_hourly_days = max(1, int(r.agg_hourly_days))
         return True
 
     def close(self) -> None:

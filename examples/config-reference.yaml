@@ -162,8 +162,9 @@ nut_control:
   # startup fails). Commands and variables are allowlisted.
   enabled: false
   # NUT upsd.users credentials with the INSTCMD / SET actions in upsd.users.
+  # Leave password empty here and set a real secret in your own config.
   username: "eneru"
-  password: "secret"
+  password: ""
   # Instant commands operators may run. Calibration and FSD are intentionally
   # omitted by default — add them explicitly only if you accept the risk.
   allowed_commands:

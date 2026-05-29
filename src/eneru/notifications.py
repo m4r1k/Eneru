@@ -123,30 +123,6 @@ class NotificationWorker:
         self._initialized = True
         return True
 
-    def apply_reload(self, config: Config) -> bool:
-        """Live-apply a reloaded notifications config (URLs / enable state).
-
-        Safe because the queue is DB-backed: rebuilding the Apprise target set is
-        an atomic reference swap, and a worker that was disabled at startup is
-        started on demand. Returns True.
-        """
-        self.config = config
-        n = config.notifications
-        if not n.enabled or not APPRISE_AVAILABLE or not n.urls:
-            # Disabled or no targets: drop the Apprise instance so nothing is
-            # delivered. The (idle) worker thread, if running, simply skips.
-            self._apprise_instance = None
-            return True
-        if not self._initialized:
-            # Was disabled at startup; bring the worker up now.
-            return self.start()
-        instance = apprise.Apprise()
-        for url in n.urls:
-            if not instance.add(url):
-                print(f"Warning: Failed to add notification URL: {url}")
-        self._apprise_instance = instance  # atomic swap; worker picks it up
-        return True
-
     def stop(self) -> None:
         """Stop the background worker thread.
 
@@ -534,8 +510,7 @@ class NotificationWorker:
         """Call Apprise. Returns True iff at least one backend
         accepted the message. Network/DNS errors → False (worker
         retries via the backoff schedule)."""
-        # Snapshot the instance once: apply_reload() may atomically rebind
-        # self._apprise_instance (or set it to None) from another thread mid-call.
+        # Snapshot the instance once for a stable read within this call.
         instance = self._apprise_instance
         if not instance:
             return False

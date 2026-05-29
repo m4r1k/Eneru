@@ -26,13 +26,17 @@ from eneru.config import Config, ConfigLoader
 # Top-level sections the running daemon reads live and can swap in place.
 SAFE_TOP_SECTIONS = ("behavior", "nut_control", "prometheus")
 # Sections that are swapped in place but ALSO need a subsystem hook to re-init
-# cached state (the daemon calls subsystem.apply_reload after the swap).
-SUBSYSTEM_SECTIONS = ("notifications", "statistics")
+# cached state (the daemon calls subsystem.apply_reload after the swap). NOTE:
+# `statistics` is handled specially below (only `retention` is live-appliable;
+# a `db_directory` change is restart-required).
+SUBSYSTEM_SECTIONS = ("statistics",)
 # Top-level sections captured at startup whose live re-init is deliberately not
-# supported (reconnecting MQTT / the SSH-health thread or swapping log handlers
-# mid-power-event risks dropping shutdown notifications); changes need a restart.
+# supported. notifications/mqtt/remote_health own worker threads or network
+# connections whose mid-power-event re-init could drop shutdown notifications;
+# logging owns file handlers. These changes need a restart.
 RESTART_TOP_SECTIONS = (
     "api", "logging", "local_shutdown", "remote_health", "mqtt",
+    "notifications",
 )
 
 
@@ -85,15 +89,24 @@ def apply_reload(primary: Config, monitor_configs: List[Config],
     for section in SAFE_TOP_SECTIONS + SUBSYSTEM_SECTIONS + RESTART_TOP_SECTIONS:
         if getattr(primary, section) == getattr(new, section):
             continue
+        if section == "statistics":
+            # Only retention is live-appliable; the stats store caches the DB
+            # path/connection at startup, so a db_directory change needs restart.
+            if primary.statistics.db_directory != new.statistics.db_directory:
+                restart.append("statistics")
+            else:
+                for cfg in configs:
+                    cfg.statistics = new.statistics
+                applied.append("statistics")
+                subsystems.append("statistics")
+            continue
         if section in RESTART_TOP_SECTIONS:
             restart.append(section)
             continue
-        # SAFE + SUBSYSTEM: swap in place so holders read the new values.
+        # SAFE: swap in place so holders read the new values.
         for cfg in configs:
             setattr(cfg, section, getattr(new, section))
         applied.append(section)
-        if section in SUBSYSTEM_SECTIONS:
-            subsystems.append(section)
 
     # --- topology (adding/removing UPS or redundancy groups) ---
     old_names = {g.ups.name for cfg in configs for g in cfg.ups_groups}

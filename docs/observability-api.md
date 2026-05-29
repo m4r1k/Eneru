@@ -51,7 +51,7 @@ is a JSON object: `{"username": "<username>", "password": "<password>"}`.
 
 "Auth disabled" always means read-only: write features cannot be reached, and enabling a control feature while auth is off is a startup error. See [Authentication](authentication.md) for the user/API-key model and the `eneru user` / `eneru apikey` CLI.
 
-**Logging in.** `POST /api/v1/auth/login` with `{"username", "password"}` returns a bearer token:
+**Logging in.** `POST /api/v1/auth/login` with a JSON body `{"username": "<username>", "password": "<password>"}` returns a bearer token:
 
 ```json
 // POST /api/v1/auth/login  ->  200

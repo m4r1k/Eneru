@@ -77,6 +77,31 @@ def test_audit_writes_to_events_via_source():
 
 
 @pytest.mark.unit
+def test_audit_ups_name_with_colon_split_on_last_colon():
+    h = object.__new__(EneruAPIHandler)
+    h.api_log = None
+    source = MagicMock()
+    h.api_source = source
+    # NUT name itself contains a colon (host:port) — must split on the LAST colon.
+    h._audit({"username": "a", "kind": "user"}, "command",
+             "ups@host:3493:beeper.toggle", "ok")
+    assert source.record_control_event.call_args[0][0] == "ups@host:3493"
+
+
+@pytest.mark.unit
+def test_audit_scrubs_control_characters():
+    h = object.__new__(EneruAPIHandler)
+    logs = []
+    h.api_log = logs.append
+    source = MagicMock()
+    h.api_source = source
+    h._audit({"username": "a\nINJECT", "kind": "user"}, "command",
+             "UPS@h:cmd\nFORGED", "ok")
+    assert "\n" not in logs[0]
+    assert "\n" not in source.record_control_event.call_args[0][2]
+
+
+@pytest.mark.unit
 def test_audit_source_without_hook_is_noop():
     h = object.__new__(EneruAPIHandler)
     h.api_log = None
@@ -119,12 +144,26 @@ def test_reload_classifies_subsystems(tmp_path):
 
 
 @pytest.mark.unit
-def test_reload_mqtt_remote_health_are_restart_required(tmp_path):
-    live = _load(tmp_path, "ups:\n  name: U@h\nmqtt:\n  enabled: false\n", "a.yaml")
-    new = _load(tmp_path, "ups:\n  name: U@h\nmqtt:\n  enabled: true\n  broker: 'mqtt://h:1883'\n", "b.yaml")
+@pytest.mark.parametrize("section,frag", [
+    ("mqtt", "mqtt:\n  enabled: true\n  broker: 'mqtt://h:1883'\n"),
+    ("notifications", "notifications:\n  enabled: true\n  urls: ['json://h']\n"),
+])
+def test_reload_restart_required_sections(tmp_path, section, frag):
+    live = _load(tmp_path, "ups:\n  name: U@h\n", "a.yaml")
+    new = _load(tmp_path, "ups:\n  name: U@h\n" + frag, "b.yaml")
     rep = reloadmod.apply_reload(live, [live], new)
-    assert "mqtt" in rep["restartRequired"]
-    assert "mqtt" not in rep["subsystems"]
+    assert section in rep["restartRequired"]
+    assert section not in rep["subsystems"]
+
+
+@pytest.mark.unit
+def test_reload_statistics_db_dir_is_restart_required(tmp_path):
+    # Only retention is live; a db_directory change needs a restart.
+    live = _load(tmp_path, "ups:\n  name: U@h\nstatistics:\n  db_directory: /a\n", "a.yaml")
+    new = _load(tmp_path, "ups:\n  name: U@h\nstatistics:\n  db_directory: /b\n", "b.yaml")
+    rep = reloadmod.apply_reload(live, [live], new)
+    assert "statistics" in rep["restartRequired"]
+    assert "statistics" not in rep["subsystems"]
 
 
 @pytest.mark.unit
@@ -140,34 +179,12 @@ def test_stats_store_apply_reload(tmp_path):
 
 
 @pytest.mark.unit
-def test_notifications_apply_reload_paths(tmp_path, monkeypatch):
-    from eneru import notifications as notif
-    cfg_on = _load(tmp_path, "notifications:\n  enabled: true\n  urls: ['json://localhost']\n")
-    cfg_off = _load(tmp_path, "notifications:\n  enabled: false\n")
-    w = notif.NotificationWorker(cfg_on)
-    # running worker: rebuild apprise targets (atomic swap)
-    w._initialized = True
-    assert w.apply_reload(cfg_on) is True
-    assert w._apprise_instance is not None
-    # disabled: drop apprise
-    assert w.apply_reload(cfg_off) is True
-    assert w._apprise_instance is None
-    # was disabled, now enabled -> delegates to start()
-    w._initialized = False
-    monkeypatch.setattr(w, "start", lambda: True)
-    assert w.apply_reload(cfg_on) is True
-
-
-@pytest.mark.unit
 def test_monitor_apply_subsystem_reload(tmp_path):
     mon = object.__new__(UPSGroupMonitor)
     mon.config = _load(tmp_path, "ups:\n  name: U@h\n")
-    mon._notification_worker = MagicMock()
     mon._stats_store = MagicMock()
-    logs = []
-    mon._log_message = logs.append
-    mon._apply_subsystem_reload(["notifications", "statistics"])
-    mon._notification_worker.apply_reload.assert_called_once()
+    mon._log_message = lambda m: None
+    mon._apply_subsystem_reload(["statistics"])
     mon._stats_store.apply_reload.assert_called_once()
 
 
@@ -175,12 +192,11 @@ def test_monitor_apply_subsystem_reload(tmp_path):
 def test_monitor_apply_subsystem_reload_swallows_errors(tmp_path):
     mon = object.__new__(UPSGroupMonitor)
     mon.config = _load(tmp_path, "ups:\n  name: U@h\n")
-    mon._notification_worker = MagicMock()
-    mon._notification_worker.apply_reload.side_effect = RuntimeError("boom")
-    mon._stats_store = None
+    mon._stats_store = MagicMock()
+    mon._stats_store.apply_reload.side_effect = RuntimeError("boom")
     logs = []
     mon._log_message = logs.append
-    mon._apply_subsystem_reload(["notifications"])  # must not raise
+    mon._apply_subsystem_reload(["statistics"])  # must not raise
     assert any("reload failed" in line for line in logs)
 
 
@@ -188,13 +204,11 @@ def test_monitor_apply_subsystem_reload_swallows_errors(tmp_path):
 def test_coordinator_apply_subsystem_reload(tmp_path):
     coord = object.__new__(MultiUPSCoordinator)
     coord.config = _load(tmp_path, "ups:\n  - name: U1@h\n")
-    coord._notification_worker = MagicMock()
     mon = object.__new__(UPSGroupMonitor)
     mon._stats_store = MagicMock()
     coord._monitors = [mon]
     coord._log = lambda m: None
-    coord._apply_subsystem_reload(["notifications", "statistics"])
-    coord._notification_worker.apply_reload.assert_called_once()
+    coord._apply_subsystem_reload(["statistics"])
     mon._stats_store.apply_reload.assert_called_once()
 
 

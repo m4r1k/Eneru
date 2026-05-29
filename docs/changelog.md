@@ -95,17 +95,34 @@ before release per the changelog workflow in `AGENTS.md`.
 - **Per-group `nut_control` overrides.** Multi-UPS deployments can override
   control credentials/allowlists per `ups:` entry (for UPSes on different `upsd`
   servers); the global block still gates the feature.
-- **Hot-reload now applies `notifications` and `statistics.retention` live**
-  (Apprise rebuild + retention update) in addition to thresholds/control/
-  prometheus. `mqtt`, `remote_health`, `logging`, and `statistics.db_directory`
-  remain **restart-required by design** — reconnecting MQTT/SSH-health or
-  swapping log handlers mid-power-event could drop shutdown notifications.
+- **Hot-reload now applies `statistics.retention` live** in addition to
+  thresholds/control/prometheus. `notifications`, `mqtt`, `remote_health`,
+  `logging`, and `statistics.db_directory` remain **restart-required by design**
+  — re-initializing a worker thread / network connection / log handler
+  mid-power-event could drop shutdown notifications. (rc3: notifications was
+  briefly live in rc2, but its worker-lifecycle edge cases — enable-from-cold,
+  empty-backend replacement, queue semantics — make a restart the safe choice.)
 - **Control/reload actions are recorded to the SQLite `events` table** (in
   addition to the daemon log) as `CONTROL_COMMAND` / `CONTROL_VARIABLE` /
   `CONFIG_RELOAD` rows — v7.0 audit-log groundwork.
 - The API answers unsupported `DELETE` requests with a clean `405`.
-- OCI CI now smoke-tests that the image serves the dashboard (`/`, `/app.js`)
-  and `/health`.
+- OCI CI now verifies the dashboard assets ship in the image (integration), and
+  E2E Test 46 asserts the running container actually serves the dashboard
+  (`/`, `/app.js`) against the NUT dummy.
+
+### Fixed (rc3 — review follow-ups)
+
+- bcrypt pinned to `>=4.0.1` (4.0.0 can raise a `PanicException` from `checkpw`
+  on a malformed salt — unacceptable for an auth path).
+- Audit/event UPS-name parsing splits on the **last** colon (NUT names can be
+  `ups@host:3493`), and audit values are scrubbed of control characters
+  (log-injection defense).
+- Per-group `nut_control` may not set `enabled` (gated globally) — now a config
+  error instead of a silent no-op. `statistics.db_directory` changes are
+  correctly reported restart-required (only `retention` is live).
+- The API endpoint index hides auth/control/reload routes when their feature is
+  disabled. `--password-stdin` strips a trailing CRLF (not just LF). The
+  reference config ships an empty `nut_control.password`.
 
 ---
 

@@ -65,6 +65,15 @@ def test_user_create_interactive_empty_errors(db, monkeypatch):
 
 
 @pytest.mark.unit
+def test_user_create_password_stdin_strips_crlf(db, capsys, monkeypatch):
+    # A CRLF-terminated pipe (Windows/CI) must not leave a trailing \r.
+    monkeypatch.setattr("sys.stdin", io.StringIO("hunter2pw\r\n"))
+    cli._cmd_user_create(_ns(username="bob", auth_db=db, password_stdin=True))
+    capsys.readouterr()
+    assert auth.AuthStore(db).authenticate("bob", "hunter2pw") is not None
+
+
+@pytest.mark.unit
 def test_user_create_empty_stdin_errors(db, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
     with pytest.raises(SystemExit):

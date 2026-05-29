@@ -1346,6 +1346,13 @@ class ConfigLoader:
                         messages.append(
                             f"ERROR: nut_control for UPS '{name}' must be a mapping")
                         continue
+                    # The feature is gated by the GLOBAL nut_control.enabled; a
+                    # per-group `enabled` is ignored at runtime, so reject it
+                    # rather than silently mislead the operator.
+                    if "enabled" in block:
+                        messages.append(
+                            f"ERROR: nut_control for UPS '{name}' must not set "
+                            "'enabled' (UPS control is enabled globally)")
                     _check_nut_control(block, f"ups '{name}' nut_control")
             logging_raw = raw_data.get("logging", {})
             messages.extend(cls._unknown_key_errors(

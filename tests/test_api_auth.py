@@ -343,6 +343,22 @@ def test_do_post_401_sets_www_authenticate(minimal_config):
 
 
 @pytest.mark.unit
+def test_available_endpoints_hidden_until_features_enabled(minimal_config):
+    # Auth + control + reload routes are advertised only when their feature is on.
+    h = _handler(minimal_config)
+    paths = {e["path"] for e in h._available_endpoints()}
+    assert "/api/v1/auth/login" not in paths
+    assert "/api/v1/config/reload" not in paths
+    assert "/api/v1/ups/{name}/command" not in paths
+    minimal_config.api.auth.enabled = True
+    minimal_config.nut_control.enabled = True
+    paths = {e["path"] for e in h._available_endpoints()}
+    assert "/api/v1/auth/login" in paths
+    assert "/api/v1/config/reload" in paths
+    assert "/api/v1/ups/{name}/command" in paths
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("exc,code", [
     (APIBadRequest("x"), 400),
     (APIPayloadTooLarge("x"), 413),

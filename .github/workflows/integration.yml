@@ -364,24 +364,11 @@ jobs:
         run: |
           docker run --rm eneru:ci version
           docker run --rm eneru:ci validate --config /etc/ups-monitor/config.yaml
-
-      - name: Verify OCI image serves the dashboard + health
-        run: |
-          # The image's default CMD enables the API on 9191; the dashboard is
-          # served from the eneru.web package via importlib.resources.
-          trap 'docker rm -f eneru-dash >/dev/null 2>&1 || true' EXIT
-          docker run -d --name eneru-dash -p 127.0.0.1:9191:9191 eneru:ci
-          ok=""
-          for _ in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:9191/health >/dev/null 2>&1; then ok=1; break; fi
-            sleep 1
-          done
-          [ -n "$ok" ] || { echo "FAIL: /health never came up"; docker logs eneru-dash; docker rm -f eneru-dash; exit 1; }
-          HTML="$(curl -fsS http://127.0.0.1:9191/)"
-          case "$HTML" in *"<title>Eneru</title>"*) echo "PASS: dashboard served from image" ;;
-            *) echo "FAIL: dashboard not served"; docker logs eneru-dash; docker rm -f eneru-dash; exit 1 ;; esac
-          curl -fsS http://127.0.0.1:9191/app.js >/dev/null || { echo "FAIL: app.js"; docker rm -f eneru-dash; exit 1; }
-          docker rm -f eneru-dash
+          # Dashboard assets ship in the image and are importable from the
+          # eneru.web package. We can't smoke the live HTTP path here (the daemon
+          # blocks on the initial NUT connection, and there's no NUT server in
+          # this job) — that runs in E2E Test 46 against the real NUT dummy.
+          docker run --rm eneru:ci python -c "import importlib.resources as r; assert (r.files('eneru.web')/'index.html').read_text().find('<title>Eneru</title>') >= 0; print('dashboard asset present in image')"
 
       - name: Verify OCI image with Podman
         env:

@@ -68,6 +68,15 @@ def test_per_group_nut_control_bad_timeout_and_unknown_key():
 
 
 @pytest.mark.unit
+def test_per_group_nut_control_enabled_is_rejected():
+    # The feature is gated globally; a per-group `enabled` is ignored at runtime,
+    # so it must be a hard error rather than a silent no-op.
+    _, errs = _validate(
+        "ups:\n  - name: U1@h\n    nut_control:\n      enabled: false\n")
+    assert any("must not set 'enabled'" in e for e in errs)
+
+
+@pytest.mark.unit
 def test_per_group_nut_control_non_mapping_is_error():
     _, errs = _validate("ups:\n  - name: U1@h\n    nut_control: true\n")
     assert any("nut_control for UPS 'U1@h' must be a mapping" in e for e in errs)

@@ -1573,9 +1573,13 @@ def _resolve_password(args):
         return auth.generate_password(), True
     if getattr(args, "password_stdin", False):
         data = sys.stdin.read()
-        # Strip exactly one trailing newline (the docker-style convention),
-        # preserving any other surrounding characters the password may contain.
-        password = data[:-1] if data.endswith("\n") else data
+        # Strip a single trailing newline (LF or CRLF — Windows/CI pipes send
+        # \r\n), preserving any other characters the password may contain.
+        if data.endswith("\n"):
+            data = data[:-1]
+        if data.endswith("\r"):
+            data = data[:-1]
+        password = data
         if not password:
             raise SystemExit("ERROR: no password received on stdin")
         return password, False
