@@ -1270,7 +1270,9 @@ YAML
 
 write_cfg 20
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-PYTHONUNBUFFERED=1 timeout 25s eneru run --config "$CFG" > /tmp/test54-daemon.log 2>&1 &
+# Generous timeout: this test does login + two reloads + a bad reload, each with
+# its own poll budget. Too short a timeout kills the daemon mid-test.
+PYTHONUNBUFFERED=1 timeout 60s eneru run --config "$CFG" > /tmp/test54-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
 
@@ -1311,10 +1313,14 @@ ANON=$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:9100/api
 # A broken config is rejected and the daemon stays up.
 echo "ups: [broken" > "$CFG"
 kill -HUP "$DAEMON_PID"
-sleep 2
+REPORTED=""
+for _ in $(seq 1 20); do
+  if grep -q "reload failed" /tmp/test54-daemon.log; then REPORTED=1; break; fi
+  sleep 0.5
+done
 curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 \
   || { echo "FAIL: daemon died on bad reload"; cat /tmp/test54-daemon.log; exit 1; }
-grep -q "reload failed" /tmp/test54-daemon.log \
+[ -n "$REPORTED" ] \
   || { echo "FAIL: bad reload not reported"; cat /tmp/test54-daemon.log; exit 1; }
 
 kill "$DAEMON_PID" 2>/dev/null || true
