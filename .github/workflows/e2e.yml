@@ -107,6 +107,17 @@ jobs:
           grep -q "stop_containers_rootless" tests/e2e/groups/loopback.sh
           grep -q "unmount_filesystems" tests/e2e/groups/loopback.sh
 
+      - name: Verify v6.0 E2E coverage is wired
+        if: matrix.group == 'cli' || matrix.group == 'single-ups'
+        run: |
+          # v6.0 wiring guard: auth CLI lifecycle (cli) and API auth login /
+          # tiered config / write gating (single-ups) must stay present.
+          if [ "${{ matrix.group }}" = "cli" ]; then
+            grep -q "Test 51: auth user + apikey CLI lifecycle" tests/e2e/groups/cli.sh
+          else
+            grep -q "Test 52: API authentication login + tiered config + write gating" tests/e2e/groups/single-ups.sh
+          fi
+
       - name: Collect logs on failure
         if: failure()
         run: |

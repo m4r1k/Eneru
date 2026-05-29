@@ -34,6 +34,21 @@ before release per the changelog workflow in `AGENTS.md`.
   - NUT auto-discovery, originally listed for v6.0, is **dropped**: it duplicates
     `nut-scanner` and does not fit the config-first model. (Roadmap to be updated.)
 
+- **API authentication middleware + write-path (slice 2 of 6.0).** The embedded
+  API now supports tiered, opt-in authentication.
+  - `POST /api/v1/auth/login` returns an in-memory bearer token (TTL
+    `api.auth.session_ttl`); `POST /api/v1/auth/logout` invalidates it.
+    Programmatic clients can instead send an API key via `Authorization: Bearer`
+    or `X-API-Key`.
+  - Tiered policy: `/health` and `/ready` are always open; reads stay open unless
+    `api.auth.require_for_reads`; **writes are hard-disabled (403) whenever auth
+    is off** and require a credential (401) when it's on. `/api/v1/config`
+    returns a sanitized view anonymously and an extended (still secret-free) view
+    when authenticated.
+  - Write-handler hardening: 64 KiB request-body cap (413), strict JSON parsing
+    (400), `WWW-Authenticate` on 401. The authorization gate is RBAC-ready for
+    v7.0 (carries a write/capability flag).
+
 ---
 
 ## [5.5.1] - 2026-05-19

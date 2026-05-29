@@ -1035,5 +1035,105 @@ PY
 echo "PASS: MQTT status payload arrived with power-quality metrics"
 )
 
+# ======================================================================
+# Test 52: API authentication — login, tiered config, write gating (v6.0)
+# ======================================================================
+# Brings up the daemon with api.auth enabled and a real bcrypt-backed user,
+# then proves: login issues a bearer token; /api/v1/config is sanitized for
+# anonymous callers and extended for authenticated ones; and an anonymous
+# write (logout) is rejected 401. Reads stay open (require_for_reads=false).
+(
+echo ""
+echo ">>> Running: Test 52: API authentication login + tiered config + write gating"
+
+AUTH_DB="$(mktemp -d)/auth.db"
+printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$AUTH_DB" \
+  || { echo "FAIL: could not create auth user"; exit 1; }
+
+cat > /tmp/config-e2e-auth.yaml <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+behavior:
+  dry_run: true
+statistics:
+  enabled: true
+  db_directory: "$(mktemp -d)"
+api:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 9100
+  auth:
+    enabled: true
+    require_for_reads: false
+    db_path: "$AUTH_DB"
+prometheus:
+  enabled: true
+notifications:
+  enabled: false
+local_shutdown:
+  enabled: false
+YAML
+
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+timeout 15s eneru run --config /tmp/config-e2e-auth.yaml > /tmp/test52-daemon.log 2>&1 &
+DAEMON_PID=$!
+trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
+
+poll_endpoint() {
+  local url="$1" out="$2" tries="${3:-20}"
+  for _ in $(seq 1 "$tries"); do
+    if curl -fsS "$url" >"$out" 2>/dev/null; then return 0; fi
+    sleep 0.5
+  done
+  return 1
+}
+
+# /health is always open
+if ! poll_endpoint http://127.0.0.1:9100/health /tmp/test52-health.json; then
+  echo "FAIL: /health never responded"; cat /tmp/test52-daemon.log; exit 1
+fi
+
+# anonymous /config -> sanitized
+curl -fsS http://127.0.0.1:9100/api/v1/config > /tmp/test52-config-anon.json
+if ! grep -q '"detail": "sanitized"' /tmp/test52-config-anon.json; then
+  echo "FAIL: anonymous /config not sanitized"; cat /tmp/test52-config-anon.json; exit 1
+fi
+
+# login -> bearer token
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"operator","password":"s3cret-pw"}' \
+  http://127.0.0.1:9100/api/v1/auth/login > /tmp/test52-login.json \
+  || { echo "FAIL: login request failed"; cat /tmp/test52-daemon.log; exit 1; }
+TOKEN=$(python3 -c "import json;print(json.load(open('/tmp/test52-login.json'))['token'])")
+if [ -z "$TOKEN" ]; then echo "FAIL: no token in login response"; cat /tmp/test52-login.json; exit 1; fi
+echo "PASS: login issued a bearer token"
+
+# bad credentials -> 401
+BAD=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"operator","password":"wrong"}' \
+  http://127.0.0.1:9100/api/v1/auth/login)
+if [ "$BAD" != "401" ]; then echo "FAIL: bad creds returned $BAD, expected 401"; exit 1; fi
+
+# authenticated /config -> extended
+curl -fsS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9100/api/v1/config \
+  > /tmp/test52-config-auth.json
+if ! grep -q '"detail": "extended"' /tmp/test52-config-auth.json; then
+  echo "FAIL: authenticated /config not extended"; cat /tmp/test52-config-auth.json; exit 1
+fi
+
+# anonymous write (logout without token) -> 401
+ANON_WRITE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:9100/api/v1/auth/logout)
+if [ "$ANON_WRITE" != "401" ]; then echo "FAIL: anonymous logout returned $ANON_WRITE, expected 401"; exit 1; fi
+
+# anonymous read still works (require_for_reads=false)
+curl -fsS http://127.0.0.1:9100/api/v1/ups > /dev/null \
+  || { echo "FAIL: anonymous read blocked unexpectedly"; exit 1; }
+
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+trap - EXIT
+echo "PASS: API auth login, tiered config, and write gating verified"
+)
+
 echo ""
 echo "=== Group 'single-ups' completed successfully ==="

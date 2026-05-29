@@ -35,7 +35,29 @@ Endpoints:
 | `/api/v1/remote-health` | Remote SSH health status | 200 |
 | `/metrics` | Prometheus text metrics | 200 / 404 (Prometheus disabled) |
 
-The API is disabled by default. When enabled, the default bind address is localhost because v5.3 has no auth layer. If you set `api.bind` to a non-loopback address (e.g. `0.0.0.0`), Eneru emits a warning at startup: `/api/v1/config` returns the configured server hostnames, the `sshOptionsConfigured` flag, and pre-shutdown command templates with no authentication, so anyone who can reach the socket can enumerate that information. Keep the API behind SSH, a local reverse proxy, or a trusted network boundary.
+The API is disabled by default. When enabled, the default bind address is localhost. If you set `api.bind` to a non-loopback address (e.g. `0.0.0.0`) **without** enabling authentication, Eneru warns at startup: `/api/v1/config` returns configured server hostnames and presence flags, so anyone who can reach the socket can read that. Keep the API behind SSH, a local reverse proxy, a trusted network boundary, or enable `api.auth`.
+
+### Authentication (v6.0)
+
+Authentication is opt-in via `api.auth.enabled` and is **tiered**:
+
+| Surface | `auth.enabled=false` | `auth.enabled=true` |
+|---------|----------------------|---------------------|
+| `/health`, `/ready` | open | open (always) |
+| `/metrics`, `/api/v1/ups*`, `/history`, `/events`, `/remote-health` | open | open unless `require_for_reads` |
+| `/api/v1/config` | sanitized | sanitized (anonymous) / **extended** (authenticated) |
+| write endpoints (UPS control, config reload) | **hard-disabled (403)** | required (401 without a credential) |
+
+"Auth disabled" always means read-only: write features cannot be reached, and enabling a control feature while auth is off is a startup error. See [Authentication](authentication.md) for the user/API-key model and the `eneru user` / `eneru apikey` CLI.
+
+**Logging in.** `POST /api/v1/auth/login` with `{"username", "password"}` returns a bearer token:
+
+```json
+// POST /api/v1/auth/login  ->  200
+{"token": "…", "tokenType": "bearer", "expiresIn": 3600}
+```
+
+Send it as `Authorization: Bearer <token>` on subsequent requests (programmatic clients send an API key the same way, or via `X-API-Key`). `POST /api/v1/auth/logout` invalidates a session token. Sessions live in memory and expire after `api.auth.session_ttl` seconds; they do not survive a daemon restart.
 
 Example response shapes:
 

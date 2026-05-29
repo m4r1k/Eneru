@@ -1,13 +1,15 @@
-"""Embedded read-only HTTP API and Prometheus endpoint."""
+"""Embedded HTTP API, Prometheus endpoint, and (v6.0) authenticated write-path."""
 
 import json
 import math
+import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
+from eneru.auth import AuthStore
 from eneru.status import (
     HISTORY_METRICS,
     collect_status,
@@ -19,9 +21,63 @@ from eneru.status import (
     readiness,
 )
 
+# Cap request bodies so a hostile/accidental huge POST can't exhaust memory in a
+# handler thread. Auth + control payloads are tiny JSON objects.
+MAX_BODY_BYTES = 64 * 1024
+
 
 class APIBadRequest(ValueError):
     """Raised when a client supplies invalid API query parameters."""
+
+
+class APIPayloadTooLarge(ValueError):
+    """Raised when a request body exceeds ``MAX_BODY_BYTES`` (413)."""
+
+
+class APIUnauthorized(Exception):
+    """Raised when a request needs a credential it didn't supply (401)."""
+
+
+class APIForbidden(Exception):
+    """Raised when an action is not permitted in the current mode (403)."""
+
+
+class SessionManager:
+    """In-memory bearer-token sessions with a fixed TTL.
+
+    Sessions are deliberately ephemeral — they live only in the daemon process
+    and are lost on restart. That's fine: a restart just means re-login, and
+    keeping them out of the DB avoids persisting anything credential-like.
+    Thread-safe because requests run on ThreadingHTTPServer worker threads.
+    """
+
+    def __init__(self, ttl_seconds: int) -> None:
+        self._ttl = max(1, int(ttl_seconds))
+        self._sessions: Dict[str, Tuple[Dict[str, Any], float]] = {}
+        self._lock = threading.Lock()
+
+    def create(self, principal: Dict[str, Any]) -> str:
+        token = secrets.token_urlsafe(32)
+        expiry = time.time() + self._ttl
+        with self._lock:
+            self._sessions[token] = (principal, expiry)
+        return token
+
+    def validate(self, token: str) -> Optional[Dict[str, Any]]:
+        now = time.time()
+        with self._lock:
+            entry = self._sessions.get(token)
+            if entry is None:
+                return None
+            principal, expiry = entry
+            if expiry < now:
+                del self._sessions[token]
+                return None
+            return principal
+
+    def invalidate(self, token: str) -> bool:
+        with self._lock:
+            return self._sessions.pop(token, None) is not None
 
 
 API_ENDPOINTS = (
@@ -45,8 +101,10 @@ API_ENDPOINTS = (
         "description": "Recent SQLite event rows",
         "query": {"limit": "1..10000", "verbosity": "0..2"},
     },
-    {"path": "/api/v1/config", "description": "Sanitized configuration summary"},
+    {"path": "/api/v1/config", "description": "Configuration summary (extended when authenticated)"},
     {"path": "/api/v1/remote-health", "description": "Remote SSH health rows"},
+    {"path": "/api/v1/auth/login", "description": "POST username/password for a session token (when auth enabled)"},
+    {"path": "/api/v1/auth/logout", "description": "POST to invalidate the current session token"},
 )
 
 
@@ -64,6 +122,14 @@ class EneruAPIServer:
         self.log_fn: Callable[[str], None] = log_fn or (lambda msg: None)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
+        # Auth machinery is built only when api.auth is enabled; otherwise the
+        # handler leaves write routes hard-disabled (v5.3 read-only behavior).
+        self._auth_store: Optional[AuthStore] = None
+        self._sessions: Optional[SessionManager] = None
+        auth_cfg = getattr(config.api, "auth", None)
+        if auth_cfg is not None and auth_cfg.enabled:
+            self._auth_store = AuthStore(auth_cfg.db_path)
+            self._sessions = SessionManager(auth_cfg.session_ttl)
 
     def start(self) -> None:
         """Start the API server when enabled."""
@@ -72,10 +138,14 @@ class EneruAPIServer:
 
         source = self.source
         config = self.config
+        auth_store = self._auth_store
+        sessions = self._sessions
 
         class Handler(EneruAPIHandler):
             api_source = source
             api_config = config
+            api_auth = auth_store
+            api_sessions = sessions
 
         addr = (self.config.api.bind, int(self.config.api.port))
         try:
@@ -96,15 +166,22 @@ class EneruAPIServer:
         )
         self._thread.start()
         self.log_fn(f"📊 API server listening on {addr[0]}:{addr[1]}")
-        # Single-line warning when bound off-loopback: the current API
-        # ships no authentication, so any caller that can reach the
-        # socket can read /api/v1/config. RBAC is planned for v6.0.
+        # Warn when bound off-loopback without auth: any caller that can reach
+        # the socket can read /api/v1/config. With api.auth enabled, writes are
+        # gated, so the warning softens to a reminder about open read endpoints.
         if not _is_loopback_bind(self.config.api.bind):
-            self.log_fn(
-                f"⚠️ API bound to {addr[0]} with no authentication "
-                "(RBAC planned for v6.0); restrict network access before "
-                "exposing beyond trusted hosts."
-            )
+            auth_cfg = getattr(self.config.api, "auth", None)
+            if auth_cfg and auth_cfg.enabled:
+                self.log_fn(
+                    f"ℹ️ API bound to {addr[0]} with auth enabled. Read endpoints "
+                    "stay open unless api.auth.require_for_reads is set."
+                )
+            else:
+                self.log_fn(
+                    f"⚠️ API bound to {addr[0]} with no authentication; enable "
+                    "api.auth or restrict network access before exposing beyond "
+                    "trusted hosts."
+                )
 
     def stop(self) -> None:
         """Stop the API server."""
@@ -120,26 +197,48 @@ class EneruAPIServer:
 
 
 class EneruAPIHandler(BaseHTTPRequestHandler):
-    """Request handler for the read-only v5.3 API."""
+    """Request handler for the Eneru API (reads + v6.0 authenticated writes)."""
 
     api_source: Any = None
     api_config: Any = None
+    # Set by EneruAPIServer.start() only when api.auth is enabled.
+    api_auth: Any = None
+    api_sessions: Any = None
 
     server_version = "EneruAPI/1.0"
 
     def do_GET(self):  # noqa: N802 - stdlib hook
+        self._dispatch(self._route)
+
+    def do_POST(self):  # noqa: N802 - stdlib hook
+        self._dispatch(self._route_post)
+
+    def log_message(self, fmt, *args):  # noqa: A003 - stdlib hook
+        return
+
+    def _dispatch(self, router: Callable[[], Tuple[int, str, Any]]) -> None:
+        """Run a router, map exceptions to responses, and write the result."""
         try:
-            status, content_type, body = self._route()
+            status, content_type, body = router()
         except APIBadRequest as exc:
             status, content_type, body = (
-                400, "application/json",
-                self._error("INVALID_REQUEST", str(exc)),
-            )
+                400, "application/json", self._error("INVALID_REQUEST", str(exc)))
+        except APIPayloadTooLarge as exc:
+            status, content_type, body = (
+                413, "application/json", self._error("PAYLOAD_TOO_LARGE", str(exc)))
+        except APIUnauthorized as exc:
+            status, content_type, body = (
+                401, "application/json", self._error("UNAUTHORIZED", str(exc)))
+        except APIForbidden as exc:
+            status, content_type, body = (
+                403, "application/json", self._error("FORBIDDEN", str(exc)))
         except Exception:
             status, content_type, body = (
                 500, "application/json",
-                {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}},
-            )
+                {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}})
+        self._finish(status, content_type, body)
+
+    def _finish(self, status: int, content_type: str, body: Any) -> None:
         if content_type == "application/json":
             raw = json.dumps(body, sort_keys=True).encode("utf-8")
         else:
@@ -155,23 +254,102 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type_header)
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
+        if status == 401:
+            self.send_header("WWW-Authenticate", "Bearer")
         self.end_headers()
         self.wfile.write(raw)
 
-    def log_message(self, fmt, *args):  # noqa: A003 - stdlib hook
-        return
+    # ----- auth helpers (v6.0) -----
+
+    def _bearer_token(self) -> Optional[str]:
+        """Return the credential from Authorization: Bearer or X-API-Key."""
+        header = self.headers.get("Authorization", "") or ""
+        if header.startswith("Bearer "):
+            return header[len("Bearer "):].strip() or None
+        api_key = self.headers.get("X-API-Key")
+        return api_key.strip() if api_key else None
+
+    def _authenticate_request(self) -> Optional[Dict[str, Any]]:
+        """Resolve the caller from a session token, then an API key. None if neither."""
+        token = self._bearer_token()
+        if not token:
+            return None
+        if self.api_sessions is not None:
+            principal = self.api_sessions.validate(token)
+            if principal is not None:
+                return principal
+        if self.api_auth is not None:
+            try:
+                principal = self.api_auth.authenticate_api_key(token)
+            except Exception:
+                principal = None
+            if principal is not None:
+                return principal
+        return None
+
+    def _authorize(self, *, write: bool) -> Optional[Dict[str, Any]]:
+        """Enforce the tiered auth policy. Returns the principal (may be None).
+
+        - auth disabled: reads are open; **writes are hard-disabled (403)** —
+          "auth off" never means "control open".
+        - auth enabled: writes require a credential (401 otherwise); reads are
+          open unless ``require_for_reads``, then they require one too.
+        """
+        auth_cfg = getattr(self.api_config.api, "auth", None)
+        enabled = bool(auth_cfg and auth_cfg.enabled)
+        if not enabled:
+            if write:
+                raise APIForbidden(
+                    "write operations require api.auth.enabled")
+            return None
+        principal = self._authenticate_request()
+        if write:
+            if principal is None:
+                raise APIUnauthorized("authentication required")
+            return principal
+        if auth_cfg.require_for_reads and principal is None:
+            raise APIUnauthorized("authentication required")
+        return principal
+
+    def _read_json_body(self) -> Dict[str, Any]:
+        """Read + parse a JSON object body, bounded by ``MAX_BODY_BYTES``."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            raise APIBadRequest("invalid Content-Length")
+        if length < 0:
+            raise APIBadRequest("invalid Content-Length")
+        if length > MAX_BODY_BYTES:
+            raise APIPayloadTooLarge(
+                f"body exceeds {MAX_BODY_BYTES} bytes")
+        raw = self.rfile.read(length) if length else b""
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            raise APIBadRequest("body must be valid JSON")
+        if not isinstance(data, dict):
+            raise APIBadRequest("body must be a JSON object")
+        return data
 
     def _route(self) -> Tuple[int, str, Any]:
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         qs = parse_qs(parsed.query)
 
+        # Liveness/readiness are always open — Kubernetes probes and load
+        # balancers can't carry credentials, and they expose no sensitive data.
         if path == "/health":
             return 200, "application/json", {"status": "ok", "generatedAt": time.time()}
 
         if path == "/ready":
             payload = readiness(self.api_source)
             return (200 if payload["ready"] else 503), "application/json", payload
+
+        # Every remaining GET is a read: open by default, gated when
+        # require_for_reads is set. principal is None for anonymous callers.
+        principal = self._authorize(write=False)
 
         if path == "/metrics":
             if not self.api_config.prometheus.enabled:
@@ -223,13 +401,63 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             }
 
         if path == "/api/v1/config":
-            return 200, "application/json", config_summary(self.api_config)
+            # Anonymous -> sanitized; authenticated -> extended (still no secrets).
+            return 200, "application/json", config_summary(
+                self.api_config, extended=principal is not None)
 
         if path == "/api/v1/remote-health":
             rows = live_remote_health(self.api_source, self.api_config)
             return 200, "application/json", {"generatedAt": time.time(), "servers": rows}
 
         return 404, "application/json", self._not_found("Endpoint not found")
+
+    def _route_post(self) -> Tuple[int, str, Any]:
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+
+        if path == "/api/v1/auth/login":
+            return self._handle_login()
+        if path == "/api/v1/auth/logout":
+            return self._handle_logout()
+
+        return 404, "application/json", self._not_found("Endpoint not found")
+
+    def _handle_login(self) -> Tuple[int, str, Any]:
+        auth_cfg = getattr(self.api_config.api, "auth", None)
+        if not (auth_cfg and auth_cfg.enabled):
+            return 404, "application/json", self._not_found("Authentication is disabled")
+        data = self._read_json_body()
+        username = data.get("username")
+        password = data.get("password")
+        if not isinstance(username, str) or not isinstance(password, str) \
+                or not username or not password:
+            raise APIBadRequest("username and password are required")
+        try:
+            principal = self.api_auth.authenticate(username, password)
+        except Exception:
+            # bcrypt missing / store error — fail closed without leaking detail.
+            return 503, "application/json", self._error(
+                "AUTH_UNAVAILABLE", "authentication backend unavailable")
+        if principal is None:
+            raise APIUnauthorized("invalid credentials")
+        token = self.api_sessions.create(principal)
+        return 200, "application/json", {
+            "token": token,
+            "tokenType": "bearer",
+            "expiresIn": int(auth_cfg.session_ttl),
+        }
+
+    def _handle_logout(self) -> Tuple[int, str, Any]:
+        auth_cfg = getattr(self.api_config.api, "auth", None)
+        if not (auth_cfg and auth_cfg.enabled):
+            return 404, "application/json", self._not_found("Authentication is disabled")
+        token = self._bearer_token()
+        # Only an active session token can be logged out (API keys aren't
+        # sessions). Treat anything else as unauthenticated.
+        if not token or self.api_sessions.validate(token) is None:
+            raise APIUnauthorized("authentication required")
+        self.api_sessions.invalidate(token)
+        return 200, "application/json", {"status": "ok"}
 
     @staticmethod
     def _error(code: str, message: str) -> Dict[str, Dict[str, str]]:
