@@ -9,6 +9,10 @@ Type=simple
 User=root
 Group=root
 ExecStart=/usr/bin/python3 /opt/ups-monitor/eneru.py run --config /etc/ups-monitor/config.yaml
+# `systemctl reload eneru` re-reads config and applies the safe subset live
+# (thresholds, control allowlists, prometheus toggle) without dropping the
+# daemon. Changes that need a full restart are logged to the journal.
+ExecReload=/bin/kill -HUP $MAINPID
 
 # Automatically restart the script if it crashes
 Restart=always

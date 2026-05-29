@@ -259,6 +259,7 @@ class RemoteHealthManager:
         self.servers = [s for s in servers if s.enabled]
         self.sidecar_path = Path(sidecar_path)
         self.stop_event = stop_event
+        self._local_stop = threading.Event()
         self.log_fn = log_fn
         self.notify_fn = notify_fn
         self.event_fn = event_fn
@@ -303,6 +304,24 @@ class RemoteHealthManager:
             if server.is_host_loopback is True:
                 self._statuses[self._key(server)].status = REMOTE_HEALTH_UNKNOWN
 
+    def _stopping(self) -> bool:
+        """True when daemon shutdown or a manager-local reload stop fired."""
+        return self.stop_event.is_set() or self._local_stop.is_set()
+
+    def _wait(self, timeout: float) -> bool:
+        """Wait for either stop signal, polling local reload stops promptly."""
+        if self._local_stop.is_set():
+            return True
+        remaining = max(0.0, float(timeout))
+        while remaining > 0:
+            slice_ = min(5.0, remaining)
+            if self.stop_event.wait(slice_):
+                return True
+            if self._local_stop.is_set():
+                return True
+            remaining -= slice_
+        return self._local_stop.is_set()
+
     def start(self) -> None:
         """Start the background healthcheck loop if configured."""
         has_loopback = any(s.is_host_loopback is True for s in self.servers)
@@ -311,6 +330,7 @@ class RemoteHealthManager:
             return
         if self._thread is not None:
             return
+        self._local_stop.clear()
         self._thread = threading.Thread(
             target=self._run_loop,
             name=f"remote-health-{self.group_label}",
@@ -320,7 +340,7 @@ class RemoteHealthManager:
 
     def stop(self, timeout: int = 5) -> None:
         """Signal the healthcheck loop and wait briefly for it to exit."""
-        self.stop_event.set()
+        self._local_stop.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
             if not self._thread.is_alive():
@@ -338,7 +358,7 @@ class RemoteHealthManager:
             self._write_sidecar()
             return self.snapshot()
         for server in self.servers:
-            if self.stop_event.is_set():
+            if self._stopping():
                 break
             if not self.config.remote_health.enabled and server.is_host_loopback is not True:
                 continue
@@ -350,7 +370,7 @@ class RemoteHealthManager:
         if self.config.remote_health.startup_check:
             self.check_once()
         interval = max(60, int(self.config.remote_health.interval))
-        while not self.stop_event.wait(interval):
+        while not self._wait(interval):
             self.check_once()
 
     def _check_server(self, server: RemoteServerConfig) -> None:

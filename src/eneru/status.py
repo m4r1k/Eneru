@@ -521,9 +521,14 @@ def _loopback_runtime_summary(
     return out
 
 
-def _remote_server_summary(server: Any) -> Dict[str, Any]:
-    """Return a sanitized remote-server configuration summary."""
-    return {
+def _remote_server_summary(server: Any, *, extended: bool = False) -> Dict[str, Any]:
+    """Return a sanitized remote-server configuration summary.
+
+    ``extended`` adds structural detail (counts, margins) for authenticated
+    callers — never secrets. Raw pre-shutdown commands stay hidden in both modes
+    because they can embed credentials in their arguments.
+    """
+    out = {
         "name": server.name or server.host,
         "host": server.host,
         "user": server.user,
@@ -535,11 +540,20 @@ def _remote_server_summary(server: Any) -> Dict[str, Any]:
         # render it differently from regular remote_servers.
         "isHostLoopback": bool(getattr(server, "is_host_loopback", False)),
     }
+    if extended:
+        out["preShutdownCommandCount"] = len(server.pre_shutdown_commands or [])
+        out["shutdownSafetyMargin"] = getattr(server, "shutdown_safety_margin", None)
+    return out
 
 
-def config_summary(config: Config) -> Dict[str, Any]:
-    """Return a sanitized configuration summary."""
-    return {
+def config_summary(config: Config, *, extended: bool = False) -> Dict[str, Any]:
+    """Return a configuration summary.
+
+    Anonymous callers get the sanitized view (the v5.3 shape). Authenticated
+    callers (``extended=True``) get additional structural detail — still no
+    passwords, hashes, tokens, or raw commands.
+    """
+    summary = {
         "ups": [
             {
                 "groupId": sanitize_name(group.ups.name),
@@ -547,7 +561,8 @@ def config_summary(config: Config) -> Dict[str, Any]:
                 "label": group.ups.label,
                 "isLocal": group.is_local,
                 "remoteServers": [
-                    _remote_server_summary(s) for s in group.remote_servers
+                    _remote_server_summary(s, extended=extended)
+                    for s in group.remote_servers
                 ],
             }
             for group in config.ups_groups
@@ -560,7 +575,8 @@ def config_summary(config: Config) -> Dict[str, Any]:
                 "minHealthy": group.min_healthy,
                 "isLocal": group.is_local,
                 "remoteServers": [
-                    _remote_server_summary(s) for s in group.remote_servers
+                    _remote_server_summary(s, extended=extended)
+                    for s in group.remote_servers
                 ],
             }
             for group in config.redundancy_groups
@@ -569,6 +585,10 @@ def config_summary(config: Config) -> Dict[str, Any]:
             "enabled": config.api.enabled,
             "bind": config.api.bind,
             "port": config.api.port,
+            "auth": {
+                "enabled": config.api.auth.enabled,
+                "requireForReads": config.api.auth.require_for_reads,
+            },
         },
         "prometheus": {"enabled": config.prometheus.enabled},
         "remoteHealth": {
@@ -587,7 +607,17 @@ def config_summary(config: Config) -> Dict[str, Any]:
             "enabled": config.notifications.enabled,
             "serviceCount": len(config.notifications.urls),
         },
+        "nutControl": {"enabled": config.nut_control.enabled},
+        "detail": "extended" if extended else "sanitized",
     }
+    if extended:
+        # Structure, not secrets: the allowlists help the dashboard render the
+        # control surface. Credentials are never included.
+        summary["nutControl"]["allowedCommands"] = list(
+            config.nut_control.allowed_commands)
+        summary["nutControl"]["allowedVariables"] = list(
+            config.nut_control.allowed_variables)
+    return summary
 
 
 def remote_health_for_monitor(monitor: Any) -> List[dict]:

@@ -271,6 +271,10 @@ class UPSGroupMonitor(
         if not self._coordinator_mode:
             signal.signal(signal.SIGTERM, self._cleanup_and_exit)
             signal.signal(signal.SIGINT, self._cleanup_and_exit)
+            # SIGHUP re-reads config and applies the safe subset live
+            # (systemctl reload / docker kill -s HUP). In coordinator mode the
+            # coordinator owns the signal and reloads every group.
+            signal.signal(signal.SIGHUP, self._handle_sighup)
 
         if self.logger is None:
             self.logger = UPSLogger(self.config.logging.file, self.config)
@@ -1307,6 +1311,100 @@ class UPSGroupMonitor(
             ])
 
         self._execute_shutdown_sequence()
+
+    def reload_config(self) -> dict:
+        """Re-read the config file and apply the safe subset live.
+
+        Returns a report dict (also used by the API reload endpoint). Never
+        raises on a bad config — the daemon keeps running on the old one.
+        """
+        from eneru.reload import perform_reload
+        report = perform_reload(self.config, [self.config], self.config.config_path)
+        if report.get("reloaded") and report.get("subsystems"):
+            self._apply_subsystem_reload(report["subsystems"])
+        self._log_reload_report(report)
+        return report
+
+    def _apply_subsystem_reload(self, subsystems: list) -> None:
+        """Re-init live subsystems whose config changed (best-effort)."""
+        if "statistics" in subsystems and self._stats_store is not None:
+            try:
+                self._stats_store.apply_reload(self.config.statistics)
+            except Exception as exc:  # pragma: no cover - defensive
+                self._log_message(f"⚠️ stats retention reload failed: {exc}")
+        if "notifications" in subsystems and not self._coordinator_mode:
+            self._reload_notification_worker()
+        if "remote_health" in subsystems:
+            self._reload_remote_health()
+        if "mqtt" in subsystems and not self._coordinator_mode:
+            self._reload_mqtt_publisher()
+
+    def _reload_notification_worker(self) -> None:
+        """Bounce the single-UPS notification worker after config reload."""
+        if self._notification_worker is not None:
+            self._notification_worker.stop()
+            self._notification_worker = None
+        if not self.config.notifications.enabled:
+            self._log_message("📢 Notifications: disabled")
+            return
+        if not APPRISE_AVAILABLE:
+            self._log_message(
+                "⚠️ WARNING: Notifications enabled but apprise not installed. "
+                "Install with: pip install apprise"
+            )
+            return
+        worker = NotificationWorker(self.config)
+        if worker.start():
+            if self._stats_store is not None and self._stats_store._conn is not None:
+                worker.register_store(self._stats_store)
+            self._notification_worker = worker
+            count = worker.get_service_count()
+            self._log_message(f"📢 Notifications reloaded ({count} service(s))")
+        else:
+            self._log_message("⚠️ WARNING: Failed to reload notifications")
+
+    def _reload_remote_health(self) -> None:
+        """Bounce remote-health with the new interval/probe/thresholds."""
+        if self._remote_health_manager is not None:
+            self._remote_health_manager.stop()
+            self._remote_health_manager = None
+        self._start_remote_health()
+        self._log_message("🔄 Remote health checks reloaded")
+
+    def _reload_mqtt_publisher(self) -> None:
+        """Bounce the MQTT publisher so broker/topic changes take effect."""
+        if self._mqtt_publisher is not None:
+            self._mqtt_publisher.stop()
+            self._mqtt_publisher = None
+        self._start_mqtt_publisher()
+        self._log_message("🔄 MQTT publisher reloaded")
+
+    def record_control_event(self, ups_name: str, event_type: str,
+                             detail: str) -> None:
+        """Record an API control/reload action to the SQLite events table
+        (v7.0 audit-log groundwork). Best-effort — never raises into the API."""
+        try:
+            if self._stats_store is not None:
+                self._stats_store.log_event(event_type, detail)
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    def _handle_sighup(self, signum, frame):
+        """SIGHUP -> hot-reload config (systemctl reload / docker kill -s HUP).
+
+        Defensive: a reload must never crash the daemon via the signal handler,
+        so any unexpected error is logged and swallowed.
+        """
+        self._log_message("🔄 SIGHUP received — reloading configuration")
+        try:
+            self.reload_config()
+        except Exception as exc:  # pragma: no cover - defensive
+            self._log_message(f"⚠️ Config reload error (ignored): {exc}")
+
+    def _log_reload_report(self, report: dict) -> None:
+        from eneru.reload import format_report
+        for line in format_report(report):
+            self._log_message(line)
 
     def _cleanup_and_exit(self, signum: int, frame):
         """Handle clean exit on signals."""

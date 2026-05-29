@@ -4,5 +4,6 @@ pytest-mock>=3.10.0
 pytest-timeout>=2.1.0
 PyYAML>=5.4.1
 apprise>=1.9.7
+bcrypt>=4.0.1
 mkdocs>=1.6.1
 mkdocs-material>=9.7.1

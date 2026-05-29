@@ -90,6 +90,9 @@ class MultiUPSCoordinator:
         """Initialize shared resources."""
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
+        # SIGHUP hot-reloads config across every group (systemctl reload /
+        # docker kill -s HUP).
+        signal.signal(signal.SIGHUP, self._handle_sighup)
 
         self._logger = UPSLogger(self.config.logging.file, self.config)
 
@@ -372,9 +375,9 @@ class MultiUPSCoordinator:
 
         notify_fn = None
         if self._notification_worker is not None:
-            notify_fn = lambda body, typ: self._notification_worker.send(
-                body, typ, category="health",
-            )
+            def notify_fn(body, typ):
+                if self._notification_worker is not None:
+                    self._notification_worker.send(body, typ, category="health")
 
         manager = RemoteHealthManager(
             config=self.config,
@@ -645,6 +648,126 @@ class MultiUPSCoordinator:
                 self._stop_event.wait(1)
         except KeyboardInterrupt:
             self._handle_signal(signal.SIGINT, None)
+
+    def reload_config(self) -> dict:
+        """Re-read config and apply the safe subset live to every group.
+
+        Updates the coordinator's shared config and each per-group monitor's
+        config in place. Returns a report (also used by the API endpoint).
+        """
+        from eneru.reload import perform_reload
+        monitor_configs = [m.config for m in self._monitors]
+        report = perform_reload(self.config, monitor_configs, self.config.config_path)
+        if report.get("reloaded") and report.get("subsystems"):
+            self._apply_subsystem_reload(report["subsystems"])
+        self._log_reload_report(report)
+        return report
+
+    def _apply_subsystem_reload(self, subsystems: list) -> None:
+        """Re-init live subsystems across the coordinator (best-effort)."""
+        if "statistics" in subsystems:
+            for mon in self._monitors:
+                store = getattr(mon, "_stats_store", None)
+                if store is not None:
+                    try:
+                        store.apply_reload(self.config.statistics)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        self._log(f"⚠️ stats retention reload failed: {exc}")
+        if "notifications" in subsystems:
+            self._reload_notification_worker()
+        if "remote_health" in subsystems:
+            self._reload_remote_health()
+        if "mqtt" in subsystems:
+            self._reload_mqtt_publisher()
+
+    def _reload_notification_worker(self) -> None:
+        """Bounce the shared notification worker after config reload."""
+        if self._notification_worker is not None:
+            self._notification_worker.stop()
+            self._notification_worker = None
+        for mon in self._monitors:
+            mon._notification_worker = None
+        for executor in self._redundancy_executors.values():
+            executor._notification_worker = None
+        if not self.config.notifications.enabled:
+            self._log("📢 Notifications: disabled")
+            return
+        if not APPRISE_AVAILABLE:
+            self._log(
+                "⚠️ WARNING: Notifications enabled but apprise not installed. "
+                "Install with: pip install apprise"
+            )
+            return
+        worker = NotificationWorker(self.config)
+        if not worker.start():
+            self._log("⚠️ WARNING: Failed to reload notifications")
+            return
+        for mon in self._monitors:
+            mon._notification_worker = worker
+            store = getattr(mon, "_stats_store", None)
+            if store is not None and store._conn is not None:
+                worker.register_store(store)
+        for executor in self._redundancy_executors.values():
+            executor._notification_worker = worker
+        self._notification_worker = worker
+        count = worker.get_service_count()
+        self._log(f"📢 Notifications reloaded ({count} service(s))")
+
+    def _reload_remote_health(self) -> None:
+        """Bounce per-UPS and redundancy remote-health managers."""
+        for mon in self._monitors:
+            mon._reload_remote_health()
+        for manager in self._redundancy_remote_health_managers:
+            manager.stop()
+        self._redundancy_remote_health_managers = []
+        if self.config.redundancy_groups:
+            monitors_by_name = {m.config.ups.name: m for m in self._monitors}
+            for rg in self.config.redundancy_groups:
+                self._start_redundancy_remote_health(rg, monitors_by_name)
+        self._log("🔄 Remote health checks reloaded")
+
+    def _reload_mqtt_publisher(self) -> None:
+        """Bounce the coordinator MQTT publisher so broker/topic changes apply."""
+        if self._mqtt_publisher is not None:
+            self._mqtt_publisher.stop()
+            self._mqtt_publisher = None
+        self._start_mqtt_publisher()
+        self._log("🔄 MQTT publisher reloaded")
+
+    def record_control_event(self, ups_name: str, event_type: str,
+                             detail: str) -> None:
+        """Record an API control/reload action to the matching UPS's events
+        table (v7.0 audit-log groundwork). Best-effort."""
+        # ups_name is the resolved NUT name (from the API handler), matched
+        # against each monitor's configured ups.name. If they ever diverge the
+        # event still lands (fallback below), just under the first store.
+        target = None
+        for mon in self._monitors:
+            groups = getattr(mon.config, "ups_groups", [])
+            if groups and groups[0].ups.name == ups_name:
+                target = mon
+                break
+        if target is None and self._monitors:
+            target = self._monitors[0]  # reload / unknown UPS -> first store
+        store = getattr(target, "_stats_store", None) if target else None
+        if store is not None:
+            try:
+                store.log_event(event_type, detail)
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+    def _handle_sighup(self, signum, frame):
+        """SIGHUP -> hot-reload config across all groups (never crashes on error)."""
+        self._log("🔄 SIGHUP received — reloading configuration")
+        try:
+            self.reload_config()
+        except Exception as exc:  # pragma: no cover - defensive
+            self._log(f"⚠️ Config reload error (ignored): {exc}")
+
+    def _log_reload_report(self, report: dict) -> None:
+        from eneru.reload import format_report
+        for line in format_report(report):
+            self._log(line)
 
     def _handle_signal(self, signum: int, frame):
         """Handle SIGTERM/SIGINT for clean shutdown."""

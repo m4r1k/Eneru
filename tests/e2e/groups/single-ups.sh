@@ -834,9 +834,18 @@ if ! grep -Eq '"ready"[[:space:]]*:[[:space:]]*true' /tmp/test46-ready.json; the
   exit 1
 fi
 
+# The dashboard is served by the embedded API (from the eneru.web package).
+DASH_HTML="$(curl -fsS http://127.0.0.1:19191/ 2>/dev/null || true)"
+case "$DASH_HTML" in
+  *"<title>Eneru</title>"*) echo "PASS (46b): dashboard served from OCI image" ;;
+  *) echo "FAIL: dashboard not served by OCI image"; docker logs eneru-e2e-under-test || true; exit 1 ;;
+esac
+curl -fsS http://127.0.0.1:19191/app.js >/dev/null 2>&1 \
+  || { echo "FAIL: dashboard app.js not served by OCI image"; exit 1; }
+
 cleanup_container
 trap - EXIT
-echo "PASS: OCI image responded with CLI-enabled API"
+echo "PASS: OCI image responded with CLI-enabled API + dashboard"
 )
 
 # ======================================================================
@@ -1033,6 +1042,370 @@ assert "nominalVoltage" in power
 PY
 
 echo "PASS: MQTT status payload arrived with power-quality metrics"
+)
+
+# ======================================================================
+# Test 52: API authentication — login, tiered config, write gating (v6.0)
+# ======================================================================
+# Brings up the daemon with api.auth enabled and a real bcrypt-backed user,
+# then proves: login issues a bearer token; /api/v1/config is sanitized for
+# anonymous callers and extended for authenticated ones; and an anonymous
+# write (logout) is rejected 401. Reads stay open (require_for_reads=false).
+(
+echo ""
+echo ">>> Running: Test 52: API authentication login + tiered config + write gating"
+
+AUTH_DB="$(mktemp -d)/auth.db"
+printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$AUTH_DB" \
+  || { echo "FAIL: could not create auth user"; exit 1; }
+
+cat > /tmp/config-e2e-auth.yaml <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+behavior:
+  dry_run: true
+statistics:
+  enabled: true
+  db_directory: "$(mktemp -d)"
+api:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 9100
+  auth:
+    enabled: true
+    require_for_reads: false
+    db_path: "$AUTH_DB"
+prometheus:
+  enabled: true
+notifications:
+  enabled: false
+local_shutdown:
+  enabled: false
+YAML
+
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+timeout 15s eneru run --config /tmp/config-e2e-auth.yaml > /tmp/test52-daemon.log 2>&1 &
+DAEMON_PID=$!
+trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
+
+poll_endpoint() {
+  local url="$1" out="$2" tries="${3:-20}"
+  for _ in $(seq 1 "$tries"); do
+    if curl -fsS "$url" >"$out" 2>/dev/null; then return 0; fi
+    sleep 0.5
+  done
+  return 1
+}
+
+# /health is always open
+if ! poll_endpoint http://127.0.0.1:9100/health /tmp/test52-health.json; then
+  echo "FAIL: /health never responded"; cat /tmp/test52-daemon.log; exit 1
+fi
+
+# anonymous /config -> sanitized
+curl -fsS http://127.0.0.1:9100/api/v1/config > /tmp/test52-config-anon.json
+if ! grep -q '"detail": "sanitized"' /tmp/test52-config-anon.json; then
+  echo "FAIL: anonymous /config not sanitized"; cat /tmp/test52-config-anon.json; exit 1
+fi
+
+# login -> bearer token
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"operator","password":"s3cret-pw"}' \
+  http://127.0.0.1:9100/api/v1/auth/login > /tmp/test52-login.json \
+  || { echo "FAIL: login request failed"; cat /tmp/test52-daemon.log; exit 1; }
+TOKEN=$(python3 -c "import json;print(json.load(open('/tmp/test52-login.json'))['token'])")
+if [ -z "$TOKEN" ]; then echo "FAIL: no token in login response"; cat /tmp/test52-login.json; exit 1; fi
+echo "PASS: login issued a bearer token"
+
+# bad credentials -> 401
+BAD=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"operator","password":"wrong"}' \
+  http://127.0.0.1:9100/api/v1/auth/login)
+if [ "$BAD" != "401" ]; then echo "FAIL: bad creds returned $BAD, expected 401"; exit 1; fi
+
+# authenticated /config -> extended
+curl -fsS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9100/api/v1/config \
+  > /tmp/test52-config-auth.json
+if ! grep -q '"detail": "extended"' /tmp/test52-config-auth.json; then
+  echo "FAIL: authenticated /config not extended"; cat /tmp/test52-config-auth.json; exit 1
+fi
+
+# anonymous write (logout without token) -> 401
+ANON_WRITE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:9100/api/v1/auth/logout)
+if [ "$ANON_WRITE" != "401" ]; then echo "FAIL: anonymous logout returned $ANON_WRITE, expected 401"; exit 1; fi
+
+# anonymous read still works (require_for_reads=false)
+curl -fsS http://127.0.0.1:9100/api/v1/ups > /dev/null \
+  || { echo "FAIL: anonymous read blocked unexpectedly"; exit 1; }
+
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+trap - EXIT
+echo "PASS: API auth login, tiered config, and write gating verified"
+)
+
+# ======================================================================
+# Test 53: UPS control — fail-closed validation + allowlist enforcement (v6.0)
+# ======================================================================
+# Proves the fail-closed invariant (nut_control without auth refuses to start)
+# and that the control endpoints enforce the command allowlist server-side.
+# NUT's dummy-ups driver in dummy mode does not execute instant commands, so
+# this test treats the driver's own CMD-NOT-SUPPORTED reply as the proof that
+# Eneru passed the allowlisted request through to NUT instead of blocking it.
+(
+echo ""
+echo ">>> Running: Test 53: UPS control fail-closed + allowlist enforcement"
+
+# Fail-closed: nut_control.enabled with auth OFF must fail validation.
+cat > /tmp/config-e2e-control-noauth.yaml <<'YAML'
+ups:
+  name: "TestUPS@localhost:3493"
+behavior:
+  dry_run: true
+nut_control:
+  enabled: true
+  allowed_commands: ["beeper.toggle"]
+YAML
+if eneru validate --config /tmp/config-e2e-control-noauth.yaml >/tmp/test53-val.log 2>&1; then
+  echo "FAIL: nut_control without auth was accepted"; cat /tmp/test53-val.log; exit 1
+fi
+grep -q "nut_control.enabled requires api.auth.enabled" /tmp/test53-val.log \
+  || { echo "FAIL: missing fail-closed message"; cat /tmp/test53-val.log; exit 1; }
+echo "PASS: nut_control without auth is rejected at startup"
+
+# With auth + nut_control enabled, the allowlist is enforced server-side.
+AUTH_DB="$(mktemp -d)/auth.db"
+RUNTIME_DIR="$(mktemp -d)"
+printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$AUTH_DB"
+
+cat > /tmp/config-e2e-control.yaml <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+behavior:
+  dry_run: true
+statistics:
+  enabled: true
+  db_directory: "$(mktemp -d)"
+logging:
+  file: "$RUNTIME_DIR/eneru.log"
+  state_file: "$RUNTIME_DIR/state.json"
+  battery_history_file: "$RUNTIME_DIR/battery-history"
+  shutdown_flag_file: "$RUNTIME_DIR/shutdown-flag"
+api:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 9100
+  auth:
+    enabled: true
+    db_path: "$AUTH_DB"
+nut_control:
+  enabled: true
+  username: "operator"
+  password: "s3cret-pw"
+  allowed_commands: ["beeper.toggle"]
+notifications:
+  enabled: false
+local_shutdown:
+  enabled: false
+YAML
+
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+timeout 15s eneru run --config /tmp/config-e2e-control.yaml > /tmp/test53-daemon.log 2>&1 &
+DAEMON_PID=$!
+trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
+
+for _ in $(seq 1 20); do
+  curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 && break
+  sleep 0.5
+done
+
+TOKEN=$(curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"operator","password":"s3cret-pw"}' \
+  http://127.0.0.1:9100/api/v1/auth/login \
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
+[ -n "$TOKEN" ] || { echo "FAIL: no token"; cat /tmp/test53-daemon.log; exit 1; }
+
+# A disallowed command is rejected 403 BEFORE any NUT call.
+DENIED=$(curl -sS -o /tmp/test53-denied.json -w '%{http_code}' \
+  -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"command":"load.off"}' \
+  http://127.0.0.1:9100/api/v1/ups/TestUPS@localhost:3493/command)
+if [ "$DENIED" != "403" ]; then
+  echo "FAIL: disallowed command returned $DENIED, expected 403"; cat /tmp/test53-denied.json; exit 1
+fi
+
+# Unauthenticated control is rejected 401.
+ANON=$(curl -sS -o /dev/null -w '%{http_code}' \
+  -X POST -H 'Content-Type: application/json' -d '{"command":"beeper.toggle"}' \
+  http://127.0.0.1:9100/api/v1/ups/TestUPS@localhost:3493/command)
+if [ "$ANON" != "401" ]; then echo "FAIL: anonymous control returned $ANON, expected 401"; exit 1; fi
+
+# An allowlisted command reaches NUT. dummy-ups in dummy mode does not support
+# instant commands, so the expected response is NUT's own CMD-NOT-SUPPORTED
+# error mapped through Eneru as 502. A 401/403 here would mean Eneru blocked the
+# request before NUT; CMD-NOT-SUPPORTED means the allowlisted request crossed
+# the API -> upscmd -> upsd boundary.
+ALLOWED=$(curl -sS -o /tmp/test53-allowed.json -w '%{http_code}' \
+  -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"command":"beeper.toggle"}' \
+  http://127.0.0.1:9100/api/v1/ups/TestUPS@localhost:3493/command)
+if [ "$ALLOWED" != "502" ]; then
+  echo "FAIL: allowed command returned $ALLOWED, expected dummy-ups NUT_ERROR 502"
+  cat /tmp/test53-allowed.json
+  cat /tmp/test53-daemon.log
+  exit 1
+fi
+grep -q '"code": "NUT_ERROR"' /tmp/test53-allowed.json \
+  || { echo "FAIL: allowed command did not return a NUT_ERROR"; cat /tmp/test53-allowed.json; exit 1; }
+grep -q 'CMD-NOT-SUPPORTED' /tmp/test53-allowed.json \
+  || { echo "FAIL: allowed command did not reach dummy-ups"; cat /tmp/test53-allowed.json; exit 1; }
+
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+trap - EXIT
+echo "PASS: UPS control fail-closed, allowlist enforcement, and NUT reachability verified"
+)
+
+# ======================================================================
+# Test 54: Config hot-reload — SIGHUP + API endpoint (v6.0)
+# ======================================================================
+# Edits a threshold in the live config, then reloads via SIGHUP and via the
+# authenticated API endpoint, asserting the daemon stays up and reports the
+# applied change. Also proves a bad config is rejected without dropping the
+# daemon.
+(
+echo ""
+echo ">>> Running: Test 54: Config hot-reload via SIGHUP and API"
+
+AUTH_DB="$(mktemp -d)/auth.db"
+printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$AUTH_DB"
+CFG=/tmp/config-e2e-reload.yaml
+
+write_cfg() {  # $1 = low_battery_threshold
+cat > "$CFG" <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+triggers:
+  low_battery_threshold: $1
+behavior:
+  dry_run: true
+statistics:
+  enabled: true
+  db_directory: "$(mktemp -d)"
+api:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 9100
+  auth:
+    enabled: true
+    db_path: "$AUTH_DB"
+notifications:
+  enabled: false
+local_shutdown:
+  enabled: false
+YAML
+}
+
+write_cfg 20
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+# Generous timeout: this test does login + two reloads + a bad reload, each with
+# its own poll budget. Too short a timeout kills the daemon mid-test.
+PYTHONUNBUFFERED=1 timeout 60s eneru run --config "$CFG" > /tmp/test54-daemon.log 2>&1 &
+DAEMON_PID=$!
+trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
+
+for _ in $(seq 1 20); do
+  curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 && break
+  sleep 0.5
+done
+
+# Edit the threshold, then SIGHUP -> the daemon applies it live and logs it.
+write_cfg 55
+kill -HUP "$DAEMON_PID"
+RELOADED=""
+for _ in $(seq 1 20); do
+  if grep -q "Config reloaded" /tmp/test54-daemon.log; then RELOADED=1; break; fi
+  sleep 0.5
+done
+[ -n "$RELOADED" ] || { echo "FAIL: SIGHUP reload not logged"; cat /tmp/test54-daemon.log; exit 1; }
+grep -q "triggers" /tmp/test54-daemon.log || { echo "FAIL: triggers not applied"; cat /tmp/test54-daemon.log; exit 1; }
+echo "PASS: SIGHUP applied the threshold change live"
+
+# API reload endpoint (authenticated) returns a report.
+TOKEN=$(curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"operator","password":"s3cret-pw"}' \
+  http://127.0.0.1:9100/api/v1/auth/login \
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
+write_cfg 60
+RELOAD_HTTP=$(curl -sS -o /tmp/test54-reload.json -w '%{http_code}' \
+  -X POST -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:9100/api/v1/config/reload)
+[ "$RELOAD_HTTP" = "200" ] || { echo "FAIL: API reload returned $RELOAD_HTTP"; cat /tmp/test54-reload.json; exit 1; }
+python3 -c "import json;assert json.load(open('/tmp/test54-reload.json'))['reloaded'] is True" \
+  || { echo "FAIL: API reload report not reloaded"; cat /tmp/test54-reload.json; exit 1; }
+
+# Anonymous reload is rejected.
+ANON=$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:9100/api/v1/config/reload)
+[ "$ANON" = "401" ] || { echo "FAIL: anonymous reload returned $ANON, expected 401"; exit 1; }
+
+# A broken config is rejected and the daemon stays up. Use the synchronous API
+# endpoint (deterministic) rather than SIGHUP + log-polling (racy in CI).
+echo "ups: [broken" > "$CFG"
+BAD_HTTP=$(curl -sS -o /tmp/test54-bad.json -w '%{http_code}' \
+  -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9100/api/v1/config/reload)
+[ "$BAD_HTTP" = "400" ] || { echo "FAIL: bad reload HTTP $BAD_HTTP, expected 400"; cat /tmp/test54-bad.json; exit 1; }
+python3 -c "import json;r=json.load(open('/tmp/test54-bad.json'));assert r['reloaded'] is False and r['errors']" \
+  || { echo "FAIL: bad reload report not rejected"; cat /tmp/test54-bad.json; exit 1; }
+# Daemon stays up on a bad reload.
+curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 \
+  || { echo "FAIL: daemon died on bad reload"; cat /tmp/test54-daemon.log; exit 1; }
+
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+trap - EXIT
+echo "PASS: config hot-reload via SIGHUP and API verified"
+)
+
+# ======================================================================
+# Test 55: Browser dashboard is served by the embedded API (v6.0)
+# ======================================================================
+# The dashboard ships with the package and is served whenever the API is on.
+# Verifies the SPA shell + assets load and that path traversal is rejected.
+(
+echo ""
+echo ">>> Running: Test 55: Browser dashboard served by embedded API"
+
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+timeout 12s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml \
+  > /tmp/test55-daemon.log 2>&1 &
+DAEMON_PID=$!
+trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
+
+for _ in $(seq 1 20); do
+  curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 && break
+  sleep 0.5
+done
+
+curl -fsS http://127.0.0.1:9100/ > /tmp/test55-index.html \
+  || { echo "FAIL: dashboard index not served"; cat /tmp/test55-daemon.log; exit 1; }
+grep -q "<title>Eneru</title>" /tmp/test55-index.html \
+  || { echo "FAIL: dashboard index missing title"; cat /tmp/test55-index.html; exit 1; }
+curl -fsS http://127.0.0.1:9100/app.js   >/dev/null || { echo "FAIL: app.js not served"; exit 1; }
+curl -fsS http://127.0.0.1:9100/style.css >/dev/null || { echo "FAIL: style.css not served"; exit 1; }
+
+# Content-Type + CSP on the HTML response.
+HDRS=$(curl -fsS -D - -o /dev/null http://127.0.0.1:9100/)
+echo "$HDRS" | grep -qi "Content-Type: text/html" || { echo "FAIL: index not text/html"; echo "$HDRS"; exit 1; }
+echo "$HDRS" | grep -qi "Content-Security-Policy" || { echo "FAIL: missing CSP header"; echo "$HDRS"; exit 1; }
+
+# Path traversal / unknown asset -> 404.
+TRAV=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:9100/nope.js")
+[ "$TRAV" = "404" ] || { echo "FAIL: unknown asset returned $TRAV, expected 404"; exit 1; }
+
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+trap - EXIT
+echo "PASS: browser dashboard served with CSP and traversal protection"
 )
 
 echo ""

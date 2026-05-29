@@ -480,7 +480,8 @@ def test_remote_health_stop_keeps_alive_thread_reference(tmp_path,
 
     manager.stop(timeout=7)
 
-    assert stop_event.is_set()
+    assert not stop_event.is_set()
+    assert manager._local_stop.is_set()
     assert thread.join_timeout == 7
     assert manager._thread is thread
 
@@ -513,7 +514,7 @@ def test_remote_health_run_loop_startup_check_then_waits(tmp_path,
         manager._run_loop()
 
     check_once.assert_called_once()
-    assert waits == [60]
+    assert waits == [5.0]
 
 
 @pytest.mark.unit
@@ -529,7 +530,7 @@ def test_remote_health_run_loop_without_startup_check_runs_after_wait(
     class StopAfterSecondWait:
         def wait(self, timeout):
             waits.append(timeout)
-            return len(waits) >= 2
+            return len(waits) >= 16
 
         def set(self):
             pass
@@ -547,7 +548,7 @@ def test_remote_health_run_loop_without_startup_check_runs_after_wait(
         manager._run_loop()
 
     check_once.assert_called_once()
-    assert waits == [75, 75]
+    assert waits == [5.0] * 16
 
 
 @pytest.mark.unit

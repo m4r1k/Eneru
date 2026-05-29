@@ -2272,6 +2272,10 @@ class TestCoordinatorRedundancyRemoteHealthDisabled:
         worker.send.assert_called_once()
         # Category for redundancy remote-health alerts is "health".
         assert worker.send.call_args.kwargs["category"] == "health"
+        worker.send.reset_mock()
+        coord._notification_worker = None
+        notify_fn("muted body", "warning")
+        worker.send.assert_not_called()
 
 
 class TestCoordinatorStartServersIdempotent:

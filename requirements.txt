@@ -11,3 +11,7 @@ PyYAML>=5.4.1
 # Optional - for notifications (100+ services via Apprise)
 # Remove this line if you don't need notifications
 apprise>=1.9.7
+
+# Optional - for API authentication (eneru user / apikey, dashboard login)
+# Only needed when api.auth is enabled. Remove if you don't use auth.
+bcrypt>=4.0.1

@@ -1,0 +1,461 @@
+"""Unit tests for v6.0 config hot-reload (src/eneru/reload.py + wiring)."""
+
+import pytest
+import threading
+from unittest.mock import MagicMock
+
+from eneru import reload as reloadmod
+from eneru.config import Config, ConfigLoader
+from eneru.monitor import UPSGroupMonitor
+from eneru.multi_ups import MultiUPSCoordinator
+
+
+def _write(path, text):
+    path.write_text(text)
+    return str(path)
+
+
+def _load(path):
+    return ConfigLoader.load(path)
+
+
+# ----- load_and_validate -----
+
+@pytest.mark.unit
+def test_load_and_validate_missing_path():
+    cfg, errors = reloadmod.load_and_validate(None)
+    assert cfg is None and errors
+
+
+@pytest.mark.unit
+def test_load_and_validate_bad_yaml(tmp_path):
+    p = _write(tmp_path / "c.yaml", "ups: [unclosed\n")
+    cfg, errors = reloadmod.load_and_validate(p)
+    assert cfg is None and any("cannot read" in e for e in errors)
+
+
+@pytest.mark.unit
+def test_load_and_validate_non_mapping(tmp_path):
+    p = _write(tmp_path / "c.yaml", "- just\n- a list\n")
+    cfg, errors = reloadmod.load_and_validate(p)
+    assert cfg is None and any("mapping" in e for e in errors)
+
+
+@pytest.mark.unit
+def test_load_and_validate_validation_error(tmp_path):
+    # fail-closed: nut_control without auth
+    p = _write(tmp_path / "c.yaml",
+               "ups:\n  name: U@h\nnut_control:\n  enabled: true\n")
+    cfg, errors = reloadmod.load_and_validate(p)
+    assert cfg is None
+    assert any("nut_control.enabled requires api.auth.enabled" in e for e in errors)
+
+
+@pytest.mark.unit
+def test_load_and_validate_success(tmp_path):
+    p = _write(tmp_path / "c.yaml", "ups:\n  name: U@h\n")
+    cfg, errors = reloadmod.load_and_validate(p)
+    assert cfg is not None and errors == []
+
+
+@pytest.mark.unit
+def test_load_and_validate_malformed_section_type(tmp_path):
+    # `triggers: 5` makes _parse_config raise; must surface as a reload error,
+    # not propagate into the signal handler.
+    p = _write(tmp_path / "c.yaml", "ups:\n  name: U@h\ntriggers: 5\n")
+    cfg, errors = reloadmod.load_and_validate(p)
+    assert cfg is None and errors
+
+
+@pytest.mark.unit
+def test_format_report_variants():
+    assert reloadmod.format_report(
+        {"reloaded": False, "errors": ["boom"]})[0].startswith("⚠️")
+    assert any("no changes" in line for line in reloadmod.format_report(
+        {"reloaded": True, "applied": [], "restartRequired": []}))
+    lines = reloadmod.format_report(
+        {"reloaded": True, "applied": ["triggers:U@h"], "restartRequired": ["api"]})
+    assert any("applied live" in s for s in lines)
+    assert any("restart" in s for s in lines)
+
+
+# ----- apply_reload -----
+
+@pytest.mark.unit
+def test_apply_reload_safe_top_section(tmp_path):
+    live = _load(_write(tmp_path / "a.yaml", "ups:\n  name: U@h\nbehavior:\n  dry_run: false\n"))
+    new = _load(_write(tmp_path / "b.yaml", "ups:\n  name: U@h\nbehavior:\n  dry_run: true\n"))
+    report = reloadmod.apply_reload(live, [live], new)
+    assert "behavior" in report["applied"]
+    assert live.behavior.dry_run is True
+
+
+@pytest.mark.unit
+def test_apply_reload_triggers_swapped_live(tmp_path):
+    live = _load(_write(tmp_path / "a.yaml",
+                        "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 20\n"))
+    new = _load(_write(tmp_path / "b.yaml",
+                       "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 35\n"))
+    report = reloadmod.apply_reload(live, [live], new)
+    assert "triggers:U@h" in report["applied"]
+    assert live.triggers.low_battery_threshold == 35
+
+
+@pytest.mark.unit
+def test_apply_reload_restart_required_section(tmp_path):
+    live = _load(_write(tmp_path / "a.yaml", "ups:\n  name: U@h\napi:\n  port: 9191\n"))
+    new = _load(_write(tmp_path / "b.yaml", "ups:\n  name: U@h\napi:\n  port: 9999\n"))
+    report = reloadmod.apply_reload(live, [live], new)
+    assert "api" in report["restartRequired"]
+    assert live.api.port == 9191  # unchanged (restart required)
+
+
+@pytest.mark.unit
+def test_apply_reload_topology_change(tmp_path):
+    live = _load(_write(tmp_path / "a.yaml", "ups:\n  - name: U1@h\n  - name: U2@h\n"))
+    new = _load(_write(tmp_path / "b.yaml", "ups:\n  - name: U1@h\n"))
+    report = reloadmod.apply_reload(live, [live], new)
+    assert "ups_groups" in report["restartRequired"]
+
+
+@pytest.mark.unit
+def test_load_and_validate_empty_file(tmp_path):
+    p = _write(tmp_path / "c.yaml", "")  # YAML -> None -> {}
+    cfg, errors = reloadmod.load_and_validate(p)
+    assert cfg is not None and errors == []
+
+
+@pytest.mark.unit
+def test_apply_reload_redundancy_change_restart(tmp_path):
+    base = ("ups:\n  - name: U1@h\n  - name: U2@h\n"
+            "redundancy_groups:\n  - name: rg\n    ups_sources: [U1@h, U2@h]\n"
+            "    min_healthy: {mh}\n")
+    live = _load(_write(tmp_path / "a.yaml", base.format(mh=1)))
+    new = _load(_write(tmp_path / "b.yaml", base.format(mh=2)))
+    report = reloadmod.apply_reload(live, [live], new)
+    assert "redundancy_groups" in report["restartRequired"]
+
+
+@pytest.mark.unit
+def test_apply_reload_group_non_trigger_change_restart(tmp_path):
+    live = _load(_write(tmp_path / "a.yaml",
+                        "ups:\n  - name: U@h\n    virtual_machines:\n      enabled: false\n"))
+    new = _load(_write(tmp_path / "b.yaml",
+                       "ups:\n  - name: U@h\n    virtual_machines:\n      enabled: true\n"))
+    report = reloadmod.apply_reload(live, [live], new)
+    assert "ups_groups:U@h" in report["restartRequired"]
+
+
+@pytest.mark.unit
+def test_apply_reload_dedups_trigger_tag_across_configs(tmp_path):
+    primary = _load(_write(tmp_path / "a.yaml",
+                           "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 20\n"))
+    monitor_cfg = _load(_write(tmp_path / "m.yaml",
+                               "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 20\n"))
+    new = _load(_write(tmp_path / "b.yaml",
+                       "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 60\n"))
+    report = reloadmod.apply_reload(primary, [monitor_cfg], new)
+    assert report["applied"].count("triggers:U@h") == 1  # deduped
+
+
+@pytest.mark.unit
+def test_apply_reload_no_change(tmp_path):
+    text = "ups:\n  name: U@h\n"
+    live = _load(_write(tmp_path / "a.yaml", text))
+    new = _load(_write(tmp_path / "b.yaml", text))
+    report = reloadmod.apply_reload(live, [live], new)
+    assert report["applied"] == [] and report["restartRequired"] == []
+
+
+@pytest.mark.unit
+def test_apply_reload_multi_config_propagation(tmp_path):
+    # Two separate Config objects (coordinator + one monitor) must both update.
+    primary = _load(_write(tmp_path / "a.yaml", "ups:\n  name: U@h\nbehavior:\n  dry_run: false\n"))
+    monitor_cfg = _load(_write(tmp_path / "m.yaml", "ups:\n  name: U@h\nbehavior:\n  dry_run: false\n"))
+    new = _load(_write(tmp_path / "b.yaml", "ups:\n  name: U@h\nbehavior:\n  dry_run: true\n"))
+    reloadmod.apply_reload(primary, [monitor_cfg], new)
+    assert primary.behavior.dry_run is True
+    assert monitor_cfg.behavior.dry_run is True
+
+
+@pytest.mark.unit
+def test_apply_reload_subsystem_sections_live(tmp_path):
+    live = _load(_write(tmp_path / "a.yaml", """
+ups:
+  name: U@h
+notifications:
+  enabled: false
+mqtt:
+  enabled: false
+remote_health:
+  interval: 3600
+"""))
+    new = _load(_write(tmp_path / "b.yaml", """
+ups:
+  name: U@h
+notifications:
+  enabled: true
+  urls: ["json://localhost"]
+mqtt:
+  enabled: true
+  broker: "mqtt://127.0.0.1:1883"
+remote_health:
+  interval: 120
+"""))
+    report = reloadmod.apply_reload(live, [live], new)
+    assert set(["notifications", "mqtt", "remote_health"]).issubset(report["applied"])
+    assert set(["notifications", "mqtt", "remote_health"]).issubset(report["subsystems"])
+    assert not set(["notifications", "mqtt", "remote_health"]).intersection(
+        report["restartRequired"]
+    )
+    assert live.notifications.enabled is True
+    assert live.mqtt.enabled is True
+    assert live.remote_health.interval == 120
+
+
+# ----- perform_reload -----
+
+@pytest.mark.unit
+def test_perform_reload_rejects_bad_config(tmp_path):
+    live = _load(_write(tmp_path / "a.yaml", "ups:\n  name: U@h\n"))
+    p = _write(tmp_path / "a.yaml", "ups: [bad\n")
+    report = reloadmod.perform_reload(live, [live], p)
+    assert report["reloaded"] is False and report["errors"]
+
+
+@pytest.mark.unit
+def test_perform_reload_applies_good_config(tmp_path):
+    p = tmp_path / "a.yaml"
+    live = _load(_write(p, "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 20\n"))
+    _write(p, "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 40\n")
+    report = reloadmod.perform_reload(live, [live], str(p))
+    assert report["reloaded"] is True
+    assert live.triggers.low_battery_threshold == 40
+
+
+# ----- monitor / coordinator wiring -----
+
+@pytest.mark.unit
+def test_monitor_reload_config_and_logging(tmp_path):
+    p = tmp_path / "a.yaml"
+    cfg = _load(_write(p, "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 20\n"))
+    _write(p, "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 50\n")
+    mon = object.__new__(UPSGroupMonitor)
+    mon.config = cfg
+    logs = []
+    mon._log_message = logs.append
+    report = mon.reload_config()
+    assert report["reloaded"] and cfg.triggers.low_battery_threshold == 50
+    assert any("reloaded" in line for line in logs)
+
+
+@pytest.mark.unit
+def test_monitor_handle_sighup_invokes_reload(tmp_path):
+    p = tmp_path / "a.yaml"
+    cfg = _load(_write(p, "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 20\n"))
+    mon = object.__new__(UPSGroupMonitor)
+    mon.config = cfg
+    logs = []
+    mon._log_message = logs.append
+    _write(p, "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 33\n")
+    mon._handle_sighup(1, None)
+    assert any("SIGHUP" in line for line in logs)
+    # The handler actually performed the reload, not just logged.
+    assert cfg.triggers.low_battery_threshold == 33
+
+
+@pytest.mark.unit
+def test_monitor_reload_report_logs_failure(tmp_path):
+    mon = object.__new__(UPSGroupMonitor)
+    logs = []
+    mon._log_message = logs.append
+    mon._log_reload_report({"reloaded": False, "errors": ["boom"],
+                            "applied": [], "restartRequired": []})
+    assert any("failed" in line for line in logs)
+    assert any("boom" in line for line in logs)
+
+
+@pytest.mark.unit
+def test_monitor_reload_report_logs_restart_required(tmp_path):
+    mon = object.__new__(UPSGroupMonitor)
+    logs = []
+    mon._log_message = logs.append
+    mon._log_reload_report({"reloaded": True, "errors": [],
+                            "applied": [], "restartRequired": ["api"]})
+    assert any("restart" in line for line in logs)
+
+
+@pytest.mark.unit
+def test_coordinator_reload_config(tmp_path):
+    p = tmp_path / "a.yaml"
+    cfg = _load(_write(p, "ups:\n  - name: U1@h\n    triggers:\n      low_battery_threshold: 20\n"))
+    coord = object.__new__(MultiUPSCoordinator)
+    coord.config = cfg
+    # The monitor holds a DISTINCT Config object (as it does at runtime), so the
+    # test fails if reload_config() stops propagating to per-monitor configs.
+    monitor = object.__new__(UPSGroupMonitor)
+    monitor.config = _load(_write(
+        tmp_path / "mon.yaml",
+        "ups:\n  - name: U1@h\n    triggers:\n      low_battery_threshold: 20\n"))
+    coord._monitors = [monitor]
+    logs = []
+    coord._log = logs.append
+    _write(p, "ups:\n  - name: U1@h\n    triggers:\n      low_battery_threshold: 45\n")
+    report = coord.reload_config()
+    assert report["reloaded"]
+    assert coord.config.ups_groups[0].triggers.low_battery_threshold == 45
+    assert monitor.config.ups_groups[0].triggers.low_battery_threshold == 45
+    assert any("reloaded" in line for line in logs)
+
+
+@pytest.mark.unit
+def test_monitor_apply_subsystem_reload_bounces_workers():
+    mon = object.__new__(UPSGroupMonitor)
+    mon._coordinator_mode = False
+    mon.config = Config()
+    mon._stats_store = MagicMock()
+    mon._log_message = MagicMock()
+    mon._reload_notification_worker = MagicMock()
+    mon._reload_remote_health = MagicMock()
+    mon._reload_mqtt_publisher = MagicMock()
+    mon._apply_subsystem_reload([
+        "statistics", "notifications", "remote_health", "mqtt",
+    ])
+    mon._stats_store.apply_reload.assert_called_once_with(mon.config.statistics)
+    mon._reload_notification_worker.assert_called_once()
+    mon._reload_remote_health.assert_called_once()
+    mon._reload_mqtt_publisher.assert_called_once()
+
+
+@pytest.mark.unit
+def test_coordinator_apply_subsystem_reload_bounces_workers():
+    coord = object.__new__(MultiUPSCoordinator)
+    coord.config = Config()
+    coord._monitors = []
+    coord._reload_notification_worker = MagicMock()
+    coord._reload_remote_health = MagicMock()
+    coord._reload_mqtt_publisher = MagicMock()
+    coord._apply_subsystem_reload(["notifications", "remote_health", "mqtt"])
+    coord._reload_notification_worker.assert_called_once()
+    coord._reload_remote_health.assert_called_once()
+    coord._reload_mqtt_publisher.assert_called_once()
+
+
+@pytest.mark.unit
+def test_remote_health_stop_does_not_set_daemon_stop_event(tmp_path):
+    from eneru.remote_health import RemoteHealthManager
+
+    daemon_stop = threading.Event()
+    mgr = RemoteHealthManager(
+        config=Config(),
+        group_label="U@h",
+        servers=[],
+        sidecar_path=tmp_path / "rh.json",
+        stop_event=daemon_stop,
+        log_fn=lambda _msg: None,
+    )
+    mgr.stop()
+    assert not daemon_stop.is_set()
+
+
+@pytest.mark.unit
+def test_monitor_reload_notification_worker_restarts_and_registers(monkeypatch):
+    import eneru.monitor as monitormod
+
+    mon = object.__new__(UPSGroupMonitor)
+    mon.config = Config()
+    mon.config.notifications.enabled = True
+    mon._notification_worker = MagicMock()
+    mon._stats_store = MagicMock()
+    mon._stats_store._conn = object()
+    mon._log_message = MagicMock()
+    worker = MagicMock()
+    worker.start.return_value = True
+    worker.get_service_count.return_value = 2
+    monkeypatch.setattr(monitormod, "APPRISE_AVAILABLE", True)
+    monkeypatch.setattr(monitormod, "NotificationWorker",
+                        MagicMock(return_value=worker))
+
+    old = mon._notification_worker
+    mon._reload_notification_worker()
+
+    old.stop.assert_called_once()
+    worker.start.assert_called_once()
+    worker.register_store.assert_called_once_with(mon._stats_store)
+    assert mon._notification_worker is worker
+
+
+@pytest.mark.unit
+def test_monitor_reload_remote_health_and_mqtt_bounce_workers():
+    mon = object.__new__(UPSGroupMonitor)
+    mon._remote_health_manager = MagicMock()
+    mon._mqtt_publisher = MagicMock()
+    mon._start_remote_health = MagicMock()
+    mon._start_mqtt_publisher = MagicMock()
+    mon._log_message = MagicMock()
+
+    old_remote = mon._remote_health_manager
+    old_mqtt = mon._mqtt_publisher
+    mon._reload_remote_health()
+    mon._reload_mqtt_publisher()
+
+    old_remote.stop.assert_called_once()
+    old_mqtt.stop.assert_called_once()
+    mon._start_remote_health.assert_called_once()
+    mon._start_mqtt_publisher.assert_called_once()
+
+
+@pytest.mark.unit
+def test_coordinator_reload_notification_worker_rewires_children(monkeypatch):
+    import eneru.multi_ups as multi_mod
+
+    coord = object.__new__(MultiUPSCoordinator)
+    coord.config = Config()
+    coord.config.notifications.enabled = True
+    coord._notification_worker = MagicMock()
+    coord._log = MagicMock()
+    monitor = MagicMock()
+    monitor._stats_store = MagicMock()
+    monitor._stats_store._conn = object()
+    executor = MagicMock()
+    coord._monitors = [monitor]
+    coord._redundancy_executors = {"rg": executor}
+    worker = MagicMock()
+    worker.start.return_value = True
+    worker.get_service_count.return_value = 1
+    monkeypatch.setattr(multi_mod, "APPRISE_AVAILABLE", True)
+    monkeypatch.setattr(multi_mod, "NotificationWorker",
+                        MagicMock(return_value=worker))
+
+    old = coord._notification_worker
+    coord._reload_notification_worker()
+
+    old.stop.assert_called_once()
+    worker.register_store.assert_called_once_with(monitor._stats_store)
+    assert coord._notification_worker is worker
+    assert monitor._notification_worker is worker
+    assert executor._notification_worker is worker
+
+
+@pytest.mark.unit
+def test_coordinator_reload_remote_health_and_mqtt_bounce_workers():
+    coord = object.__new__(MultiUPSCoordinator)
+    coord.config = Config()
+    coord.config.redundancy_groups = []
+    coord._log = MagicMock()
+    monitor = MagicMock()
+    manager = MagicMock()
+    coord._monitors = [monitor]
+    coord._redundancy_remote_health_managers = [manager]
+    coord._mqtt_publisher = MagicMock()
+    coord._start_mqtt_publisher = MagicMock()
+
+    old_mqtt = coord._mqtt_publisher
+    coord._reload_remote_health()
+    coord._reload_mqtt_publisher()
+
+    monitor._reload_remote_health.assert_called_once()
+    manager.stop.assert_called_once()
+    assert coord._redundancy_remote_health_managers == []
+    old_mqtt.stop.assert_called_once()
+    coord._start_mqtt_publisher.assert_called_once()

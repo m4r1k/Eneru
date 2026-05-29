@@ -15,7 +15,6 @@ Recently shipped: v5.0 (2026-04-11), v5.1 (2026-04-21), v5.2 (2026-04-24), v5.3 
 - UPS control via NUT `upscmd`: battery self-tests, beeper, calibration
 - Read/write UPS variables via NUT `upsrw` (sensitivity, transfer voltages)
 - Config hot-reload via `SIGHUP` or API endpoint
-- NUT server auto-discovery on the network
 
 ---
 

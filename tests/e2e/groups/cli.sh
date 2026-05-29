@@ -217,5 +217,61 @@ case "$FISH_COMPLETION" in
 esac
 )
 
+# ======================================================================
+# Test 51: auth foundation — user + apikey CLI lifecycle (v6.0)
+# ======================================================================
+# Exercises eneru user create/list/show/passwd/delete and apikey
+# create/list/revoke end-to-end against a real bcrypt install and a
+# real SQLite auth.db. Proves the [auth] extra is wired in the E2E
+# environment and that the store round-trips outside unit mocks.
+(
+echo ""
+echo ">>> Running: Test 51: auth user + apikey CLI lifecycle"
+
+AUTH_DB="$(mktemp -d)/auth.db"
+
+# Capture-then-match throughout: piping a command straight into `grep -q` can
+# SIGPIPE the producer under `set -o pipefail` (exit 141). Capture first.
+OUT="$(eneru user create alice --generate --auth-db "$AUTH_DB")"
+case "$OUT" in *"Created user 'alice'"*) ;; *) echo "FAIL: user create"; exit 1;; esac
+
+OUT="$(printf 'hunter2pw' | eneru user create bob --password-stdin --auth-db "$AUTH_DB")"
+case "$OUT" in *"Created user 'bob'"*) ;; *) echo "FAIL: user create stdin"; exit 1;; esac
+
+# duplicate is rejected (non-zero exit)
+if eneru user create alice --generate --auth-db "$AUTH_DB" >/dev/null 2>&1; then
+  echo "FAIL: duplicate user was allowed"; exit 1
+fi
+echo "PASS: duplicate user rejected"
+
+# list + show expose metadata, never a hash
+OUT="$(eneru user list --auth-db "$AUTH_DB")"
+case "$OUT" in *alice*) ;; *) echo "FAIL: user list"; exit 1;; esac
+SHOW="$(eneru user show bob --auth-db "$AUTH_DB")"
+case "$SHOW" in *"Username:"*) ;; *) echo "FAIL: user show"; exit 1;; esac
+case "$SHOW" in *'$2b$'*) echo "FAIL: user show leaked a hash"; exit 1;; esac
+
+# passwd reset
+OUT="$(printf 'newpw12345' | eneru user passwd bob --password-stdin --auth-db "$AUTH_DB")"
+case "$OUT" in *"Updated password for 'bob'"*) ;; *) echo "FAIL: user passwd"; exit 1;; esac
+
+# apikey create prints the key once, list never shows it, revoke removes it
+KEYOUT="$(eneru apikey create --label grafana --auth-db "$AUTH_DB")"
+case "$KEYOUT" in *"API key: eneru_"*) ;; *) echo "FAIL: apikey create"; exit 1;; esac
+LIST="$(eneru apikey list --auth-db "$AUTH_DB")"
+case "$LIST" in *grafana*) ;; *) echo "FAIL: apikey list"; exit 1;; esac
+case "$LIST" in *eneru_*) echo "FAIL: apikey list leaked key"; exit 1;; esac
+OUT="$(eneru apikey revoke 1 --auth-db "$AUTH_DB")"
+case "$OUT" in *"Revoked API key #1"*) ;; *) echo "FAIL: apikey revoke"; exit 1;; esac
+
+# delete + missing-user error
+OUT="$(eneru user delete bob --auth-db "$AUTH_DB")"
+case "$OUT" in *"Deleted user 'bob'"*) ;; *) echo "FAIL: user delete"; exit 1;; esac
+if eneru user delete nobody --auth-db "$AUTH_DB" >/dev/null 2>&1; then
+  echo "FAIL: deleting missing user succeeded"; exit 1
+fi
+echo "PASS: auth user + apikey CLI lifecycle"
+)
+
 echo ""
 echo "=== Group 'cli' completed successfully ==="

@@ -317,9 +317,13 @@ The v5.3 API is read-only, opt-in, and binds to localhost by default when enable
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `api.enabled` | `false` | Start the embedded read-only HTTP API with `eneru run` |
+| `api.enabled` | `false` | Start the embedded HTTP API with `eneru run` |
 | `api.bind` | `127.0.0.1` | Listen address |
 | `api.port` | `9191` | Listen port |
+| `api.auth.enabled` | `false` | Opt-in API authentication. When off, the API is read-only and all write surfaces are hard disabled (v5.3 behavior) |
+| `api.auth.require_for_reads` | `false` | When off, read endpoints (incl. `/metrics`) stay open even with auth on; writes always require a credential. Set on to also gate reads |
+| `api.auth.session_ttl` | `3600` | Dashboard session token lifetime, seconds |
+| `api.auth.db_path` | `/var/lib/eneru/auth.db` | Where local users and API keys are stored (global SQLite DB, separate from per-UPS stats). CLI `--auth-db` overrides |
 | `prometheus.enabled` | `true` | Serve Prometheus text metrics at `/metrics` |
 | `remote_health.enabled` | `true` | Run harmless SSH probes for explicitly enabled remote servers |
 | `remote_health.startup_check` | `true` | Check remote SSH connectivity at daemon startup |
@@ -332,8 +336,48 @@ The v5.3 API is read-only, opt-in, and binds to localhost by default when enable
 | `mqtt.broker` | `""` | Broker URL: `mqtt://host:port` for plaintext or `mqtts://host:port` for TLS via the system trust store (default port 8883 for `mqtts`). |
 | `mqtt.topic_prefix` | `eneru` | Topic prefix; messages publish to `<topic_prefix>/status` (QoS 0, retain false) |
 | `mqtt.publish_interval` | `10` | Republish at this interval even when the status fingerprint is unchanged |
+| `nut_control.enabled` | `false` | Enable UPS control (upscmd/upsrw). Requires `api.auth.enabled` or startup fails (write surface). See [UPS control](nut-control.md) |
+| `nut_control.username` | `""` | NUT `upsd.users` account with INSTCMD/SET actions |
+| `nut_control.password` | `""` | Password for that NUT account |
+| `nut_control.allowed_commands` | `[]` | Allowlisted instant commands (e.g. `test.battery.start`, `beeper.toggle`). Calibration/FSD omitted by default |
+| `nut_control.allowed_variables` | `[]` | Allowlisted writable variables for upsrw. Empty by default — opt in each one |
+| `nut_control.timeout` | `10` | Per-command subprocess timeout (seconds) |
 
 `api.bind` defaults to `127.0.0.1`. If you set it to a non-loopback address, Eneru emits a startup warning because `/api/v1/config` returns server hostnames, SSH usernames, shutdown ordering, and presence flags with no auth. Front-end the API with SSH or a reverse proxy that adds auth before exposing it beyond a trusted boundary.
+
+## Hot-reload
+
+Eneru can re-read its configuration without restarting. Trigger it with `SIGHUP`
+or, when the API is enabled, an authenticated `POST /api/v1/config/reload`.
+
+Reload is nginx-style: the file is re-parsed and validated first, and if it is
+invalid the daemon **keeps running on the previous config** and logs the error —
+a typo never takes monitoring down. Valid changes are split in two:
+
+- **Applied live:** trigger thresholds (per UPS group), `behavior.dry_run`,
+  `nut_control` allowlists/credentials, `prometheus.enabled`, `notifications`
+  (URLs/targets, via an Apprise rebuild), MQTT broker/topic/interval,
+  `remote_health` interval/probe/thresholds, and `statistics.retention`.
+- **Restart-required (reported, not applied):** `api.bind`/`port` and auth,
+  UPS/redundancy topology, `logging`, `local_shutdown`, and
+  `statistics.db_directory`. These are captured at startup by sockets, file
+  handlers, dependency checks, or DB connections, so Eneru reports them as
+  restart-required rather than half-applying them.
+
+```bash
+# systemd / bare-metal
+sudo systemctl reload eneru          # sends SIGHUP via ExecReload
+
+# container (tini forwards the signal to the daemon)
+docker kill -s HUP <container>
+
+# via the API (needs a session token or API key)
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:9191/api/v1/config/reload
+```
+
+The reload response (and the daemon log) lists what was applied and what still
+needs a restart.
 
 `eneru run --api`, `--api-bind`, and `--api-port` override these API settings for one daemon invocation. This is mainly for Docker, Podman, and Kubernetes healthchecks where the image should expose `/health` even if the mounted config does not enable the API.
 

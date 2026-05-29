@@ -364,6 +364,11 @@ jobs:
         run: |
           docker run --rm eneru:ci version
           docker run --rm eneru:ci validate --config /etc/ups-monitor/config.yaml
+          # Dashboard assets ship in the image and are importable from the
+          # eneru.web package. We can't smoke the live HTTP path here (the daemon
+          # blocks on the initial NUT connection, and there's no NUT server in
+          # this job) — that runs in E2E Test 46 against the real NUT dummy.
+          docker run --rm --entrypoint python eneru:ci -c "import importlib.resources as r; assert (r.files('eneru.web')/'index.html').read_text().find('<title>Eneru</title>') >= 0; print('dashboard asset present in image')"
 
       - name: Verify OCI image with Podman
         env:

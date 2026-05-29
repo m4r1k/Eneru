@@ -41,6 +41,9 @@ notifications = [
 mqtt = [
     "paho-mqtt>=2.0.0",
 ]
+auth = [
+    "bcrypt>=4.0.1",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
@@ -48,6 +51,7 @@ dev = [
     "pytest-timeout>=2.1.0",
     "apprise>=1.9.7",
     "paho-mqtt>=2.0.0",
+    "bcrypt>=4.0.1",
 ]
 docs = [
     "mkdocs>=1.6.1",
@@ -72,6 +76,8 @@ where = ["src"]
 # so `eneru completion <shell>` can read them via importlib.resources
 # regardless of install method (pip vs deb/rpm).
 "eneru.completion" = ["*.bash", "*.zsh", "*.fish"]
+# Ship the dashboard assets so importlib.resources can serve them (pip path).
+"eneru.web" = ["*.html", "*.css", "*.js"]
 
 [tool.setuptools.dynamic]
 # Resolve directly from src/eneru/version.py — pointing at

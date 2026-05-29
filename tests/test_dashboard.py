@@ -1,0 +1,112 @@
+"""Unit tests for the v6.0 dashboard static serving (api.py + eneru.web)."""
+
+from io import BytesIO
+from unittest.mock import MagicMock
+
+import pytest
+
+from eneru.api import EneruAPIHandler, SessionManager
+
+
+def _handler(config, *, path):
+    h = object.__new__(EneruAPIHandler)
+    h.path = path
+    h.api_config = config
+    h.api_source = MagicMock()
+    h.api_auth = None
+    h.api_sessions = None
+    h.headers = {}
+    h.rfile = BytesIO(b"")
+    return h
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path,ctype", [
+    ("/", "text/html"),
+    ("/app.js", "application/javascript"),
+    ("/style.css", "text/css"),
+])
+def test_static_assets_served(minimal_config, path, ctype):
+    h = _handler(minimal_config, path=path)
+    result = h._serve_static(path)
+    assert result is not None
+    assert result[0] == ctype
+    assert isinstance(result[1], bytes) and len(result[1]) > 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", [
+    "/../config.py", "/etc/passwd", "/sub/dir.js", "/nope.js",
+    "/api/v1/ups", "/..%2f", "/a/b",
+])
+def test_static_rejects_traversal_and_unknown(minimal_config, path):
+    assert _handler(minimal_config, path=path)._serve_static(path) is None
+
+
+@pytest.mark.unit
+def test_route_serves_index(minimal_config):
+    h = _handler(minimal_config, path="/")
+    status, ctype, body = h._route()
+    assert status == 200 and ctype == "text/html"
+    assert b"<title>Eneru</title>" in body
+    assert b'id="event-source-filter"' in body
+    assert b'id="event-type-filter"' in body
+
+
+@pytest.mark.unit
+def test_dashboard_open_even_with_require_for_reads(minimal_config):
+    # Static assets are served before the read gate, so the login page renders
+    # even when reads require auth.
+    minimal_config.api.auth.enabled = True
+    minimal_config.api.auth.require_for_reads = True
+    h = _handler(minimal_config, path="/")
+    h.api_sessions = SessionManager(3600)
+    assert h._route()[0] == 200
+
+
+@pytest.mark.unit
+def test_do_get_sets_csp_for_html(minimal_config):
+    h = _handler(minimal_config, path="/")
+    headers = []
+    h.send_response = lambda s: headers.append(("status", s))
+    h.send_header = lambda k, v: headers.append((k, v))
+    h.end_headers = lambda: None
+    h.wfile = BytesIO()
+    h.do_GET()
+    assert ("status", 200) in headers
+    assert ("Content-Type", "text/html; charset=utf-8") in headers
+    assert any(k == "Content-Security-Policy" for k, _ in headers)
+    assert ("X-Content-Type-Options", "nosniff") in headers
+    assert b"<title>Eneru</title>" in h.wfile.getvalue()
+
+
+@pytest.mark.unit
+def test_finish_writes_bytes_body_unchanged(minimal_config):
+    h = _handler(minimal_config, path="/style.css")
+    h.send_response = lambda s: None
+    h.send_header = lambda k, v: None
+    h.end_headers = lambda: None
+    h.wfile = BytesIO()
+    h._finish(200, "text/css", b"body{}")
+    assert h.wfile.getvalue() == b"body{}"
+
+
+@pytest.mark.unit
+def test_config_summary_exposes_nut_control(minimal_config):
+    from eneru.status import config_summary
+    anon = config_summary(minimal_config)
+    assert anon["nutControl"] == {"enabled": False}
+    ext = config_summary(minimal_config, extended=True)
+    assert "allowedCommands" in ext["nutControl"]
+    assert "allowedVariables" in ext["nutControl"]
+
+
+@pytest.mark.unit
+def test_dashboard_js_contains_plan_control_surfaces(minimal_config):
+    body = _handler(minimal_config, path="/app.js")._serve_static("/app.js")[1]
+    text = body.decode("utf-8")
+    assert "applyEventFilters" in text
+    assert "event-source-filter" in text
+    assert "event-type-filter" in text
+    assert "renderVariableForms" in text
+    assert "setVariable(" in text

@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eneru</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>⚡ Eneru</h1>
+    <div id="authbox" class="authbox">
+      <span id="who" class="who" hidden></span>
+      <button id="loginBtn" type="button">Sign in</button>
+      <button id="logoutBtn" type="button" hidden>Sign out</button>
+    </div>
+  </header>
+
+  <div id="error" class="error" hidden></div>
+
+  <main>
+    <section id="ups-section">
+      <h2>UPS status</h2>
+      <div id="ups-cards" class="cards"></div>
+    </section>
+
+    <section id="groups-section" hidden>
+      <h2>Redundancy groups</h2>
+      <div id="group-cards" class="cards"></div>
+    </section>
+
+    <section id="graph-section">
+      <h2>History</h2>
+      <div class="graph-controls">
+        <label>UPS <select id="graph-ups"></select></label>
+        <label>Metric
+          <select id="graph-metric">
+            <option value="charge">Battery charge (%)</option>
+            <option value="load">Load (%)</option>
+            <option value="runtime">Runtime (s)</option>
+            <option value="voltage">Input voltage (V)</option>
+          </select>
+        </label>
+      </div>
+      <div id="graph" class="graph"></div>
+    </section>
+
+    <section id="events-section">
+      <h2>Events</h2>
+      <div class="event-filters">
+        <label>Source
+          <select id="event-source-filter">
+            <option value="">All sources</option>
+          </select>
+        </label>
+        <label>Type
+          <select id="event-type-filter">
+            <option value="">All types</option>
+          </select>
+        </label>
+        <label>Text <input id="event-text-filter" type="search" placeholder="Filter details"></label>
+      </div>
+      <table id="events" class="events">
+        <thead><tr><th>Time</th><th>Type</th><th>Detail</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section id="control-section" hidden>
+      <h2>UPS control</h2>
+      <div id="control-panel"></div>
+    </section>
+  </main>
+
+  <!-- Login dialog -->
+  <div id="login-modal" class="modal" hidden>
+    <form id="login-form" class="modal-card">
+      <h3>Sign in</h3>
+      <label>Username <input id="login-user" autocomplete="username"></label>
+      <label>Password <input id="login-pass" type="password" autocomplete="current-password"></label>
+      <div class="modal-actions">
+        <button type="button" id="login-cancel">Cancel</button>
+        <button type="submit">Sign in</button>
+      </div>
+      <div id="login-error" class="error" hidden></div>
+    </form>
+  </div>
+
+  <footer><span id="status-line">Loading…</span></footer>
+  <script src="/app.js"></script>
+</body>
+</html>

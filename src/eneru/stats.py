@@ -204,6 +204,22 @@ class StatsStore:
         self._conn.execute("PRAGMA busy_timeout = 500")
         self._init_schema()
 
+    def apply_reload(self, stats_config) -> bool:
+        """Live-apply retention changes from a reloaded config.
+
+        Retention windows are plain attributes read by the purge cycle, so
+        updating them is safe at runtime. The DB path is NOT changed here (that
+        needs a restart). Returns True.
+        """
+        r = stats_config.retention
+        # Hold the store lock so the purge thread doesn't read a half-updated
+        # set of the three retention windows.
+        with self._db_lock:
+            self.retention_raw_hours = max(1, int(r.raw_hours))
+            self.retention_5min_days = max(1, int(r.agg_5min_days))
+            self.retention_hourly_days = max(1, int(r.agg_hourly_days))
+        return True
+
     def close(self) -> None:
         if self._conn is not None:
             try:

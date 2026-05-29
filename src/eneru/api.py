@@ -1,13 +1,19 @@
-"""Embedded read-only HTTP API and Prometheus endpoint."""
+"""Embedded HTTP API, Prometheus endpoint, and (v6.0) authenticated write-path."""
 
+import importlib.resources
 import json
 import math
+import os
+import re
+import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
+from eneru import nut_control as nutctl
+from eneru.auth import AuthStore
 from eneru.status import (
     HISTORY_METRICS,
     collect_status,
@@ -19,9 +25,111 @@ from eneru.status import (
     readiness,
 )
 
+# Cap request bodies so a hostile/accidental huge POST can't exhaust memory in a
+# handler thread. Auth + control payloads are tiny JSON objects.
+MAX_BODY_BYTES = 64 * 1024
+
+# Dashboard static assets (served from the eneru.web package). Only these flat
+# names are servable; the strict name check below makes path traversal impossible.
+_STATIC_CONTENT_TYPES = {
+    ".html": "text/html",
+    ".js": "application/javascript",
+    ".css": "text/css",
+}
+_DASHBOARD_INDEX = "index.html"
+# A conservative charset for upsrw values. NUT values are short tokens (numbers,
+# enum words, voltages). upscmd/upsrw run via execve arg lists (never a shell),
+# so this is defense-in-depth, not the only barrier — but it keeps control
+# characters and shell-ish metacharacters out of the value entirely.
+_SAFE_NUT_VALUE = re.compile(r"^[A-Za-z0-9 ._:+%/,\-]{1,64}$")
+# Strict response content-type whitelist (avoids header injection if a route
+# ever passes user data through as a content type).
+_CONTENT_TYPE_HEADERS = {
+    "application/json": "application/json; charset=utf-8",
+    "text/plain": "text/plain; charset=utf-8",
+    "text/html": "text/html; charset=utf-8",
+    "application/javascript": "application/javascript; charset=utf-8",
+    "text/css": "text/css; charset=utf-8",
+}
+
+# Serialize control writes per UPS so two concurrent requests can't race an
+# INSTCMD/SET against the same device. Keyed by the real NUT name.
+_ups_command_locks: Dict[str, threading.Lock] = {}
+_ups_locks_guard = threading.Lock()
+
+
+def _ups_lock(name: str) -> threading.Lock:
+    with _ups_locks_guard:
+        lock = _ups_command_locks.get(name)
+        if lock is None:
+            lock = threading.Lock()
+            _ups_command_locks[name] = lock
+        return lock
+
 
 class APIBadRequest(ValueError):
     """Raised when a client supplies invalid API query parameters."""
+
+
+class APIPayloadTooLarge(ValueError):
+    """Raised when a request body exceeds ``MAX_BODY_BYTES`` (413)."""
+
+
+class APIUnauthorized(Exception):
+    """Raised when a request needs a credential it didn't supply (401)."""
+
+
+class APIForbidden(Exception):
+    """Raised when an action is not permitted in the current mode (403)."""
+
+
+class SessionManager:
+    """In-memory bearer-token sessions with a fixed TTL.
+
+    Sessions are deliberately ephemeral — they live only in the daemon process
+    and are lost on restart. That's fine: a restart just means re-login, and
+    keeping them out of the DB avoids persisting anything credential-like.
+    Thread-safe because requests run on ThreadingHTTPServer worker threads.
+    """
+
+    def __init__(self, ttl_seconds: int) -> None:
+        self._ttl = max(1, int(ttl_seconds))
+        self._sessions: Dict[str, Tuple[Dict[str, Any], float]] = {}
+        self._lock = threading.Lock()
+
+    @property
+    def ttl(self) -> int:
+        """The effective session lifetime in seconds (clamped to >= 1)."""
+        return self._ttl
+
+    def create(self, principal: Dict[str, Any]) -> str:
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        expiry = now + self._ttl
+        with self._lock:
+            # Opportunistically drop expired entries so repeated logins don't
+            # grow the table unbounded (they're only otherwise reaped on reuse).
+            expired = [t for t, (_p, e) in self._sessions.items() if e < now]
+            for t in expired:
+                del self._sessions[t]
+            self._sessions[token] = (principal, expiry)
+        return token
+
+    def validate(self, token: str) -> Optional[Dict[str, Any]]:
+        now = time.time()
+        with self._lock:
+            entry = self._sessions.get(token)
+            if entry is None:
+                return None
+            principal, expiry = entry
+            if expiry < now:
+                del self._sessions[token]
+                return None
+            return principal
+
+    def invalidate(self, token: str) -> bool:
+        with self._lock:
+            return self._sessions.pop(token, None) is not None
 
 
 API_ENDPOINTS = (
@@ -45,8 +153,15 @@ API_ENDPOINTS = (
         "description": "Recent SQLite event rows",
         "query": {"limit": "1..10000", "verbosity": "0..2"},
     },
-    {"path": "/api/v1/config", "description": "Sanitized configuration summary"},
+    {"path": "/api/v1/config", "description": "Configuration summary (extended when authenticated)"},
     {"path": "/api/v1/remote-health", "description": "Remote SSH health rows"},
+    {"path": "/api/v1/auth/login", "description": "POST username/password for a session token (when auth enabled)"},
+    {"path": "/api/v1/auth/logout", "description": "POST to invalidate the current session token"},
+    {"path": "/api/v1/ups/{name}/commands", "description": "Allowlisted UPS commands (when nut_control enabled)"},
+    {"path": "/api/v1/ups/{name}/command", "description": "POST {command} to run an allowlisted upscmd"},
+    {"path": "/api/v1/ups/{name}/variables", "description": "Allowlisted writable UPS variables (upsrw)"},
+    {"path": "/api/v1/ups/{name}/variables/{var}", "description": "PUT {value} to set an allowlisted upsrw variable"},
+    {"path": "/api/v1/config/reload", "description": "POST to re-read config and apply the safe subset live"},
 )
 
 
@@ -64,6 +179,14 @@ class EneruAPIServer:
         self.log_fn: Callable[[str], None] = log_fn or (lambda msg: None)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
+        # Auth machinery is built only when api.auth is enabled; otherwise the
+        # handler leaves write routes hard-disabled (v5.3 read-only behavior).
+        self._auth_store: Optional[AuthStore] = None
+        self._sessions: Optional[SessionManager] = None
+        auth_cfg = getattr(config.api, "auth", None)
+        if auth_cfg is not None and auth_cfg.enabled:
+            self._auth_store = AuthStore(auth_cfg.db_path)
+            self._sessions = SessionManager(auth_cfg.session_ttl)
 
     def start(self) -> None:
         """Start the API server when enabled."""
@@ -72,10 +195,16 @@ class EneruAPIServer:
 
         source = self.source
         config = self.config
+        auth_store = self._auth_store
+        sessions = self._sessions
+        log_fn = self.log_fn
 
         class Handler(EneruAPIHandler):
             api_source = source
             api_config = config
+            api_auth = auth_store
+            api_sessions = sessions
+            api_log = staticmethod(log_fn)
 
         addr = (self.config.api.bind, int(self.config.api.port))
         try:
@@ -83,12 +212,14 @@ class EneruAPIServer:
         except OSError as exc:
             self.log_fn(f"⚠️ API server failed to bind {addr[0]}:{addr[1]}: {exc}")
             return
-        # Mark per-request worker threads as daemon. ThreadingHTTPServer's
-        # ``server_close()`` only stops the accept loop; in-flight worker
-        # threads keep running. With daemon_threads=True a hung handler
-        # cannot keep the daemon process alive past shutdown — this is
-        # acceptable here because every endpoint is read-only and idempotent.
-        self._httpd.daemon_threads = True
+        # v6.0: worker threads are NON-daemon. The API now has non-idempotent
+        # write endpoints (control commands, config reload), so a worker must
+        # not be cut off mid-request on shutdown — that would leave a caller
+        # unsure whether a command actually ran. ``stop()`` calls
+        # ``shutdown()`` + ``server_close()`` to drain in-flight handlers
+        # gracefully. Handlers are bounded (subprocess timeouts on control
+        # calls), so this can't hang shutdown indefinitely.
+        self._httpd.daemon_threads = False
         self._thread = threading.Thread(
             target=self._httpd.serve_forever,
             name="eneru-api",
@@ -96,15 +227,22 @@ class EneruAPIServer:
         )
         self._thread.start()
         self.log_fn(f"📊 API server listening on {addr[0]}:{addr[1]}")
-        # Single-line warning when bound off-loopback: the current API
-        # ships no authentication, so any caller that can reach the
-        # socket can read /api/v1/config. RBAC is planned for v6.0.
+        # Warn when bound off-loopback without auth: any caller that can reach
+        # the socket can read /api/v1/config. With api.auth enabled, writes are
+        # gated, so the warning softens to a reminder about open read endpoints.
         if not _is_loopback_bind(self.config.api.bind):
-            self.log_fn(
-                f"⚠️ API bound to {addr[0]} with no authentication "
-                "(RBAC planned for v6.0); restrict network access before "
-                "exposing beyond trusted hosts."
-            )
+            auth_cfg = getattr(self.config.api, "auth", None)
+            if auth_cfg and auth_cfg.enabled:
+                self.log_fn(
+                    f"ℹ️ API bound to {addr[0]} with auth enabled. Read endpoints "
+                    "stay open unless api.auth.require_for_reads is set."
+                )
+            else:
+                self.log_fn(
+                    f"⚠️ API bound to {addr[0]} with no authentication; enable "
+                    "api.auth or restrict network access before exposing beyond "
+                    "trusted hosts."
+                )
 
     def stop(self) -> None:
         """Stop the API server."""
@@ -120,58 +258,201 @@ class EneruAPIServer:
 
 
 class EneruAPIHandler(BaseHTTPRequestHandler):
-    """Request handler for the read-only v5.3 API."""
+    """Request handler for the Eneru API (reads + v6.0 authenticated writes)."""
 
     api_source: Any = None
     api_config: Any = None
+    # Set by EneruAPIServer.start() only when api.auth is enabled.
+    api_auth: Any = None
+    api_sessions: Any = None
+    api_log: Any = None
 
     server_version = "EneruAPI/1.0"
 
     def do_GET(self):  # noqa: N802 - stdlib hook
-        try:
-            status, content_type, body = self._route()
-        except APIBadRequest as exc:
-            status, content_type, body = (
-                400, "application/json",
-                self._error("INVALID_REQUEST", str(exc)),
-            )
-        except Exception:
-            status, content_type, body = (
-                500, "application/json",
-                {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}},
-            )
-        if content_type == "application/json":
-            raw = json.dumps(body, sort_keys=True).encode("utf-8")
-        else:
-            raw = str(body).encode("utf-8")
-        self.send_response(status)
-        # Keep the header value on a literal whitelist. Routes only return
-        # these two content types, but this avoids header-injection false
-        # positives if a future route accidentally passes user data through.
-        if content_type == "text/plain":
-            content_type_header = "text/plain; charset=utf-8"
-        else:
-            content_type_header = "application/json; charset=utf-8"
-        self.send_header("Content-Type", content_type_header)
-        self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(raw)
+        self._dispatch(self._route)
+
+    def do_POST(self):  # noqa: N802 - stdlib hook
+        self._dispatch(self._route_post)
+
+    def do_PUT(self):  # noqa: N802 - stdlib hook
+        self._dispatch(self._route_put)
+
+    def do_DELETE(self):  # noqa: N802 - stdlib hook
+        # No endpoint uses DELETE (API-key revocation is CLI-only); answer with
+        # a clean 405 rather than the stdlib's default 501.
+        self._finish(405, "application/json",
+                     self._error("METHOD_NOT_ALLOWED", "DELETE is not supported"))
 
     def log_message(self, fmt, *args):  # noqa: A003 - stdlib hook
         return
+
+    def _dispatch(self, router: Callable[[], Tuple[int, str, Any]]) -> None:
+        """Run a router, map exceptions to responses, and write the result."""
+        try:
+            status, content_type, body = router()
+        except APIBadRequest as exc:
+            status, content_type, body = (
+                400, "application/json", self._error("INVALID_REQUEST", str(exc)))
+        except APIPayloadTooLarge as exc:
+            status, content_type, body = (
+                413, "application/json", self._error("PAYLOAD_TOO_LARGE", str(exc)))
+        except APIUnauthorized as exc:
+            status, content_type, body = (
+                401, "application/json", self._error("UNAUTHORIZED", str(exc)))
+        except APIForbidden as exc:
+            status, content_type, body = (
+                403, "application/json", self._error("FORBIDDEN", str(exc)))
+        except Exception:
+            status, content_type, body = (
+                500, "application/json",
+                {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}})
+        self._finish(status, content_type, body)
+
+    def _finish(self, status: int, content_type: str, body: Any) -> None:
+        if content_type == "application/json":
+            raw = json.dumps(body, sort_keys=True).encode("utf-8")
+        elif isinstance(body, (bytes, bytearray)):
+            raw = bytes(body)
+        else:
+            raw = str(body).encode("utf-8")
+        self.send_response(status)
+        self.send_header(
+            "Content-Type",
+            _CONTENT_TYPE_HEADERS.get(content_type,
+                                      "application/json; charset=utf-8"))
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        if content_type == "text/html":
+            # The dashboard ships no inline scripts/styles and loads nothing
+            # third-party, so a strict same-origin CSP locks it down.
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+            self.send_header("X-Content-Type-Options", "nosniff")
+        if status == 401:
+            self.send_header("WWW-Authenticate", "Bearer")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _serve_static(self, path: str) -> Optional[Tuple[str, bytes]]:
+        """Return ``(content_type, bytes)`` for a dashboard asset, or None.
+
+        Only flat asset names from the ``eneru.web`` package are servable. The
+        strict name check (no ``/``, no ``..``) makes path traversal impossible.
+        """
+        name = _DASHBOARD_INDEX if path == "/" else path.lstrip("/")
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+            return None
+        content_type = _STATIC_CONTENT_TYPES.get(os.path.splitext(name)[1])
+        if content_type is None:
+            return None
+        try:
+            data = (importlib.resources.files("eneru.web") / name).read_bytes()
+        except (FileNotFoundError, OSError, ModuleNotFoundError):
+            return None
+        return content_type, data
+
+    # ----- auth helpers (v6.0) -----
+
+    def _bearer_token(self) -> Optional[str]:
+        """Return the credential from Authorization: Bearer or X-API-Key."""
+        header = self.headers.get("Authorization", "") or ""
+        # The auth scheme is case-insensitive per RFC 7235 ("Bearer"/"bearer").
+        if header[:7].lower() == "bearer ":
+            return header[7:].strip() or None
+        api_key = self.headers.get("X-API-Key")
+        return api_key.strip() if api_key else None
+
+    def _authenticate_request(self) -> Optional[Dict[str, Any]]:
+        """Resolve the caller from a session token, then an API key. None if neither."""
+        token = self._bearer_token()
+        if not token:
+            return None
+        if self.api_sessions is not None:
+            principal = self.api_sessions.validate(token)
+            if principal is not None:
+                return principal
+        if self.api_auth is not None:
+            try:
+                principal = self.api_auth.authenticate_api_key(token)
+            except Exception:
+                principal = None
+            if principal is not None:
+                return principal
+        return None
+
+    def _authorize(self, *, write: bool) -> Optional[Dict[str, Any]]:
+        """Enforce the tiered auth policy. Returns the principal (may be None).
+
+        - auth disabled: reads are open; **writes are hard-disabled (403)** —
+          "auth off" never means "control open".
+        - auth enabled: writes require a credential (401 otherwise); reads are
+          open unless ``require_for_reads``, then they require one too.
+        """
+        auth_cfg = getattr(self.api_config.api, "auth", None)
+        enabled = bool(auth_cfg and auth_cfg.enabled)
+        if not enabled:
+            if write:
+                raise APIForbidden(
+                    "write operations require api.auth.enabled")
+            return None
+        principal = self._authenticate_request()
+        if write:
+            if principal is None:
+                raise APIUnauthorized("authentication required")
+            return principal
+        if auth_cfg.require_for_reads and principal is None:
+            raise APIUnauthorized("authentication required")
+        return principal
+
+    def _read_json_body(self) -> Dict[str, Any]:
+        """Read + parse a JSON object body, bounded by ``MAX_BODY_BYTES``."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            raise APIBadRequest("invalid Content-Length")
+        if length < 0:
+            raise APIBadRequest("invalid Content-Length")
+        if length > MAX_BODY_BYTES:
+            raise APIPayloadTooLarge(
+                f"body exceeds {MAX_BODY_BYTES} bytes")
+        raw = self.rfile.read(length) if length else b""
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            raise APIBadRequest("body must be valid JSON")
+        if not isinstance(data, dict):
+            raise APIBadRequest("body must be a JSON object")
+        return data
 
     def _route(self) -> Tuple[int, str, Any]:
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         qs = parse_qs(parsed.query)
 
+        # Dashboard static assets (HTML/CSS/JS) carry no data and are served
+        # unauthenticated so the login form can render; the API calls the page
+        # then makes are themselves gated. Served whenever the API is enabled.
+        static = self._serve_static(path)
+        if static is not None:
+            content_type, data = static
+            return 200, content_type, data
+
+        # Liveness/readiness are always open — Kubernetes probes and load
+        # balancers can't carry credentials, and they expose no sensitive data.
         if path == "/health":
             return 200, "application/json", {"status": "ok", "generatedAt": time.time()}
 
         if path == "/ready":
             payload = readiness(self.api_source)
             return (200 if payload["ready"] else 503), "application/json", payload
+
+        # Every remaining GET is a read: open by default, gated when
+        # require_for_reads is set. principal is None for anonymous callers.
+        principal = self._authorize(write=False)
 
         if path == "/metrics":
             if not self.api_config.prometheus.enabled:
@@ -210,6 +491,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     "ups": ups_name, "metric": metric, "from": start,
                     "to": end, "data": rows,
                 }
+            if len(parts) == 6 and parts[5] == "commands":
+                return self._list_commands(ups_name)
+            if len(parts) == 6 and parts[5] == "variables":
+                return self._list_variables(ups_name)
 
         if path == "/api/v1/events":
             # Cap ``limit`` so a hostile or accidental ``?limit=10000000``
@@ -223,13 +508,265 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             }
 
         if path == "/api/v1/config":
-            return 200, "application/json", config_summary(self.api_config)
+            # Anonymous -> sanitized; authenticated -> extended (still no secrets).
+            return 200, "application/json", config_summary(
+                self.api_config, extended=principal is not None)
 
         if path == "/api/v1/remote-health":
             rows = live_remote_health(self.api_source, self.api_config)
             return 200, "application/json", {"generatedAt": time.time(), "servers": rows}
 
         return 404, "application/json", self._not_found("Endpoint not found")
+
+    def _route_post(self) -> Tuple[int, str, Any]:
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+
+        if path == "/api/v1/auth/login":
+            return self._handle_login()
+        if path == "/api/v1/auth/logout":
+            return self._handle_logout()
+        if path == "/api/v1/config/reload":
+            return self._handle_config_reload()
+
+        # POST /api/v1/ups/{name}/command
+        parts = path.split("/")
+        if len(parts) == 6 and parts[1:4] == ["api", "v1", "ups"] \
+                and parts[5] == "command":
+            return self._run_instant_command(unquote(parts[4]))
+
+        return 404, "application/json", self._not_found("Endpoint not found")
+
+    def _route_put(self) -> Tuple[int, str, Any]:
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        parts = path.split("/")
+        # PUT /api/v1/ups/{name}/variables/{var}
+        if len(parts) == 7 and parts[1:4] == ["api", "v1", "ups"] \
+                and parts[5] == "variables":
+            return self._set_variable(unquote(parts[4]), unquote(parts[6]))
+        return 404, "application/json", self._not_found("Endpoint not found")
+
+    def _handle_login(self) -> Tuple[int, str, Any]:
+        auth_cfg = getattr(self.api_config.api, "auth", None)
+        if not (auth_cfg and auth_cfg.enabled):
+            return 404, "application/json", self._not_found("Authentication is disabled")
+        data = self._read_json_body()
+        username = data.get("username")
+        password = data.get("password")
+        if not isinstance(username, str) or not isinstance(password, str) \
+                or not username or not password:
+            raise APIBadRequest("username and password are required")
+        try:
+            principal = self.api_auth.authenticate(username, password)
+        except Exception:
+            # bcrypt missing / store error — fail closed without leaking detail.
+            return 503, "application/json", self._error(
+                "AUTH_UNAVAILABLE", "authentication backend unavailable")
+        if principal is None:
+            raise APIUnauthorized("invalid credentials")
+        token = self.api_sessions.create(principal)
+        return 200, "application/json", {
+            "token": token,
+            "tokenType": "bearer",
+            # Report the manager's effective TTL (clamped), not the raw config,
+            # so the client's expiry matches the server's.
+            "expiresIn": self.api_sessions.ttl,
+        }
+
+    def _handle_logout(self) -> Tuple[int, str, Any]:
+        auth_cfg = getattr(self.api_config.api, "auth", None)
+        if not (auth_cfg and auth_cfg.enabled):
+            return 404, "application/json", self._not_found("Authentication is disabled")
+        token = self._bearer_token()
+        # Only an active session token can be logged out (API keys aren't
+        # sessions). Treat anything else as unauthenticated.
+        if not token or self.api_sessions.validate(token) is None:
+            raise APIUnauthorized("authentication required")
+        self.api_sessions.invalidate(token)
+        return 200, "application/json", {"status": "ok"}
+
+    # ----- config hot-reload (v6.0) -----
+
+    def _handle_config_reload(self) -> Tuple[int, str, Any]:
+        principal = self._authorize(write=True)
+        source = self.api_source
+        if not hasattr(source, "reload_config"):
+            return 503, "application/json", self._error(
+                "RELOAD_UNAVAILABLE", "config reload is not supported here")
+        report = source.reload_config()
+        self._audit(principal, "config", "reload",
+                    "ok" if report.get("reloaded") else "rejected")
+        status = 200 if report.get("reloaded") else 400
+        return status, "application/json", report
+
+    # ----- UPS control (v6.0) -----
+
+    def _require_nut_control(self):
+        """Return the nut_control config, or raise if the feature is off."""
+        nc = getattr(self.api_config, "nut_control", None)
+        if not (nc and nc.enabled):
+            raise APIForbidden("UPS control is disabled (set nut_control.enabled)")
+        return nc
+
+    def _resolve_ups_name(self, ups_name: str) -> Optional[str]:
+        """Return the real NUT name for a UPS id/name, or None if unknown."""
+        row = find_status(collect_status(self.api_source), ups_name)
+        return row["name"] if row is not None else None
+
+    def _effective_nut_control(self, ups_name: str):
+        """Resolve the nut_control config for one UPS.
+
+        A per-group override is already fully resolved at parse time (unset fields
+        inherited the global config), so it's used as-is — no per-field fallback
+        that could silently widen a deliberately-narrowed allowlist. The
+        ``enabled`` flag is always forced from the global config: a per-group
+        block can never enable control when the global gate is off.
+        """
+        glob = self.api_config.nut_control
+        for group in getattr(self.api_config, "ups_groups", []):
+            if group.ups.name == ups_name and getattr(group, "nut_control", None):
+                override = group.nut_control
+                from eneru.config import NutControlConfig
+                return NutControlConfig(
+                    enabled=glob.enabled,
+                    username=override.username,
+                    password=override.password,
+                    allowed_commands=override.allowed_commands,
+                    allowed_variables=override.allowed_variables,
+                    timeout=override.timeout,
+                )
+        return glob
+
+    def _list_commands(self, ups_name: str) -> Tuple[int, str, Any]:
+        self._authorize(write=True)
+        self._require_nut_control()
+        real = self._resolve_ups_name(ups_name)
+        if real is None:
+            return 404, "application/json", self._not_found("UPS not found")
+        nc = self._effective_nut_control(real)
+        ok, commands, err = nutctl.list_commands(real, timeout=nc.timeout)
+        if not ok:
+            return 502, "application/json", self._error("NUT_ERROR", err)
+        allowed = set(nc.allowed_commands)
+        return 200, "application/json", {
+            "ups": real,
+            "commands": sorted(c for c in commands if c in allowed),
+            "supported": sorted(commands),
+        }
+
+    def _list_variables(self, ups_name: str) -> Tuple[int, str, Any]:
+        self._authorize(write=True)
+        self._require_nut_control()
+        real = self._resolve_ups_name(ups_name)
+        if real is None:
+            return 404, "application/json", self._not_found("UPS not found")
+        nc = self._effective_nut_control(real)
+        ok, variables, err = nutctl.list_variables(real, timeout=nc.timeout)
+        if not ok:
+            return 502, "application/json", self._error("NUT_ERROR", err)
+        allowed = set(nc.allowed_variables)
+        return 200, "application/json", {
+            "ups": real,
+            "variables": [v for v in variables if v["name"] in allowed],
+        }
+
+    def _run_instant_command(self, ups_name: str) -> Tuple[int, str, Any]:
+        principal = self._authorize(write=True)
+        self._require_nut_control()
+        data = self._read_json_body()
+        command = data.get("command")
+        if not isinstance(command, str) or not command:
+            raise APIBadRequest("command is required")
+        real = self._resolve_ups_name(ups_name)
+        if real is None:
+            return 404, "application/json", self._not_found("UPS not found")
+        nc = self._effective_nut_control(real)
+        if command not in set(nc.allowed_commands):
+            self._audit(principal, "command", f"{real}:{command}", "denied")
+            raise APIForbidden(f"command {command!r} is not in allowed_commands")
+        with _ups_lock(real):
+            ok, out, err = nutctl.run_instant_command(
+                real, command, nc.username, nc.password, timeout=nc.timeout)
+        self._audit(principal, "command", f"{real}:{command}",
+                    "ok" if ok else "failed")
+        if not ok:
+            return 502, "application/json", self._error("NUT_ERROR", err)
+        return 200, "application/json", {"ups": real, "command": command,
+                                         "status": "ok", "output": out}
+
+    def _set_variable(self, ups_name: str, variable: str) -> Tuple[int, str, Any]:
+        principal = self._authorize(write=True)
+        self._require_nut_control()
+        data = self._read_json_body()
+        value = data.get("value")
+        if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+            raise APIBadRequest("value is required (string or number)")
+        value = str(value)
+        # The value is the only non-allowlisted user input that reaches the NUT
+        # CLI; constrain it to a safe charset (defense-in-depth — the call is an
+        # execve arg list, not a shell).
+        if not _SAFE_NUT_VALUE.match(value):
+            raise APIBadRequest("value contains unsupported characters")
+        real = self._resolve_ups_name(ups_name)
+        if real is None:
+            return 404, "application/json", self._not_found("UPS not found")
+        nc = self._effective_nut_control(real)
+        if variable not in set(nc.allowed_variables):
+            self._audit(principal, "variable", f"{real}:{variable}", "denied")
+            raise APIForbidden(f"variable {variable!r} is not in allowed_variables")
+        with _ups_lock(real):
+            ok, out, err = nutctl.set_variable(
+                real, variable, value, nc.username, nc.password, timeout=nc.timeout)
+        self._audit(principal, "variable", f"{real}:{variable}",
+                    "ok" if ok else "failed")
+        if not ok:
+            return 502, "application/json", self._error("NUT_ERROR", err)
+        return 200, "application/json", {"ups": real, "variable": variable,
+                                         "value": value, "status": "ok"}
+
+    @staticmethod
+    def _principal_label(principal: Optional[Dict[str, Any]]) -> str:
+        if not principal:
+            return "anonymous"
+        if principal.get("kind") == "api_key":
+            return f"apikey:{principal.get('label', principal.get('id'))}"
+        return str(principal.get("username", "unknown"))
+
+    _AUDIT_EVENT_TYPES = {
+        "command": "CONTROL_COMMAND",
+        "variable": "CONTROL_VARIABLE",
+        "config": "CONFIG_RELOAD",
+    }
+
+    @staticmethod
+    def _scrub(text: str) -> str:
+        """Strip control characters so audit values can't forge log/event lines."""
+        return "".join(c for c in str(text)
+                       if ord(c) >= 0x20 and ord(c) != 0x7f)
+
+    def _audit(self, principal, kind: str, target: str, result: str) -> None:
+        """Record a control action to the daemon log AND the SQLite events table
+        (v7.0 adds a tamper-evident audit log; this is the groundwork)."""
+        label = self._scrub(self._principal_label(principal))
+        target = self._scrub(target)
+        line = f"🔌 control: {label} {kind} {target} -> {result}"
+        if self.api_log is not None:
+            try:
+                self.api_log(line)
+            except Exception:
+                pass
+        source = self.api_source
+        if hasattr(source, "record_control_event"):
+            # target is "{ups}:{command_or_var}"; the UPS NUT name itself can
+            # contain a colon (e.g. UPS@host:3493), so split on the LAST one.
+            ups = target.rsplit(":", 1)[0] if ":" in target else ""
+            event_type = self._AUDIT_EVENT_TYPES.get(kind, "CONTROL")
+            try:
+                source.record_control_event(ups, event_type,
+                                            f"{label} {target} -> {result}")
+            except Exception:
+                pass
 
     @staticmethod
     def _error(code: str, message: str) -> Dict[str, Dict[str, str]]:
@@ -248,15 +785,26 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         }
 
     def _available_endpoints(self) -> List[Dict[str, Any]]:
-        # Don't advertise /metrics when Prometheus is disabled — the route
-        # genuinely returns 404 in that mode, so listing it would mislead
-        # clients that read availableEndpoints to discover what to call.
+        # Only advertise endpoints that are actually reachable in the active
+        # config — listing a route that returns 404/403 would mislead clients
+        # discovering the API via availableEndpoints.
         prometheus_enabled = bool(getattr(self.api_config.prometheus, "enabled", False))
-        return [
-            dict(endpoint)
-            for endpoint in API_ENDPOINTS
-            if endpoint["path"] != "/metrics" or prometheus_enabled
-        ]
+        auth_enabled = bool(getattr(getattr(self.api_config.api, "auth", None),
+                                    "enabled", False))
+        nut_enabled = bool(getattr(getattr(self.api_config, "nut_control", None),
+                                   "enabled", False))
+
+        def _visible(path: str) -> bool:
+            if path == "/metrics":
+                return prometheus_enabled
+            if path.startswith("/api/v1/auth/") or path == "/api/v1/config/reload":
+                return auth_enabled
+            if path.startswith("/api/v1/ups/{name}/command") or \
+                    path.startswith("/api/v1/ups/{name}/variables"):
+                return nut_enabled
+            return True
+
+        return [dict(e) for e in API_ENDPOINTS if _visible(e["path"])]
 
 
 def _parse_int_param(

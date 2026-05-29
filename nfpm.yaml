@@ -40,6 +40,7 @@ overrides:
       - python3
       - python3-yaml
       - python3-paho-mqtt
+      - python3-bcrypt
       - nut-client
     recommends:
       - apprise
@@ -59,10 +60,17 @@ overrides:
     # `pip install paho-mqtt` (use a venv or `--break-system-packages`
     # on EL10 per PEP 668). RHEL 9 with EPEL still resolves the
     # `recommends:` automatically.
+    # python3-bcrypt is a SOFT dep on RPM for the same EL10 reason as
+    # python3-paho-mqtt above: it may not resolve on every EL target.
+    # API auth is opt-in and src/eneru/auth.py lazy-imports bcrypt with an
+    # actionable install hint, so a missing package degrades cleanly rather
+    # than blocking the install. EL users who enable auth install it via
+    # `dnf install python3-bcrypt` (EPEL) or `pip install 'eneru[auth]'`.
     recommends:
       - apprise
       - openssh-clients
       - python3-paho-mqtt
+      - python3-bcrypt
 
 # Files to include in the package
 contents:
@@ -192,8 +200,29 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/reload.py
+    dst: /opt/ups-monitor/eneru/reload.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   - src: src/eneru/api.py
     dst: /opt/ups-monitor/eneru/api.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/auth.py
+    dst: /opt/ups-monitor/eneru/auth.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/nut_control.py
+    dst: /opt/ups-monitor/eneru/nut_control.py
     file_info:
       mode: 0644
       owner: root
@@ -294,6 +323,35 @@ contents:
 
   - src: src/eneru/tui.py
     dst: /opt/ups-monitor/eneru/tui.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  # Dashboard assets (served by the embedded API via importlib.resources).
+  - src: src/eneru/web/__init__.py
+    dst: /opt/ups-monitor/eneru/web/__init__.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/web/index.html
+    dst: /opt/ups-monitor/eneru/web/index.html
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/web/app.js
+    dst: /opt/ups-monitor/eneru/web/app.js
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/web/style.css
+    dst: /opt/ups-monitor/eneru/web/style.css
     file_info:
       mode: 0644
       owner: root
@@ -403,6 +461,14 @@ contents:
 
   # Create the /opt/ups-monitor/eneru/health subpackage directory
   - dst: /opt/ups-monitor/eneru/health
+    type: dir
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Create the /opt/ups-monitor/eneru/web subpackage directory (dashboard assets)
+  - dst: /opt/ups-monitor/eneru/web
     type: dir
     file_info:
       mode: 0755

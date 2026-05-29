@@ -43,10 +43,13 @@ nav:
       - Notifications: notifications.md
       - Remote servers: remote-servers.md
   - Operations:
+      - Web dashboard: dashboard.md
       - Containers and Kubernetes: containers-kubernetes.md
       - Migrate to container: migrate-to-container.md
       - Monitor and graphs: tui-graphs.md
       - Observability and API: observability-api.md
+      - Authentication: authentication.md
+      - UPS control: nut-control.md
       - Statistics: statistics.md
       - Troubleshooting: troubleshooting.md
   - Project:
