@@ -1310,18 +1310,17 @@ python3 -c "import json;assert json.load(open('/tmp/test54-reload.json'))['reloa
 ANON=$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:9100/api/v1/config/reload)
 [ "$ANON" = "401" ] || { echo "FAIL: anonymous reload returned $ANON, expected 401"; exit 1; }
 
-# A broken config is rejected and the daemon stays up.
+# A broken config is rejected and the daemon stays up. Use the synchronous API
+# endpoint (deterministic) rather than SIGHUP + log-polling (racy in CI).
 echo "ups: [broken" > "$CFG"
-kill -HUP "$DAEMON_PID"
-REPORTED=""
-for _ in $(seq 1 20); do
-  if grep -q "reload failed" /tmp/test54-daemon.log; then REPORTED=1; break; fi
-  sleep 0.5
-done
+BAD_HTTP=$(curl -sS -o /tmp/test54-bad.json -w '%{http_code}' \
+  -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9100/api/v1/config/reload)
+[ "$BAD_HTTP" = "400" ] || { echo "FAIL: bad reload HTTP $BAD_HTTP, expected 400"; cat /tmp/test54-bad.json; exit 1; }
+python3 -c "import json;r=json.load(open('/tmp/test54-bad.json'));assert r['reloaded'] is False and r['errors']" \
+  || { echo "FAIL: bad reload report not rejected"; cat /tmp/test54-bad.json; exit 1; }
+# Daemon stays up on a bad reload.
 curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 \
   || { echo "FAIL: daemon died on bad reload"; cat /tmp/test54-daemon.log; exit 1; }
-[ -n "$REPORTED" ] \
-  || { echo "FAIL: bad reload not reported"; cat /tmp/test54-daemon.log; exit 1; }
 
 kill "$DAEMON_PID" 2>/dev/null || true
 wait "$DAEMON_PID" 2>/dev/null || true
