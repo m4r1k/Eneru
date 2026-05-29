@@ -44,6 +44,10 @@ work but only their first 72 bytes are significant.
 
 ## Managing users
 
+> The examples below use the pip/developer command `eneru …`. On a **package
+> (deb/rpm) install**, invoke the wrapper instead:
+> `sudo python3 /opt/ups-monitor/eneru.py user create alice …`.
+
 ```bash
 # Create (interactive prompt by default — asks twice and confirms a match)
 eneru user create alice

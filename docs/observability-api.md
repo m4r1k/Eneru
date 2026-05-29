@@ -39,7 +39,8 @@ The API is disabled by default. When enabled, the default bind address is localh
 
 ### Authentication (v6.0)
 
-Authentication is opt-in via `api.auth.enabled` and is **tiered**:
+Authentication is opt-in via `api.auth.enabled` and is **tiered**. The login body
+is a JSON object: `{"username": "<username>", "password": "<password>"}`.
 
 | Surface | `auth.enabled=false` | `auth.enabled=true` |
 |---------|----------------------|---------------------|

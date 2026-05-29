@@ -46,7 +46,7 @@ nut_control:
 
 The NUT account must have the matching actions granted in `upsd.users`, e.g.:
 
-```
+```ini
 [eneru]
   password = secret
   instcmds = test.battery.start
