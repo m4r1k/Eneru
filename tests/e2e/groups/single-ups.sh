@@ -1323,5 +1323,47 @@ trap - EXIT
 echo "PASS: config hot-reload via SIGHUP and API verified"
 )
 
+# ======================================================================
+# Test 55: Browser dashboard is served by the embedded API (v6.0)
+# ======================================================================
+# The dashboard ships with the package and is served whenever the API is on.
+# Verifies the SPA shell + assets load and that path traversal is rejected.
+(
+echo ""
+echo ">>> Running: Test 55: Browser dashboard served by embedded API"
+
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+timeout 12s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml \
+  > /tmp/test55-daemon.log 2>&1 &
+DAEMON_PID=$!
+trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
+
+for _ in $(seq 1 20); do
+  curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 && break
+  sleep 0.5
+done
+
+curl -fsS http://127.0.0.1:9100/ > /tmp/test55-index.html \
+  || { echo "FAIL: dashboard index not served"; cat /tmp/test55-daemon.log; exit 1; }
+grep -q "<title>Eneru</title>" /tmp/test55-index.html \
+  || { echo "FAIL: dashboard index missing title"; cat /tmp/test55-index.html; exit 1; }
+curl -fsS http://127.0.0.1:9100/app.js   >/dev/null || { echo "FAIL: app.js not served"; exit 1; }
+curl -fsS http://127.0.0.1:9100/style.css >/dev/null || { echo "FAIL: style.css not served"; exit 1; }
+
+# Content-Type + CSP on the HTML response.
+HDRS=$(curl -fsS -D - -o /dev/null http://127.0.0.1:9100/)
+echo "$HDRS" | grep -qi "Content-Type: text/html" || { echo "FAIL: index not text/html"; echo "$HDRS"; exit 1; }
+echo "$HDRS" | grep -qi "Content-Security-Policy" || { echo "FAIL: missing CSP header"; echo "$HDRS"; exit 1; }
+
+# Path traversal / unknown asset -> 404.
+TRAV=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:9100/nope.js")
+[ "$TRAV" = "404" ] || { echo "FAIL: unknown asset returned $TRAV, expected 404"; exit 1; }
+
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+trap - EXIT
+echo "PASS: browser dashboard served with CSP and traversal protection"
+)
+
 echo ""
 echo "=== Group 'single-ups' completed successfully ==="

@@ -1,7 +1,10 @@
 """Embedded HTTP API, Prometheus endpoint, and (v6.0) authenticated write-path."""
 
+import importlib.resources
 import json
 import math
+import os
+import re
 import secrets
 import threading
 import time
@@ -25,6 +28,24 @@ from eneru.status import (
 # Cap request bodies so a hostile/accidental huge POST can't exhaust memory in a
 # handler thread. Auth + control payloads are tiny JSON objects.
 MAX_BODY_BYTES = 64 * 1024
+
+# Dashboard static assets (served from the eneru.web package). Only these flat
+# names are servable; the strict name check below makes path traversal impossible.
+_STATIC_CONTENT_TYPES = {
+    ".html": "text/html",
+    ".js": "application/javascript",
+    ".css": "text/css",
+}
+_DASHBOARD_INDEX = "index.html"
+# Strict response content-type whitelist (avoids header injection if a route
+# ever passes user data through as a content type).
+_CONTENT_TYPE_HEADERS = {
+    "application/json": "application/json; charset=utf-8",
+    "text/plain": "text/plain; charset=utf-8",
+    "text/html": "text/html; charset=utf-8",
+    "application/javascript": "application/javascript; charset=utf-8",
+    "text/css": "text/css; charset=utf-8",
+}
 
 # Serialize control writes per UPS so two concurrent requests can't race an
 # INSTCMD/SET against the same device. Keyed by the real NUT name.
@@ -267,23 +288,46 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     def _finish(self, status: int, content_type: str, body: Any) -> None:
         if content_type == "application/json":
             raw = json.dumps(body, sort_keys=True).encode("utf-8")
+        elif isinstance(body, (bytes, bytearray)):
+            raw = bytes(body)
         else:
             raw = str(body).encode("utf-8")
         self.send_response(status)
-        # Keep the header value on a literal whitelist. Routes only return
-        # these two content types, but this avoids header-injection false
-        # positives if a future route accidentally passes user data through.
-        if content_type == "text/plain":
-            content_type_header = "text/plain; charset=utf-8"
-        else:
-            content_type_header = "application/json; charset=utf-8"
-        self.send_header("Content-Type", content_type_header)
+        self.send_header(
+            "Content-Type",
+            _CONTENT_TYPE_HEADERS.get(content_type,
+                                      "application/json; charset=utf-8"))
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
+        if content_type == "text/html":
+            # The dashboard ships no inline scripts/styles and loads nothing
+            # third-party, so a strict same-origin CSP locks it down.
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+            self.send_header("X-Content-Type-Options", "nosniff")
         if status == 401:
             self.send_header("WWW-Authenticate", "Bearer")
         self.end_headers()
         self.wfile.write(raw)
+
+    def _serve_static(self, path: str) -> Optional[Tuple[str, bytes]]:
+        """Return ``(content_type, bytes)`` for a dashboard asset, or None.
+
+        Only flat asset names from the ``eneru.web`` package are servable. The
+        strict name check (no ``/``, no ``..``) makes path traversal impossible.
+        """
+        name = _DASHBOARD_INDEX if path == "/" else path.lstrip("/")
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+            return None
+        content_type = _STATIC_CONTENT_TYPES.get(os.path.splitext(name)[1])
+        if content_type is None:
+            return None
+        try:
+            data = (importlib.resources.files("eneru.web") / name).read_bytes()
+        except (FileNotFoundError, OSError, ModuleNotFoundError):
+            return None
+        return content_type, data
 
     # ----- auth helpers (v6.0) -----
 
@@ -363,6 +407,14 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         qs = parse_qs(parsed.query)
+
+        # Dashboard static assets (HTML/CSS/JS) carry no data and are served
+        # unauthenticated so the login form can render; the API calls the page
+        # then makes are themselves gated. Served whenever the API is enabled.
+        static = self._serve_static(path)
+        if static is not None:
+            content_type, data = static
+            return 200, content_type, data
 
         # Liveness/readiness are always open — Kubernetes probes and load
         # balancers can't carry credentials, and they expose no sensitive data.

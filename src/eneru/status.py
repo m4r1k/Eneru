@@ -607,8 +607,16 @@ def config_summary(config: Config, *, extended: bool = False) -> Dict[str, Any]:
             "enabled": config.notifications.enabled,
             "serviceCount": len(config.notifications.urls),
         },
+        "nutControl": {"enabled": config.nut_control.enabled},
         "detail": "extended" if extended else "sanitized",
     }
+    if extended:
+        # Structure, not secrets: the allowlists help the dashboard render the
+        # control surface. Credentials are never included.
+        summary["nutControl"]["allowedCommands"] = list(
+            config.nut_control.allowed_commands)
+        summary["nutControl"]["allowedVariables"] = list(
+            config.nut_control.allowed_variables)
     return summary
 
 

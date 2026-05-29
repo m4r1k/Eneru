@@ -77,6 +77,19 @@ before release per the changelog workflow in `AGENTS.md`.
     `docker kill -s HUP <container>` (tini forwards SIGHUP). Works in both
     single-UPS and multi-UPS (coordinator) modes.
 
+- **Browser dashboard (slice 5 of 6.0).** A small single-page dashboard served by
+  the embedded API server whenever the API is enabled — no external service, no
+  build step, no third-party JavaScript.
+  - UPS status cards, redundancy-group overview, hand-rolled SVG history graphs
+    (charge/load/runtime/voltage), an event timeline, and a control panel
+    (shown only when signed in and `nut_control` is enabled).
+  - Sign-in uses the auth API; the session token is held in `sessionStorage` and
+    sent as a `Bearer` header (no cookie, no CSRF). The page is a thin client —
+    all enforcement stays server-side.
+  - Served from the `eneru.web` package via `importlib.resources`; HTML carries a
+    strict `Content-Security-Policy` and `X-Content-Type-Options: nosniff`, and
+    only packaged asset names are servable (no path traversal).
+
 ---
 
 ## [5.5.1] - 2026-05-19

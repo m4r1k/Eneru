@@ -43,6 +43,7 @@ nav:
       - Notifications: notifications.md
       - Remote servers: remote-servers.md
   - Operations:
+      - Web dashboard: dashboard.md
       - Containers and Kubernetes: containers-kubernetes.md
       - Migrate to container: migrate-to-container.md
       - Monitor and graphs: tui-graphs.md

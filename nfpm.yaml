@@ -328,6 +328,35 @@ contents:
       owner: root
       group: root
 
+  # Dashboard assets (served by the embedded API via importlib.resources).
+  - src: src/eneru/web/__init__.py
+    dst: /opt/ups-monitor/eneru/web/__init__.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/web/index.html
+    dst: /opt/ups-monitor/eneru/web/index.html
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/web/app.js
+    dst: /opt/ups-monitor/eneru/web/app.js
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/web/style.css
+    dst: /opt/ups-monitor/eneru/web/style.css
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   # Systemd service file (use /lib for packages, not /etc)
   - src: packaging/eneru.service
     dst: /lib/systemd/system/eneru.service
@@ -432,6 +461,14 @@ contents:
 
   # Create the /opt/ups-monitor/eneru/health subpackage directory
   - dst: /opt/ups-monitor/eneru/health
+    type: dir
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Create the /opt/ups-monitor/eneru/web subpackage directory (dashboard assets)
+  - dst: /opt/ups-monitor/eneru/web
     type: dir
     file_info:
       mode: 0755

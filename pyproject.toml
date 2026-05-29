@@ -76,6 +76,8 @@ where = ["src"]
 # so `eneru completion <shell>` can read them via importlib.resources
 # regardless of install method (pip vs deb/rpm).
 "eneru.completion" = ["*.bash", "*.zsh", "*.fish"]
+# Ship the dashboard assets so importlib.resources can serve them (pip path).
+"eneru.web" = ["*.html", "*.css", "*.js"]
 
 [tool.setuptools.dynamic]
 # Resolve directly from src/eneru/version.py — pointing at
