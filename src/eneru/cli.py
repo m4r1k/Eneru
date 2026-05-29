@@ -766,6 +766,50 @@ def _prepare_runtime_config(config: Config, *, strict_key_check: bool = True) ->
     _inject_delegated_actions(config)
 
 
+def _auto_enable_auth_if_users_exist(config: Config) -> None:
+    """Turn API auth on automatically when the operator created users but never
+    set ``api.auth.enabled``.
+
+    The common footgun: an operator runs ``eneru user create …`` expecting to log
+    into the dashboard, but the running config never enabled auth, so login is
+    rejected with a confusing error. When (a) the API is on, (b) the operator did
+    not explicitly set ``api.auth.enabled`` (true *or* false), and (c) the auth DB
+    already holds at least one user, we flip auth on and say so loudly.
+
+    Deliberately conservative:
+
+    * An explicit ``enabled:`` in the config always wins — this only fills the
+      unset default, never overrides intent.
+    * Runs only for ``eneru run`` (after validation), never during ``validate``,
+      so static config checks stay pure and DB-independent.
+    * Skips entirely when the auth DB file does not yet exist, so a fresh install
+      never has an empty ``auth.db`` conjured into being as a startup side effect.
+    * Does NOT satisfy the ``nut_control`` fail-closed gate — UPS control still
+      requires an explicit ``api.auth.enabled: true`` (rejected earlier in
+      validation otherwise). This only smooths the dashboard-login path.
+    """
+    auth_cfg = getattr(config.api, "auth", None)
+    if not (config.api.enabled and auth_cfg is not None):
+        return
+    if auth_cfg.enabled or auth_cfg.enabled_explicitly_set:
+        return
+    if not Path(auth_cfg.db_path).exists():
+        return
+    try:
+        count = auth.AuthStore(auth_cfg.db_path).user_count()
+    except Exception:
+        # A broken/unreadable auth DB must not stop the daemon from starting;
+        # leave auth at its default-off state and let the API-layer notice warn.
+        return
+    if count > 0:
+        auth_cfg.enabled = True
+        print(
+            f"🔐 API authentication auto-enabled: {count} user(s) found in "
+            f"{auth_cfg.db_path} and api.auth.enabled was not set. "
+            "Set 'api.auth.enabled: false' explicitly to keep the API open."
+        )
+
+
 def _cmd_run(args):
     """Start the monitoring daemon."""
     config = _load_config(args)
@@ -776,6 +820,8 @@ def _cmd_run(args):
     _exit_on_config_errors(config, args)
     _exit_on_missing_loopback_contract(config)
     _exit_on_privilege_errors(config)
+
+    _auto_enable_auth_if_users_exist(config)
 
     if config.multi_ups or config.redundancy_groups:
         coordinator = MultiUPSCoordinator(config, exit_after_shutdown=args.exit_after_shutdown)

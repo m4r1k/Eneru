@@ -145,6 +145,28 @@ before release per the changelog workflow in `AGENTS.md`.
   not the daemon-wide stop event, so changing its interval/probe is like
   swapping one faucet cartridge without closing the whole house water main.
 
+### Fixed (rc5 — dashboard login UX)
+
+- **"Created a user but the dashboard won't let me sign in" fixed.** This was the
+  result of the API being enabled while `api.auth.enabled` stayed at its default
+  `false`: login returned `404 Authentication is disabled`, yet the dashboard
+  still showed a Sign-in button and only said "Sign in failed." Three changes
+  close the gap:
+  - **Auto-enable.** When the API is on, you did not explicitly set
+    `api.auth.enabled`, and the auth DB already has users, the daemon turns auth
+    on automatically and logs it. An explicit `enabled:` (true or false) always
+    wins; the auth DB is never created as a side effect; and `nut_control` still
+    requires an explicit `api.auth.enabled: true`.
+  - **Dashboard gating.** The dashboard reads `/api/v1/config` on load and hides
+    the Sign-in button when auth is disabled (nothing to sign into), and now
+    surfaces the server's actual error message on a failed login.
+  - **Startup notice.** The daemon logs a clear one-line notice when the API is
+    enabled but auth is off, explaining that Sign-in is hidden and how to enable
+    login and control.
+- No restart is required after `eneru user create`: the API reads the auth store
+  live on every request (short-lived connections), so a new user is usable
+  immediately.
+
 ---
 
 ## [5.5.1] - 2026-05-19

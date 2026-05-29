@@ -8,6 +8,9 @@ const TOKEN_KEY = "eneru_token";
 const SVG_NS = "http://www.w3.org/2000/svg";
 let lastEvents = [];
 let knownEventSources = [];
+// Whether the server has API auth enabled. Learned from /api/v1/config at start;
+// when false there is nothing to sign into, so the Sign-in button stays hidden.
+let authEnabled = false;
 
 function token() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
 function setToken(t) {
@@ -302,11 +305,21 @@ async function setVariable(ups, variable, value) {
 
 function refreshAuthUI() {
   const authed = !!token();
-  document.getElementById("loginBtn").hidden = authed;
+  // Hide Sign-in when already signed in OR when the server has auth disabled
+  // (login would just 404 with "Authentication is disabled").
+  document.getElementById("loginBtn").hidden = authed || !authEnabled;
   document.getElementById("logoutBtn").hidden = !authed;
   const who = document.getElementById("who");
   who.hidden = !authed;
   if (authed) who.textContent = "Signed in";
+}
+
+// Learn whether auth is enabled server-side. /api/v1/config is open (sanitized)
+// and reports api.auth.enabled even to anonymous callers.
+async function loadAuthState() {
+  const res = await api("/api/v1/config");
+  authEnabled = !!(res.ok && res.data && res.data.api &&
+                   res.data.api.auth && res.data.api.auth.enabled);
 }
 
 function openLogin() {
@@ -325,8 +338,12 @@ async function doLogin(ev) {
   if (res.ok && res.data && res.data.token) {
     setToken(res.data.token); closeLogin(); refreshAuthUI(); refresh();
   } else {
+    // Surface the server's actual reason (e.g. "Authentication is disabled",
+    // "invalid credentials") so a misconfiguration is self-diagnosable.
     const e = document.getElementById("login-error");
-    e.textContent = "Sign in failed."; e.hidden = false;
+    const detail = res.data && res.data.error && res.data.error.message;
+    e.textContent = detail ? ("Sign in failed: " + detail) : "Sign in failed.";
+    e.hidden = false;
   }
 }
 
@@ -361,7 +378,8 @@ async function refresh() {
   setStatus("Updated");
 }
 
-function init() {
+async function init() {
+  await loadAuthState();
   refreshAuthUI();
   document.getElementById("loginBtn").addEventListener("click", openLogin);
   document.getElementById("logoutBtn").addEventListener("click", doLogout);

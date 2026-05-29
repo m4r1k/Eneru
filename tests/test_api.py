@@ -1324,6 +1324,55 @@ def test_api_server_start_warns_on_non_loopback_bind(minimal_config):
 
 
 @pytest.mark.unit
+def test_api_server_start_notes_auth_off_on_loopback(minimal_config):
+    from unittest.mock import patch
+    from eneru.api import EneruAPIServer
+
+    # Loopback bind + auth disabled: no off-loopback warning, but a clear notice
+    # that Sign-in is hidden and how to enable login — so the hidden button is
+    # not a mystery.
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    log = []
+    server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
+
+    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+        server.start()
+
+    try:
+        assert any(
+            "authentication is disabled" in m
+            and "Sign-in is hidden" in m
+            and "eneru user create" in m
+            for m in log
+        ), log
+        # The off-loopback security warning must NOT fire on a loopback bind.
+        assert not any("no authentication" in m for m in log), log
+    finally:
+        server.stop()
+
+
+@pytest.mark.unit
+def test_api_server_start_no_auth_note_when_auth_enabled(minimal_config):
+    from unittest.mock import patch
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    minimal_config.api.auth.enabled = True
+    log = []
+    server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
+
+    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+        server.start()
+
+    try:
+        assert not any("authentication is disabled" in m for m in log), log
+    finally:
+        server.stop()
+
+
+@pytest.mark.unit
 def test_api_server_stop_no_op_when_not_started(minimal_config):
     from eneru.api import EneruAPIServer
 

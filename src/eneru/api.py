@@ -230,9 +230,10 @@ class EneruAPIServer:
         # Warn when bound off-loopback without auth: any caller that can reach
         # the socket can read /api/v1/config. With api.auth enabled, writes are
         # gated, so the warning softens to a reminder about open read endpoints.
+        auth_cfg = getattr(self.config.api, "auth", None)
+        auth_on = bool(auth_cfg and auth_cfg.enabled)
         if not _is_loopback_bind(self.config.api.bind):
-            auth_cfg = getattr(self.config.api, "auth", None)
-            if auth_cfg and auth_cfg.enabled:
+            if auth_on:
                 self.log_fn(
                     f"ℹ️ API bound to {addr[0]} with auth enabled. Read endpoints "
                     "stay open unless api.auth.require_for_reads is set."
@@ -243,6 +244,15 @@ class EneruAPIServer:
                     "api.auth or restrict network access before exposing beyond "
                     "trusted hosts."
                 )
+        elif not auth_on:
+            # Loopback + auth off: the dashboard hides its Sign-in button in this
+            # state, so spell out why and how to enable login/control. (The
+            # off-loopback branch already warns above.)
+            self.log_fn(
+                "ℹ️ API authentication is disabled; the dashboard is read-only "
+                "and Sign-in is hidden. Set api.auth.enabled: true and run "
+                "`eneru user create` to enable login and UPS control."
+            )
 
     def stop(self) -> None:
         """Stop the API server."""

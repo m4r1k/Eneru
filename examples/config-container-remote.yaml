@@ -41,3 +41,20 @@ api:
   enabled: true
   bind: "0.0.0.0"
   port: 9191
+  # Dashboard / write authentication (opt-in). Leave this block out and the API
+  # stays read-only: reads are open, writes (UPS control, config reload) are
+  # hard-disabled, and the dashboard Sign-in button is hidden.
+  #
+  # To enable login + control, create a user and either set `enabled: true`
+  # below or simply leave `enabled` unset — when the auth DB already has users
+  # and you have not pinned `enabled`, the daemon turns auth on automatically
+  # and logs it. UPS control (`nut_control.enabled: true`) always requires an
+  # explicit `enabled: true` here.
+  #
+  #   docker exec <container> eneru user create admin --generate
+  #
+  # auth:
+  #   enabled: true
+  #   require_for_reads: false   # set true to also gate read endpoints
+  #   session_ttl: 3600
+  #   db_path: "/var/lib/eneru/auth.db"

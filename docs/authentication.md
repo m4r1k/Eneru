@@ -108,6 +108,29 @@ api:
 | `api.auth.session_ttl` | `3600` | Dashboard session token lifetime, in seconds |
 | `api.auth.db_path` | `/var/lib/eneru/auth.db` | Location of the user/API-key store; CLI `--auth-db` overrides |
 
+### Auto-enable (create a user, then just sign in)
+
+If you start the daemon with the API on but **never set `api.auth.enabled`**,
+Eneru turns auth on automatically when the auth DB already holds at least one
+user, and logs a line saying so. This removes a common footgun: creating a user
+with `eneru user create` and then finding the dashboard rejects the login
+because auth was silently off.
+
+The rule is deliberately conservative:
+
+- An explicit `api.auth.enabled` (either `true` or `false`) **always wins** — set
+  `enabled: false` to keep the API open even with users present.
+- It runs only at `eneru run` startup, not during `eneru validate`, so static
+  config checks stay DB-independent.
+- It never creates the auth DB as a side effect — a fresh install with no
+  `auth.db` simply starts read-only.
+- It does **not** satisfy the `nut_control` fail-closed gate: UPS control still
+  requires an explicit `api.auth.enabled: true`.
+
+When the API is enabled but auth ends up off (no users, or `enabled: false`), the
+daemon logs a one-line notice at startup and the dashboard hides its **Sign-in**
+button — there is nothing to sign into.
+
 ## Containers
 
 In a container the store lives under the persisted `/var/lib/eneru` volume, so
