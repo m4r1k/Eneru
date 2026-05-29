@@ -234,6 +234,22 @@ points at the wrong machine — the SSH probe would return a different
 `/etc/machine-id`, the loopback would be marked FAILED, and `/ready`
 would return 503 before any destructive command is sent.
 
+## Config hot-reload in containers
+
+Edit the mounted config file on the host, then signal the container — `tini`
+(PID 1) forwards `SIGHUP` to the daemon:
+
+```bash
+docker kill -s HUP <container>     # or: podman kill -s HUP <container>
+```
+
+Eneru re-reads and validates the file and applies the safe subset live
+(thresholds, `nut_control` allowlists, `prometheus`, `dry_run`); a bad file is
+rejected and the running config is kept. Changes to bind/port, topology,
+logging, or DB paths still need a container restart. When the API is enabled you
+can instead `POST /api/v1/config/reload` with a credential. See
+[Configuration → Hot-reload](configuration.md#hot-reload).
+
 ## Podman and SELinux
 
 On SELinux hosts, label **eneru-owned** bind mounts (the

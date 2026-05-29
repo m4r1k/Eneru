@@ -1228,5 +1228,100 @@ trap - EXIT
 echo "PASS: UPS control fail-closed and allowlist enforcement verified"
 )
 
+# ======================================================================
+# Test 54: Config hot-reload — SIGHUP + API endpoint (v6.0)
+# ======================================================================
+# Edits a threshold in the live config, then reloads via SIGHUP and via the
+# authenticated API endpoint, asserting the daemon stays up and reports the
+# applied change. Also proves a bad config is rejected without dropping the
+# daemon.
+(
+echo ""
+echo ">>> Running: Test 54: Config hot-reload via SIGHUP and API"
+
+AUTH_DB="$(mktemp -d)/auth.db"
+printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$AUTH_DB"
+CFG=/tmp/config-e2e-reload.yaml
+
+write_cfg() {  # $1 = low_battery_threshold
+cat > "$CFG" <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+triggers:
+  low_battery_threshold: $1
+behavior:
+  dry_run: true
+statistics:
+  enabled: true
+  db_directory: "$(mktemp -d)"
+api:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 9100
+  auth:
+    enabled: true
+    db_path: "$AUTH_DB"
+notifications:
+  enabled: false
+local_shutdown:
+  enabled: false
+YAML
+}
+
+write_cfg 20
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+PYTHONUNBUFFERED=1 timeout 25s eneru run --config "$CFG" > /tmp/test54-daemon.log 2>&1 &
+DAEMON_PID=$!
+trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
+
+for _ in $(seq 1 20); do
+  curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 && break
+  sleep 0.5
+done
+
+# Edit the threshold, then SIGHUP -> the daemon applies it live and logs it.
+write_cfg 55
+kill -HUP "$DAEMON_PID"
+RELOADED=""
+for _ in $(seq 1 20); do
+  if grep -q "Config reloaded" /tmp/test54-daemon.log; then RELOADED=1; break; fi
+  sleep 0.5
+done
+[ -n "$RELOADED" ] || { echo "FAIL: SIGHUP reload not logged"; cat /tmp/test54-daemon.log; exit 1; }
+grep -q "triggers" /tmp/test54-daemon.log || { echo "FAIL: triggers not applied"; cat /tmp/test54-daemon.log; exit 1; }
+echo "PASS: SIGHUP applied the threshold change live"
+
+# API reload endpoint (authenticated) returns a report.
+TOKEN=$(curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"operator","password":"s3cret-pw"}' \
+  http://127.0.0.1:9100/api/v1/auth/login \
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
+write_cfg 60
+RELOAD_HTTP=$(curl -sS -o /tmp/test54-reload.json -w '%{http_code}' \
+  -X POST -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:9100/api/v1/config/reload)
+[ "$RELOAD_HTTP" = "200" ] || { echo "FAIL: API reload returned $RELOAD_HTTP"; cat /tmp/test54-reload.json; exit 1; }
+python3 -c "import json;assert json.load(open('/tmp/test54-reload.json'))['reloaded'] is True" \
+  || { echo "FAIL: API reload report not reloaded"; cat /tmp/test54-reload.json; exit 1; }
+
+# Anonymous reload is rejected.
+ANON=$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:9100/api/v1/config/reload)
+[ "$ANON" = "401" ] || { echo "FAIL: anonymous reload returned $ANON, expected 401"; exit 1; }
+
+# A broken config is rejected and the daemon stays up.
+echo "ups: [broken" > "$CFG"
+kill -HUP "$DAEMON_PID"
+sleep 2
+curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 \
+  || { echo "FAIL: daemon died on bad reload"; cat /tmp/test54-daemon.log; exit 1; }
+grep -q "reload failed" /tmp/test54-daemon.log \
+  || { echo "FAIL: bad reload not reported"; cat /tmp/test54-daemon.log; exit 1; }
+
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+trap - EXIT
+echo "PASS: config hot-reload via SIGHUP and API verified"
+)
+
 echo ""
 echo "=== Group 'single-ups' completed successfully ==="

@@ -1,0 +1,127 @@
+"""Config hot-reload (v6.0): re-read, validate, and apply the safe subset live.
+
+nginx-style: a bad config never takes the daemon down. We re-parse + validate;
+on any error we keep running on the old config and report the problem. Valid
+changes split into two buckets:
+
+- **Safe** sections are read live by the running daemon (the poll loop reads
+  ``self.config.triggers`` — a property over ``ups_groups[0].triggers`` — every
+  tick; the API handler reads ``self.config.nut_control`` / ``.prometheus`` each
+  request). We mutate those IN PLACE on the existing Config object(s), so every
+  holder that captured the same object — the API handler, each per-group monitor
+  — sees the new values immediately. We never *replace* a Config object, which
+  is exactly what would orphan those captured references.
+- Everything else (bind/port, UPS topology, logging, DB paths, notifications,
+  MQTT, remote-health) is captured at startup and reported as restart-required
+  rather than half-applied.
+"""
+
+from dataclasses import replace
+from typing import Dict, List, Optional, Tuple
+
+import yaml
+
+from eneru.config import Config, ConfigLoader
+
+# Top-level sections the running daemon reads live and can swap in place.
+SAFE_TOP_SECTIONS = ("behavior", "nut_control", "prometheus")
+# Top-level sections captured at startup; changes need a restart.
+RESTART_TOP_SECTIONS = (
+    "api", "logging", "notifications", "local_shutdown",
+    "statistics", "remote_health", "mqtt",
+)
+
+
+def load_and_validate(path: Optional[str]) -> Tuple[Optional[Config], List[str]]:
+    """Strictly load + validate a config file for reload.
+
+    Unlike ``ConfigLoader.load`` (which falls back to defaults on a bad file),
+    this returns ``(None, errors)`` so a broken file is reported, never applied.
+    """
+    if not path:
+        return None, ["no config file path is known; cannot reload"]
+    try:
+        with open(path, "r") as handle:
+            raw = yaml.safe_load(handle)
+    except (OSError, yaml.YAMLError) as exc:
+        return None, [f"cannot read config: {exc}"]
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        return None, ["config root must be a YAML mapping"]
+    cfg = ConfigLoader._parse_config(raw)
+    cfg.config_path = path
+    errors = [m for m in ConfigLoader.validate_config(cfg, raw)
+              if "ERROR" in m]
+    if errors:
+        return None, errors
+    return cfg, []
+
+
+def apply_reload(primary: Config, monitor_configs: List[Config],
+                 new: Config) -> Dict[str, List[str]]:
+    """Apply safe changes in place and classify the rest as restart-required.
+
+    ``primary`` is the config the API server shares; ``monitor_configs`` are the
+    per-group Config objects each monitor reads (in single-UPS mode this is just
+    ``[primary]``). Returns ``{"applied", "restartRequired"}``.
+    """
+    applied: List[str] = []
+    restart: List[str] = []
+    configs = [primary] + [c for c in monitor_configs if c is not primary]
+
+    # --- top-level sections ---
+    for section in SAFE_TOP_SECTIONS + RESTART_TOP_SECTIONS:
+        if getattr(primary, section) == getattr(new, section):
+            continue
+        if section in SAFE_TOP_SECTIONS:
+            for cfg in configs:
+                setattr(cfg, section, getattr(new, section))
+            applied.append(section)
+        else:
+            restart.append(section)
+
+    # --- topology (adding/removing UPS or redundancy groups) ---
+    old_names = {g.ups.name for cfg in configs for g in cfg.ups_groups}
+    new_names = {g.ups.name for g in new.ups_groups}
+    if old_names != new_names:
+        restart.append("ups_groups")
+    if primary.redundancy_groups != new.redundancy_groups:
+        restart.append("redundancy_groups")
+
+    # --- per-group triggers (safe) + other per-group fields (restart) ---
+    new_by_name = {g.ups.name: g for g in new.ups_groups}
+    for cfg in configs:
+        for grp in cfg.ups_groups:
+            ng = new_by_name.get(grp.ups.name)
+            if ng is None:
+                continue
+            if grp.triggers != ng.triggers:
+                grp.triggers = ng.triggers
+                _add(applied, f"triggers:{grp.ups.name}")
+            # Anything else changed on the group (VMs, containers, remote
+            # servers, ...) is captured by the shutdown path at run time and is
+            # reported as restart-required.
+            if replace(grp, triggers=ng.triggers) != ng:
+                _add(restart, f"ups_groups:{grp.ups.name}")
+
+    return {"applied": applied, "restartRequired": restart}
+
+
+def perform_reload(primary: Config, monitor_configs: List[Config],
+                   path: Optional[str]) -> Dict:
+    """Load+validate the file and apply the safe subset. Never raises on a bad
+    config — returns a report the caller can log or serialize."""
+    new, errors = load_and_validate(path)
+    if new is None:
+        return {"reloaded": False, "applied": [], "restartRequired": [],
+                "errors": errors}
+    report = apply_reload(primary, monitor_configs, new)
+    report["reloaded"] = True
+    report["errors"] = []
+    return report
+
+
+def _add(items: List[str], value: str) -> None:
+    if value not in items:
+        items.append(value)

@@ -124,6 +124,7 @@ API_ENDPOINTS = (
     {"path": "/api/v1/ups/{name}/command", "description": "POST {command} to run an allowlisted upscmd"},
     {"path": "/api/v1/ups/{name}/variables", "description": "Allowlisted writable UPS variables (upsrw)"},
     {"path": "/api/v1/ups/{name}/variables/{var}", "description": "PUT {value} to set an allowlisted upsrw variable"},
+    {"path": "/api/v1/config/reload", "description": "POST to re-read config and apply the safe subset live"},
 )
 
 
@@ -448,6 +449,8 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             return self._handle_login()
         if path == "/api/v1/auth/logout":
             return self._handle_logout()
+        if path == "/api/v1/config/reload":
+            return self._handle_config_reload()
 
         # POST /api/v1/ups/{name}/command
         parts = path.split("/")
@@ -503,6 +506,20 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             raise APIUnauthorized("authentication required")
         self.api_sessions.invalidate(token)
         return 200, "application/json", {"status": "ok"}
+
+    # ----- config hot-reload (v6.0) -----
+
+    def _handle_config_reload(self) -> Tuple[int, str, Any]:
+        principal = self._authorize(write=True)
+        source = self.api_source
+        if not hasattr(source, "reload_config"):
+            return 503, "application/json", self._error(
+                "RELOAD_UNAVAILABLE", "config reload is not supported here")
+        report = source.reload_config()
+        self._audit(principal, "config", "reload",
+                    "ok" if report.get("reloaded") else "rejected")
+        status = 200 if report.get("reloaded") else 400
+        return status, "application/json", report
 
     # ----- UPS control (v6.0) -----
 

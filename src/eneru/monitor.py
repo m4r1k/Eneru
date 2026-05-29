@@ -271,6 +271,10 @@ class UPSGroupMonitor(
         if not self._coordinator_mode:
             signal.signal(signal.SIGTERM, self._cleanup_and_exit)
             signal.signal(signal.SIGINT, self._cleanup_and_exit)
+            # SIGHUP re-reads config and applies the safe subset live
+            # (systemctl reload / docker kill -s HUP). In coordinator mode the
+            # coordinator owns the signal and reloads every group.
+            signal.signal(signal.SIGHUP, self._handle_sighup)
 
         if self.logger is None:
             self.logger = UPSLogger(self.config.logging.file, self.config)
@@ -1307,6 +1311,39 @@ class UPSGroupMonitor(
             ])
 
         self._execute_shutdown_sequence()
+
+    def reload_config(self) -> dict:
+        """Re-read the config file and apply the safe subset live.
+
+        Returns a report dict (also used by the API reload endpoint). Never
+        raises on a bad config — the daemon keeps running on the old one.
+        """
+        from eneru.reload import perform_reload
+        report = perform_reload(self.config, [self.config], self.config.config_path)
+        self._log_reload_report(report)
+        return report
+
+    def _handle_sighup(self, signum, frame):
+        """SIGHUP -> hot-reload config (systemctl reload / docker kill -s HUP)."""
+        self._log_message("🔄 SIGHUP received — reloading configuration")
+        self.reload_config()
+
+    def _log_reload_report(self, report: dict) -> None:
+        if not report.get("reloaded"):
+            self._log_message("⚠️ Config reload failed; keeping running config:")
+            for err in report.get("errors", []):
+                self._log_message(f"   {err}")
+            return
+        applied = report.get("applied") or []
+        restart = report.get("restartRequired") or []
+        if applied:
+            self._log_message(
+                f"✅ Config reloaded; applied live: {', '.join(applied)}")
+        if restart:
+            self._log_message(
+                f"ℹ️ Config changes that need a restart: {', '.join(restart)}")
+        if not applied and not restart:
+            self._log_message("ℹ️ Config reload: no changes detected")
 
     def _cleanup_and_exit(self, signum: int, frame):
         """Handle clean exit on signals."""

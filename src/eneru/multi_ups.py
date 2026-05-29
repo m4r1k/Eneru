@@ -90,6 +90,9 @@ class MultiUPSCoordinator:
         """Initialize shared resources."""
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
+        # SIGHUP hot-reloads config across every group (systemctl reload /
+        # docker kill -s HUP).
+        signal.signal(signal.SIGHUP, self._handle_sighup)
 
         self._logger = UPSLogger(self.config.logging.file, self.config)
 
@@ -645,6 +648,38 @@ class MultiUPSCoordinator:
                 self._stop_event.wait(1)
         except KeyboardInterrupt:
             self._handle_signal(signal.SIGINT, None)
+
+    def reload_config(self) -> dict:
+        """Re-read config and apply the safe subset live to every group.
+
+        Updates the coordinator's shared config and each per-group monitor's
+        config in place. Returns a report (also used by the API endpoint).
+        """
+        from eneru.reload import perform_reload
+        monitor_configs = [m.config for m in self._monitors]
+        report = perform_reload(self.config, monitor_configs, self.config.config_path)
+        self._log_reload_report(report)
+        return report
+
+    def _handle_sighup(self, signum, frame):
+        """SIGHUP -> hot-reload config across all groups."""
+        self._log("🔄 SIGHUP received — reloading configuration")
+        self.reload_config()
+
+    def _log_reload_report(self, report: dict) -> None:
+        if not report.get("reloaded"):
+            self._log("⚠️ Config reload failed; keeping running config:")
+            for err in report.get("errors", []):
+                self._log(f"   {err}")
+            return
+        applied = report.get("applied") or []
+        restart = report.get("restartRequired") or []
+        if applied:
+            self._log(f"✅ Config reloaded; applied live: {', '.join(applied)}")
+        if restart:
+            self._log(f"ℹ️ Config changes that need a restart: {', '.join(restart)}")
+        if not applied and not restart:
+            self._log("ℹ️ Config reload: no changes detected")
 
     def _handle_signal(self, signum: int, frame):
         """Handle SIGTERM/SIGINT for clean shutdown."""

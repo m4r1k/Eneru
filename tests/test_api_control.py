@@ -315,3 +315,81 @@ def test_audit_noop_without_log_and_swallows_errors(minimal_config):
 
     h.api_log = boom
     h._audit({"username": "x"}, "command", "t", "ok")  # swallowed
+
+
+# ----- config reload endpoint -----
+
+@pytest.mark.unit
+def test_config_reload_success(minimal_config):
+    minimal_config.api.auth.enabled = True
+    source = MagicMock()
+    source.reload_config.return_value = {
+        "reloaded": True, "applied": ["triggers:U@h"], "restartRequired": [],
+        "errors": []}
+    h = object.__new__(EneruAPIHandler)
+    h.api_config = minimal_config
+    h.api_source = source
+    h.api_sessions = SessionManager(3600)
+    h.api_auth = None
+    h.api_log = lambda m: None
+    token = h.api_sessions.create({"username": "a", "kind": "user"})
+    h.headers = {"Authorization": f"Bearer {token}"}
+    h.path = "/api/v1/config/reload"
+    h.rfile = BytesIO(b"")
+    status, _, payload = h._route_post()
+    assert status == 200 and payload["reloaded"] is True
+    source.reload_config.assert_called_once()
+
+
+@pytest.mark.unit
+def test_config_reload_invalid_returns_400(minimal_config):
+    minimal_config.api.auth.enabled = True
+    source = MagicMock()
+    source.reload_config.return_value = {
+        "reloaded": False, "applied": [], "restartRequired": [],
+        "errors": ["bad config"]}
+    h = object.__new__(EneruAPIHandler)
+    h.api_config = minimal_config
+    h.api_source = source
+    h.api_sessions = SessionManager(3600)
+    h.api_auth = None
+    h.api_log = lambda m: None
+    token = h.api_sessions.create({"username": "a", "kind": "user"})
+    h.headers = {"Authorization": f"Bearer {token}"}
+    h.path = "/api/v1/config/reload"
+    h.rfile = BytesIO(b"")
+    assert h._route_post()[0] == 400
+
+
+@pytest.mark.unit
+def test_config_reload_requires_auth(minimal_config):
+    from eneru.api import APIUnauthorized
+    minimal_config.api.auth.enabled = True
+    h = object.__new__(EneruAPIHandler)
+    h.api_config = minimal_config
+    h.api_source = MagicMock()
+    h.api_sessions = SessionManager(3600)
+    h.api_auth = None
+    h.api_log = lambda m: None
+    h.headers = {}
+    h.path = "/api/v1/config/reload"
+    h.rfile = BytesIO(b"")
+    with pytest.raises(APIUnauthorized):
+        h._route_post()
+
+
+@pytest.mark.unit
+def test_config_reload_unsupported_source_503(minimal_config):
+    minimal_config.api.auth.enabled = True
+    source = object()  # no reload_config attribute
+    h = object.__new__(EneruAPIHandler)
+    h.api_config = minimal_config
+    h.api_source = source
+    h.api_sessions = SessionManager(3600)
+    h.api_auth = None
+    h.api_log = lambda m: None
+    token = h.api_sessions.create({"username": "a", "kind": "user"})
+    h.headers = {"Authorization": f"Bearer {token}"}
+    h.path = "/api/v1/config/reload"
+    h.rfile = BytesIO(b"")
+    assert h._route_post()[0] == 503

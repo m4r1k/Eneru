@@ -200,6 +200,13 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/reload.py
+    dst: /opt/ups-monitor/eneru/reload.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   - src: src/eneru/api.py
     dst: /opt/ups-monitor/eneru/api.py
     file_info:

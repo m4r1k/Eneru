@@ -63,6 +63,20 @@ before release per the changelog workflow in `AGENTS.md`.
   - Each control action is logged with the initiating principal (v7.0 audit-log
     groundwork).
 
+- **Config hot-reload (slice 4 of 6.0).** Re-read configuration without dropping
+  the daemon, via `SIGHUP` or `POST /api/v1/config/reload` (authenticated).
+  - nginx-style: a bad config never takes the daemon down. The file is
+    re-parsed and validated; on any error the daemon keeps running on the old
+    config and reports the problem.
+  - Safe changes are applied live by mutating the shared config in place —
+    trigger thresholds (per group), `behavior.dry_run`, `nut_control`
+    allowlists/credentials, and the Prometheus toggle. Everything else
+    (bind/port, UPS topology, logging, DB paths, notifications, MQTT,
+    remote-health) is reported as restart-required rather than half-applied.
+  - systemd: `systemctl reload eneru` (new `ExecReload`). Containers:
+    `docker kill -s HUP <container>` (tini forwards SIGHUP). Works in both
+    single-UPS and multi-UPS (coordinator) modes.
+
 ---
 
 ## [5.5.1] - 2026-05-19

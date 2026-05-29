@@ -345,6 +345,36 @@ The v5.3 API is read-only, opt-in, and binds to localhost by default when enable
 
 `api.bind` defaults to `127.0.0.1`. If you set it to a non-loopback address, Eneru emits a startup warning because `/api/v1/config` returns server hostnames, SSH usernames, shutdown ordering, and presence flags with no auth. Front-end the API with SSH or a reverse proxy that adds auth before exposing it beyond a trusted boundary.
 
+## Hot-reload
+
+Eneru can re-read its configuration without restarting. Trigger it with `SIGHUP`
+or, when the API is enabled, an authenticated `POST /api/v1/config/reload`.
+
+Reload is nginx-style: the file is re-parsed and validated first, and if it is
+invalid the daemon **keeps running on the previous config** and logs the error —
+a typo never takes monitoring down. Valid changes are split in two:
+
+- **Applied live:** trigger thresholds (per UPS group), `behavior.dry_run`,
+  `nut_control` allowlists/credentials, and `prometheus.enabled`.
+- **Restart-required (reported, not applied):** `api.bind`/`port` and auth,
+  UPS/redundancy topology, `logging`, `statistics` (DB paths), `notifications`,
+  `mqtt`, and `remote_health`. Change these and restart the service.
+
+```bash
+# systemd / bare-metal
+sudo systemctl reload eneru          # sends SIGHUP via ExecReload
+
+# container (tini forwards the signal to the daemon)
+docker kill -s HUP <container>
+
+# via the API (needs a session token or API key)
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:9191/api/v1/config/reload
+```
+
+The reload response (and the daemon log) lists what was applied and what still
+needs a restart.
+
 `eneru run --api`, `--api-bind`, and `--api-port` override these API settings for one daemon invocation. This is mainly for Docker, Podman, and Kubernetes healthchecks where the image should expose `/health` even if the mounted config does not enable the API.
 
 `remote_health.probe_command` is rejected at validation time if it contains shell metacharacters (`;`, `|`, `&`, `$`, backtick, redirections, parentheses, or newlines) or any keyword in the dangerous-words blocklist. Probes are advisory: they never run pre-shutdown commands, VM/container shutdown commands, custom commands, or the configured `shutdown_command`.
