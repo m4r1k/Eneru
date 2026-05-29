@@ -25,10 +25,14 @@ from eneru.config import Config, ConfigLoader
 
 # Top-level sections the running daemon reads live and can swap in place.
 SAFE_TOP_SECTIONS = ("behavior", "nut_control", "prometheus")
-# Top-level sections captured at startup; changes need a restart.
+# Sections that are swapped in place but ALSO need a subsystem hook to re-init
+# cached state (the daemon calls subsystem.apply_reload after the swap).
+SUBSYSTEM_SECTIONS = ("notifications", "statistics")
+# Top-level sections captured at startup whose live re-init is deliberately not
+# supported (reconnecting MQTT / the SSH-health thread or swapping log handlers
+# mid-power-event risks dropping shutdown notifications); changes need a restart.
 RESTART_TOP_SECTIONS = (
-    "api", "logging", "notifications", "local_shutdown",
-    "statistics", "remote_health", "mqtt",
+    "api", "logging", "local_shutdown", "remote_health", "mqtt",
 )
 
 
@@ -74,18 +78,22 @@ def apply_reload(primary: Config, monitor_configs: List[Config],
     """
     applied: List[str] = []
     restart: List[str] = []
+    subsystems: List[str] = []
     configs = [primary] + [c for c in monitor_configs if c is not primary]
 
     # --- top-level sections ---
-    for section in SAFE_TOP_SECTIONS + RESTART_TOP_SECTIONS:
+    for section in SAFE_TOP_SECTIONS + SUBSYSTEM_SECTIONS + RESTART_TOP_SECTIONS:
         if getattr(primary, section) == getattr(new, section):
             continue
-        if section in SAFE_TOP_SECTIONS:
-            for cfg in configs:
-                setattr(cfg, section, getattr(new, section))
-            applied.append(section)
-        else:
+        if section in RESTART_TOP_SECTIONS:
             restart.append(section)
+            continue
+        # SAFE + SUBSYSTEM: swap in place so holders read the new values.
+        for cfg in configs:
+            setattr(cfg, section, getattr(new, section))
+        applied.append(section)
+        if section in SUBSYSTEM_SECTIONS:
+            subsystems.append(section)
 
     # --- topology (adding/removing UPS or redundancy groups) ---
     old_names = {g.ups.name for cfg in configs for g in cfg.ups_groups}
@@ -111,7 +119,8 @@ def apply_reload(primary: Config, monitor_configs: List[Config],
             if replace(grp, triggers=ng.triggers) != ng:
                 _add(restart, f"ups_groups:{grp.ups.name}")
 
-    return {"applied": applied, "restartRequired": restart}
+    return {"applied": applied, "restartRequired": restart,
+            "subsystems": subsystems}
 
 
 def perform_reload(primary: Config, monitor_configs: List[Config],
@@ -121,7 +130,7 @@ def perform_reload(primary: Config, monitor_configs: List[Config],
     new, errors = load_and_validate(path)
     if new is None:
         return {"reloaded": False, "applied": [], "restartRequired": [],
-                "errors": errors}
+                "subsystems": [], "errors": errors}
     report = apply_reload(primary, monitor_configs, new)
     report["reloaded"] = True
     report["errors"] = []

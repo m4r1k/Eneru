@@ -79,6 +79,25 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 A NUT-side failure (driver offline, permission denied) is returned as `502` with
 the underlying message; a disallowed command or variable is `403`.
 
-> **Multi-UPS note (v6.0):** `nut_control` credentials are global. Deployments
-> where different UPSes live on separate `upsd` servers with different
-> credentials are not yet supported; per-group credentials are planned.
+## Per-group overrides (multi-UPS)
+
+When different UPSes live on separate `upsd` servers with different credentials,
+override the global `nut_control` per group. The global block still **gates** the
+feature (`enabled`); each group supplies its own credentials/allowlists, falling
+back to the global values for any field it omits:
+
+```yaml
+nut_control:
+  enabled: true            # master switch (global)
+  username: eneru
+  password: secret
+  allowed_commands: [beeper.toggle]
+
+ups:
+  - name: "UPS1@hostA"
+    nut_control:           # overrides for this UPS only
+      username: opA
+      password: pwA
+      allowed_commands: [test.battery.start, beeper.toggle]
+  - name: "UPS2@hostB"     # no override -> uses the global credentials
+```

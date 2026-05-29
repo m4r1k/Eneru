@@ -89,7 +89,7 @@ done
 | Observability | API routing, readiness, Prometheus escaping, power-quality metrics, remote-health sidecars, MQTT publishing |
 | Authentication | User/API-key SQLite store (bcrypt hashing, salt uniqueness, truncation, CRUD), `eneru user`/`apikey` CLI lifecycle, password-input safety (getpass/generate/stdin), lazy bcrypt import |
 | API auth middleware | Session manager (TTL/expiry), tiered authorization matrix (reads open vs `require_for_reads`, writes fail-closed when auth off), bearer/API-key resolution, login/logout, body-size + JSON validation, tiered `/config` |
-| UPS control | `upscmd`/`upsrw` wrappers and output parsing, command/variable allowlist enforcement, feature-disabled and unknown-UPS handling, NUT-error mapping, fail-closed config validation (control requires auth), audit logging |
+| UPS control | `upscmd`/`upsrw` wrappers and output parsing, command/variable allowlist enforcement, per-group credential/allowlist overrides, feature-disabled and unknown-UPS handling, NUT-error mapping, fail-closed config validation (control requires auth), value sanitization, audit logging to the events table |
 | Config hot-reload | Strict load+validate (bad YAML / non-mapping / validation error rejected, running config kept), safe-vs-restart classification, in-place live apply across shared + per-monitor configs, SIGHUP handler and API `/config/reload` endpoint |
 | Web dashboard | Static asset serving via `importlib.resources`, MIME mapping, path-traversal rejection, strict CSP + `nosniff` on HTML, bytes-body responses, dashboard open before the read gate, `nutControl` exposure in the config summary |
 | Packaging | nFPM file list, package install paths, wrapper execution, OCI image smoke tests |

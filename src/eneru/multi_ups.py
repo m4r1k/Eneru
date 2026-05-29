@@ -658,8 +658,45 @@ class MultiUPSCoordinator:
         from eneru.reload import perform_reload
         monitor_configs = [m.config for m in self._monitors]
         report = perform_reload(self.config, monitor_configs, self.config.config_path)
+        if report.get("reloaded") and report.get("subsystems"):
+            self._apply_subsystem_reload(report["subsystems"])
         self._log_reload_report(report)
         return report
+
+    def _apply_subsystem_reload(self, subsystems: list) -> None:
+        """Re-init live subsystems across the coordinator (best-effort)."""
+        if "notifications" in subsystems and self._notification_worker is not None:
+            try:
+                self._notification_worker.apply_reload(self.config)
+            except Exception as exc:  # pragma: no cover - defensive
+                self._log(f"⚠️ notifications reload failed: {exc}")
+        if "statistics" in subsystems:
+            for mon in self._monitors:
+                store = getattr(mon, "_stats_store", None)
+                if store is not None:
+                    try:
+                        store.apply_reload(self.config.statistics)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        self._log(f"⚠️ stats retention reload failed: {exc}")
+
+    def record_control_event(self, ups_name: str, event_type: str,
+                             detail: str) -> None:
+        """Record an API control/reload action to the matching UPS's events
+        table (v7.0 audit-log groundwork). Best-effort."""
+        target = None
+        for mon in self._monitors:
+            groups = getattr(mon.config, "ups_groups", [])
+            if groups and groups[0].ups.name == ups_name:
+                target = mon
+                break
+        if target is None and self._monitors:
+            target = self._monitors[0]  # reload / unknown UPS -> first store
+        store = getattr(target, "_stats_store", None) if target else None
+        if store is not None:
+            try:
+                store.log_event(event_type, detail)
+            except Exception:  # pragma: no cover - defensive
+                pass
 
     def _handle_sighup(self, signum, frame):
         """SIGHUP -> hot-reload config across all groups (never crashes on error)."""

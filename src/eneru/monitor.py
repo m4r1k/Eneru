@@ -1320,8 +1320,33 @@ class UPSGroupMonitor(
         """
         from eneru.reload import perform_reload
         report = perform_reload(self.config, [self.config], self.config.config_path)
+        if report.get("reloaded") and report.get("subsystems"):
+            self._apply_subsystem_reload(report["subsystems"])
         self._log_reload_report(report)
         return report
+
+    def _apply_subsystem_reload(self, subsystems: list) -> None:
+        """Re-init live subsystems whose config changed (best-effort)."""
+        if "notifications" in subsystems and self._notification_worker is not None:
+            try:
+                self._notification_worker.apply_reload(self.config)
+            except Exception as exc:  # pragma: no cover - defensive
+                self._log_message(f"⚠️ notifications reload failed: {exc}")
+        if "statistics" in subsystems and self._stats_store is not None:
+            try:
+                self._stats_store.apply_reload(self.config.statistics)
+            except Exception as exc:  # pragma: no cover - defensive
+                self._log_message(f"⚠️ stats retention reload failed: {exc}")
+
+    def record_control_event(self, ups_name: str, event_type: str,
+                             detail: str) -> None:
+        """Record an API control/reload action to the SQLite events table
+        (v7.0 audit-log groundwork). Best-effort — never raises into the API."""
+        try:
+            if self._stats_store is not None:
+                self._stats_store.log_event(event_type, detail)
+        except Exception:  # pragma: no cover - defensive
+            pass
 
     def _handle_sighup(self, signum, frame):
         """SIGHUP -> hot-reload config (systemctl reload / docker kill -s HUP).

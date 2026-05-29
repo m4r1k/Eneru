@@ -90,6 +90,23 @@ before release per the changelog workflow in `AGENTS.md`.
     strict `Content-Security-Policy` and `X-Content-Type-Options: nosniff`, and
     only packaged asset names are servable (no path traversal).
 
+### Changed (rc2 — gap closure)
+
+- **Per-group `nut_control` overrides.** Multi-UPS deployments can override
+  control credentials/allowlists per `ups:` entry (for UPSes on different `upsd`
+  servers); the global block still gates the feature.
+- **Hot-reload now applies `notifications` and `statistics.retention` live**
+  (Apprise rebuild + retention update) in addition to thresholds/control/
+  prometheus. `mqtt`, `remote_health`, `logging`, and `statistics.db_directory`
+  remain **restart-required by design** — reconnecting MQTT/SSH-health or
+  swapping log handlers mid-power-event could drop shutdown notifications.
+- **Control/reload actions are recorded to the SQLite `events` table** (in
+  addition to the daemon log) as `CONTROL_COMMAND` / `CONTROL_VARIABLE` /
+  `CONFIG_RELOAD` rows — v7.0 audit-log groundwork.
+- The API answers unsupported `DELETE` requests with a clean `405`.
+- OCI CI now smoke-tests that the image serves the dashboard (`/`, `/app.js`)
+  and `/health`.
+
 ---
 
 ## [5.5.1] - 2026-05-19

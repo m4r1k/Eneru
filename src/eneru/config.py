@@ -394,6 +394,9 @@ class UPSGroupConfig:
     containers: ContainersConfig = field(default_factory=ContainersConfig)
     filesystems: FilesystemsConfig = field(default_factory=FilesystemsConfig)
     is_local: bool = False  # Does this UPS power the Eneru host?
+    # v6.0: optional per-group UPS-control override (creds/allowlists) for
+    # deployments where this UPS lives on a different upsd. None => use global.
+    nut_control: Optional[NutControlConfig] = None
 
     @property
     def is_multi_ups(self) -> bool:
@@ -1054,21 +1057,7 @@ class ConfigLoader:
         if 'nut_control' in data:
             raw_nc = data.get('nut_control')
             nc_data = raw_nc if isinstance(raw_nc, dict) else {}
-            # Coerce allowlists defensively: a scalar (``allowed_commands:
-            # load.off``) or ``null`` must not crash _parse_config or become a
-            # character list — validate_config reports the malformed type cleanly.
-            def _as_list(value):
-                return [str(v) for v in value] if isinstance(value, list) else []
-            config.nut_control = NutControlConfig(
-                enabled=nc_data.get('enabled', config.nut_control.enabled),
-                username=nc_data.get('username', config.nut_control.username),
-                password=nc_data.get('password', config.nut_control.password),
-                allowed_commands=_as_list(nc_data.get(
-                    'allowed_commands', config.nut_control.allowed_commands)),
-                allowed_variables=_as_list(nc_data.get(
-                    'allowed_variables', config.nut_control.allowed_variables)),
-                timeout=nc_data.get('timeout', config.nut_control.timeout),
-            )
+            config.nut_control = cls._parse_nut_control(nc_data, config.nut_control)
 
         # Detect legacy vs multi-UPS format
         ups_raw = data.get('ups', {})
@@ -1128,6 +1117,28 @@ class ConfigLoader:
         )
         return group
 
+    @staticmethod
+    def _parse_nut_control(nc_data: Dict[str, Any],
+                           base: "NutControlConfig") -> "NutControlConfig":
+        """Parse a nut_control mapping, inheriting unset fields from ``base``.
+
+        Allowlists are coerced defensively: a scalar or ``null`` becomes an empty
+        list (validate_config reports the malformed type) rather than crashing or
+        turning a string into a character list.
+        """
+        def _as_list(value):
+            return [str(v) for v in value] if isinstance(value, list) else []
+        return NutControlConfig(
+            enabled=nc_data.get('enabled', base.enabled),
+            username=nc_data.get('username', base.username),
+            password=nc_data.get('password', base.password),
+            allowed_commands=_as_list(nc_data.get('allowed_commands',
+                                                  base.allowed_commands)),
+            allowed_variables=_as_list(nc_data.get('allowed_variables',
+                                                   base.allowed_variables)),
+            timeout=nc_data.get('timeout', base.timeout),
+        )
+
     @classmethod
     def _parse_multi_ups(cls, ups_list: list,
                           global_triggers: TriggersConfig) -> List[UPSGroupConfig]:
@@ -1165,6 +1176,12 @@ class ConfigLoader:
             if 'filesystems' in entry:
                 fs_config = cls._parse_filesystems_config(entry['filesystems'])
 
+            # Per-group UPS-control override (creds/allowlists). None => global.
+            nut_control = None
+            if isinstance(entry.get('nut_control'), dict):
+                nut_control = cls._parse_nut_control(entry['nut_control'],
+                                                     NutControlConfig())
+
             group = UPSGroupConfig(
                 ups=ups_config,
                 triggers=triggers,
@@ -1173,6 +1190,7 @@ class ConfigLoader:
                 containers=containers_config,
                 filesystems=fs_config,
                 is_local=is_local,
+                nut_control=nut_control,
             )
             group._multi_ups = True
             groups.append(group)

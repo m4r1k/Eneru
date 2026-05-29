@@ -278,6 +278,12 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     def do_PUT(self):  # noqa: N802 - stdlib hook
         self._dispatch(self._route_put)
 
+    def do_DELETE(self):  # noqa: N802 - stdlib hook
+        # No endpoint uses DELETE (API-key revocation is CLI-only); answer with
+        # a clean 405 rather than the stdlib's default 501.
+        self._finish(405, "application/json",
+                     self._error("METHOD_NOT_ALLOWED", "DELETE is not supported"))
+
     def log_message(self, fmt, *args):  # noqa: A003 - stdlib hook
         return
 
@@ -608,12 +614,35 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         row = find_status(collect_status(self.api_source), ups_name)
         return row["name"] if row is not None else None
 
+    def _effective_nut_control(self, ups_name: str):
+        """Resolve the nut_control config for one UPS: the per-group override
+        (creds/allowlists) when present, else the global config. The global
+        ``enabled`` flag always gates the feature."""
+        glob = self.api_config.nut_control
+        override = None
+        for group in getattr(self.api_config, "ups_groups", []):
+            if group.ups.name == ups_name and getattr(group, "nut_control", None):
+                override = group.nut_control
+                break
+        if override is None:
+            return glob
+        from eneru.config import NutControlConfig
+        return NutControlConfig(
+            enabled=glob.enabled,
+            username=override.username or glob.username,
+            password=override.password or glob.password,
+            allowed_commands=override.allowed_commands or glob.allowed_commands,
+            allowed_variables=override.allowed_variables or glob.allowed_variables,
+            timeout=override.timeout or glob.timeout,
+        )
+
     def _list_commands(self, ups_name: str) -> Tuple[int, str, Any]:
         self._authorize(write=True)
-        nc = self._require_nut_control()
+        self._require_nut_control()
         real = self._resolve_ups_name(ups_name)
         if real is None:
             return 404, "application/json", self._not_found("UPS not found")
+        nc = self._effective_nut_control(real)
         ok, commands, err = nutctl.list_commands(real, timeout=nc.timeout)
         if not ok:
             return 502, "application/json", self._error("NUT_ERROR", err)
@@ -626,10 +655,11 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
     def _list_variables(self, ups_name: str) -> Tuple[int, str, Any]:
         self._authorize(write=True)
-        nc = self._require_nut_control()
+        self._require_nut_control()
         real = self._resolve_ups_name(ups_name)
         if real is None:
             return 404, "application/json", self._not_found("UPS not found")
+        nc = self._effective_nut_control(real)
         ok, variables, err = nutctl.list_variables(real, timeout=nc.timeout)
         if not ok:
             return 502, "application/json", self._error("NUT_ERROR", err)
@@ -641,17 +671,18 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
     def _run_instant_command(self, ups_name: str) -> Tuple[int, str, Any]:
         principal = self._authorize(write=True)
-        nc = self._require_nut_control()
+        self._require_nut_control()
         data = self._read_json_body()
         command = data.get("command")
         if not isinstance(command, str) or not command:
             raise APIBadRequest("command is required")
-        if command not in set(nc.allowed_commands):
-            self._audit(principal, "command", f"{ups_name}:{command}", "denied")
-            raise APIForbidden(f"command {command!r} is not in allowed_commands")
         real = self._resolve_ups_name(ups_name)
         if real is None:
             return 404, "application/json", self._not_found("UPS not found")
+        nc = self._effective_nut_control(real)
+        if command not in set(nc.allowed_commands):
+            self._audit(principal, "command", f"{real}:{command}", "denied")
+            raise APIForbidden(f"command {command!r} is not in allowed_commands")
         with _ups_lock(real):
             ok, out, err = nutctl.run_instant_command(
                 real, command, nc.username, nc.password, timeout=nc.timeout)
@@ -664,7 +695,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
     def _set_variable(self, ups_name: str, variable: str) -> Tuple[int, str, Any]:
         principal = self._authorize(write=True)
-        nc = self._require_nut_control()
+        self._require_nut_control()
         data = self._read_json_body()
         value = data.get("value")
         if not isinstance(value, (str, int, float)) or isinstance(value, bool):
@@ -675,12 +706,13 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         # execve arg list, not a shell).
         if not _SAFE_NUT_VALUE.match(value):
             raise APIBadRequest("value contains unsupported characters")
-        if variable not in set(nc.allowed_variables):
-            self._audit(principal, "variable", f"{ups_name}:{variable}", "denied")
-            raise APIForbidden(f"variable {variable!r} is not in allowed_variables")
         real = self._resolve_ups_name(ups_name)
         if real is None:
             return 404, "application/json", self._not_found("UPS not found")
+        nc = self._effective_nut_control(real)
+        if variable not in set(nc.allowed_variables):
+            self._audit(principal, "variable", f"{real}:{variable}", "denied")
+            raise APIForbidden(f"variable {variable!r} is not in allowed_variables")
         with _ups_lock(real):
             ok, out, err = nutctl.set_variable(
                 real, variable, value, nc.username, nc.password, timeout=nc.timeout)
@@ -699,18 +731,31 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             return f"apikey:{principal.get('label', principal.get('id'))}"
         return str(principal.get("username", "unknown"))
 
+    _AUDIT_EVENT_TYPES = {
+        "command": "CONTROL_COMMAND",
+        "variable": "CONTROL_VARIABLE",
+        "config": "CONFIG_RELOAD",
+    }
+
     def _audit(self, principal, kind: str, target: str, result: str) -> None:
-        """Record a control action to the daemon log (7.0 adds a tamper-evident
-        audit log; a structured log line is the groundwork)."""
-        if self.api_log is None:
-            return
-        try:
-            self.api_log(
-                f"🔌 control: {self._principal_label(principal)} {kind} "
-                f"{target} -> {result}"
-            )
-        except Exception:
-            pass
+        """Record a control action to the daemon log AND the SQLite events table
+        (v7.0 adds a tamper-evident audit log; this is the groundwork)."""
+        label = self._principal_label(principal)
+        line = f"🔌 control: {label} {kind} {target} -> {result}"
+        if self.api_log is not None:
+            try:
+                self.api_log(line)
+            except Exception:
+                pass
+        source = self.api_source
+        if hasattr(source, "record_control_event"):
+            ups = target.split(":", 1)[0] if ":" in target else ""
+            event_type = self._AUDIT_EVENT_TYPES.get(kind, "CONTROL")
+            try:
+                source.record_control_event(ups, event_type,
+                                            f"{label} {target} -> {result}")
+            except Exception:
+                pass
 
     @staticmethod
     def _error(code: str, message: str) -> Dict[str, Dict[str, str]]:

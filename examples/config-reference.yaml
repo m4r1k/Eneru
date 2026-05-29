@@ -175,6 +175,9 @@ nut_control:
   allowed_variables: []
   # Per-command subprocess timeout (seconds).
   timeout: 10
+  # Multi-UPS: when UPSes live on different upsd servers, override credentials
+  # and allowlists per group under each `ups:` entry's own `nut_control:` block
+  # (the global `enabled` above still gates the feature). See docs/nut-control.md.
 
 # ==============================================================================
 # NOTIFICATIONS (via Apprise)
