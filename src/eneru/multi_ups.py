@@ -683,6 +683,9 @@ class MultiUPSCoordinator:
                              detail: str) -> None:
         """Record an API control/reload action to the matching UPS's events
         table (v7.0 audit-log groundwork). Best-effort."""
+        # ups_name is the resolved NUT name (from the API handler), matched
+        # against each monitor's configured ups.name. If they ever diverge the
+        # event still lands (fallback below), just under the first store.
         target = None
         for mon in self._monitors:
             groups = getattr(mon.config, "ups_groups", [])

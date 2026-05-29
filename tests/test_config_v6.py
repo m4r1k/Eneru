@@ -47,6 +47,51 @@ def test_nut_control_allowlist_null_does_not_crash():
 
 
 @pytest.mark.unit
+def test_per_group_nut_control_scalar_allowlist_is_error():
+    # A narrowed group must never silently widen to the global allowlist via a
+    # malformed (scalar) value — it has to be a hard config error.
+    _, errs = _validate(
+        "api:\n  auth:\n    enabled: true\n"
+        "nut_control:\n  enabled: true\n  allowed_commands: [beeper.toggle]\n"
+        "ups:\n  - name: U1@h\n    nut_control:\n      allowed_commands: load.off\n")
+    assert any("ups 'U1@h' nut_control.allowed_commands must be a list" in e
+               for e in errs)
+
+
+@pytest.mark.unit
+def test_per_group_nut_control_bad_timeout_and_unknown_key():
+    _, errs = _validate(
+        "ups:\n  - name: U1@h\n    nut_control:\n      timeout: 'fast'\n"
+        "      allowed_command: [x]\n")
+    assert any("ups 'U1@h' nut_control.timeout must be an integer" in e for e in errs)
+    assert any("ups 'U1@h' nut_control.allowed_command" in e for e in errs)
+
+
+@pytest.mark.unit
+def test_per_group_nut_control_non_mapping_is_error():
+    _, errs = _validate("ups:\n  - name: U1@h\n    nut_control: true\n")
+    assert any("nut_control for UPS 'U1@h' must be a mapping" in e for e in errs)
+
+
+@pytest.mark.unit
+def test_per_group_inherits_global_but_empty_list_denies():
+    cfg, errs = _validate(
+        "api:\n  auth:\n    enabled: true\n"
+        "nut_control:\n  enabled: true\n  username: glob\n  password: gpw\n"
+        "  allowed_commands: [beeper.toggle]\n  timeout: 7\n"
+        "ups:\n  - name: U1@h\n    nut_control:\n      allowed_commands: []\n"
+        "  - name: U2@h\n    nut_control:\n      username: u2\n")
+    assert [e for e in errs if "ERROR" in e] == []
+    g1 = next(g for g in cfg.ups_groups if g.ups.name == "U1@h").nut_control
+    g2 = next(g for g in cfg.ups_groups if g.ups.name == "U2@h").nut_control
+    # explicit empty -> deny-all (NOT inherited)
+    assert g1.allowed_commands == []
+    # unset fields inherit the global config
+    assert g1.username == "glob" and g1.timeout == 7
+    assert g2.username == "u2" and g2.allowed_commands == ["beeper.toggle"]
+
+
+@pytest.mark.unit
 def test_valid_v6_config_has_no_errors():
     cfg, errs = _validate(
         "ups:\n  name: U@h\n"

@@ -369,6 +369,7 @@ jobs:
         run: |
           # The image's default CMD enables the API on 9191; the dashboard is
           # served from the eneru.web package via importlib.resources.
+          trap 'docker rm -f eneru-dash >/dev/null 2>&1 || true' EXIT
           docker run -d --name eneru-dash -p 127.0.0.1:9191:9191 eneru:ci
           ok=""
           for _ in $(seq 1 30); do

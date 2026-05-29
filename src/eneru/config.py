@@ -1064,7 +1064,8 @@ class ConfigLoader:
 
         if isinstance(ups_raw, list):
             # --- Multi-UPS mode ---
-            config.ups_groups = cls._parse_multi_ups(ups_raw, global_triggers)
+            config.ups_groups = cls._parse_multi_ups(
+                ups_raw, global_triggers, config.nut_control)
         else:
             # --- Legacy single-UPS mode ---
             config.ups_groups = [cls._parse_legacy_ups(data, ups_raw, global_triggers)]
@@ -1141,7 +1142,9 @@ class ConfigLoader:
 
     @classmethod
     def _parse_multi_ups(cls, ups_list: list,
-                          global_triggers: TriggersConfig) -> List[UPSGroupConfig]:
+                          global_triggers: TriggersConfig,
+                          global_nut_control: "NutControlConfig" = None
+                          ) -> List[UPSGroupConfig]:
         """Parse multi-UPS list format into UPSGroupConfig list."""
         groups = []
         for entry in ups_list:
@@ -1176,11 +1179,14 @@ class ConfigLoader:
             if 'filesystems' in entry:
                 fs_config = cls._parse_filesystems_config(entry['filesystems'])
 
-            # Per-group UPS-control override (creds/allowlists). None => global.
+            # Per-group UPS-control override. None => use the global config.
+            # When present, unset fields INHERIT the global config (base), and an
+            # explicitly-empty allowlist means deny-all for this group — so a
+            # narrowed group can never silently fall back to the wider global set.
             nut_control = None
             if isinstance(entry.get('nut_control'), dict):
-                nut_control = cls._parse_nut_control(entry['nut_control'],
-                                                     NutControlConfig())
+                base = global_nut_control or NutControlConfig()
+                nut_control = cls._parse_nut_control(entry['nut_control'], base)
 
             group = UPSGroupConfig(
                 ups=ups_config,
@@ -1306,20 +1312,41 @@ class ConfigLoader:
                 raw_data.get("mqtt", {}),
                 {"enabled", "broker", "topic_prefix", "publish_interval"},
             ))
-            messages.extend(cls._unknown_key_errors(
-                "nut_control",
-                raw_data.get("nut_control", {}),
-                {"enabled", "username", "password", "allowed_commands",
-                 "allowed_variables", "timeout"},
-            ))
-            raw_nc = raw_data.get("nut_control", {})
-            if isinstance(raw_nc, dict):
+            _nc_keys = {"enabled", "username", "password", "allowed_commands",
+                        "allowed_variables", "timeout"}
+
+            def _check_nut_control(block, label):
+                # Validate one nut_control mapping (global or per-group) so a
+                # malformed allowlist is a hard error, never a silent widening.
+                if not isinstance(block, dict):
+                    return
+                messages.extend(cls._unknown_key_errors(label, block, _nc_keys))
                 for list_key in ("allowed_commands", "allowed_variables"):
-                    val = raw_nc.get(list_key)
-                    # null/absent is fine (treated as empty); a scalar is not.
+                    val = block.get(list_key)
                     if val is not None and not isinstance(val, list):
                         messages.append(
-                            f"ERROR: nut_control.{list_key} must be a list")
+                            f"ERROR: {label}.{list_key} must be a list")
+                t = block.get("timeout")
+                if t is not None and (isinstance(t, bool) or not isinstance(t, int)
+                                      or t < 1):
+                    messages.append(
+                        f"ERROR: {label}.timeout must be an integer >= 1, "
+                        f"got {t!r}")
+
+            _check_nut_control(raw_data.get("nut_control", {}), "nut_control")
+            # Per-group overrides (multi-UPS list form).
+            raw_ups = raw_data.get("ups")
+            if isinstance(raw_ups, list):
+                for idx, entry in enumerate(raw_ups):
+                    if not isinstance(entry, dict) or "nut_control" not in entry:
+                        continue
+                    name = entry.get("name") or f"ups[{idx}]"
+                    block = entry["nut_control"]
+                    if not isinstance(block, dict):
+                        messages.append(
+                            f"ERROR: nut_control for UPS '{name}' must be a mapping")
+                        continue
+                    _check_nut_control(block, f"ups '{name}' nut_control")
             logging_raw = raw_data.get("logging", {})
             messages.extend(cls._unknown_key_errors(
                 "logging",

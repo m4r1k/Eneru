@@ -615,26 +615,28 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         return row["name"] if row is not None else None
 
     def _effective_nut_control(self, ups_name: str):
-        """Resolve the nut_control config for one UPS: the per-group override
-        (creds/allowlists) when present, else the global config. The global
-        ``enabled`` flag always gates the feature."""
+        """Resolve the nut_control config for one UPS.
+
+        A per-group override is already fully resolved at parse time (unset fields
+        inherited the global config), so it's used as-is — no per-field fallback
+        that could silently widen a deliberately-narrowed allowlist. The
+        ``enabled`` flag is always forced from the global config: a per-group
+        block can never enable control when the global gate is off.
+        """
         glob = self.api_config.nut_control
-        override = None
         for group in getattr(self.api_config, "ups_groups", []):
             if group.ups.name == ups_name and getattr(group, "nut_control", None):
                 override = group.nut_control
-                break
-        if override is None:
-            return glob
-        from eneru.config import NutControlConfig
-        return NutControlConfig(
-            enabled=glob.enabled,
-            username=override.username or glob.username,
-            password=override.password or glob.password,
-            allowed_commands=override.allowed_commands or glob.allowed_commands,
-            allowed_variables=override.allowed_variables or glob.allowed_variables,
-            timeout=override.timeout or glob.timeout,
-        )
+                from eneru.config import NutControlConfig
+                return NutControlConfig(
+                    enabled=glob.enabled,
+                    username=override.username,
+                    password=override.password,
+                    allowed_commands=override.allowed_commands,
+                    allowed_variables=override.allowed_variables,
+                    timeout=override.timeout,
+                )
+        return glob
 
     def _list_commands(self, ups_name: str) -> Tuple[int, str, Any]:
         self._authorize(write=True)

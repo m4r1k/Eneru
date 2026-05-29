@@ -534,7 +534,10 @@ class NotificationWorker:
         """Call Apprise. Returns True iff at least one backend
         accepted the message. Network/DNS errors → False (worker
         retries via the backoff schedule)."""
-        if not self._apprise_instance:
+        # Snapshot the instance once: apply_reload() may atomically rebind
+        # self._apprise_instance (or set it to None) from another thread mid-call.
+        instance = self._apprise_instance
+        if not instance:
             return False
         try:
             type_map = {
@@ -555,7 +558,7 @@ class NotificationWorker:
             if title:
                 notify_kwargs["title"] = title
 
-            return bool(self._apprise_instance.notify(**notify_kwargs))
+            return bool(instance.notify(**notify_kwargs))
         except Exception:
             return False
 
