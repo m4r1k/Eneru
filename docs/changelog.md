@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+Working notes for v6.0 (web dashboard, auth, UPS control, hot-reload). Trim
+before release per the changelog workflow in `AGENTS.md`.
+
+### Added
+
+- **Auth foundation (slice 1 of 6.0).** Local user accounts and API keys for the
+  API, stored in a dedicated global SQLite database (default
+  `/var/lib/eneru/auth.db`, override via `api.auth.db_path` / `--auth-db`).
+  - Passwords are stored as salted **bcrypt** hashes; API keys are random
+    `eneru_…` tokens stored as SHA-256 digests and shown once. No default user
+    and no default password ship — you create the first admin yourself.
+  - New CLI: `eneru user create|list|show|passwd|delete` and
+    `eneru apikey create|list|revoke`. Password input is interactive `getpass`,
+    `--generate`, or `--password-stdin` — there is deliberately no
+    `--password VALUE` flag (it would leak into shell history and `ps`).
+  - New config block `api.auth.{enabled,require_for_reads,session_ttl,db_path}`.
+    Opt-in: when `enabled` is false the API stays read-only (v5.3 behavior) and
+    every write surface is hard disabled. A `role` column (default `admin`) is
+    stored now so v7.0 RBAC is a data-fill, not a migration.
+  - `bcrypt` is a new optional `[auth]` extra: a hard `depends` on the deb
+    package and bundled in the container; a soft `recommends` on RPM (lazy
+    import with an actionable hint if absent).
+  - NUT auto-discovery, originally listed for v6.0, is **dropped**: it duplicates
+    `nut-scanner` and does not fit the config-first model. (Roadmap to be updated.)
+
+---
+
 ## [5.5.1] - 2026-05-19
 
 ### Fixed

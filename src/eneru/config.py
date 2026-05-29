@@ -107,11 +107,27 @@ class LoggingConfig:
 
 
 @dataclass
+class AuthConfig:
+    """API authentication configuration (v6.0).
+
+    Opt-in: when ``enabled`` is False the API behaves exactly as it did in
+    v5.3 (read-only, no credentials) and every write surface is hard
+    disabled. When True, all writes (UPS control, config reload) require a
+    valid credential; reads stay open unless ``require_for_reads`` is set.
+    """
+    enabled: bool = False
+    require_for_reads: bool = False
+    session_ttl: int = 3600
+    db_path: str = "/var/lib/eneru/auth.db"
+
+
+@dataclass
 class APIConfig:
-    """Embedded read-only HTTP API configuration."""
+    """Embedded HTTP API configuration."""
     enabled: bool = False
     bind: str = "127.0.0.1"
     port: int = 9191
+    auth: AuthConfig = field(default_factory=AuthConfig)
 
 
 @dataclass
@@ -965,10 +981,20 @@ class ConfigLoader:
             # ``.get`` instead of producing a clean validation message.
             raw_api = data.get('api')
             api_data = raw_api if isinstance(raw_api, dict) else {}
+            raw_auth = api_data.get('auth')
+            auth_data = raw_auth if isinstance(raw_auth, dict) else {}
             config.api = APIConfig(
                 enabled=api_data.get('enabled', config.api.enabled),
                 bind=api_data.get('bind', config.api.bind),
                 port=api_data.get('port', config.api.port),
+                auth=AuthConfig(
+                    enabled=auth_data.get('enabled', config.api.auth.enabled),
+                    require_for_reads=auth_data.get(
+                        'require_for_reads', config.api.auth.require_for_reads),
+                    session_ttl=auth_data.get(
+                        'session_ttl', config.api.auth.session_ttl),
+                    db_path=auth_data.get('db_path', config.api.auth.db_path),
+                ),
             )
 
         if 'prometheus' in data:
@@ -1199,8 +1225,15 @@ class ConfigLoader:
                 "behavior", raw_data.get("behavior", {}), {"dry_run"},
             ))
             messages.extend(cls._unknown_key_errors(
-                "api", raw_data.get("api", {}), {"enabled", "bind", "port"},
+                "api", raw_data.get("api", {}),
+                {"enabled", "bind", "port", "auth"},
             ))
+            raw_api_section = raw_data.get("api", {})
+            if isinstance(raw_api_section, dict):
+                messages.extend(cls._unknown_key_errors(
+                    "api.auth", raw_api_section.get("auth", {}),
+                    {"enabled", "require_for_reads", "session_ttl", "db_path"},
+                ))
             messages.extend(cls._unknown_key_errors(
                 "prometheus", raw_data.get("prometheus", {}), {"enabled"},
             ))

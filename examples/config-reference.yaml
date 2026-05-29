@@ -104,14 +104,30 @@ logging:
     facility: "daemon"
 
 # ==============================================================================
-# READ-ONLY API / OBSERVABILITY
+# HTTP API / OBSERVABILITY
 # ==============================================================================
 api:
-  # Embedded read-only HTTP API. Bind localhost by default because v5.3
-  # intentionally has no auth/authz; v6 will add protected control APIs.
+  # Embedded HTTP API. Bind localhost by default. Read endpoints are open;
+  # control/write endpoints (v6.0) are gated by the auth block below.
   enabled: false
   bind: "127.0.0.1"
   port: 9191
+
+  # API authentication (v6.0). OPT-IN: when disabled, the API behaves exactly
+  # as it did in v5.3 (read-only, no credentials) and every write surface is
+  # hard disabled — enabling a control feature (e.g. nut_control) while auth is
+  # off is a startup error. Manage users/keys with `eneru user` / `eneru apikey`.
+  auth:
+    enabled: false
+    # Tiered reads: when false (default), read endpoints stay open even with
+    # auth on (so Prometheus keeps scraping without a token); writes always
+    # require a credential. Set true to also require auth for reads.
+    require_for_reads: false
+    # Session token lifetime in seconds for dashboard logins.
+    session_ttl: 3600
+    # Where local users + API keys live. A dedicated global SQLite DB,
+    # separate from the per-UPS stats DBs. CLI `--auth-db` overrides this.
+    db_path: "/var/lib/eneru/auth.db"
 
 prometheus:
   # Served at /metrics on the API server.

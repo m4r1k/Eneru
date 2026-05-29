@@ -41,6 +41,9 @@ notifications = [
 mqtt = [
     "paho-mqtt>=2.0.0",
 ]
+auth = [
+    "bcrypt>=4.0.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
@@ -48,6 +51,7 @@ dev = [
     "pytest-timeout>=2.1.0",
     "apprise>=1.9.7",
     "paho-mqtt>=2.0.0",
+    "bcrypt>=4.0.0",
 ]
 docs = [
     "mkdocs>=1.6.1",

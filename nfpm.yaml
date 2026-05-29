@@ -40,6 +40,7 @@ overrides:
       - python3
       - python3-yaml
       - python3-paho-mqtt
+      - python3-bcrypt
       - nut-client
     recommends:
       - apprise
@@ -59,10 +60,17 @@ overrides:
     # `pip install paho-mqtt` (use a venv or `--break-system-packages`
     # on EL10 per PEP 668). RHEL 9 with EPEL still resolves the
     # `recommends:` automatically.
+    # python3-bcrypt is a SOFT dep on RPM for the same EL10 reason as
+    # python3-paho-mqtt above: it may not resolve on every EL target.
+    # API auth is opt-in and src/eneru/auth.py lazy-imports bcrypt with an
+    # actionable install hint, so a missing package degrades cleanly rather
+    # than blocking the install. EL users who enable auth install it via
+    # `dnf install python3-bcrypt` (EPEL) or `pip install 'eneru[auth]'`.
     recommends:
       - apprise
       - openssh-clients
       - python3-paho-mqtt
+      - python3-bcrypt
 
 # Files to include in the package
 contents:
@@ -194,6 +202,13 @@ contents:
 
   - src: src/eneru/api.py
     dst: /opt/ups-monitor/eneru/api.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/auth.py
+    dst: /opt/ups-monitor/eneru/auth.py
     file_info:
       mode: 0644
       owner: root

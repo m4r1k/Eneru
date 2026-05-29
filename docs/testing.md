@@ -87,6 +87,7 @@ done
 | Notifications | Formatting, retry queue, lifecycle classification, coalescing, suppression rules, container restart/upgrade stop-row deferral |
 | Statistics and TUI | SQLite schema, aggregation, event tier filtering, TUI grouping, graphs, one-shot monitor output |
 | Observability | API routing, readiness, Prometheus escaping, power-quality metrics, remote-health sidecars, MQTT publishing |
+| Authentication | User/API-key SQLite store (bcrypt hashing, salt uniqueness, truncation, CRUD), `eneru user`/`apikey` CLI lifecycle, password-input safety (getpass/generate/stdin), lazy bcrypt import |
 | Packaging | nFPM file list, package install paths, wrapper execution, OCI image smoke tests |
 
 ## End-to-end tests
@@ -117,7 +118,7 @@ The scenario files simulate online, on-battery, low-battery, FSD, brownout, over
 
 ### E2E test inventory
 
-The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 50 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
+The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 51 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
 
 | Test | Group | What it proves |
 |------|-------|----------------|
@@ -173,6 +174,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 50 numb
 | 48 | Loopback | Containerized local-host ownership delegates the same action set through a non-root SSH user with `use_sudo: true` |
 | 49 | Loopback | Missing `/etc/machine-id` bind mount keeps `/ready` false with a setup hint |
 | 50 | Loopback | Docker/Podman local capabilities with explicit no-loopback config fail startup |
+| 51 | CLI | `eneru user`/`apikey` lifecycle round-trips against a real bcrypt + SQLite auth DB (create/list/show/passwd/delete, key create/list/revoke), and never leaks a hash or key |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
 
 Every commit on the protected workflow has to prove the daemon works against real services, not just isolated Python assertions: real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.

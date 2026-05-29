@@ -317,9 +317,13 @@ The v5.3 API is read-only, opt-in, and binds to localhost by default when enable
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `api.enabled` | `false` | Start the embedded read-only HTTP API with `eneru run` |
+| `api.enabled` | `false` | Start the embedded HTTP API with `eneru run` |
 | `api.bind` | `127.0.0.1` | Listen address |
 | `api.port` | `9191` | Listen port |
+| `api.auth.enabled` | `false` | Opt-in API authentication. When off, the API is read-only and all write surfaces are hard disabled (v5.3 behavior) |
+| `api.auth.require_for_reads` | `false` | When off, read endpoints (incl. `/metrics`) stay open even with auth on; writes always require a credential. Set on to also gate reads |
+| `api.auth.session_ttl` | `3600` | Dashboard session token lifetime, seconds |
+| `api.auth.db_path` | `/var/lib/eneru/auth.db` | Where local users and API keys are stored (global SQLite DB, separate from per-UPS stats). CLI `--auth-db` overrides |
 | `prometheus.enabled` | `true` | Serve Prometheus text metrics at `/metrics` |
 | `remote_health.enabled` | `true` | Run harmless SSH probes for explicitly enabled remote servers |
 | `remote_health.startup_check` | `true` | Check remote SSH connectivity at daemon startup |

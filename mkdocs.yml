@@ -47,6 +47,7 @@ nav:
       - Migrate to container: migrate-to-container.md
       - Monitor and graphs: tui-graphs.md
       - Observability and API: observability-api.md
+      - Authentication: authentication.md
       - Statistics: statistics.md
       - Troubleshooting: troubleshooting.md
   - Project:

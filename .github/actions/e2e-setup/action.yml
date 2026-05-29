@@ -31,7 +31,7 @@ runs:
 
     - name: Install Eneru
       shell: bash
-      run: pip install ".[notifications,mqtt]"
+      run: pip install ".[notifications,mqtt,auth]"
 
     - name: Install system dependencies
       shell: bash

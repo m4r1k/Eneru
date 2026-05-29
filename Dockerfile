@@ -38,7 +38,7 @@ COPY . .
 # into /wheels. The runtime stage installs from this offline cache, so
 # pip never hits PyPI at runtime-stage time — reproducible across
 # rebuilds when the source is identical.
-RUN pip wheel --wheel-dir /wheels ".[notifications,mqtt]"
+RUN pip wheel --wheel-dir /wheels ".[notifications,mqtt,auth]"
 
 
 # ----------------------------- runtime stage --------------------------------
@@ -79,7 +79,7 @@ RUN apt-get update \
 # silent re-resolve at runtime-stage time.
 COPY --from=builder /wheels /wheels
 RUN pip install --no-index --find-links=/wheels \
-        "eneru[notifications,mqtt]" \
+        "eneru[notifications,mqtt,auth]" \
     && rm -rf /wheels
 
 COPY packaging/eneru-wrapper.py /opt/ups-monitor/eneru.py

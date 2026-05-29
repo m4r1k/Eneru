@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from eneru import auth
 from eneru.version import __version__
 from eneru.config import Config, ConfigLoader, UPSConfig, UPSGroupConfig
 from eneru.monitor import UPSGroupMonitor, compute_effective_order
@@ -1518,6 +1519,158 @@ def _cmd_shutdown_group(args):
     logger.log("Manual group shutdown rehearsal complete.")
 
 
+# ----- user / apikey management (v6.0 auth foundation) -----
+
+
+def _fmt_ts(ts) -> str:
+    """Format an epoch-seconds value as local YYYY-MM-DD HH:MM:SS."""
+    if not ts:
+        return "never"
+    return datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _resolve_auth_store(args):
+    """Build an AuthStore from --auth-db, else config api.auth.db_path.
+
+    --auth-db wins and skips config loading entirely (faster, no warnings) so
+    tests, containers, and custom installs can point at any path.
+    """
+    auth_db = getattr(args, "auth_db", None)
+    if auth_db:
+        return auth.AuthStore(auth_db)
+    config = _load_config(args)
+    return auth.AuthStore(config.api.auth.db_path)
+
+
+def _resolve_password(args):
+    """Resolve a password without ever accepting it as a CLI argument value.
+
+    Order: ``--generate`` -> ``--password-stdin`` -> interactive ``getpass``
+    (which always asks twice and checks the two entries match). Returns
+    ``(password, generated)``. A bare ``--password VALUE`` flag is deliberately
+    absent: it would leak into shell history and ``ps``.
+    """
+    if getattr(args, "generate", False):
+        return auth.generate_password(), True
+    if getattr(args, "password_stdin", False):
+        data = sys.stdin.read()
+        # Strip exactly one trailing newline (the docker-style convention),
+        # preserving any other surrounding characters the password may contain.
+        password = data[:-1] if data.endswith("\n") else data
+        if not password:
+            raise SystemExit("ERROR: no password received on stdin")
+        return password, False
+    import getpass
+    password = getpass.getpass("Password: ")
+    if not password:
+        raise SystemExit("ERROR: empty password")
+    if getpass.getpass("Confirm password: ") != password:
+        raise SystemExit("ERROR: passwords do not match")
+    return password, False
+
+
+def _cmd_user_create(args):
+    """Create a local user account."""
+    store = _resolve_auth_store(args)
+    password, generated = _resolve_password(args)
+    try:
+        store.create_user(args.username, password, role=args.role)
+    except auth.AuthError as exc:
+        raise SystemExit(f"ERROR: {exc}")
+    print(f"✅ Created user '{args.username}' (role: {args.role}).")
+    if generated:
+        print(f"Generated password: {password}")
+        print("Store it now — it is not recoverable.")
+
+
+def _cmd_user_passwd(args):
+    """Reset a user's password."""
+    store = _resolve_auth_store(args)
+    password, generated = _resolve_password(args)
+    try:
+        store.set_password(args.username, password)
+    except auth.AuthError as exc:
+        raise SystemExit(f"ERROR: {exc}")
+    print(f"✅ Updated password for '{args.username}'.")
+    if generated:
+        print(f"Generated password: {password}")
+        print("Store it now — it is not recoverable.")
+
+
+def _cmd_user_list(args):
+    """List all local users."""
+    store = _resolve_auth_store(args)
+    users = store.list_users()
+    if not users:
+        print("No users configured.")
+        return
+    print(f"{'USERNAME':<24} {'ROLE':<10} {'CREATED':<20} {'PW CHANGED':<20}")
+    for u in users:
+        print(
+            f"{u['username']:<24} {u['role']:<10} "
+            f"{_fmt_ts(u['created_at']):<20} {_fmt_ts(u['password_changed_at']):<20}"
+        )
+
+
+def _cmd_user_show(args):
+    """Show one user's metadata (never the password hash)."""
+    store = _resolve_auth_store(args)
+    u = store.get_user(args.username)
+    if u is None:
+        raise SystemExit(f"ERROR: user {args.username!r} not found")
+    print(f"Username:         {u['username']}")
+    print(f"Role:             {u['role']}")
+    print(f"Created:          {_fmt_ts(u['created_at'])}")
+    print(f"Password changed: {_fmt_ts(u['password_changed_at'])}")
+
+
+def _cmd_user_delete(args):
+    """Delete a user account."""
+    store = _resolve_auth_store(args)
+    try:
+        store.delete_user(args.username)
+    except auth.AuthError as exc:
+        raise SystemExit(f"ERROR: {exc}")
+    print(f"✅ Deleted user '{args.username}'.")
+
+
+def _cmd_apikey_create(args):
+    """Create an API key and print it once."""
+    store = _resolve_auth_store(args)
+    try:
+        key_id, key = store.create_api_key(args.label, role=args.role)
+    except auth.AuthError as exc:
+        raise SystemExit(f"ERROR: {exc}")
+    print(f"✅ Created API key #{key_id} (label: {args.label!r}, role: {args.role}).")
+    print(f"API key: {key}")
+    print("Store it now — only its hash is kept; it cannot be shown again.")
+
+
+def _cmd_apikey_list(args):
+    """List API keys (metadata only, never the key or its hash)."""
+    store = _resolve_auth_store(args)
+    keys = store.list_api_keys()
+    if not keys:
+        print("No API keys configured.")
+        return
+    print(f"{'ID':<5} {'LABEL':<24} {'ROLE':<10} {'CREATED':<20} {'LAST USED':<20}")
+    for k in keys:
+        print(
+            f"{k['id']:<5} {k['label']:<24} {k['role']:<10} "
+            f"{_fmt_ts(k['created_at']):<20} {_fmt_ts(k['last_used_at']):<20}"
+        )
+
+
+def _cmd_apikey_revoke(args):
+    """Revoke an API key by id."""
+    store = _resolve_auth_store(args)
+    try:
+        store.revoke_api_key(args.id)
+    except auth.AuthError as exc:
+        raise SystemExit(f"ERROR: {exc}")
+    print(f"✅ Revoked API key #{args.id}.")
+
+
 def _cmd_version(args):
     """Print version and exit."""
     print(f"Eneru v{__version__}")
@@ -1711,6 +1864,79 @@ def main():
         "-c", "--config", help="Path to configuration file", default=None,
     )
     remote_list_parser.set_defaults(func=_cmd_remote_list)
+
+    # --- user / apikey (v6.0 auth foundation) ---
+    def _add_auth_locator(p):
+        p.add_argument("-c", "--config", help="Path to configuration file",
+                       default=None)
+        p.add_argument("--auth-db", dest="auth_db", default=None,
+                       help="Auth database path (overrides config api.auth.db_path)")
+
+    def _add_password_source(p):
+        # No `--password VALUE`: it would leak into shell history and `ps`.
+        p.add_argument("--generate", action="store_true",
+                       help="Generate a strong random password and print it once")
+        p.add_argument("--password-stdin", dest="password_stdin",
+                       action="store_true",
+                       help="Read the password from stdin (for automation)")
+
+    user_parser = subparsers.add_parser(
+        "user", help="Manage local API user accounts")
+    # required=True: a bare `eneru user` errors with usage (exit 2) instead of
+    # silently succeeding with the top-level help.
+    user_sub = user_parser.add_subparsers(dest="user_command", required=True)
+
+    uc_parser = user_sub.add_parser("create", help="Create a local user")
+    uc_parser.add_argument("username", help="Username to create")
+    _add_auth_locator(uc_parser)
+    _add_password_source(uc_parser)
+    uc_parser.add_argument("--role", default=auth.DEFAULT_ROLE,
+                           help="User role (v6.0 supports: admin)")
+    uc_parser.set_defaults(func=_cmd_user_create)
+
+    ul_parser = user_sub.add_parser("list", help="List local users")
+    _add_auth_locator(ul_parser)
+    ul_parser.set_defaults(func=_cmd_user_list)
+
+    ush_parser = user_sub.add_parser("show", help="Show one user's metadata")
+    ush_parser.add_argument("username", help="Username to show")
+    _add_auth_locator(ush_parser)
+    ush_parser.set_defaults(func=_cmd_user_show)
+
+    up_parser = user_sub.add_parser("passwd", help="Reset a user's password")
+    up_parser.add_argument("username", help="Username whose password to reset")
+    _add_auth_locator(up_parser)
+    _add_password_source(up_parser)
+    up_parser.set_defaults(func=_cmd_user_passwd)
+
+    ud_parser = user_sub.add_parser("delete", help="Delete a user")
+    ud_parser.add_argument("username", help="Username to delete")
+    _add_auth_locator(ud_parser)
+    ud_parser.set_defaults(func=_cmd_user_delete)
+
+    apikey_parser = subparsers.add_parser(
+        "apikey", help="Manage API keys for programmatic access")
+    apikey_sub = apikey_parser.add_subparsers(
+        dest="apikey_command", required=True)
+
+    ak_parser = apikey_sub.add_parser(
+        "create", help="Create an API key (printed once)")
+    ak_parser.add_argument("--label", required=True,
+                           help="Human-readable label (e.g. 'Grafana read-only')")
+    _add_auth_locator(ak_parser)
+    ak_parser.add_argument("--role", default=auth.DEFAULT_ROLE,
+                           help="Key role (v6.0 supports: admin)")
+    ak_parser.set_defaults(func=_cmd_apikey_create)
+
+    akl_parser = apikey_sub.add_parser(
+        "list", help="List API keys (never shows the key)")
+    _add_auth_locator(akl_parser)
+    akl_parser.set_defaults(func=_cmd_apikey_list)
+
+    akr_parser = apikey_sub.add_parser("revoke", help="Revoke an API key by id")
+    akr_parser.add_argument("id", type=int, help="API key id (from 'apikey list')")
+    _add_auth_locator(akr_parser)
+    akr_parser.set_defaults(func=_cmd_apikey_revoke)
 
     # --- validate ---
     val_parser = subparsers.add_parser("validate", help="Validate configuration and show overview")
