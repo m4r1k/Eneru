@@ -37,6 +37,11 @@ _STATIC_CONTENT_TYPES = {
     ".css": "text/css",
 }
 _DASHBOARD_INDEX = "index.html"
+# A conservative charset for upsrw values. NUT values are short tokens (numbers,
+# enum words, voltages). upscmd/upsrw run via execve arg lists (never a shell),
+# so this is defense-in-depth, not the only barrier — but it keeps control
+# characters and shell-ish metacharacters out of the value entirely.
+_SAFE_NUT_VALUE = re.compile(r"^[A-Za-z0-9 ._:+%/,\-]{1,64}$")
 # Strict response content-type whitelist (avoids header injection if a route
 # ever passes user data through as a content type).
 _CONTENT_TYPE_HEADERS = {
@@ -665,6 +670,11 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if not isinstance(value, (str, int, float)) or isinstance(value, bool):
             raise APIBadRequest("value is required (string or number)")
         value = str(value)
+        # The value is the only non-allowlisted user input that reaches the NUT
+        # CLI; constrain it to a safe charset (defense-in-depth — the call is an
+        # execve arg list, not a shell).
+        if not _SAFE_NUT_VALUE.match(value):
+            raise APIBadRequest("value contains unsupported characters")
         if variable not in set(nc.allowed_variables):
             self._audit(principal, "variable", f"{ups_name}:{variable}", "denied")
             raise APIForbidden(f"variable {variable!r} is not in allowed_variables")

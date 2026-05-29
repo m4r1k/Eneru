@@ -216,6 +216,20 @@ def test_set_variable_denied(minimal_config):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("bad", ["196; rm -rf /", "a\nb", "$(whoami)", "x" * 65])
+def test_set_variable_rejects_unsafe_value(minimal_config, bad):
+    _enable(minimal_config)
+    body = json.dumps({"value": bad}).encode()
+    h = _control_handler(
+        minimal_config,
+        path="/api/v1/ups/UPS@h/variables/input.transfer.low",
+        method_body=body)
+    h.headers["Authorization"] = f"Bearer {_token(h)}"
+    with pytest.raises(APIBadRequest):
+        h._route_put()
+
+
+@pytest.mark.unit
 def test_set_variable_missing_value_400(minimal_config):
     _enable(minimal_config)
     h = _control_handler(
