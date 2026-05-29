@@ -134,9 +134,11 @@ before release per the changelog workflow in `AGENTS.md`.
 - **Event timeline filtering added.** The dashboard can filter events by source,
   event type, and detail text while preserving the existing no-dependency static
   asset model.
-- **UPS control E2E now proves the happy path.** Test 53 still checks
-  fail-closed auth and allowlist denial, and now also runs an allowlisted
-  `beeper.toggle` command through NUT.
+- **UPS control E2E now proves NUT reachability.** Test 53 still checks
+  fail-closed auth and allowlist denial, and now also sends an allowlisted
+  `beeper.toggle` command through NUT. The CI dummy driver does not implement
+  instant commands, so the expected proof is NUT's own `CMD-NOT-SUPPORTED`
+  response rather than a fake success.
 - **Hot-reload scope restored for worker subsystems.** Notifications, MQTT, and
   remote-health are now bounced live after a successful reload. The important
   plumbing fix is that remote-health reload uses a manager-local stop signal,

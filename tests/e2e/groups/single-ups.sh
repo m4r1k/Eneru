@@ -1149,6 +1149,9 @@ echo "PASS: API auth login, tiered config, and write gating verified"
 # ======================================================================
 # Proves the fail-closed invariant (nut_control without auth refuses to start)
 # and that the control endpoints enforce the command allowlist server-side.
+# NUT's dummy-ups driver in dummy mode does not execute instant commands, so
+# this test treats the driver's own CMD-NOT-SUPPORTED reply as the proof that
+# Eneru passed the allowlisted request through to NUT instead of blocking it.
 (
 echo ""
 echo ">>> Running: Test 53: UPS control fail-closed + allowlist enforcement"
@@ -1172,6 +1175,7 @@ echo "PASS: nut_control without auth is rejected at startup"
 
 # With auth + nut_control enabled, the allowlist is enforced server-side.
 AUTH_DB="$(mktemp -d)/auth.db"
+RUNTIME_DIR="$(mktemp -d)"
 printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$AUTH_DB"
 
 cat > /tmp/config-e2e-control.yaml <<YAML
@@ -1182,6 +1186,11 @@ behavior:
 statistics:
   enabled: true
   db_directory: "$(mktemp -d)"
+logging:
+  file: "$RUNTIME_DIR/eneru.log"
+  state_file: "$RUNTIME_DIR/state.json"
+  battery_history_file: "$RUNTIME_DIR/battery-history"
+  shutdown_flag_file: "$RUNTIME_DIR/shutdown-flag"
 api:
   enabled: true
   bind: "127.0.0.1"
@@ -1231,24 +1240,30 @@ ANON=$(curl -sS -o /dev/null -w '%{http_code}' \
   http://127.0.0.1:9100/api/v1/ups/TestUPS@localhost:3493/command)
 if [ "$ANON" != "401" ]; then echo "FAIL: anonymous control returned $ANON, expected 401"; exit 1; fi
 
-# An allowlisted command reaches NUT and returns success.
+# An allowlisted command reaches NUT. dummy-ups in dummy mode does not support
+# instant commands, so the expected response is NUT's own CMD-NOT-SUPPORTED
+# error mapped through Eneru as 502. A 401/403 here would mean Eneru blocked the
+# request before NUT; CMD-NOT-SUPPORTED means the allowlisted request crossed
+# the API -> upscmd -> upsd boundary.
 ALLOWED=$(curl -sS -o /tmp/test53-allowed.json -w '%{http_code}' \
   -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"command":"beeper.toggle"}' \
   http://127.0.0.1:9100/api/v1/ups/TestUPS@localhost:3493/command)
-if [ "$ALLOWED" != "200" ]; then
-  echo "FAIL: allowed command returned $ALLOWED, expected 200"
+if [ "$ALLOWED" != "502" ]; then
+  echo "FAIL: allowed command returned $ALLOWED, expected dummy-ups NUT_ERROR 502"
   cat /tmp/test53-allowed.json
   cat /tmp/test53-daemon.log
   exit 1
 fi
-grep -q '"status": "ok"' /tmp/test53-allowed.json \
-  || { echo "FAIL: allowed command did not report ok"; cat /tmp/test53-allowed.json; exit 1; }
+grep -q '"code": "NUT_ERROR"' /tmp/test53-allowed.json \
+  || { echo "FAIL: allowed command did not return a NUT_ERROR"; cat /tmp/test53-allowed.json; exit 1; }
+grep -q 'CMD-NOT-SUPPORTED' /tmp/test53-allowed.json \
+  || { echo "FAIL: allowed command did not reach dummy-ups"; cat /tmp/test53-allowed.json; exit 1; }
 
 kill "$DAEMON_PID" 2>/dev/null || true
 wait "$DAEMON_PID" 2>/dev/null || true
 trap - EXIT
-echo "PASS: UPS control fail-closed, allowlist enforcement, and NUT execution verified"
+echo "PASS: UPS control fail-closed, allowlist enforcement, and NUT reachability verified"
 )
 
 # ======================================================================

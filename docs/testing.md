@@ -180,7 +180,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 55 numb
 | 50 | Loopback | Docker/Podman local capabilities with explicit no-loopback config fail startup |
 | 51 | CLI | `eneru user`/`apikey` lifecycle round-trips against a real bcrypt + SQLite auth DB (create/list/show/passwd/delete, key create/list/revoke), and never leaks a hash or key |
 | 52 | UPS Single | API auth: login issues a bearer token, `/api/v1/config` is sanitized for anonymous and extended for authenticated callers, bad credentials are 401, and an anonymous write is rejected 401 |
-| 53 | UPS Single | UPS control: `nut_control` without auth is rejected at startup (fail-closed), with auth a disallowed command is 403, an unauthenticated control call is 401, and an allowlisted command reaches NUT |
+| 53 | UPS Single | UPS control: `nut_control` without auth is rejected at startup (fail-closed), with auth a disallowed command is 403, an unauthenticated control call is 401, and an allowlisted command reaches NUT (the dummy driver returns `CMD-NOT-SUPPORTED`, proving the request crossed the API -> upsd boundary) |
 | 54 | UPS Single | Config hot-reload: SIGHUP applies a threshold change live, the authenticated `/config/reload` endpoint returns a report (anonymous is 401), and a broken config is rejected without dropping the daemon |
 | 55 | UPS Single | Browser dashboard: the embedded API serves the SPA shell and assets with a strict CSP, and rejects path traversal / unknown assets with 404 |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
