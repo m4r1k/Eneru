@@ -154,6 +154,29 @@ mqtt:
   publish_interval: 10
 
 # ==============================================================================
+# UPS CONTROL (NUT upscmd / upsrw)  -- v6.0
+# ==============================================================================
+nut_control:
+  # Send commands and write variables to the UPS via NUT. This is a WRITE
+  # surface: it can ONLY be enabled when api.auth.enabled is true (otherwise
+  # startup fails). Commands and variables are allowlisted.
+  enabled: false
+  # NUT upsd.users credentials with the INSTCMD / SET actions in upsd.users.
+  username: "eneru"
+  password: "secret"
+  # Instant commands operators may run. Calibration and FSD are intentionally
+  # omitted by default — add them explicitly only if you accept the risk.
+  allowed_commands:
+    - test.battery.start
+    - test.battery.start.quick
+    - beeper.toggle
+  # Writable variables. EMPTY by default — upsrw can change risky settings, so
+  # opt in each variable deliberately (e.g. input.transfer.low/high).
+  allowed_variables: []
+  # Per-command subprocess timeout (seconds).
+  timeout: 10
+
+# ==============================================================================
 # NOTIFICATIONS (via Apprise)
 # ==============================================================================
 # Apprise supports 100+ notification services

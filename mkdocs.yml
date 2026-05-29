@@ -48,6 +48,7 @@ nav:
       - Monitor and graphs: tui-graphs.md
       - Observability and API: observability-api.md
       - Authentication: authentication.md
+      - UPS control: nut-control.md
       - Statistics: statistics.md
       - Troubleshooting: troubleshooting.md
   - Project:

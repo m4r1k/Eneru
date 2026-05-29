@@ -49,6 +49,20 @@ before release per the changelog workflow in `AGENTS.md`.
     (400), `WWW-Authenticate` on 401. The authorization gate is RBAC-ready for
     v7.0 (carries a write/capability flag).
 
+- **UPS control via NUT upscmd/upsrw (slice 3 of 6.0).** New `nut_control`
+  config and authenticated endpoints to run instant commands and read/write UPS
+  variables.
+  - `GET /api/v1/ups/{name}/commands`, `POST …/command`,
+    `GET …/variables`, `PUT …/variables/{var}`. Wraps the `upscmd`/`upsrw` CLIs
+    (no new dependency).
+  - Commands and variables are **allowlisted** (`allowed_commands`,
+    `allowed_variables`); calibration/FSD and all writable variables are opt-in.
+    Writes to one UPS are serialized; per-command subprocess timeout.
+  - **Fail-closed:** `nut_control.enabled` requires `api.auth.enabled` — the
+    daemon refuses to start otherwise, so control is never unauthenticated.
+  - Each control action is logged with the initiating principal (v7.0 audit-log
+    groundwork).
+
 ---
 
 ## [5.5.1] - 2026-05-19

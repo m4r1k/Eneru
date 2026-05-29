@@ -336,6 +336,12 @@ The v5.3 API is read-only, opt-in, and binds to localhost by default when enable
 | `mqtt.broker` | `""` | Broker URL: `mqtt://host:port` for plaintext or `mqtts://host:port` for TLS via the system trust store (default port 8883 for `mqtts`). |
 | `mqtt.topic_prefix` | `eneru` | Topic prefix; messages publish to `<topic_prefix>/status` (QoS 0, retain false) |
 | `mqtt.publish_interval` | `10` | Republish at this interval even when the status fingerprint is unchanged |
+| `nut_control.enabled` | `false` | Enable UPS control (upscmd/upsrw). Requires `api.auth.enabled` or startup fails (write surface). See [UPS control](nut-control.md) |
+| `nut_control.username` | `""` | NUT `upsd.users` account with INSTCMD/SET actions |
+| `nut_control.password` | `""` | Password for that NUT account |
+| `nut_control.allowed_commands` | `[]` | Allowlisted instant commands (e.g. `test.battery.start`, `beeper.toggle`). Calibration/FSD omitted by default |
+| `nut_control.allowed_variables` | `[]` | Allowlisted writable variables for upsrw. Empty by default — opt in each one |
+| `nut_control.timeout` | `10` | Per-command subprocess timeout (seconds) |
 
 `api.bind` defaults to `127.0.0.1`. If you set it to a non-loopback address, Eneru emits a startup warning because `/api/v1/config` returns server hostnames, SSH usernames, shutdown ordering, and presence flags with no auth. Front-end the API with SSH or a reverse proxy that adds auth before exposing it beyond a trusted boundary.
 

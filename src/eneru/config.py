@@ -158,6 +158,23 @@ class MQTTConfig:
 
 
 @dataclass
+class NutControlConfig:
+    """UPS control via NUT upscmd/upsrw (v6.0).
+
+    Off by default. A write surface: it can only be enabled when API auth is
+    enabled (enforced in validation), so control is never reachable without a
+    credential. Commands and writable variables are allowlisted; the variable
+    allowlist defaults empty because upsrw can change risky settings.
+    """
+    enabled: bool = False
+    username: str = ""
+    password: str = ""
+    allowed_commands: List[str] = field(default_factory=list)
+    allowed_variables: List[str] = field(default_factory=list)
+    timeout: int = 10
+
+
+@dataclass
 class NotificationsConfig:
     """Notifications configuration using Apprise."""
     enabled: bool = False
@@ -432,6 +449,7 @@ class Config:
     prometheus: PrometheusConfig = field(default_factory=PrometheusConfig)
     remote_health: RemoteHealthConfig = field(default_factory=RemoteHealthConfig)
     mqtt: MQTTConfig = field(default_factory=MQTTConfig)
+    nut_control: NutControlConfig = field(default_factory=NutControlConfig)
     # v5.2.1: source path of the YAML this Config was loaded from.
     # Used by deferred_delivery to spawn a systemd-run timer that
     # re-loads the same config out-of-process. None when the Config
@@ -1033,6 +1051,22 @@ class ConfigLoader:
                                                config.mqtt.publish_interval),
             )
 
+        if 'nut_control' in data:
+            raw_nc = data.get('nut_control')
+            nc_data = raw_nc if isinstance(raw_nc, dict) else {}
+            config.nut_control = NutControlConfig(
+                enabled=nc_data.get('enabled', config.nut_control.enabled),
+                username=nc_data.get('username', config.nut_control.username),
+                password=nc_data.get('password', config.nut_control.password),
+                allowed_commands=list(
+                    nc_data.get('allowed_commands',
+                                config.nut_control.allowed_commands)),
+                allowed_variables=list(
+                    nc_data.get('allowed_variables',
+                                config.nut_control.allowed_variables)),
+                timeout=nc_data.get('timeout', config.nut_control.timeout),
+            )
+
         # Detect legacy vs multi-UPS format
         ups_raw = data.get('ups', {})
 
@@ -1250,6 +1284,12 @@ class ConfigLoader:
                 "mqtt",
                 raw_data.get("mqtt", {}),
                 {"enabled", "broker", "topic_prefix", "publish_interval"},
+            ))
+            messages.extend(cls._unknown_key_errors(
+                "nut_control",
+                raw_data.get("nut_control", {}),
+                {"enabled", "username", "password", "allowed_commands",
+                 "allowed_variables", "timeout"},
             ))
             logging_raw = raw_data.get("logging", {})
             messages.extend(cls._unknown_key_errors(
@@ -1911,6 +1951,17 @@ class ConfigLoader:
             messages.append(
                 f"ERROR: local_shutdown.trigger_on must be 'any' or 'none', "
                 f"got '{config.local_shutdown.trigger_on}'"
+            )
+
+        # Fail-closed: UPS control is a write surface, so it must never be
+        # reachable without authentication. "Auth disabled" means read-only,
+        # full stop — refuse to start rather than expose unauthenticated control.
+        if config.nut_control.enabled and not config.api.auth.enabled:
+            messages.append(
+                "ERROR: nut_control.enabled requires api.auth.enabled — UPS "
+                "control endpoints are write operations and must be "
+                "authenticated. Enable api.auth and create a user with "
+                "'eneru user create' first."
             )
 
         return messages

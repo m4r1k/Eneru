@@ -214,6 +214,13 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/nut_control.py
+    dst: /opt/ups-monitor/eneru/nut_control.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   - src: src/eneru/mqtt.py
     dst: /opt/ups-monitor/eneru/mqtt.py
     file_info:

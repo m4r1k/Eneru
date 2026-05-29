@@ -116,6 +116,7 @@ jobs:
             grep -q "Test 51: auth user + apikey CLI lifecycle" tests/e2e/groups/cli.sh
           else
             grep -q "Test 52: API authentication login + tiered config + write gating" tests/e2e/groups/single-ups.sh
+            grep -q "Test 53: UPS control fail-closed + allowlist enforcement" tests/e2e/groups/single-ups.sh
           fi
 
       - name: Collect logs on failure

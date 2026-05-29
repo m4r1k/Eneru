@@ -1135,5 +1135,98 @@ trap - EXIT
 echo "PASS: API auth login, tiered config, and write gating verified"
 )
 
+# ======================================================================
+# Test 53: UPS control — fail-closed validation + allowlist enforcement (v6.0)
+# ======================================================================
+# Proves the fail-closed invariant (nut_control without auth refuses to start)
+# and that the control endpoints enforce the command allowlist server-side.
+(
+echo ""
+echo ">>> Running: Test 53: UPS control fail-closed + allowlist enforcement"
+
+# Fail-closed: nut_control.enabled with auth OFF must fail validation.
+cat > /tmp/config-e2e-control-noauth.yaml <<'YAML'
+ups:
+  name: "TestUPS@localhost:3493"
+behavior:
+  dry_run: true
+nut_control:
+  enabled: true
+  allowed_commands: ["beeper.toggle"]
+YAML
+if eneru validate --config /tmp/config-e2e-control-noauth.yaml >/tmp/test53-val.log 2>&1; then
+  echo "FAIL: nut_control without auth was accepted"; cat /tmp/test53-val.log; exit 1
+fi
+grep -q "nut_control.enabled requires api.auth.enabled" /tmp/test53-val.log \
+  || { echo "FAIL: missing fail-closed message"; cat /tmp/test53-val.log; exit 1; }
+echo "PASS: nut_control without auth is rejected at startup"
+
+# With auth + nut_control enabled, the allowlist is enforced server-side.
+AUTH_DB="$(mktemp -d)/auth.db"
+printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$AUTH_DB"
+
+cat > /tmp/config-e2e-control.yaml <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+behavior:
+  dry_run: true
+statistics:
+  enabled: true
+  db_directory: "$(mktemp -d)"
+api:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 9100
+  auth:
+    enabled: true
+    db_path: "$AUTH_DB"
+nut_control:
+  enabled: true
+  username: "operator"
+  password: "s3cret-pw"
+  allowed_commands: ["beeper.toggle"]
+notifications:
+  enabled: false
+local_shutdown:
+  enabled: false
+YAML
+
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+timeout 15s eneru run --config /tmp/config-e2e-control.yaml > /tmp/test53-daemon.log 2>&1 &
+DAEMON_PID=$!
+trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
+
+for _ in $(seq 1 20); do
+  curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 && break
+  sleep 0.5
+done
+
+TOKEN=$(curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"operator","password":"s3cret-pw"}' \
+  http://127.0.0.1:9100/api/v1/auth/login \
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
+[ -n "$TOKEN" ] || { echo "FAIL: no token"; cat /tmp/test53-daemon.log; exit 1; }
+
+# A disallowed command is rejected 403 BEFORE any NUT call.
+DENIED=$(curl -sS -o /tmp/test53-denied.json -w '%{http_code}' \
+  -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"command":"load.off"}' \
+  http://127.0.0.1:9100/api/v1/ups/TestUPS@localhost:3493/command)
+if [ "$DENIED" != "403" ]; then
+  echo "FAIL: disallowed command returned $DENIED, expected 403"; cat /tmp/test53-denied.json; exit 1
+fi
+
+# Unauthenticated control is rejected 401.
+ANON=$(curl -sS -o /dev/null -w '%{http_code}' \
+  -X POST -H 'Content-Type: application/json' -d '{"command":"beeper.toggle"}' \
+  http://127.0.0.1:9100/api/v1/ups/TestUPS@localhost:3493/command)
+if [ "$ANON" != "401" ]; then echo "FAIL: anonymous control returned $ANON, expected 401"; exit 1; fi
+
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+trap - EXIT
+echo "PASS: UPS control fail-closed and allowlist enforcement verified"
+)
+
 echo ""
 echo "=== Group 'single-ups' completed successfully ==="
