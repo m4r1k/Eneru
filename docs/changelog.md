@@ -147,22 +147,26 @@ before release per the changelog workflow in `AGENTS.md`.
 
 ### Fixed (rc5 — dashboard login UX)
 
-- **"Created a user but the dashboard won't let me sign in" fixed.** This was the
-  result of the API being enabled while `api.auth.enabled` stayed at its default
-  `false`: login returned `404 Authentication is disabled`, yet the dashboard
-  still showed a Sign-in button and only said "Sign in failed." Three changes
-  close the gap:
-  - **Auto-enable.** When the API is on, you did not explicitly set
-    `api.auth.enabled`, and the auth DB already has users, the daemon turns auth
-    on automatically and logs it. An explicit `enabled:` (true or false) always
-    wins; the auth DB is never created as a side effect; and `nut_control` still
-    requires an explicit `api.auth.enabled: true`.
+- **"Created a user but the dashboard won't let me sign in" fixed.** With the API
+  enabled but `api.auth.enabled` left unset, login returned `404 Authentication is
+  disabled`, yet the dashboard still showed a Sign-in button and only said "Sign
+  in failed." Four changes close the gap:
+  - **Dynamic auth activation (no restart).** Whether auth is enforced is now
+    decided per request: an explicit `api.auth.enabled` (true or false) always
+    wins; when unset, auth turns on as soon as the auth DB has a user. So
+    `eneru user create` makes the dashboard log-in work within seconds — no
+    restart, no config edit. A fresh install with no users stays read-only; the
+    check never creates the auth DB as a side effect, and `nut_control` still
+    requires an explicit `api.auth.enabled: true`. (Replaces the rc5-dev
+    startup-only auto-enable, which needed a restart for the first user.)
   - **Dashboard gating.** The dashboard reads `/api/v1/config` on load and hides
-    the Sign-in button when auth is disabled (nothing to sign into), and now
-    surfaces the server's actual error message on a failed login.
+    the Sign-in button when auth is off (nothing to sign into), and now surfaces
+    the server's actual error message on a failed login.
   - **Startup notice.** The daemon logs a clear one-line notice when the API is
     enabled but auth is off, explaining that Sign-in is hidden and how to enable
     login and control.
+  - **`eneru user` defaults to `eneru user list`.** A bare `eneru user` now lists
+    accounts instead of erroring with usage.
 - No restart is required after `eneru user create`: the API reads the auth store
   live on every request (short-lived connections), so a new user is usable
   immediately.

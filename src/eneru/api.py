@@ -165,6 +165,31 @@ API_ENDPOINTS = (
 )
 
 
+def _auth_is_active(config: Any) -> bool:
+    """Whether API authentication is effectively enforced.
+
+    An explicit ``api.auth.enabled`` (true *or* false) always wins. When it is
+    left unset, auth is active iff the auth DB already has at least one user — so
+    "create a user, then sign in" works **with no restart**, while a fresh
+    install with no users stays open (v5.3 read-only behavior). The DB is never
+    created as a side effect of this check, and a broken/unreadable DB fails
+    closed to "inactive" (writes stay hard-disabled).
+    """
+    auth_cfg = getattr(getattr(config, "api", None), "auth", None)
+    if auth_cfg is None:
+        return False
+    if getattr(auth_cfg, "enabled_explicitly_set", False):
+        return bool(auth_cfg.enabled)
+    if auth_cfg.enabled:
+        return True
+    try:
+        if not os.path.exists(auth_cfg.db_path):
+            return False
+        return AuthStore(auth_cfg.db_path).user_count() > 0
+    except Exception:
+        return False
+
+
 class EneruAPIServer:
     """Small stdlib HTTP server for read-only observability endpoints."""
 
@@ -179,12 +204,15 @@ class EneruAPIServer:
         self.log_fn: Callable[[str], None] = log_fn or (lambda msg: None)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
-        # Auth machinery is built only when api.auth is enabled; otherwise the
-        # handler leaves write routes hard-disabled (v5.3 read-only behavior).
+        # Auth machinery is built whenever the auth config exists — construction
+        # is free (no I/O until first use), and the store must be ready in case
+        # auth becomes active at runtime without a restart (e.g. the first user
+        # is created while the daemon runs; see _auth_is_active). Whether auth is
+        # actually *enforced* is decided dynamically per request, not here.
         self._auth_store: Optional[AuthStore] = None
         self._sessions: Optional[SessionManager] = None
         auth_cfg = getattr(config.api, "auth", None)
-        if auth_cfg is not None and auth_cfg.enabled:
+        if auth_cfg is not None:
             self._auth_store = AuthStore(auth_cfg.db_path)
             self._sessions = SessionManager(auth_cfg.session_ttl)
 
@@ -230,8 +258,7 @@ class EneruAPIServer:
         # Warn when bound off-loopback without auth: any caller that can reach
         # the socket can read /api/v1/config. With api.auth enabled, writes are
         # gated, so the warning softens to a reminder about open read endpoints.
-        auth_cfg = getattr(self.config.api, "auth", None)
-        auth_on = bool(auth_cfg and auth_cfg.enabled)
+        auth_on = _auth_is_active(self.config)
         if not _is_loopback_bind(self.config.api.bind):
             if auth_on:
                 self.log_fn(
@@ -365,6 +392,37 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
     # ----- auth helpers (v6.0) -----
 
+    # Cache for the "do users exist" probe on the read path: every GET calls
+    # _authorize(), so an uncached per-request user_count() would add a SQLite
+    # open to each scrape. Stored on the base class (shared across the per-start
+    # Handler subclass and all worker threads); races are benign — independent
+    # writes of a float and a bool, worst case a redundant probe.
+    _auth_active_ts: float = 0.0
+    _auth_active_val: bool = False
+    _AUTH_ACTIVE_TTL: float = 5.0
+
+    def _auth_active(self) -> bool:
+        """Effective auth state for this request (see :func:`_auth_is_active`).
+
+        Explicit/enabled cases are resolved instantly with no I/O; only the
+        unpinned "users exist?" branch consults the DB, behind a short TTL cache
+        so a brand-new first user is honored within seconds and no restart is
+        ever required.
+        """
+        auth_cfg = getattr(self.api_config.api, "auth", None)
+        if auth_cfg is None:
+            return False
+        if getattr(auth_cfg, "enabled_explicitly_set", False):
+            return bool(auth_cfg.enabled)
+        if auth_cfg.enabled:
+            return True
+        base = EneruAPIHandler
+        now = time.time()
+        if now - base._auth_active_ts > base._AUTH_ACTIVE_TTL:
+            base._auth_active_val = _auth_is_active(self.api_config)
+            base._auth_active_ts = now
+        return base._auth_active_val
+
     def _bearer_token(self) -> Optional[str]:
         """Return the credential from Authorization: Bearer or X-API-Key."""
         header = self.headers.get("Authorization", "") or ""
@@ -401,7 +459,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
           open unless ``require_for_reads``, then they require one too.
         """
         auth_cfg = getattr(self.api_config.api, "auth", None)
-        enabled = bool(auth_cfg and auth_cfg.enabled)
+        enabled = self._auth_active()
         if not enabled:
             if write:
                 raise APIForbidden(
@@ -519,8 +577,13 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
         if path == "/api/v1/config":
             # Anonymous -> sanitized; authenticated -> extended (still no secrets).
-            return 200, "application/json", config_summary(
+            summary = config_summary(
                 self.api_config, extended=principal is not None)
+            # Report the *effective* auth state: auth can be active via existing
+            # users even when api.auth.enabled is unset, and the dashboard reads
+            # this field to decide whether to show the Sign-in button.
+            summary["api"]["auth"]["enabled"] = self._auth_active()
+            return 200, "application/json", summary
 
         if path == "/api/v1/remote-health":
             rows = live_remote_health(self.api_source, self.api_config)
@@ -558,8 +621,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         return 404, "application/json", self._not_found("Endpoint not found")
 
     def _handle_login(self) -> Tuple[int, str, Any]:
-        auth_cfg = getattr(self.api_config.api, "auth", None)
-        if not (auth_cfg and auth_cfg.enabled):
+        if not self._auth_active():
             return 404, "application/json", self._not_found("Authentication is disabled")
         data = self._read_json_body()
         username = data.get("username")
@@ -585,8 +647,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         }
 
     def _handle_logout(self) -> Tuple[int, str, Any]:
-        auth_cfg = getattr(self.api_config.api, "auth", None)
-        if not (auth_cfg and auth_cfg.enabled):
+        if not self._auth_active():
             return 404, "application/json", self._not_found("Authentication is disabled")
         token = self._bearer_token()
         # Only an active session token can be logged out (API keys aren't
@@ -799,8 +860,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         # config — listing a route that returns 404/403 would mislead clients
         # discovering the API via availableEndpoints.
         prometheus_enabled = bool(getattr(self.api_config.prometheus, "enabled", False))
-        auth_enabled = bool(getattr(getattr(self.api_config.api, "auth", None),
-                                    "enabled", False))
+        auth_enabled = self._auth_active()
         nut_enabled = bool(getattr(getattr(self.api_config, "nut_control", None),
                                    "enabled", False))
 

@@ -108,28 +108,35 @@ api:
 | `api.auth.session_ttl` | `3600` | Dashboard session token lifetime, in seconds |
 | `api.auth.db_path` | `/var/lib/eneru/auth.db` | Location of the user/API-key store; CLI `--auth-db` overrides |
 
-### Auto-enable (create a user, then just sign in)
+### Auto-enable (create a user, then just sign in — no restart)
 
-If you start the daemon with the API on but **never set `api.auth.enabled`**,
-Eneru turns auth on automatically when the auth DB already holds at least one
-user, and logs a line saying so. This removes a common footgun: creating a user
-with `eneru user create` and then finding the dashboard rejects the login
-because auth was silently off.
+If the API is on but you **never set `api.auth.enabled`**, Eneru enforces auth
+automatically as soon as the auth DB has at least one user. This removes a common
+footgun: creating a user with `eneru user create` and then finding the dashboard
+rejects the login because auth was silently off.
+
+The decision is **dynamic**, re-evaluated per request (behind a few-second
+cache), so it takes effect **with no restart and no config edit**:
+
+```bash
+docker exec <container> eneru user create admin --generate
+# within a few seconds the dashboard shows Sign-in and login works — no restart
+```
 
 The rule is deliberately conservative:
 
 - An explicit `api.auth.enabled` (either `true` or `false`) **always wins** — set
   `enabled: false` to keep the API open even with users present.
-- It runs only at `eneru run` startup, not during `eneru validate`, so static
-  config checks stay DB-independent.
-- It never creates the auth DB as a side effect — a fresh install with no
-  `auth.db` simply starts read-only.
+- A fresh install with no users (and no explicit `enabled: true`) stays read-only;
+  the check never creates the auth DB as a side effect.
 - It does **not** satisfy the `nut_control` fail-closed gate: UPS control still
   requires an explicit `api.auth.enabled: true`.
 
-When the API is enabled but auth ends up off (no users, or `enabled: false`), the
+When the API is enabled but auth is off (no users, or `enabled: false`), the
 daemon logs a one-line notice at startup and the dashboard hides its **Sign-in**
-button — there is nothing to sign into.
+button — there is nothing to sign into. The dashboard learns the live auth state
+from `/api/v1/config`; if you create the first user while the dashboard is open,
+reload the page to pick up the Sign-in button.
 
 ## Containers
 

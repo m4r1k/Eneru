@@ -1,14 +1,15 @@
-"""Tests for v6.0 auth auto-enable + explicit-flag tracking.
+"""Tests for v6.0 dynamic auth activation + explicit-flag tracking.
 
-The daemon turns API auth on automatically when the operator created users but
-never set ``api.auth.enabled`` — so "create a user, then sign in" just works.
-An explicit value (true *or* false) always wins, and the auth DB is never
-conjured into existence as a side effect.
+Auth is enforced dynamically: an explicit ``api.auth.enabled`` (true or false)
+always wins; when unset, auth turns on as soon as the auth DB has a user — so
+"create a user, then sign in" works with no restart, and a fresh install with no
+users stays open.
 """
 
 import pytest
 
-from eneru import auth, cli
+from eneru import auth
+from eneru.api import _auth_is_active
 from eneru.config import ConfigLoader
 
 
@@ -29,17 +30,14 @@ def test_enabled_explicitly_set_true_when_present():
 
 @pytest.mark.unit
 def test_enabled_explicitly_set_false_when_absent():
-    # auth block present but no `enabled` key
     cfg = _cfg("ups:\n  name: U@h\napi:\n  auth:\n    session_ttl: 600\n")
     assert cfg.api.auth.enabled_explicitly_set is False
-    # no auth block at all
     cfg = _cfg("ups:\n  name: U@h\napi:\n  enabled: true\n")
     assert cfg.api.auth.enabled_explicitly_set is False
 
 
 @pytest.mark.unit
 def test_enabled_explicitly_set_excluded_from_equality():
-    # The flag must not perturb config comparisons or serialized output.
     a = _cfg("ups:\n  name: U@h\napi:\n  auth:\n    session_ttl: 5\n").api.auth
     b = _cfg("ups:\n  name: U@h\napi:\n  auth:\n    enabled: false\n    "
              "session_ttl: 5\n").api.auth
@@ -47,58 +45,64 @@ def test_enabled_explicitly_set_excluded_from_equality():
     assert "enabled_explicitly_set" not in repr(a)
 
 
-# ----- auto-enable helper -----
+# ----- dynamic activation (_auth_is_active) -----
+
+def _cfg_with_db(tmp_path, body=""):
+    db = str(tmp_path / "auth.db")
+    cfg = _cfg(f"ups:\n  name: U@h\napi:\n  enabled: true\n  auth:\n    "
+               f"db_path: {db}\n{body}")
+    return cfg, db
+
 
 @pytest.mark.unit
-def test_auto_enable_flips_on_when_users_exist(tmp_path, capsys):
-    db = str(tmp_path / "auth.db")
+def test_inactive_when_unpinned_and_db_missing(tmp_path):
+    cfg, db = _cfg_with_db(tmp_path)
+    assert _auth_is_active(cfg) is False
+    # The probe must not create the DB on a fresh install.
+    import os
+    assert not os.path.exists(db)
+
+
+@pytest.mark.unit
+def test_inactive_when_unpinned_and_no_users(tmp_path):
+    cfg, db = _cfg_with_db(tmp_path)
+    auth.AuthStore(db).user_count()  # materialize schema, zero users
+    assert _auth_is_active(cfg) is False
+
+
+@pytest.mark.unit
+def test_active_when_unpinned_and_users_exist(tmp_path):
+    cfg, db = _cfg_with_db(tmp_path)
     auth.AuthStore(db).create_user("alice", "pw")
-    cfg = _cfg(f"ups:\n  name: U@h\napi:\n  enabled: true\n  auth:\n    "
-               f"db_path: {db}\n")
-    assert cfg.api.auth.enabled is False
-    cli._auto_enable_auth_if_users_exist(cfg)
-    assert cfg.api.auth.enabled is True
-    assert "auto-enabled" in capsys.readouterr().out
+    assert _auth_is_active(cfg) is True
 
 
 @pytest.mark.unit
-def test_auto_enable_respects_explicit_false(tmp_path, capsys):
-    db = str(tmp_path / "auth.db")
+def test_explicit_false_wins_even_with_users(tmp_path):
+    cfg, db = _cfg_with_db(tmp_path, body="    enabled: false\n")
     auth.AuthStore(db).create_user("alice", "pw")
-    cfg = _cfg(f"ups:\n  name: U@h\napi:\n  enabled: true\n  auth:\n    "
-               f"enabled: false\n    db_path: {db}\n")
-    cli._auto_enable_auth_if_users_exist(cfg)
-    assert cfg.api.auth.enabled is False
-    assert "auto-enabled" not in capsys.readouterr().out
+    assert cfg.api.auth.enabled_explicitly_set is True
+    assert _auth_is_active(cfg) is False
 
 
 @pytest.mark.unit
-def test_auto_enable_noop_when_api_disabled(tmp_path):
-    db = str(tmp_path / "auth.db")
-    auth.AuthStore(db).create_user("alice", "pw")
-    cfg = _cfg(f"ups:\n  name: U@h\napi:\n  enabled: false\n  auth:\n    "
-               f"db_path: {db}\n")
-    cli._auto_enable_auth_if_users_exist(cfg)
-    assert cfg.api.auth.enabled is False
+def test_explicit_true_wins_even_with_no_users(tmp_path):
+    cfg, db = _cfg_with_db(tmp_path, body="    enabled: true\n")
+    assert _auth_is_active(cfg) is True
 
 
 @pytest.mark.unit
-def test_auto_enable_skips_when_db_missing_and_creates_nothing(tmp_path):
-    db = tmp_path / "auth.db"
-    cfg = _cfg(f"ups:\n  name: U@h\napi:\n  enabled: true\n  auth:\n    "
-               f"db_path: {db}\n")
-    cli._auto_enable_auth_if_users_exist(cfg)
-    assert cfg.api.auth.enabled is False
-    # No surprise file creation on a fresh install.
-    assert not db.exists()
+def test_active_when_unpinned_and_broken_db_fails_closed(tmp_path):
+    cfg, db = _cfg_with_db(tmp_path)
+    # A non-DB file at the path makes user_count() raise -> fail closed.
+    with open(db, "w") as fh:
+        fh.write("not a sqlite database")
+    assert _auth_is_active(cfg) is False
 
 
 @pytest.mark.unit
-def test_auto_enable_noop_with_zero_users(tmp_path):
-    db = str(tmp_path / "auth.db")
-    # Materialize the DB (schema only, no users).
-    assert auth.AuthStore(db).user_count() == 0
-    cfg = _cfg(f"ups:\n  name: U@h\napi:\n  enabled: true\n  auth:\n    "
-               f"db_path: {db}\n")
-    cli._auto_enable_auth_if_users_exist(cfg)
-    assert cfg.api.auth.enabled is False
+def test_inactive_when_config_has_no_api_auth():
+    # A config object without api/auth attributes must not raise -> inactive.
+    class Bare:
+        pass
+    assert _auth_is_active(Bare()) is False
