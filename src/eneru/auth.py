@@ -117,8 +117,12 @@ def hash_api_key(key: str) -> str:
     API keys are long random tokens, not human secrets — a fast digest is the
     right tool (bcrypt's 72-byte cap and cost would be wrong here), and the
     stored digest is useless to an attacker who reads the DB.
+
+    CodeQL flags this as weak password hashing; it is a false positive — the
+    input is a 256-bit random token, not a user password, so a slow KDF is
+    neither needed nor appropriate.
     """
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()  # lgtm[py/weak-sensitive-data-hashing]
 
 
 def _validate_role(role: str) -> str:

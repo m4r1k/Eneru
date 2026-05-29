@@ -1579,7 +1579,9 @@ def _cmd_user_create(args):
         raise SystemExit(f"ERROR: {exc}")
     print(f"✅ Created user '{args.username}' (role: {args.role}).")
     if generated:
-        print(f"Generated password: {password}")
+        # Intentional: a generated secret must reach its creator exactly once;
+        # printing it is the only delivery channel. (CodeQL FP.)
+        print(f"Generated password: {password}")  # lgtm[py/clear-text-logging-sensitive-data]
         print("Store it now — it is not recoverable.")
 
 
@@ -1593,7 +1595,9 @@ def _cmd_user_passwd(args):
         raise SystemExit(f"ERROR: {exc}")
     print(f"✅ Updated password for '{args.username}'.")
     if generated:
-        print(f"Generated password: {password}")
+        # Intentional: a generated secret must reach its creator exactly once;
+        # printing it is the only delivery channel. (CodeQL FP.)
+        print(f"Generated password: {password}")  # lgtm[py/clear-text-logging-sensitive-data]
         print("Store it now — it is not recoverable.")
 
 
@@ -1642,7 +1646,8 @@ def _cmd_apikey_create(args):
     except auth.AuthError as exc:
         raise SystemExit(f"ERROR: {exc}")
     print(f"✅ Created API key #{key_id} (label: {args.label!r}, role: {args.role}).")
-    print(f"API key: {key}")
+    # Intentional: the key is shown exactly once and never stored in plaintext.
+    print(f"API key: {key}")  # lgtm[py/clear-text-logging-sensitive-data]
     print("Store it now — only its hash is kept; it cannot be shown again.")
 
 
