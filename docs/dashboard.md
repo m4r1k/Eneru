@@ -27,10 +27,11 @@ Open `http://<host>:9191/` in a browser.
 - **History graphs** — hand-rolled SVG line charts for battery charge, load,
   runtime, and input voltage, from `/api/v1/ups/{name}/history`.
 - **Event timeline** — recent power/diagnostic/lifecycle events from
-  `/api/v1/events`.
-- **Control panel** — command buttons, shown only when you are signed in **and**
-  [`nut_control`](nut-control.md) is enabled. The buttons reflect the configured
-  allowlist; the server enforces it regardless of what the UI renders.
+  `/api/v1/events`, with filters for source, event type, and detail text.
+- **Control panel** — command buttons and writable-variable forms, shown only
+  when you are signed in **and** [`nut_control`](nut-control.md) is enabled. The
+  controls reflect the configured command/variable allowlists; the server
+  enforces them regardless of what the UI renders.
 
 The page polls every 10 seconds.
 

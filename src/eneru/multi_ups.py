@@ -375,9 +375,9 @@ class MultiUPSCoordinator:
 
         notify_fn = None
         if self._notification_worker is not None:
-            notify_fn = lambda body, typ: self._notification_worker.send(
-                body, typ, category="health",
-            )
+            def notify_fn(body, typ):
+                if self._notification_worker is not None:
+                    self._notification_worker.send(body, typ, category="health")
 
         manager = RemoteHealthManager(
             config=self.config,
@@ -673,6 +673,66 @@ class MultiUPSCoordinator:
                         store.apply_reload(self.config.statistics)
                     except Exception as exc:  # pragma: no cover - defensive
                         self._log(f"⚠️ stats retention reload failed: {exc}")
+        if "notifications" in subsystems:
+            self._reload_notification_worker()
+        if "remote_health" in subsystems:
+            self._reload_remote_health()
+        if "mqtt" in subsystems:
+            self._reload_mqtt_publisher()
+
+    def _reload_notification_worker(self) -> None:
+        """Bounce the shared notification worker after config reload."""
+        if self._notification_worker is not None:
+            self._notification_worker.stop()
+            self._notification_worker = None
+        for mon in self._monitors:
+            mon._notification_worker = None
+        for executor in self._redundancy_executors.values():
+            executor._notification_worker = None
+        if not self.config.notifications.enabled:
+            self._log("📢 Notifications: disabled")
+            return
+        if not APPRISE_AVAILABLE:
+            self._log(
+                "⚠️ WARNING: Notifications enabled but apprise not installed. "
+                "Install with: pip install apprise"
+            )
+            return
+        worker = NotificationWorker(self.config)
+        if not worker.start():
+            self._log("⚠️ WARNING: Failed to reload notifications")
+            return
+        for mon in self._monitors:
+            mon._notification_worker = worker
+            store = getattr(mon, "_stats_store", None)
+            if store is not None and store._conn is not None:
+                worker.register_store(store)
+        for executor in self._redundancy_executors.values():
+            executor._notification_worker = worker
+        self._notification_worker = worker
+        count = worker.get_service_count()
+        self._log(f"📢 Notifications reloaded ({count} service(s))")
+
+    def _reload_remote_health(self) -> None:
+        """Bounce per-UPS and redundancy remote-health managers."""
+        for mon in self._monitors:
+            mon._reload_remote_health()
+        for manager in self._redundancy_remote_health_managers:
+            manager.stop()
+        self._redundancy_remote_health_managers = []
+        if self.config.redundancy_groups:
+            monitors_by_name = {m.config.ups.name: m for m in self._monitors}
+            for rg in self.config.redundancy_groups:
+                self._start_redundancy_remote_health(rg, monitors_by_name)
+        self._log("🔄 Remote health checks reloaded")
+
+    def _reload_mqtt_publisher(self) -> None:
+        """Bounce the coordinator MQTT publisher so broker/topic changes apply."""
+        if self._mqtt_publisher is not None:
+            self._mqtt_publisher.stop()
+            self._mqtt_publisher = None
+        self._start_mqtt_publisher()
+        self._log("🔄 MQTT publisher reloaded")
 
     def record_control_event(self, ups_name: str, event_type: str,
                              detail: str) -> None:

@@ -1,6 +1,8 @@
 """Unit tests for v6.0 config hot-reload (src/eneru/reload.py + wiring)."""
 
 import pytest
+import threading
+from unittest.mock import MagicMock
 
 from eneru import reload as reloadmod
 from eneru.config import Config, ConfigLoader
@@ -176,6 +178,41 @@ def test_apply_reload_multi_config_propagation(tmp_path):
     assert monitor_cfg.behavior.dry_run is True
 
 
+@pytest.mark.unit
+def test_apply_reload_subsystem_sections_live(tmp_path):
+    live = _load(_write(tmp_path / "a.yaml", """
+ups:
+  name: U@h
+notifications:
+  enabled: false
+mqtt:
+  enabled: false
+remote_health:
+  interval: 3600
+"""))
+    new = _load(_write(tmp_path / "b.yaml", """
+ups:
+  name: U@h
+notifications:
+  enabled: true
+  urls: ["json://localhost"]
+mqtt:
+  enabled: true
+  broker: "mqtt://127.0.0.1:1883"
+remote_health:
+  interval: 120
+"""))
+    report = reloadmod.apply_reload(live, [live], new)
+    assert set(["notifications", "mqtt", "remote_health"]).issubset(report["applied"])
+    assert set(["notifications", "mqtt", "remote_health"]).issubset(report["subsystems"])
+    assert not set(["notifications", "mqtt", "remote_health"]).intersection(
+        report["restartRequired"]
+    )
+    assert live.notifications.enabled is True
+    assert live.mqtt.enabled is True
+    assert live.remote_health.interval == 120
+
+
 # ----- perform_reload -----
 
 @pytest.mark.unit
@@ -269,3 +306,156 @@ def test_coordinator_reload_config(tmp_path):
     assert coord.config.ups_groups[0].triggers.low_battery_threshold == 45
     assert monitor.config.ups_groups[0].triggers.low_battery_threshold == 45
     assert any("reloaded" in line for line in logs)
+
+
+@pytest.mark.unit
+def test_monitor_apply_subsystem_reload_bounces_workers():
+    mon = object.__new__(UPSGroupMonitor)
+    mon._coordinator_mode = False
+    mon.config = Config()
+    mon._stats_store = MagicMock()
+    mon._log_message = MagicMock()
+    mon._reload_notification_worker = MagicMock()
+    mon._reload_remote_health = MagicMock()
+    mon._reload_mqtt_publisher = MagicMock()
+    mon._apply_subsystem_reload([
+        "statistics", "notifications", "remote_health", "mqtt",
+    ])
+    mon._stats_store.apply_reload.assert_called_once_with(mon.config.statistics)
+    mon._reload_notification_worker.assert_called_once()
+    mon._reload_remote_health.assert_called_once()
+    mon._reload_mqtt_publisher.assert_called_once()
+
+
+@pytest.mark.unit
+def test_coordinator_apply_subsystem_reload_bounces_workers():
+    coord = object.__new__(MultiUPSCoordinator)
+    coord.config = Config()
+    coord._monitors = []
+    coord._reload_notification_worker = MagicMock()
+    coord._reload_remote_health = MagicMock()
+    coord._reload_mqtt_publisher = MagicMock()
+    coord._apply_subsystem_reload(["notifications", "remote_health", "mqtt"])
+    coord._reload_notification_worker.assert_called_once()
+    coord._reload_remote_health.assert_called_once()
+    coord._reload_mqtt_publisher.assert_called_once()
+
+
+@pytest.mark.unit
+def test_remote_health_stop_does_not_set_daemon_stop_event(tmp_path):
+    from eneru.remote_health import RemoteHealthManager
+
+    daemon_stop = threading.Event()
+    mgr = RemoteHealthManager(
+        config=Config(),
+        group_label="U@h",
+        servers=[],
+        sidecar_path=tmp_path / "rh.json",
+        stop_event=daemon_stop,
+        log_fn=lambda _msg: None,
+    )
+    mgr.stop()
+    assert not daemon_stop.is_set()
+
+
+@pytest.mark.unit
+def test_monitor_reload_notification_worker_restarts_and_registers(monkeypatch):
+    import eneru.monitor as monitormod
+
+    mon = object.__new__(UPSGroupMonitor)
+    mon.config = Config()
+    mon.config.notifications.enabled = True
+    mon._notification_worker = MagicMock()
+    mon._stats_store = MagicMock()
+    mon._stats_store._conn = object()
+    mon._log_message = MagicMock()
+    worker = MagicMock()
+    worker.start.return_value = True
+    worker.get_service_count.return_value = 2
+    monkeypatch.setattr(monitormod, "APPRISE_AVAILABLE", True)
+    monkeypatch.setattr(monitormod, "NotificationWorker",
+                        MagicMock(return_value=worker))
+
+    old = mon._notification_worker
+    mon._reload_notification_worker()
+
+    old.stop.assert_called_once()
+    worker.start.assert_called_once()
+    worker.register_store.assert_called_once_with(mon._stats_store)
+    assert mon._notification_worker is worker
+
+
+@pytest.mark.unit
+def test_monitor_reload_remote_health_and_mqtt_bounce_workers():
+    mon = object.__new__(UPSGroupMonitor)
+    mon._remote_health_manager = MagicMock()
+    mon._mqtt_publisher = MagicMock()
+    mon._start_remote_health = MagicMock()
+    mon._start_mqtt_publisher = MagicMock()
+    mon._log_message = MagicMock()
+
+    old_remote = mon._remote_health_manager
+    old_mqtt = mon._mqtt_publisher
+    mon._reload_remote_health()
+    mon._reload_mqtt_publisher()
+
+    old_remote.stop.assert_called_once()
+    old_mqtt.stop.assert_called_once()
+    mon._start_remote_health.assert_called_once()
+    mon._start_mqtt_publisher.assert_called_once()
+
+
+@pytest.mark.unit
+def test_coordinator_reload_notification_worker_rewires_children(monkeypatch):
+    import eneru.multi_ups as multi_mod
+
+    coord = object.__new__(MultiUPSCoordinator)
+    coord.config = Config()
+    coord.config.notifications.enabled = True
+    coord._notification_worker = MagicMock()
+    coord._log = MagicMock()
+    monitor = MagicMock()
+    monitor._stats_store = MagicMock()
+    monitor._stats_store._conn = object()
+    executor = MagicMock()
+    coord._monitors = [monitor]
+    coord._redundancy_executors = {"rg": executor}
+    worker = MagicMock()
+    worker.start.return_value = True
+    worker.get_service_count.return_value = 1
+    monkeypatch.setattr(multi_mod, "APPRISE_AVAILABLE", True)
+    monkeypatch.setattr(multi_mod, "NotificationWorker",
+                        MagicMock(return_value=worker))
+
+    old = coord._notification_worker
+    coord._reload_notification_worker()
+
+    old.stop.assert_called_once()
+    worker.register_store.assert_called_once_with(monitor._stats_store)
+    assert coord._notification_worker is worker
+    assert monitor._notification_worker is worker
+    assert executor._notification_worker is worker
+
+
+@pytest.mark.unit
+def test_coordinator_reload_remote_health_and_mqtt_bounce_workers():
+    coord = object.__new__(MultiUPSCoordinator)
+    coord.config = Config()
+    coord.config.redundancy_groups = []
+    coord._log = MagicMock()
+    monitor = MagicMock()
+    manager = MagicMock()
+    coord._monitors = [monitor]
+    coord._redundancy_remote_health_managers = [manager]
+    coord._mqtt_publisher = MagicMock()
+    coord._start_mqtt_publisher = MagicMock()
+
+    old_mqtt = coord._mqtt_publisher
+    coord._reload_remote_health()
+    coord._reload_mqtt_publisher()
+
+    monitor._reload_remote_health.assert_called_once()
+    manager.stop.assert_called_once()
+    assert coord._redundancy_remote_health_managers == []
+    old_mqtt.stop.assert_called_once()
+    coord._start_mqtt_publisher.assert_called_once()

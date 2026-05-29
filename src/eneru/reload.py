@@ -11,9 +11,13 @@ changes split into two buckets:
   holder that captured the same object — the API handler, each per-group monitor
   — sees the new values immediately. We never *replace* a Config object, which
   is exactly what would orphan those captured references.
-- Everything else (bind/port, UPS topology, logging, DB paths, notifications,
-  MQTT, remote-health) is captured at startup and reported as restart-required
-  rather than half-applied.
+- Subsystems with their own worker/socket lifecycle (notifications, MQTT,
+  remote-health, stats retention) are swapped in place and then bounced by a
+  daemon hook. Think of it like changing a filter under the sink: close the
+  small valve for that branch, replace the filter, and leave the house water on.
+- Everything else (bind/port, UPS topology, logging, DB paths, local shutdown
+  dependency checks) is still reported as restart-required rather than
+  half-applied.
 """
 
 from dataclasses import replace
@@ -29,14 +33,13 @@ SAFE_TOP_SECTIONS = ("behavior", "nut_control", "prometheus")
 # cached state (the daemon calls subsystem.apply_reload after the swap). NOTE:
 # `statistics` is handled specially below (only `retention` is live-appliable;
 # a `db_directory` change is restart-required).
-SUBSYSTEM_SECTIONS = ("statistics",)
+SUBSYSTEM_SECTIONS = ("statistics", "notifications", "mqtt", "remote_health")
 # Top-level sections captured at startup whose live re-init is deliberately not
-# supported. notifications/mqtt/remote_health own worker threads or network
-# connections whose mid-power-event re-init could drop shutdown notifications;
-# logging owns file handlers. These changes need a restart.
+# supported. API bind/port and logging own process-level sockets/handlers;
+# local_shutdown dependency checks happen at startup. These changes need a
+# restart.
 RESTART_TOP_SECTIONS = (
-    "api", "logging", "local_shutdown", "remote_health", "mqtt",
-    "notifications",
+    "api", "logging", "local_shutdown",
 )
 
 
@@ -102,6 +105,12 @@ def apply_reload(primary: Config, monitor_configs: List[Config],
             continue
         if section in RESTART_TOP_SECTIONS:
             restart.append(section)
+            continue
+        if section in SUBSYSTEM_SECTIONS:
+            for cfg in configs:
+                setattr(cfg, section, getattr(new, section))
+            applied.append(section)
+            subsystems.append(section)
             continue
         # SAFE: swap in place so holders read the new values.
         for cfg in configs:

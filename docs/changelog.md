@@ -70,9 +70,10 @@ before release per the changelog workflow in `AGENTS.md`.
     config and reports the problem.
   - Safe changes are applied live by mutating the shared config in place —
     trigger thresholds (per group), `behavior.dry_run`, `nut_control`
-    allowlists/credentials, and the Prometheus toggle. Everything else
-    (bind/port, UPS topology, logging, DB paths, notifications, MQTT,
-    remote-health) is reported as restart-required rather than half-applied.
+    allowlists/credentials, the Prometheus toggle, notification targets, MQTT,
+    remote-health settings, and stats retention. Everything else (bind/port,
+    UPS topology, logging, DB paths, local-shutdown dependency checks) is
+    reported as restart-required rather than half-applied.
   - systemd: `systemctl reload eneru` (new `ExecReload`). Containers:
     `docker kill -s HUP <container>` (tini forwards SIGHUP). Works in both
     single-UPS and multi-UPS (coordinator) modes.
@@ -96,12 +97,10 @@ before release per the changelog workflow in `AGENTS.md`.
   control credentials/allowlists per `ups:` entry (for UPSes on different `upsd`
   servers); the global block still gates the feature.
 - **Hot-reload now applies `statistics.retention` live** in addition to
-  thresholds/control/prometheus. `notifications`, `mqtt`, `remote_health`,
-  `logging`, and `statistics.db_directory` remain **restart-required by design**
-  — re-initializing a worker thread / network connection / log handler
-  mid-power-event could drop shutdown notifications. (rc3: notifications was
-  briefly live in rc2, but its worker-lifecycle edge cases — enable-from-cold,
-  empty-backend replacement, queue semantics — make a restart the safe choice.)
+  thresholds/control/prometheus. `logging`, `local_shutdown`,
+  `statistics.db_directory`, API bind/port/auth, and topology changes remain
+  restart-required because they own process-level handlers, startup dependency
+  checks, or object graphs that should not be half-swapped.
 - **Control/reload actions are recorded to the SQLite `events` table** (in
   addition to the daemon log) as `CONTROL_COMMAND` / `CONTROL_VARIABLE` /
   `CONFIG_RELOAD` rows — v7.0 audit-log groundwork.
@@ -123,6 +122,26 @@ before release per the changelog workflow in `AGENTS.md`.
 - The API endpoint index hides auth/control/reload routes when their feature is
   disabled. `--password-stdin` strips a trailing CRLF (not just LF). The
   reference config ships an empty `nut_control.password`.
+
+### Fixed (rc4 — plan-compliance follow-ups)
+
+- **OCI image CI smoke test fixed.** The dashboard asset check now overrides the
+  image entrypoint when running `python -c`, so CI tests the packaged asset
+  instead of accidentally invoking `eneru python ...`.
+- **Dashboard control completed.** The control panel now renders allowlisted
+  writable UPS variables and submits `PUT /api/v1/ups/{name}/variables/{var}`,
+  in addition to command buttons.
+- **Event timeline filtering added.** The dashboard can filter events by source,
+  event type, and detail text while preserving the existing no-dependency static
+  asset model.
+- **UPS control E2E now proves the happy path.** Test 53 still checks
+  fail-closed auth and allowlist denial, and now also runs an allowlisted
+  `beeper.toggle` command through NUT.
+- **Hot-reload scope restored for worker subsystems.** Notifications, MQTT, and
+  remote-health are now bounced live after a successful reload. The important
+  plumbing fix is that remote-health reload uses a manager-local stop signal,
+  not the daemon-wide stop event, so changing its interval/probe is like
+  swapping one faucet cartridge without closing the whole house water main.
 
 ---
 

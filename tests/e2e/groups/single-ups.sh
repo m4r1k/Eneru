@@ -1231,10 +1231,24 @@ ANON=$(curl -sS -o /dev/null -w '%{http_code}' \
   http://127.0.0.1:9100/api/v1/ups/TestUPS@localhost:3493/command)
 if [ "$ANON" != "401" ]; then echo "FAIL: anonymous control returned $ANON, expected 401"; exit 1; fi
 
+# An allowlisted command reaches NUT and returns success.
+ALLOWED=$(curl -sS -o /tmp/test53-allowed.json -w '%{http_code}' \
+  -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"command":"beeper.toggle"}' \
+  http://127.0.0.1:9100/api/v1/ups/TestUPS@localhost:3493/command)
+if [ "$ALLOWED" != "200" ]; then
+  echo "FAIL: allowed command returned $ALLOWED, expected 200"
+  cat /tmp/test53-allowed.json
+  cat /tmp/test53-daemon.log
+  exit 1
+fi
+grep -q '"status": "ok"' /tmp/test53-allowed.json \
+  || { echo "FAIL: allowed command did not report ok"; cat /tmp/test53-allowed.json; exit 1; }
+
 kill "$DAEMON_PID" 2>/dev/null || true
 wait "$DAEMON_PID" 2>/dev/null || true
 trap - EXIT
-echo "PASS: UPS control fail-closed and allowlist enforcement verified"
+echo "PASS: UPS control fail-closed, allowlist enforcement, and NUT execution verified"
 )
 
 # ======================================================================

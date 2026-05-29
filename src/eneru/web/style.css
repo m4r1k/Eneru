@@ -42,8 +42,8 @@ h2 { font-size: 1rem; color: var(--muted); text-transform: uppercase;
 .badge.crit { background: rgba(255,92,92,0.15); color: var(--crit); }
 .bar { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; margin-top: 0.35rem; }
 .bar > span { display: block; height: 100%; background: var(--accent); }
-.graph-controls { display: flex; gap: 1rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
-.graph-controls label { color: var(--muted); font-size: 0.9rem; }
+.graph-controls, .event-filters { display: flex; gap: 1rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
+.graph-controls label, .event-filters label { color: var(--muted); font-size: 0.9rem; }
 select, input { background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
         border-radius: 6px; padding: 0.3rem 0.5rem; font: inherit; }
 .graph { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem; }
@@ -69,6 +69,14 @@ button.secondary { background: var(--panel-2); color: var(--text); border: 1px s
 .modal-actions { display: flex; justify-content: flex-end; gap: 0.6rem; }
 .control-ups { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
                padding: 1rem; margin-bottom: 1rem; }
+.control-ups h4 { margin: 0.9rem 0 0.4rem; color: var(--muted); font-size: 0.85rem; }
 .control-ups .cmds { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+.vars { display: grid; gap: 0.55rem; }
+.var-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.5rem; align-items: end; }
+.var-form label { display: grid; gap: 0.25rem; color: var(--muted); font-size: 0.9rem; min-width: 0; }
+.var-form input { width: 100%; min-width: 0; }
 footer { padding: 0.6rem 1.25rem; color: var(--muted); font-size: 0.85rem;
          border-top: 1px solid var(--line); }
+@media (max-width: 640px) {
+  .var-form { grid-template-columns: 1fr; }
+}

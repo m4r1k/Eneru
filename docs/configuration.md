@@ -356,13 +356,13 @@ a typo never takes monitoring down. Valid changes are split in two:
 
 - **Applied live:** trigger thresholds (per UPS group), `behavior.dry_run`,
   `nut_control` allowlists/credentials, `prometheus.enabled`, `notifications`
-  (URLs/targets, via an Apprise rebuild), and `statistics.retention`.
+  (URLs/targets, via an Apprise rebuild), MQTT broker/topic/interval,
+  `remote_health` interval/probe/thresholds, and `statistics.retention`.
 - **Restart-required (reported, not applied):** `api.bind`/`port` and auth,
-  UPS/redundancy topology, `logging`, `statistics.db_directory`, `mqtt`, and
-  `remote_health`. These are captured at startup; reconnecting MQTT or the
-  SSH-health thread (or swapping log handlers) mid-power-event could drop
-  shutdown notifications, so Eneru deliberately reports them as
-  restart-required rather than re-initializing them live.
+  UPS/redundancy topology, `logging`, `local_shutdown`, and
+  `statistics.db_directory`. These are captured at startup by sockets, file
+  handlers, dependency checks, or DB connections, so Eneru reports them as
+  restart-required rather than half-applying them.
 
 ```bash
 # systemd / bare-metal

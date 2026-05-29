@@ -148,12 +148,13 @@ def test_reload_classifies_subsystems(tmp_path):
     ("mqtt", "mqtt:\n  enabled: true\n  broker: 'mqtt://h:1883'\n"),
     ("notifications", "notifications:\n  enabled: true\n  urls: ['json://h']\n"),
 ])
-def test_reload_restart_required_sections(tmp_path, section, frag):
+def test_reload_worker_subsystems_apply_live(tmp_path, section, frag):
     live = _load(tmp_path, "ups:\n  name: U@h\n", "a.yaml")
     new = _load(tmp_path, "ups:\n  name: U@h\n" + frag, "b.yaml")
     rep = reloadmod.apply_reload(live, [live], new)
-    assert section in rep["restartRequired"]
-    assert section not in rep["subsystems"]
+    assert section in rep["applied"]
+    assert section in rep["subsystems"]
+    assert section not in rep["restartRequired"]
 
 
 @pytest.mark.unit

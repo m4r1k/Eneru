@@ -49,6 +49,8 @@ def test_route_serves_index(minimal_config):
     status, ctype, body = h._route()
     assert status == 200 and ctype == "text/html"
     assert b"<title>Eneru</title>" in body
+    assert b'id="event-source-filter"' in body
+    assert b'id="event-type-filter"' in body
 
 
 @pytest.mark.unit
@@ -97,3 +99,14 @@ def test_config_summary_exposes_nut_control(minimal_config):
     ext = config_summary(minimal_config, extended=True)
     assert "allowedCommands" in ext["nutControl"]
     assert "allowedVariables" in ext["nutControl"]
+
+
+@pytest.mark.unit
+def test_dashboard_js_contains_plan_control_surfaces(minimal_config):
+    body = _handler(minimal_config, path="/app.js")._serve_static("/app.js")[1]
+    text = body.decode("utf-8")
+    assert "applyEventFilters" in text
+    assert "event-source-filter" in text
+    assert "event-type-filter" in text
+    assert "renderVariableForms" in text
+    assert "setVariable(" in text

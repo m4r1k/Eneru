@@ -90,8 +90,8 @@ done
 | Authentication | User/API-key SQLite store (bcrypt hashing, salt uniqueness, truncation, CRUD), `eneru user`/`apikey` CLI lifecycle, password-input safety (getpass/generate/stdin), lazy bcrypt import |
 | API auth middleware | Session manager (TTL/expiry), tiered authorization matrix (reads open vs `require_for_reads`, writes fail-closed when auth off), bearer/API-key resolution, login/logout, body-size + JSON validation, tiered `/config` |
 | UPS control | `upscmd`/`upsrw` wrappers and output parsing, command/variable allowlist enforcement, per-group credential/allowlist overrides, feature-disabled and unknown-UPS handling, NUT-error mapping, fail-closed config validation (control requires auth), value sanitization, audit logging to the events table |
-| Config hot-reload | Strict load+validate (bad YAML / non-mapping / validation error rejected, running config kept), safe-vs-restart classification, in-place live apply across shared + per-monitor configs, SIGHUP handler and API `/config/reload` endpoint |
-| Web dashboard | Static asset serving via `importlib.resources`, MIME mapping, path-traversal rejection, strict CSP + `nosniff` on HTML, bytes-body responses, dashboard open before the read gate, `nutControl` exposure in the config summary |
+| Config hot-reload | Strict load+validate (bad YAML / non-mapping / validation error rejected, running config kept), safe-vs-restart classification, in-place live apply across shared + per-monitor configs, subsystem reload hooks for stats/notifications/MQTT/remote-health, SIGHUP handler and API `/config/reload` endpoint |
+| Web dashboard | Static asset serving via `importlib.resources`, MIME mapping, path-traversal rejection, strict CSP + `nosniff` on HTML, bytes-body responses, dashboard open before the read gate, event filters, control variable forms, `nutControl` exposure in the config summary |
 | Packaging | nFPM file list, package install paths, wrapper execution, OCI image smoke tests |
 
 ## End-to-end tests
@@ -180,7 +180,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 55 numb
 | 50 | Loopback | Docker/Podman local capabilities with explicit no-loopback config fail startup |
 | 51 | CLI | `eneru user`/`apikey` lifecycle round-trips against a real bcrypt + SQLite auth DB (create/list/show/passwd/delete, key create/list/revoke), and never leaks a hash or key |
 | 52 | UPS Single | API auth: login issues a bearer token, `/api/v1/config` is sanitized for anonymous and extended for authenticated callers, bad credentials are 401, and an anonymous write is rejected 401 |
-| 53 | UPS Single | UPS control: `nut_control` without auth is rejected at startup (fail-closed), and with auth a disallowed command is 403 while an unauthenticated control call is 401 |
+| 53 | UPS Single | UPS control: `nut_control` without auth is rejected at startup (fail-closed), with auth a disallowed command is 403, an unauthenticated control call is 401, and an allowlisted command reaches NUT |
 | 54 | UPS Single | Config hot-reload: SIGHUP applies a threshold change live, the authenticated `/config/reload` endpoint returns a report (anonymous is 401), and a broken config is rejected without dropping the daemon |
 | 55 | UPS Single | Browser dashboard: the embedded API serves the SPA shell and assets with a strict CSP, and rejects path traversal / unknown assets with 404 |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |

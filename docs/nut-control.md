@@ -79,6 +79,10 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 A NUT-side failure (driver offline, permission denied) is returned as `502` with
 the underlying message; a disallowed command or variable is `403`.
 
+The web dashboard uses the same endpoints. When signed in, it shows command
+buttons and writable-variable forms only for the names returned by the
+allowlisted list endpoints.
+
 ## Per-group overrides (multi-UPS)
 
 When different UPSes live on separate `upsd` servers with different credentials,

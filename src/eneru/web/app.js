@@ -6,6 +6,8 @@
 
 const TOKEN_KEY = "eneru_token";
 const SVG_NS = "http://www.w3.org/2000/svg";
+let lastEvents = [];
+let knownEventSources = [];
 
 function token() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
 function setToken(t) {
@@ -97,12 +99,68 @@ function renderUps(payload) {
         el("b", { text: String(g.minHealthy) })]),
     ]));
   });
+  updateEventSourceFilter(rows, groups);
 }
 
 function renderEvents(payload) {
+  lastEvents = (payload && payload.events) || [];
+  updateEventTypeFilter(lastEvents);
+  applyEventFilters();
+}
+
+function updateEventSourceFilter(upsRows, groups) {
+  knownEventSources = [];
+  (upsRows || []).forEach((u) => knownEventSources.push({
+    value: u.name, label: u.label || u.name,
+  }));
+  (groups || []).forEach((g) => knownEventSources.push({
+    value: "redundancy:" + g.name, label: "redundancy:" + g.name,
+  }));
+  const sel = document.getElementById("event-source-filter");
+  const prev = sel.value;
+  sel.replaceChildren(el("option", { value: "", text: "All sources" }));
+  knownEventSources.forEach((source) => {
+    sel.appendChild(el("option", { value: source.value, text: source.label }));
+  });
+  if (knownEventSources.some((s) => s.value === prev)) sel.value = prev;
+}
+
+function updateEventTypeFilter(rows) {
+  const sel = document.getElementById("event-type-filter");
+  const prev = sel.value;
+  const types = Array.from(new Set((rows || [])
+    .map((e) => e.eventType || e.event || "")
+    .filter((v) => v))).sort();
+  sel.replaceChildren(el("option", { value: "", text: "All types" }));
+  types.forEach((type) => sel.appendChild(el("option", { value: type, text: type })));
+  if (types.includes(prev)) sel.value = prev;
+}
+
+function eventMatchesSource(event, source) {
+  if (!source) return true;
+  const haystack = [
+    event.group || "",
+    event.ups || "",
+    event.source || "",
+    event.detail || "",
+    event.details || "",
+  ].join(" ").toLowerCase();
+  return haystack.includes(source.toLowerCase());
+}
+
+function applyEventFilters() {
   const body = document.querySelector("#events tbody");
   body.replaceChildren();
-  const rows = (payload && payload.events) || [];
+  const source = document.getElementById("event-source-filter").value;
+  const type = document.getElementById("event-type-filter").value;
+  const text = document.getElementById("event-text-filter").value.trim().toLowerCase();
+  const rows = lastEvents.filter((e) => {
+    const eventType = e.eventType || e.event || "";
+    const detail = (e.detail || e.details || "").toLowerCase();
+    return eventMatchesSource(e, source)
+      && (!type || eventType === type)
+      && (!text || detail.includes(text));
+  });
   if (rows.length === 0) {
     body.appendChild(el("tr", null, [el("td", { colspan: "3", text: "No events." })]));
     return;
@@ -177,6 +235,7 @@ async function renderControl(payload) {
   const rows = (payload && payload.ups) || [];
   for (const u of rows) {
     const box = el("div", { class: "control-ups" }, [el("h3", { text: u.label || u.name })]);
+    box.appendChild(el("h4", { text: "Commands" }));
     const cmds = el("div", { class: "cmds" });
     const res = await api("/api/v1/ups/" + encodeURIComponent(u.name) + "/commands");
     ((res.data && res.data.commands) || []).forEach((c) => {
@@ -186,8 +245,37 @@ async function renderControl(payload) {
     });
     if (!cmds.childNodes.length) cmds.appendChild(el("span", { class: "who", text: "No allowlisted commands." }));
     box.appendChild(cmds);
+    box.appendChild(el("h4", { text: "Variables" }));
+    box.appendChild(await renderVariableForms(u.name));
     panel.appendChild(box);
   }
+}
+
+async function renderVariableForms(ups) {
+  const vars = el("div", { class: "vars" });
+  const res = await api("/api/v1/ups/" + encodeURIComponent(ups) + "/variables");
+  const rows = (res.data && res.data.variables) || [];
+  rows.forEach((v) => {
+    const name = v.name || v.variable || "";
+    if (!name) return;
+    const input = el("input", { name: "value", value: v.value || "" });
+    const form = el("form", { class: "var-form" }, [
+      el("label", null, [
+        el("span", { text: name }),
+        input,
+      ]),
+      el("button", { type: "submit", text: "Set" }),
+    ]);
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      setVariable(ups, name, input.value);
+    });
+    vars.appendChild(form);
+  });
+  if (!vars.childNodes.length) {
+    vars.appendChild(el("span", { class: "who", text: "No allowlisted variables." }));
+  }
+  return vars;
 }
 
 async function runCommand(ups, command) {
@@ -196,6 +284,18 @@ async function runCommand(ups, command) {
     { method: "POST", body: JSON.stringify({ command }) });
   if (!res.ok) showError("Command failed: " + ((res.data && res.data.error && res.data.error.message) || res.status));
   else setStatus("Ran " + command + " on " + ups);
+}
+
+async function setVariable(ups, variable, value) {
+  showError("");
+  const res = await api("/api/v1/ups/" + encodeURIComponent(ups) + "/variables/" +
+    encodeURIComponent(variable), { method: "PUT", body: JSON.stringify({ value }) });
+  if (!res.ok) {
+    showError("Variable update failed: " +
+      ((res.data && res.data.error && res.data.error.message) || res.status));
+  } else {
+    setStatus("Set " + variable + " on " + ups);
+  }
 }
 
 // ----- auth UI -----
@@ -269,6 +369,9 @@ function init() {
   document.getElementById("login-form").addEventListener("submit", doLogin);
   document.getElementById("graph-ups").addEventListener("change", loadGraph);
   document.getElementById("graph-metric").addEventListener("change", loadGraph);
+  document.getElementById("event-source-filter").addEventListener("change", applyEventFilters);
+  document.getElementById("event-type-filter").addEventListener("change", applyEventFilters);
+  document.getElementById("event-text-filter").addEventListener("input", applyEventFilters);
   refresh();
   setInterval(refresh, 10000);
 }

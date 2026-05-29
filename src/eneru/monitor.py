@@ -1332,6 +1332,52 @@ class UPSGroupMonitor(
                 self._stats_store.apply_reload(self.config.statistics)
             except Exception as exc:  # pragma: no cover - defensive
                 self._log_message(f"⚠️ stats retention reload failed: {exc}")
+        if "notifications" in subsystems and not self._coordinator_mode:
+            self._reload_notification_worker()
+        if "remote_health" in subsystems:
+            self._reload_remote_health()
+        if "mqtt" in subsystems and not self._coordinator_mode:
+            self._reload_mqtt_publisher()
+
+    def _reload_notification_worker(self) -> None:
+        """Bounce the single-UPS notification worker after config reload."""
+        if self._notification_worker is not None:
+            self._notification_worker.stop()
+            self._notification_worker = None
+        if not self.config.notifications.enabled:
+            self._log_message("📢 Notifications: disabled")
+            return
+        if not APPRISE_AVAILABLE:
+            self._log_message(
+                "⚠️ WARNING: Notifications enabled but apprise not installed. "
+                "Install with: pip install apprise"
+            )
+            return
+        worker = NotificationWorker(self.config)
+        if worker.start():
+            if self._stats_store is not None and self._stats_store._conn is not None:
+                worker.register_store(self._stats_store)
+            self._notification_worker = worker
+            count = worker.get_service_count()
+            self._log_message(f"📢 Notifications reloaded ({count} service(s))")
+        else:
+            self._log_message("⚠️ WARNING: Failed to reload notifications")
+
+    def _reload_remote_health(self) -> None:
+        """Bounce remote-health with the new interval/probe/thresholds."""
+        if self._remote_health_manager is not None:
+            self._remote_health_manager.stop()
+            self._remote_health_manager = None
+        self._start_remote_health()
+        self._log_message("🔄 Remote health checks reloaded")
+
+    def _reload_mqtt_publisher(self) -> None:
+        """Bounce the MQTT publisher so broker/topic changes take effect."""
+        if self._mqtt_publisher is not None:
+            self._mqtt_publisher.stop()
+            self._mqtt_publisher = None
+        self._start_mqtt_publisher()
+        self._log_message("🔄 MQTT publisher reloaded")
 
     def record_control_event(self, ups_name: str, event_type: str,
                              detail: str) -> None:
