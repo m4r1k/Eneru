@@ -17,6 +17,11 @@
   }
 }
 * { box-sizing: border-box; }
+/* The dashboard shows/hides every element via the `hidden` attribute. Class
+   rules that set `display` (e.g. `.modal { display: flex }`) otherwise win over
+   the UA `[hidden] { display: none }`, leaving the element stuck visible — which
+   pinned the login modal permanently in the foreground. Make `hidden` always win. */
+[hidden] { display: none !important; }
 body {
   margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   background: var(--bg); color: var(--text); line-height: 1.4;

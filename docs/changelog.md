@@ -171,6 +171,16 @@ before release per the changelog workflow in `AGENTS.md`.
   live on every request (short-lived connections), so a new user is usable
   immediately.
 
+### Fixed (rc6 — login modal stuck in foreground)
+
+- **The dashboard login modal never went away.** `.modal { display: flex }`
+  overrode the browser's `[hidden] { display: none }`, so the login overlay was
+  pinned in the foreground permanently and `closeLogin()` had no visual effect —
+  even a successful login left the modal covering the page, which read as "login
+  is broken." Added a global `[hidden] { display: none !important; }` reset so the
+  `hidden` attribute (used throughout the dashboard for show/hide) always wins,
+  and a stylesheet regression test guards it (there is no browser in CI).
+
 ---
 
 ## [5.5.1] - 2026-05-19

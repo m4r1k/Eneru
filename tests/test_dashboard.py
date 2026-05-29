@@ -110,3 +110,15 @@ def test_dashboard_js_contains_plan_control_surfaces(minimal_config):
     assert "event-type-filter" in text
     assert "renderVariableForms" in text
     assert "setVariable(" in text
+
+
+@pytest.mark.unit
+def test_stylesheet_makes_hidden_attribute_win(minimal_config):
+    # The dashboard shows/hides everything via the `hidden` attribute. A class
+    # that sets `display` (e.g. `.modal { display: flex }`) would otherwise win
+    # over the UA `[hidden]{display:none}` and pin the login modal in the
+    # foreground forever. Guard the reset that fixes this (no browser in CI).
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    norm = css.replace(" ", "").replace("\n", "").lower()
+    assert "[hidden]{display:none!important;}" in norm
