@@ -1,6 +1,6 @@
 # Observability and API
 
-Eneru v5.3+ includes read-only observability endpoints and outbound integrations. None of the API or MQTT surfaces here can trigger UPS shutdown, mutate state, or run commands you didn't already configure for the daemon. Note that **remote-health probes do execute SSH commands** against your configured remote servers — they're restricted to a deliberately-harmless `probe_command` (default `true`) that never touches your `pre_shutdown_commands` or `shutdown_command`. See "Remote SSH health" below for the safety contract.
+Eneru v5.3+ includes read-only observability endpoints and outbound integrations. None of the API or MQTT surfaces here can trigger UPS shutdown, mutate state, or run commands you did not already configure for the daemon. **Remote-health probes do execute SSH commands** against your configured remote servers, but they are restricted to the harmless `probe_command` (`true` by default) and never touch your `pre_shutdown_commands` or `shutdown_command`. See "Remote SSH health" below for the safety contract.
 
 ## API server
 
@@ -97,9 +97,9 @@ UPS rows include a stable `groupId` derived from the configured UPS name. Multi-
 
 `/api/v1/events` accepts `limit` and `verbosity` query parameters. `verbosity=0` returns power/shutdown events, `verbosity=1` also includes diagnostics, and `verbosity=2` returns all recorded events including lifecycle rows.
 
-For wide-range viewing and paging, `/api/v1/events` also accepts `from`/`to` (Unix seconds) and a source-qualified cursor: `before=<ts>&beforeSource=<source>&beforeId=<id>`, using the oldest row already displayed. Each event row carries the required identity — `source` (the UPS `groupId`) plus `id` (a stable, never-reused per-UPS row id) — alongside `ts`, `eventType`, and `detail`; clients should still de-duplicate loaded pages by `(source, id)`. A timestamp-only `before=<ts>` is accepted for compatibility and uses an inclusive timestamp boundary. Likewise, `/api/v1/ups/<name>/history` accepts `from`/`to`; omitting `from` returns from the earliest retained data (the hourly-aggregate retention horizon), and `from > to` is a 400.
+For wide-range viewing and paging, `/api/v1/events` also accepts `from`/`to` (Unix seconds) and a source-qualified cursor: `before=<ts>&beforeSource=<source>&beforeId=<id>`, using the oldest row already displayed. Each event row carries the required identity: `source` (the UPS `groupId`) plus `id` (a stable, never-reused per-UPS row id), alongside `ts`, `eventType`, and `detail`. Clients should still de-duplicate loaded pages by `(source, id)`. A timestamp-only `before=<ts>` is accepted for compatibility and uses an inclusive timestamp boundary. Likewise, `/api/v1/ups/<name>/history` accepts `from`/`to`; omitting `from` returns from the earliest retained data (the hourly-aggregate retention horizon), and `from > to` is a 400.
 
-**Deleting events.** `DELETE /api/v1/ups/<name>/events` removes selected events. It requires authentication (writes are hard-disabled when `api.auth` is off → 403; missing credential → 401). The JSON body is `{"items": [{"id": <int>, "ts": <int>, "eventType": "<str>"}, ...]}` (max 1000 items → 413; malformed → 400). Each row is matched on all three fields, so a stale client can only ever delete the exact rows it last saw — a mismatch deletes nothing. The response is `{"ups": "<name>", "deleted": <count>}`; if statistics is disabled the endpoint returns 503. Deletions are recorded to the events table as `EVENTS_DELETED` audit rows.
+**Deleting events.** `DELETE /api/v1/ups/<name>/events` removes selected events. It requires authentication (writes are hard-disabled when `api.auth` is off -> 403; missing credential -> 401). The JSON body is `{"items": [{"id": <int>, "ts": <int>, "eventType": "<str>"}, ...]}` (max 1000 items -> 413; malformed -> 400). Each row is matched on all three fields, so a stale client can only delete the exact rows it last saw. A mismatch deletes nothing. The response is `{"ups": "<name>", "deleted": <count>}`; if statistics is disabled the endpoint returns 503. Deletions are recorded to the events table as `EVENTS_DELETED` audit rows.
 
 ## Health and readiness
 
@@ -245,7 +245,7 @@ logging:
   format: "json"
 ```
 
-Each line is a JSON object with `timestamp`, `level`, `logger`, `message`, and — when the call site supplies them — `category`, `event_type`, `group`, `ups`, and `server`. Power events, shutdown sequences, and remote-health transitions all set the structured fields explicitly; older call sites fall back to a heuristic that parses the message text, so existing log pipelines keep working unchanged.
+Each line is a JSON object with `timestamp`, `level`, `logger`, `message`, and, when the call site supplies them, `category`, `event_type`, `group`, `ups`, and `server`. Power events, shutdown sequences, and remote-health transitions all set the structured fields explicitly; older call sites fall back to a heuristic that parses the message text, so existing log pipelines keep working unchanged.
 
 Forward logs to syslog:
 

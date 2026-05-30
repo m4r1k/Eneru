@@ -187,7 +187,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 56 numb
 | 56 | UPS Single | Event management: a wide-range `/api/v1/events` query returns source-qualified rows, an authenticated `DELETE` removes a real event (anonymous is 401), and a history `from > to` is 400 |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
 
-Every commit on the protected workflow has to prove the daemon works against real services, not just isolated Python assertions: real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.
+Every commit on the protected workflow has to prove the daemon works against real services. That means real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.
 
 ## Run E2E locally
 

@@ -289,7 +289,7 @@ within the default AppArmor confinement.
 
 ## Dangers and hardening
 
-**The loopback SSH key is, in effect, "shutdown-the-host" capability.**
+**The loopback SSH key can shut the host down.**
 Treat it that way:
 
 1. **Do not use forced commands.** `authorized_keys command="..."`
@@ -304,8 +304,8 @@ Treat it that way:
 4. **Key file mode 0400.** Eneru warns at startup if the loopback's
    key file is world-readable.
 5. **A container escape becomes a host poweroff.** That's the worst
-   case — annoying but not catastrophic, since the host poweroff is
-   what the daemon was designed to do anyway. Mitigate by treating
+   case. It is bad, but it is still the action this daemon is designed
+   to take during an outage. Mitigate by treating
    the Eneru container's lifecycle the same as any other privileged
    workload on the host.
 6. **No `--privileged`, no `--cap-add SYS_ADMIN`, no `--pid=host`.**
@@ -354,7 +354,7 @@ Inside a container Eneru does not use journald. Logs go to two places:
    kubectl logs -f deploy/eneru
    ```
 
-2. **`/var/log/eneru/ups-monitor.log`** when `logging.file` points there. Mount a persistent volume at `/var/log/eneru` so the file survives container restarts and gives you a forensic timeline after the runtime log buffer rotates away. The container `eneru` user is UID/GID 10001, so the volume must be group-writable by 10001 — `fsGroup: 10001` in the pod `securityContext` (the sample manifests do this) is the simplest way.
+2. **`/var/log/eneru/ups-monitor.log`** when `logging.file` points there. Mount a persistent volume at `/var/log/eneru` so the file survives container restarts and gives you a forensic timeline after the runtime log buffer rotates away. The container `eneru` user is UID/GID 10001, so the volume must be group-writable by 10001. `fsGroup: 10001` in the pod `securityContext` is the simplest way; the sample manifests already do this.
 
    Docker bind mount:
 

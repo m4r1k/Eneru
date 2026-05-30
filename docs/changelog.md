@@ -854,7 +854,7 @@ Or download packages directly from GitHub releases.
 - Service file and install script updated for new filename
 
 ### Why Non-Blocking Matters
-During power outages, network connectivity is often unreliable. The previous blocking implementation could delay shutdown by 10-30+ seconds per notification if the network was down. The new architecture queues notifications instantly and processes them in the background, ensuring critical shutdown operations are never delayed.
+During power outages, network connectivity is often unreliable. The previous blocking implementation could delay shutdown by 10-30+ seconds per notification if the network was down. The new architecture queues notifications immediately and processes them in the background, so critical shutdown work never waits on the network.
 
 ---
 
@@ -993,7 +993,7 @@ During power outages, network connectivity is often unreliable. The previous blo
 - Depletion rate: 60-second window, 15 samples -> 300-second window, 30 samples with grace period
 - Connection handling: basic retry -> stale data detection with failsafe shutdown
 - Shutdown triggers: 4 triggers -> 4 triggers + FSD flag detection
-- Configuration: minimal -> comprehensive with mount options
+- Configuration: minimal -> includes mount options
 
 ### Security
 - Removed `sshpass` and password storage
@@ -1001,7 +1001,7 @@ During power outages, network connectivity is often unreliable. The previous blo
 - Passwordless sudo configuration guide
 
 ### Dependencies
-- Added: `jq` (for robust JSON generation)
+- Added: `jq` (for safer JSON generation)
 - Removed: `sshpass`
 - Required: Bash 4.0+ (for associative arrays)
 

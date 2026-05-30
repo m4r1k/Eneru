@@ -92,7 +92,7 @@ docker run -d --name eneru \
   --api --api-bind 0.0.0.0 --api-port 9191
 ```
 
-Use `ghcr.io/m4r1k/eneru:testing` for pre-release builds. v5.5+ makes the OCI image first-class for **both** remote-only and local-host deployments — for full local-host ownership from a container (host poweroff, VM teardown, container stop, filesystem unmount), add `--network host`, `-v /etc/machine-id:/etc/machine-id:ro`, and a loopback SSH key. See [Choose your install](https://eneru.readthedocs.io/latest/install-comparison/) for the three deployment profiles and [Migrate to container](https://eneru.readthedocs.io/latest/migrate-to-container/) for the step-by-step.
+Use `ghcr.io/m4r1k/eneru:testing` for pre-release builds. v5.5+ supports the OCI image for **both** remote-only and local-host deployments. For full local-host ownership from a container (host poweroff, VM teardown, container stop, filesystem unmount), add `--network host`, `-v /etc/machine-id:/etc/machine-id:ro`, and a loopback SSH key. See [Choose your install](https://eneru.readthedocs.io/latest/install-comparison/) for the three deployment profiles and [Migrate to container](https://eneru.readthedocs.io/latest/migrate-to-container/) for the step-by-step.
 
 **PyPI:**
 ```bash
@@ -178,7 +178,7 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 - Notifications to 100+ services (Discord, Slack, Telegram, ntfy, email) via [Apprise](https://github.com/caronc/apprise/wiki)
 - Power quality monitoring: voltage, AVR, bypass, overload
 - Read-only API, Prometheus metrics, outbound MQTT, JSON/syslog logs, and Grafana dashboard
-- Official OCI image — first-class for both remote-only deployments AND full local-host ownership via SSH loopback delegate (v5.5+)
+- Official OCI image for both remote-only deployments and full local-host ownership via SSH loopback delegate (v5.5+)
 - Dry-run mode for safe testing
 - Comprehensive test suite across multiple Linux distros, with E2E tests against real NUT, SSH, Docker, and libvirt on every commit
 
@@ -189,7 +189,7 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 | Install path | Local-host ownership | Remote systems | Recommended for |
 |---|---|---|---|
 | **pip / deb / rpm (native)** | First-class via systemd | Yes | Homelab, single-host professional, end-user-managed enterprise |
-| **OCI image (Docker / Podman)** | First-class via SSH loopback delegate (v5.5+) | Yes | Homelab, professional, enterprise — the v5.5 default for containerized local-host |
+| **OCI image (Docker / Podman)** | Supported via SSH loopback delegate (v5.5+) | Yes | Homelab, professional, enterprise; the v5.5 default for containerized local-host |
 | **Kubernetes** | Not recommended | Yes | Enterprise multi-site fleet monitoring of remote systems |
 
 v5.5 made the OCI image first-class for the local-host case: the
@@ -229,7 +229,7 @@ Full documentation at [eneru.readthedocs.io](https://eneru.readthedocs.io/):
 
 ## Support the project
 
-Eneru is free and MIT-licensed and will stay that way. If it has saved your homelab or rack from a dirty shutdown and you'd like to chip in toward UPS hardware, NUT testing, and the maintainer's coffee budget, [Buy Me a Coffee](https://buymeacoffee.com/m4r1k) — always optional, much appreciated.
+Eneru is free and MIT-licensed and will stay that way. If it has saved your homelab or rack from a dirty shutdown and you'd like to chip in toward UPS hardware, NUT testing, and the maintainer's coffee budget, [Buy Me a Coffee](https://buymeacoffee.com/m4r1k). Always optional, much appreciated.
 
 ---
 

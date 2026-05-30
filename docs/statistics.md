@@ -169,7 +169,7 @@ sqlite3 /var/lib/eneru/UPS-192-168-1-100.db \
 
 ## Schema migrations
 
-Eneru stores the schema version in `meta.schema_version`. New releases migrate existing databases with additive `ALTER TABLE` statements and preserve old rows. Where a column can't be added in place — schema **v5** gives `events` an `id INTEGER PRIMARY KEY AUTOINCREMENT`, which SQLite cannot `ALTER ADD` — the table is rebuilt inside the same transaction (existing rows keep their identity as `id = old rowid`), so the migration is still atomic and replay-safe.
+Eneru stores the schema version in `meta.schema_version`. New releases migrate existing databases with additive `ALTER TABLE` statements and preserve old rows. When a column cannot be added in place, the table is rebuilt inside the same transaction. Schema **v5** does this for `events.id INTEGER PRIMARY KEY AUTOINCREMENT`, which SQLite cannot `ALTER ADD`; existing rows keep their identity as `id = old rowid`, so the migration is still atomic and replay-safe.
 
 Check the version:
 
