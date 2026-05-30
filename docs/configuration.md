@@ -313,7 +313,7 @@ view and appear in the TUI/API events list at Diagnostics verbosity (`-v`).
 
 ## API, metrics, remote health, and MQTT
 
-The v5.3 API is read-only, opt-in, and binds to localhost by default when enabled. Do not expose it to untrusted networks; authz is planned for v6. Two surfaces in this section deviate from "off unless enabled": Prometheus `/metrics` is on by default once the API itself is enabled (it's the canonical observability output), and `remote_health.enabled` defaults to `true` because the probes are harmless (run only against the configured `probe_command`, default `true`) and only target remote servers explicitly marked `enabled: true` elsewhere in the config.
+The API is opt-in and binds to localhost by default when enabled. With `api.auth` off it is **read-only** (every write surface is hard-disabled), exactly as in v5.x; turning `api.auth` on (see [Authentication](authentication.md)) adds the tiered write-path — reads stay open unless `api.auth.require_for_reads`, while UPS control, event deletion, and config reload require a credential. Still, do not expose the socket to untrusted networks without auth: anonymous `/api/v1/config` reveals server hostnames and presence flags. Two surfaces in this section deviate from "off unless enabled": Prometheus `/metrics` is on by default once the API itself is enabled (it's the canonical observability output), and `remote_health.enabled` defaults to `true` because the probes are harmless (run only against the configured `probe_command`, default `true`) and only target remote servers explicitly marked `enabled: true` elsewhere in the config.
 
 | Key | Default | Description |
 |-----|---------|-------------|

@@ -765,7 +765,9 @@ class MultiUPSCoordinator:
             groups = getattr(mon.config, "ups_groups", [])
             if groups and groups[0].ups.name == ups_name:
                 store = getattr(mon, "_stats_store", None)
-                return store.delete_events(items) if store is not None else None
+                if store is None or not store.is_open:
+                    return None
+                return store.delete_events(items)
         return None
 
     def _handle_sighup(self, signum, frame):

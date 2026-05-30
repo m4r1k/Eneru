@@ -108,7 +108,9 @@ logging:
 # ==============================================================================
 api:
   # Embedded HTTP API. Bind localhost by default. Read endpoints are open;
-  # control/write endpoints (v6.0) are gated by the auth block below.
+  # control/write endpoints (v6.0) are gated by the auth block below. The browser
+  # dashboard is served by this same server whenever the API is enabled (no
+  # separate flag, no extra service).
   enabled: false
   bind: "127.0.0.1"
   port: 9191
@@ -117,6 +119,10 @@ api:
   # as it did in v5.3 (read-only, no credentials) and every write surface is
   # hard disabled — enabling a control feature (e.g. nut_control) while auth is
   # off is a startup error. Manage users/keys with `eneru user` / `eneru apikey`.
+  #
+  # Auto-enable: if you leave `enabled` UNSET and the auth DB already has at least
+  # one user, auth turns on automatically (no restart) — so `eneru user create`
+  # then sign in "just works". An explicit value (true OR false) always wins.
   auth:
     enabled: false
     # Tiered reads: when false (default), read endpoints stay open even with

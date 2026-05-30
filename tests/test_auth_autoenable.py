@@ -37,11 +37,14 @@ def test_enabled_explicitly_set_false_when_absent():
 
 
 @pytest.mark.unit
-def test_enabled_explicitly_set_excluded_from_equality():
+def test_enabled_explicitly_set_participates_in_equality_not_repr():
+    # Unpinned vs explicitly-pinned (even to the same effective value) is a real
+    # api.auth change, so the hot-reload diff must see it: equality includes the
+    # flag. It stays out of repr to avoid noise.
     a = _cfg("ups:\n  name: U@h\napi:\n  auth:\n    session_ttl: 5\n").api.auth
     b = _cfg("ups:\n  name: U@h\napi:\n  auth:\n    enabled: false\n    "
              "session_ttl: 5\n").api.auth
-    assert a == b
+    assert a != b                                    # unpinned != explicitly off
     assert "enabled_explicitly_set" not in repr(a)
 
 
@@ -92,9 +95,13 @@ def test_explicit_true_wins_even_with_no_users(tmp_path):
 
 
 @pytest.mark.unit
-def test_active_when_unpinned_and_broken_db_fails_closed(tmp_path):
+def test_inactive_when_unpinned_and_db_unreadable(tmp_path):
+    # Unpinned auth + an unreadable DB -> auth INACTIVE. This is still fail-closed
+    # on the write surface: with auth inactive, reads stay open (as always) but
+    # every write is hard-disabled (403), so a corrupt/unreadable DB can never
+    # open up control. (It is not "auth active with a dead DB", which would only
+    # make every login fail while blocking the same writes.)
     cfg, db = _cfg_with_db(tmp_path)
-    # A non-DB file at the path makes user_count() raise -> fail closed.
     with open(db, "w") as fh:
         fh.write("not a sqlite database")
     assert _auth_is_active(cfg) is False

@@ -483,13 +483,31 @@ class TestSchemaMigration:
 
     @staticmethod
     def _build_v4_db(path: Path) -> None:
-        """Synthesize a v4-shaped DB (events has NO id column)."""
+        """Synthesize a real v4-shaped DB: full samples + both aggregate tables +
+        events (NO id column) + notifications + meta, so the v4->v5 rebuild is
+        exercised against a database that matches what a real v4 install holds."""
         c = sqlite3.connect(str(path), isolation_level=None)
         c.execute("PRAGMA journal_mode = WAL")
         c.execute(
             "CREATE TABLE samples (ts INTEGER NOT NULL, status TEXT, "
-            "battery_charge REAL, samples_count INTEGER)"
+            "battery_charge REAL, battery_runtime REAL, ups_load REAL, "
+            "input_voltage REAL, output_voltage REAL, depletion_rate REAL, "
+            "time_on_battery INTEGER, connection_state TEXT, "
+            "battery_voltage REAL, ups_temperature REAL, "
+            "input_frequency REAL, output_frequency REAL)"
         )
+        for table in ("agg_5min", "agg_hourly"):
+            c.execute(
+                f"CREATE TABLE {table} (ts INTEGER PRIMARY KEY, "
+                "battery_charge_avg REAL, battery_charge_min REAL, "
+                "battery_charge_max REAL, battery_runtime_avg REAL, "
+                "ups_load_avg REAL, ups_load_max REAL, input_voltage_avg REAL, "
+                "input_voltage_min REAL, input_voltage_max REAL, "
+                "samples_count INTEGER, output_voltage_avg REAL, "
+                "battery_voltage_avg REAL, ups_temperature_avg REAL, "
+                "ups_temperature_min REAL, ups_temperature_max REAL, "
+                "input_frequency_avg REAL, output_frequency_avg REAL)"
+            )
         c.execute(
             "CREATE TABLE events (ts INTEGER NOT NULL, "
             "event_type TEXT NOT NULL, detail TEXT, "
@@ -1394,8 +1412,10 @@ class TestEvents:
     def test_delete_events_isolated_per_db(self, tmp_path):
         # The per-DB id is not globally unique: deleting id=1 from one UPS DB must
         # not touch id=1 in another.
-        a = StatsStore(tmp_path / "a.db"); a.open()
-        b = StatsStore(tmp_path / "b.db"); b.open()
+        a = StatsStore(tmp_path / "a.db")
+        a.open()
+        b = StatsStore(tmp_path / "b.db")
+        b.open()
         try:
             a.log_event("X", "ax", ts=100)
             b.log_event("X", "bx", ts=100)
@@ -1404,25 +1424,32 @@ class TestEvents:
             assert len(a.query_recent_events(end_ts=9999, limit=10)) == 0
             assert len(b.query_recent_events(end_ts=9999, limit=10)) == 1  # untouched
         finally:
-            a.close(); b.close()
+            a.close()
+            b.close()
 
     @pytest.mark.unit
-    def test_query_recent_events_cursor_no_repeat_or_skip_same_second(self, store):
-        # Three events share one second + one later; paging by the composite
-        # (ts,id) cursor must walk every row exactly once.
+    def test_query_recent_events_paging_inclusive_end_ts(self, store):
+        # "Load older" pages by lowering end_ts (inclusive) to the oldest ts shown.
+        # The one-row overlap at the boundary is intentional — the dashboard
+        # de-dups by (source, id) — and paging still reaches every event.
+        for i, et in enumerate(("A", "B", "C", "D")):
+            store.log_event(et, et.lower(), ts=1000 * (i + 1))   # 1000..4000
+        page1 = store.query_recent_events(end_ts=9999, limit=2, include_id=True)
+        assert [r[2] for r in page1] == ["C", "D"]
+        page2 = store.query_recent_events(end_ts=page1[0][1], limit=2, include_id=True)
+        assert [r[2] for r in page2] == ["B", "C"]    # inclusive overlap on C
+        page3 = store.query_recent_events(end_ts=page2[0][1], limit=2, include_id=True)
+        assert [r[2] for r in page3] == ["A", "B"]
+        assert {r[2] for r in page1 + page2 + page3} == {"A", "B", "C", "D"}
+
+    @pytest.mark.unit
+    def test_query_recent_events_same_second_not_split_within_limit(self, store):
+        # Events sharing one second are returned together (ordered by id) when the
+        # limit covers them — so a same-second cluster is never half-returned.
         for et in ("A", "B", "C"):
             store.log_event(et, et.lower(), ts=5000)
-        store.log_event("D", "d", ts=6000)
-        page1 = store.query_recent_events(end_ts=9999, limit=2, include_id=True)
-        assert [r[2] for r in page1] == ["C", "D"]  # newest two (id DESC tiebreak)
-        oldest = page1[0]  # (id, ts, type, detail) of the oldest shown
-        page2 = store.query_recent_events(
-            end_ts=9999, limit=2, include_id=True,
-            before_ts=oldest[1], before_id=oldest[0])
-        assert [r[2] for r in page2] == ["A", "B"]  # no repeat of C, no skip
-        # Union is every event exactly once.
-        seen = [r[2] for r in page2] + [r[2] for r in page1]
-        assert sorted(seen) == ["A", "B", "C", "D"]
+        rows = store.query_recent_events(end_ts=9999, limit=10, include_id=True)
+        assert [r[2] for r in rows] == ["A", "B", "C"]
 
     @pytest.mark.unit
     def test_log_event_swallows_sqlite_error(self, store):

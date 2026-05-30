@@ -220,6 +220,11 @@ class StatsStore:
             self.retention_hourly_days = max(1, int(r.agg_hourly_days))
         return True
 
+    @property
+    def is_open(self) -> bool:
+        """True when the store has a live DB connection (open, not yet closed)."""
+        return self._conn is not None
+
     def close(self) -> None:
         if self._conn is not None:
             try:
@@ -649,24 +654,19 @@ class StatsStore:
         end_ts: int,
         limit: int,
         start_ts: Optional[int] = None,
-        before_ts: Optional[int] = None,
-        before_id: Optional[int] = None,
         include_types: Optional[set] = None,
         exclude_types: Optional[set] = None,
         include_id: bool = False,
     ) -> List[Tuple]:
         """Return recent events ascending by ts without loading full history.
 
-        Optional bounds/cursor for wide-range viewing and "load older" paging:
-
+        * ``end_ts`` — inclusive upper bound (``ts <= end_ts``); "load older"
+          paging sets this to the oldest timestamp already shown.
         * ``start_ts`` — inclusive lower bound (``ts >= start_ts``).
-        * ``before_ts``/``before_id`` — a composite **cursor** for the next page
-          of *older* rows: ``ts < before_ts OR (ts = before_ts AND id <
-          before_id)``. The id is required because several events can share one
-          second, so a timestamp-only cursor would repeat or skip rows.
         * ``include_id`` — prepend the row's ``id`` to each returned tuple (off by
           default, so existing 3-tuple callers are unaffected). The id is unique
-          only within this one per-UPS DB; callers must source-qualify it.
+          only within this one per-UPS DB; the aggregating layer source-qualifies
+          it and the dashboard de-dups by ``(source, id)`` across pages.
         """
         if self._conn is None:
             return []
@@ -676,9 +676,6 @@ class StatsStore:
         if start_ts is not None:
             clauses.append("ts >= ?")
             params.append(int(start_ts))
-        if before_ts is not None and before_id is not None:
-            clauses.append("(ts < ? OR (ts = ? AND id < ?))")
-            params.extend([int(before_ts), int(before_ts), int(before_id)])
         if include_types:
             placeholders = ", ".join("?" for _ in include_types)
             clauses.append(f"event_type IN ({placeholders})")

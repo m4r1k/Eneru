@@ -328,7 +328,9 @@ async function loadEvents(beforeCursor) {
 async function loadOlderEvents() {
   const oldest = lastEvents[0];   // ascending sort -> [0] is the oldest shown
   if (!oldest) { await loadEvents(); return; }
-  await loadEvents(oldest.ts + "_" + (oldest.id || 0));
+  // Page on timestamp only — the per-UPS id isn't comparable across sources.
+  // mergeEvents() de-dups by (source, id), so the inclusive boundary is safe.
+  await loadEvents(oldest.ts);
 }
 
 function resetEvents() {
@@ -440,20 +442,27 @@ async function deleteSelected() {
   const chosen = visibleEvents().filter(
     (e) => selectedEvents.has(eventKey(e)) && e.id !== undefined && e.id !== null);
   if (chosen.length === 0) return;
-  // Group by UPS name (the DELETE path is /api/v1/ups/{name}/events).
+  // Group the chosen events by UPS name (the DELETE path is
+  // /api/v1/ups/{name}/events).
   const byUps = new Map();
   for (const e of chosen) {
     if (!byUps.has(e.ups)) byUps.set(e.ups, []);
-    byUps.get(e.ups).push({ id: e.id, ts: e.ts, eventType: e.eventType || e.event });
+    byUps.get(e.ups).push(e);
   }
-  for (const [ups, items] of byUps) {
-    await api("/api/v1/ups/" + encodeURIComponent(ups) + "/events",
+  // Prune ONLY rows the server actually deleted: a failed/forbidden request
+  // must not make the row vanish from the UI.
+  const gone = new Set();
+  let failed = 0;
+  for (const [ups, evs] of byUps) {
+    const items = evs.map((e) => ({ id: e.id, ts: e.ts, eventType: e.eventType || e.event }));
+    const res = await api("/api/v1/ups/" + encodeURIComponent(ups) + "/events",
       { method: "DELETE", body: JSON.stringify({ items }) });
+    if (res.ok) evs.forEach((e) => gone.add(eventKey(e)));
+    else failed += evs.length;
   }
-  // Drop deleted rows locally, clear the selection, re-render.
-  const gone = new Set(chosen.map(eventKey));
-  lastEvents = lastEvents.filter((e) => !gone.has(eventKey(e)));
+  if (gone.size) lastEvents = lastEvents.filter((e) => !gone.has(eventKey(e)));
   selectedEvents = new Set();
+  showError(failed ? ("Could not delete " + failed + " event(s).") : "");
   applyEventFilters();
 }
 
@@ -691,15 +700,21 @@ async function refresh() {
   const [cfg, rh] = await Promise.all([
     api("/api/v1/config"), api("/api/v1/remote-health"),
   ]);
-  if (cfg.ok) {
+  if (cfg.ok && cfg.data) {
     cfgSnapshot = cfg.data;
+    // Re-read auth-enabled every poll, not just at init: with dynamic
+    // auto-enable the server can turn auth on at runtime, and the Sign-in button
+    // must appear without a reload.
+    const a = cfg.data.api && cfg.data.api.auth;
+    authEnabled = !!(a && a.enabled);
     // If we hold a token but the server treats us as anonymous (sanitized
     // config), the session was invalidated server-side — e.g. the account was
     // deleted. Reads stay open (no 401 to trip the api() handler), so detect it
     // here and sign out locally instead of showing a stale "Signed in".
-    if (token() && cfg.data && cfg.data.detail === "sanitized") {
-      setToken(""); selectedEvents = new Set(); refreshAuthUI();
+    if (token() && cfg.data.detail === "sanitized") {
+      setToken(""); selectedEvents = new Set();
     }
+    refreshAuthUI();
   }
   if (rh.ok) remoteHealthSnapshot = (rh.data && rh.data.servers) || [];
 

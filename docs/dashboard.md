@@ -66,12 +66,12 @@ browser's `sessionStorage` and sends it as a `Bearer` header — there is no
 cookie, so there is no CSRF surface. Read views follow the tiered policy (open
 unless `api.auth.require_for_reads`); control actions always require sign-in.
 
-The **Sign in** button only appears when auth is enabled (the dashboard learns
-this from `/api/v1/config` on load) — when auth is off there is nothing to sign
-into. If a login fails, the dashboard shows the server's actual reason. Note
-that creating a user with `eneru user create` can [auto-enable
-auth](authentication.md#auto-enable-create-a-user-then-just-sign-in) on the next
-start, so signing in works without hand-editing the config.
+The **Sign in** button appears whenever auth is enabled — the dashboard re-checks
+`/api/v1/config` on every refresh, so it shows up on its own once auth becomes
+active. When auth is off there is nothing to sign into. If a login fails, the
+dashboard shows the server's actual reason. Creating a user with `eneru user
+create` [auto-enables auth](authentication.md#auto-enable-create-a-user-then-just-sign-in)
+**within seconds, no restart**, so signing in works without hand-editing the config.
 
 ## Security
 

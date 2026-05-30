@@ -113,8 +113,7 @@ def test_delete_events_unknown_ups_404(minimal_config):
     minimal_config.api.auth.enabled = True
     h = _handler(minimal_config, path="/api/v1/ups/Ghost@h/events", body=_body([ITEM]))
     _authed(h)
-    status, _, payload = h._route_delete()
-    assert status == 404
+    assert h._route_delete()[0] == 404
 
 
 @pytest.mark.unit

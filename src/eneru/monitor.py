@@ -1394,7 +1394,7 @@ class UPSGroupMonitor(
         removed, or ``None`` when the store is unavailable (statistics disabled /
         not open) so the API can answer 503 instead of silently succeeding."""
         store = self._stats_store
-        if store is None:
+        if store is None or not store.is_open:
             return None
         return store.delete_events(items)
 

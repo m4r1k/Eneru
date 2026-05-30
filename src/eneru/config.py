@@ -122,9 +122,10 @@ class AuthConfig:
     # True only when the operator wrote ``api.auth.enabled`` in the config. The
     # daemon uses this to decide whether it may *auto-enable* auth when the auth
     # DB already has users (create-a-user-then-just-log-in). An explicit value —
-    # true or false — always wins. Excluded from equality/repr so it never
-    # affects config comparisons or leaks into serialized output.
-    enabled_explicitly_set: bool = field(default=False, compare=False, repr=False)
+    # true or false — always wins. It participates in equality so the hot-reload
+    # diff treats "unpinned" vs "explicitly pinned" as a real ``api.auth`` change
+    # (reported restart-required); it stays out of ``repr`` to avoid noise.
+    enabled_explicitly_set: bool = field(default=False, repr=False)
 
 
 @dataclass

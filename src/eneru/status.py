@@ -683,22 +683,24 @@ def live_remote_health(source: Any, config: Config) -> List[dict]:
 
 def query_events(config: Config, *, limit: int = 100, verbosity: int = 2,
                  start_ts: Optional[int] = None, end_ts: Optional[int] = None,
-                 before_ts: Optional[int] = None,
-                 before_id: Optional[int] = None) -> List[dict]:
-    """Return recent event rows from all per-UPS stats DBs.
+                 before_ts: Optional[int] = None) -> List[dict]:
+    """Return recent event rows aggregated from all per-UPS stats DBs.
 
     Each row carries a **source-qualified identity** — ``source`` (the UPS
-    groupId) plus ``id`` (the per-DB ``rowid``) — because ``rowid`` is unique
-    only within one per-UPS DB. Optional ``start_ts``/``end_ts`` bound the window
-    for wide-range viewing; ``before_ts``/``before_id`` page to older rows. For
-    cross-source paging the caller advances ``before`` to the oldest row shown and
-    de-dups by ``(source, id)``.
+    groupId) plus ``id`` (the per-DB row id) — because the id is unique only
+    within one per-UPS DB. ``start_ts``/``end_ts`` bound the window for wide-range
+    viewing. ``before_ts`` is the "load older" cursor: because the id is not
+    comparable across UPS databases, paging cursors on **timestamp only** (an
+    inclusive upper bound), and the dashboard de-dups by ``(source, id)`` so
+    events sharing one second across sources are never dropped. Rows are ordered
+    by ``(ts, source, id)`` so the merge across sources is deterministic.
     """
     rows: List[dict] = []
     now = int(time.time())
     limit = max(1, int(limit))
     verbosity = int(verbosity)
-    end = int(end_ts) if end_ts is not None else now
+    end = int(before_ts) if before_ts is not None else \
+        (int(end_ts) if end_ts is not None else now)
     include_types = POWER_EVENT_TYPES if verbosity == 0 else None
     exclude_types = LIFECYCLE_EVENT_TYPES if verbosity == 1 else None
     for group in config.ups_groups:
@@ -711,8 +713,6 @@ def query_events(config: Config, *, limit: int = 100, verbosity: int = 2,
                 end_ts=end,
                 limit=limit,
                 start_ts=start_ts,
-                before_ts=before_ts,
-                before_id=before_id,
                 include_types=include_types,
                 exclude_types=exclude_types,
                 include_id=True,
@@ -731,7 +731,7 @@ def query_events(config: Config, *, limit: int = 100, verbosity: int = 2,
                 conn.close()
             except Exception:
                 pass
-    rows.sort(key=lambda row: (row["ts"], row["id"]))
+    rows.sort(key=lambda row: (row["ts"], row["source"], row["id"]))
     return rows[-limit:]
 
 

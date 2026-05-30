@@ -1444,7 +1444,7 @@ local_shutdown:
   enabled: false
 YAML
 
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
 timeout 20s eneru run --config /tmp/config-e2e-events.yaml > /tmp/test56-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT

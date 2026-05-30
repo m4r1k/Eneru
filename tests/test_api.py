@@ -330,21 +330,24 @@ def test_api_events_route_range_id_and_before_paging(minimal_config, tmp_path):
     assert [e["eventType"] for e in evs] == ["B", "C", "D"]
     assert all(isinstance(e["id"], int) and e["source"] for e in evs)
 
-    # `before` cursor pages older without repeat/skip across the shared second.
+    # `before` pages older (inclusive on ts); the boundary row overlaps and the
+    # client de-dups by (source,id). id is per-UPS so the cursor is ts-only.
     status, _, page1 = route("limit=2")
     p1 = page1["events"]
     assert [e["eventType"] for e in p1] == ["C", "D"]
     oldest = p1[0]
-    status, _, page2 = route(f"limit=2&before={oldest['ts']}_{oldest['id']}")
-    assert [e["eventType"] for e in page2["events"]] == ["A", "B"]
+    status, _, page2 = route(f"limit=2&before={oldest['ts']}")
+    assert [e["eventType"] for e in page2["events"]] == ["B", "C"]
 
     # from > to is a 400.
     status, _, err = route("from=3000&to=1000")
     assert status == 400 and err["error"]["code"] == "INVALID_REQUEST"
 
-    # A malformed `before` cursor is ignored (not an error): paging restarts.
-    status, _, payload = route("before=not-a-cursor&limit=10")
-    assert status == 200 and len(payload["events"]) == 4
+    # A non-integer `before` raises APIBadRequest (→ 400 via _dispatch),
+    # consistent with from/to validation.
+    from eneru.api import APIBadRequest
+    with pytest.raises(APIBadRequest):
+        route("before=not-a-cursor&limit=10")
 
 
 @pytest.mark.unit
@@ -1432,6 +1435,7 @@ def test_api_server_start_no_auth_note_when_auth_enabled(minimal_config):
     minimal_config.api.enabled = True
     minimal_config.api.bind = "127.0.0.1"
     minimal_config.api.auth.enabled = True
+    minimal_config.api.auth.enabled_explicitly_set = True  # explicit operator choice
     log = []
     server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
 

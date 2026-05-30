@@ -37,6 +37,9 @@ def _handler(config, *, source=None, auth_store=None, sessions=None,
 
 def _enable_auth(config, *, require_for_reads=False, ttl=3600):
     config.api.auth.enabled = True
+    # Pin it as an explicit operator choice so the effective-auth path can't be
+    # mistaken for the unset/auto-enable case.
+    config.api.auth.enabled_explicitly_set = True
     config.api.auth.require_for_reads = require_for_reads
     config.api.auth.session_ttl = ttl
 

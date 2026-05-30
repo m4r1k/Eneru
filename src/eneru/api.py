@@ -161,6 +161,7 @@ API_ENDPOINTS = (
     {"path": "/api/v1/ups/{name}/command", "description": "POST {command} to run an allowlisted upscmd"},
     {"path": "/api/v1/ups/{name}/variables", "description": "Allowlisted writable UPS variables (upsrw)"},
     {"path": "/api/v1/ups/{name}/variables/{var}", "description": "PUT {value} to set an allowlisted upsrw variable"},
+    {"path": "/api/v1/ups/{name}/events", "description": "DELETE selected events {items:[{id,ts,eventType}]} (auth required)"},
     {"path": "/api/v1/config/reload", "description": "POST to re-read config and apply the safe subset live"},
 )
 
@@ -420,23 +421,6 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             base._auth_active_ts = now
         return base._auth_active_val
 
-    @staticmethod
-    def _parse_before_cursor(raw):
-        """Parse the events ``before`` paging cursor ``"<ts>_<id>"``.
-
-        Returns ``(before_ts, before_id)`` or ``(None, None)`` when absent or
-        malformed (a bad cursor is ignored, not an error — paging just restarts
-        from the most recent rows).
-        """
-        if not raw:
-            return None, None
-        value = raw[0] if isinstance(raw, list) else raw
-        ts_str, _, id_str = str(value).partition("_")
-        try:
-            return int(ts_str), int(id_str)
-        except (TypeError, ValueError):
-            return None, None
-
     def _bearer_token(self) -> Optional[str]:
         """Return the credential from Authorization: Bearer or X-API-Key."""
         header = self.headers.get("Authorization", "") or ""
@@ -630,14 +614,15 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             if start_ts is not None and end_ts is not None and start_ts > end_ts:
                 return 400, "application/json", self._error(
                     "INVALID_REQUEST", "'from' must be <= 'to'")
-            # ``before`` is the "load older" cursor: "<ts>_<id>" (oldest row shown).
-            before_ts, before_id = self._parse_before_cursor(qs.get("before"))
+            # ``before`` is the "load older" cursor — the oldest timestamp already
+            # shown (id is per-UPS, so paging cursors on ts; the client de-dups by
+            # (source, id)).
+            before_ts = _parse_int_param(qs, "before", None) if "before" in qs else None
             return 200, "application/json", {
                 "generatedAt": time.time(),
                 "events": query_events(
                     self.api_config, limit=limit, verbosity=verbosity,
-                    start_ts=start_ts, end_ts=end_ts,
-                    before_ts=before_ts, before_id=before_id),
+                    start_ts=start_ts, end_ts=end_ts, before_ts=before_ts),
             }
 
         if path == "/api/v1/config":
