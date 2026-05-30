@@ -1359,6 +1359,54 @@ class TestEvents:
         assert all(isinstance(r[0], int) for r in rows)
 
     @pytest.mark.unit
+    def test_delete_events_by_id_with_guard(self, store):
+        store.log_event("A", "a", ts=1000)
+        store.log_event("B", "b", ts=2000)
+        store.log_event("C", "c", ts=3000)
+        rows = store.query_recent_events(end_ts=9999, limit=10, include_id=True)
+        by_type = {r[2]: r for r in rows}
+        # Delete A and C by exact (id, ts, type).
+        n = store.delete_events([
+            (by_type["A"][0], 1000, "A"), (by_type["C"][0], 3000, "C")])
+        assert n == 2
+        left = store.query_recent_events(end_ts=9999, limit=10)
+        assert [r[1] for r in left] == ["B"]
+
+    @pytest.mark.unit
+    def test_delete_events_guard_mismatch_deletes_nothing(self, store):
+        store.log_event("A", "a", ts=1000)
+        rid = store.query_recent_events(end_ts=9999, limit=1, include_id=True)[0][0]
+        # Right id, wrong ts -> 0 (a stale client can't delete the wrong row).
+        assert store.delete_events([(rid, 9999, "A")]) == 0
+        # Right id, wrong type -> 0.
+        assert store.delete_events([(rid, 1000, "WRONG")]) == 0
+        assert len(store.query_recent_events(end_ts=9999, limit=10)) == 1
+
+    @pytest.mark.unit
+    def test_delete_events_dedups_and_handles_empty(self, store):
+        store.log_event("A", "a", ts=1000)
+        rid = store.query_recent_events(end_ts=9999, limit=1, include_id=True)[0][0]
+        assert store.delete_events([]) == 0
+        # Duplicate of the same row counts once.
+        assert store.delete_events([(rid, 1000, "A"), (rid, 1000, "A")]) == 1
+
+    @pytest.mark.unit
+    def test_delete_events_isolated_per_db(self, tmp_path):
+        # The per-DB id is not globally unique: deleting id=1 from one UPS DB must
+        # not touch id=1 in another.
+        a = StatsStore(tmp_path / "a.db"); a.open()
+        b = StatsStore(tmp_path / "b.db"); b.open()
+        try:
+            a.log_event("X", "ax", ts=100)
+            b.log_event("X", "bx", ts=100)
+            aid = a.query_recent_events(end_ts=9999, limit=1, include_id=True)[0][0]
+            assert a.delete_events([(aid, 100, "X")]) == 1
+            assert len(a.query_recent_events(end_ts=9999, limit=10)) == 0
+            assert len(b.query_recent_events(end_ts=9999, limit=10)) == 1  # untouched
+        finally:
+            a.close(); b.close()
+
+    @pytest.mark.unit
     def test_query_recent_events_cursor_no_repeat_or_skip_same_second(self, store):
         # Three events share one second + one later; paging by the composite
         # (ts,id) cursor must walk every row exactly once.

@@ -316,10 +316,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         self._dispatch(self._route_put)
 
     def do_DELETE(self):  # noqa: N802 - stdlib hook
-        # No endpoint uses DELETE (API-key revocation is CLI-only); answer with
-        # a clean 405 rather than the stdlib's default 501.
-        self._finish(405, "application/json",
-                     self._error("METHOD_NOT_ALLOWED", "DELETE is not supported"))
+        self._dispatch(self._route_delete)
 
     def log_message(self, fmt, *args):  # noqa: A003 - stdlib hook
         return
@@ -678,6 +675,54 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
         return 404, "application/json", self._not_found("Endpoint not found")
 
+    def _route_delete(self) -> Tuple[int, str, Any]:
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        parts = path.split("/")
+        # DELETE /api/v1/ups/{name}/events
+        if len(parts) == 6 and parts[1:4] == ["api", "v1", "ups"] \
+                and parts[5] == "events":
+            return self._delete_events(unquote(parts[4]))
+        return 404, "application/json", self._not_found("Endpoint not found")
+
+    def _delete_events(self, ups_name: str) -> Tuple[int, str, Any]:
+        """Delete selected events for one UPS (auth-gated, audited).
+
+        Body: ``{"items": [{"id", "ts", "eventType"}, ...]}``. Each item is
+        validated strictly; the store matches on all three fields so a stale
+        client can only delete the exact rows it saw.
+        """
+        principal = self._authorize(write=True)
+        data = self._read_json_body()
+        items = data.get("items")
+        if not isinstance(items, list):
+            raise APIBadRequest("'items' must be a list")
+        if len(items) > 1000:
+            raise APIPayloadTooLarge("too many items (max 1000)")
+        normalized = []
+        for it in items:
+            if not isinstance(it, dict):
+                raise APIBadRequest("each item must be an object")
+            event_id, ts, event_type = it.get("id"), it.get("ts"), it.get("eventType")
+            if not isinstance(event_id, int) or isinstance(event_id, bool):
+                raise APIBadRequest("item 'id' must be an integer")
+            if not isinstance(ts, int) or isinstance(ts, bool):
+                raise APIBadRequest("item 'ts' must be an integer")
+            if not isinstance(event_type, str) or not event_type:
+                raise APIBadRequest("item 'eventType' is required")
+            normalized.append((event_id, ts, event_type))
+        real = self._resolve_ups_name(ups_name)
+        if real is None:
+            return 404, "application/json", self._not_found("UPS not found")
+        source = self.api_source
+        deleted = (source.delete_events(real, normalized)
+                   if hasattr(source, "delete_events") else None)
+        if deleted is None:
+            return 503, "application/json", self._error(
+                "STATS_UNAVAILABLE", "the statistics store is unavailable")
+        self._audit(principal, "events", f"{real}:delete", f"{deleted} rows")
+        return 200, "application/json", {"ups": real, "deleted": deleted}
+
     def _route_put(self) -> Tuple[int, str, Any]:
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
@@ -876,6 +921,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         "command": "CONTROL_COMMAND",
         "variable": "CONTROL_VARIABLE",
         "config": "CONFIG_RELOAD",
+        "events": "EVENTS_DELETED",
     }
 
     @staticmethod

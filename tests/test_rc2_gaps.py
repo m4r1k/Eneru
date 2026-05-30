@@ -132,6 +132,39 @@ def test_coordinator_record_control_event_routes_to_ups(tmp_path):
     m1._stats_store.log_event.assert_not_called()
 
 
+@pytest.mark.unit
+def test_monitor_delete_events(tmp_path):
+    mon = object.__new__(UPSGroupMonitor)
+    mon._stats_store = MagicMock()
+    mon._stats_store.delete_events.return_value = 3
+    assert mon.delete_events("UPS@h", [(1, 100, "A")]) == 3
+    mon._stats_store.delete_events.assert_called_once_with([(1, 100, "A")])
+    # No store -> None so the API answers 503.
+    mon._stats_store = None
+    assert mon.delete_events("UPS@h", [(1, 100, "A")]) is None
+
+
+@pytest.mark.unit
+def test_coordinator_delete_events_routes_to_ups(tmp_path):
+    coord = object.__new__(MultiUPSCoordinator)
+    m1 = object.__new__(UPSGroupMonitor)
+    m1.config = _load(tmp_path, "ups:\n  - name: U1@h\n", "m1.yaml")
+    m1._stats_store = MagicMock()
+    m2 = object.__new__(UPSGroupMonitor)
+    m2.config = _load(tmp_path, "ups:\n  - name: U2@h\n", "m2.yaml")
+    m2._stats_store = MagicMock()
+    m2._stats_store.delete_events.return_value = 1
+    coord._monitors = [m1, m2]
+    assert coord.delete_events("U2@h", [(9, 5, "X")]) == 1
+    m2._stats_store.delete_events.assert_called_once_with([(9, 5, "X")])
+    m1._stats_store.delete_events.assert_not_called()
+    # Unknown UPS -> None (no first-store fallback for a destructive op).
+    assert coord.delete_events("Ghost@h", [(9, 5, "X")]) is None
+    # Matched UPS but no open store -> None.
+    m2._stats_store = None
+    assert coord.delete_events("U2@h", [(9, 5, "X")]) is None
+
+
 # ----- subsystem live-reload hooks (#1) -----
 
 @pytest.mark.unit
@@ -216,13 +249,18 @@ def test_coordinator_apply_subsystem_reload(tmp_path):
 # ----- do_DELETE (#6) -----
 
 @pytest.mark.unit
-def test_do_delete_returns_405(minimal_config):
+def test_do_delete_unknown_path_returns_404(minimal_config):
+    # DELETE is now a real verb (event deletion); an unknown DELETE path is a
+    # 404, not the old blanket 405.
+    from unittest.mock import MagicMock
     h = object.__new__(EneruAPIHandler)
     h.api_config = minimal_config
+    h.api_source = MagicMock()
+    h.path = "/api/v1/nope"
     headers = []
     h.send_response = lambda s: headers.append(("status", s))
     h.send_header = lambda k, v: None
     h.end_headers = lambda: None
     h.wfile = BytesIO()
     h.do_DELETE()
-    assert ("status", 405) in headers
+    assert ("status", 404) in headers

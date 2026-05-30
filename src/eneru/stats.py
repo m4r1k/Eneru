@@ -708,6 +708,42 @@ class StatsStore:
             self._log_error_once(f"stats: query_recent_events failed: {e}")
             return []
 
+    def delete_events(self, items) -> int:
+        """Delete events by ``(id, ts, event_type)``. Returns the count removed.
+
+        Each row is matched on all three columns, not just ``id``: the id alone
+        is authoritative (AUTOINCREMENT never reuses one), but the ts/type guard
+        means a stale client request can only ever delete the exact row it saw —
+        a mismatch deletes nothing (counts as 0, not an error). Idempotent on
+        duplicates, and atomic: any SQLite error rolls the whole batch back.
+        ``items`` is an iterable of ``(id, ts, event_type)``.
+        """
+        if self._conn is None:
+            return 0
+        seen = set()
+        rows = []
+        for it in items:
+            key = (int(it[0]), int(it[1]), str(it[2]))
+            if key not in seen:
+                seen.add(key)
+                rows.append(key)
+        if not rows:
+            return 0
+        try:
+            count = 0
+            with self._db_lock, self._conn:
+                for event_id, ts, event_type in rows:
+                    cur = self._conn.execute(
+                        "DELETE FROM events WHERE id = ? AND ts = ? "
+                        "AND event_type = ?",
+                        (event_id, ts, event_type),
+                    )
+                    count += cur.rowcount
+            return count
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: delete_events failed: {e}")
+            return 0
+
     # ----- notification queue (v4+) -----
 
     def enqueue_notification(self, body: str, notify_type: str,

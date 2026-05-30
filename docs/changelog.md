@@ -198,6 +198,18 @@ before release per the changelog workflow in `AGENTS.md`.
   queries and "load older" paging. The cursor is `(ts, id)` so events sharing one
   second are never repeated or skipped.
 
+### Added (rc7 — delete events from the dashboard)
+
+- **Selected events can be deleted from the dashboard** (signed-in only). A new
+  auth-gated `DELETE /api/v1/ups/{name}/events` removes events by their
+  source-qualified `(id, ts, eventType)` — matching all three so a stale client
+  can only ever delete the exact rows it saw (a mismatch deletes nothing). Writes
+  route through the live per-UPS stats store; if statistics is disabled the
+  endpoint returns 503 rather than touching a second connection. Each deletion is
+  audited (`EVENTS_DELETED`). The dashboard shows per-row checkboxes and a
+  "Delete selected" action only when authenticated; only currently-visible
+  selected rows are ever deleted.
+
 ### Fixed (rc7 — dashboard bug fixes)
 
 - **Deleting a user now ends their active dashboard session.** Sessions are

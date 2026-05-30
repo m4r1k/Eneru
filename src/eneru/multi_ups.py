@@ -756,6 +756,18 @@ class MultiUPSCoordinator:
             except Exception:  # pragma: no cover - defensive
                 pass
 
+    def delete_events(self, ups_name: str, items):
+        """Delete events from the matching UPS's live store. Returns the count
+        removed, or ``None`` when that UPS has no open store (→ API 503). Unlike
+        the audit path there is no first-store fallback: a destructive op must
+        never land on the wrong UPS's database."""
+        for mon in self._monitors:
+            groups = getattr(mon.config, "ups_groups", [])
+            if groups and groups[0].ups.name == ups_name:
+                store = getattr(mon, "_stats_store", None)
+                return store.delete_events(items) if store is not None else None
+        return None
+
     def _handle_sighup(self, signum, frame):
         """SIGHUP -> hot-reload config across all groups (never crashes on error)."""
         self._log("🔄 SIGHUP received — reloading configuration")

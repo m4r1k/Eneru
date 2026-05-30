@@ -140,6 +140,17 @@ def test_dashboard_has_wide_history_surfaces(minimal_config):
 
 
 @pytest.mark.unit
+def test_dashboard_has_event_delete_surface(minimal_config):
+    # Guard the Slice C delete-selected surface (auth-gated in JS, server-enforced).
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    assert 'id="event-delete"' in html
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    assert "deleteSelected" in js
+    assert 'method: "DELETE"' in js
+
+
+@pytest.mark.unit
 def test_stylesheet_makes_hidden_attribute_win(minimal_config):
     # The dashboard shows/hides everything via the `hidden` attribute. A class
     # that sets `display` (e.g. `.modal { display: flex }`) would otherwise win

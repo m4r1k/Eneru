@@ -150,6 +150,7 @@ async function loadOlderEvents() {
 
 function resetEvents() {
   lastEvents = [];
+  selectedEvents = new Set();
   loadEvents();
 }
 
@@ -193,31 +194,84 @@ function eventMatchesSource(event, source) {
   return haystack.includes(source.toLowerCase());
 }
 
-function applyEventFilters() {
-  const body = document.querySelector("#events tbody");
-  body.replaceChildren();
+// Selected event keys ((source,id)). Persists across re-render so a filter tweak
+// or poll doesn't drop the user's selection; cleared after a delete, on range
+// change, and on sign-out. Only currently-visible selected rows are ever deleted.
+let selectedEvents = new Set();
+
+function visibleEvents() {
   const source = document.getElementById("event-source-filter").value;
   const type = document.getElementById("event-type-filter").value;
   const text = document.getElementById("event-text-filter").value.trim().toLowerCase();
-  const rows = lastEvents.filter((e) => {
+  return lastEvents.filter((e) => {
     const eventType = e.eventType || e.event || "";
     const detail = (e.detail || e.details || "").toLowerCase();
     return eventMatchesSource(e, source)
       && (!type || eventType === type)
       && (!text || detail.includes(text));
   });
+}
+
+function applyEventFilters() {
+  const body = document.querySelector("#events tbody");
+  body.replaceChildren();
+  const signedIn = !!token();
+  // The selection column + Delete action only exist when signed in; keep the
+  // header and empty-state colspan in sync so widths never mismatch.
+  document.getElementById("events-head").replaceChildren(...[
+    ...(signedIn ? [el("th", { text: "" })] : []),
+    el("th", { text: "Time" }), el("th", { text: "Type" }),
+    el("th", { text: "Detail" }),
+  ]);
+  document.getElementById("event-delete").hidden = !signedIn;
+  const rows = visibleEvents();
   if (rows.length === 0) {
-    body.appendChild(el("tr", null, [el("td", { colspan: "3", text: "No events." })]));
+    body.appendChild(el("tr", null, [
+      el("td", { colspan: signedIn ? "4" : "3", text: "No events." })]));
     return;
   }
   rows.forEach((e) => {
     const ts = e.ts ? new Date(e.ts * 1000).toLocaleString() : "—";
-    body.appendChild(el("tr", null, [
+    const cells = [];
+    if (signedIn) {
+      const cb = el("input", { type: "checkbox" });
+      cb.checked = selectedEvents.has(eventKey(e));
+      cb.addEventListener("change", () => {
+        if (cb.checked) selectedEvents.add(eventKey(e));
+        else selectedEvents.delete(eventKey(e));
+      });
+      const td = el("td"); td.appendChild(cb); cells.push(td);
+    }
+    cells.push(
       el("td", { text: ts }),
       el("td", { text: e.eventType || e.event || "" }),
       el("td", { text: e.detail || e.details || "" }),
-    ]));
+    );
+    body.appendChild(el("tr", null, cells));
   });
+}
+
+async function deleteSelected() {
+  // Only visible + selected rows with a real id are deletable — a filtered-out
+  // selection is never touched.
+  const chosen = visibleEvents().filter(
+    (e) => selectedEvents.has(eventKey(e)) && e.id !== undefined && e.id !== null);
+  if (chosen.length === 0) return;
+  // Group by UPS name (the DELETE path is /api/v1/ups/{name}/events).
+  const byUps = new Map();
+  for (const e of chosen) {
+    if (!byUps.has(e.ups)) byUps.set(e.ups, []);
+    byUps.get(e.ups).push({ id: e.id, ts: e.ts, eventType: e.eventType || e.event });
+  }
+  for (const [ups, items] of byUps) {
+    await api("/api/v1/ups/" + encodeURIComponent(ups) + "/events",
+      { method: "DELETE", body: JSON.stringify({ items }) });
+  }
+  // Drop deleted rows locally, clear the selection, re-render.
+  const gone = new Set(chosen.map(eventKey));
+  lastEvents = lastEvents.filter((e) => !gone.has(eventKey(e)));
+  selectedEvents = new Set();
+  applyEventFilters();
 }
 
 // Cache the last series so a resize can redraw without refetching.
@@ -422,7 +476,7 @@ async function doLogin(ev) {
 
 async function doLogout() {
   await api("/api/v1/auth/logout", { method: "POST" });
-  setToken(""); refreshAuthUI(); refresh();
+  setToken(""); selectedEvents = new Set(); refreshAuthUI(); refresh();
 }
 
 // ----- polling -----
@@ -472,6 +526,7 @@ async function init() {
   document.getElementById("event-text-filter").addEventListener("input", applyEventFilters);
   document.getElementById("event-range").addEventListener("change", resetEvents);
   document.getElementById("event-load-older").addEventListener("click", loadOlderEvents);
+  document.getElementById("event-delete").addEventListener("click", deleteSelected);
   observeGraphResize();
   refresh();
   setInterval(refresh, 10000);
