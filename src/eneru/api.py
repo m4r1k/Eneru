@@ -151,7 +151,15 @@ API_ENDPOINTS = (
     {
         "path": "/api/v1/events",
         "description": "Recent SQLite event rows",
-        "query": {"limit": "1..10000", "verbosity": "0..2"},
+        "query": {
+            "limit": "1..10000",
+            "verbosity": "0..2",
+            "from": "unix timestamp",
+            "to": "unix timestamp",
+            "before": "unix timestamp cursor",
+            "beforeSource": "source-qualified cursor source",
+            "beforeId": "source-qualified cursor id",
+        },
     },
     {"path": "/api/v1/config", "description": "Configuration summary (extended when authenticated)"},
     {"path": "/api/v1/remote-health", "description": "Remote SSH health rows"},

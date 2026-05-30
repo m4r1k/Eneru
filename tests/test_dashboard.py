@@ -137,6 +137,10 @@ def test_dashboard_has_wide_history_surfaces(minimal_config):
     assert "loadOlderEvents" in js
     assert "mergeEvents" in js
     assert "eventKey" in js
+    # Cursor paging must keep the selected lower bound, and rendered rows should
+    # still honor the range if older rows are already cached client-side.
+    assert 'if (from !== null) q += "&from=" + from' in js
+    assert "return (from === null || e.ts >= from)" in js
 
 
 @pytest.mark.unit
@@ -148,6 +152,7 @@ def test_dashboard_has_event_delete_surface(minimal_config):
         "/app.js")[1].decode("utf-8")
     assert "deleteSelected" in js
     assert 'method: "DELETE"' in js
+    assert "if (!beforeEvent) selectedEvents = new Set()" in js
 
 
 @pytest.mark.unit

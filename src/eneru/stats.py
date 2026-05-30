@@ -419,25 +419,58 @@ class StatsStore:
             # (INTEGER PRIMARY KEY AUTOINCREMENT). SQLite can't ALTER ADD a
             # PRIMARY KEY column, so rebuild the table, preserving each row's
             # identity as id = old rowid. AUTOINCREMENT guarantees a deleted
-            # event's id is never handed to a later row — that's what makes the
-            # API's delete-by-id safe. The whole _init_schema body runs in one
-            # transaction (see open()), so a crash here rolls back cleanly; the
-            # leading DROP heals a DB that died mid-rebuild on a prior open.
-            self._conn.executescript("""
-                DROP TABLE IF EXISTS events_v5_new;
-                CREATE TABLE events_v5_new (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ts INTEGER NOT NULL,
-                    event_type TEXT NOT NULL,
-                    detail TEXT,
-                    notification_sent INTEGER DEFAULT 1
-                );
-                INSERT INTO events_v5_new (id, ts, event_type, detail, notification_sent)
-                    SELECT rowid, ts, event_type, detail, notification_sent FROM events;
-                DROP TABLE events;
-                ALTER TABLE events_v5_new RENAME TO events;
-                CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
-            """)
+            # event's id is never handed to a later row -- that's what makes the
+            # API's delete-by-id safe.
+            self._migrate_events_to_v5()
+
+    def _migrate_events_to_v5(self) -> None:
+        """Rebuild ``events`` with a stable id column.
+
+        DDL in ``executescript`` can commit outside the surrounding context
+        manager, so the destructive rebuild uses an explicit savepoint. That
+        keeps the old table intact if a crash or SQLite error lands between the
+        copy and the rename.
+        """
+        self._conn.execute("SAVEPOINT migrate_events_v5")
+        try:
+            if self._events_has_v5_id():
+                # Recover a DB opened after an older unsafe rebuild died after
+                # copying rows and dropping events, but before the final rename.
+                if self._table_exists("events_v5_new"):
+                    event_count = self._conn.execute(
+                        "SELECT COUNT(*) FROM events"
+                    ).fetchone()[0]
+                    scratch_count = self._conn.execute(
+                        "SELECT COUNT(*) FROM events_v5_new"
+                    ).fetchone()[0]
+                    if event_count == 0 and scratch_count > 0:
+                        self._conn.execute("DROP TABLE events")
+                        self._conn.execute(
+                            "ALTER TABLE events_v5_new RENAME TO events"
+                        )
+                    else:
+                        self._conn.execute("DROP TABLE events_v5_new")
+            else:
+                self._conn.execute("DROP TABLE IF EXISTS events_v5_new")
+                self._conn.execute("""
+                    CREATE TABLE events_v5_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts INTEGER NOT NULL,
+                        event_type TEXT NOT NULL,
+                        detail TEXT,
+                        notification_sent INTEGER DEFAULT 1
+                    )
+                """)
+                self._conn.execute("""
+                    INSERT INTO events_v5_new
+                        (id, ts, event_type, detail, notification_sent)
+                    SELECT rowid, ts, event_type, detail, notification_sent
+                    FROM events
+                """)
+                self._conn.execute("DROP TABLE events")
+                self._conn.execute("ALTER TABLE events_v5_new RENAME TO events")
+
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)")
             # Pin the AUTOINCREMENT high-water mark to the max preserved id so a
             # later delete of the highest row can never let a new event reuse it
             # (belt-and-suspenders alongside RENAME's sqlite_sequence fixup).
@@ -445,6 +478,24 @@ class StatsStore:
                 "INSERT OR REPLACE INTO sqlite_sequence(name, seq) "
                 "SELECT 'events', COALESCE(MAX(id), 0) FROM events"
             )
+            self._conn.execute("RELEASE SAVEPOINT migrate_events_v5")
+        except Exception:
+            self._conn.execute("ROLLBACK TO SAVEPOINT migrate_events_v5")
+            self._conn.execute("RELEASE SAVEPOINT migrate_events_v5")
+            raise
+
+    def _table_exists(self, name: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (name,),
+        ).fetchone()
+        return row is not None
+
+    def _events_has_v5_id(self) -> bool:
+        return any(
+            row[1] == "id" and row[5] == 1
+            for row in self._conn.execute("PRAGMA table_info(events)")
+        )
 
     def _safe_alter(self, table: str, column_def: str) -> None:
         """Idempotent ``ALTER TABLE ... ADD COLUMN``; ignores duplicates."""

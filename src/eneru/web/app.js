@@ -319,7 +319,8 @@ function eventRangeFrom() {
 async function loadEvents(beforeEvent) {
   let q = "limit=200";
   const from = eventRangeFrom();
-  if (from !== null && !beforeEvent) q += "&from=" + from;
+  if (from !== null) q += "&from=" + from;
+  if (!beforeEvent) selectedEvents = new Set();
   if (beforeEvent) {
     q += "&before=" + encodeURIComponent(beforeEvent.ts);
     if (beforeEvent.source && beforeEvent.id !== undefined && beforeEvent.id !== null) {
@@ -383,19 +384,20 @@ function eventMatchesSource(event, source) {
   return haystack.includes(source.toLowerCase());
 }
 
-// Selected event keys ((source,id)). Persists across re-render so a filter tweak
-// or poll doesn't drop the user's selection; cleared after a delete, on range
-// change, and on sign-out. Only currently-visible selected rows are ever deleted.
+// Selected event keys ((source,id)). Cleared on every refresh, delete, range
+// change, and sign-out so a stale destructive selection cannot linger.
 let selectedEvents = new Set();
 
 function visibleEvents() {
   const source = document.getElementById("event-source-filter").value;
   const type = document.getElementById("event-type-filter").value;
   const text = document.getElementById("event-text-filter").value.trim().toLowerCase();
+  const from = eventRangeFrom();
   return lastEvents.filter((e) => {
     const eventType = e.eventType || e.event || "";
     const detail = (e.detail || e.details || "").toLowerCase();
-    return eventMatchesSource(e, source)
+    return (from === null || e.ts >= from)
+      && eventMatchesSource(e, source)
       && (!type || eventType === type)
       && (!text || detail.includes(text));
   });

@@ -411,6 +411,10 @@ def test_api_core_routes(minimal_config, monitor):
     status, _, payload = handler._route()
     assert status == 200
     assert any(row["path"] == "/api/v1/events" for row in payload["endpoints"])
+    events_ep = next(row for row in payload["endpoints"]
+                     if row["path"] == "/api/v1/events")
+    assert events_ep["query"]["from"] == "unix timestamp"
+    assert events_ep["query"]["beforeSource"] == "source-qualified cursor source"
 
     handler.path = "/api/v1/ups/TestUPS-localhost"
     status, _, payload = handler._route()

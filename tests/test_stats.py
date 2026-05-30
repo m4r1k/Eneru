@@ -606,6 +606,53 @@ class TestSchemaMigration:
         finally:
             s.close()
 
+    @pytest.mark.unit
+    def test_v5_migration_recovers_orphaned_rebuild_table(self, tmp_path):
+        # Simulate an older unsafe rebuild that copied rows into the scratch
+        # table and dropped events, then died before the rename.
+        path = tmp_path / "v4-partial.db"
+        conn = sqlite3.connect(path)
+        try:
+            conn.executescript("""
+                CREATE TABLE events_v5_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    detail TEXT,
+                    notification_sent INTEGER DEFAULT 1
+                );
+                CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+                INSERT INTO meta(key, value) VALUES ('schema_version', '4');
+            """)
+            conn.executemany(
+                "INSERT INTO events_v5_new"
+                "(id, ts, event_type, detail, notification_sent) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(1, 1000, "ON_BATTERY", "a", 1),
+                 (2, 1000, "LOW_BATTERY", "b", 1)],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        s = StatsStore(path)
+        s.open()
+        try:
+            rows = s._conn.execute(
+                "SELECT id, ts, event_type, detail FROM events ORDER BY id"
+            ).fetchall()
+            assert rows == [(1, 1000, "ON_BATTERY", "a"),
+                            (2, 1000, "LOW_BATTERY", "b")]
+            tables = {r[0] for r in s._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            assert "events_v5_new" not in tables
+            sv = s._conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            assert int(sv[0]) == SCHEMA_VERSION
+        finally:
+            s.close()
+
 
 class TestNotificationQueue:
     """v4: persistent notification queue CRUD + TTL/cap/age rules."""
