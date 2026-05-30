@@ -415,12 +415,14 @@ def test_available_endpoints_hidden_until_features_enabled(minimal_config):
     paths = {e["path"] for e in h._available_endpoints()}
     assert "/api/v1/auth/login" not in paths
     assert "/api/v1/config/reload" not in paths
+    assert "/api/v1/ups/{name}/events" not in paths
     assert "/api/v1/ups/{name}/command" not in paths
     minimal_config.api.auth.enabled = True
     minimal_config.nut_control.enabled = True
     paths = {e["path"] for e in h._available_endpoints()}
     assert "/api/v1/auth/login" in paths
     assert "/api/v1/config/reload" in paths
+    assert "/api/v1/ups/{name}/events" in paths
     assert "/api/v1/ups/{name}/command" in paths
 
 

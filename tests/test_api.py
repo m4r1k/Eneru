@@ -310,9 +310,10 @@ def test_api_events_route_range_id_and_before_paging(minimal_config, tmp_path):
     store.open()
     try:
         store.log_event("A", "a", ts=1000)
-        store.log_event("B", "b", ts=2000)   # two share 2000
+        store.log_event("B", "b", ts=2000)   # three share 2000
         store.log_event("C", "c", ts=2000)
-        store.log_event("D", "d", ts=3000)
+        store.log_event("D", "d", ts=2000)
+        store.log_event("E", "e", ts=3000)
     finally:
         store.close()
 
@@ -327,17 +328,24 @@ def test_api_events_route_range_id_and_before_paging(minimal_config, tmp_path):
     status, _, payload = route("from=2000&limit=10")
     evs = payload["events"]
     assert status == 200
-    assert [e["eventType"] for e in evs] == ["B", "C", "D"]
+    assert [e["eventType"] for e in evs] == ["B", "C", "D", "E"]
     assert all(isinstance(e["id"], int) and e["source"] for e in evs)
 
-    # `before` pages older (inclusive on ts); the boundary row overlaps and the
-    # client de-dups by (source,id). id is per-UPS so the cursor is ts-only.
+    # Timestamp-only `before` remains backward compatible: the boundary overlaps
+    # and the client de-dups by (source,id).
     status, _, page1 = route("limit=2")
     p1 = page1["events"]
-    assert [e["eventType"] for e in p1] == ["C", "D"]
+    assert [e["eventType"] for e in p1] == ["D", "E"]
     oldest = p1[0]
     status, _, page2 = route(f"limit=2&before={oldest['ts']}")
-    assert [e["eventType"] for e in page2["events"]] == ["B", "C"]
+    assert [e["eventType"] for e in page2["events"]] == ["C", "D"]
+
+    # Source-qualified cursor advances strictly inside a same-second cluster,
+    # avoiding a stuck "Load older" loop when one second has more rows than a page.
+    cursor = ("limit=2&before={ts}&beforeSource={source}&beforeId={event_id}"
+              .format(ts=oldest["ts"], source=oldest["source"], event_id=oldest["id"]))
+    status, _, page3 = route(cursor)
+    assert [e["eventType"] for e in page3["events"]] == ["B", "C"]
 
     # from > to is a 400.
     status, _, err = route("from=3000&to=1000")
@@ -348,6 +356,8 @@ def test_api_events_route_range_id_and_before_paging(minimal_config, tmp_path):
     from eneru.api import APIBadRequest
     with pytest.raises(APIBadRequest):
         route("before=not-a-cursor&limit=10")
+    with pytest.raises(APIBadRequest):
+        route("before=2000&beforeSource=default&limit=10")
 
 
 @pytest.mark.unit

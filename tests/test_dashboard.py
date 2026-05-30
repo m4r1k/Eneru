@@ -155,6 +155,7 @@ def test_dashboard_has_drilldown_and_theme_surfaces(minimal_config):
     # Guard Slice D (drill-down) + Slice E (theme, banner) surfaces.
     html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
     assert 'id="detail-modal"' in html
+    assert 'role="dialog"' in html
     assert 'id="theme-select"' in html
     assert 'id="banner"' in html
     js = _handler(minimal_config, path="/app.js")._serve_static(

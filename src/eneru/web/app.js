@@ -316,11 +316,17 @@ function eventRangeFrom() {
   return Math.floor(Date.now() / 1000) - parseInt(v, 10);
 }
 
-async function loadEvents(beforeCursor) {
+async function loadEvents(beforeEvent) {
   let q = "limit=200";
   const from = eventRangeFrom();
-  if (from !== null && !beforeCursor) q += "&from=" + from;
-  if (beforeCursor) q += "&before=" + encodeURIComponent(beforeCursor);
+  if (from !== null && !beforeEvent) q += "&from=" + from;
+  if (beforeEvent) {
+    q += "&before=" + encodeURIComponent(beforeEvent.ts);
+    if (beforeEvent.source && beforeEvent.id !== undefined && beforeEvent.id !== null) {
+      q += "&beforeSource=" + encodeURIComponent(beforeEvent.source);
+      q += "&beforeId=" + encodeURIComponent(beforeEvent.id);
+    }
+  }
   const res = await api("/api/v1/events?" + q);
   if (res.ok && res.data) mergeEvents(res.data.events);
 }
@@ -328,9 +334,7 @@ async function loadEvents(beforeCursor) {
 async function loadOlderEvents() {
   const oldest = lastEvents[0];   // ascending sort -> [0] is the oldest shown
   if (!oldest) { await loadEvents(); return; }
-  // Page on timestamp only — the per-UPS id isn't comparable across sources.
-  // mergeEvents() de-dups by (source, id), so the inclusive boundary is safe.
-  await loadEvents(oldest.ts);
+  await loadEvents(oldest);
 }
 
 function resetEvents() {
@@ -549,8 +553,8 @@ async function renderControl(payload) {
   const sec = document.getElementById("control-section");
   const panel = document.getElementById("control-panel");
   // Control is only meaningful when authenticated and nut_control is enabled.
-  const cfg = await api("/api/v1/config");
-  const nutEnabled = cfg.data && cfg.data.nutControl && cfg.data.nutControl.enabled;
+  const nutEnabled = cfgSnapshot && cfgSnapshot.nutControl &&
+    cfgSnapshot.nutControl.enabled;
   if (!token() || !nutEnabled) { sec.hidden = true; return; }
   sec.hidden = false;
   panel.replaceChildren();

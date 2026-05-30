@@ -657,6 +657,7 @@ class StatsStore:
         include_types: Optional[set] = None,
         exclude_types: Optional[set] = None,
         include_id: bool = False,
+        before_id: Optional[int] = None,
     ) -> List[Tuple]:
         """Return recent events ascending by ts without loading full history.
 
@@ -667,12 +668,18 @@ class StatsStore:
           default, so existing 3-tuple callers are unaffected). The id is unique
           only within this one per-UPS DB; the aggregating layer source-qualifies
           it and the dashboard de-dups by ``(source, id)`` across pages.
+        * ``before_id`` — with ``end_ts``, use a strict same-second upper bound
+          ``(ts, id) < (end_ts, before_id)`` for source-qualified paging.
         """
         if self._conn is None:
             return []
         limit = max(1, int(limit))
-        clauses = ["ts <= ?"]
-        params: List[Any] = [int(end_ts)]
+        if before_id is None:
+            clauses = ["ts <= ?"]
+            params: List[Any] = [int(end_ts)]
+        else:
+            clauses = ["(ts < ? OR (ts = ? AND id < ?))"]
+            params = [int(end_ts), int(end_ts), int(before_id)]
         if start_ts is not None:
             clauses.append("ts >= ?")
             params.append(int(start_ts))

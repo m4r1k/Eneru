@@ -142,7 +142,7 @@ When the API is enabled but auth is off (no users, or `enabled: false`), the
 daemon logs a one-line notice at startup and the dashboard hides its **Sign-in**
 button — there is nothing to sign into. The dashboard learns the live auth state
 from `/api/v1/config`; if you create the first user while the dashboard is open,
-reload the page to pick up the Sign-in button.
+the **Sign-in** button appears on the next poll, usually within a few seconds.
 
 ## Containers
 

@@ -1452,6 +1452,20 @@ class TestEvents:
         assert [r[2] for r in rows] == ["A", "B", "C"]
 
     @pytest.mark.unit
+    def test_query_recent_events_before_id_advances_within_same_second(self, store):
+        for et in ("A", "B", "C"):
+            store.log_event(et, et.lower(), ts=5000)
+        page1 = store.query_recent_events(end_ts=9999, limit=2, include_id=True)
+        assert [r[2] for r in page1] == ["B", "C"]
+        page2 = store.query_recent_events(
+            end_ts=page1[0][1],
+            before_id=page1[0][0],
+            limit=2,
+            include_id=True,
+        )
+        assert [r[2] for r in page2] == ["A"]
+
+    @pytest.mark.unit
     def test_log_event_swallows_sqlite_error(self, store):
         class _BoomConn:
             def __enter__(self): return self

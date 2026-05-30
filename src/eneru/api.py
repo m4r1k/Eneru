@@ -614,15 +614,28 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             if start_ts is not None and end_ts is not None and start_ts > end_ts:
                 return 400, "application/json", self._error(
                     "INVALID_REQUEST", "'from' must be <= 'to'")
-            # ``before`` is the "load older" cursor — the oldest timestamp already
-            # shown (id is per-UPS, so paging cursors on ts; the client de-dups by
-            # (source, id)).
-            before_ts = _parse_int_param(qs, "before", None) if "before" in qs else None
+            before_ts = None
+            before_cursor = None
+            has_cursor_detail = "beforeSource" in qs or "beforeId" in qs
+            if "before" in qs:
+                before_ts = _parse_int_param(qs, "before", None)
+                if has_cursor_detail:
+                    if "beforeSource" not in qs or "beforeId" not in qs:
+                        raise APIBadRequest(
+                            "'beforeSource' and 'beforeId' must be supplied together")
+                    before_source = (qs.get("beforeSource") or [""])[0]
+                    if not before_source:
+                        raise APIBadRequest("'beforeSource' is required")
+                    before_id = _parse_int_param(qs, "beforeId", None, minimum=1)
+                    before_cursor = (before_ts, before_source, before_id)
+            elif has_cursor_detail:
+                raise APIBadRequest("'before' is required with cursor details")
             return 200, "application/json", {
                 "generatedAt": time.time(),
                 "events": query_events(
                     self.api_config, limit=limit, verbosity=verbosity,
-                    start_ts=start_ts, end_ts=end_ts, before_ts=before_ts),
+                    start_ts=start_ts, end_ts=end_ts, before_ts=before_ts,
+                    before_cursor=before_cursor),
             }
 
         if path == "/api/v1/config":
@@ -967,6 +980,8 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             if path == "/metrics":
                 return prometheus_enabled
             if path.startswith("/api/v1/auth/") or path == "/api/v1/config/reload":
+                return auth_enabled
+            if path == "/api/v1/ups/{name}/events":
                 return auth_enabled
             if path.startswith("/api/v1/ups/{name}/command") or \
                     path.startswith("/api/v1/ups/{name}/variables"):
