@@ -186,6 +186,26 @@ def test_session_invalidated_when_user_deleted(minimal_config, tmp_path):
 
 
 @pytest.mark.unit
+def test_config_is_sanitized_for_deleted_user_session(minimal_config, tmp_path):
+    # The dashboard signs out when it holds a token but /config comes back
+    # "sanitized" (anonymous). Prove the server delivers that signal once the
+    # account is gone, even though the read itself stays open (200).
+    _enable_auth(minimal_config)
+    store = AuthStore(tmp_path / "auth.db")
+    store.create_user("alice", "pw")
+    sessions = SessionManager(3600)
+    token = sessions.create({"username": "alice", "role": "admin", "kind": "user"})
+    store.delete_user("alice")
+    h = _handler(minimal_config, source=MagicMock(), auth_store=store,
+                 sessions=sessions, path="/api/v1/config",
+                 headers={"Authorization": f"Bearer {token}"})
+    status, _, payload = h._route()
+    assert status == 200
+    assert payload["detail"] == "sanitized"      # treated as anonymous
+    assert sessions.validate(token) is None        # and the session was reaped
+
+
+@pytest.mark.unit
 def test_session_preserved_when_get_user_errors(minimal_config):
     # A transient auth-DB error must NOT log out an already-authenticated user.
     store = MagicMock()

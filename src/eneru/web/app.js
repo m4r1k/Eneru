@@ -691,7 +691,16 @@ async function refresh() {
   const [cfg, rh] = await Promise.all([
     api("/api/v1/config"), api("/api/v1/remote-health"),
   ]);
-  if (cfg.ok) cfgSnapshot = cfg.data;
+  if (cfg.ok) {
+    cfgSnapshot = cfg.data;
+    // If we hold a token but the server treats us as anonymous (sanitized
+    // config), the session was invalidated server-side — e.g. the account was
+    // deleted. Reads stay open (no 401 to trip the api() handler), so detect it
+    // here and sign out locally instead of showing a stale "Signed in".
+    if (token() && cfg.data && cfg.data.detail === "sanitized") {
+      setToken(""); selectedEvents = new Set(); refreshAuthUI();
+    }
+  }
   if (rh.ok) remoteHealthSnapshot = (rh.data && rh.data.servers) || [];
 
   const ups = await api("/api/v1/ups");

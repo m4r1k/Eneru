@@ -233,8 +233,11 @@ before release per the changelog workflow in `AGENTS.md`.
   in-memory and outlived the user row they were minted from, so a deleted user
   stayed signed in until the session TTL. The API now re-checks that a session's
   user still exists on each request and invalidates the token when the account is
-  gone (→ the dashboard flips to signed-out). The check fails safe: a transient
-  auth-DB error keeps the established session rather than logging out a valid user.
+  gone; the check fails safe (a transient auth-DB error keeps the established
+  session rather than logging out a valid user). Because read endpoints stay open
+  by default (no 401 to react to), the dashboard also signs out locally as soon as
+  it holds a token but `/api/v1/config` comes back anonymous — so a refresh after
+  the account is removed flips the UI to signed-out.
 - **Dashboard history graph no longer renders distorted.** The hand-rolled SVG
   stretched a fixed `viewBox` to the container width, skewing the line and labels.
   It now sizes the viewBox to the real pixel width (1:1 mapping) with

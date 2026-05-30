@@ -164,6 +164,9 @@ def test_dashboard_has_drilldown_and_theme_surfaces(minimal_config):
     assert "applyTheme" in js
     # Drill-down must read the shared snapshot, not fetch per card.
     assert "remoteHealthSnapshot" in js
+    # Deleted-user / expired session: the client signs out when it holds a token
+    # but /config returns the sanitized (anonymous) view.
+    assert 'detail === "sanitized"' in js
 
 
 @pytest.mark.unit
