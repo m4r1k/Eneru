@@ -440,7 +440,12 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if self.api_sessions is not None:
             principal = self.api_sessions.validate(token)
             if principal is not None:
-                return principal
+                if self._session_principal_still_valid(principal):
+                    return principal
+                # The backing user was deleted while the session lived — kill the
+                # token so the client (and any later request) is forced to 401.
+                self.api_sessions.invalidate(token)
+                return None
         if self.api_auth is not None:
             try:
                 principal = self.api_auth.authenticate_api_key(token)
@@ -449,6 +454,30 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             if principal is not None:
                 return principal
         return None
+
+    def _session_principal_still_valid(self, principal: Dict[str, Any]) -> bool:
+        """Confirm a session's user account still exists.
+
+        Sessions are in-memory and outlive the DB row they were minted from, so a
+        deleted user would otherwise stay signed in until TTL. Only invalidate on
+        a *definitive* answer that the user is gone; if the lookup raises (auth DB
+        unavailable), keep the established session rather than logging out a valid
+        user on a transient error. Non-user principals (API keys) are re-checked
+        against the DB on their own path and never reach here.
+        """
+        if principal.get("kind") != "user":
+            return True
+        store = self.api_auth
+        if store is None:
+            return True
+        username = principal.get("username")
+        if not username:
+            return True
+        try:
+            return store.get_user(username) is not None
+        except Exception:
+            # DB error / unavailable -> fail safe: keep the existing session.
+            return True
 
     def _authorize(self, *, write: bool) -> Optional[Dict[str, Any]]:
         """Enforce the tiered auth policy. Returns the principal (may be None).

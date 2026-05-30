@@ -178,19 +178,30 @@ function applyEventFilters() {
   });
 }
 
+// Cache the last series so a resize can redraw without refetching.
+let lastGraphSeries = null;
+
 function renderGraph(series) {
+  if (series !== undefined) lastGraphSeries = series;
   const host = document.getElementById("graph");
+  // Size the viewBox to the host's real pixel width so the coordinate system maps
+  // 1:1 to screen pixels (no horizontal stretch -> no distorted line/labels).
+  // When the host is hidden or not yet laid out, clientWidth is 0; skip rather
+  // than emit a broken viewBox — the ResizeObserver redraws once it has width.
+  const W = host.clientWidth;
+  if (!W) return;
   host.replaceChildren();
-  const pts = (series && series.data) || [];
-  const W = 800, H = 220, pad = 30;
+  const pts = (lastGraphSeries && lastGraphSeries.data) || [];
+  const H = 220, pad = 30;
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  svg.setAttribute("preserveAspectRatio", "none");
   const axis = (x1, y1, x2, y2) => {
     const l = document.createElementNS(SVG_NS, "line");
     l.setAttribute("x1", x1); l.setAttribute("y1", y1);
     l.setAttribute("x2", x2); l.setAttribute("y2", y2);
-    l.setAttribute("class", "axis"); svg.appendChild(l);
+    l.setAttribute("class", "axis");
+    l.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.appendChild(l);
   };
   axis(pad, H - pad, W - 5, H - pad);
   axis(pad, 5, pad, H - pad);
@@ -208,6 +219,7 @@ function renderGraph(series) {
     });
     const path = document.createElementNS(SVG_NS, "path");
     path.setAttribute("d", d); path.setAttribute("class", "plot");
+    path.setAttribute("vector-effect", "non-scaling-stroke");
     svg.appendChild(path);
     const lab = (txt, yy) => {
       const t = document.createElementNS(SVG_NS, "text");
@@ -222,6 +234,25 @@ function renderGraph(series) {
     t.textContent = "Not enough data yet"; svg.appendChild(t);
   }
   host.appendChild(svg);
+}
+
+// One global observer redraws the cached graph on layout changes (window resize,
+// the host going from hidden/zero-width to visible). Registered once in init();
+// never recreated by the polling refresh. A rAF coalesces bursts of events.
+let _graphRedrawPending = false;
+function observeGraphResize() {
+  const host = document.getElementById("graph");
+  if (!host) return;
+  const redraw = () => {
+    if (_graphRedrawPending) return;
+    _graphRedrawPending = true;
+    requestAnimationFrame(() => { _graphRedrawPending = false; renderGraph(); });
+  };
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(redraw).observe(host);
+  } else {
+    window.addEventListener("resize", redraw);
+  }
 }
 
 // ----- control panel (5c) -----
@@ -390,6 +421,7 @@ async function init() {
   document.getElementById("event-source-filter").addEventListener("change", applyEventFilters);
   document.getElementById("event-type-filter").addEventListener("change", applyEventFilters);
   document.getElementById("event-text-filter").addEventListener("input", applyEventFilters);
+  observeGraphResize();
   refresh();
   setInterval(refresh, 10000);
 }

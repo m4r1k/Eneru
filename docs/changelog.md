@@ -181,6 +181,20 @@ before release per the changelog workflow in `AGENTS.md`.
   `hidden` attribute (used throughout the dashboard for show/hide) always wins,
   and a stylesheet regression test guards it (there is no browser in CI).
 
+### Fixed (rc7 — dashboard bug fixes)
+
+- **Deleting a user now ends their active dashboard session.** Sessions are
+  in-memory and outlived the user row they were minted from, so a deleted user
+  stayed signed in until the session TTL. The API now re-checks that a session's
+  user still exists on each request and invalidates the token when the account is
+  gone (→ the dashboard flips to signed-out). The check fails safe: a transient
+  auth-DB error keeps the established session rather than logging out a valid user.
+- **Dashboard history graph no longer renders distorted.** The hand-rolled SVG
+  stretched a fixed `viewBox` to the container width, skewing the line and labels.
+  It now sizes the viewBox to the real pixel width (1:1 mapping) with
+  non-scaling strokes, redraws via a single shared resize observer, and skips
+  rendering while the graph host has zero width (hidden / not yet laid out).
+
 ---
 
 ## [5.5.1] - 2026-05-19

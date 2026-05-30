@@ -73,6 +73,12 @@ There is deliberately **no `--password VALUE` flag** — a password on the comma
 line leaks into shell history and the process list (`ps`). Use the interactive
 prompt, `--generate`, or `--password-stdin`.
 
+**Deleting a user ends their active sessions.** Dashboard sessions are held in
+memory with a TTL, but the API re-checks on every request that the session's user
+still exists; deleting the account invalidates its session token immediately, so
+an open dashboard is signed out on its next poll. (A transient auth-DB error
+during that check keeps the existing session rather than logging out a valid user.)
+
 ## Managing API keys
 
 API keys are for programmatic clients (Grafana, scripts, CI) that send

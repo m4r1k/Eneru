@@ -113,6 +113,18 @@ def test_dashboard_js_contains_plan_control_surfaces(minimal_config):
 
 
 @pytest.mark.unit
+def test_dashboard_js_graph_is_resize_safe(minimal_config):
+    # Guard the graph-scaling fix (no browser in CI): the renderer must size the
+    # viewBox to the host width, use non-scaling strokes, and register a single
+    # resize observer rather than stretching a fixed viewBox.
+    text = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    assert "observeGraphResize" in text
+    assert "non-scaling-stroke" in text
+    assert "host.clientWidth" in text
+
+
+@pytest.mark.unit
 def test_stylesheet_makes_hidden_attribute_win(minimal_config):
     # The dashboard shows/hides everything via the `hidden` attribute. A class
     # that sets `display` (e.g. `.modal { display: flex }`) would otherwise win
