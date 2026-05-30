@@ -304,6 +304,78 @@ def test_api_events_route_accepts_verbosity(minimal_config, tmp_path):
 
 
 @pytest.mark.unit
+def test_api_events_route_range_id_and_before_paging(minimal_config, tmp_path):
+    minimal_config.statistics.db_directory = str(tmp_path)
+    store = StatsStore(tmp_path / "default.db")
+    store.open()
+    try:
+        store.log_event("A", "a", ts=1000)
+        store.log_event("B", "b", ts=2000)   # two share 2000
+        store.log_event("C", "c", ts=2000)
+        store.log_event("D", "d", ts=3000)
+    finally:
+        store.close()
+
+    def route(query):
+        h = object.__new__(EneruAPIHandler)
+        h.path = "/api/v1/events?" + query
+        h.api_config = minimal_config
+        h.api_source = MagicMock()
+        return h._route()
+
+    # `from` bounds the window; rows carry source-qualified id + source.
+    status, _, payload = route("from=2000&limit=10")
+    evs = payload["events"]
+    assert status == 200
+    assert [e["eventType"] for e in evs] == ["B", "C", "D"]
+    assert all(isinstance(e["id"], int) and e["source"] for e in evs)
+
+    # `before` cursor pages older without repeat/skip across the shared second.
+    status, _, page1 = route("limit=2")
+    p1 = page1["events"]
+    assert [e["eventType"] for e in p1] == ["C", "D"]
+    oldest = p1[0]
+    status, _, page2 = route(f"limit=2&before={oldest['ts']}_{oldest['id']}")
+    assert [e["eventType"] for e in page2["events"]] == ["A", "B"]
+
+    # from > to is a 400.
+    status, _, err = route("from=3000&to=1000")
+    assert status == 400 and err["error"]["code"] == "INVALID_REQUEST"
+
+    # A malformed `before` cursor is ignored (not an error): paging restarts.
+    status, _, payload = route("before=not-a-cursor&limit=10")
+    assert status == 200 and len(payload["events"]) == 4
+
+
+@pytest.mark.unit
+def test_api_history_rejects_from_after_to(minimal_config):
+    h = object.__new__(EneruAPIHandler)
+    h.path = "/api/v1/ups/TestUPS@localhost/history?metric=charge&from=200&to=100"
+    h.api_config = minimal_config
+    h.api_source = MagicMock()
+    status, _, payload = h._route()
+    assert status == 400
+    assert payload["error"]["code"] == "INVALID_REQUEST"
+
+
+@pytest.mark.unit
+def test_api_history_all_clamps_to_retention_horizon(minimal_config, tmp_path):
+    # Omitting `from` ("All") maps to the hourly-retention horizon, not 0.
+    minimal_config.statistics.db_directory = str(tmp_path)
+    minimal_config.statistics.retention.agg_hourly_days = 10
+    store = StatsStore(tmp_path / "default.db")
+    store.open()
+    store.close()
+    h = object.__new__(EneruAPIHandler)
+    h.path = "/api/v1/ups/TestUPS@localhost/history?metric=charge&to=1000000"
+    h.api_config = minimal_config
+    h.api_source = MagicMock()
+    status, _, payload = h._route()
+    assert status == 200
+    assert payload["from"] == 1000000 - 10 * 86400
+
+
+@pytest.mark.unit
 def test_api_core_routes(minimal_config, monitor):
     handler = object.__new__(EneruAPIHandler)
     handler.api_config = minimal_config

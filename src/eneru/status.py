@@ -681,12 +681,24 @@ def live_remote_health(source: Any, config: Config) -> List[dict]:
     return rows
 
 
-def query_events(config: Config, *, limit: int = 100, verbosity: int = 2) -> List[dict]:
-    """Return recent event rows from all per-UPS stats DBs."""
+def query_events(config: Config, *, limit: int = 100, verbosity: int = 2,
+                 start_ts: Optional[int] = None, end_ts: Optional[int] = None,
+                 before_ts: Optional[int] = None,
+                 before_id: Optional[int] = None) -> List[dict]:
+    """Return recent event rows from all per-UPS stats DBs.
+
+    Each row carries a **source-qualified identity** — ``source`` (the UPS
+    groupId) plus ``id`` (the per-DB ``rowid``) — because ``rowid`` is unique
+    only within one per-UPS DB. Optional ``start_ts``/``end_ts`` bound the window
+    for wide-range viewing; ``before_ts``/``before_id`` page to older rows. For
+    cross-source paging the caller advances ``before`` to the oldest row shown and
+    de-dups by ``(source, id)``.
+    """
     rows: List[dict] = []
     now = int(time.time())
     limit = max(1, int(limit))
     verbosity = int(verbosity)
+    end = int(end_ts) if end_ts is not None else now
     include_types = POWER_EVENT_TYPES if verbosity == 0 else None
     exclude_types = LIFECYCLE_EVENT_TYPES if verbosity == 1 else None
     for group in config.ups_groups:
@@ -695,14 +707,20 @@ def query_events(config: Config, *, limit: int = 100, verbosity: int = 2) -> Lis
             continue
         try:
             store = StatsStore.from_connection(conn)
-            for ts, event_type, detail in store.query_recent_events(
-                end_ts=now,
+            for event_id, ts, event_type, detail in store.query_recent_events(
+                end_ts=end,
                 limit=limit,
+                start_ts=start_ts,
+                before_ts=before_ts,
+                before_id=before_id,
                 include_types=include_types,
                 exclude_types=exclude_types,
+                include_id=True,
             ):
                 rows.append({
                     "ts": int(ts),
+                    "id": int(event_id),
+                    "source": sanitize_name(group.ups.name),
                     "ups": group.ups.name,
                     "label": group.ups.label,
                     "eventType": event_type,
@@ -713,7 +731,7 @@ def query_events(config: Config, *, limit: int = 100, verbosity: int = 2) -> Lis
                 conn.close()
             except Exception:
                 pass
-    rows.sort(key=lambda row: row["ts"])
+    rows.sort(key=lambda row: (row["ts"], row["id"]))
     return rows[-limit:]
 
 

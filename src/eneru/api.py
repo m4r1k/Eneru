@@ -423,6 +423,23 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             base._auth_active_ts = now
         return base._auth_active_val
 
+    @staticmethod
+    def _parse_before_cursor(raw):
+        """Parse the events ``before`` paging cursor ``"<ts>_<id>"``.
+
+        Returns ``(before_ts, before_id)`` or ``(None, None)`` when absent or
+        malformed (a bad cursor is ignored, not an error — paging just restarts
+        from the most recent rows).
+        """
+        if not raw:
+            return None, None
+        value = raw[0] if isinstance(raw, list) else raw
+        ts_str, _, id_str = str(value).partition("_")
+        try:
+            return int(ts_str), int(id_str)
+        except (TypeError, ValueError):
+            return None, None
+
     def _bearer_token(self) -> Optional[str]:
         """Return the credential from Authorization: Bearer or X-API-Key."""
         header = self.headers.get("Authorization", "") or ""
@@ -580,7 +597,19 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                         f"metric must be one of: {allowed}",
                     )
                 end = _parse_int_param(qs, "to", int(time.time()))
-                start = _parse_int_param(qs, "from", end - 3600)
+                # Earliest data that can exist = the hourly-aggregate retention
+                # horizon. Omitting `from` ("All") maps here, not to an unbounded
+                # scan; an explicit `from` older than this is clamped up to it.
+                horizon = end - int(
+                    self.api_config.statistics.retention.agg_hourly_days) * 86400
+                if "from" in qs:
+                    start = _parse_int_param(qs, "from", end - 3600)
+                    if start > end:
+                        return 400, "application/json", self._error(
+                            "INVALID_REQUEST", "'from' must be <= 'to'")
+                    start = max(start, horizon)
+                else:
+                    start = horizon
                 rows = query_history(self.api_config, ups_name, metric, start, end)
                 if rows is None:
                     return 404, "application/json", self._not_found("UPS not found")
@@ -599,9 +628,19 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             # configured stats DB.
             limit = _parse_int_param(qs, "limit", 100, minimum=1, maximum=10000)
             verbosity = _parse_int_param(qs, "verbosity", 2, minimum=0, maximum=2)
+            start_ts = _parse_int_param(qs, "from", None) if "from" in qs else None
+            end_ts = _parse_int_param(qs, "to", None) if "to" in qs else None
+            if start_ts is not None and end_ts is not None and start_ts > end_ts:
+                return 400, "application/json", self._error(
+                    "INVALID_REQUEST", "'from' must be <= 'to'")
+            # ``before`` is the "load older" cursor: "<ts>_<id>" (oldest row shown).
+            before_ts, before_id = self._parse_before_cursor(qs.get("before"))
             return 200, "application/json", {
                 "generatedAt": time.time(),
-                "events": query_events(self.api_config, limit=limit, verbosity=verbosity),
+                "events": query_events(
+                    self.api_config, limit=limit, verbosity=verbosity,
+                    start_ts=start_ts, end_ts=end_ts,
+                    before_ts=before_ts, before_id=before_id),
             }
 
         if path == "/api/v1/config":

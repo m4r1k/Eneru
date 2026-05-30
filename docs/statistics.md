@@ -59,7 +59,7 @@ These intervals come from `StatsWriter` defaults in `src/eneru/stats.py`: `flush
 | `samples` | Raw poll samples, typically 1 Hz |
 | `agg_5min` | Five-minute aggregate buckets |
 | `agg_hourly` | Hourly aggregate buckets |
-| `events` | Power, health, lifecycle, slow-response diagnostics, remote-health transition, and shutdown events |
+| `events` | Power, health, lifecycle, slow-response diagnostics, remote-health transition, and shutdown events. Each row has an `id` (`INTEGER PRIMARY KEY AUTOINCREMENT`, schema v5) that the API uses to target individual events for deletion; the id is never reused, so deletion is always safe |
 | `notifications` | Persistent notification queue and delivery history |
 | `meta` | Schema version and lifecycle metadata |
 
@@ -169,7 +169,7 @@ sqlite3 /var/lib/eneru/UPS-192-168-1-100.db \
 
 ## Schema migrations
 
-Eneru stores the schema version in `meta.schema_version`. New releases migrate existing databases with additive `ALTER TABLE` statements and preserve old rows.
+Eneru stores the schema version in `meta.schema_version`. New releases migrate existing databases with additive `ALTER TABLE` statements and preserve old rows. Where a column can't be added in place — schema **v5** gives `events` an `id INTEGER PRIMARY KEY AUTOINCREMENT`, which SQLite cannot `ALTER ADD` — the table is rebuilt inside the same transaction (existing rows keep their identity as `id = old rowid`), so the migration is still atomic and replay-safe.
 
 Check the version:
 

@@ -105,10 +105,52 @@ function renderUps(payload) {
   updateEventSourceFilter(rows, groups);
 }
 
-function renderEvents(payload) {
-  lastEvents = (payload && payload.events) || [];
+// Source-qualified identity: the per-DB `id` is only unique within one UPS, so
+// it must be paired with `source`. Falls back to a content key for safety.
+function eventKey(e) {
+  const id = (e.id !== undefined && e.id !== null) ? e.id
+    : (e.ts + "|" + (e.eventType || "") + "|" + (e.detail || ""));
+  return (e.source || "") + "|" + id;
+}
+
+// Merge incoming events into the accumulated, de-duplicated list (so polling and
+// "Load older" both grow it without repeats), sorted ascending by (ts, id) and
+// capped so a long session can't grow unbounded.
+function mergeEvents(incoming) {
+  const map = new Map();
+  for (const e of lastEvents) map.set(eventKey(e), e);
+  for (const e of (incoming || [])) map.set(eventKey(e), e);
+  lastEvents = Array.from(map.values())
+    .sort((a, b) => (a.ts - b.ts) || ((a.id || 0) - (b.id || 0)));
+  if (lastEvents.length > 2000) lastEvents = lastEvents.slice(-2000);
   updateEventTypeFilter(lastEvents);
   applyEventFilters();
+}
+
+function eventRangeFrom() {
+  const v = document.getElementById("event-range").value;
+  if (v === "all") return null;
+  return Math.floor(Date.now() / 1000) - parseInt(v, 10);
+}
+
+async function loadEvents(beforeCursor) {
+  let q = "limit=200";
+  const from = eventRangeFrom();
+  if (from !== null && !beforeCursor) q += "&from=" + from;
+  if (beforeCursor) q += "&before=" + encodeURIComponent(beforeCursor);
+  const res = await api("/api/v1/events?" + q);
+  if (res.ok && res.data) mergeEvents(res.data.events);
+}
+
+async function loadOlderEvents() {
+  const oldest = lastEvents[0];   // ascending sort -> [0] is the oldest shown
+  if (!oldest) { await loadEvents(); return; }
+  await loadEvents(oldest.ts + "_" + (oldest.id || 0));
+}
+
+function resetEvents() {
+  lastEvents = [];
+  loadEvents();
 }
 
 function updateEventSourceFilter(upsRows, groups) {
@@ -394,8 +436,15 @@ async function loadGraph() {
   const ups = document.getElementById("graph-ups").value;
   const metric = document.getElementById("graph-metric").value;
   if (!ups) { renderGraph(null); return; }
+  let q = "metric=" + encodeURIComponent(metric);
+  const range = document.getElementById("graph-range").value;
+  if (range !== "all") {
+    const to = Math.floor(Date.now() / 1000);
+    q += "&to=" + to + "&from=" + (to - parseInt(range, 10));
+  }
+  // range "all" omits `from`; the server clamps it to the retention horizon.
   const res = await api("/api/v1/ups/" + encodeURIComponent(ups) +
-    "/history?metric=" + encodeURIComponent(metric));
+    "/history?" + q);
   renderGraph(res.ok ? res.data : null);
 }
 
@@ -403,8 +452,7 @@ async function refresh() {
   const ups = await api("/api/v1/ups");
   if (ups.ok) { renderUps(ups.data); renderControl(ups.data); showError(""); }
   else if (ups.status !== 401) showError("Could not load UPS status (HTTP " + ups.status + ")");
-  const events = await api("/api/v1/events?limit=50");
-  if (events.ok) renderEvents(events.data);
+  await loadEvents();        // merges fresh recent events into the accumulated list
   await loadGraph();
   setStatus("Updated");
 }
@@ -418,9 +466,12 @@ async function init() {
   document.getElementById("login-form").addEventListener("submit", doLogin);
   document.getElementById("graph-ups").addEventListener("change", loadGraph);
   document.getElementById("graph-metric").addEventListener("change", loadGraph);
+  document.getElementById("graph-range").addEventListener("change", loadGraph);
   document.getElementById("event-source-filter").addEventListener("change", applyEventFilters);
   document.getElementById("event-type-filter").addEventListener("change", applyEventFilters);
   document.getElementById("event-text-filter").addEventListener("input", applyEventFilters);
+  document.getElementById("event-range").addEventListener("change", resetEvents);
+  document.getElementById("event-load-older").addEventListener("click", loadOlderEvents);
   observeGraphResize();
   refresh();
   setInterval(refresh, 10000);

@@ -1225,9 +1225,10 @@ class TestQueryEventsAndHistoryHappyPath:
                    return_value=good_conn), \
              patch("eneru.status.StatsStore.from_connection") as from_conn:
             store = MagicMock()
+            # v5: query_recent_events(include_id=True) yields (id, ts, type, detail).
             store.query_recent_events.return_value = [
-                (200, "POWER_RESTORED", "back"),
-                (100, "ON_BATTERY", "outage"),
+                (2, 200, "POWER_RESTORED", "back"),
+                (1, 100, "ON_BATTERY", "outage"),
             ]
             from_conn.return_value = store
             rows = query_events(config, limit=10, verbosity=0)
@@ -1236,6 +1237,9 @@ class TestQueryEventsAndHistoryHappyPath:
         assert rows[0]["eventType"] == "ON_BATTERY"
         assert rows[0]["label"] == "Rack"
         assert rows[0]["ups"] == "UPS@h"
+        # Source-qualified identity is exposed for the API/dashboard.
+        assert rows[0]["id"] == 1
+        assert rows[0]["source"] == "UPS-h"
 
     @pytest.mark.unit
     def test_query_history_unknown_metric_returns_none(self):

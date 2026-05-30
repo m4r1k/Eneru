@@ -45,7 +45,7 @@ SAMPLE_FIELDS: Tuple[str, ...] = (
 # Bump and add a migration block in StatsStore._init_schema whenever the
 # samples / agg_5min / agg_hourly / events / meta / notifications schema
 # gains a column or table. See src/eneru/AGENTS.md "Stats schema evolution".
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Bucket sizes for aggregation tiers.
 BUCKET_5MIN = 5 * 60
@@ -291,6 +291,7 @@ class StatsStore:
                 );
 
                 CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ts INTEGER NOT NULL,
                     event_type TEXT NOT NULL,
                     detail TEXT,
@@ -407,6 +408,38 @@ class StatsStore:
                 CREATE INDEX IF NOT EXISTS idx_notifications_status_ts
                     ON notifications(status, ts);
             """)
+
+        if current < 5:
+            # v4 -> v5: give events a stable, never-reused id
+            # (INTEGER PRIMARY KEY AUTOINCREMENT). SQLite can't ALTER ADD a
+            # PRIMARY KEY column, so rebuild the table, preserving each row's
+            # identity as id = old rowid. AUTOINCREMENT guarantees a deleted
+            # event's id is never handed to a later row — that's what makes the
+            # API's delete-by-id safe. The whole _init_schema body runs in one
+            # transaction (see open()), so a crash here rolls back cleanly; the
+            # leading DROP heals a DB that died mid-rebuild on a prior open.
+            self._conn.executescript("""
+                DROP TABLE IF EXISTS events_v5_new;
+                CREATE TABLE events_v5_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    detail TEXT,
+                    notification_sent INTEGER DEFAULT 1
+                );
+                INSERT INTO events_v5_new (id, ts, event_type, detail, notification_sent)
+                    SELECT rowid, ts, event_type, detail, notification_sent FROM events;
+                DROP TABLE events;
+                ALTER TABLE events_v5_new RENAME TO events;
+                CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+            """)
+            # Pin the AUTOINCREMENT high-water mark to the max preserved id so a
+            # later delete of the highest row can never let a new event reuse it
+            # (belt-and-suspenders alongside RENAME's sqlite_sequence fixup).
+            self._conn.execute(
+                "INSERT OR REPLACE INTO sqlite_sequence(name, seq) "
+                "SELECT 'events', COALESCE(MAX(id), 0) FROM events"
+            )
 
     def _safe_alter(self, table: str, column_def: str) -> None:
         """Idempotent ``ALTER TABLE ... ADD COLUMN``; ignores duplicates."""
@@ -615,15 +648,37 @@ class StatsStore:
         *,
         end_ts: int,
         limit: int,
+        start_ts: Optional[int] = None,
+        before_ts: Optional[int] = None,
+        before_id: Optional[int] = None,
         include_types: Optional[set] = None,
         exclude_types: Optional[set] = None,
+        include_id: bool = False,
     ) -> List[Tuple]:
-        """Return recent events ascending by ts without loading full history."""
+        """Return recent events ascending by ts without loading full history.
+
+        Optional bounds/cursor for wide-range viewing and "load older" paging:
+
+        * ``start_ts`` — inclusive lower bound (``ts >= start_ts``).
+        * ``before_ts``/``before_id`` — a composite **cursor** for the next page
+          of *older* rows: ``ts < before_ts OR (ts = before_ts AND id <
+          before_id)``. The id is required because several events can share one
+          second, so a timestamp-only cursor would repeat or skip rows.
+        * ``include_id`` — prepend the row's ``id`` to each returned tuple (off by
+          default, so existing 3-tuple callers are unaffected). The id is unique
+          only within this one per-UPS DB; callers must source-qualify it.
+        """
         if self._conn is None:
             return []
         limit = max(1, int(limit))
         clauses = ["ts <= ?"]
         params: List[Any] = [int(end_ts)]
+        if start_ts is not None:
+            clauses.append("ts >= ?")
+            params.append(int(start_ts))
+        if before_ts is not None and before_id is not None:
+            clauses.append("(ts < ? OR (ts = ? AND id < ?))")
+            params.extend([int(before_ts), int(before_ts), int(before_id)])
         if include_types:
             placeholders = ", ".join("?" for _ in include_types)
             clauses.append(f"event_type IN ({placeholders})")
@@ -638,10 +693,12 @@ class StatsStore:
         # multiple events share the same second (notification fanout,
         # rapid trigger flap), so paginated reads don't return
         # different subsets across calls.
+        cols = "id, ts, event_type, detail" if include_id else \
+            "ts, event_type, detail"
         query = (
-            "SELECT ts, event_type, detail FROM events "
+            f"SELECT {cols} FROM events "
             f"WHERE {' AND '.join(clauses)} "
-            "ORDER BY ts DESC, rowid DESC LIMIT ?"
+            "ORDER BY ts DESC, id DESC LIMIT ?"
         )
         try:
             with self._db_lock:

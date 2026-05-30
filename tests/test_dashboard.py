@@ -125,6 +125,21 @@ def test_dashboard_js_graph_is_resize_safe(minimal_config):
 
 
 @pytest.mark.unit
+def test_dashboard_has_wide_history_surfaces(minimal_config):
+    # Guard the Slice B surfaces: graph + event range selectors and the
+    # "load older" paging that drives wide-history viewing.
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    assert 'id="graph-range"' in html
+    assert 'id="event-range"' in html
+    assert 'id="event-load-older"' in html
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    assert "loadOlderEvents" in js
+    assert "mergeEvents" in js
+    assert "eventKey" in js
+
+
+@pytest.mark.unit
 def test_stylesheet_makes_hidden_attribute_win(minimal_config):
     # The dashboard shows/hides everything via the `hidden` attribute. A class
     # that sets `display` (e.g. `.modal { display: flex }`) would otherwise win

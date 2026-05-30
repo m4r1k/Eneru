@@ -181,6 +181,23 @@ before release per the changelog workflow in `AGENTS.md`.
   `hidden` attribute (used throughout the dashboard for show/hide) always wins,
   and a stylesheet regression test guards it (there is no browser in CI).
 
+### Added (rc7 — wider history)
+
+- **Graphs and the event timeline can now show much wider history.** The history
+  graph gains a range selector (1h / 6h / 24h / 7d / 30d / 1y / All) and the event
+  timeline gains a range selector plus a **Load older** button that pages further
+  back. The backend already retained ~5 years of hourly aggregates; `All` maps to
+  that retention horizon (never an unbounded scan), and `from > to` is a 400.
+- **Events carry a stable id (schema v5).** The `events` table gains an
+  `id INTEGER PRIMARY KEY AUTOINCREMENT` (added via a crash-safe table rebuild
+  that preserves existing rows as `id = old rowid`). Because AUTOINCREMENT never
+  reuses a deleted id, the API can safely target individual events. The
+  `/api/v1/events` response now includes a source-qualified identity
+  (`source` + `id`); the TUI and the dashboard's visible columns are unchanged.
+- **`/api/v1/events` accepts `from`, `to`, and a `before` cursor** for wide-range
+  queries and "load older" paging. The cursor is `(ts, id)` so events sharing one
+  second are never repeated or skipped.
+
 ### Fixed (rc7 — dashboard bug fixes)
 
 - **Deleting a user now ends their active dashboard session.** Sessions are

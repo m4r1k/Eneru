@@ -41,6 +41,17 @@
             <option value="voltage">Input voltage (V)</option>
           </select>
         </label>
+        <label>Range
+          <select id="graph-range">
+            <option value="3600">Last hour</option>
+            <option value="21600">Last 6 hours</option>
+            <option value="86400" selected>Last 24 hours</option>
+            <option value="604800">Last 7 days</option>
+            <option value="2592000">Last 30 days</option>
+            <option value="31536000">Last year</option>
+            <option value="all">All</option>
+          </select>
+        </label>
       </div>
       <div id="graph" class="graph"></div>
     </section>
@@ -59,9 +70,22 @@
           </select>
         </label>
         <label>Text <input id="event-text-filter" type="search" placeholder="Filter details"></label>
+        <label>Range
+          <select id="event-range">
+            <option value="86400">Last 24 hours</option>
+            <option value="604800" selected>Last 7 days</option>
+            <option value="2592000">Last 30 days</option>
+            <option value="31536000">Last year</option>
+            <option value="all">All</option>
+          </select>
+        </label>
+      </div>
+      <div class="event-actions">
+        <button type="button" id="event-delete" hidden>Delete selected</button>
+        <button type="button" id="event-load-older">Load older</button>
       </div>
       <table id="events" class="events">
-        <thead><tr><th>Time</th><th>Type</th><th>Detail</th></tr></thead>
+        <thead><tr id="events-head"><th>Time</th><th>Type</th><th>Detail</th></tr></thead>
         <tbody></tbody>
       </table>
     </section>
