@@ -85,13 +85,14 @@ done
 | Redundancy runtime | Quorum evaluation, advisory triggers, connection-grace handling, idempotent group execution |
 | Health monitoring | Voltage thresholds, AVR, bypass, overload, battery anomaly filtering |
 | Notifications | Formatting, retry queue, lifecycle classification, coalescing, suppression rules, container restart/upgrade stop-row deferral |
-| Statistics and TUI | SQLite schema, aggregation, event tier filtering, TUI grouping, graphs, one-shot monitor output |
+| Statistics and TUI | SQLite schema (incl. the v5 `events.id` AUTOINCREMENT table-rebuild migration — column added, rows/version preserved, idempotent, id-not-reused-after-delete), aggregation, event tier filtering, wide-range + composite-cursor event paging across duplicate timestamps, `delete_events` (id+ts+type guard, dedup, per-DB isolation), TUI grouping, graphs, one-shot monitor output |
 | Observability | API routing, readiness, Prometheus escaping, power-quality metrics, remote-health sidecars, MQTT publishing |
 | Authentication | User/API-key SQLite store (bcrypt hashing, salt uniqueness, truncation, CRUD), `eneru user`/`apikey` CLI lifecycle, password-input safety (getpass/generate/stdin), lazy bcrypt import |
-| API auth middleware | Session manager (TTL/expiry), tiered authorization matrix (reads open vs `require_for_reads`, writes fail-closed when auth off), bearer/API-key resolution, login/logout, body-size + JSON validation, tiered `/config` |
+| API auth middleware | Session manager (TTL/expiry), tiered authorization matrix (reads open vs `require_for_reads`, writes fail-closed when auth off), bearer/API-key resolution, session re-validation against user existence (deleted user signed out; DB error preserves the session), login/logout, body-size + JSON validation, tiered `/config` |
+| Event management API | `DELETE /api/v1/ups/{name}/events` — authed delete + `EVENTS_DELETED` audit, anonymous 401 / auth-off 403, unknown UPS 404, stats-unavailable 503, malformed-body matrix (400) and oversize (413); monitor/coordinator routing to the live per-UPS store; events `from`/`to`/`before` paging and history `from > to`/`All` validation |
 | UPS control | `upscmd`/`upsrw` wrappers and output parsing, command/variable allowlist enforcement, per-group credential/allowlist overrides, feature-disabled and unknown-UPS handling, NUT-error mapping, fail-closed config validation (control requires auth), value sanitization, audit logging to the events table |
 | Config hot-reload | Strict load+validate (bad YAML / non-mapping / validation error rejected, running config kept), safe-vs-restart classification, in-place live apply across shared + per-monitor configs, subsystem reload hooks for stats/notifications/MQTT/remote-health, SIGHUP handler and API `/config/reload` endpoint |
-| Web dashboard | Static asset serving via `importlib.resources`, MIME mapping, path-traversal rejection, strict CSP + `nosniff` on HTML, bytes-body responses, dashboard open before the read gate, event filters, control variable forms, `nutControl` exposure in the config summary |
+| Web dashboard | Static asset serving via `importlib.resources`, MIME mapping, path-traversal rejection, strict CSP + `nosniff` on HTML, bytes-body responses, dashboard open before the read gate, event filters, control variable forms, `nutControl` exposure in the config summary, and marker guards for the asset-level surfaces with no browser in CI (`[hidden]` reset, resize-safe graph, wide-history range/paging, delete-selected, drill-down, Light/Dark/System theme) |
 | Packaging | nFPM file list, package install paths, wrapper execution, OCI image smoke tests |
 
 ## End-to-end tests
@@ -122,7 +123,7 @@ The scenario files simulate online, on-battery, low-battery, FSD, brownout, over
 
 ### E2E test inventory
 
-The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 55 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
+The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 56 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
 
 | Test | Group | What it proves |
 |------|-------|----------------|
@@ -183,6 +184,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 55 numb
 | 53 | UPS Single | UPS control: `nut_control` without auth is rejected at startup (fail-closed), with auth a disallowed command is 403, an unauthenticated control call is 401, and an allowlisted command reaches NUT (the dummy driver returns `CMD-NOT-SUPPORTED`, proving the request crossed the API -> upsd boundary) |
 | 54 | UPS Single | Config hot-reload: SIGHUP applies a threshold change live, the authenticated `/config/reload` endpoint returns a report (anonymous is 401), and a broken config is rejected without dropping the daemon |
 | 55 | UPS Single | Browser dashboard: the embedded API serves the SPA shell and assets with a strict CSP, and rejects path traversal / unknown assets with 404 |
+| 56 | UPS Single | Event management: a wide-range `/api/v1/events` query returns source-qualified rows, an authenticated `DELETE` removes a real event (anonymous is 401), and a history `from > to` is 400 |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
 
 Every commit on the protected workflow has to prove the daemon works against real services, not just isolated Python assertions: real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.

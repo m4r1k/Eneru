@@ -29,8 +29,9 @@ Endpoints:
 | `/api/v1` | API endpoint index | 200 |
 | `/api/v1/ups` | Current UPS/group status | 200 |
 | `/api/v1/ups/<name>` | One UPS status | 200 / 404 |
-| `/api/v1/ups/<name>/history` | SQLite metric history | 200 / 400 (bad metric) / 404 |
-| `/api/v1/events` | Recent event rows | 200 / 400 (bad query) |
+| `/api/v1/ups/<name>/history` | SQLite metric history (`metric`, `from`, `to`) | 200 / 400 (bad metric or `from > to`) / 404 |
+| `/api/v1/events` | Recent event rows (`limit`, `verbosity`, `from`, `to`, `before`) | 200 / 400 (bad query) |
+| `DELETE /api/v1/ups/<name>/events` | Delete selected events (auth required) | 200 / 400 / 401 / 403 / 404 / 413 / 503 |
 | `/api/v1/config` | Sanitized config summary | 200 |
 | `/api/v1/remote-health` | Remote SSH health status | 200 |
 | `/metrics` | Prometheus text metrics | 200 / 404 (Prometheus disabled) |
@@ -95,6 +96,10 @@ UPS rows include a stable `groupId` derived from the configured UPS name. Multi-
 `powerQuality` mixes JSON strings and numbers by source: raw NUT readings (`inputVoltage`, `outputVoltage`, `batteryVoltage`, `temperature`, `inputFrequency`, `outputFrequency`) and state labels (`voltageState`, `avrState`, `bypassState`, `overloadState`) are strings; Eneru-derived values (`nominalVoltage`, `warningLow`, `warningHigh`) are numbers. Strings are empty when the UPS does not publish that NUT field. Consumers that compare numeric ranges should coerce the string fields with `float()` (or `| float` in Home Assistant templates) and treat empty strings as missing data.
 
 `/api/v1/events` accepts `limit` and `verbosity` query parameters. `verbosity=0` returns power/shutdown events, `verbosity=1` also includes diagnostics, and `verbosity=2` returns all recorded events including lifecycle rows.
+
+For wide-range viewing and paging, `/api/v1/events` also accepts `from`/`to` (Unix seconds) and a `before` cursor of the form `"<ts>_<id>"` that returns the next page of older rows. Each event row carries a **source-qualified identity** — `source` (the UPS `groupId`) plus `id` (a stable, never-reused per-UPS row id) — alongside `ts`, `eventType`, and `detail`. Likewise, `/api/v1/ups/<name>/history` accepts `from`/`to`; omitting `from` returns from the earliest retained data (the hourly-aggregate retention horizon), and `from > to` is a 400.
+
+**Deleting events.** `DELETE /api/v1/ups/<name>/events` removes selected events. It requires authentication (writes are hard-disabled when `api.auth` is off → 403; missing credential → 401). The JSON body is `{"items": [{"id": <int>, "ts": <int>, "eventType": "<str>"}, ...]}` (max 1000 items → 413; malformed → 400). Each row is matched on all three fields, so a stale client can only ever delete the exact rows it last saw — a mismatch deletes nothing. The response is `{"ups": "<name>", "deleted": <count>}`; if statistics is disabled the endpoint returns 503. Deletions are recorded to the events table as `EVENTS_DELETED` audit rows.
 
 ## Health and readiness
 
