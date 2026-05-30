@@ -198,6 +198,23 @@ before release per the changelog workflow in `AGENTS.md`.
   queries and "load older" paging. The cursor is `(ts, id)` so events sharing one
   second are never repeated or skipped.
 
+### Added (rc7 — dashboard drill-down, richer status, theming)
+
+- **Click a UPS for full details.** Each status card opens a detail panel showing
+  live status, power quality (input/output/battery voltage, frequencies,
+  temperature), its configuration, redundancy-group membership, and remote-health
+  for that source. The dashboard fetches one shared config + remote-health
+  snapshot per refresh, so opening details triggers no extra per-card requests.
+- **Richer status + redundancy rollup + banner.** Status cards highlight battery
+  thresholds; redundancy groups show a healthy/required rollup; a prominent banner
+  warns on-battery and flags shutdown-imminent. The banner is driven by **live**
+  UPS/redundancy status (not stale events), so it clears as soon as power returns.
+- **Light / Dark / System theme switcher.** A neutral palette replaces the amber
+  one, with a header toggle persisted in `localStorage`. The default is **System**
+  (pure CSS `prefers-color-scheme`, no flash); an explicit choice pins it.
+- **Accessibility/polish:** Esc closes modals, cards are keyboard-activatable, and
+  the layout is responsive on narrow screens.
+
 ### Added (rc7 — delete events from the dashboard)
 
 - **Selected events can be deleted from the dashboard** (signed-in only). A new

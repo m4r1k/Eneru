@@ -5,12 +5,41 @@
 // no CSRF surface.
 
 const TOKEN_KEY = "eneru_token";
+const THEME_KEY = "eneru_theme";
 const SVG_NS = "http://www.w3.org/2000/svg";
 let lastEvents = [];
 let knownEventSources = [];
 // Whether the server has API auth enabled. Learned from /api/v1/config at start;
 // when false there is nothing to sign into, so the Sign-in button stays hidden.
 let authEnabled = false;
+// Snapshots fetched once per refresh and shared by the drill-down, so opening a
+// detail panel never triggers per-card config/remote-health requests.
+let cfgSnapshot = null;
+let remoteHealthSnapshot = [];
+let lastUpsRows = [];
+let lastGroups = [];
+
+// ----- theme (light / dark / system) -----
+
+function applyTheme(value) {
+  const v = (value === "light" || value === "dark") ? value : "system";
+  // "system" -> no attribute, so the pure-CSS @media(prefers-color-scheme) rules
+  // apply (flash-free default). An explicit choice pins data-theme.
+  if (v === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = v;
+  try { localStorage.setItem(THEME_KEY, v); } catch (_e) { /* private mode */ }
+}
+
+function initTheme() {
+  let saved = "system";
+  try { saved = localStorage.getItem(THEME_KEY) || "system"; } catch (_e) { /* */ }
+  applyTheme(saved);
+  const sel = document.getElementById("theme-select");
+  if (sel) {
+    sel.value = saved;
+    sel.addEventListener("change", () => applyTheme(sel.value));
+  }
+}
 
 function token() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
 function setToken(t) {
@@ -56,26 +85,42 @@ function statusClass(status) {
 
 // ----- rendering -----
 
+// A UPS counts as healthy for a redundancy rollup when it is reachable and not
+// on battery / low / replace-battery.
+function upsHealthy(u) {
+  if (u.connectionState && u.connectionState !== "connected") return false;
+  const s = (u.status || "").toUpperCase();
+  return !(s.includes("OB") || s.includes("LB") || s.includes("RB")
+           || s.includes("FSD") || s === "");
+}
+
+function batteryClass(charge) {
+  if (isNaN(charge)) return "";
+  if (charge < 20) return "crit";
+  if (charge < 50) return "warn";
+  return "ok";
+}
+
 function renderUps(payload) {
   const wrap = document.getElementById("ups-cards");
   wrap.replaceChildren();
   const rows = (payload && payload.ups) || [];
+  lastUpsRows = rows;
   const sel = document.getElementById("graph-ups");
   const prev = sel.value;
   sel.replaceChildren();
   rows.forEach((u) => {
     const charge = parseFloat(u.batteryCharge);
-    const card = el("div", { class: "card" }, [
+    const card = el("div", { class: "card card-click", tabindex: "0",
+      role: "button", title: "View details" }, [
       el("h3", { text: u.label || u.name }),
       el("div", { class: "row" }, [
         el("span", { text: "Status" }),
         el("span", { class: "badge " + statusClass(u.status), text: u.status || "—" }),
       ]),
       el("div", { class: "row" }, [el("span", { text: "Battery" }),
-        el("b", { text: isNaN(charge) ? "—" : charge + "%" })]),
-      el("div", { class: "bar" }, [
-        el("span", null, []),
-      ]),
+        el("b", { class: batteryClass(charge), text: isNaN(charge) ? "—" : charge + "%" })]),
+      el("div", { class: "bar" }, [el("span", { class: batteryClass(charge) }, [])]),
       el("div", { class: "row" }, [el("span", { text: "Runtime" }),
         el("b", { text: u.runtime != null ? u.runtime + "s" : "—" })]),
       el("div", { class: "row" }, [el("span", { text: "Load" }),
@@ -83,26 +128,164 @@ function renderUps(payload) {
     ]);
     if (!isNaN(charge)) card.querySelector(".bar > span").style.width =
       Math.max(0, Math.min(100, charge)) + "%";
+    card.addEventListener("click", () => openDetail(u.name));
+    card.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDetail(u.name); }
+    });
     wrap.appendChild(card);
     sel.appendChild(el("option", { value: u.name, text: u.label || u.name }));
   });
   if (prev) sel.value = prev;
 
   const groups = (payload && payload.redundancyGroups) || [];
+  lastGroups = groups;
   const gsec = document.getElementById("groups-section");
   const gwrap = document.getElementById("group-cards");
   gwrap.replaceChildren();
   gsec.hidden = groups.length === 0;
+  const byName = {};
+  rows.forEach((u) => { byName[u.name] = u; });
   groups.forEach((g) => {
+    const sources = g.upsSources || [];
+    const healthy = sources.filter((n) => byName[n] && upsHealthy(byName[n])).length;
+    const min = g.minHealthy;
+    const cls = healthy < min ? "crit" : (healthy === min ? "warn" : "ok");
     gwrap.appendChild(el("div", { class: "card" }, [
       el("h3", { text: g.name }),
+      el("div", { class: "row" }, [el("span", { text: "Healthy" }),
+        el("span", { class: "badge " + cls, text: healthy + " / " + min + " required" })]),
       el("div", { class: "row" }, [el("span", { text: "Sources" }),
-        el("b", { text: String((g.upsSources || []).length) })]),
-      el("div", { class: "row" }, [el("span", { text: "Min healthy" }),
-        el("b", { text: String(g.minHealthy) })]),
+        el("b", { text: String(sources.length) })]),
     ]));
   });
   updateEventSourceFilter(rows, groups);
+}
+
+// ----- UPS detail drill-down (Slice D) -----
+
+let openDetailName = null;
+
+function detailRow(label, value) {
+  return el("div", { class: "row" }, [
+    el("span", { text: label }),
+    el("b", { text: (value === undefined || value === null || value === "")
+      ? "—" : String(value) }),
+  ]);
+}
+
+function detailSection(title, rows) {
+  return el("div", { class: "detail-section" },
+    [el("h4", { text: title })].concat(rows));
+}
+
+function openDetail(name) {
+  openDetailName = name;
+  renderDetail(name);
+  document.getElementById("detail-modal").hidden = false;
+}
+
+function closeDetail() {
+  openDetailName = null;
+  document.getElementById("detail-modal").hidden = true;
+}
+
+function renderDetail(name) {
+  const u = lastUpsRows.find((r) => r.name === name);
+  const body = document.getElementById("detail-body");
+  document.getElementById("detail-title").textContent =
+    (u && (u.label || u.name)) || name;
+  if (!u) { body.replaceChildren(el("p", { text: "No data for this UPS." })); return; }
+  const pq = u.powerQuality || {};
+  const sections = [];
+
+  sections.push(detailSection("Live status", [
+    el("div", { class: "row" }, [el("span", { text: "Status" }),
+      el("span", { class: "badge " + statusClass(u.status), text: u.status || "—" })]),
+    detailRow("Battery", u.batteryCharge != null ? u.batteryCharge + "%" : null),
+    detailRow("Runtime", u.runtime != null ? u.runtime + "s" : null),
+    detailRow("Load", u.load != null ? u.load + "%" : null),
+    detailRow("Connection", u.connectionState),
+    detailRow("Time on battery", u.timeOnBattery != null ? u.timeOnBattery + "s" : null),
+  ]));
+
+  sections.push(detailSection("Power quality", [
+    detailRow("Input voltage", pq.inputVoltage != null ? pq.inputVoltage + " V" : null),
+    detailRow("Output voltage", pq.outputVoltage != null ? pq.outputVoltage + " V" : null),
+    detailRow("Battery voltage", pq.batteryVoltage != null ? pq.batteryVoltage + " V" : null),
+    detailRow("Input frequency", pq.inputFrequency != null ? pq.inputFrequency + " Hz" : null),
+    detailRow("Output frequency", pq.outputFrequency != null ? pq.outputFrequency + " Hz" : null),
+    detailRow("Temperature", pq.temperature != null ? pq.temperature + " °C" : null),
+  ]));
+
+  // Configuration (from the shared /api/v1/config snapshot).
+  const cfgUps = ((cfgSnapshot && cfgSnapshot.ups) || []).find((c) => c.name === name);
+  if (cfgUps) {
+    const rows = [
+      detailRow("Local host", cfgUps.isLocal ? "yes" : "no"),
+      detailRow("Remote servers", (cfgUps.remoteServers || []).length),
+    ];
+    (cfgUps.remoteServers || []).forEach((s, i) =>
+      rows.push(detailRow("• server " + (i + 1), s.host || s.name || "configured")));
+    if (cfgSnapshot && cfgSnapshot.nutControl) {
+      rows.push(detailRow("UPS control", cfgSnapshot.nutControl.enabled ? "enabled" : "disabled"));
+    }
+    sections.push(detailSection("Configuration", rows));
+  }
+
+  // Redundancy group membership.
+  const member = lastGroups.filter((g) => (g.upsSources || []).includes(name));
+  if (member.length) {
+    sections.push(detailSection("Redundancy groups",
+      member.map((g) => detailRow(g.name,
+        (g.upsSources || []).length + " sources, " + g.minHealthy + " required"))));
+  }
+
+  // Remote health rows for this source.
+  const rh = remoteHealthSnapshot.filter((r) =>
+    r.group === name || r.group === u.label || r.group === u.groupId);
+  if (rh.length) {
+    sections.push(detailSection("Remote health", rh.map((r) => {
+      const host = r.server || r.host || "host";
+      const healthy = (r.healthy === true || r.status === "healthy"
+        || r.status === "ok" || r.reachable === true);
+      return el("div", { class: "row" }, [
+        el("span", { text: host }),
+        el("span", { class: "badge " + (healthy ? "ok" : "crit"),
+          text: healthy ? "reachable" : "unreachable" }),
+      ]);
+    })));
+  }
+
+  body.replaceChildren(...sections);
+}
+
+// Banner driven by LIVE status (not stale events): low-battery / shutdown-pending
+// is critical; on-battery is a warning; otherwise hidden.
+function renderBanner() {
+  const banner = document.getElementById("banner");
+  const rows = lastUpsRows;
+  let crit = null, warn = null;
+  for (const u of rows) {
+    const s = (u.status || "").toUpperCase();
+    if (s.includes("LB") || s.includes("FSD") || u.triggerActive) {
+      crit = u; break;
+    }
+    if (s.includes("OB") && !warn) warn = u;
+  }
+  if (crit) {
+    banner.className = "banner crit";
+    const why = crit.triggerReason ? (": " + crit.triggerReason) : "";
+    banner.textContent = "⚠️ Shutdown imminent — " +
+      (crit.label || crit.name) + " is on low battery" + why;
+    banner.hidden = false;
+  } else if (warn) {
+    banner.className = "banner warn";
+    banner.textContent = "🔋 On battery — " + (warn.label || warn.name) +
+      " is running on battery power";
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
 }
 
 // Source-qualified identity: the per-DB `id` is only unique within one UPS, so
@@ -503,15 +686,31 @@ async function loadGraph() {
 }
 
 async function refresh() {
+  // One shared config + remote-health snapshot per cycle so the drill-down reads
+  // from memory instead of firing per-card requests.
+  const [cfg, rh] = await Promise.all([
+    api("/api/v1/config"), api("/api/v1/remote-health"),
+  ]);
+  if (cfg.ok) cfgSnapshot = cfg.data;
+  if (rh.ok) remoteHealthSnapshot = (rh.data && rh.data.servers) || [];
+
   const ups = await api("/api/v1/ups");
-  if (ups.ok) { renderUps(ups.data); renderControl(ups.data); showError(""); }
-  else if (ups.status !== 401) showError("Could not load UPS status (HTTP " + ups.status + ")");
+  if (ups.ok) {
+    renderUps(ups.data); renderControl(ups.data); renderBanner(); showError("");
+  } else if (ups.status !== 401) {
+    showError("Could not load UPS status (HTTP " + ups.status + ")");
+  }
   await loadEvents();        // merges fresh recent events into the accumulated list
   await loadGraph();
+  // If a detail modal is open, keep it live with the fresh snapshot.
+  if (!document.getElementById("detail-modal").hidden && openDetailName) {
+    renderDetail(openDetailName);
+  }
   setStatus("Updated");
 }
 
 async function init() {
+  initTheme();
   await loadAuthState();
   refreshAuthUI();
   document.getElementById("loginBtn").addEventListener("click", openLogin);
@@ -527,6 +726,13 @@ async function init() {
   document.getElementById("event-range").addEventListener("change", resetEvents);
   document.getElementById("event-load-older").addEventListener("click", loadOlderEvents);
   document.getElementById("event-delete").addEventListener("click", deleteSelected);
+  document.getElementById("detail-close").addEventListener("click", closeDetail);
+  // Esc closes whichever modal is open.
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape") return;
+    if (!document.getElementById("detail-modal").hidden) closeDetail();
+    if (!document.getElementById("login-modal").hidden) closeLogin();
+  });
   observeGraphResize();
   refresh();
   setInterval(refresh, 10000);

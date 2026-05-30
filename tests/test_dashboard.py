@@ -151,6 +151,31 @@ def test_dashboard_has_event_delete_surface(minimal_config):
 
 
 @pytest.mark.unit
+def test_dashboard_has_drilldown_and_theme_surfaces(minimal_config):
+    # Guard Slice D (drill-down) + Slice E (theme, banner) surfaces.
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    assert 'id="detail-modal"' in html
+    assert 'id="theme-select"' in html
+    assert 'id="banner"' in html
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    assert "openDetail" in js and "renderDetail" in js
+    assert "renderBanner" in js
+    assert "applyTheme" in js
+    # Drill-down must read the shared snapshot, not fetch per card.
+    assert "remoteHealthSnapshot" in js
+
+
+@pytest.mark.unit
+def test_dashboard_theme_palette_supports_light_dark_system(minimal_config):
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    assert 'data-theme="light"' in css
+    assert 'data-theme="dark"' in css
+    assert "prefers-color-scheme: light" in css
+
+
+@pytest.mark.unit
 def test_stylesheet_makes_hidden_attribute_win(minimal_config):
     # The dashboard shows/hides everything via the `hidden` attribute. A class
     # that sets `display` (e.g. `.modal { display: flex }`) would otherwise win

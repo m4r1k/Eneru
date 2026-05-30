@@ -10,12 +10,20 @@
   <header>
     <h1>⚡ Eneru</h1>
     <div id="authbox" class="authbox">
+      <label class="theme-pick">Theme
+        <select id="theme-select" aria-label="Color theme">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </label>
       <span id="who" class="who" hidden></span>
       <button id="loginBtn" type="button">Sign in</button>
       <button id="logoutBtn" type="button" hidden>Sign out</button>
     </div>
   </header>
 
+  <div id="banner" class="banner" role="status" hidden></div>
   <div id="error" class="error" hidden></div>
 
   <main>
@@ -108,6 +116,17 @@
       </div>
       <div id="login-error" class="error" hidden></div>
     </form>
+  </div>
+
+  <!-- UPS detail dialog -->
+  <div id="detail-modal" class="modal" hidden>
+    <div class="modal-card detail-card">
+      <div class="modal-head">
+        <h3 id="detail-title">UPS details</h3>
+        <button type="button" id="detail-close" aria-label="Close">✕</button>
+      </div>
+      <div id="detail-body"></div>
+    </div>
   </div>
 
   <footer><span id="status-line">Loading…</span></footer>
