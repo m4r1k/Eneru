@@ -1338,11 +1338,28 @@ class ConfigLoader:
                 if not isinstance(block, dict):
                     return
                 messages.extend(cls._unknown_key_errors(label, block, _nc_keys))
+                # N4: NUT command/variable names are dotted alphanumerics. Reject
+                # an allowlist entry with spaces / shell metacharacters / '=' at
+                # load (a typo'd entry would otherwise flow verbatim into the
+                # upscmd/upsrw argv). Not an injection (argv, not shell), but
+                # catching it here turns a silent no-op into a startup error.
+                _nut_name_chars = set(
+                    "abcdefghijklmnopqrstuvwxyz"
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-")
                 for list_key in ("allowed_commands", "allowed_variables"):
                     val = block.get(list_key)
-                    if val is not None and not isinstance(val, list):
+                    if val is None:
+                        continue
+                    if not isinstance(val, list):
                         messages.append(
                             f"ERROR: {label}.{list_key} must be a list")
+                        continue
+                    for entry in val:
+                        if not (isinstance(entry, str) and entry
+                                and all(c in _nut_name_chars for c in entry)):
+                            messages.append(
+                                f"ERROR: {label}.{list_key} entry {entry!r} is not "
+                                "a valid NUT name (letters, digits, . _ + - only)")
                 t = block.get("timeout")
                 if t is not None and (isinstance(t, bool) or not isinstance(t, int)
                                       or t < 1):

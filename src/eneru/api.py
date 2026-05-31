@@ -368,13 +368,16 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                                       "application/json; charset=utf-8"))
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
+        # N2: nosniff on EVERY response (JSON/JS/CSS/HTML), not just HTML -- the
+        # dashboard's static assets are served with specific content types and
+        # must not be MIME-sniffed.
+        self.send_header("X-Content-Type-Options", "nosniff")
         if content_type == "text/html":
             # The dashboard ships no inline scripts/styles and loads nothing
             # third-party, so a strict same-origin CSP locks it down.
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; base-uri 'none'; frame-ancestors 'none'")
-            self.send_header("X-Content-Type-Options", "nosniff")
         if status == 401:
             self.send_header("WWW-Authenticate", "Bearer")
         self.end_headers()

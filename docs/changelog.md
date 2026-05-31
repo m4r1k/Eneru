@@ -35,8 +35,9 @@ hot-reload. With authentication left off, the API stays read-only exactly as in
   commands and writable variables, wrapping `upscmd`/`upsrw` (no new dependency).
   Fail-closed — control cannot be enabled while authentication is off.
 - **Event management API.** Events carry a stable, never-reused `id` (stats schema
-  v5); `/api/v1/events` supports wide-range `from`/`to` queries and `(ts, id)`
-  cursor paging, and an authenticated `DELETE /api/v1/ups/{name}/events` removes
+  v5); `/api/v1/events` supports wide-range `from`/`to` queries and source-
+  qualified `(ts, source, id)` cursor paging, and an authenticated
+  `DELETE /api/v1/ups/{name}/events` removes
   selected rows. Existing databases migrate automatically on first start.
 - **Config hot-reload** without restarting the daemon — `systemctl reload eneru`,
   `SIGHUP` (`docker kill -s HUP`), or an authenticated `POST /api/v1/config/reload`.
@@ -187,6 +188,22 @@ already hysteresis-gated), the per-poll battery-history file write (a forensic
 record; cross-restart read-back is entangled with the on-battery deque reset),
 the `upsrw` SET timeout (operator-tunable via `nut_control.timeout`), and a
 couple of niche multi-daemon / degenerate-config edges.
+
+Nits:
+
+- `X-Content-Type-Options: nosniff` is now sent on every API response, not just
+  the dashboard HTML.
+- Passwords containing a NUL byte are rejected at creation (guards against older
+  bcrypt builds that truncated at NUL).
+- `nut_control` allowlist entries are validated against the NUT name charset at
+  config load.
+- `StatsStore.from_connection` no longer calls `.close()` on a connection that
+  was never opened (dead code relying on a swallowed exception).
+- The slow-SSH diagnostic no longer records two `REMOTE_SSH_SLOW_RESPONSE` rows
+  in a single cycle when a probe crosses both the log and the sustained-notify
+  thresholds at once.
+- Changelog wording: event paging uses a source-qualified `(ts, source, id)`
+  cursor (was written as `(ts, id)`).
 
 ---
 
