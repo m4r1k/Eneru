@@ -423,7 +423,7 @@ with three additions:
    deliberately **not** run as a blocking probe at the start of the
    shutdown sequence: that would add an SSH round-trip on the critical
    path before the poweroff during an outage, and Eneru would proceed
-   regardless (the loopback targets `127.0.0.1` = this host, which must
+   regardless (the configured host-loopback target is the host that must
    go down), so the probe would only add latency. Fix a reported
    mismatch from the health-loop warning, not at shutdown time.
 3. **Eneru generates `pre_shutdown_commands` for you.** Don't
