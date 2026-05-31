@@ -52,7 +52,20 @@ class BatteryMonitorMixin:
                 f"⚠️ Battery history persist failed: {exc}"
             )
 
-        if len(self.state.battery_history) < 30:
+        # Historically this required a flat 30 samples. But the deque is first
+        # pruned to `depletion.window` seconds, so the most samples that can
+        # ever survive is ~window/check_interval. With a slow poll interval
+        # (e.g. check_interval=11, window=300 -> ~27 samples) the count never
+        # reaches 30 and the depletion trigger (T3) is silently dead forever.
+        # Cap the floor by what the window can actually hold so T3 stays armed,
+        # while still requiring a few samples for a stable rate.
+        try:
+            check_interval = max(1, int(self.config.ups.check_interval))
+        except (TypeError, ValueError):
+            check_interval = 1
+        window = self.config.triggers.depletion.window
+        min_samples = max(3, min(30, window // check_interval))
+        if len(self.state.battery_history) < min_samples:
             return 0.0
 
         oldest_time, oldest_battery = self.state.battery_history[0]

@@ -595,6 +595,16 @@ class MultiUPSCoordinator:
                     if self.config.local_shutdown.message:
                         cmd_parts.append(self.config.local_shutdown.message)
                     run_command(cmd_parts)
+                    # NOTE (H9): we deliberately do NOT eagerly re-arm the guard
+                    # here. Re-entry during the SAME outage is already blocked by
+                    # the monitor's suffixed _shutdown_flag_path (coordinator
+                    # mode never clears it mid-sequence), and the guard is re-armed
+                    # on the OB/FSD->OL recovery via power_restored_callback ->
+                    # _clear_local_shutdown_state. Clearing it right after
+                    # run_command would instead re-drain peers and re-send the
+                    # "shutting down" notification on every subsequent failed poll
+                    # in a non-halting/sandbox config (the multi-UPS analog of the
+                    # H2 failsafe re-fire).
         else:
             self._log("✅ Local shutdown disabled. Group shutdown complete.")
             self._global_shutdown_flag.unlink(missing_ok=True)
@@ -806,6 +816,30 @@ class MultiUPSCoordinator:
         for line in format_report(report):
             self._log(line)
 
+    def _shutdown_join_deadline(self) -> int:
+        """Bounded wait (seconds) for an in-flight shutdown to finish on signal.
+
+        Tied to the configured remote-shutdown + drain budgets so the host
+        poweroff (the last step of the sequence) can complete, and capped so a
+        wedged sequence can't block exit forever. (systemd's TimeoutStopSec is
+        the ultimate governor; this just stops us abandoning our own work.)
+        """
+        max_remote = 0
+        for group in self.config.ups_groups:
+            for srv in group.remote_servers:
+                try:
+                    max_remote = max(
+                        max_remote,
+                        int(srv.command_timeout) + int(srv.connect_timeout)
+                        + int(srv.shutdown_safety_margin),
+                    )
+                except (TypeError, ValueError):
+                    continue
+        budget = max_remote + 120  # + local drain/poweroff headroom
+        if self.config.local_shutdown.drain_on_local_shutdown:
+            budget += 120
+        return min(max(budget, 30), 600)
+
     def _handle_signal(self, signum: int, frame):
         """Handle SIGTERM/SIGINT for clean shutdown."""
         self._log("🛑 Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
@@ -819,11 +853,32 @@ class MultiUPSCoordinator:
         if self._api_server is not None:
             self._api_server.stop()
 
-        # Wait briefly for monitor + evaluator threads to finish
-        for thread in self._threads:
-            thread.join(timeout=5)
-        for thread in self._evaluator_threads:
-            thread.join(timeout=5)
+        # If a shutdown sequence is already in flight (a real power event, not
+        # just `systemctl stop`), a monitor/evaluator thread is mid-sequence and
+        # the host poweroff is its LAST step. Racing a 5 s join then sys.exit()
+        # would kill that thread before the poweroff runs -- a missed shutdown.
+        # When in flight, wait a generous, config-derived, bounded deadline so
+        # the sequence can finish; otherwise keep the brisk 5 s exit.
+        shutdown_in_flight = (
+            self._global_shutdown_flag.exists()
+            or any(m._shutdown_flag_path.exists() for m in self._monitors)
+        )
+        if shutdown_in_flight:
+            join_budget = self._shutdown_join_deadline()
+            self._log(
+                f"⏳ Shutdown sequence in progress; waiting up to {join_budget}s "
+                "for it to complete (host poweroff) before exit."
+            )
+        else:
+            join_budget = 5
+
+        # Deadline-based join so the TOTAL wait is bounded by join_budget, not
+        # join_budget per thread. The signal handler runs on the main thread, so
+        # none of these is the current thread (no self-join hazard).
+        deadline = time.time() + join_budget
+        for thread in (*self._threads, *self._evaluator_threads):
+            remaining = max(0.0, deadline - time.time())
+            thread.join(timeout=remaining)
 
         # v5.2.1: see UPSGroupMonitor._cleanup_and_exit for the full
         # rationale. Drain pending non-lifecycle rows first, then enqueue

@@ -35,6 +35,12 @@ def run_command(
     capture_output: bool = True
 ) -> Tuple[int, str, str]:
     """Run a shell command and return (exit_code, stdout, stderr)."""
+    # A None timeout means "wait forever" to subprocess.run. No caller wants
+    # that during a shutdown sequence: a config value that slipped through as
+    # None (e.g. `unmount.timeout:` with no value) would otherwise let a busy
+    # umount hang the drain phase indefinitely. Fall back to the default bound.
+    if timeout is None:
+        timeout = 30
     try:
         result = subprocess.run(
             cmd,

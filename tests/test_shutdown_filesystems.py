@@ -46,32 +46,57 @@ def _make_fs_monitor(tmp_path, *, sync_enabled=True, unmount_enabled=True, mount
 
 @pytest.mark.unit
 def test_sync_filesystems_disabled_no_op(tmp_path):
-    """sync_enabled=False returns without invoking os.sync."""
+    """sync_enabled=False returns without invoking sync."""
     monitor = _make_fs_monitor(tmp_path, sync_enabled=False)
-    with patch("eneru.shutdown.filesystems.os.sync") as mock_sync, \
+    with patch("eneru.shutdown.filesystems.run_command") as mock_run, \
          patch("eneru.shutdown.filesystems.time.sleep"):
         monitor._sync_filesystems()
-    mock_sync.assert_not_called()
+    mock_run.assert_not_called()
 
 
 @pytest.mark.unit
 def test_sync_filesystems_dry_run_skips_os_sync(tmp_path):
-    """Dry-run logs the action but never calls os.sync()."""
+    """Dry-run logs the action but never runs the sync subprocess."""
     monitor = _make_fs_monitor(tmp_path, dry_run=True)
-    with patch("eneru.shutdown.filesystems.os.sync") as mock_sync:
+    with patch("eneru.shutdown.filesystems.run_command") as mock_run:
         monitor._sync_filesystems()
-    mock_sync.assert_not_called()
+    mock_run.assert_not_called()
 
 
 @pytest.mark.unit
-def test_sync_filesystems_real_calls_os_sync_then_sleeps(tmp_path):
-    """Real path: os.sync() + 2-second sleep for storage controller flush."""
+def test_sync_filesystems_real_runs_bounded_sync_then_sleeps(tmp_path):
+    """H6: real path runs a bounded `sync` subprocess + 2s controller-flush sleep."""
     monitor = _make_fs_monitor(tmp_path)
-    with patch("eneru.shutdown.filesystems.os.sync") as mock_sync, \
+    with patch("eneru.shutdown.filesystems.run_command",
+               return_value=(0, "", "")) as mock_run, \
          patch("eneru.shutdown.filesystems.time.sleep") as mock_sleep:
         monitor._sync_filesystems()
-    mock_sync.assert_called_once()
+    mock_run.assert_called_once()
+    # Bounded against a wall-clock timeout, not an unbounded os.sync().
+    assert mock_run.call_args.args[0] == ["sync"]
+    assert mock_run.call_args.kwargs.get("timeout")
     mock_sleep.assert_called_once_with(2)
+
+
+@pytest.mark.unit
+def test_sync_filesystems_timeout_proceeds(tmp_path):
+    """H6: a hung sync (exit 124) is logged and the sequence proceeds (no raise)."""
+    monitor = _make_fs_monitor(tmp_path)
+    with patch("eneru.shutdown.filesystems.run_command",
+               return_value=(124, "", "")) as mock_run, \
+         patch("eneru.shutdown.filesystems.time.sleep"):
+        monitor._sync_filesystems()
+    mock_run.assert_called_once()
+
+
+@pytest.mark.unit
+def test_sync_filesystems_error_proceeds(tmp_path):
+    """H6: a sync error (non-zero, non-124) is logged and the sequence proceeds."""
+    monitor = _make_fs_monitor(tmp_path)
+    with patch("eneru.shutdown.filesystems.run_command",
+               return_value=(1, "", "boom")), \
+         patch("eneru.shutdown.filesystems.time.sleep"):
+        monitor._sync_filesystems()
 
 
 @pytest.mark.unit

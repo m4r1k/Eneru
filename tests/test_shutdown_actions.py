@@ -448,6 +448,7 @@ class TestNoDriftBetweenInProcessAndTemplates:
         "docker": "stop_containers",  # also covered by stop_compose
         "podman": "stop_containers",
         "umount": "unmount_filesystems",
+        "sync": None,  # local bounded `sync` (H6); no remote analogue
         "mountpoint": None,  # introspection only, no remote analogue
         "loginctl": "stop_containers_rootless",
         "sudo": None,  # transport, not a unique action

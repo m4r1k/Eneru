@@ -14,6 +14,13 @@ from eneru.actions import REMOTE_ACTIONS, render_action, serialize_umount_target
 from eneru.config import RemoteServerConfig
 from eneru.utils import run_command
 
+# Per-command wall-clock buffer added on top of the configured timeout to absorb
+# SSH connection/teardown overhead. _run_remote_command spends this on every
+# command. _shutdown_remote_server reserves command_timeout + this buffer for
+# the final poweroff before spending the deadline on pre-shutdown commands, so a
+# slow pre-phase can't starve the poweroff (H8).
+_SSH_OVERHEAD_BUFFER = 30
+
 
 @dataclass
 class RemotePreShutdownResult:
@@ -504,7 +511,7 @@ class RemoteShutdownMixin:
         # shutdown-phase deadline requires a tighter cap. This prevents a
         # hung pre-shutdown command from outliving the phase and later
         # drifting into the final shutdown command.
-        command_timeout = timeout + 30
+        command_timeout = timeout + _SSH_OVERHEAD_BUFFER
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -516,11 +523,11 @@ class RemoteShutdownMixin:
             return True, ""
         elif exit_code == 124:
             # ``command_timeout`` is the value actually handed to
-            # ``run_command`` (timeout + 30 s buffer, capped by the
+            # ``run_command`` (timeout + SSH overhead buffer, capped by the
             # phase deadline). Reporting just ``timeout`` would mislead
             # operators when deadline-capping shrinks the effective
             # window below what was configured per-command.
-            if command_timeout != timeout + 30:
+            if command_timeout != timeout + _SSH_OVERHEAD_BUFFER:
                 return (
                     False,
                     f"timed out after {command_timeout}s "
@@ -745,13 +752,28 @@ class RemoteShutdownMixin:
             category="shutdown",
         )
 
-        # Execute pre-shutdown commands first
+        # Execute pre-shutdown commands first. RESERVE enough of the phase
+        # deadline for the final shutdown command (its own timeout + the SSH
+        # overhead buffer _run_remote_command adds) so a slow pre-shutdown phase
+        # can NEVER starve or skip the actual poweroff (H8). Pre-commands run
+        # against the reduced deadline; the poweroff then runs against the full
+        # deadline, spending the reserved slice. When the reserve exceeds the
+        # whole budget, pre-commands get no time at all -- the poweroff wins.
         if has_pre_cmds:
+            pre_deadline = deadline
+            if deadline is not None:
+                final_reserve = server.command_timeout + _SSH_OVERHEAD_BUFFER
+                pre_deadline = deadline - final_reserve
             result.pre_commands = self._execute_remote_pre_shutdown(
-                server, collect_result=True, deadline=deadline,
+                server, collect_result=True, deadline=pre_deadline,
             )
 
-        if result.pre_commands.timed_out or self._remote_deadline_exceeded(deadline):
+        # Skip the poweroff ONLY when the FULL phase deadline is blown. A
+        # pre-phase that merely exhausted its reserved slice (pre_commands
+        # .timed_out) must NOT cancel the poweroff -- reserving its budget is
+        # precisely what stops the starvation H8 fixes. Pre-phase failures are
+        # still recorded in result.pre_commands for the summary.
+        if self._remote_deadline_exceeded(deadline):
             result.completed = False
             result.timed_out = True
             result.error = (

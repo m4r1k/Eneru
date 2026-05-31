@@ -635,29 +635,54 @@ class TestRemotePreShutdownExecution:
         assert "1 failed" in log_text
 
     @pytest.mark.unit
-    def test_pre_shutdown_deadline_skips_late_final_shutdown(self, remote_monitor):
+    def test_slow_pre_phase_still_attempts_final_shutdown(self, remote_monitor):
+        """H8: a slow pre-shutdown phase that exhausts its reserved slice must
+        NOT starve or skip the final poweroff. As long as the FULL phase
+        deadline isn't blown, the shutdown command is still attempted."""
+        from eneru.shutdown.remote import RemotePreShutdownResult
         server = RemoteServerConfig(
-            name="slow",
-            enabled=True,
-            host="10.0.0.3",
-            user="root",
+            name="slow", enabled=True, host="10.0.0.3", user="root",
             command_timeout=30,
             pre_shutdown_commands=[
                 RemoteCommandConfig(command="sleep 999", timeout=1),
+            ],
+        )
+        # Pre-phase reports timed_out (used up its reserved budget); the full
+        # deadline is far away (monotonic pinned to 0, deadline 100).
+        pre_result = RemotePreShutdownResult(attempted=1, failed=1, timed_out=True)
+        with patch.object(remote_monitor, "_execute_remote_pre_shutdown",
+                          return_value=pre_result), \
+             patch.object(remote_monitor, "_run_remote_command",
+                          return_value=(True, "")) as mock_run, \
+             patch("eneru.shutdown.remote.time.monotonic", return_value=0.0):
+            result = remote_monitor._shutdown_remote_server(server, deadline=100.0)
+
+        assert mock_run.call_count == 1          # poweroff attempted
+        assert result.shutdown_sent is True
+
+    @pytest.mark.unit
+    def test_full_deadline_blown_skips_final_shutdown(self, remote_monitor):
+        """If the FULL phase deadline is already exceeded, the poweroff is
+        skipped -- the phase is genuinely out of time."""
+        from eneru.shutdown.remote import RemotePreShutdownResult
+        server = RemoteServerConfig(
+            name="slow", enabled=True, host="10.0.0.3", user="root",
+            command_timeout=30,
+            pre_shutdown_commands=[
                 RemoteCommandConfig(command="sleep 999", timeout=1),
             ],
         )
+        pre_result = RemotePreShutdownResult(attempted=1, failed=0, timed_out=False)
+        with patch.object(remote_monitor, "_execute_remote_pre_shutdown",
+                          return_value=pre_result), \
+             patch.object(remote_monitor, "_run_remote_command",
+                          return_value=(True, "")) as mock_run, \
+             patch("eneru.shutdown.remote.time.monotonic", return_value=200.0):
+            result = remote_monitor._shutdown_remote_server(server, deadline=100.0)
 
-        with patch("eneru.shutdown.remote.time.monotonic", side_effect=[0.0, 11.0]):
-            with patch.object(remote_monitor, "_run_remote_command",
-                              return_value=(False, "timed out")) as mock_run:
-                result = remote_monitor._shutdown_remote_server(server, deadline=10.0)
-
-        assert result.timed_out is True
+        assert mock_run.call_count == 0          # poweroff skipped (out of time)
         assert result.shutdown_sent is False
-        assert result.pre_commands.timed_out is True
-        assert mock_run.call_count == 1
-        assert mock_run.call_args.args[3] == "sleep 999"
+        assert result.timed_out is True
 
     @pytest.mark.unit
     def test_loopback_pre_shutdown_supplies_skip_ids_and_umount_targets(

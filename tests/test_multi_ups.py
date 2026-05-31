@@ -1480,8 +1480,13 @@ class TestCoordinatorHandleSignal:
         with patch("eneru.multi_ups.sys.exit"):
             coord._handle_signal(_signal.SIGINT, None)
 
+        # Deadline-based join (H10): each thread is joined once with a positive,
+        # bounded timeout (<= the 5 s no-in-flight budget), not necessarily the
+        # exact integer 5 -- it's `deadline - now`.
         for thread in threads:
-            thread.join.assert_called_once_with(timeout=5)
+            thread.join.assert_called_once()
+            timeout = thread.join.call_args.kwargs["timeout"]
+            assert 0 < timeout <= 5
 
     @pytest.mark.unit
     def test_handle_signal_enqueues_stop_after_flush_and_stop(self, tmp_path):
@@ -2070,8 +2075,10 @@ ups:
         rh2.stop.assert_called_once()
         coord._mqtt_publisher.stop.assert_called_once()
         coord._api_server.stop.assert_called_once()
-        t1.join.assert_called_once_with(timeout=5)
-        t2.join.assert_called_once_with(timeout=5)
+        # Deadline-based join (H10): bounded positive timeout, not exactly 5.
+        for thread in (t1, t2):
+            thread.join.assert_called_once()
+            assert 0 < thread.join.call_args.kwargs["timeout"] <= 5
 
     @pytest.mark.unit
     def test_handle_signal_skips_lifecycle_notif_during_upgrade(self, tmp_path):

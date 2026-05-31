@@ -584,12 +584,66 @@ class TestFailsafe:
         monitor._in_redundancy_group = False
         monitor.state.previous_status = "OB DISCHRG"
         monitor.state.connection_state = "OK"
-        # Trigger failsafe immediately (non-stale-data path).
+        # H3: hard failures are debounced like stale data. Push the hard-error
+        # counter to tolerance-1 so this iteration reaches tolerance and fires
+        # (mirrors how the stale-data tests pre-set stale_data_count).
+        monitor.state.connection_error_count = (
+            monitor.config.ups.max_stale_data_tolerance - 1
+        )
         with patch.object(monitor, "_execute_shutdown_sequence") as mock_exec:
             _run_one_iteration(monitor, (False, {}, "Network error"))
 
         mock_exec.assert_called_once()
         assert monitor.state.connection_state == "FAILED"
+
+    @pytest.mark.unit
+    def test_single_hard_error_while_ob_is_debounced(self, tmp_path):
+        """H3: a single transient hard NUT failure while on battery does NOT
+        fire the FAILSAFE (it is debounced by max_stale_data_tolerance), so a
+        momentary connection refusal / upsc timeout can't drop a healthy host."""
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = False
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.connection_state = "OK"
+        monitor.config.ups.max_stale_data_tolerance = 3
+        monitor.state.connection_error_count = 0
+        with patch.object(monitor, "_execute_shutdown_sequence") as mock_exec:
+            _run_one_iteration(monitor, (False, {}, "Network error"))
+        mock_exec.assert_not_called()
+        assert monitor.state.connection_error_count == 1
+
+    @pytest.mark.unit
+    def test_tolerance_one_restores_instant_fsb(self, tmp_path):
+        """H3: max_stale_data_tolerance=1 restores the instant fail-closed FSB."""
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = False
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.connection_state = "OK"
+        monitor.config.ups.max_stale_data_tolerance = 1
+        with patch.object(monitor, "_execute_shutdown_sequence") as mock_exec:
+            _run_one_iteration(monitor, (False, {}, "Network error"))
+        mock_exec.assert_called_once()
+
+    @pytest.mark.unit
+    def test_failsafe_does_not_refire_while_latched(self, tmp_path):
+        """H2: once the on-battery FAILSAFE has acted, it must not re-run the
+        shutdown sequence on every subsequent failed poll (non-halting config)."""
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = False
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.connection_state = "OK"
+        monitor.config.ups.max_stale_data_tolerance = 1
+        with patch.object(monitor, "_execute_shutdown_sequence") as mock_exec:
+            # First failed poll fires the sequence.
+            _run_one_iteration(monitor, (False, {}, "Network error"))
+            assert mock_exec.call_count == 1
+            assert monitor._failsafe_initiated is True
+            # Subsequent failed polls (NUT still down, previous_status still OB)
+            # must NOT re-fire while the latch is set.
+            for _ in range(3):
+                monitor._stop_event.clear()
+                _run_one_iteration(monitor, (False, {}, "Network error"))
+            assert mock_exec.call_count == 1
 
     @pytest.mark.unit
     def test_connection_lost_while_ol_enters_grace_period(self, tmp_path):
@@ -685,15 +739,14 @@ class TestShutdownSequence:
         assert flag_existed
 
     @pytest.mark.unit
-    def test_shutdown_aborts_on_step_failure(self, tmp_path):
-        """Documents current behavior: an unhandled exception inside a
-        shutdown step propagates up and ABORTS the remaining steps. The
-        steps themselves handle expected failures internally; only an
-        unexpected raise reaches the orchestrator. If we ever decide to
-        wrap each step in try/except so subsequent steps run as
-        best-effort, this test must change to assert the new contract.
+    def test_shutdown_continues_past_drain_step_failure(self, tmp_path):
+        """H4: an unhandled exception inside a drain step is caught and logged;
+        the remaining drain steps AND the remote/poweroff path still run, so a
+        wedged libvirt or a bad config value can never skip the host poweroff.
+        (Previously such an exception aborted the whole sequence.)
         """
         monitor = make_monitor(tmp_path)
+        monitor.config.behavior.dry_run = True  # don't actually power off in the test
         call_order = []
 
         def failing_vms():
@@ -704,13 +757,14 @@ class TestShutdownSequence:
         monitor._shutdown_containers = lambda: call_order.append("containers")
         monitor._sync_filesystems = lambda: call_order.append("sync")
         monitor._unmount_filesystems = lambda: call_order.append("unmount")
-        monitor._shutdown_remote_servers = lambda: call_order.append("remote")
+        monitor._shutdown_remote_servers = (
+            lambda: call_order.append("remote") or [])
 
-        with pytest.raises(RuntimeError, match="VM shutdown failed"):
-            monitor._execute_shutdown_sequence()
+        # No raise: the sequence completes despite the VM step failing.
+        monitor._execute_shutdown_sequence()
 
-        # Only the failing step ran; subsequent steps did NOT execute.
-        assert call_order == ["vms"]
+        # Every drain step ran AND the remote/poweroff path was reached.
+        assert call_order == ["vms", "containers", "sync", "unmount", "remote"]
 
 
 # ==============================================================================
@@ -1776,8 +1830,13 @@ class TestAdvisoryTriggers:
         monitor = make_monitor(tmp_path)
         monitor._in_redundancy_group = False
         monitor.state.previous_status = "OB DISCHRG"
-        # Connection error (not "Data stale") fires failsafe immediately.
+        # Connection error (not "Data stale") fires the failsafe once the hard-
+        # error counter reaches tolerance (H3); pre-set to tolerance-1 so this
+        # iteration fires (mirrors the stale-data tests).
         monitor.state.stale_data_count = 0
+        monitor.state.connection_error_count = (
+            monitor.config.ups.max_stale_data_tolerance - 1
+        )
         monitor.state.connection_state = "OK"
 
         with patch.object(monitor, "_execute_shutdown_sequence") as mock_exec:

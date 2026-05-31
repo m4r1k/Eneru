@@ -7,7 +7,6 @@ https://github.com/m4r1k/Eneru
 
 import sqlite3
 import sys
-import os
 import time
 import signal
 import threading
@@ -132,6 +131,11 @@ class UPSGroupMonitor(
         # local shutdown sequence. The redundancy-group evaluator owns the
         # decision to actually drain shared resources.
         self._in_redundancy_group = bool(in_redundancy_group)
+        # H2: per-outage latch so the on-battery FAILSAFE runs the shutdown
+        # sequence at most once per connection-loss event (non-halting configs
+        # clear the flag and would otherwise re-fire every poll). Reset on the
+        # next successful poll.
+        self._failsafe_initiated = False
 
         # Per-group state file paths (suffix for multi-UPS)
         sfx = f".{state_file_suffix}" if state_file_suffix else ""
@@ -1111,19 +1115,47 @@ class UPSGroupMonitor(
         is_local = group.is_local if group else True  # legacy single-UPS = local
 
         if is_local and not delegated:
-            self._shutdown_vms()
-            self._shutdown_containers()
-            self._sync_filesystems()
-            self._unmount_filesystems()
-        remote_results = self._shutdown_remote_servers() or []
+            # Each drain phase is best-effort housekeeping. A failure in one
+            # (a wedged libvirt, a bad config value, a hung mount) must NEVER
+            # abort the path to the host poweroff below -- that is the actual
+            # protective action. Previously an unguarded exception here
+            # propagated to run() (FATAL + re-raise) or, in coordinator mode,
+            # was swallowed without ever reaching the poweroff. Wrap each phase.
+            for phase_name, phase_fn in (
+                ("VM shutdown", self._shutdown_vms),
+                ("container shutdown", self._shutdown_containers),
+                ("filesystem sync", self._sync_filesystems),
+                ("filesystem unmount", self._unmount_filesystems),
+            ):
+                try:
+                    phase_fn()
+                except Exception as exc:
+                    self._log_message(
+                        f"❌ {phase_name} phase failed: {exc}. Continuing the "
+                        "shutdown sequence -- drain is best-effort, the host "
+                        "halt is not."
+                    )
+        # Remote shutdown is also best-effort: its per-server work is already
+        # guarded internally, but wrap the call too so the H4 contract -- the
+        # host poweroff below is ALWAYS reached -- is structural, not dependent
+        # on the callee never raising during setup.
+        try:
+            remote_results = self._shutdown_remote_servers() or []
+        except Exception as exc:
+            self._log_message(
+                f"❌ remote shutdown phase failed: {exc}. Continuing to the "
+                "host poweroff."
+            )
+            remote_results = []
 
         if is_local and self.config.filesystems.sync_enabled and not delegated:
             self._log_message("💾 Final filesystem sync...")
             if self.config.behavior.dry_run:
                 self._log_message("  🧪 [DRY-RUN] Would perform final sync")
             else:
-                os.sync()
-                self._log_message("  ✅ Final sync complete")
+                # Bounded sync (FilesystemShutdownMixin) so a hung mount can't
+                # wedge the sequence before the host poweroff below.
+                self._bounded_sync("Final filesystem sync")
 
         # In coordinator mode, notify the coordinator instead of doing local shutdown
         if self._coordinator_mode:
@@ -1835,29 +1867,48 @@ class UPSGroupMonitor(
             # ==================================================================
 
             if not success:
+                # ``is_failsafe_trigger`` drives the OFF-battery grace path and
+                # fires on the first hard error (unchanged). ``onbattery_failsafe``
+                # gates the irreversible ON-battery shutdown and is debounced for
+                # hard errors (H3) the same way stale data already is.
                 is_failsafe_trigger = False
+                onbattery_failsafe = False
+                tolerance = self.config.ups.max_stale_data_tolerance
 
                 if "Data stale" in error_msg:
                     self.state.stale_data_count += 1
                     if self.state.connection_state not in ("FAILED", "GRACE_PERIOD"):
                         self._log_message(
                             f"⚠️ WARNING: Data stale from UPS {self.config.ups.name} "
-                            f"(Attempt {self.state.stale_data_count}/{self.config.ups.max_stale_data_tolerance})."
+                            f"(Attempt {self.state.stale_data_count}/{tolerance})."
                         )
 
-                    if self.state.stale_data_count >= self.config.ups.max_stale_data_tolerance:
+                    if self.state.stale_data_count >= tolerance:
                         is_failsafe_trigger = True
+                        onbattery_failsafe = True
                 else:
+                    self.state.connection_error_count += 1
                     if self.state.connection_state not in ("FAILED", "GRACE_PERIOD"):
                         self._log_message(
-                            f"❌ ERROR: Cannot connect to UPS {self.config.ups.name}. Output: {error_msg}"
+                            f"❌ ERROR: Cannot connect to UPS {self.config.ups.name} "
+                            f"(Attempt {self.state.connection_error_count}/"
+                            f"{tolerance}). Output: {error_msg}"
                         )
                     self.state.stale_data_count = 0
+                    # Off-battery: first hard error feeds the grace period as
+                    # before. On-battery (H3): require max_stale_data_tolerance
+                    # consecutive hard failures before the IRREVERSIBLE shutdown,
+                    # so a single transient NUT blip (connection refused during a
+                    # upsd restart, or a 30s upsc timeout -> run_command 124)
+                    # can't drop a healthy host riding out a survivable dip. Set
+                    # max_stale_data_tolerance=1 to restore instant FSB.
                     is_failsafe_trigger = True
+                    if self.state.connection_error_count >= tolerance:
+                        onbattery_failsafe = True
 
-                # FAILSAFE: If connection lost while on battery, shutdown immediately
-                # This is NEVER affected by the grace period
-                if is_failsafe_trigger and "OB" in self.state.previous_status:
+                # FAILSAFE: If connection lost while on battery, shut down.
+                # This is NEVER affected by the grace period.
+                if onbattery_failsafe and "OB" in self.state.previous_status:
                     with self.state._lock:
                         self.state.connection_state = "FAILED"
                         self.state.connection_lost_time = 0.0
@@ -1865,11 +1916,22 @@ class UPSGroupMonitor(
                     # once connection_state == "FAILED", health_model short-
                     # circuits to UNKNOWN regardless of the count, and the
                     # next successful poll resets it (see line ~1486).
-                    if self._in_redundancy_group:
+                    if self._failsafe_initiated:
+                        # H2: already acted on this outage's FAILSAFE. Do NOT
+                        # re-run the sequence every poll while NUT stays
+                        # unreachable. Non-halting configs (local_shutdown
+                        # disabled, dry-run, delegated) clear the shutdown flag
+                        # on completion, so without this latch the entire
+                        # remote/VM/container sequence would re-fire each poll
+                        # and flood notifications. The latch resets on the next
+                        # successful poll (recovery).
+                        pass
+                    elif self._in_redundancy_group:
                         # Advisory mode: redundancy-group evaluator owns the
                         # shutdown decision. Recording the trigger here +
                         # reporting connection_state=FAILED is enough -- the
                         # group's policy + min_healthy decide what happens.
+                        self._failsafe_initiated = True
                         self._record_advisory_trigger(
                             "FAILSAFE (FSB): connection lost while On Battery"
                         )
@@ -1878,6 +1940,7 @@ class UPSGroupMonitor(
                             "while On Battery; deferring to group evaluator."
                         )
                     else:
+                        self._failsafe_initiated = True
                         self._shutdown_flag_path.touch()
                         self._log_message(
                             "🚨 FAILSAFE TRIGGERED (FSB): Connection lost or data persistently stale "
@@ -1893,6 +1956,14 @@ class UPSGroupMonitor(
                         )
                         self._execute_shutdown_sequence()
 
+                # On battery but the hard-error debounce hasn't reached tolerance
+                # yet (H3): wait for the next poll. Do NOT start the off-battery
+                # grace machinery and do NOT shut down -- just let the counter
+                # accumulate. (Stale-data-below-tolerance lands here too, exactly
+                # as before, since neither flag is set yet.)
+                elif "OB" in self.state.previous_status:
+                    pass
+
                 # Grace period logic (only when NOT on battery)
                 elif is_failsafe_trigger:
                     self._handle_connection_failure(error_msg)
@@ -1904,7 +1975,12 @@ class UPSGroupMonitor(
             # DATA PROCESSING
             # ==================================================================
 
+            # A successful poll clears the failure debounce counters and re-arms
+            # the FAILSAFE latch (H2/H3): NUT is visible again, so a later loss
+            # is a fresh event that must be allowed to act.
             self.state.stale_data_count = 0
+            self.state.connection_error_count = 0
+            self._failsafe_initiated = False
 
             if self.state.connection_state == "GRACE_PERIOD":
                 # Recovered during grace period: quiet recovery, no notification

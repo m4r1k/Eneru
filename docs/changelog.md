@@ -77,6 +77,52 @@ daemon *before* the host poweroff. Critical fixes:
   It is now a config error when local shutdown is enabled, with a defensive
   guard at both call sites.
 
+High fixes:
+
+- **Redundancy cold-start no longer drops a powered rack.** The evaluator's
+  time-based startup grace alone could fire a group shutdown when a member's NUT
+  server was merely slow to publish its first snapshot (UNKNOWN ->
+  unknown_counts_as=critical). It now holds the quorum decision until every
+  present member has reported at least once, bounded by a readiness deadline
+  derived from the per-member connection-loss grace; a member with no monitor at
+  all still counts immediately, and a genuinely dead UPS still fires once the
+  window passes.
+- **On-battery FAILSAFE no longer re-fires every poll.** In non-halting configs
+  (local shutdown disabled, dry-run, or loopback-delegated) the failsafe cleared
+  its flag and re-ran the entire remote/VM/container sequence on each failed
+  poll. A per-outage latch now runs it once per connection-loss event; it
+  re-arms on the next successful poll.
+- **A single transient NUT failure on battery no longer shuts the host down.**
+  Hard poll failures (connection refused, or a 30s upsc timeout) are now
+  debounced by `max_stale_data_tolerance` the same way stale data already was,
+  so a momentary blip can't drop a host riding out a survivable dip. Set
+  `max_stale_data_tolerance: 1` to restore instant fail-closed FSB. Off-battery
+  grace handling is unchanged.
+- **Drain phases can't abort the host poweroff.** Each local drain phase (VMs,
+  containers, sync, unmount) is wrapped so an exception is logged and the
+  sequence still reaches the poweroff -- a wedged libvirt or a bad value no
+  longer leaves the host running on a draining battery.
+- **Bounded filesystem sync.** `os.sync()` (which blocks until every mount
+  flushes) is replaced by a `sync` subprocess with a wall-clock timeout, so a
+  hung NFS/CIFS mount can't wedge the sequence before poweroff; the kernel
+  re-syncs at halt regardless.
+- **Drain-phase timeouts validated at load.** `virtual_machines.max_wait`,
+  `containers.stop_timeout`, and `filesystems.unmount.timeout` are now
+  type/range-checked (a quoted "30s" or a null value previously crashed the
+  phase or made `umount` hang forever); `run_command` also treats a `None`
+  timeout as the default bound.
+- **Remote poweroff can't be starved by a slow pre-shutdown phase.** The final
+  shutdown command now reserves its own budget before pre-shutdown commands
+  spend the phase deadline, and is skipped only if the *full* deadline is blown.
+- **SIGTERM/SIGINT during an in-flight shutdown** now waits a bounded,
+  config-derived deadline for the sequence (incl. the host poweroff) to finish
+  instead of abandoning it after 5s. **Duplicate `ups.name`** and **unknown
+  per-UPS / per-redundancy keys** (e.g. a misspelled `is_local`) are now rejected
+  at load.
+- **Depletion-rate trigger (T3) stays armed at slow poll intervals.** The
+  30-sample floor is now derived from `depletion.window / check_interval`, so a
+  larger `check_interval` no longer silently disables the fast-drain trigger.
+
 ---
 
 ## [5.5.1] - 2026-05-19

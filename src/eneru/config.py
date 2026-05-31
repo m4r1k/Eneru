@@ -1419,12 +1419,31 @@ class ConfigLoader:
             _validate_remote_servers(
                 "remote_servers", raw_data.get("remote_servers", []),
             )
+            # Per-UPS-entry top-level keys. Every other section gets a strict
+            # unknown-key sweep; without this one a typo like `is_locl: true`
+            # silently parses the group as non-local (is_local defaults False),
+            # disabling local-host self-protection while the operator believes
+            # it is on. Mirror the contract: misspelled safety keys must error.
+            ups_entry_keys = {
+                "name", "display_name", "check_interval",
+                "max_stale_data_tolerance", "connection_loss_grace_period",
+                "is_local", "triggers", "remote_servers", "virtual_machines",
+                "containers", "filesystems", "nut_control",
+            }
+            redundancy_entry_keys = {
+                "name", "ups_sources", "min_healthy", "degraded_counts_as",
+                "unknown_counts_as", "is_local", "triggers", "remote_servers",
+                "virtual_machines", "containers", "filesystems",
+            }
             ups_raw = raw_data.get("ups")
             if isinstance(ups_raw, list):
                 for idx, entry in enumerate(ups_raw):
                     if not isinstance(entry, dict):
                         continue
                     label = entry.get("name", idx)
+                    messages.extend(cls._unknown_key_errors(
+                        f"ups[{label!r}]", entry, ups_entry_keys,
+                    ))
                     _validate_triggers(
                         f"ups[{label!r}].triggers",
                         entry.get("triggers", {}),
@@ -1439,6 +1458,10 @@ class ConfigLoader:
                     if not isinstance(entry, dict):
                         continue
                     label = entry.get("name", idx)
+                    messages.extend(cls._unknown_key_errors(
+                        f"redundancy_groups[{label!r}]", entry,
+                        redundancy_entry_keys,
+                    ))
                     group_triggers = entry.get("triggers", {})
                     _validate_triggers(
                         f"redundancy_groups[{label!r}].triggers",
@@ -1712,6 +1735,37 @@ class ConfigLoader:
             _check_trigger_numbers(
                 f"redundancy_groups[{(rg.name or '(unnamed)')!r}]", rg.triggers)
 
+        # Drain-phase timeouts feed `while time_waited < max_wait`,
+        # `stop_timeout + 30`, and subprocess timeouts during shutdown. A
+        # non-int (quoted "30s") crashes the phase mid-sequence; a null
+        # unmount.timeout becomes subprocess.run(timeout=None) -> a busy umount
+        # hangs forever. Validate them at load so the host still powers off.
+        def _check_drain_timeouts(label: str, grp):
+            mw = grp.virtual_machines.max_wait
+            if not cls._is_int_nonbool_in_range(mw, minimum=0):
+                messages.append(
+                    f"ERROR: {label}.virtual_machines.max_wait must be a "
+                    f"non-negative integer, got {mw!r}."
+                )
+            st = grp.containers.stop_timeout
+            if not cls._is_int_nonbool_in_range(st, minimum=0):
+                messages.append(
+                    f"ERROR: {label}.containers.stop_timeout must be a "
+                    f"non-negative integer, got {st!r}."
+                )
+            ut = grp.filesystems.unmount.timeout
+            if not cls._is_int_nonbool_in_range(ut, minimum=1):
+                messages.append(
+                    f"ERROR: {label}.filesystems.unmount.timeout must be an "
+                    f"integer >= 1, got {ut!r}."
+                )
+
+        for group in config.ups_groups:
+            _check_drain_timeouts(f"ups[{group.ups.label!r}]", group)
+        for rg in config.redundancy_groups:
+            _check_drain_timeouts(
+                f"redundancy_groups[{(rg.name or '(unnamed)')!r}]", rg)
+
         # Multi-UPS validation
         if config.multi_ups:
             # Check ownership: non-local groups must not have local resources
@@ -1753,6 +1807,27 @@ class ConfigLoader:
             messages.append(
                 f"ERROR: Multiple groups marked as is_local: {', '.join(all_local)}. "
                 "At most one group (UPS or redundancy) can power the Eneru host."
+            )
+
+        # ups.name uniqueness. The name keys the per-group stats DB path, the
+        # state-file suffix, the monitors-by-name routing dict, and redundancy
+        # member resolution -- duplicates corrupt or cross-wire all of those.
+        # Dedup on the SANITIZED name actually used for filenames, so two names
+        # differing only in @/:/ (which sanitize to the same file) still collide.
+        def _sanitize_name(n: str) -> str:
+            return (n or "").replace("@", "-").replace(":", "-").replace("/", "-")
+
+        seen_ups_names: Dict[str, int] = {}
+        for group in config.ups_groups:
+            key = _sanitize_name(group.ups.name)
+            seen_ups_names[key] = seen_ups_names.get(key, 0) + 1
+        dup_ups = sorted(k for k, c in seen_ups_names.items() if c > 1)
+        if dup_ups:
+            messages.append(
+                "ERROR: duplicate UPS name(s) across ups_groups: "
+                f"{', '.join(dup_ups)}. Each ups.name must be unique -- it keys "
+                "the stats DB, state file, API command routing, and redundancy "
+                "membership."
             )
 
         # is_host_loopback uniqueness + per-entry rules. Runtime-context checks

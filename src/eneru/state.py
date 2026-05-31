@@ -68,6 +68,11 @@ class MonitorState:
     connection_flap_count: int = 0
     connection_first_flap_time: float = 0.0
     stale_data_count: int = 0
+    # Consecutive HARD poll failures (connection refused / timeout / non-stale
+    # errors) since the last success. Mirrors stale_data_count so the on-battery
+    # FAILSAFE debounces a single transient NUT blip the same way stale data is
+    # debounced (H3); reset to 0 on any successful poll.
+    connection_error_count: int = 0
     voltage_warning_low: float = 0.0
     voltage_warning_high: float = 0.0
     nominal_voltage: float = 230.0

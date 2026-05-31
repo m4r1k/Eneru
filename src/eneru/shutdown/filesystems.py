@@ -1,15 +1,44 @@
 """Filesystem sync + unmount phase of the shutdown sequence."""
 
-import os
 import shlex
 import time
 from typing import List
 
 from eneru.utils import run_command
 
+# Wall-clock bound for the filesystem sync. A bare os.sync() blocks until EVERY
+# mounted filesystem flushes; a hung/unreachable network mount (NFS/CIFS with a
+# dead server, on the same failing power circuit) would leave it forever in
+# uninterruptible D-state and the host would never reach poweroff. The kernel
+# re-syncs during halt anyway, so abandoning a stuck sync after this many
+# seconds is safe and strictly better than never powering off.
+_SYNC_TIMEOUT_SECONDS = 30
+
 
 class FilesystemShutdownMixin:
     """Mixin: filesystem sync and unmount during shutdown."""
+
+    def _bounded_sync(self, label: str) -> None:
+        """Run ``sync`` with a hard timeout so a hung mount can't stall poweroff.
+
+        Runs the coreutils ``sync`` binary as a subprocess (run_command bounds
+        it with a timeout) instead of the unbounded, uninterruptible
+        ``os.sync()``. On timeout/error we log and proceed -- the kernel flushes
+        again during the halt, so the poweroff must never be held hostage to a
+        dead network filesystem.
+        """
+        exit_code, _, _ = run_command(["sync"], timeout=_SYNC_TIMEOUT_SECONDS)
+        if exit_code == 124:
+            self._log_message(
+                f"  ⚠️ {label} timed out after {_SYNC_TIMEOUT_SECONDS}s "
+                "(a hung mount?); proceeding -- the kernel re-syncs during halt."
+            )
+        elif exit_code != 0:
+            self._log_message(
+                f"  ⚠️ {label} reported an error (exit {exit_code}); proceeding."
+            )
+        else:
+            self._log_message(f"  ✅ {label} complete")
 
     def _sync_filesystems(self):
         """Sync all filesystems.
@@ -26,9 +55,8 @@ class FilesystemShutdownMixin:
         if self.config.behavior.dry_run:
             self._log_message("  🧪 [DRY-RUN] Would sync filesystems")
         else:
-            os.sync()
+            self._bounded_sync("Filesystem sync")
             time.sleep(2)  # Allow storage controller caches to flush
-            self._log_message("  ✅ Filesystems synced")
 
     def _unmount_filesystems(self):
         """Unmount configured filesystems."""
