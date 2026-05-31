@@ -52,6 +52,31 @@ hot-reload. With authentication left off, the API stays read-only exactly as in
 - **NUT auto-discovery**, previously listed for 6.0, was dropped: it duplicates
   `nut-scanner` and does not fit Eneru's config-first model.
 
+### Fixed (rc10 — pre-release audit hardening)
+
+A structured whole-repository audit (see `docs/testing.md` → "Pre-release code
+review") hardened the shutdown decision path. The new auth/API/control surface
+held up; the residual risk was a config typo or a slow subsystem crashing the
+daemon *before* the host poweroff. Critical fixes:
+
+- **Multi-UPS drain no longer self-joins its own thread.** With
+  `drain_on_local_shutdown: true`, `_drain_all_groups` ran on the firing group's
+  monitor thread and tried to `join()` that same thread, raising `RuntimeError`
+  and aborting the sequence before the host poweroff — a missed local shutdown.
+  It now skips the current thread, so peers drain and the host still powers off.
+- **Shutdown-trigger thresholds are validated at load.** A non-numeric YAML
+  scalar (e.g. a quoted `"20"`, which templating tools emit routinely) survived
+  parse and raised `TypeError` on the first on-battery poll, killing the monitor
+  loop exactly when a shutdown was due. `low_battery_threshold`,
+  `critical_runtime_threshold`, `depletion.window/critical_rate/grace_period`,
+  and `extended_time.threshold` are now type/range-checked for every UPS and
+  redundancy group, so a bad value is a startup error, not a mid-outage crash.
+- **Empty/null `local_shutdown.command` is rejected at load.** `command:` with
+  no value parsed to `None` (and `""` yielded `run_command([])`), silently
+  skipping the host poweroff after VMs/containers/remotes were already drained.
+  It is now a config error when local shutdown is enabled, with a defensive
+  guard at both call sites.
+
 ---
 
 ## [5.5.1] - 2026-05-19

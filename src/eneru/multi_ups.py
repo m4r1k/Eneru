@@ -580,10 +580,21 @@ class MultiUPSCoordinator:
                     version=__version__,
                     reason=REASON_SEQUENCE_COMPLETE,
                 )
-                cmd_parts = self.config.local_shutdown.command.split()
-                if self.config.local_shutdown.message:
-                    cmd_parts.append(self.config.local_shutdown.message)
-                run_command(cmd_parts)
+                # Defense-in-depth: config validation already rejects an
+                # empty/None command at load, but a programmatically-built
+                # Config could still reach here. str()+strip guards against
+                # None.split() / run_command([]) silently no-op'ing the
+                # poweroff after peers were already drained.
+                cmd_parts = str(self.config.local_shutdown.command or "").split()
+                if not cmd_parts:
+                    self._log(
+                        "❌ local_shutdown.command is empty -- cannot power off "
+                        "the host. Set local_shutdown.command to a valid command."
+                    )
+                else:
+                    if self.config.local_shutdown.message:
+                        cmd_parts.append(self.config.local_shutdown.message)
+                    run_command(cmd_parts)
         else:
             self._log("✅ Local shutdown disabled. Group shutdown complete.")
             self._global_shutdown_flag.unlink(missing_ok=True)
@@ -609,12 +620,22 @@ class MultiUPSCoordinator:
         """
         self._log("⏳ Draining all UPS groups -- shutting down their resources...")
 
+        # This runs ON one of the monitor threads (the group whose trigger
+        # fired calls _handle_local_shutdown -> here, synchronously). That
+        # thread's own Thread object is in self._threads, and joining the
+        # CURRENT thread raises RuntimeError("cannot join current thread"),
+        # which would unwind out of the whole shutdown sequence BEFORE the
+        # host poweroff -- a missed local shutdown. So never join ourselves.
+        me = threading.current_thread()
+
         # Phase 1: signal every peer monitor to stop its poll loop, then
         # join with a short window so the loops exit before we run their
         # shutdown sequences.
         self._stop_event.set()
         join_deadline = time.time() + max(1, timeout // 4)
         for thread in self._threads:
+            if thread is me:
+                continue
             remaining = max(0.0, join_deadline - time.time())
             thread.join(timeout=remaining)
 
@@ -630,9 +651,11 @@ class MultiUPSCoordinator:
         # Final join window for any threads still wrapping up.
         deadline = time.time() + timeout
         for thread in self._threads:
+            if thread is me:
+                continue
             remaining = max(0.0, deadline - time.time())
             thread.join(timeout=remaining)
-        still_running = [t for t in self._threads if t.is_alive()]
+        still_running = [t for t in self._threads if t is not me and t.is_alive()]
         if still_running:
             self._log(f"⚠️ {len(still_running)} monitor(s) still running after drain timeout")
 

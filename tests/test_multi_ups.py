@@ -699,6 +699,46 @@ class TestDrainOnLocalShutdown:
         mock_monitor._execute_shutdown_sequence.assert_called_once()
 
     @pytest.mark.unit
+    def test_drain_skips_current_thread_no_self_join_crash(self, tmp_path):
+        """Regression (C1): _drain_all_groups runs ON a monitor thread whose
+        own Thread object is in self._threads. Joining the current thread
+        raises RuntimeError('cannot join current thread'), which previously
+        unwound the whole sequence BEFORE the host poweroff -- a missed
+        shutdown. The drain must skip itself and still drain peers."""
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True),
+            ],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                shutdown_flag_file=str(tmp_path / "flag"),
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+            ),
+            local_shutdown=LocalShutdownConfig(
+                enabled=False,
+                drain_on_local_shutdown=True,
+            ),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+
+        mock_monitor = MagicMock()
+        mock_monitor._shutdown_flag_path = tmp_path / "flag-ups2"
+        mock_monitor._shutdown_flag_path.unlink(missing_ok=True)
+        mock_monitor._log_prefix = "[UPS2] "
+        coord._monitors = [mock_monitor]
+        # The bug trigger: the CURRENT thread is in _threads (real runtime
+        # shape -- the firing group's poll thread drives the drain).
+        coord._threads = [threading.current_thread()]
+
+        # Pre-fix this raised RuntimeError; post-fix it returns cleanly.
+        coord._drain_all_groups(timeout=1)
+
+        # And the peer drain must still have happened.
+        mock_monitor._execute_shutdown_sequence.assert_called_once()
+
+    @pytest.mark.unit
     def test_drain_not_called_when_disabled(self, tmp_path):
         """drain_on_local_shutdown=false must NOT drain other groups."""
         config = Config(

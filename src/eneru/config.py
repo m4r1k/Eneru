@@ -1660,6 +1660,58 @@ class ConfigLoader:
                     f"non-negative integer, got {delay!r}."
                 )
 
+        # Shutdown-trigger numeric fields feed direct comparisons in the
+        # on-battery hot path (monitor._handle_on_battery, health/battery.py).
+        # A non-numeric YAML scalar -- most commonly a quoted "20", which
+        # templating tools (Ansible/Helm/envsubst) emit routinely -- survives
+        # parse as a str and raises TypeError on the FIRST on-battery poll,
+        # killing the monitor loop exactly when a shutdown decision is due.
+        # Validate every group's PARSED triggers so a bad value is a startup
+        # error, never a mid-outage crash.
+        def _check_trigger_numbers(label: str, t: TriggersConfig):
+            if not cls._is_int_nonbool_in_range(
+                    t.low_battery_threshold, minimum=0, maximum=100):
+                messages.append(
+                    f"ERROR: {label}.triggers.low_battery_threshold must be an "
+                    f"integer between 0 and 100, got {t.low_battery_threshold!r}."
+                )
+            if not cls._is_int_nonbool_in_range(
+                    t.critical_runtime_threshold, minimum=0):
+                messages.append(
+                    f"ERROR: {label}.triggers.critical_runtime_threshold must be "
+                    f"a non-negative integer, got {t.critical_runtime_threshold!r}."
+                )
+            if not cls._is_int_nonbool_in_range(t.depletion.window, minimum=1):
+                messages.append(
+                    f"ERROR: {label}.triggers.depletion.window must be an integer "
+                    f">= 1, got {t.depletion.window!r}."
+                )
+            rate = t.depletion.critical_rate
+            if (isinstance(rate, bool) or not isinstance(rate, (int, float))
+                    or rate <= 0):
+                messages.append(
+                    f"ERROR: {label}.triggers.depletion.critical_rate must be a "
+                    f"number greater than 0, got {rate!r}."
+                )
+            if not cls._is_int_nonbool_in_range(
+                    t.depletion.grace_period, minimum=0):
+                messages.append(
+                    f"ERROR: {label}.triggers.depletion.grace_period must be a "
+                    f"non-negative integer, got {t.depletion.grace_period!r}."
+                )
+            if not cls._is_int_nonbool_in_range(
+                    t.extended_time.threshold, minimum=0):
+                messages.append(
+                    f"ERROR: {label}.triggers.extended_time.threshold must be a "
+                    f"non-negative integer, got {t.extended_time.threshold!r}."
+                )
+
+        for group in config.ups_groups:
+            _check_trigger_numbers(f"ups[{group.ups.label!r}]", group.triggers)
+        for rg in config.redundancy_groups:
+            _check_trigger_numbers(
+                f"redundancy_groups[{(rg.name or '(unnamed)')!r}]", rg.triggers)
+
         # Multi-UPS validation
         if config.multi_ups:
             # Check ownership: non-local groups must not have local resources
@@ -2023,6 +2075,19 @@ class ConfigLoader:
                 f"ERROR: local_shutdown.trigger_on must be 'any' or 'none', "
                 f"got '{config.local_shutdown.trigger_on}'"
             )
+
+        # local_shutdown.command is the host poweroff itself. `command:` with a
+        # null value parses to None (the default only applies to an ABSENT key),
+        # and an empty string yields run_command([]) -- both silently skip the
+        # poweroff AFTER VMs/containers/remotes were already drained. Reject a
+        # missing/empty command at load when local shutdown is enabled.
+        if config.local_shutdown.enabled:
+            cmd = config.local_shutdown.command
+            if not isinstance(cmd, str) or not cmd.strip():
+                messages.append(
+                    "ERROR: local_shutdown.command must be a non-empty string "
+                    f"when local_shutdown.enabled is true, got {cmd!r}."
+                )
 
         # api.auth.session_ttl and nut_control.timeout are coerced with int()
         # downstream (SessionManager, subprocess timeouts) — validate here so a

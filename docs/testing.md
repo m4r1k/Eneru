@@ -34,6 +34,45 @@ thousands of tests, all gated at ≥95% per-file line+branch coverage. E2E
 tests are fewer, but they exercise the real service boundaries where
 packaging, NUT, SSH, Docker, filesystem, and CLI assumptions meet.
 
+## Pre-release code review (v6.0.0)
+
+Automated tests prove the code does what a test author *thought to ask*. They
+do not, on their own, prove that nobody overlooked a way the daemon can drop a
+healthy host or miss a real outage. So before the v6.0.0 release the whole
+repository at HEAD — not just the release diff — went through a structured,
+adversarial audit on top of the test pyramid. Think of it as a second pair of
+eyes that is paid to assume every safety claim is wrong until it reads the code
+and proves otherwise.
+
+The audit was deliberately broad-then-deep:
+
+- **Fan-out.** Eighteen independent reviewers each took one subsystem — the
+  trigger evaluation and shutdown sequence, the multi-UPS coordinator and its
+  locks, the redundancy quorum math, every shutdown/health mixin, remote-health
+  flapping, the v6.0 API/auth/`nut_control`/dashboard surface, the SQLite stats
+  layer, config parsing and hot-reload, and the test suite itself — and read
+  the relevant files **in full**, not in excerpts.
+- **Adversarial verification.** Every Critical/High/Medium candidate was handed
+  to a second, independent reviewer whose job was to *refute* it by tracing the
+  real call path and looking for an upstream guard the first reviewer missed.
+  Only findings that survived that second pass were kept; one proposed High was
+  refuted this way and dropped.
+- **Maintainer confirmation.** The crown-jewel findings (the shutdown decision
+  path and the auth/control gate) were then re-read by hand against the live
+  code before any fix was written, so no fix rests solely on an automated claim.
+
+The pass classified findings as Critical / High / Medium / Low / Nit using a
+UPS-specific rubric where "false shutdown of a healthy host", "missed shutdown
+during a real outage", and "auth bypass to a control endpoint" are the
+Critical-tier outcomes. The headline result: the new v6.0 security surface
+(argv-only NUT control, bcrypt + CSPRNG tokens, parameterized SQL, a strict
+static-asset name check, and a write gate in front of every mutating route)
+held up well; the residual risk was concentrated in the shutdown decision path,
+where a plausible config typo or a slow/wedged subsystem could crash the daemon
+*before* the host poweroff. Every confirmed finding from that audit is fixed in
+the rc10 work, each accompanied by a regression test that fails against the
+pre-fix code, so the same class of bug cannot silently return.
+
 ## CI layout
 
 | Workflow | File | What it checks |

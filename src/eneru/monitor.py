@@ -1184,10 +1184,20 @@ class UPSGroupMonitor(
                     reason=REASON_SEQUENCE_COMPLETE,
                 )
 
-                cmd_parts = self.config.local_shutdown.command.split()
-                if self.config.local_shutdown.message:
-                    cmd_parts.append(self.config.local_shutdown.message)
-                run_command(cmd_parts)
+                # Defense-in-depth: config validation rejects an empty/None
+                # command at load, but guard here too so a programmatically-
+                # built Config can never None.split() / run_command([]) and
+                # silently skip the poweroff after the drain phases ran.
+                cmd_parts = str(self.config.local_shutdown.command or "").split()
+                if not cmd_parts:
+                    self._log_message(
+                        "❌ local_shutdown.command is empty -- cannot power off "
+                        "the host. Set local_shutdown.command to a valid command."
+                    )
+                else:
+                    if self.config.local_shutdown.message:
+                        cmd_parts.append(self.config.local_shutdown.message)
+                    run_command(cmd_parts)
         elif self.config.local_shutdown.enabled and delegated:
             # v5.5: the loopback's shutdown_command (already executed during
             # _shutdown_remote_servers) is what actually powers off the host.
