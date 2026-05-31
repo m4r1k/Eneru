@@ -350,12 +350,17 @@ class TestMultiUPSCoordinator:
         assert len(calls) == 0
 
     @pytest.mark.unit
-    def test_defense_in_depth_lock(self):
+    def test_defense_in_depth_lock(self, tmp_path):
         """L24: the REAL _handle_local_shutdown guard prevents a double local
         shutdown -- a second call (e.g. a second UPS group tripping) returns
         before running the body. Drives the real method, not a copy of it."""
         config = self._make_config(
             [UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True)],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "global-shutdown-flag"),
+            ),
             local_shutdown=LocalShutdownConfig(enabled=False),
         )
         coord = MultiUPSCoordinator(config)
@@ -2565,3 +2570,105 @@ class TestHandleSignalDeferredScheduling:
         sched.assert_not_called()
         # Eager fallback was attempted (and its exception swallowed).
         worker._send_via_apprise_bounded.assert_called_once()
+
+
+# ==============================================================================
+# COVERAGE: H10 join-deadline, in-flight signal branch, control-event routing
+# ==============================================================================
+
+class TestCoordinatorShutdownJoinAndAudit:
+    """Cover the rc10 additions: _shutdown_join_deadline, the in-flight signal
+    branch, and record_control_event routing."""
+
+    def _cfg(self, tmp_path, *, servers=None, drain=False):
+        from types import SimpleNamespace  # noqa: F401 (kept local)
+        return Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS1"), is_local=True,
+                remote_servers=servers or [],
+            )],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "flag"),
+            ),
+            local_shutdown=LocalShutdownConfig(
+                enabled=True, drain_on_local_shutdown=drain),
+        )
+
+    @pytest.mark.unit
+    def test_shutdown_join_deadline_from_remote_budget(self, tmp_path):
+        """H10: budget = max remote (cmd+connect+margin) + 120 drain headroom."""
+        srv = RemoteServerConfig(
+            name="nas", host="10.0.0.1", user="root",
+            command_timeout=20, connect_timeout=10, shutdown_safety_margin=60)
+        coord = MultiUPSCoordinator(self._cfg(tmp_path, servers=[srv]))
+        assert coord._shutdown_join_deadline() == 20 + 10 + 60 + 120
+
+    @pytest.mark.unit
+    def test_shutdown_join_deadline_capped_and_floored(self, tmp_path):
+        """H10: the deadline is clamped to [30, 600]."""
+        big = RemoteServerConfig(
+            name="nas", host="10.0.0.1", user="root",
+            command_timeout=9999, connect_timeout=0, shutdown_safety_margin=0)
+        coord = MultiUPSCoordinator(self._cfg(tmp_path, servers=[big], drain=True))
+        assert coord._shutdown_join_deadline() == 600  # capped
+        # No remote servers -> just the 120 headroom (above the 30 floor).
+        coord2 = MultiUPSCoordinator(self._cfg(tmp_path))
+        assert coord2._shutdown_join_deadline() == 120
+
+    @pytest.mark.unit
+    def test_handle_signal_in_flight_waits_longer(self, tmp_path):
+        """H10: with a shutdown already in flight, the signal handler logs the
+        longer bounded wait instead of the brisk 5s exit."""
+        coord = MultiUPSCoordinator(self._cfg(tmp_path))
+        logs = []
+        coord._log = lambda m: logs.append(m)
+        coord._notification_worker = None
+        coord._threads = []
+        coord._evaluator_threads = []
+        coord._global_shutdown_flag.touch()  # shutdown in flight
+        with patch("eneru.multi_ups.read_upgrade_marker", return_value=None), \
+             patch("eneru.multi_ups.read_shutdown_marker", return_value=None), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.sys.exit"):
+            coord._handle_signal(15, None)
+        assert any("Shutdown sequence in progress" in m for m in logs), logs
+
+    @pytest.mark.unit
+    def test_handle_signal_reentrancy_guard(self, tmp_path):
+        """L5: a second signal during teardown is ignored."""
+        coord = MultiUPSCoordinator(self._cfg(tmp_path))
+        coord._log = lambda m: None
+        coord._notification_worker = None
+        coord._threads = []
+        coord._evaluator_threads = []
+        coord._signal_handling = True  # pretend a handler is already running
+        # Must return immediately without raising SystemExit.
+        coord._handle_signal(15, None)
+
+    @pytest.mark.unit
+    def test_record_control_event_routes_to_matching_store(self, tmp_path):
+        """Audit groundwork: a control event lands in the matching UPS's store."""
+        from types import SimpleNamespace
+        coord = MultiUPSCoordinator(self._cfg(tmp_path))
+        mon = MagicMock()
+        mon.config.ups_groups = [SimpleNamespace(ups=SimpleNamespace(name="UPS1"))]
+        store = MagicMock()
+        mon._stats_store = store
+        coord._monitors = [mon]
+        coord.record_control_event("UPS1", "CONTROL_COMMAND", "ran beeper.toggle")
+        store.log_event.assert_called_once_with("CONTROL_COMMAND", "ran beeper.toggle")
+
+    @pytest.mark.unit
+    def test_record_control_event_falls_back_to_first_store(self, tmp_path):
+        """Unknown/reload UPS name -> first monitor's store."""
+        from types import SimpleNamespace
+        coord = MultiUPSCoordinator(self._cfg(tmp_path))
+        mon = MagicMock()
+        mon.config.ups_groups = [SimpleNamespace(ups=SimpleNamespace(name="UPS1"))]
+        store = MagicMock()
+        mon._stats_store = store
+        coord._monitors = [mon]
+        coord.record_control_event("", "CONFIG_RELOAD", "reloaded")
+        store.log_event.assert_called_once_with("CONFIG_RELOAD", "reloaded")

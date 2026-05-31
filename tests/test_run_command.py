@@ -49,6 +49,17 @@ class TestRunCommand:
         assert "timed out" in stderr.lower()
 
     @pytest.mark.unit
+    def test_none_timeout_falls_back_to_default(self):
+        """H7: a None timeout must NOT mean 'wait forever' -- it falls back to
+        the default bound so a config slip (unmount.timeout:) can't hang."""
+        from unittest.mock import patch
+        with patch("eneru.utils.subprocess.run") as mock_run:
+            mock_run.return_value = type(
+                "R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            run_command(["echo", "hi"], timeout=None)
+        assert mock_run.call_args.kwargs["timeout"] == 30
+
+    @pytest.mark.unit
     def test_command_not_found(self):
         """Test command that doesn't exist."""
         exit_code, stdout, stderr = run_command(
