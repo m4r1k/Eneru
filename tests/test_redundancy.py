@@ -734,6 +734,24 @@ class TestEvaluatorThreadLifecycle:
         ev.evaluate_once()
         executor.shutdown.assert_called_once()
 
+    @pytest.mark.unit
+    def test_readiness_window_excludes_disabled_grace(self):
+        """cubic: a member whose connection grace is DISABLED must not extend the
+        cold-start readiness window (a disabled grace doesn't delay FAILED)."""
+        group = _redundancy_group(min_healthy=1)
+        monitors = {
+            "UPS-A": _FakeMonitor("UPS-A", _snap()),
+            "UPS-B": _FakeMonitor("UPS-B", _snap()),
+        }
+        for m in monitors.values():
+            m.config.ups.connection_loss_grace_period.enabled = False
+        ev = RedundancyGroupEvaluator(
+            group, monitors, MagicMock(),
+            stop_event=threading.Event(), logger=None, startup_grace_seconds=10,
+        )
+        # base_grace excluded (disabled) -> window = startup_grace(10) + 0 + 10.
+        assert ev._readiness_window == 20
+
 
 # ===========================================================================
 # Executor: synthetic config wiring + idempotency + dry-run cleanup

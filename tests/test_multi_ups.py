@@ -2618,6 +2618,29 @@ class TestCoordinatorShutdownJoinAndAudit:
         assert coord2._shutdown_join_deadline() == 120
 
     @pytest.mark.unit
+    def test_shutdown_join_deadline_includes_redundancy_and_pre_commands(self, tmp_path):
+        """cubic: the budget must count redundancy-group remotes AND pre-shutdown
+        command runtime, not just per-UPS final commands."""
+        from eneru import RedundancyGroupConfig, RemoteCommandConfig
+        rg_srv = RemoteServerConfig(
+            name="rnas", host="10.0.0.9", user="root",
+            command_timeout=10, connect_timeout=5, shutdown_safety_margin=20,
+            pre_shutdown_commands=[RemoteCommandConfig(command="echo x", timeout=40)],
+        )
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True)],
+            redundancy_groups=[RedundancyGroupConfig(
+                name="rg", ups_sources=["UPS1"], remote_servers=[rg_srv])],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "s"),
+                battery_history_file=str(tmp_path / "h"),
+                shutdown_flag_file=str(tmp_path / "f")),
+        )
+        coord = MultiUPSCoordinator(config)
+        # rg_srv: pre(40) + cmd(10) + connect(5) + margin(20) = 75; + 120 headroom.
+        assert coord._shutdown_join_deadline() == 75 + 120
+
+    @pytest.mark.unit
     def test_shutdown_join_deadline_ignores_non_int_timeout(self, tmp_path):
         """A server with a non-int timeout is skipped in the budget calc, not
         crashed (defensive int() guard)."""

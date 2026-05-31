@@ -2058,10 +2058,12 @@ class UPSGroupMonitor(
 
             ups_status = ups_data.get('ups.status', '')
 
-            # Re-arm the FAILSAFE latch only when the outage is over (back on
-            # line power). While still on battery a reconnection doesn't end the
-            # outage, so the latch stays set (per-outage, not per-reconnect).
-            if "OB" not in ups_status and "FSD" not in ups_status:
+            # Re-arm the FAILSAFE latch only when the outage is over: we have a
+            # VALID status AND it shows line power. A missing/empty status is an
+            # unresolved state, not "on line", so it must NOT re-arm the latch
+            # mid-outage (cubic). On battery a reconnection alone doesn't end the
+            # outage either, so the latch is per-outage, not per-reconnect.
+            if ups_status and "OB" not in ups_status and "FSD" not in ups_status:
                 self._failsafe_initiated = False
 
             if not ups_status:

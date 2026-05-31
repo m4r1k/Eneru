@@ -865,17 +865,28 @@ class MultiUPSCoordinator:
         wedged sequence can't block exit forever. (systemd's TimeoutStopSec is
         the ultimate governor; this just stops us abandoning our own work.)
         """
+        def _server_budget(srv) -> int:
+            # Full per-server wall time: pre-shutdown commands + the final
+            # command + connect + safety margin (cubic -- pre-command runtime
+            # was previously ignored, under-budgeting servers with pre-commands).
+            try:
+                pre = sum(
+                    int(c.timeout) if c.timeout is not None
+                    else int(srv.command_timeout)
+                    for c in srv.pre_shutdown_commands
+                )
+                return (pre + int(srv.command_timeout) + int(srv.connect_timeout)
+                        + int(srv.shutdown_safety_margin))
+            except (TypeError, ValueError):
+                return 0
+
         max_remote = 0
-        for group in self.config.ups_groups:
-            for srv in group.remote_servers:
-                try:
-                    max_remote = max(
-                        max_remote,
-                        int(srv.command_timeout) + int(srv.connect_timeout)
-                        + int(srv.shutdown_safety_margin),
-                    )
-                except (TypeError, ValueError):
-                    continue
+        # Include redundancy-group remotes too (cubic): a redundancy-group
+        # shutdown is just as much "in flight" as a per-UPS one on signal.
+        groups = list(self.config.ups_groups) + list(self.config.redundancy_groups)
+        for group in groups:
+            for srv in getattr(group, "remote_servers", []):
+                max_remote = max(max_remote, _server_budget(srv))
         budget = max_remote + 120  # + local drain/poweroff headroom
         if self.config.local_shutdown.drain_on_local_shutdown:
             budget += 120

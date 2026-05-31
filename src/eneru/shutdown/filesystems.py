@@ -1,11 +1,19 @@
 """Filesystem sync + unmount phase of the shutdown sequence."""
 
 import shlex
+import shutil
 import subprocess
 import time
 from typing import List
 
 from eneru.utils import run_command
+
+# Resolve `sync` to an absolute path once. The previous os.sync() was PATH-free;
+# switching to a subprocess (to get a real timeout) introduced a PATH dependency
+# (cubic). A hardened systemd unit with a restricted PATH could then fail to find
+# `sync` and skip the flush entirely. Prefer the PATH lookup, falling back to the
+# canonical coreutils location so it resolves even with an empty PATH.
+_SYNC_BIN = shutil.which("sync") or "/bin/sync"
 
 # Wall-clock bound for the filesystem sync. A bare os.sync() blocks until EVERY
 # mounted filesystem flushes; a hung/unreachable network mount (NFS/CIFS with a
@@ -35,7 +43,7 @@ class FilesystemShutdownMixin:
         """
         try:
             proc = subprocess.Popen(
-                ["sync"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                [_SYNC_BIN], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except (OSError, ValueError) as exc:
             self._log_message(
                 f"  ⚠️ {label}: could not start `sync` ({exc}); proceeding.")

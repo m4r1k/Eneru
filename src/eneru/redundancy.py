@@ -504,8 +504,13 @@ class RedundancyGroupEvaluator(threading.Thread):
             if m is None:
                 continue
             try:
-                grace_durations.append(
-                    int(m.config.ups.connection_loss_grace_period.duration))
+                grace = m.config.ups.connection_loss_grace_period
+                # Only count the grace duration when grace is actually ENABLED
+                # for that member (cubic). A disabled grace doesn't delay a
+                # member going FAILED, so it must not stretch this group's
+                # cold-start hold and delay a real quorum-loss shutdown.
+                if grace.enabled:
+                    grace_durations.append(int(grace.duration))
             except Exception:
                 pass
         base_grace = max(grace_durations) if grace_durations else 0

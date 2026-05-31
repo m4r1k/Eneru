@@ -74,7 +74,8 @@ def test_sync_filesystems_real_runs_bounded_sync_then_sleeps(tmp_path):
          patch("eneru.shutdown.filesystems.time.sleep") as mock_sleep:
         monitor._sync_filesystems()
     mock_popen.assert_called_once()
-    assert mock_popen.call_args.args[0] == ["sync"]  # Popen(["sync"], ...)
+    argv = mock_popen.call_args.args[0]
+    assert len(argv) == 1 and argv[0].endswith("sync")  # Popen([<abs>/sync])
     mock_sleep.assert_called_once_with(2)
 
 
