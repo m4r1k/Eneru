@@ -394,11 +394,63 @@ class RedundancyGroupExecutor(
         try:
             delegating = self._uses_loopback_delegate
             if self._group.is_local and not delegating:
-                self._shutdown_vms()
-                self._shutdown_containers()
-                self._sync_filesystems()
-                self._unmount_filesystems()
-            self._shutdown_remote_servers()
+                local_phases = [
+                    ("VM shutdown", self._shutdown_vms),
+                    ("Container shutdown", self._shutdown_containers),
+                    ("Filesystem sync", self._sync_filesystems),
+                    ("Filesystem unmount", self._unmount_filesystems),
+                ]
+                for label, func in local_phases:
+                    try:
+                        func()
+                    except Exception as exc:
+                        self._log_message(
+                            f"  ❌ {label} failed: {exc}. Continuing shutdown."
+                        )
+
+            try:
+                remote_results = self._shutdown_remote_servers() or []
+            except Exception as exc:
+                self._log_message(
+                    f"❌ Remote shutdown phase failed: {exc}. Continuing shutdown."
+                )
+                remote_results = []
+
+            if self._group.is_local and delegating:
+                loopback_results = [
+                    result for result in remote_results
+                    if any(
+                        server.enabled
+                        and server.is_host_loopback is True
+                        and (server.name or server.host) == result.server
+                        and server.host == result.host
+                        for server in self.config.remote_servers
+                    )
+                ]
+                if not loopback_results or not all(
+                    result.success for result in loopback_results
+                ):
+                    details = "; ".join(
+                        result.error or "shutdown command was not sent"
+                        for result in loopback_results
+                        if not result.success
+                    ) or "loopback shutdown result missing"
+                    self._log_message(
+                        "❌ Delegated redundancy host poweroff failed; shutdown "
+                        f"sequence is incomplete: {details}"
+                    )
+                    self._send_notification(
+                        f"❌ **Redundancy Group Shutdown Incomplete:** "
+                        f"{self._group.name}\n"
+                        f"Host poweroff delegation failed: {details}",
+                        "failure",
+                        category="shutdown_summary",
+                    )
+                    self._shutdown_flag_path.unlink(missing_ok=True)
+                    with self._lock:
+                        self._shutdown_done = False
+                    return False
+
             self._log_message(
                 f"✅ REDUNDANCY GROUP SHUTDOWN COMPLETE: {self._group.name}"
             )
