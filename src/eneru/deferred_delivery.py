@@ -331,7 +331,9 @@ def _eager_send(
         # method (see notifications.py); we reach in deliberately
         # rather than re-instantiating an Apprise object because the
         # worker has already validated the URLs at startup.
-        success = worker._send_via_apprise(body, notify_type)
+        # Bounded (M6): the eager send can run from the signal handler; a hung
+        # endpoint must not block daemon exit. Times out -> row stays pending.
+        success = worker._send_via_apprise_bounded(body, notify_type)
     except Exception as e:  # pragma: no cover -- defensive
         log_fn(f"⚠️ Eager-send via Apprise raised: {e}")
         return

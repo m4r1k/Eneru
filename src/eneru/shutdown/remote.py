@@ -164,6 +164,12 @@ class RemoteShutdownMixin:
                 pre_commands=RemotePreShutdownResult(),
             )
 
+        # M2: verify each loopback's host identity ON the destructive path, not
+        # only in the background health loop, so a misconfigured machine-id
+        # bind-mount is surfaced at the moment we drain/poweroff via the delegate.
+        if loopbacks:
+            self._verify_loopback_identities(loopbacks)
+
         phase_idx = 0
         regular_results: List[RemoteShutdownResult] = []
 
@@ -338,6 +344,44 @@ class RemoteShutdownMixin:
             self._send_notification(
                 f"❌ **Remote Shutdown Failed:** {display}\nError: {error_msg}",
                 self.config.NOTIFY_FAILURE,
+                category="shutdown",
+            )
+
+    def _verify_loopback_identities(self, loopbacks) -> None:
+        """Advisory host-identity check on the DESTRUCTIVE loopback path (M2).
+
+        The background remote-health loop verifies loopback identity, but the
+        shutdown path itself did not. Re-run the probe here -- for loopbacks that
+        actually have an ``expected_host_identity`` to check against -- so a
+        misconfigured /etc/machine-id bind-mount is surfaced (log + notification)
+        at the exact moment we are about to drain/poweroff via that delegate.
+
+        We deliberately do NOT abort on failure: the loopback shutdown command
+        targets 127.0.0.1 = THIS host, which is exactly what must be powered off
+        during an outage. Refusing would leave the host running on a draining
+        battery -- a missed shutdown, the worse outcome. So we warn loudly and
+        proceed.
+        """
+        from eneru.remote_health import run_loopback_identity_probe
+        for lb in loopbacks:
+            if not lb.expected_host_identity:
+                continue  # nothing to verify against -- the probe can't confirm
+            try:
+                ok, detail, _ = run_loopback_identity_probe(lb)
+            except Exception as exc:  # pragma: no cover - defensive
+                ok, detail = False, f"identity probe raised: {exc}"
+            if ok:
+                continue
+            display = lb.name or lb.host
+            self._log_message(
+                f"⚠️ Loopback host-identity check FAILED for {display} before "
+                f"delegated shutdown: {detail} Proceeding anyway -- the loopback "
+                "poweroff targets the local host, which must go down in an outage."
+            )
+            self._send_notification(
+                f"⚠️ **Loopback identity unverified before shutdown:** {display}\n"
+                f"{detail}",
+                self.config.NOTIFY_WARNING,
                 category="shutdown",
             )
 

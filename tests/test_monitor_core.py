@@ -2827,7 +2827,7 @@ class TestCleanupAndExit:
 
         # Scheduler not invoked (no notif_id), eager Apprise fallback fires
         scheduler.assert_not_called()
-        worker._send_via_apprise.assert_called_once()
+        worker._send_via_apprise_bounded.assert_called_once()
 
     @pytest.mark.unit
     def test_graceful_stop_does_not_overwrite_sequence_complete_marker(self, tmp_path):
@@ -3534,7 +3534,7 @@ class TestCleanupAndExitDefensive:
         monitor._stats_store = store
         monitor._stop_stats = MagicMock()
         worker = MagicMock()
-        worker._send_via_apprise.side_effect = RuntimeError("apprise gone")
+        worker._send_via_apprise_bounded.side_effect = RuntimeError("apprise gone")
         monitor._notification_worker = worker
         monitor._send_notification = MagicMock(return_value=None)
         monitor._shutdown_flag_path.unlink(missing_ok=True)
@@ -3546,7 +3546,7 @@ class TestCleanupAndExitDefensive:
             with pytest.raises(SystemExit):
                 monitor._cleanup_and_exit(15, None)
 
-        worker._send_via_apprise.assert_called_once()
+        worker._send_via_apprise_bounded.assert_called_once()
 
 
 class TestHandleOnBatteryDefensive:

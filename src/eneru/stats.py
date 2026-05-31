@@ -630,6 +630,15 @@ class StatsStore:
         cutoff_raw = now - self.retention_raw_hours * 3600
         cutoff_5min = now - self.retention_5min_days * 86400
         cutoff_hourly = now - self.retention_hourly_days * 86400
+        # M5: align the raw/5-min cutoffs DOWN to the next-tier bucket boundary
+        # so purge only ever deletes WHOLE buckets' worth of rows. Otherwise it
+        # trims the early rows of the bucket straddling the cutoff, and the next
+        # aggregate() re-derives that already-finalized bucket from the reduced
+        # set -- overwriting its avg/min/max with wrong values that then
+        # propagate into the hourly tier. Keeping at most one extra bucket of raw
+        # data (~5 min) / 5-min data (~1 h) is a negligible retention cost.
+        cutoff_raw = (cutoff_raw // BUCKET_5MIN) * BUCKET_5MIN
+        cutoff_5min = (cutoff_5min // BUCKET_HOURLY) * BUCKET_HOURLY
         try:
             with self._db_lock, self._conn:
                 deleted_raw = self._conn.execute(

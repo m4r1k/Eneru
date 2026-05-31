@@ -1758,21 +1758,30 @@ class TestEdgeCases:
         assert n == 1
 
     @pytest.mark.unit
-    def test_purge_keeps_row_at_exact_cutoff(self, tmp_path):
-        """Purge SQL is ``ts < cutoff``; a row at cutoff exactly stays."""
+    def test_purge_aligns_raw_cutoff_to_bucket_boundary(self, tmp_path):
+        """M5: the raw cutoff is aligned DOWN to a 5-min bucket boundary so purge
+        deletes only WHOLE buckets. It must NOT trim the early samples of the
+        bucket straddling the rolling cutoff -- doing so would let the next
+        aggregate() re-derive that finalized bucket from a reduced sample set
+        and corrupt its avg/min/max (which then propagates to the hourly tier)."""
+        from eneru.stats import BUCKET_5MIN
         s = StatsStore(tmp_path / "boundary.db", retention_raw_hours=1)
         s.open()
         try:
             now = int(time.time())
-            cutoff = now - 3600  # the rolling cutoff_raw
-            # One row strictly older, one at the cutoff.
-            s.buffer_sample(SAMPLE_UPS_DATA, ts=cutoff - 1)
-            s.buffer_sample(SAMPLE_UPS_DATA, ts=cutoff)
+            aligned = (now - 3600) // BUCKET_5MIN * BUCKET_5MIN
+            older_ts = aligned - 1     # in the previous, fully-expired bucket
+            straddle_ts = aligned + 1  # in the bucket straddling the rolling cutoff
+            s.buffer_sample(SAMPLE_UPS_DATA, ts=older_ts)
+            s.buffer_sample(SAMPLE_UPS_DATA, ts=straddle_ts)
             s.flush()
-            s.purge()
-            cur = s._conn.execute("SELECT ts FROM samples ORDER BY ts ASC")
-            tss = [r[0] for r in cur.fetchall()]
-            assert tss == [cutoff]
+            # Pin time so the aligned cutoff is deterministic.
+            with patch("eneru.stats.time.time", return_value=now):
+                s.purge()
+            tss = [r[0] for r in s._conn.execute(
+                "SELECT ts FROM samples ORDER BY ts ASC").fetchall()]
+            assert older_ts not in tss       # whole expired bucket deleted
+            assert straddle_ts in tss        # straddling bucket's sample kept
         finally:
             s.close()
 

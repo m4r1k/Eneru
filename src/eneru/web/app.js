@@ -362,9 +362,12 @@ function updateEventSourceFilter(upsRows, groups) {
   (upsRows || []).forEach((u) => knownEventSources.push({
     value: u.name, label: u.label || u.name,
   }));
-  (groups || []).forEach((g) => knownEventSources.push({
-    value: "redundancy:" + g.name, label: "redundancy:" + g.name,
-  }));
+  // M8: do NOT offer "redundancy:<name>" as an event source. Redundancy-group
+  // power events are written to the text log only -- they never land in any
+  // per-UPS stats DB, so /api/v1/events can never return rows for them and the
+  // filter would be permanently empty. (`groups` is accepted for signature
+  // stability / future use once redundancy events are persisted.)
+  void groups;
   const sel = document.getElementById("event-source-filter");
   const prev = sel.value;
   sel.replaceChildren(el("option", { value: "", text: "All sources" }));

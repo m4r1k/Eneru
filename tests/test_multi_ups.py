@@ -412,6 +412,37 @@ class TestMultiUPSCoordinator:
         )
 
     @pytest.mark.unit
+    def test_clear_local_shutdown_state_refuses_mid_flight(self, tmp_path):
+        """M1: while a local shutdown is committed and running outside the lock,
+        an unrelated group's recovery must NOT re-arm the guard -- otherwise a
+        concurrent trigger could admit a SECOND poweroff. Once the sequence
+        returns (in_flight cleared), recovery re-arms normally."""
+        flag_path = tmp_path / "global-shutdown-flag"
+        config = self._make_config(
+            [UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True)],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(flag_path),
+            ),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._local_shutdown_initiated = True
+        coord._local_shutdown_in_flight = True
+        flag_path.touch()
+
+        coord._clear_local_shutdown_state()
+        assert coord._local_shutdown_initiated is True, "must not re-arm mid-flight"
+        assert flag_path.exists(), "flag must survive a mid-flight clear attempt"
+
+        # Sequence finished -> recovery may re-arm.
+        coord._local_shutdown_in_flight = False
+        coord._clear_local_shutdown_state()
+        assert coord._local_shutdown_initiated is False
+        assert not flag_path.exists()
+
+    @pytest.mark.unit
     def test_clear_local_shutdown_state_idempotent(self, tmp_path):
         """Safe to call when nothing was in flight (steady-state OL or
         repeated OL transitions)."""
@@ -2513,8 +2544,8 @@ class TestHandleSignalDeferredScheduling:
 
     @pytest.mark.unit
     def test_eager_apprise_fallback_swallows_exception(self, tmp_path):
-        """When `_send_via_apprise` raises in the no-store fallback path,
-        the handler swallows the exception (lines 726-727)."""
+        """When `_send_via_apprise_bounded` raises in the no-store fallback
+        path, the handler swallows the exception."""
         config = _coord_config(tmp_path)
         coord = MultiUPSCoordinator(config)
         coord._log = MagicMock()
@@ -2526,7 +2557,7 @@ class TestHandleSignalDeferredScheduling:
         worker.send.return_value = None  # No stores registered → returns None
         worker._stores_lock = threading.Lock()
         worker._stores = []
-        worker._send_via_apprise.side_effect = RuntimeError("apprise gone")
+        worker._send_via_apprise_bounded.side_effect = RuntimeError("apprise gone")
         coord._notification_worker = worker
 
         with patch("eneru.multi_ups.read_upgrade_marker", return_value=None), \
@@ -2538,4 +2569,4 @@ class TestHandleSignalDeferredScheduling:
 
         sched.assert_not_called()
         # Eager fallback was attempted (and its exception swallowed).
-        worker._send_via_apprise.assert_called_once()
+        worker._send_via_apprise_bounded.assert_called_once()

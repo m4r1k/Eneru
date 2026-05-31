@@ -23,7 +23,10 @@ class BatteryMonitorMixin:
         if not is_numeric(current_battery):
             return 0.0
 
-        current_battery_float = float(current_battery)
+        # M12: clamp out-of-range firmware readings. A transient negative or
+        # >100 charge from flaky firmware would otherwise inflate the depletion
+        # rate that feeds the T3 shutdown trigger.
+        current_battery_float = max(0.0, min(100.0, float(current_battery)))
         cutoff_time = current_time - self.config.triggers.depletion.window
 
         self.state.battery_history = deque(
@@ -125,8 +128,13 @@ class BatteryMonitorMixin:
         drop = prev_charge - current_charge
         elapsed = current_time - prev_time if prev_time > 0 else 0
 
-        # Threshold: >20% drop within 120 seconds while on line power
-        if drop > 20 and elapsed < 120:
+        # Threshold: >20% drop within 120 seconds while on line power.
+        # M11: only START a fresh detection when none is pending. A battery that
+        # keeps dropping fast every poll previously re-entered here each time,
+        # resetting pending_anomaly_count to 1 so the 3-poll confirmation was
+        # never reached. With a pending anomaly we fall through to the
+        # confirmation branch below, which increments the counter instead.
+        if drop > 20 and elapsed < 120 and self.state.pending_anomaly_charge < 0:
             # First detection -- record as pending, wait for confirmation
             self.state.pending_anomaly_charge = current_charge
             self.state.pending_anomaly_prev_charge = prev_charge

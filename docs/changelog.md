@@ -123,6 +123,37 @@ High fixes:
   30-sample floor is now derived from `depletion.window / check_interval`, so a
   larger `check_interval` no longer silently disables the fast-drain trigger.
 
+Medium fixes:
+
+- **No double local poweroff.** The coordinator's local-shutdown guard is now
+  held "in flight" while the committed sequence runs outside the lock, so an
+  unrelated group's power-restored event can't re-arm it mid-sequence and admit
+  a second poweroff.
+- **Loopback host-identity is checked on the destructive path**, not only in the
+  background health loop: a failed/mismatched machine-id check now logs and
+  notifies right before the delegated drain/poweroff. It deliberately proceeds
+  (the loopback targets the local host, which must go down in an outage).
+- **Deleted admin can't keep control through a DB blip.** Write/control requests
+  now re-check the session's account strictly and fail closed if the auth DB is
+  unavailable; reads stay lenient and the token survives for when the DB returns.
+- **Stats aggregation no longer corrupts the bucket straddling the retention
+  cutoff.** Purge cutoffs are aligned down to the next-tier bucket boundary so
+  only whole buckets are deleted.
+- **Graceful-exit notification can't block shutdown.** The eager Apprise send
+  from the signal handler runs on a short-lived thread with a hard timeout.
+- **Config safety warnings/validation.** A multi-UPS config with no `is_local`
+  group but `local_shutdown` enabled + `trigger_on: any` now warns; `local_shutdown`
+  gets the same unknown-key sweep as other safety sections.
+- **Health robustness.** Voltage auto-detect only samples on line power (a
+  startup brownout can't latch a depressed nominal); a non-positive NUT nominal
+  falls back to the default instead of flagging everything over-voltage; a
+  worsening battery anomaly no longer resets its own 3-poll confirmation; and the
+  depletion-rate input is clamped to [0, 100] against flaky firmware readings.
+- **Drain phases run best-effort** (shared with the High fix) so a failure can't
+  skip the host poweroff.
+- The dashboard no longer offers a `redundancy:<name>` event-source filter that
+  could never return rows (redundancy events aren't persisted to a stats DB).
+
 ---
 
 ## [5.5.1] - 2026-05-19

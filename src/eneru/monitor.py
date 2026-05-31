@@ -1564,7 +1564,7 @@ class UPSGroupMonitor(
                 # coalescing in this degraded case, but the alternative
                 # is no notification at all).
                 try:
-                    self._notification_worker._send_via_apprise(
+                    self._notification_worker._send_via_apprise_bounded(
                         body, notify_type,
                     )
                 except Exception:

@@ -537,6 +537,30 @@ class NotificationWorker:
         except Exception:
             return False
 
+    def _send_via_apprise_bounded(self, body: str, notify_type: str,
+                                  timeout: float = 5.0) -> bool:
+        """Eager send bounded by a wall-clock timeout (M6).
+
+        The lifecycle "Service Stopped" notification is shipped eagerly from the
+        SIGTERM/SIGINT handler on the MAIN thread when no deferred delivery is
+        available. ``apprise.notify()`` has no timeout, so a hung endpoint would
+        block daemon exit -- violating the "shutdown must not wait on network"
+        contract. Run the send on a short-lived daemon thread and give up after
+        ``timeout`` seconds; on timeout the row stays pending and ships on the
+        next start (the lossless guarantee). Mirrors the flush(timeout=5) budget.
+        """
+        result = {"ok": False}
+
+        def _run():
+            result["ok"] = self._send_via_apprise(body, notify_type)
+
+        t = threading.Thread(target=_run, name="eneru-eager-notify", daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            return False  # timed out -> leave pending for the next start
+        return result["ok"]
+
     def _maybe_prune(self) -> None:
         """Run TTL prune at most once per ``_PRUNE_INTERVAL_SECS``.
 

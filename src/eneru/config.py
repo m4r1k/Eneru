@@ -1293,6 +1293,15 @@ class ConfigLoader:
             messages.extend(cls._unknown_key_errors(
                 "behavior", raw_data.get("behavior", {}), {"dry_run"},
             ))
+            # M13: local_shutdown is a safety section -- its parser defaults
+            # `enabled` to True, so a misspelled key would silently leave local
+            # poweroff enabled. Sweep it for unknown keys like every other
+            # safety section (configuration.md promises typos are caught).
+            messages.extend(cls._unknown_key_errors(
+                "local_shutdown", raw_data.get("local_shutdown", {}),
+                {"enabled", "command", "message", "drain_on_local_shutdown",
+                 "trigger_on", "wall"},
+            ))
             messages.extend(cls._unknown_key_errors(
                 "api", raw_data.get("api", {}),
                 {"enabled", "bind", "port", "auth"},
@@ -1807,6 +1816,23 @@ class ConfigLoader:
             messages.append(
                 f"ERROR: Multiple groups marked as is_local: {', '.join(all_local)}. "
                 "At most one group (UPS or redundancy) can power the Eneru host."
+            )
+
+        # M7: multi-UPS with NO is_local group, local shutdown enabled, and the
+        # default trigger_on='any' means ANY monitored UPS going critical (even
+        # one powering only a remote server) will run the local poweroff. That's
+        # rarely intended; warn so the operator confirms it (or marks a group
+        # is_local / sets trigger_on: none). A single-UPS config implicitly owns
+        # local resources, so this only applies to the multi-UPS topology.
+        if (config.multi_ups and not all_local
+                and config.local_shutdown.enabled
+                and config.local_shutdown.trigger_on == "any"):
+            messages.append(
+                "WARNING: multi-UPS config has no is_local group but "
+                "local_shutdown is enabled with trigger_on='any' -- ANY UPS "
+                "going critical will power off this host. Mark the owning group "
+                "is_local, or set local_shutdown.trigger_on: none, to confirm "
+                "this is intended."
             )
 
         # ups.name uniqueness. The name keys the per-group stats DB path, the

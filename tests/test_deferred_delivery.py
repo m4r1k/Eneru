@@ -339,7 +339,7 @@ class TestScheduleDeferred:
         assert "--config" in cmd
         assert "/etc/ups-monitor/config.yaml" in cmd
         # Eager-send fallback should NOT have fired.
-        worker._send_via_apprise.assert_not_called()
+        worker._send_via_apprise_bounded.assert_not_called()
         # Log should mention scheduling.
         assert any("scheduled" in c.args[0].lower()
                    for c in log.call_args_list)
@@ -372,7 +372,7 @@ class TestScheduleDeferred:
         """No systemd-run on PATH → eager Apprise delivery."""
         log = MagicMock()
         worker = MagicMock()
-        worker._send_via_apprise.return_value = True
+        worker._send_via_apprise_bounded.return_value = True
 
         with patch("eneru.deferred_delivery.subprocess.run",
                    side_effect=FileNotFoundError("systemd-run")), \
@@ -388,7 +388,7 @@ class TestScheduleDeferred:
                 worker=worker,
                 log_fn=log,
             )
-        worker._send_via_apprise.assert_called_once_with("🛑 Stopped", "warning")
+        worker._send_via_apprise_bounded.assert_called_once_with("🛑 Stopped", "warning")
         assert any("falling back" in c.args[0].lower()
                    for c in log.call_args_list)
 
@@ -396,7 +396,7 @@ class TestScheduleDeferred:
     def test_falls_back_when_systemd_run_returns_nonzero(self, tmp_path):
         log = MagicMock()
         worker = MagicMock()
-        worker._send_via_apprise.return_value = True
+        worker._send_via_apprise_bounded.return_value = True
 
         result = MagicMock(returncode=1, stderr=b"some systemd error")
         with patch("eneru.deferred_delivery.subprocess.run",
@@ -411,13 +411,13 @@ class TestScheduleDeferred:
                 body="x", notify_type="warning",
                 worker=worker, log_fn=log,
             )
-        worker._send_via_apprise.assert_called_once()
+        worker._send_via_apprise_bounded.assert_called_once()
 
     @pytest.mark.unit
     def test_falls_back_when_systemd_run_times_out(self, tmp_path):
         log = MagicMock()
         worker = MagicMock()
-        worker._send_via_apprise.return_value = True
+        worker._send_via_apprise_bounded.return_value = True
 
         with patch("eneru.deferred_delivery.subprocess.run",
                    side_effect=subprocess.TimeoutExpired(cmd="systemd-run",
@@ -432,7 +432,7 @@ class TestScheduleDeferred:
                 body="x", notify_type="warning",
                 worker=worker, log_fn=log,
             )
-        worker._send_via_apprise.assert_called_once()
+        worker._send_via_apprise_bounded.assert_called_once()
 
     @pytest.mark.unit
     def test_falls_back_to_eager_when_no_config_path(self, tmp_path):
@@ -440,7 +440,7 @@ class TestScheduleDeferred:
         delivery via the worker's Apprise instance."""
         log = MagicMock()
         worker = MagicMock()
-        worker._send_via_apprise.return_value = True
+        worker._send_via_apprise_bounded.return_value = True
 
         with patch("eneru.deferred_delivery.subprocess.run") as run, \
              patch("eneru.stats.StatsStore.open"), \
@@ -454,7 +454,7 @@ class TestScheduleDeferred:
                 worker=worker, log_fn=log,
             )
         run.assert_not_called()
-        worker._send_via_apprise.assert_called_once()
+        worker._send_via_apprise_bounded.assert_called_once()
 
 
 # ==============================================================================
@@ -473,7 +473,7 @@ class TestScheduleShortCircuits:
         no Job query. This is the foreground `eneru run` path."""
         log = MagicMock()
         worker = MagicMock()
-        worker._send_via_apprise.return_value = True
+        worker._send_via_apprise_bounded.return_value = True
         # Drop INVOCATION_ID from env to simulate non-systemd context.
         env = {k: v for k, v in __import__("os").environ.items()
                if k != "INVOCATION_ID"}
@@ -492,7 +492,7 @@ class TestScheduleShortCircuits:
                 worker=worker, log_fn=log,
             )
         run.assert_not_called()
-        worker._send_via_apprise.assert_called_once_with("🛑 stop", "warning")
+        worker._send_via_apprise_bounded.assert_called_once_with("🛑 stop", "warning")
         assert any("Not running under systemd" in c.args[0]
                    for c in log.call_args_list)
 
@@ -518,7 +518,7 @@ class TestScheduleShortCircuits:
                 worker=worker, log_fn=log,
             )
         run.assert_not_called()
-        worker._send_via_apprise.assert_not_called()
+        worker._send_via_apprise_bounded.assert_not_called()
         assert any("container runtime" in c.args[0].lower()
                    and "pending" in c.args[0].lower()
                    for c in log.call_args_list)
@@ -529,7 +529,7 @@ class TestScheduleShortCircuits:
         This is the instant-Stopped UX win for `systemctl stop eneru`."""
         log = MagicMock()
         worker = MagicMock()
-        worker._send_via_apprise.return_value = True
+        worker._send_via_apprise_bounded.return_value = True
         with patch.dict("os.environ",
                         {"INVOCATION_ID": "test-invocation"}), \
              patch("eneru.deferred_delivery._detect_systemd_stop_intent",
@@ -549,7 +549,7 @@ class TestScheduleShortCircuits:
         # is also mocked, so subprocess.run shouldn't have been
         # called (the systemd-run path is what would call it).
         run.assert_not_called()
-        worker._send_via_apprise.assert_called_once_with("🛑 stop", "warning")
+        worker._send_via_apprise_bounded.assert_called_once_with("🛑 stop", "warning")
         assert any("systemctl stop detected" in c.args[0]
                    for c in log.call_args_list)
 
@@ -564,7 +564,7 @@ class TestEagerSend:
     def test_marks_sent_on_apprise_success(self, tmp_path):
         """Worker.send_via_apprise returns True → row gets marked sent."""
         worker = MagicMock()
-        worker._send_via_apprise.return_value = True
+        worker._send_via_apprise_bounded.return_value = True
         db_path = tmp_path / "ups.db"
         # Pre-create a row via real StatsStore so mark_notification_sent
         # has something to update.
@@ -599,7 +599,7 @@ class TestEagerSend:
     @pytest.mark.unit
     def test_leaves_pending_on_apprise_failure(self, tmp_path):
         worker = MagicMock()
-        worker._send_via_apprise.return_value = False
+        worker._send_via_apprise_bounded.return_value = False
         db_path = tmp_path / "ups.db"
         store = StatsStore(db_path)
         store.open()
@@ -1063,7 +1063,7 @@ class TestEagerSendMarkSentFailure:
         risk."""
         log = MagicMock()
         worker = MagicMock()
-        worker._send_via_apprise.return_value = True
+        worker._send_via_apprise_bounded.return_value = True
 
         _eager_send(
             notification_id=42,
@@ -1074,5 +1074,5 @@ class TestEagerSendMarkSentFailure:
             log_fn=log,
         )
 
-        worker._send_via_apprise.assert_called_once_with("🛑 Stopped", "warning")
+        worker._send_via_apprise_bounded.assert_called_once_with("🛑 Stopped", "warning")
         assert any("mark_sent failed" in c.args[0] for c in log.call_args_list)
