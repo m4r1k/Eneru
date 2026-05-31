@@ -338,9 +338,17 @@ def _eager_send(
         log_fn(f"⚠️ Eager-send via Apprise raised: {e}")
         return
     if not success:
+        # At-least-once by design (cubic): a bounded send that TIMED OUT may
+        # still complete on its abandoned background thread, yet we return here
+        # and leave the row pending so the next start retries -- which can yield
+        # ONE duplicate "Service Stopped" notification. That is deliberate: for a
+        # stop notification a possible duplicate is strictly preferable to silent
+        # loss, and we must not block daemon exit to learn the orphan thread's
+        # real outcome (the whole point of the bounded send, M6).
         log_fn(
-            "⚠️ Eager-send via Apprise returned False (network down?) "
-            "— stop notification stays pending for the next start"
+            "⚠️ Eager-send via Apprise returned False/timed out (network down?) "
+            "— stop notification stays pending for the next start "
+            "(a duplicate is possible if a timed-out send later completes)"
         )
         return
     try:

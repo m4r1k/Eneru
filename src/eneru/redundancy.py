@@ -510,7 +510,12 @@ class RedundancyGroupEvaluator(threading.Thread):
                 # member going FAILED, so it must not stretch this group's
                 # cold-start hold and delay a real quorum-loss shutdown.
                 if grace.enabled:
-                    grace_durations.append(int(grace.duration))
+                    # Clamp to non-negative (cubic): duration is typed int but
+                    # not range-validated, so a negative/malformed value must not
+                    # SHRINK the readiness window -- that would let a real quorum
+                    # loss fire before members finish their first connect
+                    # (premature shutdown). 0 is the safe floor.
+                    grace_durations.append(max(0, int(grace.duration)))
             except Exception:
                 pass
         base_grace = max(grace_durations) if grace_durations else 0

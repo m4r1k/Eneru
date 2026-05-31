@@ -752,6 +752,26 @@ class TestEvaluatorThreadLifecycle:
         # base_grace excluded (disabled) -> window = startup_grace(10) + 0 + 10.
         assert ev._readiness_window == 20
 
+    @pytest.mark.unit
+    def test_readiness_window_clamps_negative_grace_duration(self):
+        """cubic: a negative/malformed grace duration must NOT shrink the
+        cold-start readiness window (which would let a real quorum loss fire
+        before members finish their first connect). 0 is the safe floor."""
+        group = _redundancy_group(min_healthy=1)
+        monitors = {
+            "UPS-A": _FakeMonitor("UPS-A", _snap()),
+            "UPS-B": _FakeMonitor("UPS-B", _snap()),
+        }
+        for m in monitors.values():
+            m.config.ups.connection_loss_grace_period.enabled = True
+            m.config.ups.connection_loss_grace_period.duration = -300
+        ev = RedundancyGroupEvaluator(
+            group, monitors, MagicMock(),
+            stop_event=threading.Event(), logger=None, startup_grace_seconds=10,
+        )
+        # Clamped to 0 -> window = startup_grace(10) + 0 + 10, never shrunk.
+        assert ev._readiness_window == 20
+
 
 # ===========================================================================
 # Executor: synthetic config wiring + idempotency + dry-run cleanup

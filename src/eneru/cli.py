@@ -1607,8 +1607,11 @@ def _cmd_user_create(args):
     # L19: validate username + role BEFORE prompting for the password, so an
     # invalid name/role fails fast instead of after the operator types (and
     # confirms) a password that's about to be thrown away.
+    # Capture the NORMALIZED (stripped) name back into args (cubic): a
+    # whitespace-padded --username otherwise passes validation here but the
+    # success message and any later lookup key on the raw padded string.
     try:
-        auth._validate_username(args.username)
+        args.username = auth._validate_username(args.username)
         auth._validate_role(args.role)
     except auth.AuthError as exc:
         raise SystemExit(f"ERROR: {exc}")
@@ -1629,8 +1632,10 @@ def _cmd_user_passwd(args):
     """Reset a user's password."""
     store = _resolve_auth_store(args)
     # L19: validate the username format before prompting for the new password.
+    # Canonicalize to the normalized name (cubic): set_password() keys the SQL
+    # lookup on the exact string, so a padded name would prompt-then-miss.
     try:
-        auth._validate_username(args.username)
+        args.username = auth._validate_username(args.username)
     except auth.AuthError as exc:
         raise SystemExit(f"ERROR: {exc}")
     password, generated = _resolve_password(args)
