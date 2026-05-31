@@ -553,8 +553,8 @@ See [Remote servers](remote-servers.md) for SSH keys, sudoers, predefined action
 | `test-notifications` | Send one test notification |
 | `user {create,list,show,passwd,delete}` | Manage API/dashboard users (see [Authentication](authentication.md)) |
 | `apikey {create,list,revoke}` | Manage programmatic API keys (see [Authentication](authentication.md)) |
-| `shutdown` | Run a manual shutdown drill (remote / redundancy group) |
-| `remote` | List configured remote servers |
+| `shutdown {remote,group}` | Run a manual shutdown drill for one remote server or a full group |
+| `remote {list}` | List configured remote shutdown targets |
 | `completion {bash,zsh,fish}` | Print a shell completion script |
 | `version` | Print version |
 

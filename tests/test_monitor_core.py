@@ -1592,34 +1592,40 @@ class TestMultiPhaseShutdown:
         for 2 × max_timeout. Regression guard for the deadline-based join in
         ``_shutdown_servers_parallel``.
         """
-        # Tiny budgets so the test is fast: pre_cmd=0, command_timeout=0,
-        # connect_timeout=0, safety_margin=1 -> max_timeout = 1 second.
+        # Two no-op workers in one phase. With the SSH-overhead buffer now in
+        # the budget the absolute deadline is ~30s+, so instead of timing a hung
+        # worker we prove the *structure*: the join timeout handed to each
+        # successive thread DECREASES (deadline - elapsed), which only happens
+        # under a single shared deadline. Per-thread stacking would hand each
+        # thread the same full budget.
         servers = [
-            RemoteServerConfig(name="StuckA", enabled=True, host="10.0.0.1", user="root",
-                               shutdown_order=1, command_timeout=0, connect_timeout=0,
-                               shutdown_safety_margin=1),
-            RemoteServerConfig(name="StuckB", enabled=True, host="10.0.0.2", user="root",
-                               shutdown_order=1, command_timeout=0, connect_timeout=0,
-                               shutdown_safety_margin=1),
+            RemoteServerConfig(name="A", enabled=True, host="10.0.0.1", user="root",
+                               shutdown_order=1, command_timeout=5, connect_timeout=2,
+                               shutdown_safety_margin=10),
+            RemoteServerConfig(name="B", enabled=True, host="10.0.0.2", user="root",
+                               shutdown_order=1, command_timeout=5, connect_timeout=2,
+                               shutdown_safety_margin=10),
         ]
         monitor = make_monitor(tmp_path, remote_servers=servers)
+        monitor._shutdown_remote_server = lambda s: None  # no-op workers
 
-        def hang_forever(server):
-            time.sleep(10)  # well beyond the 1s budget
+        timeouts = []
+        original_join = threading.Thread.join
 
-        monitor._shutdown_remote_server = hang_forever
+        def capture_join(self, timeout=None):
+            timeouts.append(timeout)
+            time.sleep(0.05)  # advance the deadline clock between joins
+            return original_join(self, timeout=0)
 
-        start = time.monotonic()
-        monitor._shutdown_remote_servers()
-        elapsed = time.monotonic() - start
+        with patch.object(threading.Thread, "join", capture_join):
+            monitor._shutdown_remote_servers()
 
-        # Stacked behavior would be ~2 s; deadline-based should be ~1 s.
-        # Allow a generous 1.8 s ceiling for CI scheduler jitter; still well
-        # below the 2 s stacked floor and the 10 s actual hang time.
-        assert elapsed < 1.8, (
-            f"Phase took {elapsed:.2f}s — expected ~1s (deadline-based join), "
-            "looks like per-thread timeouts are stacking."
+        assert len(timeouts) >= 2
+        assert timeouts[1] < timeouts[0], (
+            "join timeouts should DECREASE across threads (one shared "
+            "deadline); constant timeouts indicate per-thread stacking"
         )
+        assert all(t >= 0 for t in timeouts)
 
 
 class TestRemoteShutdownSafetyMargin:
@@ -1651,11 +1657,11 @@ class TestRemoteShutdownSafetyMargin:
         with patch.object(threading.Thread, "join", capture_join):
             monitor._shutdown_remote_servers()
 
-        # max_timeout = max(0+5+2+10, 0+5+2+120) = 127.
-        # Deadline-based join subtracts the tiny elapsed time between
-        # computing `deadline` and the first join, so the captured value
-        # will be just under 127.
-        assert captured["first_timeout"] == pytest.approx(127, abs=0.5)
+        # Each server has 0 pre-commands -> num_commands=1 -> +1*30 SSH buffer.
+        # max_timeout = max(0+5+2+10+30, 0+5+2+120+30) = max(47, 157) = 157.
+        # Deadline-based join subtracts the tiny elapsed time between computing
+        # `deadline` and the first join, so the captured value is just under 157.
+        assert captured["first_timeout"] == pytest.approx(157, abs=0.5)
 
 
 # ==============================================================================

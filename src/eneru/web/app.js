@@ -617,15 +617,30 @@ async function renderControl(payload) {
   }
   sec.hidden = false;
   const rows = (payload && payload.ups) || [];
-  const key = token() + "|" + rows.map((u) => u.name).join(",");
-  if (key === _controlBuiltKey) return;  // already built for this token + UPS set
-  _controlBuiltKey = key;
-  panel.replaceChildren();
+  // Key on token + UPS set AND the allowlists, so a live config reload that
+  // changes allowed commands/variables (without changing token or UPS set)
+  // still busts the cache and rebuilds (CodeRabbit). /api/v1/config exposes the
+  // allowlists when authenticated.
+  const nc = (cfgSnapshot && cfgSnapshot.nutControl) || {};
+  const key = JSON.stringify({
+    token: token(),
+    ups: rows.map((u) => u.name),
+    commands: nc.allowedCommands || [],
+    variables: nc.allowedVariables || [],
+  });
+  if (key === _controlBuiltKey) return;  // already built for this token + UPS set + allowlists
+  // Build into a detached fragment and commit the cache key only once EVERY
+  // fetch succeeded (cubic P2). Setting the key up-front meant a transient
+  // commands/variables fetch failure built an empty panel that then never
+  // rebuilt for the rest of the session.
+  let builtOk = true;
+  const frag = document.createDocumentFragment();
   for (const u of rows) {
     const box = el("div", { class: "control-ups" }, [el("h3", { text: u.label || u.name })]);
     box.appendChild(el("h4", { text: "Commands" }));
     const cmds = el("div", { class: "cmds" });
     const res = await api("/api/v1/ups/" + encodeURIComponent(u.name) + "/commands");
+    if (!res.ok) builtOk = false;
     ((res.data && res.data.commands) || []).forEach((c) => {
       const btn = el("button", { type: "button", text: c });
       btn.addEventListener("click", () => runCommand(u.name, c));
@@ -634,9 +649,13 @@ async function renderControl(payload) {
     if (!cmds.childNodes.length) cmds.appendChild(el("span", { class: "who", text: "No allowlisted commands." }));
     box.appendChild(cmds);
     box.appendChild(el("h4", { text: "Variables" }));
-    box.appendChild(await renderVariableForms(u.name));
-    panel.appendChild(box);
+    const vres = await renderVariableForms(u.name);
+    if (!vres.ok) builtOk = false;
+    box.appendChild(vres.node);
+    frag.appendChild(box);
   }
+  panel.replaceChildren(frag);
+  _controlBuiltKey = builtOk ? key : null;  // retry next poll if anything failed
 }
 
 async function renderVariableForms(ups) {
@@ -663,7 +682,7 @@ async function renderVariableForms(ups) {
   if (!vars.childNodes.length) {
     vars.appendChild(el("span", { class: "who", text: "No allowlisted variables." }));
   }
-  return vars;
+  return { node: vars, ok: res.ok };  // ok feeds renderControl's cache-key commit
 }
 
 async function runCommand(ups, command) {

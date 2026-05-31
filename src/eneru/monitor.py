@@ -1179,15 +1179,40 @@ class UPSGroupMonitor(
                 pass
 
         if self.config.local_shutdown.enabled and not delegated:
-            record_sequence_complete()
-            self._log_message("🔌 Shutting down local server NOW")
-            self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE")
-
             if self.config.behavior.dry_run:
+                record_sequence_complete()
+                self._log_message("🔌 Shutting down local server NOW")
+                self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE")
                 self._log_message(f"🧪 [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
                 self._log_message("🧪 [DRY-RUN] Shutdown sequence completed successfully (no actual shutdown)")
                 self._shutdown_flag_path.unlink(missing_ok=True)
             else:
+                # Validate the poweroff command BEFORE recording the run as a
+                # completed shutdown (CodeRabbit). Config validation rejects an
+                # empty/None command at load, but a programmatically-built Config
+                # could still reach here; if it does, the host stays up, so we
+                # must NOT write SHUTDOWN_SEQUENCE_COMPLETE / the recovery marker
+                # or leave the flag set (which would gate future triggers until
+                # line power returns). Report INCOMPLETE, clear the flag, bail.
+                cmd_parts = str(self.config.local_shutdown.command or "").split()
+                if not cmd_parts:
+                    self._log_message(
+                        "❌ local_shutdown.command is empty -- host poweroff "
+                        "SKIPPED; shutdown sequence INCOMPLETE. Set "
+                        "local_shutdown.command to a valid command."
+                    )
+                    self._send_notification(
+                        f"❌ **Shutdown Sequence Incomplete** (took {elapsed}s)\n"
+                        "Host poweroff command is empty; the host is still up.",
+                        self.config.NOTIFY_FAILURE,
+                        category="shutdown_summary",
+                    )
+                    self._shutdown_flag_path.unlink(missing_ok=True)
+                    return
+
+                record_sequence_complete()
+                self._log_message("🔌 Shutting down local server NOW")
+                self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE")
                 # Single-shot summary notification covering the whole sequence;
                 # the per-phase chatter that used to mirror every log line is
                 # gone in v5.2 (journalctl is the forensic record).
@@ -1216,20 +1241,9 @@ class UPSGroupMonitor(
                     reason=REASON_SEQUENCE_COMPLETE,
                 )
 
-                # Defense-in-depth: config validation rejects an empty/None
-                # command at load, but guard here too so a programmatically-
-                # built Config can never None.split() / run_command([]) and
-                # silently skip the poweroff after the drain phases ran.
-                cmd_parts = str(self.config.local_shutdown.command or "").split()
-                if not cmd_parts:
-                    self._log_message(
-                        "❌ local_shutdown.command is empty -- cannot power off "
-                        "the host. Set local_shutdown.command to a valid command."
-                    )
-                else:
-                    if self.config.local_shutdown.message:
-                        cmd_parts.append(self.config.local_shutdown.message)
-                    run_command(cmd_parts)
+                if self.config.local_shutdown.message:
+                    cmd_parts.append(self.config.local_shutdown.message)
+                run_command(cmd_parts)
         elif self.config.local_shutdown.enabled and delegated:
             # v5.5: the loopback's shutdown_command (already executed during
             # _shutdown_remote_servers) is what actually powers off the host.
@@ -1873,7 +1887,14 @@ class UPSGroupMonitor(
                 # hard errors (H3) the same way stale data already is.
                 is_failsafe_trigger = False
                 onbattery_failsafe = False
-                tolerance = self.config.ups.max_stale_data_tolerance
+                # Coerce defensively: a quoted YAML max_stale_data_tolerance
+                # ("3") would otherwise make the `count >= tolerance` comparisons
+                # below raise TypeError and kill the loop on a failed poll. (Also
+                # validated at config load, but guard the hot path too.)
+                try:
+                    tolerance = max(1, int(self.config.ups.max_stale_data_tolerance))
+                except (TypeError, ValueError):
+                    tolerance = 3
 
                 if "Data stale" in error_msg:
                     self.state.stale_data_count += 1
@@ -1975,12 +1996,14 @@ class UPSGroupMonitor(
             # DATA PROCESSING
             # ==================================================================
 
-            # A successful poll clears the failure debounce counters and re-arms
-            # the FAILSAFE latch (H2/H3): NUT is visible again, so a later loss
-            # is a fresh event that must be allowed to act.
+            # A successful poll clears the failure debounce counters: NUT is
+            # visible again. The FAILSAFE latch is NOT reset here -- a brief NUT
+            # reconnection while the UPS is still ON BATTERY must not re-arm the
+            # failsafe (which would let the next hard error re-drain in dry-run/
+            # delegated/enabled=false setups). The latch is per-OUTAGE: it clears
+            # only once the UPS is back on line power (see below).
             self.state.stale_data_count = 0
             self.state.connection_error_count = 0
-            self._failsafe_initiated = False
 
             if self.state.connection_state == "GRACE_PERIOD":
                 # Recovered during grace period: quiet recovery, no notification
@@ -2034,6 +2057,12 @@ class UPSGroupMonitor(
                     self._clear_advisory_trigger()
 
             ups_status = ups_data.get('ups.status', '')
+
+            # Re-arm the FAILSAFE latch only when the outage is over (back on
+            # line power). While still on battery a reconnection doesn't end the
+            # outage, so the latch stays set (per-outage, not per-reconnect).
+            if "OB" not in ups_status and "FSD" not in ups_status:
+                self._failsafe_initiated = False
 
             if not ups_status:
                 self._log_message(

@@ -685,6 +685,41 @@ class TestRemotePreShutdownExecution:
         assert result.timed_out is True
 
     @pytest.mark.unit
+    def test_pre_shutdown_skips_when_deadline_already_exceeded(self, remote_monitor):
+        """Pre-shutdown commands are skipped (timed_out) when the phase deadline
+        is already blown on entry -- nothing runs."""
+        server = RemoteServerConfig(
+            name="s", enabled=True, host="10.0.0.3", user="root",
+            pre_shutdown_commands=[RemoteCommandConfig(command="echo hi", timeout=5)],
+        )
+        with patch.object(remote_monitor, "_remote_deadline_exceeded",
+                          return_value=True), \
+             patch.object(remote_monitor, "_run_remote_command") as mock_run:
+            result = remote_monitor._execute_remote_pre_shutdown(
+                server, collect_result=True, deadline=10.0)
+        assert result.timed_out is True
+        mock_run.assert_not_called()
+
+    @pytest.mark.unit
+    def test_pre_shutdown_stops_when_deadline_exceeded_midway(self, remote_monitor):
+        """Once the deadline passes after a pre-command, the rest are skipped."""
+        server = RemoteServerConfig(
+            name="s", enabled=True, host="10.0.0.3", user="root",
+            pre_shutdown_commands=[
+                RemoteCommandConfig(command="echo a", timeout=5),
+                RemoteCommandConfig(command="echo b", timeout=5),
+            ],
+        )
+        with patch.object(remote_monitor, "_remote_deadline_exceeded",
+                          side_effect=[False, True]), \
+             patch.object(remote_monitor, "_run_remote_command",
+                          return_value=(True, "")) as mock_run:
+            result = remote_monitor._execute_remote_pre_shutdown(
+                server, collect_result=True, deadline=10.0)
+        assert result.timed_out is True
+        assert mock_run.call_count == 1          # only the first command ran
+
+    @pytest.mark.unit
     def test_loopback_pre_shutdown_supplies_skip_ids_and_umount_targets(
         self, remote_monitor
     ):
@@ -992,62 +1027,6 @@ class TestLoopbackShutdownOrdering:
 
         hosts = [host for host, _ in calls]
         assert hosts == ["10.0.0.10", "127.0.0.1"]
-
-    @pytest.mark.unit
-    def test_loopback_identity_mismatch_warns_but_proceeds(self, remote_monitor):
-        """M2: when a loopback's host-identity probe FAILS on the destructive
-        path, Eneru warns + notifies but still issues the poweroff (refusing
-        would leave the local host running on a draining battery)."""
-        loopback = RemoteServerConfig(
-            name="host-loopback", enabled=True, host="127.0.0.1", user="root",
-            is_host_loopback=True, shutdown_command="shutdown -h now",
-            expected_host_identity="expected-machine-id",
-            pre_shutdown_commands=[],
-        )
-        remote_monitor.config.ups_groups[0].remote_servers = [loopback]
-        remote_monitor._send_notification = MagicMock()
-
-        calls, run_patch = self._record_calls(remote_monitor)
-        with run_patch, patch(
-            "eneru.remote_health.run_loopback_identity_probe",
-            return_value=(False, "host identity mismatch: bind-mount missing", 5),
-        ):
-            remote_monitor._shutdown_remote_servers()
-
-        # Poweroff still ran despite the failed identity check.
-        assert "127.0.0.1" in [host for host, _ in calls]
-        # And an identity warning notification was emitted.
-        bodies = [
-            (c.args[0] if c.args else "")
-            for c in remote_monitor._send_notification.call_args_list
-        ]
-        assert any("identity" in b.lower() for b in bodies), bodies
-
-    @pytest.mark.unit
-    def test_loopback_identity_ok_no_warning(self, remote_monitor):
-        """M2: a passing identity probe emits no identity warning."""
-        loopback = RemoteServerConfig(
-            name="host-loopback", enabled=True, host="127.0.0.1", user="root",
-            is_host_loopback=True, shutdown_command="shutdown -h now",
-            expected_host_identity="expected-machine-id",
-            pre_shutdown_commands=[],
-        )
-        remote_monitor.config.ups_groups[0].remote_servers = [loopback]
-        remote_monitor._send_notification = MagicMock()
-
-        calls, run_patch = self._record_calls(remote_monitor)
-        with run_patch, patch(
-            "eneru.remote_health.run_loopback_identity_probe",
-            return_value=(True, "", 5),
-        ):
-            remote_monitor._shutdown_remote_servers()
-
-        assert "127.0.0.1" in [host for host, _ in calls]
-        bodies = [
-            (c.args[0] if c.args else "")
-            for c in remote_monitor._send_notification.call_args_list
-        ]
-        assert not any("identity" in b.lower() for b in bodies), bodies
 
     @pytest.mark.unit
     def test_loopback_result_aggregates_pre_and_post(self, remote_monitor):

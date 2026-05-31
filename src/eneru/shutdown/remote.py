@@ -173,12 +173,15 @@ class RemoteShutdownMixin:
                 pre_commands=RemotePreShutdownResult(),
             )
 
-        # M2: verify each loopback's host identity ON the destructive path, not
-        # only in the background health loop, so a misconfigured machine-id
-        # bind-mount is surfaced at the moment we drain/poweroff via the delegate.
-        if loopbacks:
-            self._verify_loopback_identities(loopbacks)
-
+        # M2 NOTE: an earlier rc10 iteration ran a fresh, blocking
+        # run_loopback_identity_probe() here before the destructive phases. It
+        # was reverted: the probe is an SSH round-trip (bounded, but up to
+        # connect_timeout+10s) that would delay the poweroff during an outage,
+        # and we PROCEED regardless of its result, so it added latency on the
+        # critical path for purely-informational value. Loopback identity is
+        # already verified by the background RemoteHealthManager loop (which
+        # logs + notifies a mismatch) and gated by /ready, so the misconfig is
+        # surfaced there without blocking shutdown.
         phase_idx = 0
         regular_results: List[RemoteShutdownResult] = []
 
@@ -356,44 +359,6 @@ class RemoteShutdownMixin:
                 category="shutdown",
             )
 
-    def _verify_loopback_identities(self, loopbacks) -> None:
-        """Advisory host-identity check on the DESTRUCTIVE loopback path (M2).
-
-        The background remote-health loop verifies loopback identity, but the
-        shutdown path itself did not. Re-run the probe here -- for loopbacks that
-        actually have an ``expected_host_identity`` to check against -- so a
-        misconfigured /etc/machine-id bind-mount is surfaced (log + notification)
-        at the exact moment we are about to drain/poweroff via that delegate.
-
-        We deliberately do NOT abort on failure: the loopback shutdown command
-        targets 127.0.0.1 = THIS host, which is exactly what must be powered off
-        during an outage. Refusing would leave the host running on a draining
-        battery -- a missed shutdown, the worse outcome. So we warn loudly and
-        proceed.
-        """
-        from eneru.remote_health import run_loopback_identity_probe
-        for lb in loopbacks:
-            if not lb.expected_host_identity:
-                continue  # nothing to verify against -- the probe can't confirm
-            try:
-                ok, detail, _ = run_loopback_identity_probe(lb)
-            except Exception as exc:  # pragma: no cover - defensive
-                ok, detail = False, f"identity probe raised: {exc}"
-            if ok:
-                continue
-            display = lb.name or lb.host
-            self._log_message(
-                f"⚠️ Loopback host-identity check FAILED for {display} before "
-                f"delegated shutdown: {detail} Proceeding anyway -- the loopback "
-                "poweroff targets the local host, which must go down in an outage."
-            )
-            self._send_notification(
-                f"⚠️ **Loopback identity unverified before shutdown:** {display}\n"
-                f"{detail}",
-                self.config.NOTIFY_WARNING,
-                category="shutdown",
-            )
-
     def _shutdown_servers_parallel(
         self, servers: List[RemoteServerConfig]
     ) -> List[RemoteShutdownResult]:
@@ -410,11 +375,19 @@ class RemoteShutdownMixin:
                 (cmd.timeout if cmd.timeout is not None else server.command_timeout)
                 for cmd in server.pre_shutdown_commands
             )
+            # _run_remote_command spends `timeout + _SSH_OVERHEAD_BUFFER` on EACH
+            # command (every pre-shutdown command plus the final shutdown). The
+            # phase-deadline budget must reserve that buffer per command too
+            # (CodeRabbit), otherwise the parallel join deadline can expire while
+            # a worker is still legitimately inside its own SSH timeout and the
+            # server is wrongly reported timed-out.
+            num_commands = len(server.pre_shutdown_commands) + 1
             return (
                 pre_cmd_time
                 + server.command_timeout
                 + server.connect_timeout
                 + server.shutdown_safety_margin
+                + num_commands * _SSH_OVERHEAD_BUFFER
             )
 
         max_timeout = max(calc_server_timeout(s) for s in servers)

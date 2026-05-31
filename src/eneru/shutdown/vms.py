@@ -46,20 +46,24 @@ class VMShutdownMixin:
         max_wait = self.config.virtual_machines.max_wait
         self._log_message(f"  ⏳ Waiting up to {max_wait}s for VMs to shutdown gracefully...")
         wait_interval = 5
-        time_waited = 0
+        # L7 / CodeRabbit: use a WALL-CLOCK deadline rather than counting only
+        # the sleeps. The old loop advanced `time_waited` only after sleep(), so
+        # each (bounded) `virsh list` poll plus a wedged libvirtd could stretch
+        # the phase well past max_wait. A monotonic deadline charges poll time
+        # too, and each poll/sleep is capped to the remaining budget so the whole
+        # graceful wait is bounded by ~max_wait before force-destroy/poweroff.
+        deadline = time.monotonic() + max_wait
         # Seed with the originally-running list so a transient virsh
         # failure on the first poll doesn't make the loop think the VMs
         # are gone (empty stdout would otherwise yield remaining_vms=[]
         # and skip force-destroy).
         remaining_vms: List[str] = list(running_vms)
 
-        while time_waited < max_wait:
-            # L7: bound each poll to wait_interval so a wedged libvirtd (a virsh
-            # call that hangs to run_command's 30s default) can't blow the
-            # max_wait budget many times over before force-destroy/poweroff.
+        while time.monotonic() < deadline:
+            remaining_budget = max(1, int(deadline - time.monotonic()))
             exit_code, stdout, _ = run_command(
                 ["virsh", "list", "--name", "--state-running"],
-                timeout=wait_interval,
+                timeout=min(wait_interval, remaining_budget),
             )
             if exit_code != 0:
                 # libvirtd may be wedged or restarting. Don't trust empty
@@ -75,13 +79,13 @@ class VMShutdownMixin:
                 remaining_vms = [vm for vm in running_vms if vm in still_running]
 
                 if not remaining_vms:
-                    self._log_message(f"  ✅ All VMs stopped gracefully after {time_waited}s.")
+                    self._log_message("  ✅ All VMs stopped gracefully.")
                     break
 
-                self._log_message(f"  🕒 Still waiting for: {' '.join(remaining_vms)} (Waited {time_waited}s)")
+                self._log_message(f"  🕒 Still waiting for: {' '.join(remaining_vms)}")
 
-            time.sleep(wait_interval)
-            time_waited += wait_interval
+            # Sleep only up to the remaining budget so we don't overshoot.
+            time.sleep(max(0, min(wait_interval, deadline - time.monotonic())))
 
         if remaining_vms:
             self._log_message("  ⚠️ Timeout reached. Force destroying remaining VMs.")

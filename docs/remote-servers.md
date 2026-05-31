@@ -418,16 +418,14 @@ with three additions:
    host's value at the same path instead of supplying a literal
    string. Mismatch marks the loopback FAILED with a clear hint.
 
-   **At shutdown time (6.0.0+):** the identity guard also runs at the
-   *start of the delegated shutdown sequence*, not only in the
-   background health loop. If the probe fails or mismatches there,
-   Eneru logs a prominent warning and sends a notification — but it
-   **still proceeds with the poweroff**. The loopback always targets
-   `127.0.0.1` (this very host), which is exactly what must go down
-   during an outage; refusing would leave the host running on a
-   draining battery — a missed shutdown, the worse outcome. So treat
-   that warning as "fix your `/etc/machine-id` bind-mount", not as a
-   sign the shutdown was skipped.
+   The identity guard runs in the **background remote-health loop**
+   (and gates `/ready`), where a mismatch is logged and notified. It is
+   deliberately **not** run as a blocking probe at the start of the
+   shutdown sequence: that would add an SSH round-trip on the critical
+   path before the poweroff during an outage, and Eneru would proceed
+   regardless (the loopback targets `127.0.0.1` = this host, which must
+   go down), so the probe would only add latency. Fix a reported
+   mismatch from the health-loop warning, not at shutdown time.
 3. **Eneru generates `pre_shutdown_commands` for you.** Don't
    duplicate VM / container / filesystem actions on the loopback —
    Eneru translates the local config into the equivalent SSH

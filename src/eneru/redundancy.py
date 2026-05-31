@@ -494,8 +494,15 @@ class RedundancyGroupEvaluator(threading.Thread):
         # connection-loss grace, on top of the startup grace). A member that has
         # reported once and then goes stale/FAILED is NOT cold-start -- it
         # counts per policy as before.
+        # Scope the readiness window to THIS group's members only (CodeRabbit):
+        # deriving it from every monitor would let an unrelated UPS with a large
+        # connection_loss_grace_period stretch this group's cold-start hold and
+        # delay a real quorum-loss shutdown longer than this group intended.
         grace_durations = []
-        for m in monitors_by_ups_name.values():
+        for name in group.ups_sources:
+            m = monitors_by_ups_name.get(name)
+            if m is None:
+                continue
             try:
                 grace_durations.append(
                     int(m.config.ups.connection_loss_grace_period.duration))

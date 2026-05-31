@@ -1,6 +1,7 @@
 """Filesystem sync + unmount phase of the shutdown sequence."""
 
 import shlex
+import subprocess
 import time
 from typing import List
 
@@ -19,26 +20,51 @@ class FilesystemShutdownMixin:
     """Mixin: filesystem sync and unmount during shutdown."""
 
     def _bounded_sync(self, label: str) -> None:
-        """Run ``sync`` with a hard timeout so a hung mount can't stall poweroff.
+        """Run ``sync`` with a TRUE wall-clock bound so a hung mount can't stall
+        the poweroff.
 
-        Runs the coreutils ``sync`` binary as a subprocess (run_command bounds
-        it with a timeout) instead of the unbounded, uninterruptible
-        ``os.sync()``. On timeout/error we log and proceed -- the kernel flushes
-        again during the halt, so the poweroff must never be held hostage to a
-        dead network filesystem.
+        Uses ``Popen`` + a polling deadline rather than ``subprocess.run(timeout=)``
+        or the unbounded, uninterruptible ``os.sync()``. The reason
+        (CodeRabbit): ``subprocess.run``'s timeout sends SIGKILL and then BLOCKS
+        in wait() to reap -- and a ``sync`` stuck on a dead NFS/CIFS mount sits
+        in uninterruptible D-state where even SIGKILL can't land, so that wait
+        hangs and the "timeout" never returns. Here we poll ``proc.poll()`` and,
+        if the deadline passes, we best-effort kill and ABANDON the process
+        WITHOUT waiting -- the daemon thread is never blocked, the orphan dies at
+        halt, and the kernel re-syncs during the halt regardless.
         """
-        exit_code, _, _ = run_command(["sync"], timeout=_SYNC_TIMEOUT_SECONDS)
-        if exit_code == 124:
+        try:
+            proc = subprocess.Popen(
+                ["sync"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, ValueError) as exc:
             self._log_message(
-                f"  ⚠️ {label} timed out after {_SYNC_TIMEOUT_SECONDS}s "
-                "(a hung mount?); proceeding -- the kernel re-syncs during halt."
-            )
-        elif exit_code != 0:
+                f"  ⚠️ {label}: could not start `sync` ({exc}); proceeding.")
+            return
+        deadline = time.monotonic() + _SYNC_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            time.sleep(0.2)
+        rc = proc.poll()
+        if rc is None:
+            # Still running at the deadline -- almost certainly a mount in
+            # uninterruptible D-state. Signal best-effort and abandon it; do NOT
+            # wait (that's exactly what would hang). Proceed to poweroff.
+            try:
+                proc.kill()
+            except Exception:
+                pass
             self._log_message(
-                f"  ⚠️ {label} reported an error (exit {exit_code}); proceeding."
+                f"  ⚠️ {label} did not finish within {_SYNC_TIMEOUT_SECONDS}s "
+                "(a hung mount?); proceeding without waiting -- the kernel "
+                "re-syncs during halt."
             )
-        else:
+        elif rc == 0:
             self._log_message(f"  ✅ {label} complete")
+        else:
+            self._log_message(
+                f"  ⚠️ {label} reported an error (exit {rc}); proceeding."
+            )
 
     def _sync_filesystems(self):
         """Sync all filesystems.

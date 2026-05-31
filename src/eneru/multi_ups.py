@@ -60,6 +60,11 @@ class MultiUPSCoordinator:
         # M1: set while a committed local shutdown is running outside the lock,
         # so recovery can't re-arm the guard mid-flight and admit a 2nd poweroff.
         self._local_shutdown_in_flight = False
+        # If a recovery (OB->OL) arrives DURING the in-flight window we defer the
+        # re-arm to the end of _handle_local_shutdown instead of dropping it --
+        # otherwise a no-op/non-halting shutdown would stay latched forever and
+        # block the next outage (cubic P1).
+        self._rearm_after_inflight = False
         # L5: re-entrancy guard for the SIGTERM/SIGINT handler.
         self._signal_handling = False
         self._global_shutdown_flag = Path(config.logging.shutdown_flag_file)
@@ -534,9 +539,13 @@ class MultiUPSCoordinator:
             # M1: never re-arm while a local shutdown is committed and running
             # (its drain/flush/run_command execute outside the lock). Clearing
             # the guard mid-flight would let a concurrent trigger admit a SECOND
-            # poweroff. The in_flight flag is cleared by _handle_local_shutdown's
-            # finally once the sequence returns, after which recovery re-arms.
+            # poweroff. But we must NOT simply drop this recovery: if it's the
+            # only OB->OL transition (a no-op/non-halting shutdown), nothing else
+            # would re-arm and the next outage would be blocked (cubic P1). So
+            # remember it and let _handle_local_shutdown's finally re-arm once
+            # the sequence has returned.
             if self._local_shutdown_in_flight:
+                self._rearm_after_inflight = True
                 return
             self._local_shutdown_initiated = False
             self._global_shutdown_flag.unlink(missing_ok=True)
@@ -635,9 +644,16 @@ class MultiUPSCoordinator:
         finally:
             # The committed sequence is no longer running outside the lock, so
             # recovery is allowed to re-arm again. (On a real halt the process
-            # never reaches here -- the host is already going down.)
+            # never reaches here -- the host is already going down.) If a
+            # recovery arrived DURING the in-flight window, apply the deferred
+            # re-arm now so a no-op/non-halting shutdown doesn't stay latched and
+            # block the next outage (cubic P1).
             with self._local_shutdown_lock:
                 self._local_shutdown_in_flight = False
+                if self._rearm_after_inflight:
+                    self._rearm_after_inflight = False
+                    self._local_shutdown_initiated = False
+                    self._global_shutdown_flag.unlink(missing_ok=True)
 
     def _drain_all_groups(self, timeout: int = 120):
         """Shut down all groups' resources, then stop monitor threads.

@@ -130,10 +130,6 @@ Medium fixes:
   held "in flight" while the committed sequence runs outside the lock, so an
   unrelated group's power-restored event can't re-arm it mid-sequence and admit
   a second poweroff.
-- **Loopback host-identity is checked on the destructive path**, not only in the
-  background health loop: a failed/mismatched machine-id check now logs and
-  notifies right before the delegated drain/poweroff. It deliberately proceeds
-  (the loopback targets the local host, which must go down in an outage).
 - **Deleted admin can't keep control through a DB blip.** Write/control requests
   now re-check the session's account strictly and fail closed if the auth DB is
   unavailable; reads stay lenient and the token survives for when the DB returns.

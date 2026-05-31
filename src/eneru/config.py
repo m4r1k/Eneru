@@ -1470,6 +1470,15 @@ class ConfigLoader:
                     messages.extend(cls._unknown_key_errors(
                         f"ups[{label!r}]", entry, ups_entry_keys,
                     ))
+                    # Also sweep the nested connection_loss_grace_period sub-keys
+                    # -- it's a safety sub-section, so a typo there must error too
+                    # rather than silently fall back to defaults (cubic P2).
+                    clgp = entry.get("connection_loss_grace_period")
+                    if isinstance(clgp, dict):
+                        messages.extend(cls._unknown_key_errors(
+                            f"ups[{label!r}].connection_loss_grace_period",
+                            clgp, {"enabled", "duration", "flap_threshold"},
+                        ))
                     _validate_triggers(
                         f"ups[{label!r}].triggers",
                         entry.get("triggers", {}),
@@ -1806,6 +1815,23 @@ class ConfigLoader:
         for rg in config.redundancy_groups:
             _check_drain_timeouts(
                 f"redundancy_groups[{(rg.name or '(unnamed)')!r}]", rg)
+
+        # ups.check_interval and ups.max_stale_data_tolerance feed the poll loop
+        # and the failsafe debounce comparisons. A non-int (quoted "1") would
+        # TypeError there; validate at load. (cubic P1 follow-up to H3.)
+        for group in config.ups_groups:
+            ci = group.ups.check_interval
+            if not cls._is_int_nonbool_in_range(ci, minimum=1):
+                messages.append(
+                    f"ERROR: ups[{group.ups.label!r}].check_interval must be an "
+                    f"integer >= 1, got {ci!r}."
+                )
+            mst = group.ups.max_stale_data_tolerance
+            if not cls._is_int_nonbool_in_range(mst, minimum=1):
+                messages.append(
+                    f"ERROR: ups[{group.ups.label!r}].max_stale_data_tolerance "
+                    f"must be an integer >= 1, got {mst!r}."
+                )
 
         # Multi-UPS validation
         if config.multi_ups:

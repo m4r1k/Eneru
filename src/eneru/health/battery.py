@@ -63,18 +63,21 @@ class BatteryMonitorMixin:
             )
 
         # Historically this required a flat 30 samples. But the deque is first
-        # pruned to `depletion.window` seconds, so the most samples that can
-        # ever survive is ~window/check_interval. With a slow poll interval
-        # (e.g. check_interval=11, window=300 -> ~27 samples) the count never
-        # reaches 30 and the depletion trigger (T3) is silently dead forever.
-        # Cap the floor by what the window can actually hold so T3 stays armed,
-        # while still requiring a few samples for a stable rate.
+        # pruned to `depletion.window` seconds, so the most samples that can ever
+        # survive is ~window/check_interval. With a slow poll interval (e.g.
+        # check_interval=11, window=300 -> ~27 samples) a flat 30 is never
+        # reached and the depletion trigger (T3) is silently dead forever.
+        # Require min(30, window/check_interval) -- capped by what the window can
+        # actually hold so T3 stays armed -- with a floor of 2 (a rate needs two
+        # points). The floor must NOT exceed the holdable count, or tiny windows
+        # would re-disable T3 (cubic P2); 2 points is the physical minimum, so a
+        # window smaller than ~2*check_interval genuinely can't compute a rate.
         try:
             check_interval = max(1, int(self.config.ups.check_interval))
         except (TypeError, ValueError):
             check_interval = 1
         window = self.config.triggers.depletion.window
-        min_samples = max(3, min(30, window // check_interval))
+        min_samples = min(30, max(2, window // check_interval))
         if len(self.state.battery_history) < min_samples:
             return 0.0
 

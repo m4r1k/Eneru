@@ -2618,6 +2618,57 @@ class TestCoordinatorShutdownJoinAndAudit:
         assert coord2._shutdown_join_deadline() == 120
 
     @pytest.mark.unit
+    def test_shutdown_join_deadline_ignores_non_int_timeout(self, tmp_path):
+        """A server with a non-int timeout is skipped in the budget calc, not
+        crashed (defensive int() guard)."""
+        bad = RemoteServerConfig(
+            name="bad", host="10.0.0.1", user="root",
+            command_timeout="oops", connect_timeout=0, shutdown_safety_margin=0)
+        coord = MultiUPSCoordinator(self._cfg(tmp_path, servers=[bad]))
+        # bad server contributes nothing -> just the 120 drain headroom.
+        assert coord._shutdown_join_deadline() == 120
+
+    @pytest.mark.unit
+    def test_inflight_recovery_defers_rearm(self, tmp_path):
+        """cubic P1: a recovery that races the in-flight window does not drop the
+        re-arm -- _clear_local_shutdown_state defers it, and the finally of
+        _handle_local_shutdown applies it so the guard isn't left stuck after a
+        non-halting shutdown."""
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True)],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "flag"),
+            ),
+            local_shutdown=LocalShutdownConfig(
+                enabled=False, drain_on_local_shutdown=True),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda m: None
+        coord._notification_worker = None
+        coord._monitors = []
+        coord._threads = []
+
+        seen = {}
+
+        def fake_drain(timeout=120):
+            # A concurrent OB->OL recovery fires while the shutdown is in flight.
+            coord._clear_local_shutdown_state()
+            seen["initiated_midflight"] = coord._local_shutdown_initiated
+            seen["rearm_pending"] = coord._rearm_after_inflight
+
+        coord._drain_all_groups = fake_drain
+        coord._handle_local_shutdown("UPS1")
+
+        # Mid-flight: the guard was NOT cleared (no second-poweroff window)...
+        assert seen["initiated_midflight"] is True
+        assert seen["rearm_pending"] is True
+        # ...but the deferred re-arm fired in the finally, so we're not stuck.
+        assert coord._local_shutdown_initiated is False
+        assert coord._rearm_after_inflight is False
+
+    @pytest.mark.unit
     def test_handle_signal_in_flight_waits_longer(self, tmp_path):
         """H10: with a shutdown already in flight, the signal handler logs the
         longer bounded wait instead of the brisk 5s exit."""
