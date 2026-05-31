@@ -470,7 +470,11 @@ class RemoteHealthManager:
                         self.config.NOTIFY_FAILURE,
                     )
                     notification_sent = True
-        elif not success:
+        elif not success and current != REMOTE_HEALTH_FAILED:
+            # L8: only log "degraded" while the server is genuinely degrading
+            # (before it crosses failure_threshold). Once it's FAILED we've
+            # already logged + notified the failure; relabelling it "degraded"
+            # on every subsequent poll is noisy and misleading.
             self.log_fn(f"⚠️ Remote health degraded: {display}: {error}")
         self._record_slow_ssh_response(
             key, display, server.host, latency_ms, success, now,
@@ -494,7 +498,17 @@ class RemoteHealthManager:
             self._slow_ssh_check_streak[key] = 0
             self._slow_ssh_notified[key] = False
             return
-        if latency_ms >= self._slow_ssh_log_threshold_ms:
+        # N1: if THIS call is about to record the sustained-slow event below,
+        # skip the transient one so a single cycle doesn't write two
+        # REMOTE_SSH_SLOW_RESPONSE rows for the same probe.
+        will_record_sustained = (
+            latency_ms >= self._slow_ssh_notify_threshold_ms
+            and not self._slow_ssh_notified.get(key, False)
+            and (self._slow_ssh_check_streak.get(key, 0) + 1)
+            >= self._slow_ssh_notify_consecutive_checks
+        )
+        if (latency_ms >= self._slow_ssh_log_threshold_ms
+                and not will_record_sustained):
             last_log = self._last_slow_ssh_log_time.get(key, 0.0)
             if (
                 last_log == 0.0

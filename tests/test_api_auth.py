@@ -222,14 +222,30 @@ def test_session_preserved_when_get_user_errors(minimal_config):
 
 
 @pytest.mark.unit
+def test_write_recheck_fails_closed_on_db_error(minimal_config):
+    # M4: a WRITE/control path must fail closed when the session user lookup
+    # errors -- a just-deleted admin must not keep control through a DB blip --
+    # while reads stay lenient and the token survives for when the DB recovers.
+    store = MagicMock()
+    store.get_user.side_effect = RuntimeError("db locked")
+    sessions = SessionManager(3600)
+    token = sessions.create({"username": "alice", "role": "admin", "kind": "user"})
+    h = _handler(minimal_config, auth_store=store, sessions=sessions,
+                 headers={"Authorization": f"Bearer {token}"})
+    assert h._authenticate_request()["username"] == "alice"      # read: lenient
+    assert h._authenticate_request(strict=True) is None          # write: denied
+    assert sessions.validate(token) is not None                  # token intact
+
+
+@pytest.mark.unit
 def test_session_validity_ignores_non_user_principals(minimal_config):
     # API-key-kind principals never carry a username; they must not be re-checked
     # via get_user (and must not be invalidated by it).
     store = MagicMock()
     h = _handler(minimal_config, auth_store=store)
-    assert h._session_principal_still_valid({"kind": "api_key", "id": 1}) is True
+    assert h._session_user_status({"kind": "api_key", "id": 1}) == "ok"
     # A user-kind principal without a username is treated as valid (defensive).
-    assert h._session_principal_still_valid({"kind": "user"}) is True
+    assert h._session_user_status({"kind": "user"}) == "ok"
     store.get_user.assert_not_called()
 
 

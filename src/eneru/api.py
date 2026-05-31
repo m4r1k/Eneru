@@ -41,7 +41,9 @@ _DASHBOARD_INDEX = "index.html"
 # enum words, voltages). upscmd/upsrw run via execve arg lists (never a shell),
 # so this is defense-in-depth, not the only barrier — but it keeps control
 # characters and shell-ish metacharacters out of the value entirely.
-_SAFE_NUT_VALUE = re.compile(r"^[A-Za-z0-9 ._:+%/,\-]{1,64}$")
+# L9: anchor with \Z, not $ -- in Python `$` also matches just before a trailing
+# newline, so "value\n" would slip through this defense-in-depth charset filter.
+_SAFE_NUT_VALUE = re.compile(r"\A[A-Za-z0-9 ._:+%/,\-]{1,64}\Z")
 # Strict response content-type whitelist (avoids header injection if a route
 # ever passes user data through as a content type).
 _CONTENT_TYPE_HEADERS = {
@@ -366,13 +368,16 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                                       "application/json; charset=utf-8"))
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
+        # N2: nosniff on EVERY response (JSON/JS/CSS/HTML), not just HTML -- the
+        # dashboard's static assets are served with specific content types and
+        # must not be MIME-sniffed.
+        self.send_header("X-Content-Type-Options", "nosniff")
         if content_type == "text/html":
             # The dashboard ships no inline scripts/styles and loads nothing
             # third-party, so a strict same-origin CSP locks it down.
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; base-uri 'none'; frame-ancestors 'none'")
-            self.send_header("X-Content-Type-Options", "nosniff")
         if status == 401:
             self.send_header("WWW-Authenticate", "Bearer")
         self.end_headers()
@@ -438,20 +443,33 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         api_key = self.headers.get("X-API-Key")
         return api_key.strip() if api_key else None
 
-    def _authenticate_request(self) -> Optional[Dict[str, Any]]:
-        """Resolve the caller from a session token, then an API key. None if neither."""
+    def _authenticate_request(self, *, strict: bool = False) -> Optional[Dict[str, Any]]:
+        """Resolve the caller from a session token, then an API key. None if neither.
+
+        ``strict`` is set for WRITE/control paths: when a session's user lookup
+        fails (auth DB unavailable) the request is denied rather than allowed, so
+        a deleted admin can't run control commands during a DB outage. Reads
+        stay lenient (``strict=False``) so a transient blip doesn't log out a
+        valid user. An *unknown* status never invalidates the token either way,
+        so a genuine session recovers once the DB is back (M4).
+        """
         token = self._bearer_token()
         if not token:
             return None
         if self.api_sessions is not None:
             principal = self.api_sessions.validate(token)
             if principal is not None:
-                if self._session_principal_still_valid(principal):
+                status = self._session_user_status(principal)
+                if status == "ok":
                     return principal
-                # The backing user was deleted while the session lived — kill the
-                # token so the client (and any later request) is forced to 401.
-                self.api_sessions.invalidate(token)
-                return None
+                if status == "gone":
+                    # The backing user was deleted while the session lived — kill
+                    # the token so the client (and any later request) 401s.
+                    self.api_sessions.invalidate(token)
+                    return None
+                # status == "unknown" (transient auth-DB error): writes fail
+                # closed, reads keep the session. Token left intact.
+                return None if strict else principal
         if self.api_auth is not None:
             try:
                 principal = self.api_auth.authenticate_api_key(token)
@@ -461,29 +479,29 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 return principal
         return None
 
-    def _session_principal_still_valid(self, principal: Dict[str, Any]) -> bool:
-        """Confirm a session's user account still exists.
+    def _session_user_status(self, principal: Dict[str, Any]) -> str:
+        """Return ``'ok'`` | ``'gone'`` | ``'unknown'`` for a session principal.
+
+        - ``'ok'``      -- the user exists (or this isn't a DB-backed user session)
+        - ``'gone'``    -- the user row is definitively absent (deleted)
+        - ``'unknown'`` -- the lookup raised (auth DB unavailable)
 
         Sessions are in-memory and outlive the DB row they were minted from, so a
-        deleted user would otherwise stay signed in until TTL. Only invalidate on
-        a *definitive* answer that the user is gone; if the lookup raises (auth DB
-        unavailable), keep the established session rather than logging out a valid
-        user on a transient error. Non-user principals (API keys) are re-checked
-        against the DB on their own path and never reach here.
+        deleted user would otherwise stay signed in until TTL. Non-user
+        principals (API keys) are re-checked against the DB on their own path.
         """
         if principal.get("kind") != "user":
-            return True
+            return "ok"
         store = self.api_auth
         if store is None:
-            return True
+            return "ok"
         username = principal.get("username")
         if not username:
-            return True
+            return "ok"
         try:
-            return store.get_user(username) is not None
+            return "ok" if store.get_user(username) is not None else "gone"
         except Exception:
-            # DB error / unavailable -> fail safe: keep the existing session.
-            return True
+            return "unknown"
 
     def _authorize(self, *, write: bool) -> Optional[Dict[str, Any]]:
         """Enforce the tiered auth policy. Returns the principal (may be None).
@@ -500,7 +518,8 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 raise APIForbidden(
                     "write operations require api.auth.enabled")
             return None
-        principal = self._authenticate_request()
+        # Writes re-check the user account strictly (fail closed on DB error).
+        principal = self._authenticate_request(strict=write)
         if write:
             if principal is None:
                 raise APIUnauthorized("authentication required")

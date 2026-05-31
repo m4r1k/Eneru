@@ -46,32 +46,65 @@ def _make_fs_monitor(tmp_path, *, sync_enabled=True, unmount_enabled=True, mount
 
 @pytest.mark.unit
 def test_sync_filesystems_disabled_no_op(tmp_path):
-    """sync_enabled=False returns without invoking os.sync."""
+    """sync_enabled=False returns without invoking sync."""
     monitor = _make_fs_monitor(tmp_path, sync_enabled=False)
-    with patch("eneru.shutdown.filesystems.os.sync") as mock_sync, \
+    with patch("eneru.shutdown.filesystems.subprocess.Popen") as mock_popen, \
          patch("eneru.shutdown.filesystems.time.sleep"):
         monitor._sync_filesystems()
-    mock_sync.assert_not_called()
+    mock_popen.assert_not_called()
 
 
 @pytest.mark.unit
 def test_sync_filesystems_dry_run_skips_os_sync(tmp_path):
-    """Dry-run logs the action but never calls os.sync()."""
+    """Dry-run logs the action but never spawns the sync subprocess."""
     monitor = _make_fs_monitor(tmp_path, dry_run=True)
-    with patch("eneru.shutdown.filesystems.os.sync") as mock_sync:
+    with patch("eneru.shutdown.filesystems.subprocess.Popen") as mock_popen:
         monitor._sync_filesystems()
-    mock_sync.assert_not_called()
+    mock_popen.assert_not_called()
 
 
 @pytest.mark.unit
-def test_sync_filesystems_real_calls_os_sync_then_sleeps(tmp_path):
-    """Real path: os.sync() + 2-second sleep for storage controller flush."""
+def test_sync_filesystems_real_runs_bounded_sync_then_sleeps(tmp_path):
+    """H6: real path spawns a bounded `sync` Popen + 2s controller-flush sleep."""
     monitor = _make_fs_monitor(tmp_path)
-    with patch("eneru.shutdown.filesystems.os.sync") as mock_sync, \
+    proc = MagicMock()
+    proc.poll.return_value = 0  # finishes immediately, success
+    with patch("eneru.shutdown.filesystems.subprocess.Popen",
+               return_value=proc) as mock_popen, \
          patch("eneru.shutdown.filesystems.time.sleep") as mock_sleep:
         monitor._sync_filesystems()
-    mock_sync.assert_called_once()
+    mock_popen.assert_called_once()
+    argv = mock_popen.call_args.args[0]
+    assert len(argv) == 1 and argv[0].endswith("sync")  # Popen([<abs>/sync])
     mock_sleep.assert_called_once_with(2)
+
+
+@pytest.mark.unit
+def test_sync_filesystems_timeout_abandons_and_proceeds(tmp_path):
+    """H6 (CodeRabbit): a sync stuck past the deadline is killed best-effort and
+    ABANDONED (no blocking wait), and the sequence proceeds without raising."""
+    monitor = _make_fs_monitor(tmp_path)
+    proc = MagicMock()
+    proc.poll.return_value = None  # never finishes
+    with patch("eneru.shutdown.filesystems.subprocess.Popen",
+               return_value=proc), \
+         patch("eneru.shutdown.filesystems._SYNC_TIMEOUT_SECONDS", 0), \
+         patch("eneru.shutdown.filesystems.time.sleep"):
+        monitor._sync_filesystems()  # must not hang or raise
+    proc.kill.assert_called_once()
+
+
+@pytest.mark.unit
+def test_sync_filesystems_error_proceeds(tmp_path):
+    """H6: a sync error (non-zero exit) is logged and the sequence proceeds."""
+    monitor = _make_fs_monitor(tmp_path)
+    proc = MagicMock()
+    proc.poll.return_value = 1
+    with patch("eneru.shutdown.filesystems.subprocess.Popen",
+               return_value=proc) as mock_popen, \
+         patch("eneru.shutdown.filesystems.time.sleep"):
+        monitor._sync_filesystems()
+    mock_popen.assert_called_once()  # the bounded-sync path WAS exercised
 
 
 @pytest.mark.unit

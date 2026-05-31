@@ -57,6 +57,16 @@ class MultiUPSCoordinator:
         self._stop_event = threading.Event()
         self._local_shutdown_lock = threading.Lock()
         self._local_shutdown_initiated = False
+        # M1: set while a committed local shutdown is running outside the lock,
+        # so recovery can't re-arm the guard mid-flight and admit a 2nd poweroff.
+        self._local_shutdown_in_flight = False
+        # If a recovery (OB->OL) arrives DURING the in-flight window we defer the
+        # re-arm to the end of _handle_local_shutdown instead of dropping it --
+        # otherwise a no-op/non-halting shutdown would stay latched forever and
+        # block the next outage (cubic P1).
+        self._rearm_after_inflight = False
+        # L5: re-entrancy guard for the SIGTERM/SIGINT handler.
+        self._signal_handling = False
         self._global_shutdown_flag = Path(config.logging.shutdown_flag_file)
 
         # Shared resources
@@ -526,72 +536,124 @@ class MultiUPSCoordinator:
         is gone -- a state worse than the one we set out to fix.
         """
         with self._local_shutdown_lock:
+            # M1: never re-arm while a local shutdown is committed and running
+            # (its drain/flush/run_command execute outside the lock). Clearing
+            # the guard mid-flight would let a concurrent trigger admit a SECOND
+            # poweroff. But we must NOT simply drop this recovery: if it's the
+            # only OB->OL transition (a no-op/non-halting shutdown), nothing else
+            # would re-arm and the next outage would be blocked (cubic P1). So
+            # remember it and let _handle_local_shutdown's finally re-arm once
+            # the sequence has returned.
+            if self._local_shutdown_in_flight:
+                self._rearm_after_inflight = True
+                return
             self._local_shutdown_initiated = False
             self._global_shutdown_flag.unlink(missing_ok=True)
 
     def _handle_local_shutdown(self, triggered_by: str):
         """Execute local shutdown with defense-in-depth protection."""
-        # Defense layer 1: in-memory lock
+        # Defense layer 1: in-memory lock. Set BOTH the "initiated" guard and the
+        # "in flight" flag atomically: in_flight tells _clear_local_shutdown_state
+        # not to re-arm the guard mid-sequence (M1), which would otherwise let an
+        # unrelated group's recovery clear the guard while the drain/flush/
+        # run_command below run outside the lock and admit a SECOND poweroff.
         proceed = False
         with self._local_shutdown_lock:
             if not self._local_shutdown_initiated:
                 self._local_shutdown_initiated = True
+                self._local_shutdown_in_flight = True
                 proceed = True
 
         if not proceed:
             return
 
-        # Defense layer 2: filesystem flag
-        self._global_shutdown_flag.touch()
+        try:
+            # Defense layer 2: filesystem flag
+            self._global_shutdown_flag.touch()
 
-        self._log(f"🚨 Local shutdown triggered by {triggered_by}")
+            self._log(f"🚨 Local shutdown triggered by {triggered_by}")
 
-        # Drain other groups if configured
-        if self.config.local_shutdown.drain_on_local_shutdown:
-            self._log("⏳ Draining all UPS groups before local shutdown...")
-            self._drain_all_groups(timeout=120)
+            # Drain other groups if configured
+            if self.config.local_shutdown.drain_on_local_shutdown:
+                self._log("⏳ Draining all UPS groups before local shutdown...")
+                self._drain_all_groups(timeout=120)
 
-        # Execute local shutdown
-        if self.config.local_shutdown.enabled:
-            self._log("🔌 Shutting down local server NOW")
-            if self.config.behavior.dry_run:
-                self._log(f"🧪 [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
-                self._global_shutdown_flag.unlink(missing_ok=True)
-            else:
-                if self._notification_worker:
-                    self._notification_worker.send(
-                        "🛑 **Shutdown Sequence Complete**\nShutting down local server NOW.",
-                        "failure",
-                        category="shutdown_summary",
-                    )
-                    # Drain in flight before halt; lossless guarantee on
-                    # what doesn't make it.
-                    self._notification_worker.flush(timeout=5)
+            # Execute local shutdown
+            if self.config.local_shutdown.enabled:
+                self._log("🔌 Shutting down local server NOW")
+                if self.config.behavior.dry_run:
+                    self._log(f"🧪 [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
+                    self._global_shutdown_flag.unlink(missing_ok=True)
                 else:
-                    time.sleep(5)
-                # Slice 3: tag this shutdown as power-loss-triggered so
-                # the next start can emit "📊 Recovered" and the Slice 4
-                # bonus folds the prev shutdown into a richer message.
-                # (Single-UPS path already does this in monitor.py;
-                # coordinator mode was missing it — caught in pre-push
-                # review.)
-                write_shutdown_marker(
-                    Path(self.config.statistics.db_directory),
-                    version=__version__,
-                    reason=REASON_SEQUENCE_COMPLETE,
-                )
-                cmd_parts = self.config.local_shutdown.command.split()
-                if self.config.local_shutdown.message:
-                    cmd_parts.append(self.config.local_shutdown.message)
-                run_command(cmd_parts)
-        else:
-            self._log("✅ Local shutdown disabled. Group shutdown complete.")
-            self._global_shutdown_flag.unlink(missing_ok=True)
+                    if self._notification_worker:
+                        self._notification_worker.send(
+                            "🛑 **Shutdown Sequence Complete**\nShutting down local server NOW.",
+                            "failure",
+                            category="shutdown_summary",
+                        )
+                        # Drain in flight before halt; lossless guarantee on
+                        # what doesn't make it.
+                        self._notification_worker.flush(timeout=5)
+                    else:
+                        time.sleep(5)
+                    # Slice 3: tag this shutdown as power-loss-triggered so
+                    # the next start can emit "📊 Recovered" and the Slice 4
+                    # bonus folds the prev shutdown into a richer message.
+                    # (Single-UPS path already does this in monitor.py;
+                    # coordinator mode was missing it — caught in pre-push
+                    # review.)
+                    write_shutdown_marker(
+                        Path(self.config.statistics.db_directory),
+                        version=__version__,
+                        reason=REASON_SEQUENCE_COMPLETE,
+                    )
+                    # Defense-in-depth: config validation already rejects an
+                    # empty/None command at load, but a programmatically-built
+                    # Config could still reach here. str()+strip guards against
+                    # None.split() / run_command([]) silently no-op'ing the
+                    # poweroff after peers were already drained.
+                    cmd_parts = str(self.config.local_shutdown.command or "").split()
+                    if not cmd_parts:
+                        self._log(
+                            "❌ local_shutdown.command is empty -- cannot power off "
+                            "the host. Set local_shutdown.command to a valid command."
+                        )
+                    else:
+                        if self.config.local_shutdown.message:
+                            cmd_parts.append(self.config.local_shutdown.message)
+                        run_command(cmd_parts)
+                        # NOTE (H9): we deliberately do NOT eagerly re-arm the
+                        # guard here. Re-entry during the SAME outage is already
+                        # blocked by the monitor's suffixed _shutdown_flag_path
+                        # (coordinator mode never clears it mid-sequence), and the
+                        # guard is re-armed on the OB/FSD->OL recovery via
+                        # power_restored_callback -> _clear_local_shutdown_state.
+                        # Clearing it right after run_command would instead
+                        # re-drain peers and re-send the "shutting down"
+                        # notification on every subsequent failed poll in a
+                        # non-halting/sandbox config (the multi-UPS analog of the
+                        # H2 failsafe re-fire).
+            else:
+                self._log("✅ Local shutdown disabled. Group shutdown complete.")
+                self._global_shutdown_flag.unlink(missing_ok=True)
 
-        # Exit if --exit-after-shutdown was specified
-        if self._exit_after_shutdown:
-            self._log("🛑 Exiting after shutdown sequence (--exit-after-shutdown)")
-            self._stop_event.set()
+            # Exit if --exit-after-shutdown was specified
+            if self._exit_after_shutdown:
+                self._log("🛑 Exiting after shutdown sequence (--exit-after-shutdown)")
+                self._stop_event.set()
+        finally:
+            # The committed sequence is no longer running outside the lock, so
+            # recovery is allowed to re-arm again. (On a real halt the process
+            # never reaches here -- the host is already going down.) If a
+            # recovery arrived DURING the in-flight window, apply the deferred
+            # re-arm now so a no-op/non-halting shutdown doesn't stay latched and
+            # block the next outage (cubic P1).
+            with self._local_shutdown_lock:
+                self._local_shutdown_in_flight = False
+                if self._rearm_after_inflight:
+                    self._rearm_after_inflight = False
+                    self._local_shutdown_initiated = False
+                    self._global_shutdown_flag.unlink(missing_ok=True)
 
     def _drain_all_groups(self, timeout: int = 120):
         """Shut down all groups' resources, then stop monitor threads.
@@ -609,12 +671,22 @@ class MultiUPSCoordinator:
         """
         self._log("⏳ Draining all UPS groups -- shutting down their resources...")
 
+        # This runs ON one of the monitor threads (the group whose trigger
+        # fired calls _handle_local_shutdown -> here, synchronously). That
+        # thread's own Thread object is in self._threads, and joining the
+        # CURRENT thread raises RuntimeError("cannot join current thread"),
+        # which would unwind out of the whole shutdown sequence BEFORE the
+        # host poweroff -- a missed local shutdown. So never join ourselves.
+        me = threading.current_thread()
+
         # Phase 1: signal every peer monitor to stop its poll loop, then
         # join with a short window so the loops exit before we run their
         # shutdown sequences.
         self._stop_event.set()
         join_deadline = time.time() + max(1, timeout // 4)
         for thread in self._threads:
+            if thread is me:
+                continue
             remaining = max(0.0, join_deadline - time.time())
             thread.join(timeout=remaining)
 
@@ -630,9 +702,11 @@ class MultiUPSCoordinator:
         # Final join window for any threads still wrapping up.
         deadline = time.time() + timeout
         for thread in self._threads:
+            if thread is me:
+                continue
             remaining = max(0.0, deadline - time.time())
             thread.join(timeout=remaining)
-        still_running = [t for t in self._threads if t.is_alive()]
+        still_running = [t for t in self._threads if t is not me and t.is_alive()]
         if still_running:
             self._log(f"⚠️ {len(still_running)} monitor(s) still running after drain timeout")
 
@@ -783,8 +857,49 @@ class MultiUPSCoordinator:
         for line in format_report(report):
             self._log(line)
 
+    def _shutdown_join_deadline(self) -> int:
+        """Bounded wait (seconds) for an in-flight shutdown to finish on signal.
+
+        Tied to the configured remote-shutdown + drain budgets so the host
+        poweroff (the last step of the sequence) can complete, and capped so a
+        wedged sequence can't block exit forever. (systemd's TimeoutStopSec is
+        the ultimate governor; this just stops us abandoning our own work.)
+        """
+        def _server_budget(srv) -> int:
+            # Full per-server wall time: pre-shutdown commands + the final
+            # command + connect + safety margin (cubic -- pre-command runtime
+            # was previously ignored, under-budgeting servers with pre-commands).
+            try:
+                pre = sum(
+                    int(c.timeout) if c.timeout is not None
+                    else int(srv.command_timeout)
+                    for c in srv.pre_shutdown_commands
+                )
+                return (pre + int(srv.command_timeout) + int(srv.connect_timeout)
+                        + int(srv.shutdown_safety_margin))
+            except (TypeError, ValueError):
+                return 0
+
+        max_remote = 0
+        # Include redundancy-group remotes too (cubic): a redundancy-group
+        # shutdown is just as much "in flight" as a per-UPS one on signal.
+        groups = list(self.config.ups_groups) + list(self.config.redundancy_groups)
+        for group in groups:
+            for srv in getattr(group, "remote_servers", []):
+                max_remote = max(max_remote, _server_budget(srv))
+        budget = max_remote + 120  # + local drain/poweroff headroom
+        if self.config.local_shutdown.drain_on_local_shutdown:
+            budget += 120
+        return min(max(budget, 30), 600)
+
     def _handle_signal(self, signum: int, frame):
         """Handle SIGTERM/SIGINT for clean shutdown."""
+        # L5: a second signal arriving during the join/teardown window must not
+        # re-run the whole teardown (double notifications, redundant joins). The
+        # first signal owns the exit; ignore the rest.
+        if self._signal_handling:
+            return
+        self._signal_handling = True
         self._log("🛑 Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
 
         self._stop_event.set()
@@ -796,11 +911,32 @@ class MultiUPSCoordinator:
         if self._api_server is not None:
             self._api_server.stop()
 
-        # Wait briefly for monitor + evaluator threads to finish
-        for thread in self._threads:
-            thread.join(timeout=5)
-        for thread in self._evaluator_threads:
-            thread.join(timeout=5)
+        # If a shutdown sequence is already in flight (a real power event, not
+        # just `systemctl stop`), a monitor/evaluator thread is mid-sequence and
+        # the host poweroff is its LAST step. Racing a 5 s join then sys.exit()
+        # would kill that thread before the poweroff runs -- a missed shutdown.
+        # When in flight, wait a generous, config-derived, bounded deadline so
+        # the sequence can finish; otherwise keep the brisk 5 s exit.
+        shutdown_in_flight = (
+            self._global_shutdown_flag.exists()
+            or any(m._shutdown_flag_path.exists() for m in self._monitors)
+        )
+        if shutdown_in_flight:
+            join_budget = self._shutdown_join_deadline()
+            self._log(
+                f"⏳ Shutdown sequence in progress; waiting up to {join_budget}s "
+                "for it to complete (host poweroff) before exit."
+            )
+        else:
+            join_budget = 5
+
+        # Deadline-based join so the TOTAL wait is bounded by join_budget, not
+        # join_budget per thread. The signal handler runs on the main thread, so
+        # none of these is the current thread (no self-join hazard).
+        deadline = time.time() + join_budget
+        for thread in (*self._threads, *self._evaluator_threads):
+            remaining = max(0.0, deadline - time.time())
+            thread.join(timeout=remaining)
 
         # v5.2.1: see UPSGroupMonitor._cleanup_and_exit for the full
         # rationale. Drain pending non-lifecycle rows first, then enqueue
@@ -857,7 +993,7 @@ class MultiUPSCoordinator:
                 # row never landed in SQLite. Ship eagerly via Apprise
                 # so the lifecycle stop isn't silently lost.
                 try:
-                    self._notification_worker._send_via_apprise(
+                    self._notification_worker._send_via_apprise_bounded(
                         body, notify_type,
                     )
                 except Exception:

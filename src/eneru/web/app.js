@@ -52,7 +52,16 @@ async function api(path, opts) {
   const headers = opts.headers || {};
   if (token()) headers["Authorization"] = "Bearer " + token();
   if (opts.body) headers["Content-Type"] = "application/json";
-  const res = await fetch(path, { method: opts.method || "GET", headers, body: opts.body });
+  let res;
+  try {
+    res = await fetch(path, { method: opts.method || "GET", headers, body: opts.body });
+  } catch (_e) {
+    // L14: a network error (daemon down, or connectivity lost during a power
+    // event -- exactly when the dashboard matters) rejects the fetch. Return a
+    // non-ok result with status 0 so callers show a "connection lost" indicator
+    // instead of an unhandled rejection that silently freezes the poll loop.
+    return { ok: false, status: 0, data: null };
+  }
   if (res.status === 401) { setToken(""); refreshAuthUI(); }
   let data = null;
   try { data = await res.json(); } catch (_e) { /* non-JSON (static) */ }
@@ -362,9 +371,12 @@ function updateEventSourceFilter(upsRows, groups) {
   (upsRows || []).forEach((u) => knownEventSources.push({
     value: u.name, label: u.label || u.name,
   }));
-  (groups || []).forEach((g) => knownEventSources.push({
-    value: "redundancy:" + g.name, label: "redundancy:" + g.name,
-  }));
+  // M8: do NOT offer "redundancy:<name>" as an event source. Redundancy-group
+  // power events are written to the text log only -- they never land in any
+  // per-UPS stats DB, so /api/v1/events can never return rows for them and the
+  // filter would be permanently empty. (`groups` is accepted for signature
+  // stability / future use once redundancy events are persisted.)
+  void groups;
   const sel = document.getElementById("event-source-filter");
   const prev = sel.value;
   sel.replaceChildren(el("option", { value: "", text: "All sources" }));
@@ -586,21 +598,49 @@ function observeGraphResize() {
 
 // ----- control panel (5c) -----
 
+// L15: cache key for the built control panel. The command/variable lists are
+// config-static, so rebuilding the panel every poll was pure waste -- 2 extra
+// requests per UPS each cycle AND it wiped any half-typed variable value. We
+// rebuild only when the auth token or the set of UPS names actually changes.
+let _controlBuiltKey = null;
+
 async function renderControl(payload) {
   const sec = document.getElementById("control-section");
   const panel = document.getElementById("control-panel");
   // Control is only meaningful when authenticated and nut_control is enabled.
   const nutEnabled = cfgSnapshot && cfgSnapshot.nutControl &&
     cfgSnapshot.nutControl.enabled;
-  if (!token() || !nutEnabled) { sec.hidden = true; return; }
+  if (!token() || !nutEnabled) {
+    sec.hidden = true;
+    _controlBuiltKey = null;  // rebuild when control becomes available again
+    return;
+  }
   sec.hidden = false;
-  panel.replaceChildren();
   const rows = (payload && payload.ups) || [];
+  // Key on token + UPS set AND the allowlists, so a live config reload that
+  // changes allowed commands/variables (without changing token or UPS set)
+  // still busts the cache and rebuilds (CodeRabbit). /api/v1/config exposes the
+  // allowlists when authenticated.
+  const nc = (cfgSnapshot && cfgSnapshot.nutControl) || {};
+  const key = JSON.stringify({
+    token: token(),
+    ups: rows.map((u) => u.name),
+    commands: nc.allowedCommands || [],
+    variables: nc.allowedVariables || [],
+  });
+  if (key === _controlBuiltKey) return;  // already built for this token + UPS set + allowlists
+  // Build into a detached fragment and commit the cache key only once EVERY
+  // fetch succeeded (cubic P2). Setting the key up-front meant a transient
+  // commands/variables fetch failure built an empty panel that then never
+  // rebuilt for the rest of the session.
+  let builtOk = true;
+  const frag = document.createDocumentFragment();
   for (const u of rows) {
     const box = el("div", { class: "control-ups" }, [el("h3", { text: u.label || u.name })]);
     box.appendChild(el("h4", { text: "Commands" }));
     const cmds = el("div", { class: "cmds" });
     const res = await api("/api/v1/ups/" + encodeURIComponent(u.name) + "/commands");
+    if (!res.ok) builtOk = false;
     ((res.data && res.data.commands) || []).forEach((c) => {
       const btn = el("button", { type: "button", text: c });
       btn.addEventListener("click", () => runCommand(u.name, c));
@@ -609,9 +649,13 @@ async function renderControl(payload) {
     if (!cmds.childNodes.length) cmds.appendChild(el("span", { class: "who", text: "No allowlisted commands." }));
     box.appendChild(cmds);
     box.appendChild(el("h4", { text: "Variables" }));
-    box.appendChild(await renderVariableForms(u.name));
-    panel.appendChild(box);
+    const vres = await renderVariableForms(u.name);
+    if (!vres.ok) builtOk = false;
+    box.appendChild(vres.node);
+    frag.appendChild(box);
   }
+  panel.replaceChildren(frag);
+  _controlBuiltKey = builtOk ? key : null;  // retry next poll if anything failed
 }
 
 async function renderVariableForms(ups) {
@@ -638,7 +682,7 @@ async function renderVariableForms(ups) {
   if (!vars.childNodes.length) {
     vars.appendChild(el("span", { class: "who", text: "No allowlisted variables." }));
   }
-  return vars;
+  return { node: vars, ok: res.ok };  // ok feeds renderControl's cache-key commit
 }
 
 async function runCommand(ups, command) {
@@ -762,6 +806,8 @@ async function refresh() {
   const ups = await api("/api/v1/ups");
   if (ups.ok) {
     renderUps(ups.data); renderControl(ups.data); renderBanner(); showError("");
+  } else if (ups.status === 0) {
+    showError("⚠️ Connection lost — retrying…");  // L14: network/daemon down
   } else if (ups.status !== 401) {
     showError("Could not load UPS status (HTTP " + ups.status + ")");
   }

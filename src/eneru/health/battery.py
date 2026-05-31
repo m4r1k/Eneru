@@ -23,7 +23,10 @@ class BatteryMonitorMixin:
         if not is_numeric(current_battery):
             return 0.0
 
-        current_battery_float = float(current_battery)
+        # M12: clamp out-of-range firmware readings. A transient negative or
+        # >100 charge from flaky firmware would otherwise inflate the depletion
+        # rate that feeds the T3 shutdown trigger.
+        current_battery_float = max(0.0, min(100.0, float(current_battery)))
         cutoff_time = current_time - self.config.triggers.depletion.window
 
         self.state.battery_history = deque(
@@ -32,6 +35,13 @@ class BatteryMonitorMixin:
         )
         self.state.battery_history.append((current_time, current_battery_float))
 
+        # L17 (evaluated, deferred): this file is written every poll but not
+        # read back at startup. It's a forensic record today. Reading it back to
+        # let depletion-rate survive a daemon restart mid-outage is entangled
+        # with the on-battery deque reset in monitor._handle_on_battery (a fresh
+        # OB transition clears battery_history), which is the same
+        # restart-adoption area as the H3 work -- so a safe cross-restart
+        # read-back is a larger change than a Low warrants and is deferred.
         try:
             # with_name(name + '.tmp') preserves the per-UPS suffix on the
             # path (e.g. 'ups-battery-history.ups1') so concurrent writers
@@ -52,7 +62,23 @@ class BatteryMonitorMixin:
                 f"⚠️ Battery history persist failed: {exc}"
             )
 
-        if len(self.state.battery_history) < 30:
+        # Historically this required a flat 30 samples. But the deque is first
+        # pruned to `depletion.window` seconds, so the most samples that can ever
+        # survive is ~window/check_interval. With a slow poll interval (e.g.
+        # check_interval=11, window=300 -> ~27 samples) a flat 30 is never
+        # reached and the depletion trigger (T3) is silently dead forever.
+        # Require min(30, window/check_interval) -- capped by what the window can
+        # actually hold so T3 stays armed -- with a floor of 2 (a rate needs two
+        # points). The floor must NOT exceed the holdable count, or tiny windows
+        # would re-disable T3 (cubic P2); 2 points is the physical minimum, so a
+        # window smaller than ~2*check_interval genuinely can't compute a rate.
+        try:
+            check_interval = max(1, int(self.config.ups.check_interval))
+        except (TypeError, ValueError):
+            check_interval = 1
+        window = self.config.triggers.depletion.window
+        min_samples = min(30, max(2, window // check_interval))
+        if len(self.state.battery_history) < min_samples:
             return 0.0
 
         oldest_time, oldest_battery = self.state.battery_history[0]
@@ -112,8 +138,13 @@ class BatteryMonitorMixin:
         drop = prev_charge - current_charge
         elapsed = current_time - prev_time if prev_time > 0 else 0
 
-        # Threshold: >20% drop within 120 seconds while on line power
-        if drop > 20 and elapsed < 120:
+        # Threshold: >20% drop within 120 seconds while on line power.
+        # M11: only START a fresh detection when none is pending. A battery that
+        # keeps dropping fast every poll previously re-entered here each time,
+        # resetting pending_anomaly_count to 1 so the 3-poll confirmation was
+        # never reached. With a pending anomaly we fall through to the
+        # confirmation branch below, which increments the counter instead.
+        if drop > 20 and elapsed < 120 and self.state.pending_anomaly_charge < 0:
             # First detection -- record as pending, wait for confirmation
             self.state.pending_anomaly_charge = current_charge
             self.state.pending_anomaly_prev_charge = prev_charge

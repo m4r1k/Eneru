@@ -51,6 +51,13 @@ SCHEMA_VERSION = 5
 BUCKET_5MIN = 5 * 60
 BUCKET_HOURLY = 60 * 60
 
+# Numeric sample columns that query_range may select. `metric` is interpolated
+# into the SQL column position there, so this internal allowlist (L11) is
+# defense-in-depth: callers already validate against status.HISTORY_METRICS, but
+# a future caller that forgets cannot inject. Derived from SAMPLE_FIELDS so it
+# stays in sync; the non-numeric/identity columns are excluded.
+_QUERYABLE_METRICS = frozenset(SAMPLE_FIELDS) - {"ts", "status", "connection_state"}
+
 
 def _to_float(value) -> Optional[float]:
     """Lenient float coercion. Returns ``None`` for empty / non-numeric."""
@@ -630,6 +637,15 @@ class StatsStore:
         cutoff_raw = now - self.retention_raw_hours * 3600
         cutoff_5min = now - self.retention_5min_days * 86400
         cutoff_hourly = now - self.retention_hourly_days * 86400
+        # M5: align the raw/5-min cutoffs DOWN to the next-tier bucket boundary
+        # so purge only ever deletes WHOLE buckets' worth of rows. Otherwise it
+        # trims the early rows of the bucket straddling the cutoff, and the next
+        # aggregate() re-derives that already-finalized bucket from the reduced
+        # set -- overwriting its avg/min/max with wrong values that then
+        # propagate into the hourly tier. Keeping at most one extra bucket of raw
+        # data (~5 min) / 5-min data (~1 h) is a negligible retention cost.
+        cutoff_raw = (cutoff_raw // BUCKET_5MIN) * BUCKET_5MIN
+        cutoff_5min = (cutoff_5min // BUCKET_HOURLY) * BUCKET_HOURLY
         try:
             with self._db_lock, self._conn:
                 deleted_raw = self._conn.execute(
@@ -1093,6 +1109,11 @@ class StatsStore:
         if self._conn is None:
             return []
 
+        # L11: reject any metric not on the internal allowlist before it reaches
+        # the interpolated column position.
+        if metric not in _QUERYABLE_METRICS:
+            return []
+
         tier = prefer_tier or self._pick_tier(start_ts, end_ts)
         try:
             with self._db_lock:
@@ -1176,14 +1197,10 @@ class StatsStore:
     def from_connection(cls, conn: sqlite3.Connection) -> "StatsStore":
         """Wrap an existing SQLite connection without taking ownership."""
         store = cls(Path(":memory:"))
-        # __init__ already opened a throw-away in-memory SQLite handle
-        # to keep the dataclass invariants happy. Close it before
-        # rebinding to the caller-owned connection so the wrapper
-        # doesn't leak one sqlite handle per call.
-        try:
-            store._conn.close()
-        except Exception:
-            pass
+        # N5: __init__ does NOT open a connection (self._conn stays None until
+        # open()), so there is no throw-away handle to close here -- the previous
+        # store._conn.close() always raised AttributeError into a swallowed
+        # except. Just rebind to the caller-owned connection.
         store._conn = conn
         return store
 

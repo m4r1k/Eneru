@@ -8,6 +8,7 @@ flush(), and the memory-buffer drain on first ``register_store``.
 """
 
 import pytest
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -111,6 +112,35 @@ class TestWorkerLifecycle:
         config.notifications.urls = []
         worker = NotificationWorker(config)
         assert worker.start() is False
+
+    @pytest.mark.unit
+    def test_send_via_apprise_bounded_returns_result(self):
+        """M6: bounded eager send returns the underlying send result."""
+        worker = NotificationWorker(Config())
+        with patch.object(worker, "_send_via_apprise", return_value=True) as inner:
+            assert worker._send_via_apprise_bounded("b", "info") is True
+        inner.assert_called_once_with("b", "info")
+        with patch.object(worker, "_send_via_apprise", return_value=False):
+            assert worker._send_via_apprise_bounded("b", "info") is False
+
+    @pytest.mark.unit
+    def test_send_via_apprise_bounded_times_out(self):
+        """M6: a hung eager send is abandoned after the timeout (returns False)
+        so the SIGTERM handler isn't blocked; the row stays pending."""
+        worker = NotificationWorker(Config())
+        started = threading.Event()
+        release = threading.Event()
+
+        def _slow(body, notify_type):
+            started.set()
+            release.wait(5)
+            return True
+
+        with patch.object(worker, "_send_via_apprise", side_effect=_slow):
+            result = worker._send_via_apprise_bounded("b", "info", timeout=0.05)
+        assert result is False
+        assert started.is_set()
+        release.set()  # let the daemon thread unwind
 
     @pytest.mark.unit
     @patch("eneru.notifications.APPRISE_AVAILABLE", True)
@@ -838,14 +868,18 @@ class TestNotificationWorkerStartEarlyReturns:
         minimal_config.notifications.urls = ["bogus://not-a-real-scheme/x"]
         worker = NotificationWorker(minimal_config)
 
-        with patch("eneru.notifications.APPRISE_AVAILABLE", True):
+        # L1: patch the whole `apprise` module object (like the sibling tests),
+        # not its `.Apprise` attribute -- when the optional apprise extra isn't
+        # installed `eneru.notifications.apprise` is None, and patching an
+        # attribute of None raises AttributeError. This keeps the test hermetic.
+        with patch("eneru.notifications.APPRISE_AVAILABLE", True), \
+                patch("eneru.notifications.apprise") as mock_apprise:
             fake_apprise_instance = MagicMock()
             # add() returns False for every URL, len() returns 0
             fake_apprise_instance.add = MagicMock(return_value=False)
             fake_apprise_instance.__len__ = MagicMock(return_value=0)
-            with patch("eneru.notifications.apprise.Apprise",
-                       return_value=fake_apprise_instance):
-                assert worker.start() is False
+            mock_apprise.Apprise.return_value = fake_apprise_instance
+            assert worker.start() is False
 
         out = capsys.readouterr().out
         assert "Failed to add notification URL" in out or "No valid notification URLs" in out

@@ -454,6 +454,13 @@ def _synthesize_loopback_if_needed(
         owner.remote_servers.append(synthesized)
     else:
         # Implicit single-UPS mode with no groups — attach to top-level.
+        # L18 (evaluated, degenerate-only): when ups_groups is EMPTY,
+        # config.remote_servers is a read-only property returning a throwaway
+        # list, so this append is lost and the daemon later aborts with a
+        # less-than-obvious "no loopback" error. A real config always has at
+        # least one UPS group (it's required to configure local capabilities),
+        # so this only bites a degenerate/empty config that fails to start
+        # anyway -- left as-is rather than fabricating a synthetic group.
         config.remote_servers.append(synthesized)
 
     print(
@@ -1573,11 +1580,13 @@ def _resolve_password(args):
         return auth.generate_password(), True
     if getattr(args, "password_stdin", False):
         data = sys.stdin.read()
-        # Strip a single trailing newline (LF or CRLF — Windows/CI pipes send
-        # \r\n), preserving any other characters the password may contain.
-        if data.endswith("\n"):
-            data = data[:-1]
-        if data.endswith("\r"):
+        # Strip a single trailing LINE TERMINATOR (CRLF from Windows/CI pipes,
+        # or LF), preserving every other character. L20: a BARE trailing "\r"
+        # (no following "\n") is NOT a line terminator -- it's a legitimate
+        # password character -- so it must be kept, not stripped.
+        if data.endswith("\r\n"):
+            data = data[:-2]
+        elif data.endswith("\n"):
             data = data[:-1]
         password = data
         if not password:
@@ -1595,6 +1604,17 @@ def _resolve_password(args):
 def _cmd_user_create(args):
     """Create a local user account."""
     store = _resolve_auth_store(args)
+    # L19: validate username + role BEFORE prompting for the password, so an
+    # invalid name/role fails fast instead of after the operator types (and
+    # confirms) a password that's about to be thrown away.
+    # Capture the NORMALIZED (stripped) name back into args (cubic): a
+    # whitespace-padded --username otherwise passes validation here but the
+    # success message and any later lookup key on the raw padded string.
+    try:
+        args.username = auth._validate_username(args.username)
+        auth._validate_role(args.role)
+    except auth.AuthError as exc:
+        raise SystemExit(f"ERROR: {exc}")
     password, generated = _resolve_password(args)
     try:
         store.create_user(args.username, password, role=args.role)
@@ -1611,6 +1631,13 @@ def _cmd_user_create(args):
 def _cmd_user_passwd(args):
     """Reset a user's password."""
     store = _resolve_auth_store(args)
+    # L19: validate the username format before prompting for the new password.
+    # Canonicalize to the normalized name (cubic): set_password() keys the SQL
+    # lookup on the exact string, so a padded name would prompt-then-miss.
+    try:
+        args.username = auth._validate_username(args.username)
+    except auth.AuthError as exc:
+        raise SystemExit(f"ERROR: {exc}")
     password, generated = _resolve_password(args)
     try:
         store.set_password(args.username, password)

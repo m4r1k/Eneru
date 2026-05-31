@@ -95,6 +95,18 @@ def test_user_create_invalid_role_errors(db):
                                  role="viewer"))
 
 
+@pytest.mark.unit
+def test_user_create_normalizes_padded_username(db, capsys):
+    # cubic: a whitespace-padded --username must be canonicalized so the
+    # success message and any later lookup key on the SAME (stripped) name.
+    cli._cmd_user_create(_ns(username="  alice  ", auth_db=db, generate=True))
+    out = capsys.readouterr().out
+    assert "Created user 'alice'" in out  # printed name is normalized
+    store = auth.AuthStore(db)
+    assert store.get_user("alice") is not None
+    assert store.get_user("  alice  ") is None  # not stored padded
+
+
 # ----- user list / show / passwd / delete -----
 
 @pytest.mark.unit
@@ -134,6 +146,15 @@ def test_user_passwd_generate(db, capsys):
 def test_user_passwd_missing_errors(db):
     with pytest.raises(SystemExit):
         cli._cmd_user_passwd(_ns(username="ghost", auth_db=db, generate=True))
+
+
+@pytest.mark.unit
+def test_user_passwd_normalizes_padded_username(db, capsys):
+    # cubic: set_password() keys the lookup on the exact string; a padded name
+    # must be normalized so an existing user is found (not prompt-then-miss).
+    auth.AuthStore(db).create_user("alice", "old")
+    cli._cmd_user_passwd(_ns(username="  alice  ", auth_db=db, generate=True))
+    assert "Updated password for 'alice'" in capsys.readouterr().out
 
 
 @pytest.mark.unit

@@ -350,31 +350,31 @@ class TestMultiUPSCoordinator:
         assert len(calls) == 0
 
     @pytest.mark.unit
-    def test_defense_in_depth_lock(self):
-        """Threading lock prevents double local shutdown."""
+    def test_defense_in_depth_lock(self, tmp_path):
+        """L24: the REAL _handle_local_shutdown guard prevents a double local
+        shutdown -- a second call (e.g. a second UPS group tripping) returns
+        before running the body. Drives the real method, not a copy of it."""
         config = self._make_config(
             [UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True)],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "global-shutdown-flag"),
+            ),
             local_shutdown=LocalShutdownConfig(enabled=False),
         )
         coord = MultiUPSCoordinator(config)
-        coord._log = lambda msg: None
+        logs = []
+        coord._log = lambda msg: logs.append(msg)
         coord._notification_worker = None
 
-        shutdown_count = []
-
-        def counting_shutdown(label):
-            proceed = False
-            with coord._local_shutdown_lock:
-                if not coord._local_shutdown_initiated:
-                    coord._local_shutdown_initiated = True
-                    proceed = True
-            if proceed:
-                shutdown_count.append(label)
-
-        coord._handle_local_shutdown = counting_shutdown
         coord._handle_local_shutdown("UPS1")
         coord._handle_local_shutdown("UPS2")
-        assert len(shutdown_count) == 1
+
+        # The body's "triggered by" line fires once; the second call hit the
+        # guard (proceed=False) and returned before logging anything.
+        triggered = [m for m in logs if "Local shutdown triggered by" in m]
+        assert triggered == ["🚨 Local shutdown triggered by UPS1"]
 
     @pytest.mark.unit
     def test_clear_local_shutdown_state_resets_lock_and_flag(self, tmp_path):
@@ -410,6 +410,37 @@ class TestMultiUPSCoordinator:
         assert not flag_path.exists(), (
             "global flag must be cleared on POWER_RESTORED"
         )
+
+    @pytest.mark.unit
+    def test_clear_local_shutdown_state_refuses_mid_flight(self, tmp_path):
+        """M1: while a local shutdown is committed and running outside the lock,
+        an unrelated group's recovery must NOT re-arm the guard -- otherwise a
+        concurrent trigger could admit a SECOND poweroff. Once the sequence
+        returns (in_flight cleared), recovery re-arms normally."""
+        flag_path = tmp_path / "global-shutdown-flag"
+        config = self._make_config(
+            [UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True)],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(flag_path),
+            ),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._local_shutdown_initiated = True
+        coord._local_shutdown_in_flight = True
+        flag_path.touch()
+
+        coord._clear_local_shutdown_state()
+        assert coord._local_shutdown_initiated is True, "must not re-arm mid-flight"
+        assert flag_path.exists(), "flag must survive a mid-flight clear attempt"
+
+        # Sequence finished -> recovery may re-arm.
+        coord._local_shutdown_in_flight = False
+        coord._clear_local_shutdown_state()
+        assert coord._local_shutdown_initiated is False
+        assert not flag_path.exists()
 
     @pytest.mark.unit
     def test_clear_local_shutdown_state_idempotent(self, tmp_path):
@@ -696,6 +727,46 @@ class TestDrainOnLocalShutdown:
 
         coord._drain_all_groups(timeout=5)
 
+        mock_monitor._execute_shutdown_sequence.assert_called_once()
+
+    @pytest.mark.unit
+    def test_drain_skips_current_thread_no_self_join_crash(self, tmp_path):
+        """Regression (C1): _drain_all_groups runs ON a monitor thread whose
+        own Thread object is in self._threads. Joining the current thread
+        raises RuntimeError('cannot join current thread'), which previously
+        unwound the whole sequence BEFORE the host poweroff -- a missed
+        shutdown. The drain must skip itself and still drain peers."""
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True),
+            ],
+            behavior=BehaviorConfig(dry_run=True),
+            logging=LoggingConfig(
+                shutdown_flag_file=str(tmp_path / "flag"),
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+            ),
+            local_shutdown=LocalShutdownConfig(
+                enabled=False,
+                drain_on_local_shutdown=True,
+            ),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+
+        mock_monitor = MagicMock()
+        mock_monitor._shutdown_flag_path = tmp_path / "flag-ups2"
+        mock_monitor._shutdown_flag_path.unlink(missing_ok=True)
+        mock_monitor._log_prefix = "[UPS2] "
+        coord._monitors = [mock_monitor]
+        # The bug trigger: the CURRENT thread is in _threads (real runtime
+        # shape -- the firing group's poll thread drives the drain).
+        coord._threads = [threading.current_thread()]
+
+        # Pre-fix this raised RuntimeError; post-fix it returns cleanly.
+        coord._drain_all_groups(timeout=1)
+
+        # And the peer drain must still have happened.
         mock_monitor._execute_shutdown_sequence.assert_called_once()
 
     @pytest.mark.unit
@@ -1440,8 +1511,13 @@ class TestCoordinatorHandleSignal:
         with patch("eneru.multi_ups.sys.exit"):
             coord._handle_signal(_signal.SIGINT, None)
 
+        # Deadline-based join (H10): each thread is joined once with a positive,
+        # bounded timeout (<= the 5 s no-in-flight budget), not necessarily the
+        # exact integer 5 -- it's `deadline - now`.
         for thread in threads:
-            thread.join.assert_called_once_with(timeout=5)
+            thread.join.assert_called_once()
+            timeout = thread.join.call_args.kwargs["timeout"]
+            assert 0 < timeout <= 5
 
     @pytest.mark.unit
     def test_handle_signal_enqueues_stop_after_flush_and_stop(self, tmp_path):
@@ -2030,8 +2106,10 @@ ups:
         rh2.stop.assert_called_once()
         coord._mqtt_publisher.stop.assert_called_once()
         coord._api_server.stop.assert_called_once()
-        t1.join.assert_called_once_with(timeout=5)
-        t2.join.assert_called_once_with(timeout=5)
+        # Deadline-based join (H10): bounded positive timeout, not exactly 5.
+        for thread in (t1, t2):
+            thread.join.assert_called_once()
+            assert 0 < thread.join.call_args.kwargs["timeout"] <= 5
 
     @pytest.mark.unit
     def test_handle_signal_skips_lifecycle_notif_during_upgrade(self, tmp_path):
@@ -2466,8 +2544,8 @@ class TestHandleSignalDeferredScheduling:
 
     @pytest.mark.unit
     def test_eager_apprise_fallback_swallows_exception(self, tmp_path):
-        """When `_send_via_apprise` raises in the no-store fallback path,
-        the handler swallows the exception (lines 726-727)."""
+        """When `_send_via_apprise_bounded` raises in the no-store fallback
+        path, the handler swallows the exception."""
         config = _coord_config(tmp_path)
         coord = MultiUPSCoordinator(config)
         coord._log = MagicMock()
@@ -2479,7 +2557,7 @@ class TestHandleSignalDeferredScheduling:
         worker.send.return_value = None  # No stores registered → returns None
         worker._stores_lock = threading.Lock()
         worker._stores = []
-        worker._send_via_apprise.side_effect = RuntimeError("apprise gone")
+        worker._send_via_apprise_bounded.side_effect = RuntimeError("apprise gone")
         coord._notification_worker = worker
 
         with patch("eneru.multi_ups.read_upgrade_marker", return_value=None), \
@@ -2491,4 +2569,180 @@ class TestHandleSignalDeferredScheduling:
 
         sched.assert_not_called()
         # Eager fallback was attempted (and its exception swallowed).
-        worker._send_via_apprise.assert_called_once()
+        worker._send_via_apprise_bounded.assert_called_once()
+
+
+# ==============================================================================
+# COVERAGE: H10 join-deadline, in-flight signal branch, control-event routing
+# ==============================================================================
+
+class TestCoordinatorShutdownJoinAndAudit:
+    """Cover the rc10 additions: _shutdown_join_deadline, the in-flight signal
+    branch, and record_control_event routing."""
+
+    def _cfg(self, tmp_path, *, servers=None, drain=False):
+        from types import SimpleNamespace  # noqa: F401 (kept local)
+        return Config(
+            ups_groups=[UPSGroupConfig(
+                ups=UPSConfig(name="UPS1"), is_local=True,
+                remote_servers=servers or [],
+            )],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "flag"),
+            ),
+            local_shutdown=LocalShutdownConfig(
+                enabled=True, drain_on_local_shutdown=drain),
+        )
+
+    @pytest.mark.unit
+    def test_shutdown_join_deadline_from_remote_budget(self, tmp_path):
+        """H10: budget = max remote (cmd+connect+margin) + 120 drain headroom."""
+        srv = RemoteServerConfig(
+            name="nas", host="10.0.0.1", user="root",
+            command_timeout=20, connect_timeout=10, shutdown_safety_margin=60)
+        coord = MultiUPSCoordinator(self._cfg(tmp_path, servers=[srv]))
+        assert coord._shutdown_join_deadline() == 20 + 10 + 60 + 120
+
+    @pytest.mark.unit
+    def test_shutdown_join_deadline_capped_and_floored(self, tmp_path):
+        """H10: the deadline is clamped to [30, 600]."""
+        big = RemoteServerConfig(
+            name="nas", host="10.0.0.1", user="root",
+            command_timeout=9999, connect_timeout=0, shutdown_safety_margin=0)
+        coord = MultiUPSCoordinator(self._cfg(tmp_path, servers=[big], drain=True))
+        assert coord._shutdown_join_deadline() == 600  # capped
+        # No remote servers -> just the 120 headroom (above the 30 floor).
+        coord2 = MultiUPSCoordinator(self._cfg(tmp_path))
+        assert coord2._shutdown_join_deadline() == 120
+
+    @pytest.mark.unit
+    def test_shutdown_join_deadline_includes_redundancy_and_pre_commands(self, tmp_path):
+        """cubic: the budget must count redundancy-group remotes AND pre-shutdown
+        command runtime, not just per-UPS final commands."""
+        from eneru import RedundancyGroupConfig, RemoteCommandConfig
+        rg_srv = RemoteServerConfig(
+            name="rnas", host="10.0.0.9", user="root",
+            command_timeout=10, connect_timeout=5, shutdown_safety_margin=20,
+            pre_shutdown_commands=[RemoteCommandConfig(command="echo x", timeout=40)],
+        )
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True)],
+            redundancy_groups=[RedundancyGroupConfig(
+                name="rg", ups_sources=["UPS1"], remote_servers=[rg_srv])],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "s"),
+                battery_history_file=str(tmp_path / "h"),
+                shutdown_flag_file=str(tmp_path / "f")),
+        )
+        coord = MultiUPSCoordinator(config)
+        # rg_srv: pre(40) + cmd(10) + connect(5) + margin(20) = 75; + 120 headroom.
+        assert coord._shutdown_join_deadline() == 75 + 120
+
+    @pytest.mark.unit
+    def test_shutdown_join_deadline_ignores_non_int_timeout(self, tmp_path):
+        """A server with a non-int timeout is skipped in the budget calc, not
+        crashed (defensive int() guard)."""
+        bad = RemoteServerConfig(
+            name="bad", host="10.0.0.1", user="root",
+            command_timeout="oops", connect_timeout=0, shutdown_safety_margin=0)
+        coord = MultiUPSCoordinator(self._cfg(tmp_path, servers=[bad]))
+        # bad server contributes nothing -> just the 120 drain headroom.
+        assert coord._shutdown_join_deadline() == 120
+
+    @pytest.mark.unit
+    def test_inflight_recovery_defers_rearm(self, tmp_path):
+        """cubic P1: a recovery that races the in-flight window does not drop the
+        re-arm -- _clear_local_shutdown_state defers it, and the finally of
+        _handle_local_shutdown applies it so the guard isn't left stuck after a
+        non-halting shutdown."""
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True)],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "flag"),
+            ),
+            local_shutdown=LocalShutdownConfig(
+                enabled=False, drain_on_local_shutdown=True),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda m: None
+        coord._notification_worker = None
+        coord._monitors = []
+        coord._threads = []
+
+        seen = {}
+
+        def fake_drain(timeout=120):
+            # A concurrent OB->OL recovery fires while the shutdown is in flight.
+            coord._clear_local_shutdown_state()
+            seen["initiated_midflight"] = coord._local_shutdown_initiated
+            seen["rearm_pending"] = coord._rearm_after_inflight
+
+        coord._drain_all_groups = fake_drain
+        coord._handle_local_shutdown("UPS1")
+
+        # Mid-flight: the guard was NOT cleared (no second-poweroff window)...
+        assert seen["initiated_midflight"] is True
+        assert seen["rearm_pending"] is True
+        # ...but the deferred re-arm fired in the finally, so we're not stuck.
+        assert coord._local_shutdown_initiated is False
+        assert coord._rearm_after_inflight is False
+
+    @pytest.mark.unit
+    def test_handle_signal_in_flight_waits_longer(self, tmp_path):
+        """H10: with a shutdown already in flight, the signal handler logs the
+        longer bounded wait instead of the brisk 5s exit."""
+        coord = MultiUPSCoordinator(self._cfg(tmp_path))
+        logs = []
+        coord._log = lambda m: logs.append(m)
+        coord._notification_worker = None
+        coord._threads = []
+        coord._evaluator_threads = []
+        coord._global_shutdown_flag.touch()  # shutdown in flight
+        with patch("eneru.multi_ups.read_upgrade_marker", return_value=None), \
+             patch("eneru.multi_ups.read_shutdown_marker", return_value=None), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.sys.exit"):
+            coord._handle_signal(15, None)
+        assert any("Shutdown sequence in progress" in m for m in logs), logs
+
+    @pytest.mark.unit
+    def test_handle_signal_reentrancy_guard(self, tmp_path):
+        """L5: a second signal during teardown is ignored."""
+        coord = MultiUPSCoordinator(self._cfg(tmp_path))
+        coord._log = lambda m: None
+        coord._notification_worker = None
+        coord._threads = []
+        coord._evaluator_threads = []
+        coord._signal_handling = True  # pretend a handler is already running
+        # Must return immediately without raising SystemExit.
+        coord._handle_signal(15, None)
+
+    @pytest.mark.unit
+    def test_record_control_event_routes_to_matching_store(self, tmp_path):
+        """Audit groundwork: a control event lands in the matching UPS's store."""
+        from types import SimpleNamespace
+        coord = MultiUPSCoordinator(self._cfg(tmp_path))
+        mon = MagicMock()
+        mon.config.ups_groups = [SimpleNamespace(ups=SimpleNamespace(name="UPS1"))]
+        store = MagicMock()
+        mon._stats_store = store
+        coord._monitors = [mon]
+        coord.record_control_event("UPS1", "CONTROL_COMMAND", "ran beeper.toggle")
+        store.log_event.assert_called_once_with("CONTROL_COMMAND", "ran beeper.toggle")
+
+    @pytest.mark.unit
+    def test_record_control_event_falls_back_to_first_store(self, tmp_path):
+        """Unknown/reload UPS name -> first monitor's store."""
+        from types import SimpleNamespace
+        coord = MultiUPSCoordinator(self._cfg(tmp_path))
+        mon = MagicMock()
+        mon.config.ups_groups = [SimpleNamespace(ups=SimpleNamespace(name="UPS1"))]
+        store = MagicMock()
+        mon._stats_store = store
+        coord._monitors = [mon]
+        coord.record_control_event("", "CONFIG_RELOAD", "reloaded")
+        store.log_event.assert_called_once_with("CONFIG_RELOAD", "reloaded")

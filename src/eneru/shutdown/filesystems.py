@@ -1,15 +1,78 @@
 """Filesystem sync + unmount phase of the shutdown sequence."""
 
-import os
 import shlex
+import shutil
+import subprocess
 import time
 from typing import List
 
 from eneru.utils import run_command
 
+# Resolve `sync` to an absolute path once. The previous os.sync() was PATH-free;
+# switching to a subprocess (to get a real timeout) introduced a PATH dependency
+# (cubic). A hardened systemd unit with a restricted PATH could then fail to find
+# `sync` and skip the flush entirely. Prefer the PATH lookup, falling back to the
+# canonical coreutils location so it resolves even with an empty PATH.
+_SYNC_BIN = shutil.which("sync") or "/bin/sync"
+
+# Wall-clock bound for the filesystem sync. A bare os.sync() blocks until EVERY
+# mounted filesystem flushes; a hung/unreachable network mount (NFS/CIFS with a
+# dead server, on the same failing power circuit) would leave it forever in
+# uninterruptible D-state and the host would never reach poweroff. The kernel
+# re-syncs during halt anyway, so abandoning a stuck sync after this many
+# seconds is safe and strictly better than never powering off.
+_SYNC_TIMEOUT_SECONDS = 30
+
 
 class FilesystemShutdownMixin:
     """Mixin: filesystem sync and unmount during shutdown."""
+
+    def _bounded_sync(self, label: str) -> None:
+        """Run ``sync`` with a TRUE wall-clock bound so a hung mount can't stall
+        the poweroff.
+
+        Uses ``Popen`` + a polling deadline rather than ``subprocess.run(timeout=)``
+        or the unbounded, uninterruptible ``os.sync()``. The reason
+        (CodeRabbit): ``subprocess.run``'s timeout sends SIGKILL and then BLOCKS
+        in wait() to reap -- and a ``sync`` stuck on a dead NFS/CIFS mount sits
+        in uninterruptible D-state where even SIGKILL can't land, so that wait
+        hangs and the "timeout" never returns. Here we poll ``proc.poll()`` and,
+        if the deadline passes, we best-effort kill and ABANDON the process
+        WITHOUT waiting -- the daemon thread is never blocked, the orphan dies at
+        halt, and the kernel re-syncs during the halt regardless.
+        """
+        try:
+            proc = subprocess.Popen(
+                [_SYNC_BIN], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, ValueError) as exc:
+            self._log_message(
+                f"  ⚠️ {label}: could not start `sync` ({exc}); proceeding.")
+            return
+        deadline = time.monotonic() + _SYNC_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            time.sleep(0.2)
+        rc = proc.poll()
+        if rc is None:
+            # Still running at the deadline -- almost certainly a mount in
+            # uninterruptible D-state. Signal best-effort and abandon it; do NOT
+            # wait (that's exactly what would hang). Proceed to poweroff.
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            self._log_message(
+                f"  ⚠️ {label} did not finish within {_SYNC_TIMEOUT_SECONDS}s "
+                "(a hung mount?); proceeding without waiting -- the kernel "
+                "re-syncs during halt."
+            )
+        elif rc == 0:
+            self._log_message(f"  ✅ {label} complete")
+        else:
+            self._log_message(
+                f"  ⚠️ {label} reported an error (exit {rc}); proceeding."
+            )
 
     def _sync_filesystems(self):
         """Sync all filesystems.
@@ -26,9 +89,8 @@ class FilesystemShutdownMixin:
         if self.config.behavior.dry_run:
             self._log_message("  🧪 [DRY-RUN] Would sync filesystems")
         else:
-            os.sync()
+            self._bounded_sync("Filesystem sync")
             time.sleep(2)  # Allow storage controller caches to flush
-            self._log_message("  ✅ Filesystems synced")
 
     def _unmount_filesystems(self):
         """Unmount configured filesystems."""

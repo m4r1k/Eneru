@@ -88,6 +88,12 @@ def _prepare_password(password: str) -> bytes:
 def hash_password(password: str) -> str:
     """Return a bcrypt hash (self-describing ``$2b$…`` string) for ``password``."""
     bcrypt = require_bcrypt()
+    # N3: reject an embedded NUL. Shipped bcrypt 5.x hashes the whole 72-byte
+    # input, but some older builds truncated at the first NUL -- which would let
+    # "pw\x00anything" verify against a hash of "pw". Reject at creation so the
+    # store's behavior can't silently regress on an older distro bcrypt.
+    if "\x00" in password:
+        raise AuthError("password must not contain NUL bytes")
     return bcrypt.hashpw(_prepare_password(password), bcrypt.gensalt()).decode("ascii")
 
 

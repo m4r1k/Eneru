@@ -184,7 +184,7 @@ class TestDelegatedShutdownSequence:
         monitor = _make_delegated_monitor(tmp_path)
         self._spy_phases(monitor)
         with _patch_runtime("container (Docker)"), \
-             patch("eneru.monitor.os.sync") as sync_mock:
+             patch.object(monitor, "_bounded_sync") as sync_mock:
             monitor._execute_shutdown_sequence()
             sync_mock.assert_not_called()
 
@@ -724,11 +724,11 @@ class TestNativeFinalSyncBranch:
         monitor._log_message = lambda msg, **kw: log.append(msg)
 
         with _patch_runtime("systemd service"), \
-             patch("eneru.monitor.os.sync") as sync_mock:
+             patch.object(monitor, "_bounded_sync") as sync_mock:
             monitor._execute_shutdown_sequence()
 
         assert any("Final filesystem sync" in m for m in log), log
-        # Dry-run: no actual os.sync call.
+        # Dry-run: no actual sync call.
         sync_mock.assert_not_called()
         assert any("[DRY-RUN] Would perform final sync" in m for m in log), log
 
@@ -751,8 +751,9 @@ class TestNativeFinalSyncBranch:
         monitor._log_message = lambda msg, **kw: log.append(msg)
 
         with _patch_runtime("systemd service"), \
-             patch("eneru.monitor.os.sync") as sync_mock:
+             patch.object(monitor, "_bounded_sync") as sync_mock:
             monitor._execute_shutdown_sequence()
 
+        # H6: the final sync now runs via the bounded `sync` subprocess helper.
         sync_mock.assert_called_once()
-        assert any("Final sync complete" in m for m in log), log
+        assert any("Final filesystem sync" in m for m in log), log

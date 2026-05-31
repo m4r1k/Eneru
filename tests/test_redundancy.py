@@ -677,6 +677,101 @@ class TestEvaluatorThreadLifecycle:
         ev.join(timeout=2)
         executor.shutdown.assert_not_called()
 
+    @pytest.mark.unit
+    def test_cold_start_holds_fire_until_members_report(self):
+        """H1: present members that have NEVER reported (last_update_time==0)
+        must not drop a powered rack while inside the readiness window, even
+        with unknown_counts_as=critical and quorum numerically lost."""
+        group = _redundancy_group(
+            min_healthy=2, unknown_counts_as="critical",
+            ups_sources=["A", "B", "C"],
+        )
+        monitors = {
+            "A": _FakeMonitor("A", _snap()),                     # reported, healthy
+            "B": _FakeMonitor("B", _snap(last_update_time=0)),   # never reported
+            "C": _FakeMonitor("C", _snap(last_update_time=0)),   # never reported
+        }
+        executor = MagicMock()
+        executor.shutdown.return_value = True
+        ev = RedundancyGroupEvaluator(
+            group, monitors, executor,
+            stop_event=threading.Event(), logger=None,
+            startup_grace_seconds=0,
+        )
+        # healthy_count=1 < min_healthy=2, but B/C never reported and we're in
+        # the readiness window -> hold, no fire.
+        ev.evaluate_once()
+        executor.shutdown.assert_not_called()
+        # Once B and C publish their first (healthy) snapshot, quorum holds.
+        for n in ("B", "C"):
+            with monitors[n].state._lock:
+                monitors[n].state.latest_update_time = time.time()
+                monitors[n].state.latest_status = "OL"
+        ev.evaluate_once()
+        executor.shutdown.assert_not_called()
+
+    @pytest.mark.unit
+    def test_cold_start_hold_expires_then_fires(self):
+        """H1: once the readiness window elapses, a still-never-reported member
+        counts as UNKNOWN->critical and a real quorum loss fires -- a genuinely
+        dead UPS at boot is still protected."""
+        group = _redundancy_group(
+            min_healthy=2, unknown_counts_as="critical",
+            ups_sources=["A", "B"],
+        )
+        monitors = {
+            "A": _FakeMonitor("A", _snap()),                    # reported healthy
+            "B": _FakeMonitor("B", _snap(last_update_time=0)),  # never reports
+        }
+        executor = MagicMock()
+        executor.shutdown.return_value = True
+        ev = RedundancyGroupEvaluator(
+            group, monitors, executor,
+            stop_event=threading.Event(), logger=None,
+            startup_grace_seconds=0,
+        )
+        ev._readiness_window = 0  # force the readiness window to have elapsed
+        ev.evaluate_once()
+        executor.shutdown.assert_called_once()
+
+    @pytest.mark.unit
+    def test_readiness_window_excludes_disabled_grace(self):
+        """cubic: a member whose connection grace is DISABLED must not extend the
+        cold-start readiness window (a disabled grace doesn't delay FAILED)."""
+        group = _redundancy_group(min_healthy=1)
+        monitors = {
+            "UPS-A": _FakeMonitor("UPS-A", _snap()),
+            "UPS-B": _FakeMonitor("UPS-B", _snap()),
+        }
+        for m in monitors.values():
+            m.config.ups.connection_loss_grace_period.enabled = False
+        ev = RedundancyGroupEvaluator(
+            group, monitors, MagicMock(),
+            stop_event=threading.Event(), logger=None, startup_grace_seconds=10,
+        )
+        # base_grace excluded (disabled) -> window = startup_grace(10) + 0 + 10.
+        assert ev._readiness_window == 20
+
+    @pytest.mark.unit
+    def test_readiness_window_clamps_negative_grace_duration(self):
+        """cubic: a negative/malformed grace duration must NOT shrink the
+        cold-start readiness window (which would let a real quorum loss fire
+        before members finish their first connect). 0 is the safe floor."""
+        group = _redundancy_group(min_healthy=1)
+        monitors = {
+            "UPS-A": _FakeMonitor("UPS-A", _snap()),
+            "UPS-B": _FakeMonitor("UPS-B", _snap()),
+        }
+        for m in monitors.values():
+            m.config.ups.connection_loss_grace_period.enabled = True
+            m.config.ups.connection_loss_grace_period.duration = -300
+        ev = RedundancyGroupEvaluator(
+            group, monitors, MagicMock(),
+            stop_event=threading.Event(), logger=None, startup_grace_seconds=10,
+        )
+        # Clamped to 0 -> window = startup_grace(10) + 0 + 10, never shrunk.
+        assert ev._readiness_window == 20
+
 
 # ===========================================================================
 # Executor: synthetic config wiring + idempotency + dry-run cleanup

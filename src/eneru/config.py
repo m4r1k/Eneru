@@ -1293,6 +1293,15 @@ class ConfigLoader:
             messages.extend(cls._unknown_key_errors(
                 "behavior", raw_data.get("behavior", {}), {"dry_run"},
             ))
+            # M13: local_shutdown is a safety section -- its parser defaults
+            # `enabled` to True, so a misspelled key would silently leave local
+            # poweroff enabled. Sweep it for unknown keys like every other
+            # safety section (configuration.md promises typos are caught).
+            messages.extend(cls._unknown_key_errors(
+                "local_shutdown", raw_data.get("local_shutdown", {}),
+                {"enabled", "command", "message", "drain_on_local_shutdown",
+                 "trigger_on", "wall"},
+            ))
             messages.extend(cls._unknown_key_errors(
                 "api", raw_data.get("api", {}),
                 {"enabled", "bind", "port", "auth"},
@@ -1329,11 +1338,28 @@ class ConfigLoader:
                 if not isinstance(block, dict):
                     return
                 messages.extend(cls._unknown_key_errors(label, block, _nc_keys))
+                # N4: NUT command/variable names are dotted alphanumerics. Reject
+                # an allowlist entry with spaces / shell metacharacters / '=' at
+                # load (a typo'd entry would otherwise flow verbatim into the
+                # upscmd/upsrw argv). Not an injection (argv, not shell), but
+                # catching it here turns a silent no-op into a startup error.
+                _nut_name_chars = set(
+                    "abcdefghijklmnopqrstuvwxyz"
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-")
                 for list_key in ("allowed_commands", "allowed_variables"):
                     val = block.get(list_key)
-                    if val is not None and not isinstance(val, list):
+                    if val is None:
+                        continue
+                    if not isinstance(val, list):
                         messages.append(
                             f"ERROR: {label}.{list_key} must be a list")
+                        continue
+                    for entry in val:
+                        if not (isinstance(entry, str) and entry
+                                and all(c in _nut_name_chars for c in entry)):
+                            messages.append(
+                                f"ERROR: {label}.{list_key} entry {entry!r} is not "
+                                "a valid NUT name (letters, digits, . _ + - only)")
                 t = block.get("timeout")
                 if t is not None and (isinstance(t, bool) or not isinstance(t, int)
                                       or t < 1):
@@ -1419,12 +1445,40 @@ class ConfigLoader:
             _validate_remote_servers(
                 "remote_servers", raw_data.get("remote_servers", []),
             )
+            # Per-UPS-entry top-level keys. Every other section gets a strict
+            # unknown-key sweep; without this one a typo like `is_locl: true`
+            # silently parses the group as non-local (is_local defaults False),
+            # disabling local-host self-protection while the operator believes
+            # it is on. Mirror the contract: misspelled safety keys must error.
+            ups_entry_keys = {
+                "name", "display_name", "check_interval",
+                "max_stale_data_tolerance", "connection_loss_grace_period",
+                "is_local", "triggers", "remote_servers", "virtual_machines",
+                "containers", "filesystems", "nut_control",
+            }
+            redundancy_entry_keys = {
+                "name", "ups_sources", "min_healthy", "degraded_counts_as",
+                "unknown_counts_as", "is_local", "triggers", "remote_servers",
+                "virtual_machines", "containers", "filesystems",
+            }
             ups_raw = raw_data.get("ups")
             if isinstance(ups_raw, list):
                 for idx, entry in enumerate(ups_raw):
                     if not isinstance(entry, dict):
                         continue
                     label = entry.get("name", idx)
+                    messages.extend(cls._unknown_key_errors(
+                        f"ups[{label!r}]", entry, ups_entry_keys,
+                    ))
+                    # Also sweep the nested connection_loss_grace_period sub-keys
+                    # -- it's a safety sub-section, so a typo there must error too
+                    # rather than silently fall back to defaults (cubic P2).
+                    clgp = entry.get("connection_loss_grace_period")
+                    if isinstance(clgp, dict):
+                        messages.extend(cls._unknown_key_errors(
+                            f"ups[{label!r}].connection_loss_grace_period",
+                            clgp, {"enabled", "duration", "flap_threshold"},
+                        ))
                     _validate_triggers(
                         f"ups[{label!r}].triggers",
                         entry.get("triggers", {}),
@@ -1439,6 +1493,10 @@ class ConfigLoader:
                     if not isinstance(entry, dict):
                         continue
                     label = entry.get("name", idx)
+                    messages.extend(cls._unknown_key_errors(
+                        f"redundancy_groups[{label!r}]", entry,
+                        redundancy_entry_keys,
+                    ))
                     group_triggers = entry.get("triggers", {})
                     _validate_triggers(
                         f"redundancy_groups[{label!r}].triggers",
@@ -1660,6 +1718,121 @@ class ConfigLoader:
                     f"non-negative integer, got {delay!r}."
                 )
 
+        # Shutdown-trigger numeric fields feed direct comparisons in the
+        # on-battery hot path (monitor._handle_on_battery, health/battery.py).
+        # A non-numeric YAML scalar -- most commonly a quoted "20", which
+        # templating tools (Ansible/Helm/envsubst) emit routinely -- survives
+        # parse as a str and raises TypeError on the FIRST on-battery poll,
+        # killing the monitor loop exactly when a shutdown decision is due.
+        # Validate every group's PARSED triggers so a bad value is a startup
+        # error, never a mid-outage crash.
+        def _check_trigger_numbers(label: str, t: TriggersConfig):
+            if not cls._is_int_nonbool_in_range(
+                    t.low_battery_threshold, minimum=0, maximum=100):
+                messages.append(
+                    f"ERROR: {label}.triggers.low_battery_threshold must be an "
+                    f"integer between 0 and 100, got {t.low_battery_threshold!r}."
+                )
+            if not cls._is_int_nonbool_in_range(
+                    t.critical_runtime_threshold, minimum=0):
+                messages.append(
+                    f"ERROR: {label}.triggers.critical_runtime_threshold must be "
+                    f"a non-negative integer, got {t.critical_runtime_threshold!r}."
+                )
+            if not cls._is_int_nonbool_in_range(t.depletion.window, minimum=1):
+                messages.append(
+                    f"ERROR: {label}.triggers.depletion.window must be an integer "
+                    f">= 1, got {t.depletion.window!r}."
+                )
+            rate = t.depletion.critical_rate
+            if (isinstance(rate, bool) or not isinstance(rate, (int, float))
+                    or rate <= 0):
+                messages.append(
+                    f"ERROR: {label}.triggers.depletion.critical_rate must be a "
+                    f"number greater than 0, got {rate!r}."
+                )
+            if not cls._is_int_nonbool_in_range(
+                    t.depletion.grace_period, minimum=0):
+                messages.append(
+                    f"ERROR: {label}.triggers.depletion.grace_period must be a "
+                    f"non-negative integer, got {t.depletion.grace_period!r}."
+                )
+            if not cls._is_int_nonbool_in_range(
+                    t.extended_time.threshold, minimum=0):
+                messages.append(
+                    f"ERROR: {label}.triggers.extended_time.threshold must be a "
+                    f"non-negative integer, got {t.extended_time.threshold!r}."
+                )
+            # L2: relationship check -- a stabilization window >= the
+            # critical-runtime threshold suppresses the runtime trigger for the
+            # entire remaining runtime, so the host could die on battery before
+            # the window ever opens. Warn (don't reject -- it can be deliberate).
+            sd = t.on_battery_stabilization_delay
+            crt = t.critical_runtime_threshold
+            if (cls._is_int_nonbool_in_range(sd, minimum=0)
+                    and cls._is_int_nonbool_in_range(crt, minimum=1)
+                    and sd >= crt):
+                messages.append(
+                    f"WARNING: {label}.triggers.on_battery_stabilization_delay "
+                    f"({sd}s) >= critical_runtime_threshold ({crt}s): the "
+                    "stabilization window can suppress the runtime trigger for "
+                    "the whole remaining runtime. Consider lowering the delay."
+                )
+
+        for group in config.ups_groups:
+            _check_trigger_numbers(f"ups[{group.ups.label!r}]", group.triggers)
+        for rg in config.redundancy_groups:
+            _check_trigger_numbers(
+                f"redundancy_groups[{(rg.name or '(unnamed)')!r}]", rg.triggers)
+
+        # Drain-phase timeouts feed `while time_waited < max_wait`,
+        # `stop_timeout + 30`, and subprocess timeouts during shutdown. A
+        # non-int (quoted "30s") crashes the phase mid-sequence; a null
+        # unmount.timeout becomes subprocess.run(timeout=None) -> a busy umount
+        # hangs forever. Validate them at load so the host still powers off.
+        def _check_drain_timeouts(label: str, grp):
+            mw = grp.virtual_machines.max_wait
+            if not cls._is_int_nonbool_in_range(mw, minimum=0):
+                messages.append(
+                    f"ERROR: {label}.virtual_machines.max_wait must be a "
+                    f"non-negative integer, got {mw!r}."
+                )
+            st = grp.containers.stop_timeout
+            if not cls._is_int_nonbool_in_range(st, minimum=0):
+                messages.append(
+                    f"ERROR: {label}.containers.stop_timeout must be a "
+                    f"non-negative integer, got {st!r}."
+                )
+            ut = grp.filesystems.unmount.timeout
+            if not cls._is_int_nonbool_in_range(ut, minimum=1):
+                messages.append(
+                    f"ERROR: {label}.filesystems.unmount.timeout must be an "
+                    f"integer >= 1, got {ut!r}."
+                )
+
+        for group in config.ups_groups:
+            _check_drain_timeouts(f"ups[{group.ups.label!r}]", group)
+        for rg in config.redundancy_groups:
+            _check_drain_timeouts(
+                f"redundancy_groups[{(rg.name or '(unnamed)')!r}]", rg)
+
+        # ups.check_interval and ups.max_stale_data_tolerance feed the poll loop
+        # and the failsafe debounce comparisons. A non-int (quoted "1") would
+        # TypeError there; validate at load. (cubic P1 follow-up to H3.)
+        for group in config.ups_groups:
+            ci = group.ups.check_interval
+            if not cls._is_int_nonbool_in_range(ci, minimum=1):
+                messages.append(
+                    f"ERROR: ups[{group.ups.label!r}].check_interval must be an "
+                    f"integer >= 1, got {ci!r}."
+                )
+            mst = group.ups.max_stale_data_tolerance
+            if not cls._is_int_nonbool_in_range(mst, minimum=1):
+                messages.append(
+                    f"ERROR: ups[{group.ups.label!r}].max_stale_data_tolerance "
+                    f"must be an integer >= 1, got {mst!r}."
+                )
+
         # Multi-UPS validation
         if config.multi_ups:
             # Check ownership: non-local groups must not have local resources
@@ -1701,6 +1874,44 @@ class ConfigLoader:
             messages.append(
                 f"ERROR: Multiple groups marked as is_local: {', '.join(all_local)}. "
                 "At most one group (UPS or redundancy) can power the Eneru host."
+            )
+
+        # M7: multi-UPS with NO is_local group, local shutdown enabled, and the
+        # default trigger_on='any' means ANY monitored UPS going critical (even
+        # one powering only a remote server) will run the local poweroff. That's
+        # rarely intended; warn so the operator confirms it (or marks a group
+        # is_local / sets trigger_on: none). A single-UPS config implicitly owns
+        # local resources, so this only applies to the multi-UPS topology.
+        if (config.multi_ups and not all_local
+                and config.local_shutdown.enabled
+                and config.local_shutdown.trigger_on == "any"):
+            messages.append(
+                "WARNING: multi-UPS config has no is_local group but "
+                "local_shutdown is enabled with trigger_on='any' -- ANY UPS "
+                "going critical will power off this host. Mark the owning group "
+                "is_local, or set local_shutdown.trigger_on: none, to confirm "
+                "this is intended."
+            )
+
+        # ups.name uniqueness. The name keys the per-group stats DB path, the
+        # state-file suffix, the monitors-by-name routing dict, and redundancy
+        # member resolution -- duplicates corrupt or cross-wire all of those.
+        # Dedup on the SANITIZED name actually used for filenames, so two names
+        # differing only in @/:/ (which sanitize to the same file) still collide.
+        def _sanitize_name(n: str) -> str:
+            return (n or "").replace("@", "-").replace(":", "-").replace("/", "-")
+
+        seen_ups_names: Dict[str, int] = {}
+        for group in config.ups_groups:
+            key = _sanitize_name(group.ups.name)
+            seen_ups_names[key] = seen_ups_names.get(key, 0) + 1
+        dup_ups = sorted(k for k, c in seen_ups_names.items() if c > 1)
+        if dup_ups:
+            messages.append(
+                "ERROR: duplicate UPS name(s) across ups_groups: "
+                f"{', '.join(dup_ups)}. Each ups.name must be unique -- it keys "
+                "the stats DB, state file, API command routing, and redundancy "
+                "membership."
             )
 
         # is_host_loopback uniqueness + per-entry rules. Runtime-context checks
@@ -2023,6 +2234,19 @@ class ConfigLoader:
                 f"ERROR: local_shutdown.trigger_on must be 'any' or 'none', "
                 f"got '{config.local_shutdown.trigger_on}'"
             )
+
+        # local_shutdown.command is the host poweroff itself. `command:` with a
+        # null value parses to None (the default only applies to an ABSENT key),
+        # and an empty string yields run_command([]) -- both silently skip the
+        # poweroff AFTER VMs/containers/remotes were already drained. Reject a
+        # missing/empty command at load when local shutdown is enabled.
+        if config.local_shutdown.enabled:
+            cmd = config.local_shutdown.command
+            if not isinstance(cmd, str) or not cmd.strip():
+                messages.append(
+                    "ERROR: local_shutdown.command must be a non-empty string "
+                    f"when local_shutdown.enabled is true, got {cmd!r}."
+                )
 
         # api.auth.session_ttl and nut_control.timeout are coerced with int()
         # downstream (SessionManager, subprocess timeouts) — validate here so a

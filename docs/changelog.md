@@ -35,8 +35,9 @@ hot-reload. With authentication left off, the API stays read-only exactly as in
   commands and writable variables, wrapping `upscmd`/`upsrw` (no new dependency).
   Fail-closed — control cannot be enabled while authentication is off.
 - **Event management API.** Events carry a stable, never-reused `id` (stats schema
-  v5); `/api/v1/events` supports wide-range `from`/`to` queries and `(ts, id)`
-  cursor paging, and an authenticated `DELETE /api/v1/ups/{name}/events` removes
+  v5); `/api/v1/events` supports wide-range `from`/`to` queries and source-
+  qualified `(ts, source, id)` cursor paging, and an authenticated
+  `DELETE /api/v1/ups/{name}/events` removes
   selected rows. Existing databases migrate automatically on first start.
 - **Config hot-reload** without restarting the daemon — `systemctl reload eneru`,
   `SIGHUP` (`docker kill -s HUP`), or an authenticated `POST /api/v1/config/reload`.
@@ -51,6 +52,154 @@ hot-reload. With authentication left off, the API stays read-only exactly as in
 
 - **NUT auto-discovery**, previously listed for 6.0, was dropped: it duplicates
   `nut-scanner` and does not fit Eneru's config-first model.
+
+### Fixed (rc10 — pre-release audit hardening)
+
+A structured whole-repository audit (see `docs/testing.md` → "Pre-release code
+review") hardened the shutdown decision path. The new auth/API/control surface
+held up; the residual risk was a config typo or a slow subsystem crashing the
+daemon *before* the host poweroff. Critical fixes:
+
+- **Multi-UPS drain no longer self-joins its own thread.** With
+  `drain_on_local_shutdown: true`, `_drain_all_groups` ran on the firing group's
+  monitor thread and tried to `join()` that same thread, raising `RuntimeError`
+  and aborting the sequence before the host poweroff — a missed local shutdown.
+  It now skips the current thread, so peers drain and the host still powers off.
+- **Shutdown-trigger thresholds are validated at load.** A non-numeric YAML
+  scalar (e.g. a quoted `"20"`, which templating tools emit routinely) survived
+  parse and raised `TypeError` on the first on-battery poll, killing the monitor
+  loop exactly when a shutdown was due. `low_battery_threshold`,
+  `critical_runtime_threshold`, `depletion.window/critical_rate/grace_period`,
+  and `extended_time.threshold` are now type/range-checked for every UPS and
+  redundancy group, so a bad value is a startup error, not a mid-outage crash.
+- **Empty/null `local_shutdown.command` is rejected at load.** `command:` with
+  no value parsed to `None` (and `""` yielded `run_command([])`), silently
+  skipping the host poweroff after VMs/containers/remotes were already drained.
+  It is now a config error when local shutdown is enabled, with a defensive
+  guard at both call sites.
+
+High fixes:
+
+- **Redundancy cold-start no longer drops a powered rack.** The evaluator's
+  time-based startup grace alone could fire a group shutdown when a member's NUT
+  server was merely slow to publish its first snapshot (UNKNOWN ->
+  unknown_counts_as=critical). It now holds the quorum decision until every
+  present member has reported at least once, bounded by a readiness deadline
+  derived from the per-member connection-loss grace; a member with no monitor at
+  all still counts immediately, and a genuinely dead UPS still fires once the
+  window passes.
+- **On-battery FAILSAFE no longer re-fires every poll.** In non-halting configs
+  (local shutdown disabled, dry-run, or loopback-delegated) the failsafe cleared
+  its flag and re-ran the entire remote/VM/container sequence on each failed
+  poll. A per-outage latch now runs it once per connection-loss event; it
+  re-arms on the next successful poll.
+- **A single transient NUT failure on battery no longer shuts the host down.**
+  Hard poll failures (connection refused, or a 30s upsc timeout) are now
+  debounced by `max_stale_data_tolerance` the same way stale data already was,
+  so a momentary blip can't drop a host riding out a survivable dip. Set
+  `max_stale_data_tolerance: 1` to restore instant fail-closed FSB. Off-battery
+  grace handling is unchanged.
+- **Drain phases can't abort the host poweroff.** Each local drain phase (VMs,
+  containers, sync, unmount) is wrapped so an exception is logged and the
+  sequence still reaches the poweroff -- a wedged libvirt or a bad value no
+  longer leaves the host running on a draining battery.
+- **Bounded filesystem sync.** `os.sync()` (which blocks until every mount
+  flushes) is replaced by a `sync` subprocess with a wall-clock timeout, so a
+  hung NFS/CIFS mount can't wedge the sequence before poweroff; the kernel
+  re-syncs at halt regardless.
+- **Drain-phase timeouts validated at load.** `virtual_machines.max_wait`,
+  `containers.stop_timeout`, and `filesystems.unmount.timeout` are now
+  type/range-checked (a quoted "30s" or a null value previously crashed the
+  phase or made `umount` hang forever); `run_command` also treats a `None`
+  timeout as the default bound.
+- **Remote poweroff can't be starved by a slow pre-shutdown phase.** The final
+  shutdown command now reserves its own budget before pre-shutdown commands
+  spend the phase deadline, and is skipped only if the *full* deadline is blown.
+- **SIGTERM/SIGINT during an in-flight shutdown** now waits a bounded,
+  config-derived deadline for the sequence (incl. the host poweroff) to finish
+  instead of abandoning it after 5s. **Duplicate `ups.name`** and **unknown
+  per-UPS / per-redundancy keys** (e.g. a misspelled `is_local`) are now rejected
+  at load.
+- **Depletion-rate trigger (T3) stays armed at slow poll intervals.** The
+  30-sample floor is now derived from `depletion.window / check_interval`, so a
+  larger `check_interval` no longer silently disables the fast-drain trigger.
+
+Medium fixes:
+
+- **No double local poweroff.** The coordinator's local-shutdown guard is now
+  held "in flight" while the committed sequence runs outside the lock, so an
+  unrelated group's power-restored event can't re-arm it mid-sequence and admit
+  a second poweroff.
+- **Deleted admin can't keep control through a DB blip.** Write/control requests
+  now re-check the session's account strictly and fail closed if the auth DB is
+  unavailable; reads stay lenient and the token survives for when the DB returns.
+- **Stats aggregation no longer corrupts the bucket straddling the retention
+  cutoff.** Purge cutoffs are aligned down to the next-tier bucket boundary so
+  only whole buckets are deleted.
+- **Graceful-exit notification can't block shutdown.** The eager Apprise send
+  from the signal handler runs on a short-lived thread with a hard timeout.
+- **Config safety warnings/validation.** A multi-UPS config with no `is_local`
+  group but `local_shutdown` enabled + `trigger_on: any` now warns; `local_shutdown`
+  gets the same unknown-key sweep as other safety sections.
+- **Health robustness.** Voltage auto-detect only samples on line power (a
+  startup brownout can't latch a depressed nominal); a non-positive NUT nominal
+  falls back to the default instead of flagging everything over-voltage; a
+  worsening battery anomaly no longer resets its own 3-poll confirmation; and the
+  depletion-rate input is clamped to [0, 100] against flaky firmware readings.
+- **Drain phases run best-effort** (shared with the High fix) so a failure can't
+  skip the host poweroff.
+- The dashboard no longer offers a `redundancy:<name>` event-source filter that
+  could never return rows (redundancy events aren't persisted to a stats DB).
+
+Low fixes:
+
+- Config validation now warns when `on_battery_stabilization_delay >=
+  critical_runtime_threshold` (the stabilization window would suppress the
+  runtime trigger for the whole remaining runtime).
+- A SIGTERM/SIGINT re-entrancy guard stops a second signal re-running teardown.
+- The VM-shutdown wait loop bounds each `virsh list` poll so a wedged libvirtd
+  can't blow the `max_wait` budget.
+- A FAILED remote server is no longer re-logged as "degraded" on every poll.
+- `_SAFE_NUT_VALUE` is anchored with `\Z` (a trailing newline no longer slips
+  through the upsrw value filter).
+- `StatsStore.query_range` validates the metric against an internal allowlist
+  before it reaches the interpolated SQL column position (defense-in-depth).
+- Derived `powerQuality` thresholds (nominal / warning band) report `null`
+  before the first poll instead of dataclass defaults that look like real data.
+- The dashboard survives connection loss (fetch errors show a "Connection lost"
+  banner instead of freezing the poll loop) and no longer rebuilds the control
+  panel every poll (which wiped half-typed values and re-fetched per UPS).
+- CLI: `user create` / `passwd` validate the username/role before prompting for
+  a password; `--password-stdin` keeps a password that legitimately ends in a
+  bare carriage return.
+- The hermetic notifications test no longer requires the optional `apprise`
+  extra to be installed; several brittle tests that re-implemented loop/guard
+  logic now drive the real code paths.
+- Docs: README trigger count matches its list; the configuration.md CLI table
+  lists the `user`/`apikey`/`shutdown`/`remote` subcommands.
+
+Evaluated and intentionally left as-is (documented): the per-transition voltage
+event log (a deliberate forensic record, bounded by retention; notifications are
+already hysteresis-gated), the per-poll battery-history file write (a forensic
+record; cross-restart read-back is entangled with the on-battery deque reset),
+the `upsrw` SET timeout (operator-tunable via `nut_control.timeout`), and a
+couple of niche multi-daemon / degenerate-config edges.
+
+Nits:
+
+- `X-Content-Type-Options: nosniff` is now sent on every API response, not just
+  the dashboard HTML.
+- Passwords containing a NUL byte are rejected at creation (guards against older
+  bcrypt builds that truncated at NUL).
+- `nut_control` allowlist entries are validated against the NUT name charset at
+  config load.
+- `StatsStore.from_connection` no longer calls `.close()` on a connection that
+  was never opened (dead code relying on a swallowed exception).
+- The slow-SSH diagnostic no longer records two `REMOTE_SSH_SLOW_RESPONSE` rows
+  in a single cycle when a probe crosses both the log and the sustained-notify
+  thresholds at once.
+- Changelog wording: event paging uses a source-qualified `(ts, source, id)`
+  cursor (was written as `(ts, id)`).
 
 ---
 

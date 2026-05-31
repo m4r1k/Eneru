@@ -62,6 +62,11 @@ _LEGACY_TRANSFER_BUFFER_V = 5.0
 # (utility fault, generator instability, site wiring) that the
 # operator wants to know about NOW, not 30s from now.
 VOLTAGE_SEVERE_DEVIATION_PCT = 0.15  # >±15% from nominal = severe
+# Below this, a NUT-reported input.voltage.nominal is garbage (0 / unset on some
+# drivers), not a real grid -- the lowest real standard grid is 100V. Treat such
+# a value as missing so it can't make warning_high=0 and flag every reading as
+# over-voltage (M10).
+MIN_PLAUSIBLE_NOMINAL_V = 50.0
 
 
 def _snap_to_standard_grid(value: float) -> float:
@@ -180,15 +185,18 @@ class VoltageMonitorMixin:
         low_transfer = self._get_ups_var("input.transfer.low")
         high_transfer = self._get_ups_var("input.transfer.high")
 
-        if is_numeric(nominal_raw):
+        if is_numeric(nominal_raw) and float(nominal_raw) >= MIN_PLAUSIBLE_NOMINAL_V:
             raw_nominal = float(nominal_raw)
             snapped = _snap_to_standard_grid(raw_nominal)
             self.state.nominal_voltage = snapped
             origin = (f"NUT={raw_nominal}, snapped" if snapped != raw_nominal
                       else f"NUT={raw_nominal}")
         else:
+            # Missing, or implausibly small (e.g. 0 from a driver that doesn't
+            # publish nominal): fall back to the default rather than deriving a
+            # warning_high of 0 that flags every reading as over-voltage (M10).
             self.state.nominal_voltage = 230.0
-            origin = "NUT=missing, default"
+            origin = "NUT=missing/implausible, default"
 
         # Stash the raw transfer values for notification context; they're
         # informational only and never used to gate any decision.
@@ -338,9 +346,13 @@ class VoltageMonitorMixin:
         (>±15%) bypass the dwell and notify immediately -- those signal
         real grid trouble where the operator wants to know now.
         """
-        # Cross-check NUT's reported nominal against observed reality.
-        # Runs only until enough samples accumulate; cheap no-op after.
-        self._check_voltage_autodetect(input_voltage)
+        # Cross-check NUT's reported nominal against observed reality, but only
+        # sample on LINE power (M9). On battery the input.voltage reading is the
+        # grid that just sagged/failed, not the steady nominal; feeding it to
+        # auto-detect during a startup brownout would latch a depressed nominal
+        # for the daemon's lifetime. Runs only until enough samples accumulate.
+        if "OB" not in ups_status and "FSD" not in ups_status:
+            self._check_voltage_autodetect(input_voltage)
 
         if "OL" not in ups_status:
             if "OB" in ups_status or "FSD" in ups_status:
@@ -381,6 +393,13 @@ class VoltageMonitorMixin:
         # State log line is sacred -- always written immediately on
         # transition. The notification path is gated by the hysteresis
         # logic in _maybe_notify_voltage_pending unless severe.
+        # L16 (evaluated, intentionally kept): under sustained voltage flapping
+        # this writes one event row per real transition, which can accumulate.
+        # That is deliberate -- the events table is the forensic black-box and
+        # every transition is genuine. The noisy *notifications* are already
+        # silenced by the hysteresis dwell above, and total growth is bounded by
+        # the stats retention/purge. Rate-limiting the log here would discard
+        # forensic detail, so it is left as-is on purpose.
         if target != self.state.voltage_state:
             if target == "NORMAL":
                 self._log_power_event(

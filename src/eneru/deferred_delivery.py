@@ -331,14 +331,24 @@ def _eager_send(
         # method (see notifications.py); we reach in deliberately
         # rather than re-instantiating an Apprise object because the
         # worker has already validated the URLs at startup.
-        success = worker._send_via_apprise(body, notify_type)
+        # Bounded (M6): the eager send can run from the signal handler; a hung
+        # endpoint must not block daemon exit. Times out -> row stays pending.
+        success = worker._send_via_apprise_bounded(body, notify_type)
     except Exception as e:  # pragma: no cover -- defensive
         log_fn(f"⚠️ Eager-send via Apprise raised: {e}")
         return
     if not success:
+        # At-least-once by design (cubic): a bounded send that TIMED OUT may
+        # still complete on its abandoned background thread, yet we return here
+        # and leave the row pending so the next start retries -- which can yield
+        # ONE duplicate "Service Stopped" notification. That is deliberate: for a
+        # stop notification a possible duplicate is strictly preferable to silent
+        # loss, and we must not block daemon exit to learn the orphan thread's
+        # real outcome (the whole point of the bounded send, M6).
         log_fn(
-            "⚠️ Eager-send via Apprise returned False (network down?) "
-            "— stop notification stays pending for the next start"
+            "⚠️ Eager-send via Apprise returned False/timed out (network down?) "
+            "— stop notification stays pending for the next start "
+            "(a duplicate is possible if a timed-out send later completes)"
         )
         return
     try:

@@ -88,6 +88,95 @@ class TestConfigValidation:
             messages = ConfigLoader.validate_config(minimal_config)
             assert not any("trigger_on" in m for m in messages)
 
+    # --- C2: shutdown-trigger numeric fields must be validated at load ---
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad", ["20", "thirty", None, [20], True])
+    def test_validate_rejects_nonint_low_battery_threshold(self, minimal_config, bad):
+        """Regression (C2): a non-int low_battery_threshold (most commonly a
+        quoted '20' from a templating tool) must error at load. Otherwise it
+        survives parse as a str and raises TypeError (int < str) on the first
+        on-battery poll, killing the monitor loop when a shutdown is due."""
+        minimal_config.triggers.low_battery_threshold = bad
+        errors = [m for m in ConfigLoader.validate_config(minimal_config)
+                  if m.startswith("ERROR")]
+        assert any("low_battery_threshold" in m for m in errors), (
+            f"low_battery_threshold={bad!r} should ERROR; got {errors!r}")
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad", [-1, 101, 150])
+    def test_validate_rejects_out_of_range_low_battery_threshold(
+            self, minimal_config, bad):
+        minimal_config.triggers.low_battery_threshold = bad
+        errors = [m for m in ConfigLoader.validate_config(minimal_config)
+                  if m.startswith("ERROR")]
+        assert any("low_battery_threshold" in m for m in errors)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad", ["600", None, True, [1]])
+    def test_validate_rejects_nonint_critical_runtime_threshold(
+            self, minimal_config, bad):
+        minimal_config.triggers.critical_runtime_threshold = bad
+        errors = [m for m in ConfigLoader.validate_config(minimal_config)
+                  if m.startswith("ERROR")]
+        assert any("critical_runtime_threshold" in m for m in errors)
+
+    @pytest.mark.unit
+    def test_validate_rejects_nonnumeric_depletion_and_extended(
+            self, minimal_config):
+        """depletion.* and extended_time.threshold feed comparisons too."""
+        minimal_config.triggers.depletion.critical_rate = "fast"
+        minimal_config.triggers.depletion.window = "300"
+        minimal_config.triggers.depletion.grace_period = None
+        minimal_config.triggers.extended_time.threshold = "900"
+        errors = [m for m in ConfigLoader.validate_config(minimal_config)
+                  if m.startswith("ERROR")]
+        assert any("depletion.critical_rate" in m for m in errors)
+        assert any("depletion.window" in m for m in errors)
+        assert any("depletion.grace_period" in m for m in errors)
+        assert any("extended_time.threshold" in m for m in errors)
+
+    @pytest.mark.unit
+    def test_validate_accepts_valid_trigger_numbers(self, minimal_config):
+        """Defaults (incl. float critical_rate) produce no trigger-number ERROR."""
+        messages = ConfigLoader.validate_config(minimal_config)
+        assert not any(
+            m.startswith("ERROR") and (
+                "low_battery_threshold" in m
+                or "critical_runtime_threshold" in m
+                or "depletion." in m
+                or "extended_time.threshold" in m)
+            for m in messages)
+
+    # --- C3: local_shutdown.command must be a non-empty string when enabled ---
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad", [None, "", "   "])
+    def test_validate_rejects_empty_local_shutdown_command(
+            self, minimal_config, bad):
+        """Regression (C3): null/empty command must error at load, not let
+        None.split()/run_command([]) silently skip the host poweroff after the
+        drain phases already ran."""
+        minimal_config.local_shutdown.enabled = True
+        minimal_config.local_shutdown.command = bad
+        errors = [m for m in ConfigLoader.validate_config(minimal_config)
+                  if m.startswith("ERROR")]
+        assert any("local_shutdown.command" in m for m in errors), (
+            f"command={bad!r} should ERROR; got {errors!r}")
+
+    @pytest.mark.unit
+    def test_validate_accepts_valid_local_shutdown_command(self, minimal_config):
+        minimal_config.local_shutdown.enabled = True
+        minimal_config.local_shutdown.command = "shutdown -h now"
+        messages = ConfigLoader.validate_config(minimal_config)
+        assert not any("local_shutdown.command" in m for m in messages)
+
+    @pytest.mark.unit
+    def test_validate_ignores_empty_command_when_disabled(self, minimal_config):
+        """An empty command is harmless when local shutdown is disabled."""
+        minimal_config.local_shutdown.enabled = False
+        minimal_config.local_shutdown.command = ""
+        messages = ConfigLoader.validate_config(minimal_config)
+        assert not any("local_shutdown.command" in m for m in messages)
+
     @pytest.mark.unit
     def test_validate_new_observability_defaults(self, minimal_config):
         """v5.3 observability defaults are safe and valid."""

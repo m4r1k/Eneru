@@ -115,9 +115,18 @@ def monitor_status(monitor: Any) -> Dict[str, Any]:
             "avrState": snap.avr_state,
             "bypassState": snap.bypass_state,
             "overloadState": snap.overload_state,
-            "nominalVoltage": snap.nominal_voltage,
-            "warningLow": snap.voltage_warning_low,
-            "warningHigh": snap.voltage_warning_high,
+            # L13: these are Eneru-DERIVED thresholds, set by
+            # _initialize_voltage_thresholds on the first successful poll. Before
+            # that they hold dataclass defaults (230.0 / 0.0 / 0.0) that are
+            # indistinguishable from real readings. Report null until a poll has
+            # landed so consumers (Prometheus -> NaN, MQTT -> none) see "unknown"
+            # rather than a fake 0V warning band.
+            "nominalVoltage": (snap.nominal_voltage
+                               if snap.last_update_time else None),
+            "warningLow": (snap.voltage_warning_low
+                           if snap.last_update_time else None),
+            "warningHigh": (snap.voltage_warning_high
+                            if snap.last_update_time else None),
         },
         "depletionRate": snap.depletion_rate,
         "timeOnBattery": snap.time_on_battery,

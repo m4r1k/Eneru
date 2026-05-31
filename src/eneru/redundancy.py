@@ -483,6 +483,47 @@ class RedundancyGroupEvaluator(threading.Thread):
         self._was_quorum_lost = False
         self._fired = False
 
+        # Cold-start protection (H1). The time-based startup grace above is not
+        # enough on its own: a member whose NUT server is merely slow to come up
+        # at boot keeps last_update_time==0 -> assess_health returns UNKNOWN ->
+        # with the default unknown_counts_as=critical it never counts healthy, so
+        # once the grace expires a fully-powered rack can be shut down. Until
+        # EVERY member has published at least one snapshot we suppress
+        # quorum-loss firing, bounded by a readiness deadline that covers
+        # realistic first-connect latency (the largest per-member
+        # connection-loss grace, on top of the startup grace). A member that has
+        # reported once and then goes stale/FAILED is NOT cold-start -- it
+        # counts per policy as before.
+        # Scope the readiness window to THIS group's members only (CodeRabbit):
+        # deriving it from every monitor would let an unrelated UPS with a large
+        # connection_loss_grace_period stretch this group's cold-start hold and
+        # delay a real quorum-loss shutdown longer than this group intended.
+        grace_durations = []
+        for name in group.ups_sources:
+            m = monitors_by_ups_name.get(name)
+            if m is None:
+                continue
+            try:
+                grace = m.config.ups.connection_loss_grace_period
+                # Only count the grace duration when grace is actually ENABLED
+                # for that member (cubic). A disabled grace doesn't delay a
+                # member going FAILED, so it must not stretch this group's
+                # cold-start hold and delay a real quorum-loss shutdown.
+                if grace.enabled:
+                    # Clamp to non-negative (cubic): duration is typed int but
+                    # not range-validated, so a negative/malformed value must not
+                    # SHRINK the readiness window -- that would let a real quorum
+                    # loss fire before members finish their first connect
+                    # (premature shutdown). 0 is the safe floor.
+                    grace_durations.append(max(0, int(grace.duration)))
+            except Exception:
+                pass
+        base_grace = max(grace_durations) if grace_durations else 0
+        self._readiness_window = self._startup_grace + base_grace + 10
+        self._ever_reported = set()
+        self._start_monotonic = time.monotonic()
+        self._cold_start_logged = False
+
     def _log(self, message: str):
         prefixed = f"{self._log_prefix}{message}" if self._log_prefix else message
         if self._logger is not None:
@@ -522,6 +563,12 @@ class RedundancyGroupEvaluator(threading.Thread):
                 triggers = None
             else:
                 snap = monitor.state.snapshot()
+                # A member that has published at least one successful poll
+                # (last_update_time > 0) is no longer "cold-start" -- if it later
+                # goes stale/FAILED it counts per policy. Only never-reported
+                # members are held back below.
+                if getattr(snap, "last_update_time", 0):
+                    self._ever_reported.add(ups_name)
                 check_interval = monitor.config.ups.check_interval
                 max_stale_data_tolerance = (
                     monitor.config.ups.max_stale_data_tolerance
@@ -543,7 +590,33 @@ class RedundancyGroupEvaluator(threading.Thread):
             if self._effective_health(raw) == UPSHealth.HEALTHY:
                 healthy_count += 1
 
-        quorum_lost = healthy_count < self._group.min_healthy
+        raw_quorum_lost = healthy_count < self._group.min_healthy
+
+        # Cold-start hold (H1): if a member whose monitor EXISTS has NEVER
+        # reported and we're still inside the readiness window, do not treat
+        # quorum as lost yet -- a slow-to-boot NUT server must not drop a powered
+        # rack. Once every present member has reported (or the window expires),
+        # normal evaluation resumes so a genuinely dead UPS at boot still
+        # triggers protection per policy. A member with NO monitor in the map is
+        # a permanent (config/wiring) condition, not a boot delay, so it counts
+        # as UNKNOWN immediately and is excluded from the hold.
+        never_reported = [
+            n for n in self._group.ups_sources
+            if self._monitors.get(n) is not None and n not in self._ever_reported
+        ]
+        within_readiness = (
+            (time.monotonic() - self._start_monotonic) < self._readiness_window
+        )
+        cold_start_hold = bool(never_reported) and within_readiness
+        if cold_start_hold and raw_quorum_lost and not self._cold_start_logged:
+            self._cold_start_logged = True
+            self._log(
+                f"⏳ Redundancy group '{self._group.name}' deferring quorum "
+                f"decision: member(s) {', '.join(never_reported)} have not "
+                "published a first snapshot yet (cold-start protection)."
+            )
+
+        quorum_lost = raw_quorum_lost and not cold_start_hold
 
         if quorum_lost and not self._was_quorum_lost:
             tally = ", ".join(f"{name}={h.value}" for name, h in per_ups.items())
@@ -565,6 +638,14 @@ class RedundancyGroupEvaluator(threading.Thread):
             # subsequent quorum loss for the rest of this daemon's
             # life, exactly the issue #4 symptom this PR fixes.
             # ``clear_shutdown_state()`` is idempotent.
+            #
+            # L4 (evaluated, intentional): this recovery clear deliberately does
+            # NOT pass refuse_active_peer=True. Recovery must always re-arm THIS
+            # daemon's own guard; the refuse-active-peer check (used at startup)
+            # would raise if another running process owned the shared flag, which
+            # would wrongly abort a legitimate recovery. The two-daemons-sharing-
+            # one-flag-file case is an operator misconfiguration already guarded
+            # at startup, so we don't re-check it on every recovery tick.
             self._executor.clear_shutdown_state()
             if self._fired:
                 self._fired = False

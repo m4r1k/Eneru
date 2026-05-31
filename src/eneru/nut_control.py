@@ -120,6 +120,12 @@ def set_variable(
     """Write a UPS variable (``upsrw -s var=value -u … -p … ups``).
 
     Returns ``(ok, output, error)``.
+
+    L10 (evaluated, tunable): a write that actually changes UPS state (e.g. a
+    battery-calibration variable) can take longer to acknowledge than a read, so
+    a slow SET may be reported failed here while NUT still applies it. The bound
+    is the operator-tunable ``nut_control.timeout`` (passed as ``timeout``);
+    raise it for slow devices rather than special-casing SET.
     """
     cmd = (["upsrw", "-s", f"{variable}={value}"]
            + _creds_args(username, password) + [ups_name])

@@ -4,6 +4,8 @@ import pytest
 import time
 from unittest.mock import patch, MagicMock, call
 
+from test_monitor_core import _run_one_iteration
+
 from eneru import (
     Config,
     UPSConfig,
@@ -329,51 +331,37 @@ class TestGracePeriodFailsafe:
 
     @pytest.mark.unit
     def test_failsafe_bypasses_grace_period_on_battery(self, monitor):
-        """Test that failsafe fires immediately when on battery."""
+        """L21/L22: drive the REAL _main_loop. A failed poll while on battery
+        fires the failsafe (grace never applies on battery). The hard-error
+        debounce (H3) is pre-satisfied so the single iteration fires."""
+        monitor._in_redundancy_group = False
         monitor.state.previous_status = "OB DISCHRG"
         monitor.state.connection_state = "OK"
-
-        with patch.object(monitor, "_execute_shutdown_sequence") as mock_shutdown:
-            with patch.object(monitor, "_send_notification"):
-                # Simulate the main loop logic
-                is_failsafe_trigger = True
-
-                if is_failsafe_trigger and "OB" in monitor.state.previous_status:
-                    monitor.state.connection_state = "FAILED"
-                    monitor.state.connection_lost_time = 0.0
-                    monitor._shutdown_flag_path.touch()
-                    monitor._send_notification("FAILSAFE", monitor.config.NOTIFY_FAILURE)
-                    monitor._execute_shutdown_sequence()
-                elif is_failsafe_trigger:
-                    monitor._handle_connection_failure("Connection refused")
-
-                mock_shutdown.assert_called_once()
-                assert monitor.state.connection_state == "FAILED"
+        monitor.state.connection_error_count = (
+            monitor.config.ups.max_stale_data_tolerance - 1
+        )
+        with patch.object(monitor, "_execute_shutdown_sequence") as mock_shutdown, \
+                patch.object(monitor, "_send_notification"):
+            _run_one_iteration(monitor, (False, {}, "Connection refused"))
+        mock_shutdown.assert_called_once()
+        assert monitor.state.connection_state == "FAILED"
 
     @pytest.mark.unit
     def test_failsafe_during_active_grace_period(self, monitor):
-        """Test failsafe fires if power goes out during grace period."""
-        # Start in grace period (connection lost while on line power)
+        """L22: power goes out (OB) while a connection grace period is active;
+        the REAL loop's failsafe must still fire (grace is bypassed on battery)."""
+        monitor._in_redundancy_group = False
         monitor.state.connection_state = "GRACE_PERIOD"
         monitor.state.connection_lost_time = time.time() - 10
-        # Now power goes out
         monitor.state.previous_status = "OB DISCHRG"
-
-        with patch.object(monitor, "_execute_shutdown_sequence") as mock_shutdown:
-            with patch.object(monitor, "_send_notification"):
-                is_failsafe_trigger = True
-
-                if is_failsafe_trigger and "OB" in monitor.state.previous_status:
-                    monitor.state.connection_state = "FAILED"
-                    monitor.state.connection_lost_time = 0.0
-                    monitor._shutdown_flag_path.touch()
-                    monitor._send_notification("FAILSAFE", monitor.config.NOTIFY_FAILURE)
-                    monitor._execute_shutdown_sequence()
-                elif is_failsafe_trigger:
-                    monitor._handle_connection_failure("Connection refused")
-
-                mock_shutdown.assert_called_once()
-                assert monitor.state.connection_state == "FAILED"
+        monitor.state.connection_error_count = (
+            monitor.config.ups.max_stale_data_tolerance - 1
+        )
+        with patch.object(monitor, "_execute_shutdown_sequence") as mock_shutdown, \
+                patch.object(monitor, "_send_notification"):
+            _run_one_iteration(monitor, (False, {}, "Connection refused"))
+        mock_shutdown.assert_called_once()
+        assert monitor.state.connection_state == "FAILED"
 
 
 # ==============================================================================

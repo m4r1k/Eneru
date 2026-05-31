@@ -68,6 +68,11 @@ class MonitorState:
     connection_flap_count: int = 0
     connection_first_flap_time: float = 0.0
     stale_data_count: int = 0
+    # Consecutive HARD poll failures (connection refused / timeout / non-stale
+    # errors) since the last success. Mirrors stale_data_count so the on-battery
+    # FAILSAFE debounces a single transient NUT blip the same way stale data is
+    # debounced (H3); reset to 0 on any successful poll.
+    connection_error_count: int = 0
     voltage_warning_low: float = 0.0
     voltage_warning_high: float = 0.0
     nominal_voltage: float = 230.0
@@ -156,6 +161,17 @@ class MonitorState:
         Always read via this helper from another thread; direct attribute
         access is not safe because the poll cycle updates several fields in
         quick succession.
+
+        L12 (SUSPECTED, evaluated): this reader holds ``_lock``, and the
+        safety-critical multi-field writes (the depletion-rate write and the
+        end-of-cycle bulk publish in monitor.py) each take ``_lock`` too, so the
+        decision-relevant fields are consistent. A few *derived display* fields
+        (voltage_state / avr_state / bypass_state / overload_state) are updated
+        in health/voltage.py without the lock, so a snapshot can occasionally
+        catch one of those a single poll stale. Impact is unproven and cosmetic
+        (they feed status/Prometheus labels, not shutdown decisions); locking
+        every writer on the hot poll loop is risk-for-little-gain, so this is
+        documented for maintainer judgment rather than changed here.
         """
         with self._lock:
             return HealthSnapshot(
