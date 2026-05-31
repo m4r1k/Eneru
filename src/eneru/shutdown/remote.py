@@ -48,7 +48,16 @@ class RemoteShutdownResult:
 
     @property
     def success(self) -> bool:
-        """Return True only when the final shutdown command was accepted."""
+        """Return True only when the final shutdown command was accepted.
+
+        L6 (evaluated, intentional): for a loopback, ``crashed`` (a Phase-A
+        pre-action crash) and ``shutdown_sent`` (the Phase-C poweroff succeeded)
+        can BOTH be true -- the host drain partially failed but the poweroff
+        still went out. Both flags are accurate; ``success`` deliberately treats
+        a Phase-A crash as "not fully successful" so the summary surfaces the
+        drain failure, even though the host did power off. This is a reporting
+        nuance, not a shutdown defect, so it is left as-is.
+        """
         return (
             self.completed
             and self.shutdown_sent

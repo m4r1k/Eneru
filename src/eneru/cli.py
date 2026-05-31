@@ -454,6 +454,13 @@ def _synthesize_loopback_if_needed(
         owner.remote_servers.append(synthesized)
     else:
         # Implicit single-UPS mode with no groups — attach to top-level.
+        # L18 (evaluated, degenerate-only): when ups_groups is EMPTY,
+        # config.remote_servers is a read-only property returning a throwaway
+        # list, so this append is lost and the daemon later aborts with a
+        # less-than-obvious "no loopback" error. A real config always has at
+        # least one UPS group (it's required to configure local capabilities),
+        # so this only bites a degenerate/empty config that fails to start
+        # anyway -- left as-is rather than fabricating a synthetic group.
         config.remote_servers.append(synthesized)
 
     print(

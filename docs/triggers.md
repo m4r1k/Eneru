@@ -158,7 +158,9 @@ FSD is the highest-priority trigger. If `ups.status` includes `FSD`, Eneru start
 
 ## Failsafe battery protection
 
-If Eneru was on battery and then loses visibility of the UPS, it starts shutdown immediately. This is not configurable.
+If Eneru was on battery and then loses visibility of the UPS, it runs the
+shutdown sequence — it assumes the UPS may be near cut-off and a missed shutdown
+is worse than an early one.
 
 Examples:
 
@@ -167,7 +169,19 @@ Examples:
 - USB connection to the UPS fails.
 - The UPS stops returning fresh data.
 
-The connection-loss grace period only applies while the UPS is on line power. It does not delay failsafe shutdown.
+**A single transient blip does not trigger it (changed in 6.0.0).** Earlier
+releases fired the failsafe on the very first failed poll. A momentary
+connection refusal (e.g. an `upsd` restart) or a slow `upsc` call that hit its
+30-second timeout could therefore drop a host that was simply riding out a
+survivable dip. The failsafe now requires **`ups.max_stale_data_tolerance`
+consecutive failed polls** — the same debounce that stale data already used — so
+both failure kinds get the same number of chances. Set
+`ups.max_stale_data_tolerance: 1` to restore the old fire-on-first-error
+behaviour.
+
+The connection-loss grace period only applies while the UPS is on line power. It
+does not change the on-battery failsafe (the failsafe still ignores the grace
+window; it only adds the consecutive-failure debounce above).
 
 ### Failsafe timeline
 
@@ -175,8 +189,9 @@ The connection-loss grace period only applies while the UPS is on line power. It
 |------|-------|--------------|
 | Line power | NUT connection drops while previous UPS status is `OL` | Connection grace may suppress the notification |
 | Line power | NUT returns during grace | No shutdown. The recovery can count toward flap detection |
-| On battery | NUT connection drops while previous UPS status is `OB` | Failsafe bypasses grace and starts shutdown immediately |
-| Afterwards | UPS visibility remains lost | Eneru assumes the UPS may be near cut-off and runs the shutdown sequence |
+| On battery | A failed poll while previous UPS status is `OB` | Counts toward the failsafe; no shutdown yet (below tolerance) |
+| On battery | `max_stale_data_tolerance` consecutive failed polls while `OB` | Failsafe starts the shutdown sequence (grace window does not apply) |
+| Afterwards | UPS visibility remains lost | Eneru assumes the UPS may be near cut-off and continues the shutdown sequence |
 
 ## Voltage sensitivity
 

@@ -161,6 +161,17 @@ class MonitorState:
         Always read via this helper from another thread; direct attribute
         access is not safe because the poll cycle updates several fields in
         quick succession.
+
+        L12 (SUSPECTED, evaluated): this reader holds ``_lock``, and the
+        safety-critical multi-field writes (the depletion-rate write and the
+        end-of-cycle bulk publish in monitor.py) each take ``_lock`` too, so the
+        decision-relevant fields are consistent. A few *derived display* fields
+        (voltage_state / avr_state / bypass_state / overload_state) are updated
+        in health/voltage.py without the lock, so a snapshot can occasionally
+        catch one of those a single poll stale. Impact is unproven and cosmetic
+        (they feed status/Prometheus labels, not shutdown decisions); locking
+        every writer on the hot poll loop is risk-for-little-gain, so this is
+        documented for maintainer judgment rather than changed here.
         """
         with self._lock:
             return HealthSnapshot(

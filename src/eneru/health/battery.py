@@ -35,6 +35,13 @@ class BatteryMonitorMixin:
         )
         self.state.battery_history.append((current_time, current_battery_float))
 
+        # L17 (evaluated, deferred): this file is written every poll but not
+        # read back at startup. It's a forensic record today. Reading it back to
+        # let depletion-rate survive a daemon restart mid-outage is entangled
+        # with the on-battery deque reset in monitor._handle_on_battery (a fresh
+        # OB transition clears battery_history), which is the same
+        # restart-adoption area as the H3 work -- so a safe cross-restart
+        # read-back is a larger change than a Low warrants and is deferred.
         try:
             # with_name(name + '.tmp') preserves the per-UPS suffix on the
             # path (e.g. 'ups-battery-history.ups1') so concurrent writers

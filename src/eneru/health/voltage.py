@@ -393,6 +393,13 @@ class VoltageMonitorMixin:
         # State log line is sacred -- always written immediately on
         # transition. The notification path is gated by the hysteresis
         # logic in _maybe_notify_voltage_pending unless severe.
+        # L16 (evaluated, intentionally kept): under sustained voltage flapping
+        # this writes one event row per real transition, which can accumulate.
+        # That is deliberate -- the events table is the forensic black-box and
+        # every transition is genuine. The noisy *notifications* are already
+        # silenced by the hysteresis dwell above, and total growth is bounded by
+        # the stats retention/purge. Rate-limiting the log here would discard
+        # forensic detail, so it is left as-is on purpose.
         if target != self.state.voltage_state:
             if target == "NORMAL":
                 self._log_power_event(

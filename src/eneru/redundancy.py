@@ -621,6 +621,14 @@ class RedundancyGroupEvaluator(threading.Thread):
             # subsequent quorum loss for the rest of this daemon's
             # life, exactly the issue #4 symptom this PR fixes.
             # ``clear_shutdown_state()`` is idempotent.
+            #
+            # L4 (evaluated, intentional): this recovery clear deliberately does
+            # NOT pass refuse_active_peer=True. Recovery must always re-arm THIS
+            # daemon's own guard; the refuse-active-peer check (used at startup)
+            # would raise if another running process owned the shared flag, which
+            # would wrongly abort a legitimate recovery. The two-daemons-sharing-
+            # one-flag-file case is an operator misconfiguration already guarded
+            # at startup, so we don't re-check it on every recovery tick.
             self._executor.clear_shutdown_state()
             if self._fired:
                 self._fired = False
