@@ -1737,6 +1737,21 @@ class ConfigLoader:
                     f"ERROR: {label}.triggers.extended_time.threshold must be a "
                     f"non-negative integer, got {t.extended_time.threshold!r}."
                 )
+            # L2: relationship check -- a stabilization window >= the
+            # critical-runtime threshold suppresses the runtime trigger for the
+            # entire remaining runtime, so the host could die on battery before
+            # the window ever opens. Warn (don't reject -- it can be deliberate).
+            sd = t.on_battery_stabilization_delay
+            crt = t.critical_runtime_threshold
+            if (cls._is_int_nonbool_in_range(sd, minimum=0)
+                    and cls._is_int_nonbool_in_range(crt, minimum=1)
+                    and sd >= crt):
+                messages.append(
+                    f"WARNING: {label}.triggers.on_battery_stabilization_delay "
+                    f"({sd}s) >= critical_runtime_threshold ({crt}s): the "
+                    "stabilization window can suppress the runtime trigger for "
+                    "the whole remaining runtime. Consider lowering the delay."
+                )
 
         for group in config.ups_groups:
             _check_trigger_numbers(f"ups[{group.ups.label!r}]", group.triggers)

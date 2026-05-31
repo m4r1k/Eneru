@@ -54,7 +54,13 @@ class VMShutdownMixin:
         remaining_vms: List[str] = list(running_vms)
 
         while time_waited < max_wait:
-            exit_code, stdout, _ = run_command(["virsh", "list", "--name", "--state-running"])
+            # L7: bound each poll to wait_interval so a wedged libvirtd (a virsh
+            # call that hangs to run_command's 30s default) can't blow the
+            # max_wait budget many times over before force-destroy/poweroff.
+            exit_code, stdout, _ = run_command(
+                ["virsh", "list", "--name", "--state-running"],
+                timeout=wait_interval,
+            )
             if exit_code != 0:
                 # libvirtd may be wedged or restarting. Don't trust empty
                 # stdout as "all stopped" — keep the previous remaining_vms

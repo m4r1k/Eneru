@@ -52,7 +52,16 @@ async function api(path, opts) {
   const headers = opts.headers || {};
   if (token()) headers["Authorization"] = "Bearer " + token();
   if (opts.body) headers["Content-Type"] = "application/json";
-  const res = await fetch(path, { method: opts.method || "GET", headers, body: opts.body });
+  let res;
+  try {
+    res = await fetch(path, { method: opts.method || "GET", headers, body: opts.body });
+  } catch (_e) {
+    // L14: a network error (daemon down, or connectivity lost during a power
+    // event -- exactly when the dashboard matters) rejects the fetch. Return a
+    // non-ok result with status 0 so callers show a "connection lost" indicator
+    // instead of an unhandled rejection that silently freezes the poll loop.
+    return { ok: false, status: 0, data: null };
+  }
   if (res.status === 401) { setToken(""); refreshAuthUI(); }
   let data = null;
   try { data = await res.json(); } catch (_e) { /* non-JSON (static) */ }
@@ -589,16 +598,29 @@ function observeGraphResize() {
 
 // ----- control panel (5c) -----
 
+// L15: cache key for the built control panel. The command/variable lists are
+// config-static, so rebuilding the panel every poll was pure waste -- 2 extra
+// requests per UPS each cycle AND it wiped any half-typed variable value. We
+// rebuild only when the auth token or the set of UPS names actually changes.
+let _controlBuiltKey = null;
+
 async function renderControl(payload) {
   const sec = document.getElementById("control-section");
   const panel = document.getElementById("control-panel");
   // Control is only meaningful when authenticated and nut_control is enabled.
   const nutEnabled = cfgSnapshot && cfgSnapshot.nutControl &&
     cfgSnapshot.nutControl.enabled;
-  if (!token() || !nutEnabled) { sec.hidden = true; return; }
+  if (!token() || !nutEnabled) {
+    sec.hidden = true;
+    _controlBuiltKey = null;  // rebuild when control becomes available again
+    return;
+  }
   sec.hidden = false;
-  panel.replaceChildren();
   const rows = (payload && payload.ups) || [];
+  const key = token() + "|" + rows.map((u) => u.name).join(",");
+  if (key === _controlBuiltKey) return;  // already built for this token + UPS set
+  _controlBuiltKey = key;
+  panel.replaceChildren();
   for (const u of rows) {
     const box = el("div", { class: "control-ups" }, [el("h3", { text: u.label || u.name })]);
     box.appendChild(el("h4", { text: "Commands" }));
@@ -765,6 +787,8 @@ async function refresh() {
   const ups = await api("/api/v1/ups");
   if (ups.ok) {
     renderUps(ups.data); renderControl(ups.data); renderBanner(); showError("");
+  } else if (ups.status === 0) {
+    showError("⚠️ Connection lost — retrying…");  // L14: network/daemon down
   } else if (ups.status !== 401) {
     showError("Could not load UPS status (HTTP " + ups.status + ")");
   }

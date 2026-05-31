@@ -351,30 +351,25 @@ class TestMultiUPSCoordinator:
 
     @pytest.mark.unit
     def test_defense_in_depth_lock(self):
-        """Threading lock prevents double local shutdown."""
+        """L24: the REAL _handle_local_shutdown guard prevents a double local
+        shutdown -- a second call (e.g. a second UPS group tripping) returns
+        before running the body. Drives the real method, not a copy of it."""
         config = self._make_config(
             [UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True)],
             local_shutdown=LocalShutdownConfig(enabled=False),
         )
         coord = MultiUPSCoordinator(config)
-        coord._log = lambda msg: None
+        logs = []
+        coord._log = lambda msg: logs.append(msg)
         coord._notification_worker = None
 
-        shutdown_count = []
-
-        def counting_shutdown(label):
-            proceed = False
-            with coord._local_shutdown_lock:
-                if not coord._local_shutdown_initiated:
-                    coord._local_shutdown_initiated = True
-                    proceed = True
-            if proceed:
-                shutdown_count.append(label)
-
-        coord._handle_local_shutdown = counting_shutdown
         coord._handle_local_shutdown("UPS1")
         coord._handle_local_shutdown("UPS2")
-        assert len(shutdown_count) == 1
+
+        # The body's "triggered by" line fires once; the second call hit the
+        # guard (proceed=False) and returned before logging anything.
+        triggered = [m for m in logs if "Local shutdown triggered by" in m]
+        assert triggered == ["🚨 Local shutdown triggered by UPS1"]
 
     @pytest.mark.unit
     def test_clear_local_shutdown_state_resets_lock_and_flag(self, tmp_path):

@@ -154,6 +154,40 @@ Medium fixes:
 - The dashboard no longer offers a `redundancy:<name>` event-source filter that
   could never return rows (redundancy events aren't persisted to a stats DB).
 
+Low fixes:
+
+- Config validation now warns when `on_battery_stabilization_delay >=
+  critical_runtime_threshold` (the stabilization window would suppress the
+  runtime trigger for the whole remaining runtime).
+- A SIGTERM/SIGINT re-entrancy guard stops a second signal re-running teardown.
+- The VM-shutdown wait loop bounds each `virsh list` poll so a wedged libvirtd
+  can't blow the `max_wait` budget.
+- A FAILED remote server is no longer re-logged as "degraded" on every poll.
+- `_SAFE_NUT_VALUE` is anchored with `\Z` (a trailing newline no longer slips
+  through the upsrw value filter).
+- `StatsStore.query_range` validates the metric against an internal allowlist
+  before it reaches the interpolated SQL column position (defense-in-depth).
+- Derived `powerQuality` thresholds (nominal / warning band) report `null`
+  before the first poll instead of dataclass defaults that look like real data.
+- The dashboard survives connection loss (fetch errors show a "Connection lost"
+  banner instead of freezing the poll loop) and no longer rebuilds the control
+  panel every poll (which wiped half-typed values and re-fetched per UPS).
+- CLI: `user create` / `passwd` validate the username/role before prompting for
+  a password; `--password-stdin` keeps a password that legitimately ends in a
+  bare carriage return.
+- The hermetic notifications test no longer requires the optional `apprise`
+  extra to be installed; several brittle tests that re-implemented loop/guard
+  logic now drive the real code paths.
+- Docs: README trigger count matches its list; the configuration.md CLI table
+  lists the `user`/`apikey`/`shutdown`/`remote` subcommands.
+
+Evaluated and intentionally left as-is (documented): the per-transition voltage
+event log (a deliberate forensic record, bounded by retention; notifications are
+already hysteresis-gated), the per-poll battery-history file write (a forensic
+record; cross-restart read-back is entangled with the on-battery deque reset),
+the `upsrw` SET timeout (operator-tunable via `nut_control.timeout`), and a
+couple of niche multi-daemon / degenerate-config edges.
+
 ---
 
 ## [5.5.1] - 2026-05-19

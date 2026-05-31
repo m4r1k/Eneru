@@ -1573,11 +1573,13 @@ def _resolve_password(args):
         return auth.generate_password(), True
     if getattr(args, "password_stdin", False):
         data = sys.stdin.read()
-        # Strip a single trailing newline (LF or CRLF — Windows/CI pipes send
-        # \r\n), preserving any other characters the password may contain.
-        if data.endswith("\n"):
-            data = data[:-1]
-        if data.endswith("\r"):
+        # Strip a single trailing LINE TERMINATOR (CRLF from Windows/CI pipes,
+        # or LF), preserving every other character. L20: a BARE trailing "\r"
+        # (no following "\n") is NOT a line terminator -- it's a legitimate
+        # password character -- so it must be kept, not stripped.
+        if data.endswith("\r\n"):
+            data = data[:-2]
+        elif data.endswith("\n"):
             data = data[:-1]
         password = data
         if not password:
@@ -1595,6 +1597,14 @@ def _resolve_password(args):
 def _cmd_user_create(args):
     """Create a local user account."""
     store = _resolve_auth_store(args)
+    # L19: validate username + role BEFORE prompting for the password, so an
+    # invalid name/role fails fast instead of after the operator types (and
+    # confirms) a password that's about to be thrown away.
+    try:
+        auth._validate_username(args.username)
+        auth._validate_role(args.role)
+    except auth.AuthError as exc:
+        raise SystemExit(f"ERROR: {exc}")
     password, generated = _resolve_password(args)
     try:
         store.create_user(args.username, password, role=args.role)
@@ -1611,6 +1621,11 @@ def _cmd_user_create(args):
 def _cmd_user_passwd(args):
     """Reset a user's password."""
     store = _resolve_auth_store(args)
+    # L19: validate the username format before prompting for the new password.
+    try:
+        auth._validate_username(args.username)
+    except auth.AuthError as exc:
+        raise SystemExit(f"ERROR: {exc}")
     password, generated = _resolve_password(args)
     try:
         store.set_password(args.username, password)

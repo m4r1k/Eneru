@@ -60,6 +60,8 @@ class MultiUPSCoordinator:
         # M1: set while a committed local shutdown is running outside the lock,
         # so recovery can't re-arm the guard mid-flight and admit a 2nd poweroff.
         self._local_shutdown_in_flight = False
+        # L5: re-entrancy guard for the SIGTERM/SIGINT handler.
+        self._signal_handling = False
         self._global_shutdown_flag = Path(config.logging.shutdown_flag_file)
 
         # Shared resources
@@ -865,6 +867,12 @@ class MultiUPSCoordinator:
 
     def _handle_signal(self, signum: int, frame):
         """Handle SIGTERM/SIGINT for clean shutdown."""
+        # L5: a second signal arriving during the join/teardown window must not
+        # re-run the whole teardown (double notifications, redundant joins). The
+        # first signal owns the exit; ignore the rest.
+        if self._signal_handling:
+            return
+        self._signal_handling = True
         self._log("🛑 Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
 
         self._stop_event.set()

@@ -868,14 +868,18 @@ class TestNotificationWorkerStartEarlyReturns:
         minimal_config.notifications.urls = ["bogus://not-a-real-scheme/x"]
         worker = NotificationWorker(minimal_config)
 
-        with patch("eneru.notifications.APPRISE_AVAILABLE", True):
+        # L1: patch the whole `apprise` module object (like the sibling tests),
+        # not its `.Apprise` attribute -- when the optional apprise extra isn't
+        # installed `eneru.notifications.apprise` is None, and patching an
+        # attribute of None raises AttributeError. This keeps the test hermetic.
+        with patch("eneru.notifications.APPRISE_AVAILABLE", True), \
+                patch("eneru.notifications.apprise") as mock_apprise:
             fake_apprise_instance = MagicMock()
             # add() returns False for every URL, len() returns 0
             fake_apprise_instance.add = MagicMock(return_value=False)
             fake_apprise_instance.__len__ = MagicMock(return_value=0)
-            with patch("eneru.notifications.apprise.Apprise",
-                       return_value=fake_apprise_instance):
-                assert worker.start() is False
+            mock_apprise.Apprise.return_value = fake_apprise_instance
+            assert worker.start() is False
 
         out = capsys.readouterr().out
         assert "Failed to add notification URL" in out or "No valid notification URLs" in out

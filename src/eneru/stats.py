@@ -51,6 +51,13 @@ SCHEMA_VERSION = 5
 BUCKET_5MIN = 5 * 60
 BUCKET_HOURLY = 60 * 60
 
+# Numeric sample columns that query_range may select. `metric` is interpolated
+# into the SQL column position there, so this internal allowlist (L11) is
+# defense-in-depth: callers already validate against status.HISTORY_METRICS, but
+# a future caller that forgets cannot inject. Derived from SAMPLE_FIELDS so it
+# stays in sync; the non-numeric/identity columns are excluded.
+_QUERYABLE_METRICS = frozenset(SAMPLE_FIELDS) - {"ts", "status", "connection_state"}
+
 
 def _to_float(value) -> Optional[float]:
     """Lenient float coercion. Returns ``None`` for empty / non-numeric."""
@@ -1100,6 +1107,11 @@ class StatsStore:
         ``depletion_rate``.
         """
         if self._conn is None:
+            return []
+
+        # L11: reject any metric not on the internal allowlist before it reaches
+        # the interpolated column position.
+        if metric not in _QUERYABLE_METRICS:
             return []
 
         tier = prefer_tier or self._pick_tier(start_ts, end_ts)

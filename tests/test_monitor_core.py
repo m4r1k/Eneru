@@ -659,36 +659,33 @@ class TestFailsafe:
 
     @pytest.mark.unit
     def test_stale_data_increments_counter(self, tmp_path):
-        """Stale data increments counter before triggering failsafe."""
+        """L23: drive the REAL loop -- one stale poll (below tolerance, not on
+        battery) increments the counter and does NOT fire a shutdown."""
         monitor = make_monitor(tmp_path)
+        monitor.state.previous_status = "OL CHRG"  # not on battery
+        monitor.state.connection_state = "OK"
         monitor.state.stale_data_count = 0
-
-        # Simulate stale data handling from main loop
-        error_msg = "Data stale"
-        if "Data stale" in error_msg:
-            monitor.state.stale_data_count += 1
-            if monitor.state.stale_data_count >= monitor.config.ups.max_stale_data_tolerance:
-                is_failsafe_trigger = True
-            else:
-                is_failsafe_trigger = False
-
+        with patch.object(monitor, "_execute_shutdown_sequence") as mock_exec:
+            _run_one_iteration(monitor, (False, {}, "Data stale"))
         assert monitor.state.stale_data_count == 1
-        assert is_failsafe_trigger is False  # Not yet at tolerance (3)
+        mock_exec.assert_not_called()
 
     @pytest.mark.unit
     def test_stale_data_reaches_tolerance(self, tmp_path):
-        """Stale data at tolerance threshold triggers failsafe."""
+        """L23: drive the REAL loop -- stale data reaching tolerance while on
+        battery fires the failsafe shutdown."""
         monitor = make_monitor(tmp_path)
-        monitor.state.stale_data_count = 2  # One more will reach 3
-
-        error_msg = "Data stale"
-        monitor.state.stale_data_count += 1
-        is_failsafe_trigger = (
-            monitor.state.stale_data_count >= monitor.config.ups.max_stale_data_tolerance
+        monitor._in_redundancy_group = False
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.connection_state = "OK"
+        monitor.state.stale_data_count = (
+            monitor.config.ups.max_stale_data_tolerance - 1
         )
-
-        assert monitor.state.stale_data_count == 3
-        assert is_failsafe_trigger is True
+        with patch.object(monitor, "_execute_shutdown_sequence") as mock_exec:
+            _run_one_iteration(monitor, (False, {}, "Data stale"))
+        assert (monitor.state.stale_data_count
+                >= monitor.config.ups.max_stale_data_tolerance)
+        mock_exec.assert_called_once()
 
 
 # ==============================================================================

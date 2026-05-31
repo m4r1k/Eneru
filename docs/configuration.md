@@ -551,6 +551,10 @@ See [Remote servers](remote-servers.md) for SSH keys, sudoers, predefined action
 | `monitor` | Open the TUI dashboard |
 | `tui` | Alias for `monitor` |
 | `test-notifications` | Send one test notification |
+| `user {create,list,show,passwd,delete}` | Manage API/dashboard users (see [Authentication](authentication.md)) |
+| `apikey {create,list,revoke}` | Manage programmatic API keys (see [Authentication](authentication.md)) |
+| `shutdown` | Run a manual shutdown drill (remote / redundancy group) |
+| `remote` | List configured remote servers |
 | `completion {bash,zsh,fish}` | Print a shell completion script |
 | `version` | Print version |
 

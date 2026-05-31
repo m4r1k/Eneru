@@ -41,7 +41,9 @@ _DASHBOARD_INDEX = "index.html"
 # enum words, voltages). upscmd/upsrw run via execve arg lists (never a shell),
 # so this is defense-in-depth, not the only barrier — but it keeps control
 # characters and shell-ish metacharacters out of the value entirely.
-_SAFE_NUT_VALUE = re.compile(r"^[A-Za-z0-9 ._:+%/,\-]{1,64}$")
+# L9: anchor with \Z, not $ -- in Python `$` also matches just before a trailing
+# newline, so "value\n" would slip through this defense-in-depth charset filter.
+_SAFE_NUT_VALUE = re.compile(r"\A[A-Za-z0-9 ._:+%/,\-]{1,64}\Z")
 # Strict response content-type whitelist (avoids header injection if a route
 # ever passes user data through as a content type).
 _CONTENT_TYPE_HEADERS = {

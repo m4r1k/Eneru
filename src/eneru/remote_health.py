@@ -470,7 +470,11 @@ class RemoteHealthManager:
                         self.config.NOTIFY_FAILURE,
                     )
                     notification_sent = True
-        elif not success:
+        elif not success and current != REMOTE_HEALTH_FAILED:
+            # L8: only log "degraded" while the server is genuinely degrading
+            # (before it crosses failure_threshold). Once it's FAILED we've
+            # already logged + notified the failure; relabelling it "degraded"
+            # on every subsequent poll is noisy and misleading.
             self.log_fn(f"⚠️ Remote health degraded: {display}: {error}")
         self._record_slow_ssh_response(
             key, display, server.host, latency_ms, success, now,
