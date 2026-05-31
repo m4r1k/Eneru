@@ -152,7 +152,12 @@ def test_dashboard_has_event_delete_surface(minimal_config):
         "/app.js")[1].decode("utf-8")
     assert "deleteSelected" in js
     assert 'method: "DELETE"' in js
-    assert "if (!beforeEvent) selectedEvents = new Set()" in js
+    # Selections must survive passive polling: loadEvents clears only on an
+    # explicit clearSelection (range change), never on the unconditional refresh
+    # path. The Delete button surfaces the live, actionable selection count.
+    assert "clearSelection" in js
+    assert "loadEvents(undefined, true)" in js
+    assert "Delete selected (" in js
 
 
 @pytest.mark.unit

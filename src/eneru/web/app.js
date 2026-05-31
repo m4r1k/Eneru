@@ -164,6 +164,9 @@ function renderUps(payload) {
 // ----- UPS detail drill-down (Slice D) -----
 
 let openDetailName = null;
+// Where focus was before the modal opened, so closing returns it there instead
+// of dropping keyboard / screen-reader users back at the top of the page.
+let detailReturnFocus = null;
 
 function detailRow(label, value) {
   return el("div", { class: "row" }, [
@@ -179,14 +182,22 @@ function detailSection(title, rows) {
 }
 
 function openDetail(name) {
+  detailReturnFocus = document.activeElement;
   openDetailName = name;
   renderDetail(name);
   document.getElementById("detail-modal").hidden = false;
+  // Pull focus into the dialog so Tab stays among its controls and assistive
+  // tech announces it; the close button is the first focusable element.
+  document.getElementById("detail-close").focus();
 }
 
 function closeDetail() {
   openDetailName = null;
   document.getElementById("detail-modal").hidden = true;
+  if (detailReturnFocus && typeof detailReturnFocus.focus === "function") {
+    detailReturnFocus.focus();
+  }
+  detailReturnFocus = null;
 }
 
 function renderDetail(name) {
@@ -316,11 +327,13 @@ function eventRangeFrom() {
   return Math.floor(Date.now() / 1000) - parseInt(v, 10);
 }
 
-async function loadEvents(beforeEvent) {
+async function loadEvents(beforeEvent, clearSelection = false) {
   let q = "limit=200";
   const from = eventRangeFrom();
   if (from !== null) q += "&from=" + from;
-  if (!beforeEvent) selectedEvents = new Set();
+  // Only intentional actions clear the selection; the passive 10s poll passes
+  // clearSelection=false so an in-progress selection survives a refresh.
+  if (clearSelection) selectedEvents = new Set();
   if (beforeEvent) {
     q += "&before=" + encodeURIComponent(beforeEvent.ts);
     if (beforeEvent.source && beforeEvent.id !== undefined && beforeEvent.id !== null) {
@@ -340,8 +353,8 @@ async function loadOlderEvents() {
 
 function resetEvents() {
   lastEvents = [];
-  selectedEvents = new Set();
-  loadEvents();
+  // A range change is a new dataset, so the selection no longer applies.
+  loadEvents(undefined, true);
 }
 
 function updateEventSourceFilter(upsRows, groups) {
@@ -384,8 +397,10 @@ function eventMatchesSource(event, source) {
   return haystack.includes(source.toLowerCase());
 }
 
-// Selected event keys ((source,id)). Cleared on every refresh, delete, range
-// change, and sign-out so a stale destructive selection cannot linger.
+// Selected event keys ((source,id)). Preserved across passive polling so an
+// in-progress selection survives a 10s refresh; cleared only on intentional
+// actions — range change, successful delete, sign-out, and server-side session
+// invalidation — so a stale destructive selection cannot linger.
 let selectedEvents = new Set();
 
 function visibleEvents() {
@@ -403,6 +418,20 @@ function visibleEvents() {
   });
 }
 
+// Reflect the live, actionable selection on the Delete button. The count is the
+// number of currently-visible rows with a real id — exactly what deleteSelected
+// will act on — so the label never promises a delete it won't perform. Disabled
+// at zero so the button is never a silent no-op.
+function updateDeleteButton() {
+  const btn = document.getElementById("event-delete");
+  if (!token()) { btn.hidden = true; return; }
+  btn.hidden = false;
+  const n = visibleEvents().filter(
+    (e) => selectedEvents.has(eventKey(e)) && e.id !== undefined && e.id !== null).length;
+  btn.disabled = n === 0;
+  btn.textContent = n ? ("Delete selected (" + n + ")") : "Delete selected";
+}
+
 function applyEventFilters() {
   const body = document.querySelector("#events tbody");
   body.replaceChildren();
@@ -414,7 +443,7 @@ function applyEventFilters() {
     el("th", { text: "Time" }), el("th", { text: "Type" }),
     el("th", { text: "Detail" }),
   ]);
-  document.getElementById("event-delete").hidden = !signedIn;
+  updateDeleteButton();
   const rows = visibleEvents();
   if (rows.length === 0) {
     body.appendChild(el("tr", null, [
@@ -430,6 +459,7 @@ function applyEventFilters() {
       cb.addEventListener("change", () => {
         if (cb.checked) selectedEvents.add(eventKey(e));
         else selectedEvents.delete(eventKey(e));
+        updateDeleteButton();
       });
       const td = el("td"); td.appendChild(cb); cells.push(td);
     }
@@ -449,7 +479,12 @@ async function deleteSelected() {
     (e) => selectedEvents.has(eventKey(e)) && e.id !== undefined && e.id !== null);
   if (chosen.length === 0) return;
   // Group the chosen events by UPS name (the DELETE path is
-  // /api/v1/ups/{name}/events).
+  // /api/v1/ups/{name}/events). Every event carries BOTH a raw `ups`
+  // (group.ups.name) and a sanitized `source` (the groupId that eventKey uses
+  // for identity); see status.query_events. The server resolves the path name
+  // via _resolve_ups_name -> find_status, which matches the raw name OR its
+  // sanitized form, so grouping by the raw `ups` reaches the same UPS that the
+  // source-keyed identity refers to. Two encodings of one UPS, not a mismatch.
   const byUps = new Map();
   for (const e of chosen) {
     if (!byUps.has(e.ups)) byUps.set(e.ups, []);

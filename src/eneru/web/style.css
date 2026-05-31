@@ -72,6 +72,7 @@ select, input { background: var(--panel-2); color: var(--text); border: 1px soli
 button { background: var(--accent); color: var(--on-accent); border: none; border-radius: 6px;
          padding: 0.4rem 0.8rem; font: inherit; font-weight: 600; cursor: pointer; }
 button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
 .authbox { display: flex; align-items: center; gap: 0.6rem; }
 .who { color: var(--muted); font-size: 0.9rem; }
 .error { background: rgba(255,92,92,0.12); color: var(--crit); border: 1px solid var(--crit);
