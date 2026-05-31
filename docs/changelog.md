@@ -9,141 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Working notes for v6.0 (web dashboard, auth, UPS control, hot-reload). Trim
-before release per the changelog workflow in `AGENTS.md`.
+v6.0 is a major release that turns the read-only observability API into an
+interactive product: a browser dashboard, authentication, UPS control, and config
+hot-reload. With authentication left off, the API stays read-only exactly as in
+5.x. New features only; no behavior changes to monitoring or shutdown.
 
 ### Added
 
-- **Auth foundation (slice 1 of 6.0).** Local user accounts and API keys for the
-  API, stored in a dedicated global SQLite database (default
-  `/var/lib/eneru/auth.db`, override via `api.auth.db_path` / `--auth-db`).
-  - Passwords are stored as salted **bcrypt** hashes; API keys are random
-    `eneru_…` tokens stored as SHA-256 digests and shown once. No default user
-    and no default password ship — you create the first admin yourself.
-  - New CLI: `eneru user create|list|show|passwd|delete` and
-    `eneru apikey create|list|revoke`. Password input is interactive `getpass`,
-    `--generate`, or `--password-stdin` — there is deliberately no
-    `--password VALUE` flag (it would leak into shell history and `ps`).
-  - New config block `api.auth.{enabled,require_for_reads,session_ttl,db_path}`.
-    Opt-in: when `enabled` is false the API stays read-only (v5.3 behavior) and
-    every write surface is hard disabled. A `role` column (default `admin`) is
-    stored now so v7.0 RBAC is a data-fill, not a migration.
-  - `bcrypt` is a new optional `[auth]` extra: a hard `depends` on the deb
-    package and bundled in the container; a soft `recommends` on RPM (lazy
-    import with an actionable hint if absent).
-  - NUT auto-discovery, originally listed for v6.0, is **dropped**: it duplicates
-    `nut-scanner` and does not fit the config-first model. (Roadmap to be updated.)
+- **Browser dashboard**, served by the embedded API whenever it is enabled — no
+  extra service, no build step, no third-party JavaScript. Live UPS status cards
+  that open a detail panel (status, power quality, configuration, redundancy
+  membership, remote health), a redundancy healthy/required rollup, an
+  on-battery/shutdown banner, SVG history graphs with a selectable range
+  (1 hour to 1 year, or All), an event timeline with filters, wide-range paging,
+  and (when signed in) selectable deletion, a UPS control panel, and a
+  **Light / Dark / System** theme.
+- **API authentication** (opt-in, tiered). Local users and API keys — bcrypt
+  password hashes, SHA-256 key digests — in a dedicated global SQLite database,
+  managed by `eneru user` and `eneru apikey`. Read endpoints stay open (Prometheus
+  keeps scraping) unless `api.auth.require_for_reads`; every write requires a
+  credential. Clients send a bearer session token or an API key — no cookies, so
+  no CSRF. Auth activates automatically once a user exists (no restart needed); an
+  explicit `api.auth.enabled` always wins.
+- **UPS control via NUT** (`nut_control`): authenticated, allowlisted instant
+  commands and writable variables, wrapping `upscmd`/`upsrw` (no new dependency).
+  Fail-closed — control cannot be enabled while authentication is off.
+- **Event management API.** Events carry a stable, never-reused `id` (stats schema
+  v5); `/api/v1/events` supports wide-range `from`/`to` queries and `(ts, id)`
+  cursor paging, and an authenticated `DELETE /api/v1/ups/{name}/events` removes
+  selected rows. Existing databases migrate automatically on first start.
+- **Config hot-reload** without restarting the daemon — `systemctl reload eneru`,
+  `SIGHUP` (`docker kill -s HUP`), or an authenticated `POST /api/v1/config/reload`.
+  Safe changes apply live (trigger thresholds, `nut_control`, notifications, MQTT,
+  remote health, Prometheus, stats retention); everything else is reported as
+  restart-required. A bad config never takes the daemon down — it keeps running on
+  the previous configuration and reports the error.
+- **`[auth]` packaging extra** (bcrypt): a hard dependency on the deb package,
+  bundled in the container image, and a soft recommendation on RPM.
 
-- **API authentication middleware + write-path (slice 2 of 6.0).** The embedded
-  API now supports tiered, opt-in authentication.
-  - `POST /api/v1/auth/login` returns an in-memory bearer token (TTL
-    `api.auth.session_ttl`); `POST /api/v1/auth/logout` invalidates it.
-    Programmatic clients can instead send an API key via `Authorization: Bearer`
-    or `X-API-Key`.
-  - Tiered policy: `/health` and `/ready` are always open; reads stay open unless
-    `api.auth.require_for_reads`; **writes are hard-disabled (403) whenever auth
-    is off** and require a credential (401) when it's on. `/api/v1/config`
-    returns a sanitized view anonymously and an extended (still secret-free) view
-    when authenticated.
-  - Write-handler hardening: 64 KiB request-body cap (413), strict JSON parsing
-    (400), `WWW-Authenticate` on 401. The authorization gate is RBAC-ready for
-    v7.0 (carries a write/capability flag).
+### Removed
 
-- **UPS control via NUT upscmd/upsrw (slice 3 of 6.0).** New `nut_control`
-  config and authenticated endpoints to run instant commands and read/write UPS
-  variables.
-  - `GET /api/v1/ups/{name}/commands`, `POST …/command`,
-    `GET …/variables`, `PUT …/variables/{var}`. Wraps the `upscmd`/`upsrw` CLIs
-    (no new dependency).
-  - Commands and variables are **allowlisted** (`allowed_commands`,
-    `allowed_variables`); calibration/FSD and all writable variables are opt-in.
-    Writes to one UPS are serialized; per-command subprocess timeout.
-  - **Fail-closed:** `nut_control.enabled` requires `api.auth.enabled` — the
-    daemon refuses to start otherwise, so control is never unauthenticated.
-  - Each control action is logged with the initiating principal (v7.0 audit-log
-    groundwork).
-
-- **Config hot-reload (slice 4 of 6.0).** Re-read configuration without dropping
-  the daemon, via `SIGHUP` or `POST /api/v1/config/reload` (authenticated).
-  - nginx-style: a bad config never takes the daemon down. The file is
-    re-parsed and validated; on any error the daemon keeps running on the old
-    config and reports the problem.
-  - Safe changes are applied live by mutating the shared config in place —
-    trigger thresholds (per group), `behavior.dry_run`, `nut_control`
-    allowlists/credentials, the Prometheus toggle, notification targets, MQTT,
-    remote-health settings, and stats retention. Everything else (bind/port,
-    UPS topology, logging, DB paths, local-shutdown dependency checks) is
-    reported as restart-required rather than half-applied.
-  - systemd: `systemctl reload eneru` (new `ExecReload`). Containers:
-    `docker kill -s HUP <container>` (tini forwards SIGHUP). Works in both
-    single-UPS and multi-UPS (coordinator) modes.
-
-- **Browser dashboard (slice 5 of 6.0).** A small single-page dashboard served by
-  the embedded API server whenever the API is enabled — no external service, no
-  build step, no third-party JavaScript.
-  - UPS status cards, redundancy-group overview, hand-rolled SVG history graphs
-    (charge/load/runtime/voltage), an event timeline, and a control panel
-    (shown only when signed in and `nut_control` is enabled).
-  - Sign-in uses the auth API; the session token is held in `sessionStorage` and
-    sent as a `Bearer` header (no cookie, no CSRF). The page is a thin client —
-    all enforcement stays server-side.
-  - Served from the `eneru.web` package via `importlib.resources`; HTML carries a
-    strict `Content-Security-Policy` and `X-Content-Type-Options: nosniff`, and
-    only packaged asset names are servable (no path traversal).
-
-### Changed (rc2 — gap closure)
-
-- **Per-group `nut_control` overrides.** Multi-UPS deployments can override
-  control credentials/allowlists per `ups:` entry (for UPSes on different `upsd`
-  servers); the global block still gates the feature.
-- **Hot-reload now applies `statistics.retention` live** in addition to
-  thresholds/control/prometheus. `logging`, `local_shutdown`,
-  `statistics.db_directory`, API bind/port/auth, and topology changes remain
-  restart-required because they own process-level handlers, startup dependency
-  checks, or object graphs that should not be half-swapped.
-- **Control/reload actions are recorded to the SQLite `events` table** (in
-  addition to the daemon log) as `CONTROL_COMMAND` / `CONTROL_VARIABLE` /
-  `CONFIG_RELOAD` rows — v7.0 audit-log groundwork.
-- The API answers unsupported `DELETE` requests with a clean `405`.
-- OCI CI now verifies the dashboard assets ship in the image (integration), and
-  E2E Test 46 asserts the running container actually serves the dashboard
-  (`/`, `/app.js`) against the NUT dummy.
-
-### Fixed (rc3 — review follow-ups)
-
-- bcrypt pinned to `>=4.0.1` (4.0.0 can raise a `PanicException` from `checkpw`
-  on a malformed salt — unacceptable for an auth path).
-- Audit/event UPS-name parsing splits on the **last** colon (NUT names can be
-  `ups@host:3493`), and audit values are scrubbed of control characters
-  (log-injection defense).
-- Per-group `nut_control` may not set `enabled` (gated globally) — now a config
-  error instead of a silent no-op. `statistics.db_directory` changes are
-  correctly reported restart-required (only `retention` is live).
-- The API endpoint index hides auth/control/reload routes when their feature is
-  disabled. `--password-stdin` strips a trailing CRLF (not just LF). The
-  reference config ships an empty `nut_control.password`.
-
-### Fixed (rc4 — plan-compliance follow-ups)
-
-- **OCI image CI smoke test fixed.** The dashboard asset check now overrides the
-  image entrypoint when running `python -c`, so CI tests the packaged asset
-  instead of accidentally invoking `eneru python ...`.
-- **Dashboard control completed.** The control panel now renders allowlisted
-  writable UPS variables and submits `PUT /api/v1/ups/{name}/variables/{var}`,
-  in addition to command buttons.
-- **Event timeline filtering added.** The dashboard can filter events by source,
-  event type, and detail text while preserving the existing no-dependency static
-  asset model.
-- **UPS control E2E now proves NUT reachability.** Test 53 still checks
-  fail-closed auth and allowlist denial, and now also sends an allowlisted
-  `beeper.toggle` command through NUT. The CI dummy driver does not implement
-  instant commands, so the expected proof is NUT's own `CMD-NOT-SUPPORTED`
-  response rather than a fake success.
-- **Hot-reload scope restored for worker subsystems.** Notifications, MQTT, and
-  remote-health are now bounced live after a successful reload. The important
-  plumbing fix is that remote-health reload uses a manager-local stop signal,
-  not the daemon-wide stop event, so changing its interval/probe is like
-  swapping one faucet cartridge without closing the whole house water main.
+- **NUT auto-discovery**, previously listed for 6.0, was dropped: it duplicates
+  `nut-scanner` and does not fit Eneru's config-first model.
 
 ---
 
@@ -947,7 +854,7 @@ Or download packages directly from GitHub releases.
 - Service file and install script updated for new filename
 
 ### Why Non-Blocking Matters
-During power outages, network connectivity is often unreliable. The previous blocking implementation could delay shutdown by 10-30+ seconds per notification if the network was down. The new architecture queues notifications instantly and processes them in the background, ensuring critical shutdown operations are never delayed.
+During power outages, network connectivity is often unreliable. The previous blocking implementation could delay shutdown by 10-30+ seconds per notification if the network was down. The new architecture queues notifications immediately and processes them in the background, so critical shutdown work never waits on the network.
 
 ---
 
@@ -1086,7 +993,7 @@ During power outages, network connectivity is often unreliable. The previous blo
 - Depletion rate: 60-second window, 15 samples -> 300-second window, 30 samples with grace period
 - Connection handling: basic retry -> stale data detection with failsafe shutdown
 - Shutdown triggers: 4 triggers -> 4 triggers + FSD flag detection
-- Configuration: minimal -> comprehensive with mount options
+- Configuration: minimal -> includes mount options
 
 ### Security
 - Removed `sshpass` and password storage
@@ -1094,7 +1001,7 @@ During power outages, network connectivity is often unreliable. The previous blo
 - Passwordless sudo configuration guide
 
 ### Dependencies
-- Added: `jq` (for robust JSON generation)
+- Added: `jq` (for safer JSON generation)
 - Removed: `sshpass`
 - Required: Bash 4.0+ (for associative arrays)
 

@@ -236,7 +236,7 @@ The monitoring loop writes samples to an in-memory buffer. `StatsWriter` flushes
 
 Read [`src/eneru/stats.py`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/stats.py), [`src/eneru/tui.py`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/tui.py), and [`src/eneru/graph.py`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/graph.py) for the data store, dashboard, and Braille graph renderer.
 
-## Read-only observability
+## Observability and the API
 
 The API, Prometheus renderer, MQTT publisher, and TUI all read from the same status model in `src/eneru/status.py`. That model combines live monitor snapshots with sidecar JSON for remote health. It includes UPS battery/runtime/load, power-quality readings, grid-quality states, remote-health rows, redundancy-group rows, and event history.
 
@@ -246,13 +246,66 @@ monitor state + sidecars
         v
   status read model
         |
-        +-- HTTP API (/api/v1/ups, /api/v1/events, /api/v1/remote-health)
+        +-- HTTP API (/api/v1/ups, /api/v1/events, /api/v1/remote-health, /api/v1/config)
         +-- Prometheus /metrics
         +-- MQTT status payload
         +-- TUI one-shot and live views
+        +-- browser dashboard (static SPA, see below)
 ```
 
 Remote-health probes are the exception to the "read-only consumer" rule: the daemon's `RemoteHealthManager` runs the configured harmless SSH `probe_command`, default `true`, then writes live state and sidecar JSON. API, MQTT, Prometheus, and the TUI only read that state.
+
+### v6.0: authenticated write-path + dashboard
+
+The embedded `http.server` handler (`src/eneru/api.py`) gained an opt-in, tiered auth layer and a small set of write endpoints. With `api.auth` disabled it is byte-for-byte the v5.x read-only API; with it enabled, reads stay open (so Prometheus keeps scraping) while writes require a credential. Every request flows through one gate:
+
+```text
+          HTTP request
+               |
+               v
+     +---------+----------+      static asset?  -> serve eneru/web SPA (no auth)
+     | EneruAPIHandler    |      health/ready?   -> always open
+     | _auth_active()     |
+     | _authorize(write=) |
+     +----+----------+----+
+          |          |
+       read         write (POST/PUT/DELETE)
+          |          |
+   open unless    require credential (401), else act + _audit() to events table
+ require_for_reads   |
+          |          +-- POST /auth/login,/logout        (SessionManager: in-memory TTL tokens)
+          v          +-- POST /ups/{n}/command, PUT .../variables   (nut_control: upscmd/upsrw)
+   sanitized vs      +-- DELETE /ups/{n}/events           (StatsStore.delete_events)
+   extended /config  +-- POST /config/reload              (live reload, see below)
+               |
+               v
+        +------+-------+        +------------------------+
+        | AuthStore     |       | dashboard (eneru/web)  |
+        | users + keys  |<------+ thin SPA: bearer token |
+        | bcrypt/sha256 |       | in sessionStorage      |
+        +---------------+       +------------------------+
+```
+
+`AuthStore` (`src/eneru/auth.py`) is a dedicated global SQLite DB (users + API keys) separate from the per-UPS stats DBs; auth is read live per request, so creating a user takes effect with no restart. Credentials never appear in `/api/v1/config` (sanitized anonymously, extended — but still secret-free — when authenticated). The dashboard under `src/eneru/web/` is a dependency-free SPA served from the package via `importlib.resources` under a strict `Content-Security-Policy`.
+
+Read [`src/eneru/api.py`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/api.py) for the handler, gate, and routing; [`src/eneru/auth.py`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/auth.py) for the credential store; and [`src/eneru/nut_control.py`](https://github.com/m4r1k/Eneru/blob/main/src/eneru/nut_control.py) for the `upscmd`/`upsrw` wrappers.
+
+### Config hot-reload
+
+`SIGHUP` (or `POST /api/v1/config/reload`) re-reads the config without dropping the daemon (`src/eneru/reload.py`). The new file is parsed and validated; on any error the running config is kept and the error reported. Safe sections are swapped in place on the shared config object that the poll loop reads live; sections that own process-level handlers (`api` bind/port + auth, `logging`, `local_shutdown`) are reported restart-required rather than half-applied.
+
+```text
+SIGHUP / POST /config/reload
+        |
+        v
+  load_and_validate(path) --(invalid)--> keep old config, report errors
+        | valid
+        v
+  apply_reload(): per-section diff
+        +-- safe        -> swap in place (triggers, nut_control, prometheus, stats retention)
+        +-- subsystem   -> hand to apply_reload() hook (notifications, MQTT, remote-health)
+        +-- restart-req. -> report only (api, logging, local_shutdown, topology, db paths)
+```
 
 ## Configuration as a safety boundary
 

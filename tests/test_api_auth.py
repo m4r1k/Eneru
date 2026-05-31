@@ -37,6 +37,9 @@ def _handler(config, *, source=None, auth_store=None, sessions=None,
 
 def _enable_auth(config, *, require_for_reads=False, ttl=3600):
     config.api.auth.enabled = True
+    # Pin it as an explicit operator choice so the effective-auth path can't be
+    # mistaken for the unset/auto-enable case.
+    config.api.auth.enabled_explicitly_set = True
     config.api.auth.require_for_reads = require_for_reads
     config.api.auth.session_ttl = ttl
 
@@ -132,6 +135,7 @@ def test_session_create_purges_expired():
 @pytest.mark.unit
 def test_authenticate_request_session_then_apikey(minimal_config, tmp_path):
     store = AuthStore(tmp_path / "auth.db")
+    store.create_user("alice", "pw")
     _, key = store.create_api_key("ci")
     sessions = SessionManager(3600)
     stoken = sessions.create({"username": "alice", "role": "admin", "kind": "user"})
@@ -165,6 +169,68 @@ def test_authenticate_request_defensive_paths(minimal_config):
     h = _handler(minimal_config, auth_store=None, sessions=None,
                  headers={"Authorization": "Bearer tok"})
     assert h._authenticate_request() is None
+
+
+@pytest.mark.unit
+def test_session_invalidated_when_user_deleted(minimal_config, tmp_path):
+    # A session outlives the user row it was minted from; deleting the user must
+    # end the session (the deleted-user-stays-signed-in bug).
+    store = AuthStore(tmp_path / "auth.db")
+    store.create_user("alice", "pw")
+    sessions = SessionManager(3600)
+    token = sessions.create({"username": "alice", "role": "admin", "kind": "user"})
+    h = _handler(minimal_config, auth_store=store, sessions=sessions,
+                 headers={"Authorization": f"Bearer {token}"})
+    assert h._authenticate_request()["username"] == "alice"   # still valid
+
+    store.delete_user("alice")
+    assert h._authenticate_request() is None                  # now rejected
+    assert sessions.validate(token) is None                   # token reaped
+
+
+@pytest.mark.unit
+def test_config_is_sanitized_for_deleted_user_session(minimal_config, tmp_path):
+    # The dashboard signs out when it holds a token but /config comes back
+    # "sanitized" (anonymous). Prove the server delivers that signal once the
+    # account is gone, even though the read itself stays open (200).
+    _enable_auth(minimal_config)
+    store = AuthStore(tmp_path / "auth.db")
+    store.create_user("alice", "pw")
+    sessions = SessionManager(3600)
+    token = sessions.create({"username": "alice", "role": "admin", "kind": "user"})
+    store.delete_user("alice")
+    h = _handler(minimal_config, source=MagicMock(), auth_store=store,
+                 sessions=sessions, path="/api/v1/config",
+                 headers={"Authorization": f"Bearer {token}"})
+    status, _, payload = h._route()
+    assert status == 200
+    assert payload["detail"] == "sanitized"      # treated as anonymous
+    assert sessions.validate(token) is None        # and the session was reaped
+
+
+@pytest.mark.unit
+def test_session_preserved_when_get_user_errors(minimal_config):
+    # A transient auth-DB error must NOT log out an already-authenticated user.
+    store = MagicMock()
+    store.get_user.side_effect = RuntimeError("db locked")
+    sessions = SessionManager(3600)
+    token = sessions.create({"username": "alice", "role": "admin", "kind": "user"})
+    h = _handler(minimal_config, auth_store=store, sessions=sessions,
+                 headers={"Authorization": f"Bearer {token}"})
+    assert h._authenticate_request()["username"] == "alice"   # session preserved
+    assert sessions.validate(token) is not None               # token intact
+
+
+@pytest.mark.unit
+def test_session_validity_ignores_non_user_principals(minimal_config):
+    # API-key-kind principals never carry a username; they must not be re-checked
+    # via get_user (and must not be invalidated by it).
+    store = MagicMock()
+    h = _handler(minimal_config, auth_store=store)
+    assert h._session_principal_still_valid({"kind": "api_key", "id": 1}) is True
+    # A user-kind principal without a username is treated as valid (defensive).
+    assert h._session_principal_still_valid({"kind": "user"}) is True
+    store.get_user.assert_not_called()
 
 
 # ----- login -----
@@ -349,12 +415,14 @@ def test_available_endpoints_hidden_until_features_enabled(minimal_config):
     paths = {e["path"] for e in h._available_endpoints()}
     assert "/api/v1/auth/login" not in paths
     assert "/api/v1/config/reload" not in paths
+    assert "/api/v1/ups/{name}/events" not in paths
     assert "/api/v1/ups/{name}/command" not in paths
     minimal_config.api.auth.enabled = True
     minimal_config.nut_control.enabled = True
     paths = {e["path"] for e in h._available_endpoints()}
     assert "/api/v1/auth/login" in paths
     assert "/api/v1/config/reload" in paths
+    assert "/api/v1/ups/{name}/events" in paths
     assert "/api/v1/ups/{name}/command" in paths
 
 

@@ -304,6 +304,91 @@ def test_api_events_route_accepts_verbosity(minimal_config, tmp_path):
 
 
 @pytest.mark.unit
+def test_api_events_route_range_id_and_before_paging(minimal_config, tmp_path):
+    minimal_config.statistics.db_directory = str(tmp_path)
+    store = StatsStore(tmp_path / "default.db")
+    store.open()
+    try:
+        store.log_event("A", "a", ts=1000)
+        store.log_event("B", "b", ts=2000)   # three share 2000
+        store.log_event("C", "c", ts=2000)
+        store.log_event("D", "d", ts=2000)
+        store.log_event("E", "e", ts=3000)
+    finally:
+        store.close()
+
+    def route(query):
+        h = object.__new__(EneruAPIHandler)
+        h.path = "/api/v1/events?" + query
+        h.api_config = minimal_config
+        h.api_source = MagicMock()
+        return h._route()
+
+    # `from` bounds the window; rows carry source-qualified id + source.
+    status, _, payload = route("from=2000&limit=10")
+    evs = payload["events"]
+    assert status == 200
+    assert [e["eventType"] for e in evs] == ["B", "C", "D", "E"]
+    assert all(isinstance(e["id"], int) and e["source"] for e in evs)
+
+    # Timestamp-only `before` remains backward compatible: the boundary overlaps
+    # and the client de-dups by (source,id).
+    status, _, page1 = route("limit=2")
+    p1 = page1["events"]
+    assert [e["eventType"] for e in p1] == ["D", "E"]
+    oldest = p1[0]
+    status, _, page2 = route(f"limit=2&before={oldest['ts']}")
+    assert [e["eventType"] for e in page2["events"]] == ["C", "D"]
+
+    # Source-qualified cursor advances strictly inside a same-second cluster,
+    # avoiding a stuck "Load older" loop when one second has more rows than a page.
+    cursor = ("limit=2&before={ts}&beforeSource={source}&beforeId={event_id}"
+              .format(ts=oldest["ts"], source=oldest["source"], event_id=oldest["id"]))
+    status, _, page3 = route(cursor)
+    assert [e["eventType"] for e in page3["events"]] == ["B", "C"]
+
+    # from > to is a 400.
+    status, _, err = route("from=3000&to=1000")
+    assert status == 400 and err["error"]["code"] == "INVALID_REQUEST"
+
+    # A non-integer `before` raises APIBadRequest (→ 400 via _dispatch),
+    # consistent with from/to validation.
+    from eneru.api import APIBadRequest
+    with pytest.raises(APIBadRequest):
+        route("before=not-a-cursor&limit=10")
+    with pytest.raises(APIBadRequest):
+        route("before=2000&beforeSource=default&limit=10")
+
+
+@pytest.mark.unit
+def test_api_history_rejects_from_after_to(minimal_config):
+    h = object.__new__(EneruAPIHandler)
+    h.path = "/api/v1/ups/TestUPS@localhost/history?metric=charge&from=200&to=100"
+    h.api_config = minimal_config
+    h.api_source = MagicMock()
+    status, _, payload = h._route()
+    assert status == 400
+    assert payload["error"]["code"] == "INVALID_REQUEST"
+
+
+@pytest.mark.unit
+def test_api_history_all_clamps_to_retention_horizon(minimal_config, tmp_path):
+    # Omitting `from` ("All") maps to the hourly-retention horizon, not 0.
+    minimal_config.statistics.db_directory = str(tmp_path)
+    minimal_config.statistics.retention.agg_hourly_days = 10
+    store = StatsStore(tmp_path / "default.db")
+    store.open()
+    store.close()
+    h = object.__new__(EneruAPIHandler)
+    h.path = "/api/v1/ups/TestUPS@localhost/history?metric=charge&to=1000000"
+    h.api_config = minimal_config
+    h.api_source = MagicMock()
+    status, _, payload = h._route()
+    assert status == 200
+    assert payload["from"] == 1000000 - 10 * 86400
+
+
+@pytest.mark.unit
 def test_api_core_routes(minimal_config, monitor):
     handler = object.__new__(EneruAPIHandler)
     handler.api_config = minimal_config
@@ -326,6 +411,10 @@ def test_api_core_routes(minimal_config, monitor):
     status, _, payload = handler._route()
     assert status == 200
     assert any(row["path"] == "/api/v1/events" for row in payload["endpoints"])
+    events_ep = next(row for row in payload["endpoints"]
+                     if row["path"] == "/api/v1/events")
+    assert events_ep["query"]["from"] == "unix timestamp"
+    assert events_ep["query"]["beforeSource"] == "source-qualified cursor source"
 
     handler.path = "/api/v1/ups/TestUPS-localhost"
     status, _, payload = handler._route()
@@ -1319,6 +1408,56 @@ def test_api_server_start_warns_on_non_loopback_bind(minimal_config):
             and "api.auth" in m
             for m in log
         ), log
+    finally:
+        server.stop()
+
+
+@pytest.mark.unit
+def test_api_server_start_notes_auth_off_on_loopback(minimal_config):
+    from unittest.mock import patch
+    from eneru.api import EneruAPIServer
+
+    # Loopback bind + auth disabled: no off-loopback warning, but a clear notice
+    # that Sign-in is hidden and how to enable login — so the hidden button is
+    # not a mystery.
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    log = []
+    server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
+
+    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+        server.start()
+
+    try:
+        assert any(
+            "authentication is disabled" in m
+            and "Sign-in is hidden" in m
+            and "eneru user create" in m
+            for m in log
+        ), log
+        # The off-loopback security warning must NOT fire on a loopback bind.
+        assert not any("no authentication" in m for m in log), log
+    finally:
+        server.stop()
+
+
+@pytest.mark.unit
+def test_api_server_start_no_auth_note_when_auth_enabled(minimal_config):
+    from unittest.mock import patch
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    minimal_config.api.auth.enabled = True
+    minimal_config.api.auth.enabled_explicitly_set = True  # explicit operator choice
+    log = []
+    server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
+
+    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+        server.start()
+
+    try:
+        assert not any("authentication is disabled" in m for m in log), log
     finally:
         server.stop()
 

@@ -45,7 +45,7 @@ SAMPLE_FIELDS: Tuple[str, ...] = (
 # Bump and add a migration block in StatsStore._init_schema whenever the
 # samples / agg_5min / agg_hourly / events / meta / notifications schema
 # gains a column or table. See src/eneru/AGENTS.md "Stats schema evolution".
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Bucket sizes for aggregation tiers.
 BUCKET_5MIN = 5 * 60
@@ -220,6 +220,11 @@ class StatsStore:
             self.retention_hourly_days = max(1, int(r.agg_hourly_days))
         return True
 
+    @property
+    def is_open(self) -> bool:
+        """True when the store has a live DB connection (open, not yet closed)."""
+        return self._conn is not None
+
     def close(self) -> None:
         if self._conn is not None:
             try:
@@ -291,6 +296,7 @@ class StatsStore:
                 );
 
                 CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ts INTEGER NOT NULL,
                     event_type TEXT NOT NULL,
                     detail TEXT,
@@ -407,6 +413,89 @@ class StatsStore:
                 CREATE INDEX IF NOT EXISTS idx_notifications_status_ts
                     ON notifications(status, ts);
             """)
+
+        if current < 5:
+            # v4 -> v5: give events a stable, never-reused id
+            # (INTEGER PRIMARY KEY AUTOINCREMENT). SQLite can't ALTER ADD a
+            # PRIMARY KEY column, so rebuild the table, preserving each row's
+            # identity as id = old rowid. AUTOINCREMENT guarantees a deleted
+            # event's id is never handed to a later row -- that's what makes the
+            # API's delete-by-id safe.
+            self._migrate_events_to_v5()
+
+    def _migrate_events_to_v5(self) -> None:
+        """Rebuild ``events`` with a stable id column.
+
+        DDL in ``executescript`` can commit outside the surrounding context
+        manager, so the destructive rebuild uses an explicit savepoint. That
+        keeps the old table intact if a crash or SQLite error lands between the
+        copy and the rename.
+        """
+        self._conn.execute("SAVEPOINT migrate_events_v5")
+        try:
+            if self._events_has_v5_id():
+                # Recover a DB opened after an older unsafe rebuild died after
+                # copying rows and dropping events, but before the final rename.
+                if self._table_exists("events_v5_new"):
+                    event_count = self._conn.execute(
+                        "SELECT COUNT(*) FROM events"
+                    ).fetchone()[0]
+                    scratch_count = self._conn.execute(
+                        "SELECT COUNT(*) FROM events_v5_new"
+                    ).fetchone()[0]
+                    if event_count == 0 and scratch_count > 0:
+                        self._conn.execute("DROP TABLE events")
+                        self._conn.execute(
+                            "ALTER TABLE events_v5_new RENAME TO events"
+                        )
+                    else:
+                        self._conn.execute("DROP TABLE events_v5_new")
+            else:
+                self._conn.execute("DROP TABLE IF EXISTS events_v5_new")
+                self._conn.execute("""
+                    CREATE TABLE events_v5_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts INTEGER NOT NULL,
+                        event_type TEXT NOT NULL,
+                        detail TEXT,
+                        notification_sent INTEGER DEFAULT 1
+                    )
+                """)
+                self._conn.execute("""
+                    INSERT INTO events_v5_new
+                        (id, ts, event_type, detail, notification_sent)
+                    SELECT rowid, ts, event_type, detail, notification_sent
+                    FROM events
+                """)
+                self._conn.execute("DROP TABLE events")
+                self._conn.execute("ALTER TABLE events_v5_new RENAME TO events")
+
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)")
+            # Pin the AUTOINCREMENT high-water mark to the max preserved id so a
+            # later delete of the highest row can never let a new event reuse it
+            # (belt-and-suspenders alongside RENAME's sqlite_sequence fixup).
+            self._conn.execute(
+                "INSERT OR REPLACE INTO sqlite_sequence(name, seq) "
+                "SELECT 'events', COALESCE(MAX(id), 0) FROM events"
+            )
+            self._conn.execute("RELEASE SAVEPOINT migrate_events_v5")
+        except Exception:
+            self._conn.execute("ROLLBACK TO SAVEPOINT migrate_events_v5")
+            self._conn.execute("RELEASE SAVEPOINT migrate_events_v5")
+            raise
+
+    def _table_exists(self, name: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (name,),
+        ).fetchone()
+        return row is not None
+
+    def _events_has_v5_id(self) -> bool:
+        return any(
+            row[1] == "id" and row[5] == 1
+            for row in self._conn.execute("PRAGMA table_info(events)")
+        )
 
     def _safe_alter(self, table: str, column_def: str) -> None:
         """Idempotent ``ALTER TABLE ... ADD COLUMN``; ignores duplicates."""
@@ -615,15 +704,36 @@ class StatsStore:
         *,
         end_ts: int,
         limit: int,
+        start_ts: Optional[int] = None,
         include_types: Optional[set] = None,
         exclude_types: Optional[set] = None,
+        include_id: bool = False,
+        before_id: Optional[int] = None,
     ) -> List[Tuple]:
-        """Return recent events ascending by ts without loading full history."""
+        """Return recent events ascending by ts without loading full history.
+
+        * ``end_ts`` — inclusive upper bound (``ts <= end_ts``); "load older"
+          paging sets this to the oldest timestamp already shown.
+        * ``start_ts`` — inclusive lower bound (``ts >= start_ts``).
+        * ``include_id`` — prepend the row's ``id`` to each returned tuple (off by
+          default, so existing 3-tuple callers are unaffected). The id is unique
+          only within this one per-UPS DB; the aggregating layer source-qualifies
+          it and the dashboard de-dups by ``(source, id)`` across pages.
+        * ``before_id`` — with ``end_ts``, use a strict same-second upper bound
+          ``(ts, id) < (end_ts, before_id)`` for source-qualified paging.
+        """
         if self._conn is None:
             return []
         limit = max(1, int(limit))
-        clauses = ["ts <= ?"]
-        params: List[Any] = [int(end_ts)]
+        if before_id is None:
+            clauses = ["ts <= ?"]
+            params: List[Any] = [int(end_ts)]
+        else:
+            clauses = ["(ts < ? OR (ts = ? AND id < ?))"]
+            params = [int(end_ts), int(end_ts), int(before_id)]
+        if start_ts is not None:
+            clauses.append("ts >= ?")
+            params.append(int(start_ts))
         if include_types:
             placeholders = ", ".join("?" for _ in include_types)
             clauses.append(f"event_type IN ({placeholders})")
@@ -638,10 +748,12 @@ class StatsStore:
         # multiple events share the same second (notification fanout,
         # rapid trigger flap), so paginated reads don't return
         # different subsets across calls.
+        cols = "id, ts, event_type, detail" if include_id else \
+            "ts, event_type, detail"
         query = (
-            "SELECT ts, event_type, detail FROM events "
+            f"SELECT {cols} FROM events "
             f"WHERE {' AND '.join(clauses)} "
-            "ORDER BY ts DESC, rowid DESC LIMIT ?"
+            "ORDER BY ts DESC, id DESC LIMIT ?"
         )
         try:
             with self._db_lock:
@@ -650,6 +762,42 @@ class StatsStore:
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: query_recent_events failed: {e}")
             return []
+
+    def delete_events(self, items) -> int:
+        """Delete events by ``(id, ts, event_type)``. Returns the count removed.
+
+        Each row is matched on all three columns, not just ``id``: the id alone
+        is authoritative (AUTOINCREMENT never reuses one), but the ts/type guard
+        means a stale client request can only ever delete the exact row it saw —
+        a mismatch deletes nothing (counts as 0, not an error). Idempotent on
+        duplicates, and atomic: any SQLite error rolls the whole batch back.
+        ``items`` is an iterable of ``(id, ts, event_type)``.
+        """
+        if self._conn is None:
+            return 0
+        seen = set()
+        rows = []
+        for it in items:
+            key = (int(it[0]), int(it[1]), str(it[2]))
+            if key not in seen:
+                seen.add(key)
+                rows.append(key)
+        if not rows:
+            return 0
+        try:
+            count = 0
+            with self._db_lock, self._conn:
+                for event_id, ts, event_type in rows:
+                    cur = self._conn.execute(
+                        "DELETE FROM events WHERE id = ? AND ts = ? "
+                        "AND event_type = ?",
+                        (event_id, ts, event_type),
+                    )
+                    count += cur.rowcount
+            return count
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: delete_events failed: {e}")
+            return 0
 
     # ----- notification queue (v4+) -----
 

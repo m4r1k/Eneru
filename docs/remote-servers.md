@@ -155,7 +155,7 @@ One slow server can extend the phase deadline, but it does not make other server
 
 ### Timeout semantics
 
-When a remote command exceeds its budget, Eneru kills the **local** SSH process (SIGKILL via `subprocess.run(timeout=…)`). The remote shell command may still be running on the target host afterwards — for example a configured `pre_shutdown_commands` entry of `systemctl stop kubelet` that takes longer than its timeout will leave `systemctl` running unattended on the remote, even though Eneru has moved on to the next command. Set timeouts conservatively (longer than the worst-case successful runtime) so the local kill only happens for genuinely-stuck commands, and avoid `pre_shutdown_commands` entries that you can't tolerate being interrupted mid-flight.
+When a remote command exceeds its budget, Eneru kills the **local** SSH process (SIGKILL via `subprocess.run(timeout=…)`). The remote shell command may still be running on the target host afterwards. For example, a configured `pre_shutdown_commands` entry of `systemctl stop kubelet` that takes longer than its timeout will leave `systemctl` running unattended on the remote, even though Eneru has moved on to the next command. Set timeouts conservatively (longer than the worst-case successful runtime) so the local kill only happens for genuinely-stuck commands, and avoid `pre_shutdown_commands` entries that you can't tolerate being interrupted mid-flight.
 
 ## SSH key setup
 
@@ -331,7 +331,7 @@ This command only targets the selected remote server. It does not run local VM s
 
 ### Full-sequence rehearsal
 
-When you want to verify the entire configured shutdown sequence for one group — multi-server `shutdown_order`, VMs, containers, filesystems, then per-server pre-shutdown commands and shutdown commands — use `shutdown group` instead:
+When you want to verify the entire configured shutdown sequence for one group, use `shutdown group` instead. It covers multi-server `shutdown_order`, VMs, containers, filesystems, then per-server pre-shutdown commands and shutdown commands:
 
 ```bash
 sudo eneru shutdown group --config /etc/ups-monitor/config.yaml --group rack-a --dry-run
@@ -340,7 +340,7 @@ sudo eneru shutdown group --config /etc/ups-monitor/config.yaml --group rack-a -
 Behaviour by group kind:
 
 - **UPS group** (matched by `display_name` or `name`): runs `_execute_shutdown_sequence` end to end. With `--i-really-want-to-proceed-with-group-shutdown`, the final `local_shutdown.command` will fire if `local_shutdown.enabled`, halting the host.
-- **Redundancy group** (matched by `redundancy_groups[*].name`): runs `RedundancyGroupExecutor.shutdown` end to end. Local poweroff is **not** wired in the rehearsal even with the confirm flag — the coordinator's poweroff callback is intentionally absent so an operator cannot accidentally halt the host with a "rehearsal". To exercise that path, run `eneru run` with `behavior.dry_run: true` against the same config.
+- **Redundancy group** (matched by `redundancy_groups[*].name`): runs `RedundancyGroupExecutor.shutdown` end to end. Local poweroff is **not** wired in the rehearsal even with the confirm flag. The coordinator's poweroff callback is intentionally absent so an operator cannot accidentally halt the host with a "rehearsal". To exercise that path, run `eneru run` with `behavior.dry_run: true` against the same config.
 
 The rehearsal isolates its own `shutdown_flag_file` / `state_file` / `battery_history_file` in a per-invocation temp directory so it never collides with a running daemon.
 

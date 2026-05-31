@@ -1408,5 +1408,98 @@ trap - EXIT
 echo "PASS: browser dashboard served with CSP and traversal protection"
 )
 
+# ======================================================================
+# Test 56: Event management — wide-range query + auth-gated delete (v6.0)
+# ======================================================================
+# Proves the wide-history events query works, that an authenticated client can
+# delete a real event by its (id, ts, eventType), that an anonymous delete is
+# rejected 401, and that a history from>to is a 400.
+(
+echo ""
+echo ">>> Running: Test 56: event management — wide-range query + auth-gated delete"
+
+AUTH_DB="$(mktemp -d)/auth.db"
+printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$AUTH_DB" \
+  || { echo "FAIL: could not create auth user"; exit 1; }
+
+cat > /tmp/config-e2e-events.yaml <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+behavior:
+  dry_run: true
+statistics:
+  enabled: true
+  db_directory: "$(mktemp -d)"
+api:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 9100
+  auth:
+    enabled: true
+    require_for_reads: false
+    db_path: "$AUTH_DB"
+notifications:
+  enabled: false
+local_shutdown:
+  enabled: false
+YAML
+
+cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
+timeout 20s eneru run --config /tmp/config-e2e-events.yaml > /tmp/test56-daemon.log 2>&1 &
+DAEMON_PID=$!
+trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
+
+for _ in $(seq 1 20); do
+  curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 && break
+  sleep 0.5
+done
+
+# Wide-range query returns events (the daemon records at least a lifecycle row).
+EVENTS=""
+for _ in $(seq 1 20); do
+  curl -fsS "http://127.0.0.1:9100/api/v1/events?from=1&to=9999999999&limit=10&verbosity=2" \
+    > /tmp/test56-events.json 2>/dev/null || true
+  if python3 -c "import json,sys;sys.exit(0 if json.load(open('/tmp/test56-events.json'))['events'] else 1)" 2>/dev/null; then
+    EVENTS="ok"; break
+  fi
+  sleep 0.5
+done
+[ -n "$EVENTS" ] || { echo "FAIL: no events from wide-range query"; cat /tmp/test56-daemon.log; exit 1; }
+
+# Each event carries a source-qualified identity (id + source).
+python3 -c "import json,sys;e=json.load(open('/tmp/test56-events.json'))['events'][0];sys.exit(0 if ('id' in e and 'source' in e) else 1)" \
+  || { echo "FAIL: event row missing id/source"; cat /tmp/test56-events.json; exit 1; }
+
+UPS_ENC=$(python3 -c "import json,urllib.parse;e=json.load(open('/tmp/test56-events.json'))['events'][0];print(urllib.parse.quote(e['ups'],safe=''))")
+BODY=$(python3 -c "import json;e=json.load(open('/tmp/test56-events.json'))['events'][0];print(json.dumps({'items':[{'id':e['id'],'ts':e['ts'],'eventType':e['eventType']}]}))")
+
+# Anonymous delete -> 401.
+ANON=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H 'Content-Type: application/json' \
+  -d "$BODY" "http://127.0.0.1:9100/api/v1/ups/$UPS_ENC/events")
+[ "$ANON" = "401" ] || { echo "FAIL: anonymous delete returned $ANON, expected 401"; exit 1; }
+
+# Login + authenticated delete -> 200 with deleted >= 1.
+TOKEN=$(curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"operator","password":"s3cret-pw"}' \
+  http://127.0.0.1:9100/api/v1/auth/login | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
+[ -n "$TOKEN" ] || { echo "FAIL: no token"; cat /tmp/test56-daemon.log; exit 1; }
+
+curl -fsS -X DELETE -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "$BODY" "http://127.0.0.1:9100/api/v1/ups/$UPS_ENC/events" > /tmp/test56-del.json \
+  || { echo "FAIL: authed delete request failed"; cat /tmp/test56-daemon.log; exit 1; }
+python3 -c "import json,sys;d=json.load(open('/tmp/test56-del.json'));sys.exit(0 if d.get('deleted',0)>=1 else 1)" \
+  || { echo "FAIL: authed delete did not remove a row"; cat /tmp/test56-del.json; exit 1; }
+
+# History with from > to -> 400.
+HIST=$(curl -sS -o /dev/null -w '%{http_code}' \
+  "http://127.0.0.1:9100/api/v1/ups/$UPS_ENC/history?metric=charge&from=200&to=100")
+[ "$HIST" = "400" ] || { echo "FAIL: history from>to returned $HIST, expected 400"; exit 1; }
+
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+trap - EXIT
+echo "PASS: event wide-range query, auth-gated delete, and history validation verified"
+)
+
 echo ""
 echo "=== Group 'single-ups' completed successfully ==="

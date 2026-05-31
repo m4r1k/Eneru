@@ -73,6 +73,12 @@ There is deliberately **no `--password VALUE` flag** — a password on the comma
 line leaks into shell history and the process list (`ps`). Use the interactive
 prompt, `--generate`, or `--password-stdin`.
 
+**Deleting a user ends their active sessions.** Dashboard sessions are held in
+memory with a TTL, but the API re-checks on every request that the session's user
+still exists; deleting the account invalidates its session token immediately, so
+an open dashboard is signed out on its next poll. (A transient auth-DB error
+during that check keeps the existing session rather than logging out a valid user.)
+
 ## Managing API keys
 
 API keys are for programmatic clients (Grafana, scripts, CI) that send
@@ -107,6 +113,36 @@ api:
 | `api.auth.require_for_reads` | `false` | When off, read endpoints stay open even with auth on; writes always require a credential |
 | `api.auth.session_ttl` | `3600` | Dashboard session token lifetime, in seconds |
 | `api.auth.db_path` | `/var/lib/eneru/auth.db` | Location of the user/API-key store; CLI `--auth-db` overrides |
+
+### Auto-enable (create a user, then just sign in — no restart)
+
+If the API is on but you **never set `api.auth.enabled`**, Eneru enforces auth
+automatically as soon as the auth DB has at least one user. This removes a common
+footgun: creating a user with `eneru user create` and then finding the dashboard
+rejects the login because auth was silently off.
+
+The decision is **dynamic**, re-evaluated per request (behind a few-second
+cache), so it takes effect **with no restart and no config edit**:
+
+```bash
+docker exec <container> eneru user create admin --generate
+# within a few seconds the dashboard shows Sign-in and login works — no restart
+```
+
+The rule is deliberately conservative:
+
+- An explicit `api.auth.enabled` (either `true` or `false`) **always wins** — set
+  `enabled: false` to keep the API open even with users present.
+- A fresh install with no users (and no explicit `enabled: true`) stays read-only;
+  the check never creates the auth DB as a side effect.
+- It does **not** satisfy the `nut_control` fail-closed gate: UPS control still
+  requires an explicit `api.auth.enabled: true`.
+
+When the API is enabled but auth is off (no users, or `enabled: false`), the
+daemon logs a one-line notice at startup and the dashboard hides its **Sign-in**
+button — there is nothing to sign into. The dashboard learns the live auth state
+from `/api/v1/config`; if you create the first user while the dashboard is open,
+the **Sign-in** button appears on the next poll, usually within a few seconds.
 
 ## Containers
 

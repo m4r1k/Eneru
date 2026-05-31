@@ -215,6 +215,25 @@ def test_resolve_auth_store_from_config(tmp_path, capsys):
     assert auth.AuthStore(custom_db).get_user("alice") is not None
 
 
+# ----- bare `eneru user` defaults to list -----
+
+@pytest.mark.unit
+def test_user_no_subcommand_defaults_to_list(db, capsys, monkeypatch):
+    auth.AuthStore(db).create_user("alice", "pw")
+    monkeypatch.setattr("sys.argv", ["eneru", "user", "--auth-db", db])
+    cli.main()
+    out = capsys.readouterr().out
+    assert "alice" in out and "USERNAME" in out
+
+
+@pytest.mark.unit
+def test_user_list_subcommand_still_works(db, capsys, monkeypatch):
+    auth.AuthStore(db).create_user("bob", "pw")
+    monkeypatch.setattr("sys.argv", ["eneru", "user", "list", "--auth-db", db])
+    cli.main()
+    assert "bob" in capsys.readouterr().out
+
+
 # ----- helpers -----
 
 @pytest.mark.unit

@@ -151,7 +151,15 @@ API_ENDPOINTS = (
     {
         "path": "/api/v1/events",
         "description": "Recent SQLite event rows",
-        "query": {"limit": "1..10000", "verbosity": "0..2"},
+        "query": {
+            "limit": "1..10000",
+            "verbosity": "0..2",
+            "from": "unix timestamp",
+            "to": "unix timestamp",
+            "before": "unix timestamp cursor",
+            "beforeSource": "source-qualified cursor source",
+            "beforeId": "source-qualified cursor id",
+        },
     },
     {"path": "/api/v1/config", "description": "Configuration summary (extended when authenticated)"},
     {"path": "/api/v1/remote-health", "description": "Remote SSH health rows"},
@@ -161,8 +169,34 @@ API_ENDPOINTS = (
     {"path": "/api/v1/ups/{name}/command", "description": "POST {command} to run an allowlisted upscmd"},
     {"path": "/api/v1/ups/{name}/variables", "description": "Allowlisted writable UPS variables (upsrw)"},
     {"path": "/api/v1/ups/{name}/variables/{var}", "description": "PUT {value} to set an allowlisted upsrw variable"},
+    {"path": "/api/v1/ups/{name}/events", "description": "DELETE selected events {items:[{id,ts,eventType}]} (auth required)"},
     {"path": "/api/v1/config/reload", "description": "POST to re-read config and apply the safe subset live"},
 )
+
+
+def _auth_is_active(config: Any) -> bool:
+    """Whether API authentication is effectively enforced.
+
+    An explicit ``api.auth.enabled`` (true *or* false) always wins. When it is
+    left unset, auth is active iff the auth DB already has at least one user — so
+    "create a user, then sign in" works **with no restart**, while a fresh
+    install with no users stays open (v5.3 read-only behavior). The DB is never
+    created as a side effect of this check, and a broken/unreadable DB fails
+    closed to "inactive" (writes stay hard-disabled).
+    """
+    auth_cfg = getattr(getattr(config, "api", None), "auth", None)
+    if auth_cfg is None:
+        return False
+    if getattr(auth_cfg, "enabled_explicitly_set", False):
+        return bool(auth_cfg.enabled)
+    if auth_cfg.enabled:
+        return True
+    try:
+        if not os.path.exists(auth_cfg.db_path):
+            return False
+        return AuthStore(auth_cfg.db_path).user_count() > 0
+    except Exception:
+        return False
 
 
 class EneruAPIServer:
@@ -179,12 +213,15 @@ class EneruAPIServer:
         self.log_fn: Callable[[str], None] = log_fn or (lambda msg: None)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
-        # Auth machinery is built only when api.auth is enabled; otherwise the
-        # handler leaves write routes hard-disabled (v5.3 read-only behavior).
+        # Auth machinery is built whenever the auth config exists — construction
+        # is free (no I/O until first use), and the store must be ready in case
+        # auth becomes active at runtime without a restart (e.g. the first user
+        # is created while the daemon runs; see _auth_is_active). Whether auth is
+        # actually *enforced* is decided dynamically per request, not here.
         self._auth_store: Optional[AuthStore] = None
         self._sessions: Optional[SessionManager] = None
         auth_cfg = getattr(config.api, "auth", None)
-        if auth_cfg is not None and auth_cfg.enabled:
+        if auth_cfg is not None:
             self._auth_store = AuthStore(auth_cfg.db_path)
             self._sessions = SessionManager(auth_cfg.session_ttl)
 
@@ -230,9 +267,9 @@ class EneruAPIServer:
         # Warn when bound off-loopback without auth: any caller that can reach
         # the socket can read /api/v1/config. With api.auth enabled, writes are
         # gated, so the warning softens to a reminder about open read endpoints.
+        auth_on = _auth_is_active(self.config)
         if not _is_loopback_bind(self.config.api.bind):
-            auth_cfg = getattr(self.config.api, "auth", None)
-            if auth_cfg and auth_cfg.enabled:
+            if auth_on:
                 self.log_fn(
                     f"ℹ️ API bound to {addr[0]} with auth enabled. Read endpoints "
                     "stay open unless api.auth.require_for_reads is set."
@@ -243,6 +280,15 @@ class EneruAPIServer:
                     "api.auth or restrict network access before exposing beyond "
                     "trusted hosts."
                 )
+        elif not auth_on:
+            # Loopback + auth off: the dashboard hides its Sign-in button in this
+            # state, so spell out why and how to enable login/control. (The
+            # off-loopback branch already warns above.)
+            self.log_fn(
+                "ℹ️ API authentication is disabled; the dashboard is read-only "
+                "and Sign-in is hidden. Set api.auth.enabled: true and run "
+                "`eneru user create` to enable login and UPS control."
+            )
 
     def stop(self) -> None:
         """Stop the API server."""
@@ -279,10 +325,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         self._dispatch(self._route_put)
 
     def do_DELETE(self):  # noqa: N802 - stdlib hook
-        # No endpoint uses DELETE (API-key revocation is CLI-only); answer with
-        # a clean 405 rather than the stdlib's default 501.
-        self._finish(405, "application/json",
-                     self._error("METHOD_NOT_ALLOWED", "DELETE is not supported"))
+        self._dispatch(self._route_delete)
 
     def log_message(self, fmt, *args):  # noqa: A003 - stdlib hook
         return
@@ -355,6 +398,37 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
     # ----- auth helpers (v6.0) -----
 
+    # Cache for the "do users exist" probe on the read path: every GET calls
+    # _authorize(), so an uncached per-request user_count() would add a SQLite
+    # open to each scrape. Stored on the base class (shared across the per-start
+    # Handler subclass and all worker threads); races are benign — independent
+    # writes of a float and a bool, worst case a redundant probe.
+    _auth_active_ts: float = 0.0
+    _auth_active_val: bool = False
+    _AUTH_ACTIVE_TTL: float = 5.0
+
+    def _auth_active(self) -> bool:
+        """Effective auth state for this request (see :func:`_auth_is_active`).
+
+        Explicit/enabled cases are resolved instantly with no I/O; only the
+        unpinned "users exist?" branch consults the DB, behind a short TTL cache
+        so a brand-new first user is honored within seconds and no restart is
+        ever required.
+        """
+        auth_cfg = getattr(self.api_config.api, "auth", None)
+        if auth_cfg is None:
+            return False
+        if getattr(auth_cfg, "enabled_explicitly_set", False):
+            return bool(auth_cfg.enabled)
+        if auth_cfg.enabled:
+            return True
+        base = EneruAPIHandler
+        now = time.time()
+        if now - base._auth_active_ts > base._AUTH_ACTIVE_TTL:
+            base._auth_active_val = _auth_is_active(self.api_config)
+            base._auth_active_ts = now
+        return base._auth_active_val
+
     def _bearer_token(self) -> Optional[str]:
         """Return the credential from Authorization: Bearer or X-API-Key."""
         header = self.headers.get("Authorization", "") or ""
@@ -372,7 +446,12 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if self.api_sessions is not None:
             principal = self.api_sessions.validate(token)
             if principal is not None:
-                return principal
+                if self._session_principal_still_valid(principal):
+                    return principal
+                # The backing user was deleted while the session lived — kill the
+                # token so the client (and any later request) is forced to 401.
+                self.api_sessions.invalidate(token)
+                return None
         if self.api_auth is not None:
             try:
                 principal = self.api_auth.authenticate_api_key(token)
@@ -381,6 +460,30 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             if principal is not None:
                 return principal
         return None
+
+    def _session_principal_still_valid(self, principal: Dict[str, Any]) -> bool:
+        """Confirm a session's user account still exists.
+
+        Sessions are in-memory and outlive the DB row they were minted from, so a
+        deleted user would otherwise stay signed in until TTL. Only invalidate on
+        a *definitive* answer that the user is gone; if the lookup raises (auth DB
+        unavailable), keep the established session rather than logging out a valid
+        user on a transient error. Non-user principals (API keys) are re-checked
+        against the DB on their own path and never reach here.
+        """
+        if principal.get("kind") != "user":
+            return True
+        store = self.api_auth
+        if store is None:
+            return True
+        username = principal.get("username")
+        if not username:
+            return True
+        try:
+            return store.get_user(username) is not None
+        except Exception:
+            # DB error / unavailable -> fail safe: keep the existing session.
+            return True
 
     def _authorize(self, *, write: bool) -> Optional[Dict[str, Any]]:
         """Enforce the tiered auth policy. Returns the principal (may be None).
@@ -391,7 +494,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
           open unless ``require_for_reads``, then they require one too.
         """
         auth_cfg = getattr(self.api_config.api, "auth", None)
-        enabled = bool(auth_cfg and auth_cfg.enabled)
+        enabled = self._auth_active()
         if not enabled:
             if write:
                 raise APIForbidden(
@@ -483,7 +586,19 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                         f"metric must be one of: {allowed}",
                     )
                 end = _parse_int_param(qs, "to", int(time.time()))
-                start = _parse_int_param(qs, "from", end - 3600)
+                # Earliest data that can exist = the hourly-aggregate retention
+                # horizon. Omitting `from` ("All") maps here, not to an unbounded
+                # scan; an explicit `from` older than this is clamped up to it.
+                horizon = end - int(
+                    self.api_config.statistics.retention.agg_hourly_days) * 86400
+                if "from" in qs:
+                    start = _parse_int_param(qs, "from", end - 3600)
+                    if start > end:
+                        return 400, "application/json", self._error(
+                            "INVALID_REQUEST", "'from' must be <= 'to'")
+                    start = max(start, horizon)
+                else:
+                    start = horizon
                 rows = query_history(self.api_config, ups_name, metric, start, end)
                 if rows is None:
                     return 404, "application/json", self._not_found("UPS not found")
@@ -502,15 +617,44 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             # configured stats DB.
             limit = _parse_int_param(qs, "limit", 100, minimum=1, maximum=10000)
             verbosity = _parse_int_param(qs, "verbosity", 2, minimum=0, maximum=2)
+            start_ts = _parse_int_param(qs, "from", None) if "from" in qs else None
+            end_ts = _parse_int_param(qs, "to", None) if "to" in qs else None
+            if start_ts is not None and end_ts is not None and start_ts > end_ts:
+                return 400, "application/json", self._error(
+                    "INVALID_REQUEST", "'from' must be <= 'to'")
+            before_ts = None
+            before_cursor = None
+            has_cursor_detail = "beforeSource" in qs or "beforeId" in qs
+            if "before" in qs:
+                before_ts = _parse_int_param(qs, "before", None)
+                if has_cursor_detail:
+                    if "beforeSource" not in qs or "beforeId" not in qs:
+                        raise APIBadRequest(
+                            "'beforeSource' and 'beforeId' must be supplied together")
+                    before_source = (qs.get("beforeSource") or [""])[0]
+                    if not before_source:
+                        raise APIBadRequest("'beforeSource' is required")
+                    before_id = _parse_int_param(qs, "beforeId", None, minimum=1)
+                    before_cursor = (before_ts, before_source, before_id)
+            elif has_cursor_detail:
+                raise APIBadRequest("'before' is required with cursor details")
             return 200, "application/json", {
                 "generatedAt": time.time(),
-                "events": query_events(self.api_config, limit=limit, verbosity=verbosity),
+                "events": query_events(
+                    self.api_config, limit=limit, verbosity=verbosity,
+                    start_ts=start_ts, end_ts=end_ts, before_ts=before_ts,
+                    before_cursor=before_cursor),
             }
 
         if path == "/api/v1/config":
             # Anonymous -> sanitized; authenticated -> extended (still no secrets).
-            return 200, "application/json", config_summary(
+            summary = config_summary(
                 self.api_config, extended=principal is not None)
+            # Report the *effective* auth state: auth can be active via existing
+            # users even when api.auth.enabled is unset, and the dashboard reads
+            # this field to decide whether to show the Sign-in button.
+            summary["api"]["auth"]["enabled"] = self._auth_active()
+            return 200, "application/json", summary
 
         if path == "/api/v1/remote-health":
             rows = live_remote_health(self.api_source, self.api_config)
@@ -537,6 +681,54 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
         return 404, "application/json", self._not_found("Endpoint not found")
 
+    def _route_delete(self) -> Tuple[int, str, Any]:
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        parts = path.split("/")
+        # DELETE /api/v1/ups/{name}/events
+        if len(parts) == 6 and parts[1:4] == ["api", "v1", "ups"] \
+                and parts[5] == "events":
+            return self._delete_events(unquote(parts[4]))
+        return 404, "application/json", self._not_found("Endpoint not found")
+
+    def _delete_events(self, ups_name: str) -> Tuple[int, str, Any]:
+        """Delete selected events for one UPS (auth-gated, audited).
+
+        Body: ``{"items": [{"id", "ts", "eventType"}, ...]}``. Each item is
+        validated strictly; the store matches on all three fields so a stale
+        client can only delete the exact rows it saw.
+        """
+        principal = self._authorize(write=True)
+        data = self._read_json_body()
+        items = data.get("items")
+        if not isinstance(items, list):
+            raise APIBadRequest("'items' must be a list")
+        if len(items) > 1000:
+            raise APIPayloadTooLarge("too many items (max 1000)")
+        normalized = []
+        for it in items:
+            if not isinstance(it, dict):
+                raise APIBadRequest("each item must be an object")
+            event_id, ts, event_type = it.get("id"), it.get("ts"), it.get("eventType")
+            if not isinstance(event_id, int) or isinstance(event_id, bool):
+                raise APIBadRequest("item 'id' must be an integer")
+            if not isinstance(ts, int) or isinstance(ts, bool):
+                raise APIBadRequest("item 'ts' must be an integer")
+            if not isinstance(event_type, str) or not event_type:
+                raise APIBadRequest("item 'eventType' is required")
+            normalized.append((event_id, ts, event_type))
+        real = self._resolve_ups_name(ups_name)
+        if real is None:
+            return 404, "application/json", self._not_found("UPS not found")
+        source = self.api_source
+        deleted = (source.delete_events(real, normalized)
+                   if hasattr(source, "delete_events") else None)
+        if deleted is None:
+            return 503, "application/json", self._error(
+                "STATS_UNAVAILABLE", "the statistics store is unavailable")
+        self._audit(principal, "events", f"{real}:delete", f"{deleted} rows")
+        return 200, "application/json", {"ups": real, "deleted": deleted}
+
     def _route_put(self) -> Tuple[int, str, Any]:
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
@@ -548,8 +740,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         return 404, "application/json", self._not_found("Endpoint not found")
 
     def _handle_login(self) -> Tuple[int, str, Any]:
-        auth_cfg = getattr(self.api_config.api, "auth", None)
-        if not (auth_cfg and auth_cfg.enabled):
+        if not self._auth_active():
             return 404, "application/json", self._not_found("Authentication is disabled")
         data = self._read_json_body()
         username = data.get("username")
@@ -575,8 +766,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         }
 
     def _handle_logout(self) -> Tuple[int, str, Any]:
-        auth_cfg = getattr(self.api_config.api, "auth", None)
-        if not (auth_cfg and auth_cfg.enabled):
+        if not self._auth_active():
             return 404, "application/json", self._not_found("Authentication is disabled")
         token = self._bearer_token()
         # Only an active session token can be logged out (API keys aren't
@@ -737,6 +927,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         "command": "CONTROL_COMMAND",
         "variable": "CONTROL_VARIABLE",
         "config": "CONFIG_RELOAD",
+        "events": "EVENTS_DELETED",
     }
 
     @staticmethod
@@ -789,8 +980,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         # config — listing a route that returns 404/403 would mislead clients
         # discovering the API via availableEndpoints.
         prometheus_enabled = bool(getattr(self.api_config.prometheus, "enabled", False))
-        auth_enabled = bool(getattr(getattr(self.api_config.api, "auth", None),
-                                    "enabled", False))
+        auth_enabled = self._auth_active()
         nut_enabled = bool(getattr(getattr(self.api_config, "nut_control", None),
                                    "enabled", False))
 
@@ -798,6 +988,8 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             if path == "/metrics":
                 return prometheus_enabled
             if path.startswith("/api/v1/auth/") or path == "/api/v1/config/reload":
+                return auth_enabled
+            if path == "/api/v1/ups/{name}/events":
                 return auth_enabled
             if path.startswith("/api/v1/ups/{name}/command") or \
                     path.startswith("/api/v1/ups/{name}/variables"):

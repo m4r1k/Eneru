@@ -1389,6 +1389,15 @@ class UPSGroupMonitor(
         except Exception:  # pragma: no cover - defensive
             pass
 
+    def delete_events(self, ups_name: str, items):
+        """Delete events from the live per-UPS stats store. Returns the count
+        removed, or ``None`` when the store is unavailable (statistics disabled /
+        not open) so the API can answer 503 instead of silently succeeding."""
+        store = self._stats_store
+        if store is None or not store.is_open:
+            return None
+        return store.delete_events(items)
+
     def _handle_sighup(self, signum, frame):
         """SIGHUP -> hot-reload config (systemctl reload / docker kill -s HUP).
 

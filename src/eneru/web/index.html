@@ -10,12 +10,20 @@
   <header>
     <h1>⚡ Eneru</h1>
     <div id="authbox" class="authbox">
+      <label class="theme-pick">Theme
+        <select id="theme-select" aria-label="Color theme">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </label>
       <span id="who" class="who" hidden></span>
       <button id="loginBtn" type="button">Sign in</button>
       <button id="logoutBtn" type="button" hidden>Sign out</button>
     </div>
   </header>
 
+  <div id="banner" class="banner" role="status" hidden></div>
   <div id="error" class="error" hidden></div>
 
   <main>
@@ -41,6 +49,17 @@
             <option value="voltage">Input voltage (V)</option>
           </select>
         </label>
+        <label>Range
+          <select id="graph-range">
+            <option value="3600">Last hour</option>
+            <option value="21600">Last 6 hours</option>
+            <option value="86400" selected>Last 24 hours</option>
+            <option value="604800">Last 7 days</option>
+            <option value="2592000">Last 30 days</option>
+            <option value="31536000">Last year</option>
+            <option value="all">All</option>
+          </select>
+        </label>
       </div>
       <div id="graph" class="graph"></div>
     </section>
@@ -59,9 +78,22 @@
           </select>
         </label>
         <label>Text <input id="event-text-filter" type="search" placeholder="Filter details"></label>
+        <label>Range
+          <select id="event-range">
+            <option value="86400">Last 24 hours</option>
+            <option value="604800" selected>Last 7 days</option>
+            <option value="2592000">Last 30 days</option>
+            <option value="31536000">Last year</option>
+            <option value="all">All</option>
+          </select>
+        </label>
+      </div>
+      <div class="event-actions">
+        <button type="button" id="event-delete" hidden>Delete selected</button>
+        <button type="button" id="event-load-older">Load older</button>
       </div>
       <table id="events" class="events">
-        <thead><tr><th>Time</th><th>Type</th><th>Detail</th></tr></thead>
+        <thead><tr id="events-head"><th>Time</th><th>Type</th><th>Detail</th></tr></thead>
         <tbody></tbody>
       </table>
     </section>
@@ -84,6 +116,17 @@
       </div>
       <div id="login-error" class="error" hidden></div>
     </form>
+  </div>
+
+  <!-- UPS detail dialog -->
+  <div id="detail-modal" class="modal" hidden>
+    <div class="modal-card detail-card" role="dialog" aria-modal="true" aria-labelledby="detail-title">
+      <div class="modal-head">
+        <h3 id="detail-title">UPS details</h3>
+        <button type="button" id="detail-close" aria-label="Close">✕</button>
+      </div>
+      <div id="detail-body"></div>
+    </div>
   </div>
 
   <footer><span id="status-line">Loading…</span></footer>

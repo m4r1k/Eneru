@@ -1,15 +1,15 @@
 # Choose your install
 
-Eneru ships in three deployment profiles. v5.5 made the OCI container a
-first-class home for **every** feature including local-host shutdown —
-the previous "container = remote-only" framing from v5.4 is gone.
+Eneru ships in three deployment profiles. Since v5.5, the OCI container can own
+local-host shutdown too. The old v5.4 rule of "container = remote-only" no
+longer applies.
 
 ## The three profiles at a glance
 
 | Install path | Local-host ownership | Remote systems | Recommended for |
 |---|---|---|---|
-| **pip / deb / rpm (native)** | First-class via systemd | Yes | Homelab, single-host professional, end-user-managed enterprise |
-| **OCI image (Docker / Podman)** | First-class via SSH loopback delegate | Yes | Homelab, professional, enterprise — the v5.5 default for containerized local-host |
+| **pip / deb / rpm (native)** | Full support via systemd | Yes | Homelab, single-host professional, end-user-managed enterprise |
+| **OCI image (Docker / Podman)** | Supported via SSH loopback delegate | Yes | Homelab, professional, enterprise; the v5.5 default for containerized local-host |
 | **Kubernetes** | Not recommended | Yes | Enterprise multi-site fleet monitoring of remote systems |
 
 ### Quick decision
@@ -150,7 +150,7 @@ so volume mounts are readable by the container user.
 
 ## When Eneru reports `/ready` 503
 
-Eneru is defense technology — strict readiness. ANY required
-capability that's unachievable returns 503. See
+Eneru treats readiness strictly. If a required capability is unreachable,
+`/ready` returns 503. See
 [Troubleshooting](troubleshooting.md#ready-vs-503-decision-matrix)
 for the full per-runtime decision table.

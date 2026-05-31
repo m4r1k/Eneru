@@ -313,7 +313,7 @@ view and appear in the TUI/API events list at Diagnostics verbosity (`-v`).
 
 ## API, metrics, remote health, and MQTT
 
-The v5.3 API is read-only, opt-in, and binds to localhost by default when enabled. Do not expose it to untrusted networks; authz is planned for v6. Two surfaces in this section deviate from "off unless enabled": Prometheus `/metrics` is on by default once the API itself is enabled (it's the canonical observability output), and `remote_health.enabled` defaults to `true` because the probes are harmless (run only against the configured `probe_command`, default `true`) and only target remote servers explicitly marked `enabled: true` elsewhere in the config.
+The API is opt-in and binds to localhost by default when enabled. With `api.auth` off it is **read-only** (every write surface is hard-disabled), exactly as in v5.x. Turning `api.auth` on (see [Authentication](authentication.md)) adds the tiered write path: reads stay open unless `api.auth.require_for_reads`, while UPS control, event deletion, and config reload require a credential. Still, do not expose the socket to untrusted networks without auth: anonymous `/api/v1/config` reveals server hostnames and presence flags. Two settings in this section are on by default once their parent feature is enabled: Prometheus `/metrics` is on once the API is enabled, and `remote_health.enabled` defaults to `true` because the probes run only against explicitly enabled remote servers and use the configured `probe_command` (`true` by default).
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -350,9 +350,9 @@ The v5.3 API is read-only, opt-in, and binds to localhost by default when enable
 Eneru can re-read its configuration without restarting. Trigger it with `SIGHUP`
 or, when the API is enabled, an authenticated `POST /api/v1/config/reload`.
 
-Reload is nginx-style: the file is re-parsed and validated first, and if it is
-invalid the daemon **keeps running on the previous config** and logs the error —
-a typo never takes monitoring down. Valid changes are split in two:
+Reload is nginx-style: the file is re-parsed and validated first. If it is
+invalid, the daemon **keeps running on the previous config** and logs the error,
+so a typo never takes monitoring down. Valid changes are split in two:
 
 - **Applied live:** trigger thresholds (per UPS group), `behavior.dry_run`,
   `nut_control` allowlists/credentials, `prometheus.enabled`, `notifications`
@@ -383,7 +383,7 @@ needs a restart.
 
 `remote_health.probe_command` is rejected at validation time if it contains shell metacharacters (`;`, `|`, `&`, `$`, backtick, redirections, parentheses, or newlines) or any keyword in the dangerous-words blocklist. Probes are advisory: they never run pre-shutdown commands, VM/container shutdown commands, custom commands, or the configured `shutdown_command`.
 
-**MQTT on RHEL.** Debian/Ubuntu `.deb` packages install `python3-paho-mqtt` as a hard dependency. RPM packages list it as a `Recommends:` only — RHEL 9 + EPEL pulls it in automatically, but on RHEL 8 (where the EPEL build targets the system python3.6, not the python3.9 used by Eneru) and on RHEL 10 (no `python3-paho-mqtt` exists in BaseOS / AppStream / CRB / EPEL 10) you need to install it via pip after installing eneru:
+**MQTT on RHEL.** Debian/Ubuntu `.deb` packages install `python3-paho-mqtt` as a hard dependency. RPM packages list it as a `Recommends:` only. RHEL 9 + EPEL pulls it in automatically, but on RHEL 8 (where the EPEL build targets the system python3.6, not the python3.9 used by Eneru) and on RHEL 10 (no `python3-paho-mqtt` exists in BaseOS / AppStream / CRB / EPEL 10) you need to install it via pip after installing eneru:
 
 ```bash
 # RHEL 8 (with python39 alternative):

@@ -119,6 +119,13 @@ class AuthConfig:
     require_for_reads: bool = False
     session_ttl: int = 3600
     db_path: str = "/var/lib/eneru/auth.db"
+    # True only when the operator wrote ``api.auth.enabled`` in the config. The
+    # daemon uses this to decide whether it may *auto-enable* auth when the auth
+    # DB already has users (create-a-user-then-just-log-in). An explicit value —
+    # true or false — always wins. It participates in equality so the hot-reload
+    # diff treats "unpinned" vs "explicitly pinned" as a real ``api.auth`` change
+    # (reported restart-required); it stays out of ``repr`` to avoid noise.
+    enabled_explicitly_set: bool = field(default=False, repr=False)
 
 
 @dataclass
@@ -1015,6 +1022,7 @@ class ConfigLoader:
                     session_ttl=auth_data.get(
                         'session_ttl', config.api.auth.session_ttl),
                     db_path=auth_data.get('db_path', config.api.auth.db_path),
+                    enabled_explicitly_set='enabled' in auth_data,
                 ),
             )
 

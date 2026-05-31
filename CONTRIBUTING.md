@@ -94,7 +94,7 @@ src/eneru/
 
 ## Testing checklist
 
-Before submitting a PR, ensure:
+Before submitting a PR, check:
 
 - [ ] All tests pass (`pytest`)
 - [ ] `validate` passes (`python -m eneru validate`)

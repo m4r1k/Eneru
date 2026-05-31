@@ -1,22 +1,37 @@
+/* Neutral palette. Dark is the base; Light applies via prefers-color-scheme
+   (System default, flash-free) and via an explicit [data-theme] override set by
+   the theme switcher. Explicit data-theme always wins over the OS preference. */
 :root {
-  --bg: #14110c;
-  --panel: #1f1a12;
-  --panel-2: #2a2318;
-  --text: #f3ead7;
-  --muted: #b6a888;
-  --accent: #f5a623;
-  --ok: #5bd672;
-  --warn: #f5a623;
-  --crit: #ff5c5c;
-  --line: #3a3120;
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-2: #20242d;
+  --text: #e6e9ef;
+  --muted: #9aa3b2;
+  --accent: #4f8cf7;
+  --on-accent: #0b0e13;
+  --ok: #4ccb6e;
+  --warn: #e7a13a;
+  --crit: #ef5b5b;
+  --line: #2b303b;
 }
+:root[data-theme="light"], :root[data-theme="light"] * { color-scheme: light; }
+:root[data-theme="dark"], :root[data-theme="dark"] * { color-scheme: dark; }
 @media (prefers-color-scheme: light) {
-  :root {
-    --bg: #faf6ee; --panel: #fff; --panel-2: #f1ead9; --text: #2a2318;
-    --muted: #6b5f47; --line: #e3d8bf;
+  :root:not([data-theme]) {
+    --bg: #f7f8fa; --panel: #ffffff; --panel-2: #eef1f5; --text: #1b1f27;
+    --muted: #5b6473; --accent: #2563eb; --on-accent: #ffffff; --line: #dfe3ea;
   }
 }
+:root[data-theme="light"] {
+  --bg: #f7f8fa; --panel: #ffffff; --panel-2: #eef1f5; --text: #1b1f27;
+  --muted: #5b6473; --accent: #2563eb; --on-accent: #ffffff; --line: #dfe3ea;
+}
 * { box-sizing: border-box; }
+/* The dashboard shows/hides every element via the `hidden` attribute. Class
+   rules that set `display` (e.g. `.modal { display: flex }`) otherwise win over
+   the UA `[hidden] { display: none }`, leaving the element stuck visible — which
+   pinned the login modal permanently in the foreground. Make `hidden` always win. */
+[hidden] { display: none !important; }
 body {
   margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   background: var(--bg); color: var(--text); line-height: 1.4;
@@ -54,9 +69,10 @@ select, input { background: var(--panel-2); color: var(--text); border: 1px soli
 .events { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 .events th, .events td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--line); }
 .events th { color: var(--muted); font-weight: 600; }
-button { background: var(--accent); color: #14110c; border: none; border-radius: 6px;
+button { background: var(--accent); color: var(--on-accent); border: none; border-radius: 6px;
          padding: 0.4rem 0.8rem; font: inherit; font-weight: 600; cursor: pointer; }
 button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
 .authbox { display: flex; align-items: center; gap: 0.6rem; }
 .who { color: var(--muted); font-size: 0.9rem; }
 .error { background: rgba(255,92,92,0.12); color: var(--crit); border: 1px solid var(--crit);
@@ -77,6 +93,50 @@ button.secondary { background: var(--panel-2); color: var(--text); border: 1px s
 .var-form input { width: 100%; min-width: 0; }
 footer { padding: 0.6rem 1.25rem; color: var(--muted); font-size: 0.85rem;
          border-top: 1px solid var(--line); }
+
+/* Theme picker in the header */
+.theme-pick { color: var(--muted); font-size: 0.85rem; display: flex;
+              align-items: center; gap: 0.35rem; }
+
+/* On-battery / shutdown banner */
+.banner { margin: 0 1.25rem 1rem; padding: 0.6rem 0.9rem; border-radius: 6px;
+          font-weight: 600; border: 1px solid transparent; }
+.banner.warn { background: rgba(231,161,58,0.14); color: var(--warn);
+               border-color: var(--warn); }
+.banner.crit { background: rgba(239,91,91,0.14); color: var(--crit);
+               border-color: var(--crit); }
+
+/* Clickable UPS cards (drill-down) */
+.card-click { cursor: pointer; transition: border-color 0.12s, transform 0.12s; }
+.card-click:hover { border-color: var(--accent); }
+.card-click:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Threshold coloring on battery value + bar */
+.card .row b.ok, .detail-section .row b.ok { color: var(--ok); }
+.card .row b.warn, .detail-section .row b.warn { color: var(--warn); }
+.card .row b.crit, .detail-section .row b.crit { color: var(--crit); }
+.bar > span.ok { background: var(--ok); }
+.bar > span.warn { background: var(--warn); }
+.bar > span.crit { background: var(--crit); }
+
+/* Event actions row */
+.event-actions { display: flex; gap: 0.6rem; margin-bottom: 0.6rem; }
+
+/* UPS detail modal */
+.detail-card { width: min(560px, 94vw); max-height: 85vh; overflow: auto; }
+.modal-head { display: flex; align-items: center; justify-content: space-between; }
+.modal-head h3 { margin: 0; }
+.modal-head button { background: var(--panel-2); color: var(--text);
+                     border: 1px solid var(--line); }
+.detail-section { margin-top: 0.5rem; }
+.detail-section h4 { margin: 0 0 0.3rem; color: var(--muted); font-size: 0.8rem;
+                     text-transform: uppercase; letter-spacing: 0.04em; }
+.detail-section .row { display: flex; justify-content: space-between;
+                       padding: 0.15rem 0; color: var(--muted); }
+.detail-section .row b { color: var(--text); font-weight: 600; }
+
 @media (max-width: 640px) {
   .var-form { grid-template-columns: 1fr; }
+  header { flex-wrap: wrap; gap: 0.5rem; }
+  .authbox { flex-wrap: wrap; }
 }

@@ -681,28 +681,60 @@ def live_remote_health(source: Any, config: Config) -> List[dict]:
     return rows
 
 
-def query_events(config: Config, *, limit: int = 100, verbosity: int = 2) -> List[dict]:
-    """Return recent event rows from all per-UPS stats DBs."""
+def query_events(config: Config, *, limit: int = 100, verbosity: int = 2,
+                 start_ts: Optional[int] = None, end_ts: Optional[int] = None,
+                 before_ts: Optional[int] = None,
+                 before_cursor: Optional[tuple] = None) -> List[dict]:
+    """Return recent event rows aggregated from all per-UPS stats DBs.
+
+    Each row carries a **source-qualified identity** — ``source`` (the UPS
+    groupId) plus ``id`` (the per-DB row id) — because the id is unique only
+    within one per-UPS DB. ``start_ts``/``end_ts`` bound the window for wide-range
+    viewing. ``before_cursor`` is the "load older" cursor ``(ts, source, id)``;
+    the timestamp-only ``before_ts`` path stays supported for older clients. Rows
+    are ordered by ``(ts, source, id)`` so the merge across sources is
+    deterministic and paging can progress through many same-second rows.
+    """
     rows: List[dict] = []
     now = int(time.time())
     limit = max(1, int(limit))
     verbosity = int(verbosity)
+    cursor_ts, cursor_source, cursor_id = before_cursor or (None, None, None)
+    end = int(cursor_ts if cursor_ts is not None else before_ts) \
+        if (cursor_ts is not None or before_ts is not None) else \
+        (int(end_ts) if end_ts is not None else now)
     include_types = POWER_EVENT_TYPES if verbosity == 0 else None
     exclude_types = LIFECYCLE_EVENT_TYPES if verbosity == 1 else None
     for group in config.ups_groups:
+        source = sanitize_name(group.ups.name)
+        local_end = end
+        before_id = None
+        if cursor_ts is not None:
+            if source < cursor_source:
+                local_end = int(cursor_ts)
+            elif source == cursor_source:
+                local_end = int(cursor_ts)
+                before_id = int(cursor_id)
+            else:
+                local_end = int(cursor_ts) - 1
         conn = StatsStore.open_readonly(stats_db_path_for_group(config, group))
         if conn is None:
             continue
         try:
             store = StatsStore.from_connection(conn)
-            for ts, event_type, detail in store.query_recent_events(
-                end_ts=now,
+            for event_id, ts, event_type, detail in store.query_recent_events(
+                end_ts=local_end,
                 limit=limit,
+                start_ts=start_ts,
                 include_types=include_types,
                 exclude_types=exclude_types,
+                include_id=True,
+                before_id=before_id,
             ):
                 rows.append({
                     "ts": int(ts),
+                    "id": int(event_id),
+                    "source": source,
                     "ups": group.ups.name,
                     "label": group.ups.label,
                     "eventType": event_type,
@@ -713,7 +745,7 @@ def query_events(config: Config, *, limit: int = 100, verbosity: int = 2) -> Lis
                 conn.close()
             except Exception:
                 pass
-    rows.sort(key=lambda row: row["ts"])
+    rows.sort(key=lambda row: (row["ts"], row["source"], row["id"]))
     return rows[-limit:]
 
 

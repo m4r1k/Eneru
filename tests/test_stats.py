@@ -481,6 +481,178 @@ class TestSchemaMigration:
         finally:
             s.close()
 
+    @staticmethod
+    def _build_v4_db(path: Path) -> None:
+        """Synthesize a real v4-shaped DB: full samples + both aggregate tables +
+        events (NO id column) + notifications + meta, so the v4->v5 rebuild is
+        exercised against a database that matches what a real v4 install holds."""
+        c = sqlite3.connect(str(path), isolation_level=None)
+        c.execute("PRAGMA journal_mode = WAL")
+        c.execute(
+            "CREATE TABLE samples (ts INTEGER NOT NULL, status TEXT, "
+            "battery_charge REAL, battery_runtime REAL, ups_load REAL, "
+            "input_voltage REAL, output_voltage REAL, depletion_rate REAL, "
+            "time_on_battery INTEGER, connection_state TEXT, "
+            "battery_voltage REAL, ups_temperature REAL, "
+            "input_frequency REAL, output_frequency REAL)"
+        )
+        for table in ("agg_5min", "agg_hourly"):
+            c.execute(
+                f"CREATE TABLE {table} (ts INTEGER PRIMARY KEY, "
+                "battery_charge_avg REAL, battery_charge_min REAL, "
+                "battery_charge_max REAL, battery_runtime_avg REAL, "
+                "ups_load_avg REAL, ups_load_max REAL, input_voltage_avg REAL, "
+                "input_voltage_min REAL, input_voltage_max REAL, "
+                "samples_count INTEGER, output_voltage_avg REAL, "
+                "battery_voltage_avg REAL, ups_temperature_avg REAL, "
+                "ups_temperature_min REAL, ups_temperature_max REAL, "
+                "input_frequency_avg REAL, output_frequency_avg REAL)"
+            )
+        c.execute(
+            "CREATE TABLE events (ts INTEGER NOT NULL, "
+            "event_type TEXT NOT NULL, detail TEXT, "
+            "notification_sent INTEGER DEFAULT 1)"
+        )
+        c.executescript(
+            "CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "ts INTEGER NOT NULL, body TEXT NOT NULL, notify_type TEXT NOT NULL, "
+            "category TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', "
+            "attempts INTEGER NOT NULL DEFAULT 0, sent_at INTEGER, "
+            "cancel_reason TEXT);"
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);"
+        )
+        c.execute("INSERT INTO meta(key,value) VALUES ('schema_version','4')")
+        # Two events sharing one second + one later — proves id preserves order
+        # (id = old rowid) and survives the table rebuild.
+        c.executemany(
+            "INSERT INTO events(ts, event_type, detail) VALUES (?, ?, ?)",
+            [(1000, "ON_BATTERY", "a"), (1000, "LOW_BATTERY", "b"),
+             (2000, "POWER_RESTORED", "c")],
+        )
+        c.close()
+
+    @pytest.mark.unit
+    def test_v4_db_migrates_events_to_v5_adds_id(self, tmp_path):
+        path = tmp_path / "v4.db"
+        self._build_v4_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            info = list(s._conn.execute("PRAGMA table_info(events)"))
+            cols = {r[1] for r in info}
+            assert "id" in cols
+            # id is the INTEGER PRIMARY KEY (pk flag set).
+            assert any(r[1] == "id" and r[5] == 1 for r in info)
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v4_to_v5_bumps_meta_and_preserves_rows(self, tmp_path):
+        path = tmp_path / "v4.db"
+        self._build_v4_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            sv = s._conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            assert int(sv[0]) == SCHEMA_VERSION  # 5
+            rows = s._conn.execute(
+                "SELECT id, ts, event_type, detail FROM events ORDER BY id"
+            ).fetchall()
+            # id == old rowid (insertion order), all fields intact.
+            assert rows == [(1, 1000, "ON_BATTERY", "a"),
+                            (2, 1000, "LOW_BATTERY", "b"),
+                            (3, 2000, "POWER_RESTORED", "c")]
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v5_id_is_not_reused_after_delete(self, tmp_path):
+        # The safety guarantee behind delete-by-id: AUTOINCREMENT never hands a
+        # deleted event's id to a later one.
+        path = tmp_path / "v4.db"
+        self._build_v4_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            s._conn.execute("DELETE FROM events WHERE id=3")
+            s._conn.commit()
+            s.log_event("NEW", "x", ts=3000)
+            new_id = s._conn.execute(
+                "SELECT id FROM events WHERE event_type='NEW'"
+            ).fetchone()[0]
+            assert new_id == 4  # not 3
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v5_migration_idempotent(self, tmp_path):
+        path = tmp_path / "v4.db"
+        self._build_v4_db(path)
+        open_and_close_store(path)
+        open_and_close_store(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            cols = {r[1] for r in s._conn.execute("PRAGMA table_info(events)")}
+            assert "id" in cols
+            # No leftover scratch table from the rebuild.
+            tables = {r[0] for r in s._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            assert "events_v5_new" not in tables
+            # Rows still intact (rebuild ran exactly once).
+            assert s._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 3
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v5_migration_recovers_orphaned_rebuild_table(self, tmp_path):
+        # Simulate an older unsafe rebuild that copied rows into the scratch
+        # table and dropped events, then died before the rename.
+        path = tmp_path / "v4-partial.db"
+        conn = sqlite3.connect(path)
+        try:
+            conn.executescript("""
+                CREATE TABLE events_v5_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    detail TEXT,
+                    notification_sent INTEGER DEFAULT 1
+                );
+                CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+                INSERT INTO meta(key, value) VALUES ('schema_version', '4');
+            """)
+            conn.executemany(
+                "INSERT INTO events_v5_new"
+                "(id, ts, event_type, detail, notification_sent) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(1, 1000, "ON_BATTERY", "a", 1),
+                 (2, 1000, "LOW_BATTERY", "b", 1)],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        s = StatsStore(path)
+        s.open()
+        try:
+            rows = s._conn.execute(
+                "SELECT id, ts, event_type, detail FROM events ORDER BY id"
+            ).fetchall()
+            assert rows == [(1, 1000, "ON_BATTERY", "a"),
+                            (2, 1000, "LOW_BATTERY", "b")]
+            tables = {r[0] for r in s._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            assert "events_v5_new" not in tables
+            sv = s._conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            assert int(sv[0]) == SCHEMA_VERSION
+        finally:
+            s.close()
+
 
 class TestNotificationQueue:
     """v4: persistent notification queue CRUD + TTL/cap/age rules."""
@@ -1238,6 +1410,109 @@ class TestEvents:
         assert len(rows) == 1
 
     @pytest.mark.unit
+    def test_query_recent_events_include_id_and_start_ts(self, store):
+        store.log_event("A", "a", ts=1000)
+        store.log_event("B", "b", ts=2000)
+        store.log_event("C", "c", ts=3000)
+        # Default shape stays a 3-tuple (TUI/legacy callers unaffected).
+        assert store.query_recent_events(end_ts=9999, limit=10)[0] == \
+            (1000, "A", "a")
+        # include_id prepends the row id; start_ts bounds the lower edge.
+        rows = store.query_recent_events(
+            end_ts=9999, limit=10, start_ts=2000, include_id=True)
+        assert [(r[1], r[2]) for r in rows] == [(2000, "B"), (3000, "C")]
+        assert all(isinstance(r[0], int) for r in rows)
+
+    @pytest.mark.unit
+    def test_delete_events_by_id_with_guard(self, store):
+        store.log_event("A", "a", ts=1000)
+        store.log_event("B", "b", ts=2000)
+        store.log_event("C", "c", ts=3000)
+        rows = store.query_recent_events(end_ts=9999, limit=10, include_id=True)
+        by_type = {r[2]: r for r in rows}
+        # Delete A and C by exact (id, ts, type).
+        n = store.delete_events([
+            (by_type["A"][0], 1000, "A"), (by_type["C"][0], 3000, "C")])
+        assert n == 2
+        left = store.query_recent_events(end_ts=9999, limit=10)
+        assert [r[1] for r in left] == ["B"]
+
+    @pytest.mark.unit
+    def test_delete_events_guard_mismatch_deletes_nothing(self, store):
+        store.log_event("A", "a", ts=1000)
+        rid = store.query_recent_events(end_ts=9999, limit=1, include_id=True)[0][0]
+        # Right id, wrong ts -> 0 (a stale client can't delete the wrong row).
+        assert store.delete_events([(rid, 9999, "A")]) == 0
+        # Right id, wrong type -> 0.
+        assert store.delete_events([(rid, 1000, "WRONG")]) == 0
+        assert len(store.query_recent_events(end_ts=9999, limit=10)) == 1
+
+    @pytest.mark.unit
+    def test_delete_events_dedups_and_handles_empty(self, store):
+        store.log_event("A", "a", ts=1000)
+        rid = store.query_recent_events(end_ts=9999, limit=1, include_id=True)[0][0]
+        assert store.delete_events([]) == 0
+        # Duplicate of the same row counts once.
+        assert store.delete_events([(rid, 1000, "A"), (rid, 1000, "A")]) == 1
+
+    @pytest.mark.unit
+    def test_delete_events_isolated_per_db(self, tmp_path):
+        # The per-DB id is not globally unique: deleting id=1 from one UPS DB must
+        # not touch id=1 in another.
+        a = StatsStore(tmp_path / "a.db")
+        a.open()
+        b = StatsStore(tmp_path / "b.db")
+        b.open()
+        try:
+            a.log_event("X", "ax", ts=100)
+            b.log_event("X", "bx", ts=100)
+            aid = a.query_recent_events(end_ts=9999, limit=1, include_id=True)[0][0]
+            assert a.delete_events([(aid, 100, "X")]) == 1
+            assert len(a.query_recent_events(end_ts=9999, limit=10)) == 0
+            assert len(b.query_recent_events(end_ts=9999, limit=10)) == 1  # untouched
+        finally:
+            a.close()
+            b.close()
+
+    @pytest.mark.unit
+    def test_query_recent_events_paging_inclusive_end_ts(self, store):
+        # "Load older" pages by lowering end_ts (inclusive) to the oldest ts shown.
+        # The one-row overlap at the boundary is intentional — the dashboard
+        # de-dups by (source, id) — and paging still reaches every event.
+        for i, et in enumerate(("A", "B", "C", "D")):
+            store.log_event(et, et.lower(), ts=1000 * (i + 1))   # 1000..4000
+        page1 = store.query_recent_events(end_ts=9999, limit=2, include_id=True)
+        assert [r[2] for r in page1] == ["C", "D"]
+        page2 = store.query_recent_events(end_ts=page1[0][1], limit=2, include_id=True)
+        assert [r[2] for r in page2] == ["B", "C"]    # inclusive overlap on C
+        page3 = store.query_recent_events(end_ts=page2[0][1], limit=2, include_id=True)
+        assert [r[2] for r in page3] == ["A", "B"]
+        assert {r[2] for r in page1 + page2 + page3} == {"A", "B", "C", "D"}
+
+    @pytest.mark.unit
+    def test_query_recent_events_same_second_not_split_within_limit(self, store):
+        # Events sharing one second are returned together (ordered by id) when the
+        # limit covers them — so a same-second cluster is never half-returned.
+        for et in ("A", "B", "C"):
+            store.log_event(et, et.lower(), ts=5000)
+        rows = store.query_recent_events(end_ts=9999, limit=10, include_id=True)
+        assert [r[2] for r in rows] == ["A", "B", "C"]
+
+    @pytest.mark.unit
+    def test_query_recent_events_before_id_advances_within_same_second(self, store):
+        for et in ("A", "B", "C"):
+            store.log_event(et, et.lower(), ts=5000)
+        page1 = store.query_recent_events(end_ts=9999, limit=2, include_id=True)
+        assert [r[2] for r in page1] == ["B", "C"]
+        page2 = store.query_recent_events(
+            end_ts=page1[0][1],
+            before_id=page1[0][0],
+            limit=2,
+            include_id=True,
+        )
+        assert [r[2] for r in page2] == ["A"]
+
+    @pytest.mark.unit
     def test_log_event_swallows_sqlite_error(self, store):
         class _BoomConn:
             def __enter__(self): return self
@@ -1842,7 +2117,11 @@ class TestMigrationCorruptSchemaVersion:
             "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);"
             "INSERT INTO meta(key, value) VALUES ('schema_version', 'oops');"
             "CREATE TABLE samples (ts INTEGER);"
-            "CREATE TABLE events (ts INTEGER);"
+            # Real v1 events shape (event_type/detail present) so the v5
+            # table-rebuild can copy columns; the test's point is the corrupt
+            # schema_version falling back to v1, not a malformed events table.
+            "CREATE TABLE events (ts INTEGER NOT NULL, event_type TEXT NOT NULL, "
+            "detail TEXT);"
             "CREATE TABLE agg_5min (ts INTEGER);"
             "CREATE TABLE agg_hourly (ts INTEGER);"
         )
@@ -1857,6 +2136,7 @@ class TestMigrationCorruptSchemaVersion:
             cur = store._conn.execute("PRAGMA table_info(events)")
             cols = {row[1] for row in cur.fetchall()}
             assert "notification_sent" in cols
+            assert "id" in cols  # v5 rebuild ran too
             cur = store._conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name='notifications'"

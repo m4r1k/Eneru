@@ -1894,10 +1894,17 @@ def main():
     remote_list_parser.set_defaults(func=_cmd_remote_list)
 
     # --- user / apikey (v6.0 auth foundation) ---
-    def _add_auth_locator(p):
+    def _add_auth_locator(p, *, suppress=False):
+        # When the same locator lives on both a parent (`user`) and its
+        # subcommands, an unset subcommand option whose default is None would
+        # OVERWRITE a value the parent already parsed (so `eneru user --auth-db X
+        # list` would silently lose X). Subcommands therefore use
+        # argparse.SUPPRESS: when not supplied they leave the attribute untouched,
+        # preserving the parent's value; when supplied they still win.
+        default = argparse.SUPPRESS if suppress else None
         p.add_argument("-c", "--config", help="Path to configuration file",
-                       default=None)
-        p.add_argument("--auth-db", dest="auth_db", default=None,
+                       default=default)
+        p.add_argument("--auth-db", dest="auth_db", default=default,
                        help="Auth database path (overrides config api.auth.db_path)")
 
     def _add_password_source(p):
@@ -1913,36 +1920,41 @@ def main():
 
     user_parser = subparsers.add_parser(
         "user", help="Manage local API user accounts")
-    # required=True: a bare `eneru user` errors with usage (exit 2) instead of
-    # silently succeeding with the top-level help.
-    user_sub = user_parser.add_subparsers(dest="user_command", required=True)
+    # A bare `eneru user` defaults to `eneru user list` — the common read action.
+    # The locator lives on the parent so `eneru user --auth-db …` works with no
+    # subcommand; the subcommands re-declare it with SUPPRESS (see
+    # _add_auth_locator) so a value given before the subcommand is preserved and
+    # one given after still wins, in either order.
+    _add_auth_locator(user_parser)
+    user_parser.set_defaults(func=_cmd_user_list)
+    user_sub = user_parser.add_subparsers(dest="user_command")
 
     uc_parser = user_sub.add_parser("create", help="Create a local user")
     uc_parser.add_argument("username", help="Username to create")
-    _add_auth_locator(uc_parser)
+    _add_auth_locator(uc_parser, suppress=True)
     _add_password_source(uc_parser)
     uc_parser.add_argument("--role", default=auth.DEFAULT_ROLE,
                            help="User role (v6.0 supports: admin)")
     uc_parser.set_defaults(func=_cmd_user_create)
 
     ul_parser = user_sub.add_parser("list", help="List local users")
-    _add_auth_locator(ul_parser)
+    _add_auth_locator(ul_parser, suppress=True)
     ul_parser.set_defaults(func=_cmd_user_list)
 
     ush_parser = user_sub.add_parser("show", help="Show one user's metadata")
     ush_parser.add_argument("username", help="Username to show")
-    _add_auth_locator(ush_parser)
+    _add_auth_locator(ush_parser, suppress=True)
     ush_parser.set_defaults(func=_cmd_user_show)
 
     up_parser = user_sub.add_parser("passwd", help="Reset a user's password")
     up_parser.add_argument("username", help="Username whose password to reset")
-    _add_auth_locator(up_parser)
+    _add_auth_locator(up_parser, suppress=True)
     _add_password_source(up_parser)
     up_parser.set_defaults(func=_cmd_user_passwd)
 
     ud_parser = user_sub.add_parser("delete", help="Delete a user")
     ud_parser.add_argument("username", help="Username to delete")
-    _add_auth_locator(ud_parser)
+    _add_auth_locator(ud_parser, suppress=True)
     ud_parser.set_defaults(func=_cmd_user_delete)
 
     apikey_parser = subparsers.add_parser(
