@@ -323,10 +323,6 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
     server_version = "EneruAPI/1.0"
 
-    def setup(self) -> None:
-        super().setup()
-        self.connection.settimeout(REQUEST_READ_TIMEOUT_SECONDS)
-
     def do_GET(self):  # noqa: N802 - stdlib hook
         self._dispatch(self._route)
 
@@ -509,7 +505,13 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if not username:
             return "ok"
         try:
-            return "ok" if store.get_user(username) is not None else "gone"
+            user = store.get_user(username)
+            if user is None:
+                return "gone"
+            issued_at = principal.get("password_changed_at")
+            if issued_at is not None and user.get("password_changed_at") != issued_at:
+                return "gone"
+            return "ok"
         except Exception:
             return "unknown"
 
@@ -549,10 +551,53 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if length > MAX_BODY_BYTES:
             raise APIPayloadTooLarge(
                 f"body exceeds {MAX_BODY_BYTES} bytes")
+        deadline = time.monotonic() + REQUEST_READ_TIMEOUT_SECONDS
+        timeout_changed = False
+        previous_timeout = None
+        connection = getattr(self, "connection", None)
+        if length and connection is not None:
+            try:
+                previous_timeout = connection.gettimeout()
+                connection.settimeout(REQUEST_READ_TIMEOUT_SECONDS)
+                timeout_changed = True
+            except Exception:
+                # Tests and uncommon socket wrappers may not expose timeout
+                # controls. Real sockets get the read-specific timeout above.
+                pass
         try:
-            raw = self.rfile.read(length) if length else b""
-        except (socket.timeout, TimeoutError, OSError):
-            raise APIBadRequest("request body timed out")
+            try:
+                chunks = []
+                remaining = length
+                reader = getattr(self.rfile, "read1", None)
+                if not callable(reader):
+                    reader = self.rfile.read
+                while remaining:
+                    time_left = deadline - time.monotonic()
+                    if time_left <= 0:
+                        raise APIBadRequest("request body timed out")
+                    if timeout_changed:
+                        try:
+                            connection.settimeout(time_left)
+                        except Exception:
+                            pass
+                    chunk = reader(min(remaining, 65536))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                raw = b"".join(chunks) if length else b""
+            except (socket.timeout, TimeoutError):
+                raise APIBadRequest("request body timed out")
+            except OSError:
+                raise APIBadRequest("failed to read request body")
+        finally:
+            if timeout_changed:
+                try:
+                    connection.settimeout(previous_timeout)
+                except Exception:
+                    pass
+        if length and len(raw) != length:
+            raise APIBadRequest("incomplete request body")
         if not raw:
             return {}
         try:
@@ -590,10 +635,11 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         # form before it has a token.
         if path == "/api/v1/auth/state":
             auth_cfg = getattr(self.api_config.api, "auth", None)
+            auth_active = self._auth_active()
             return 200, "application/json", {
-                "enabled": self._auth_active(),
+                "enabled": auth_active,
                 "requireForReads": bool(
-                    getattr(auth_cfg, "require_for_reads", False)
+                    auth_active and getattr(auth_cfg, "require_for_reads", False)
                 ),
             }
 
@@ -1000,8 +1046,12 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             try:
                 source.record_control_event(ups, event_type,
                                             f"{label} {target} -> {result}")
-            except Exception:
-                pass
+            except Exception as exc:
+                if self.api_log is not None:
+                    try:
+                        self.api_log(f"⚠️ control audit event failed: {exc}")
+                    except Exception:
+                        pass
 
     @staticmethod
     def _error(code: str, message: str) -> Dict[str, Dict[str, str]]:

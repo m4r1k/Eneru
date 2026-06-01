@@ -216,6 +216,21 @@ class TestReadinessNativeInstall:
         assert any("nut_polling" in r for r in payload["reasons"])
 
     @pytest.mark.unit
+    def test_not_ready_when_source_config_missing_reports_no_config(self):
+        monitor = MagicMock()
+        monitor.config = _bare_metal_config()
+        monitor.state.snapshot.return_value = _ok_snapshot()
+        source = MagicMock()
+        source.config = None
+        source._monitors = [monitor]
+
+        payload = readiness(source)
+
+        assert payload["ready"] is False
+        assert payload["reason"] == "no config"
+        assert payload["ups"][0]["name"] == "UPS@host"
+
+    @pytest.mark.unit
     def test_not_ready_when_local_vm_configured_but_virsh_missing(self):
         config = Config(
             ups_groups=[UPSGroupConfig(
@@ -399,6 +414,35 @@ class TestRedundancyGroupStatus:
         assert rows[0]["quorumLost"] is False
         assert rows[0]["members"][0]["health"] == "degraded"
         assert rows[0]["members"][0]["effectiveHealth"] == "healthy"
+
+    @pytest.mark.unit
+    def test_quorum_lost_honors_live_evaluator_cold_start_hold(self):
+        group = RedundancyGroupConfig(
+            name="rack",
+            ups_sources=["UPS-A@host"],
+            min_healthy=1,
+            unknown_counts_as="critical",
+        )
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS-A@host"))],
+            redundancy_groups=[group],
+        )
+        monitor = MagicMock()
+        monitor.config = Config(ups_groups=[config.ups_groups[0]])
+        monitor.state.snapshot.return_value = MonitorState().snapshot()
+        evaluator = MagicMock()
+        evaluator._group = group
+        evaluator.cold_start_hold_active.return_value = True
+        source = MagicMock()
+        source._monitors = [monitor]
+        source._redundancy_remote_health_managers = []
+        source._evaluator_threads = [evaluator]
+
+        rows = redundancy_group_statuses(source, config)
+
+        assert rows[0]["healthyCount"] == 0
+        assert rows[0]["quorumLost"] is False
+        assert rows[0]["quorumDeferred"] is True
 
 
 class TestReadinessContainerWithLoopback:

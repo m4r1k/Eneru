@@ -6,8 +6,10 @@ on timeout) is most reliably covered with focused unit tests against a
 patched ``eneru.shutdown.vms.run_command`` / ``command_exists``.
 """
 
-import pytest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from eneru import (
     Config,
@@ -125,6 +127,59 @@ def test_shutdown_vms_graceful_shutdown_completes_first_poll(tmp_path):
     assert ["virsh", "shutdown", "vm2"] in issued
     # No `destroy` should fire when graceful shutdown completes cleanly.
     assert not any(c[:2] == ["virsh", "destroy"] for c in issued)
+
+
+@pytest.mark.unit
+def test_shutdown_vms_logs_shutdown_stdout(tmp_path: Path) -> None:
+    """virsh shutdown stdout is relayed to the operator log."""
+    monitor = _make_vm_monitor(tmp_path, max_wait=10)
+    log = []
+    monitor._log_message = log.append
+    call_outputs = [
+        (0, "vm1\n", ""),              # initial list
+        (0, "Domain vm1 is being shutdown\n", ""),
+        (0, "", ""),                   # poll: stopped
+    ]
+
+    with patch("eneru.shutdown.vms.command_exists", return_value=True), \
+         patch("eneru.shutdown.vms.run_command", side_effect=call_outputs), \
+         patch("eneru.shutdown.vms.time.sleep"):
+        monitor._shutdown_vms()
+
+    assert any("Domain vm1 is being shutdown" in line for line in log)
+
+
+@pytest.mark.unit
+def test_shutdown_vms_retry_poll_failure_keeps_prior_remaining(
+    tmp_path: Path,
+) -> None:
+    """A failed wait-loop poll must not make stuck VMs look stopped."""
+    monitor = _make_vm_monitor(tmp_path, max_wait=1)
+    log = []
+    monitor._log_message = log.append
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["virsh", "list", "--name"]:
+            calls = getattr(fake_run, "calls", 0)
+            fake_run.calls = calls + 1
+            if calls == 0:
+                return (0, "vm1\n", "")
+            return (1, "", "libvirt down")
+        return (0, "", "")
+
+    with patch("eneru.shutdown.vms.command_exists", return_value=True), \
+         patch("eneru.shutdown.vms.run_command", side_effect=fake_run) as mock_run, \
+         patch("eneru.shutdown.vms.time.monotonic",
+               side_effect=[0.0, 0.0, 0.0, 1.1, 1.1]), \
+         patch("eneru.shutdown.vms.time.sleep"):
+        monitor._shutdown_vms()
+
+    assert any("keeping prior remaining VMs (1)" in line for line in log)
+    destroy_calls = [
+        c.args[0] for c in mock_run.call_args_list
+        if c.args[0][:2] == ["virsh", "destroy"]
+    ]
+    assert destroy_calls == [["virsh", "destroy", "vm1"]]
 
 
 @pytest.mark.unit

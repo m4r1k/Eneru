@@ -26,8 +26,8 @@ When the timer fires:
   ``status != 'pending'`` and exits silently. The user gets a single
   ``🔄 Restarted`` notification.
 - If no replacement came up (``systemctl stop``), the row is still
-  ``pending``. The deliver helper opens the per-UPS Apprise instance,
-  sends the row, and marks it ``sent``. The user gets a single
+  ``pending``. The deliver helper claims it as ``delivering``, opens the
+  per-UPS Apprise instance, sends the row, and marks it ``sent``. The user gets a single
   ``🛑 Service Stopped`` notification.
 
 Fallback path: when ``systemd-run`` isn't available in a foreground
@@ -42,6 +42,7 @@ it with one Restarted/Upgraded lifecycle notification.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
@@ -49,6 +50,9 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import Callable, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 # Window between OUR exit and the deferred-delivery timer firing.
@@ -354,7 +358,7 @@ def _eager_send(
     try:
         from eneru.stats import StatsStore
         store = StatsStore(db_path)
-        store.open()
+        store.open(recover_delivering=False)
         try:
             store.mark_notification_sent(notification_id)
         finally:
@@ -413,13 +417,18 @@ def deliver_pending_stop(
         # AND mark_notification_sent would overwrite the row's
         # `cancelled` status back to `sent` — reopening the
         # duplicate-lifecycle race the v5.2.1 fix exists to close.
-        # Claim by transitioning pending→sent in a single statement;
-        # only proceed with delivery if we actually won the row.
+        # Claim by transitioning pending→delivering in a single statement;
+        # only proceed with delivery if we actually won the row. Do not mark
+        # sent until Apprise returns success — a crash between claim and send is
+        # recovered by the next daemon open moving stale delivering rows to
+        # pending.
+        now = int(time.time())
         with store._db_lock:
             cur = store._conn.execute(
-                "UPDATE notifications SET status='sent', sent_at=?, "
-                "attempts=attempts+1 WHERE id=? AND status='pending'",
-                (int(time.time()), notification_id),
+                "UPDATE notifications SET status='delivering', sent_at=NULL, "
+                "delivering_at=?, attempts=attempts+1 "
+                "WHERE id=? AND status='pending'",
+                (now, notification_id),
             )
             store._conn.commit()
             won = cur.rowcount > 0
@@ -434,12 +443,13 @@ def deliver_pending_stop(
         if not worker.start():
             # apprise unavailable / no urls — revert the claim so a
             # future start can retry instead of leaving a row marked
-            # `sent` with no actual delivery.
+            # `delivering` with no actual delivery.
             try:
                 with store._db_lock:
                     store._conn.execute(
                         "UPDATE notifications SET status='pending', "
-                        "sent_at=NULL WHERE id=?",
+                        "sent_at=NULL, delivering_at=NULL "
+                        "WHERE id=? AND status='delivering'",
                         (notification_id,),
                     )
                     store._conn.commit()
@@ -447,14 +457,41 @@ def deliver_pending_stop(
                 pass
             return 0
         try:
-            if not worker._send_via_apprise(body, notify_type):
+            try:
+                delivered = worker._send_via_apprise(body, notify_type)
+            except Exception:
+                logger.exception(
+                    "Deferred stop notification delivery failed; "
+                    "notification_id=%s notify_type=%s",
+                    notification_id,
+                    notify_type,
+                )
+                delivered = False
+            if delivered:
+                try:
+                    with store._db_lock:
+                        store._conn.execute(
+                            "UPDATE notifications SET status='sent', sent_at=?, "
+                            "delivering_at=NULL "
+                            "WHERE id=? AND status='delivering'",
+                            (int(time.time()), notification_id),
+                        )
+                        store._conn.commit()
+                except sqlite3.Error:
+                    logger.exception(
+                        "Deferred stop notification sent but mark-sent failed; "
+                        "notification_id=%s",
+                        notification_id,
+                    )
+            else:
                 # Apprise rejected — revert claim to give the next
                 # daemon a chance to retry.
                 try:
                     with store._db_lock:
                         store._conn.execute(
                             "UPDATE notifications SET status='pending', "
-                            "sent_at=NULL WHERE id=?",
+                            "sent_at=NULL, delivering_at=NULL "
+                            "WHERE id=? AND status='delivering'",
                             (notification_id,),
                         )
                         store._conn.commit()

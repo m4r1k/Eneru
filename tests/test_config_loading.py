@@ -1,9 +1,13 @@
 """Tests for Config defaults and YAML file-loading paths."""
 
-import pytest
-import yaml
+import builtins
+import importlib
+import sys
 from pathlib import Path
 
+import pytest
+
+import eneru.config as config_module
 from eneru import (
     Config,
     ConfigLoader,
@@ -64,6 +68,18 @@ class TestConfigDefaults:
         assert default_config.containers.enabled is False
         assert default_config.filesystems.sync_enabled is True
         assert default_config.local_shutdown.enabled is True
+
+    @pytest.mark.unit
+    def test_legacy_accessors_return_defaults_without_groups(self) -> None:
+        """Programmatic empty Config objects still expose safe legacy defaults."""
+        config = Config(ups_groups=[])
+
+        assert config.ups.name == "UPS@localhost"
+        assert config.triggers.low_battery_threshold == 20
+        assert config.remote_servers == []
+        assert config.virtual_machines.enabled is False
+        assert config.containers.enabled is False
+        assert config.filesystems.sync_enabled is True
 
 
 class TestConfigLoading:
@@ -159,6 +175,59 @@ local_shutdown:
         assert config.ups.name == "UPS@localhost"
 
     @pytest.mark.unit
+    def test_load_without_pyyaml_returns_defaults(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """If PyYAML is unavailable, loading falls back to default config."""
+        real_import = builtins.__import__
+
+        def blocked_yaml_import(
+            name,
+            globals=None,
+            locals=None,
+            fromlist=(),
+            level=0,
+        ):
+            if name == "yaml":
+                raise ImportError("blocked for test")
+            return real_import(name, globals, locals, fromlist, level)
+
+        module_name = "_eneru_config_no_yaml_test"
+        spec = importlib.util.spec_from_file_location(
+            module_name, config_module.__file__,
+        )
+        assert spec is not None and spec.loader is not None
+        fresh_config = importlib.util.module_from_spec(spec)
+        try:
+            with monkeypatch.context() as m:
+                m.setattr(builtins, "__import__", blocked_yaml_import)
+                m.setitem(sys.modules, module_name, fresh_config)
+                spec.loader.exec_module(fresh_config)
+                assert fresh_config.YAML_AVAILABLE is False
+                config = fresh_config.ConfigLoader.load()
+        finally:
+            sys.modules.pop(module_name, None)
+
+        assert config.ups.name == "UPS@localhost"
+        assert "PyYAML not installed" in capsys.readouterr().out
+
+    @pytest.mark.unit
+    def test_load_with_no_default_paths_returns_defaults(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """No explicit config and no default files should not be fatal."""
+        monkeypatch.setattr(ConfigLoader, "DEFAULT_CONFIG_PATHS", [])
+
+        config = ConfigLoader.load()
+
+        assert config.ups.name == "UPS@localhost"
+        assert "No config file found" in capsys.readouterr().out
+
+    @pytest.mark.unit
     def test_load_empty_file(self, temp_config_file):
         """Test loading an empty file returns defaults."""
         temp_config_file.write_text("")
@@ -179,6 +248,11 @@ local_shutdown:
         config = ConfigLoader.load(str(temp_config_file))
         assert config.ups.name == "UPS@localhost"
         assert "root must be a YAML mapping" in capsys.readouterr().out
+
+    @pytest.mark.unit
+    def test_unknown_key_errors_ignores_non_mapping_data(self):
+        """The helper is tolerant because callers validate section shape later."""
+        assert ConfigLoader._unknown_key_errors("section", [], {"known"}) == []
 
 
 class TestRedundancyGroupLoading:
@@ -385,4 +459,3 @@ redundancy_groups:
         assert config.redundancy_groups[0].name == "12345"
         assert all(isinstance(s, str)
                    for s in config.redundancy_groups[0].ups_sources)
-

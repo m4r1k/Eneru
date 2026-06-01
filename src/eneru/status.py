@@ -14,6 +14,7 @@ from eneru.remote_health import (
     read_remote_health_sidecar,
     remote_health_sidecar_path,
 )
+from eneru.redundancy import effective_redundancy_health
 from eneru.stats import StatsStore
 from eneru.utils import command_exists
 
@@ -161,40 +162,46 @@ def collect_status(source: Any) -> Dict[str, Any]:
     return payload
 
 
-def _map_redundancy_degraded(group: Any) -> UPSHealth:
-    """Map DEGRADED through the group's quorum policy."""
-    if getattr(group, "degraded_counts_as", "healthy") == "critical":
-        return UPSHealth.CRITICAL
-    return UPSHealth.HEALTHY
+def _redundancy_evaluators_by_group(source: Any) -> Dict[str, Any]:
+    """Return live redundancy evaluators keyed by group name."""
+    out: Dict[str, Any] = {}
+    for evaluator in getattr(source, "_evaluator_threads", []) or []:
+        group = getattr(evaluator, "_group", None)
+        name = getattr(group, "name", None)
+        if name:
+            out[str(name)] = evaluator
+    return out
 
 
-def _effective_redundancy_health(group: Any, raw: UPSHealth) -> UPSHealth:
-    """Return how a raw UPS health tier contributes to group quorum."""
-    if raw == UPSHealth.DEGRADED:
-        return _map_redundancy_degraded(group)
-    if raw == UPSHealth.UNKNOWN:
-        policy = getattr(group, "unknown_counts_as", "critical")
-        if policy == "healthy":
-            return UPSHealth.HEALTHY
-        if policy == "degraded":
-            return _map_redundancy_degraded(group)
-        return UPSHealth.CRITICAL
-    return raw
+def _redundancy_cold_start_hold(evaluator: Any) -> bool:
+    """Mirror the evaluator's startup hold when a live evaluator is present."""
+    if evaluator is None:
+        return False
+    checker = getattr(evaluator, "cold_start_hold_active", None)
+    if not callable(checker):
+        return False
+    try:
+        return bool(checker())
+    except Exception:
+        return False
 
 
 def _redundancy_member_health(monitor: Any, group: Any) -> UPSHealth:
     """Assess one redundancy member using the same inputs as the evaluator."""
-    snap = monitor.state.snapshot()
-    ups_cfg = monitor.config.ups
-    grace_cfg = ups_cfg.connection_loss_grace_period
-    return assess_health(
-        snap,
-        group.triggers,
-        ups_cfg.check_interval,
-        max_stale_data_tolerance=ups_cfg.max_stale_data_tolerance,
-        connection_grace_enabled=grace_cfg.enabled,
-        connection_grace_duration=grace_cfg.duration,
-    )
+    try:
+        snap = monitor.state.snapshot()
+        ups_cfg = monitor.config.ups
+        grace_cfg = ups_cfg.connection_loss_grace_period
+        return assess_health(
+            snap,
+            group.triggers,
+            ups_cfg.check_interval,
+            max_stale_data_tolerance=ups_cfg.max_stale_data_tolerance,
+            connection_grace_enabled=grace_cfg.enabled,
+            connection_grace_duration=grace_cfg.duration,
+        )
+    except Exception:
+        return UPSHealth.UNKNOWN
 
 
 def redundancy_group_statuses(source: Any, config: Optional[Config]) -> List[dict]:
@@ -210,6 +217,7 @@ def redundancy_group_statuses(source: Any, config: Optional[Config]) -> List[dic
         getattr(manager, "group_label", ""): manager
         for manager in getattr(source, "_redundancy_remote_health_managers", []) or []
     }
+    evaluators = _redundancy_evaluators_by_group(source)
     for group in config.redundancy_groups:
         members = []
         healthy_count = 0
@@ -219,7 +227,7 @@ def redundancy_group_statuses(source: Any, config: Optional[Config]) -> List[dic
                 _redundancy_member_health(monitor, group)
                 if monitor is not None else UPSHealth.UNKNOWN
             )
-            effective = _effective_redundancy_health(group, raw)
+            effective = effective_redundancy_health(group, raw)
             if effective == UPSHealth.HEALTHY:
                 healthy_count += 1
             members.append({
@@ -236,13 +244,19 @@ def redundancy_group_statuses(source: Any, config: Optional[Config]) -> List[dic
                 remote_health_sidecar_path(redundancy_state_file_path(config, group.name))
             )
         )
+        raw_quorum_lost = healthy_count < group.min_healthy
+        cold_start_hold = (
+            raw_quorum_lost
+            and _redundancy_cold_start_hold(evaluators.get(group.name))
+        )
         rows.append({
             "groupId": f"redundancy-{sanitize_name(group.name)}",
             "name": group.name,
             "upsSources": list(group.ups_sources),
             "minHealthy": group.min_healthy,
             "healthyCount": healthy_count,
-            "quorumLost": healthy_count < group.min_healthy,
+            "quorumLost": raw_quorum_lost and not cold_start_hold,
+            "quorumDeferred": cold_start_hold,
             "members": members,
             "isLocal": group.is_local,
             "remoteHealth": remote_health,
@@ -479,10 +493,15 @@ def readiness(source: Any) -> Dict[str, Any]:
             nut_failed_any = True
         else:
             nut_visible_any = True
-    if not rows or config is None:
+    if not rows:
         return {
             "ready": False, "reason": "no monitors", "reasons": ["no monitors"],
             "ups": [], "capabilities": [],
+        }
+    if config is None:
+        return {
+            "ready": False, "reason": "no config", "reasons": ["no config"],
+            "ups": rows, "capabilities": [],
         }
 
     # Build merged remote-health snapshot for capability scoring.

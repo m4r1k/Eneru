@@ -2704,7 +2704,9 @@ class TestTriggerImmediateShutdown:
         monitor._execute_shutdown_sequence.assert_called_once()
 
     @pytest.mark.unit
-    def test_shutdown_flag_write_failure_does_not_block_shutdown(self, tmp_path):
+    def test_shutdown_flag_write_failure_does_not_block_shutdown(
+        self, tmp_path: Path,
+    ) -> None:
         monitor = make_monitor(tmp_path)
         monitor._stats_store = MagicMock()
         monitor._execute_shutdown_sequence = MagicMock()
@@ -2719,6 +2721,52 @@ class TestTriggerImmediateShutdown:
         monitor._execute_shutdown_sequence.assert_called_once()
         assert any(
             "Could not write shutdown flag" in str(call)
+            for call in monitor.logger.log.call_args_list
+        )
+
+    @pytest.mark.unit
+    def test_shutdown_flag_write_failure_still_blocks_duplicate_shutdowns(
+        self, tmp_path: Path,
+    ) -> None:
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        monitor._execute_shutdown_sequence = MagicMock()
+
+        with patch.object(
+            type(monitor._shutdown_flag_path),
+            "touch",
+            side_effect=OSError("read-only filesystem"),
+        ):
+            monitor._trigger_immediate_shutdown("first trigger")
+
+        monitor._trigger_immediate_shutdown("second trigger")
+
+        monitor._execute_shutdown_sequence.assert_called_once()
+        assert any(
+            "already in progress" in str(call)
+            for call in monitor.logger.log.call_args_list
+        )
+
+    @pytest.mark.unit
+    def test_shutdown_flag_clear_failure_disables_disk_guard(
+        self, tmp_path: Path,
+    ) -> None:
+        monitor = make_monitor(tmp_path)
+        monitor._shutdown_in_progress = True
+        monitor._shutdown_flag_path.touch()
+
+        with patch.object(
+            type(monitor._shutdown_flag_path),
+            "unlink",
+            side_effect=OSError("read-only filesystem"),
+        ):
+            monitor._clear_shutdown_in_progress()
+
+        assert monitor._shutdown_in_progress is False
+        assert monitor._shutdown_flag_unusable is True
+        assert monitor._shutdown_guard_active() is False
+        assert any(
+            "Ignoring the on-disk guard" in str(call)
             for call in monitor.logger.log.call_args_list
         )
 
@@ -2758,6 +2806,30 @@ class TestCleanupAndExit:
         monitor._remote_health_manager.stop.assert_called_once()
         monitor._mqtt_publisher.stop.assert_called_once()
         monitor._api_server.stop.assert_called_once()
+
+    @pytest.mark.unit
+    def test_mid_shutdown_signal_uses_in_memory_guard_when_flag_missing(
+        self, tmp_path: Path,
+    ) -> None:
+        """If the flag write failed, the in-memory guard still identifies a
+        real shutdown sequence and prevents the graceful-stop path."""
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        monitor._stop_stats = MagicMock()
+        monitor._shutdown_in_progress = True
+        monitor._shutdown_flag_path.unlink(missing_ok=True)
+
+        worker = MagicMock()
+        monitor._notification_worker = worker
+        monitor._send_notification = MagicMock()
+
+        with pytest.raises(SystemExit) as exc_info:
+            monitor._cleanup_and_exit(15, None)
+
+        assert exc_info.value.code == 0
+        worker.flush.assert_called_once()
+        worker.stop.assert_called_once()
+        monitor._send_notification.assert_not_called()
 
     @pytest.mark.unit
     def test_graceful_stop_enqueues_lifecycle_notification(self, tmp_path):
@@ -3120,7 +3192,7 @@ class TestGetAllUpsDataFailurePaths:
         assert err == "Data stale"
 
     @pytest.mark.unit
-    def test_missing_status_returns_failed_poll(self, tmp_path):
+    def test_missing_status_returns_failed_poll(self, tmp_path: Path) -> None:
         monitor = make_monitor(tmp_path)
         with patch.object(
             monitor, "_run_upsc",

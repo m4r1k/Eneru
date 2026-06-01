@@ -1,6 +1,8 @@
 """Tests for ``src/eneru/deferred_delivery.py`` — the v5.2.1 systemd-run
 based deferred-stop notification mechanism."""
 
+import logging
+import sqlite3
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -726,6 +728,159 @@ class TestDeliverPendingStop:
         assert row[0] == "sent"
 
     @pytest.mark.unit
+    def test_claim_is_delivering_until_apprise_succeeds(self, tmp_path):
+        """A claimed row must not look sent before the send actually succeeds."""
+        db_path = tmp_path / "ups.db"
+        row_id = self._make_pending_row(db_path)
+        seen_status = []
+
+        def send_and_observe(_body, _notify_type):
+            store = StatsStore(db_path)
+            store.open(recover_delivering=False)
+            try:
+                row = store._conn.execute(
+                    "SELECT status FROM notifications WHERE id = ?",
+                    (row_id,),
+                ).fetchone()
+                seen_status.append(row[0])
+            finally:
+                store.close()
+            return True
+
+        cfg = self._make_config()
+        with patch("eneru.notifications.NotificationWorker") as Worker:
+            worker = Worker.return_value
+            worker.start.return_value = True
+            worker._send_via_apprise.side_effect = send_and_observe
+            rc = deliver_pending_stop(
+                notification_id=row_id, db_path=db_path, config=cfg,
+            )
+
+        assert rc == 0
+        assert seen_status == ["delivering"]
+        store = StatsStore(db_path)
+        store.open()
+        try:
+            row = store._conn.execute(
+                "SELECT status FROM notifications WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+        finally:
+            store.close()
+        assert row[0] == "sent"
+
+    @pytest.mark.unit
+    def test_success_does_not_overwrite_cancelled_delivering_row(self, tmp_path):
+        """If a newer daemon cancels the claimed row while Apprise is sending,
+        the success mark must not resurrect that lifecycle event as sent."""
+        db_path = tmp_path / "ups.db"
+        row_id = self._make_pending_row(db_path)
+
+        def send_and_cancel(_body, _notify_type):
+            store = StatsStore(db_path)
+            store.open(recover_delivering=False)
+            try:
+                store.cancel_notification(row_id, "superseded")
+            finally:
+                store.close()
+            return True
+
+        cfg = self._make_config()
+        with patch("eneru.notifications.NotificationWorker") as Worker:
+            worker = Worker.return_value
+            worker.start.return_value = True
+            worker._send_via_apprise.side_effect = send_and_cancel
+            rc = deliver_pending_stop(
+                notification_id=row_id, db_path=db_path, config=cfg,
+            )
+
+        assert rc == 0
+        store = StatsStore(db_path)
+        store.open()
+        try:
+            row = store._conn.execute(
+                "SELECT status, sent_at, cancel_reason FROM notifications "
+                "WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+        finally:
+            store.close()
+        assert row == ("cancelled", None, "superseded")
+
+    @pytest.mark.unit
+    def test_success_logs_when_mark_sent_fails(self, tmp_path, caplog):
+        """A delivered one-shot still needs an audit breadcrumb if SQLite dies
+        before the row can be marked sent."""
+        db_path = tmp_path / "ups.db"
+        row_id = self._make_pending_row(db_path)
+
+        def send_and_drop_table(_body, _notify_type):
+            conn = sqlite3.connect(str(db_path))
+            try:
+                conn.execute("DROP TABLE notifications")
+                conn.commit()
+            finally:
+                conn.close()
+            return True
+
+        cfg = self._make_config()
+        with patch("eneru.notifications.NotificationWorker") as Worker, \
+                caplog.at_level(logging.ERROR, logger="eneru.deferred_delivery"):
+            worker = Worker.return_value
+            worker.start.return_value = True
+            worker._send_via_apprise.side_effect = send_and_drop_table
+            rc = deliver_pending_stop(
+                notification_id=row_id, db_path=db_path, config=cfg,
+            )
+
+        assert rc == 0
+        assert "sent but mark-sent failed" in caplog.text
+
+    @pytest.mark.unit
+    def test_exception_requeues_claim_and_logs(self, tmp_path, caplog):
+        """Unexpected Apprise errors leave the row retryable and visible in logs."""
+        db_path = tmp_path / "ups.db"
+        row_id = self._make_pending_row(db_path)
+        seen_status = []
+
+        def send_and_raise(_body, _notify_type):
+            store = StatsStore(db_path)
+            store.open(recover_delivering=False)
+            try:
+                row = store._conn.execute(
+                    "SELECT status FROM notifications WHERE id = ?",
+                    (row_id,),
+                ).fetchone()
+                seen_status.append(row[0])
+            finally:
+                store.close()
+            raise RuntimeError("apprise blew up")
+
+        cfg = self._make_config()
+        with patch("eneru.notifications.NotificationWorker") as Worker, \
+                caplog.at_level(logging.ERROR, logger="eneru.deferred_delivery"):
+            worker = Worker.return_value
+            worker.start.return_value = True
+            worker._send_via_apprise.side_effect = send_and_raise
+            rc = deliver_pending_stop(
+                notification_id=row_id, db_path=db_path, config=cfg,
+            )
+
+        assert rc == 0
+        assert seen_status == ["delivering"]
+        assert "Deferred stop notification delivery failed" in caplog.text
+        store = StatsStore(db_path)
+        store.open()
+        try:
+            row = store._conn.execute(
+                "SELECT status, sent_at FROM notifications WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+        finally:
+            store.close()
+        assert row == ("pending", None)
+
+    @pytest.mark.unit
     def test_returns_zero_when_row_is_purged(self, tmp_path):
         """Row was purged (e.g., max_age_days TTL) between scheduling
         and timer fire → silent no-op."""
@@ -900,6 +1055,13 @@ class TestDeliverPendingStopErrorBranches:
                 return self._action(sql, params)
             return self._real.execute(sql, params)
 
+        def __enter__(self):
+            self._real.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._real.__exit__(*exc)
+
         def commit(self):
             return self._real.commit()
 
@@ -923,7 +1085,7 @@ class TestDeliverPendingStopErrorBranches:
             # the real connection so the SELECT still finds the pending row.
             self._conn = TestDeliverPendingStopErrorBranches._ProxyConn(
                 real_conn,
-                "UPDATE NOTIFICATIONS SET STATUS='SENT'",
+                "UPDATE NOTIFICATIONS SET STATUS='DELIVERING'",
                 lambda sql, params: _ZeroRowCursor(),
             )
 

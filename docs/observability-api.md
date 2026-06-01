@@ -33,6 +33,7 @@ Endpoints:
 | `/api/v1/events` | Recent event rows (`limit`, `verbosity`, `from`, `to`, `before`) | 200 / 400 (bad query) |
 | `DELETE /api/v1/ups/<name>/events` | Delete selected events (auth required) | 200 / 400 / 401 / 403 / 404 / 413 / 503 |
 | `/api/v1/config` | Sanitized config summary | 200 |
+| `/api/v1/auth/state` | Effective auth state for dashboard login bootstrap | 200 |
 | `/api/v1/remote-health` | Remote SSH health status | 200 |
 | `/metrics` | Prometheus text metrics | 200 / 404 (Prometheus disabled) |
 
@@ -48,9 +49,10 @@ is a JSON object: `{"username": "<username>", "password": "<password>"}`.
 | `/health`, `/ready` | open | open (always) |
 | `/metrics`, `/api/v1/ups*`, `/history`, `/events`, `/remote-health` | open | open unless `require_for_reads` |
 | `/api/v1/config` | sanitized | sanitized (anonymous) / **extended** (authenticated) |
+| `/api/v1/auth/state` | open | open (always) |
 | write endpoints (UPS control, config reload) | **hard-disabled (403)** | required (401 without a credential) |
 
-"Auth disabled" always means read-only: write features cannot be reached, and enabling a control feature while auth is off is a startup error. See [Authentication](authentication.md) for the user/API-key model and the `eneru user` / `eneru apikey` CLI.
+"Auth disabled" always means read-only: write features cannot be reached, and enabling a control feature while auth is off is a startup error. If `api.auth.enabled` is left unset, auth activates automatically once the auth DB contains at least one user; if the DB file exists but cannot be read, Eneru fails closed and treats auth as active. See [Authentication](authentication.md) for the user/API-key model and the `eneru user` / `eneru apikey` CLI.
 
 **Logging in.** `POST /api/v1/auth/login` with a JSON body `{"username": "<username>", "password": "<password>"}` returns a bearer token:
 
@@ -59,7 +61,7 @@ is a JSON object: `{"username": "<username>", "password": "<password>"}`.
 {"token": "…", "tokenType": "bearer", "expiresIn": 3600}
 ```
 
-Send it as `Authorization: Bearer <token>` on subsequent requests (programmatic clients send an API key the same way, or via `X-API-Key`). `POST /api/v1/auth/logout` invalidates a session token. Sessions live in memory and expire after `api.auth.session_ttl` seconds; they do not survive a daemon restart.
+Send it as `Authorization: Bearer <token>` on subsequent requests (programmatic clients send an API key the same way, or via `X-API-Key`). `POST /api/v1/auth/logout` invalidates a session token. Sessions live in memory, expire after `api.auth.session_ttl` seconds, and are invalidated if the user is deleted or their password is reset; they do not survive a daemon restart.
 
 Example response shapes:
 
@@ -91,7 +93,7 @@ Example response shapes:
 {"generatedAt": 1720000000.0, "events": [{"ts": 1720000000, "category": "power_event", "event": "ON_BATTERY", "details": "..."}]}
 ```
 
-UPS rows include a stable `groupId` derived from the configured UPS name. Multi-UPS responses also include `redundancyGroups` rows with their source UPS names, quorum target, locality flag, and remote-health rows.
+UPS rows include a stable `groupId` derived from the configured UPS name. Multi-UPS responses also include `redundancyGroups` rows with their source UPS names, quorum target, server-computed `healthyCount` / `quorumLost`, per-member raw/effective health, locality flag, and remote-health rows. During evaluator cold start, `quorumDeferred` is `true` and `quorumLost` remains `false` until members have had their first-report window.
 
 `powerQuality` mixes JSON strings and numbers by source: raw NUT readings (`inputVoltage`, `outputVoltage`, `batteryVoltage`, `temperature`, `inputFrequency`, `outputFrequency`) and state labels (`voltageState`, `avrState`, `bypassState`, `overloadState`) are strings; Eneru-derived values (`nominalVoltage`, `warningLow`, `warningHigh`) are numbers. Strings are empty when the UPS does not publish that NUT field. Consumers that compare numeric ranges should coerce the string fields with `float()` (or `| float` in Home Assistant templates) and treat empty strings as missing data.
 

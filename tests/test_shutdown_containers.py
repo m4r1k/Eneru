@@ -1,7 +1,9 @@
 """Tests for ContainerShutdownMixin (Docker/Podman + compose phase)."""
 
-import pytest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from eneru import (
     Config,
@@ -327,6 +329,18 @@ def test_compose_stacks_skips_missing_file(tmp_path):
 
 
 @pytest.mark.unit
+def test_compose_stacks_skips_blank_path(tmp_path: Path) -> None:
+    """A programmatic blank compose path is ignored before touching the FS."""
+    monitor = _make_container_monitor(
+        tmp_path,
+        compose_files=[ComposeFileConfig(path="")],
+    )
+    with patch("eneru.shutdown.containers.run_command") as mock_run:
+        monitor._shutdown_compose_stacks()
+    mock_run.assert_not_called()
+
+
+@pytest.mark.unit
 def test_compose_stacks_dry_run(tmp_path):
     """Dry-run logs the compose down but doesn't invoke it."""
     cf = tmp_path / "compose.yml"
@@ -375,6 +389,39 @@ def test_compose_stacks_skips_file_that_contains_current_container(tmp_path):
 
     with patch("eneru.shutdown.containers.run_command", side_effect=fake_run):
         monitor._shutdown_compose_stacks()
+
+
+@pytest.mark.unit
+def test_compose_stack_contains_self_false_when_ids_do_not_match(
+    tmp_path: Path,
+) -> None:
+    """A compose project with other containers must still be eligible for down."""
+    monitor = _make_container_monitor(tmp_path)
+    monitor._current_container_ids = lambda: {_SHORT_ID}
+    other = "fedcba987654"
+
+    with patch("eneru.shutdown.containers.run_command",
+               return_value=(0, f"{other}\n", "")):
+        assert monitor._compose_stack_contains_self("/stack.yml") is False
+
+
+@pytest.mark.unit
+def test_compose_stacks_nonzero_exit_logs_failure(tmp_path: Path) -> None:
+    """Compose down failures are logged and treated as best-effort."""
+    cf = tmp_path / "compose.yml"
+    cf.write_text("services: {}\n")
+    monitor = _make_container_monitor(
+        tmp_path,
+        compose_files=[ComposeFileConfig(path=str(cf))],
+    )
+    log = []
+    monitor._log_message = log.append
+
+    with patch("eneru.shutdown.containers.run_command",
+               return_value=(2, "", "bad compose")):
+        monitor._shutdown_compose_stacks()
+
+    assert any("compose down failed: bad compose" in line for line in log)
 
 
 @pytest.mark.unit
@@ -685,6 +732,30 @@ def test_rootless_podman_skips_users_with_unparseable_uid(tmp_path):
 
 
 @pytest.mark.unit
+def test_rootless_podman_skips_blank_and_incomplete_loginctl_rows(
+    tmp_path: Path,
+) -> None:
+    """Blank and UID-only rows from loginctl should not spawn sudo commands."""
+    monitor = _make_container_monitor(
+        tmp_path, runtime="podman", container_runtime="podman",
+        include_user_containers=True,
+    )
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == "loginctl":
+            return (0, "\n1000\n1001 alice\n", "")
+        return (0, "", "")
+
+    with patch("eneru.shutdown.containers.run_command", side_effect=fake_run):
+        monitor._shutdown_podman_user_containers()
+
+    sudo_calls = [cmd for cmd in calls if cmd[:2] == ["sudo", "-u"]]
+    assert sudo_calls == [["sudo", "-u", "alice", "podman", "ps", "-q"]]
+
+
+@pytest.mark.unit
 def test_shutdown_containers_routes_to_rootless_when_include_user_containers_true(tmp_path):
     """The main shutdown path delegates to rootless handling only when
     runtime=podman AND include_user_containers=True."""
@@ -722,7 +793,9 @@ def test_shutdown_containers_skips_rootless_for_docker_runtime(tmp_path):
 
 
 @pytest.mark.unit
-def test_current_container_ids_handles_missing_cgroup_files(tmp_path):
+def test_current_container_ids_handles_missing_cgroup_files(
+    tmp_path: Path,
+) -> None:
     """No /proc/self/cgroup (bare metal) → must not raise; hostname-only fallback."""
     monitor = _make_container_monitor(tmp_path)
     # Restore the real method (the shared fixture stubs it for determinism).
@@ -734,7 +807,9 @@ def test_current_container_ids_handles_missing_cgroup_files(tmp_path):
 
 
 @pytest.mark.unit
-def test_current_container_ids_picks_up_hostname_when_it_looks_like_id(tmp_path):
+def test_current_container_ids_picks_up_hostname_when_it_looks_like_id(
+    tmp_path: Path,
+) -> None:
     """Docker sets hostname to the short container ID by default."""
     monitor = _make_container_monitor(tmp_path)
     # Restore the real method (the shared fixture stubs it for determinism).
@@ -743,6 +818,33 @@ def test_current_container_ids_picks_up_hostname_when_it_looks_like_id(tmp_path)
          patch("pathlib.Path.read_text", side_effect=OSError):
         ids = monitor._current_container_ids()
     assert ids == {_SHORT_ID}
+
+
+@pytest.mark.unit
+def test_current_container_ids_merges_cgroup_and_mountinfo_sources(
+    tmp_path: Path,
+) -> None:
+    """Self-detection should collect IDs from both /proc cgroup and mountinfo."""
+    monitor = _make_container_monitor(tmp_path)
+    del monitor._current_container_ids
+    mount_id = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
+    def fake_read_text(path: Path, encoding: str = "utf-8") -> str:
+        path_text = str(path)
+        if path_text in {"/proc/self/cgroup", "/proc/1/cgroup"}:
+            return f"0::/system.slice/docker-{_FULL_ID}.scope\n"
+        if path_text == "/proc/self/mountinfo":
+            return (
+                f"431 430 0:73 /var/lib/docker/containers/{mount_id}/hosts "
+                "/etc/hosts rw - tmpfs tmpfs rw\n"
+            )
+        raise AssertionError(path_text)
+
+    with patch("eneru.shutdown.containers.socket.gethostname", return_value="host"), \
+         patch("pathlib.Path.read_text", fake_read_text):
+        ids = monitor._current_container_ids()
+
+    assert ids == {_FULL_ID, mount_id}
 
 
 # ----------------------------------------------------------------------

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import eneru.api as api_module
 from eneru.api import (
     APIBadRequest,
     APIForbidden,
@@ -15,6 +16,7 @@ from eneru.api import (
     APIUnauthorized,
     EneruAPIHandler,
     MAX_BODY_BYTES,
+    REQUEST_READ_TIMEOUT_SECONDS,
     SessionManager,
 )
 from eneru.auth import AuthStore
@@ -187,6 +189,23 @@ def test_session_invalidated_when_user_deleted(minimal_config, tmp_path):
     store.delete_user("alice")
     assert h._authenticate_request() is None                  # now rejected
     assert sessions.validate(token) is None                   # token reaped
+
+
+@pytest.mark.unit
+def test_session_invalidated_when_password_changes(minimal_config, tmp_path):
+    store = AuthStore(tmp_path / "auth.db")
+    store.create_user("alice", "pw1")
+    principal = store.authenticate("alice", "pw1")
+    sessions = SessionManager(3600)
+    token = sessions.create(principal)
+    h = _handler(minimal_config, auth_store=store, sessions=sessions,
+                 headers={"Authorization": f"Bearer {token}"})
+
+    assert h._authenticate_request()["username"] == "alice"
+    store.set_password("alice", "pw2")
+
+    assert h._authenticate_request() is None
+    assert sessions.validate(token) is None
 
 
 @pytest.mark.unit
@@ -383,6 +402,73 @@ def test_read_json_body_timeout_is_bad_request(minimal_config):
         h._read_json_body()
 
 
+@pytest.mark.unit
+def test_read_json_body_non_timeout_read_error_is_bad_request(minimal_config):
+    class BrokenBody:
+        def read(self, _length):
+            raise BrokenPipeError("client went away")
+
+    h = _handler(minimal_config, headers={"Content-Length": "2"})
+    h.rfile = BrokenBody()
+    with pytest.raises(APIBadRequest, match="failed to read request body"):
+        h._read_json_body()
+
+
+@pytest.mark.unit
+def test_read_json_body_enforces_total_deadline(minimal_config, monkeypatch):
+    class DripBody:
+        def __init__(self):
+            self.chunks = [b"{", b"}"]
+
+        def read1(self, _length):
+            return self.chunks.pop(0)
+
+    times = iter([
+        100.0,  # deadline setup
+        100.0,  # first chunk is inside the deadline
+        111.0,  # second chunk would arrive after the 10s total budget
+    ])
+    monkeypatch.setattr(api_module.time, "monotonic", lambda: next(times))
+
+    h = _handler(minimal_config, headers={"Content-Length": "2"})
+    h.rfile = DripBody()
+    with pytest.raises(APIBadRequest, match="request body timed out"):
+        h._read_json_body()
+
+
+@pytest.mark.unit
+def test_read_json_body_rejects_short_read(minimal_config):
+    h = _handler(
+        minimal_config,
+        headers={"Content-Length": "10"},
+        body=b"{}",
+    )
+    with pytest.raises(APIBadRequest):
+        h._read_json_body()
+
+
+@pytest.mark.unit
+def test_read_json_body_timeout_is_restored_after_read(minimal_config):
+    class FakeConnection:
+        def __init__(self):
+            self.timeout = None
+            self.set_calls = []
+
+        def gettimeout(self):
+            return self.timeout
+
+        def settimeout(self, timeout):
+            self.timeout = timeout
+            self.set_calls.append(timeout)
+
+    h = _handler(minimal_config, body=b"{}")
+    h.connection = FakeConnection()
+
+    assert h._read_json_body() == {}
+    assert h.connection.set_calls[0] == REQUEST_READ_TIMEOUT_SECONDS
+    assert h.connection.set_calls[-1] is None
+
+
 # ----- tiered /config + read gating via _route -----
 
 @pytest.mark.unit
@@ -420,6 +506,17 @@ def test_auth_state_open_when_reads_require_auth(minimal_config):
     status, _, payload = h._route()
     assert status == 200
     assert payload == {"enabled": True, "requireForReads": True}
+
+
+@pytest.mark.unit
+def test_auth_state_reports_effective_read_gate(minimal_config):
+    minimal_config.api.auth.enabled = False
+    minimal_config.api.auth.enabled_explicitly_set = True
+    minimal_config.api.auth.require_for_reads = True
+    h = _handler(minimal_config, path="/api/v1/auth/state")
+    status, _, payload = h._route()
+    assert status == 200
+    assert payload == {"enabled": False, "requireForReads": False}
 
 
 @pytest.mark.unit

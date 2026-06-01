@@ -1336,6 +1336,27 @@ class TestCoordinatorRealLocalShutdown:
         assert cmd_parts == ["/sbin/poweroff"]
 
     @pytest.mark.unit
+    def test_real_shutdown_empty_command_logs_and_skips_poweroff(self, tmp_path):
+        """Programmatic configs can bypass validation; fail closed if the local
+        shutdown command is blank instead of trying to exec an empty argv."""
+        config = _coord_config(
+            tmp_path,
+            behavior=BehaviorConfig(dry_run=False),
+            local_shutdown=LocalShutdownConfig(enabled=True, command="   "),
+        )
+        coord = MultiUPSCoordinator(config)
+        logs = []
+        coord._log = logs.append
+        coord._notification_worker = None
+
+        with patch("eneru.multi_ups.time.sleep"), \
+             patch("eneru.multi_ups.run_command") as mock_run:
+            coord._handle_local_shutdown("UPS1")
+
+        mock_run.assert_not_called()
+        assert any("local_shutdown.command is empty" in line for line in logs)
+
+    @pytest.mark.unit
     def test_disabled_local_shutdown_clears_flag(self, tmp_path):
         """When local_shutdown.enabled=False, the global flag is removed."""
         config = _coord_config(
@@ -2143,6 +2164,33 @@ ups:
         mon._stop_stats.assert_called_once()
 
     @pytest.mark.unit
+    def test_handle_signal_logs_monitor_stats_close_failure(self, tmp_path):
+        import signal as _signal
+
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+        logs = []
+        coord._log = logs.append
+        coord._notification_worker = None
+        coord._threads = []
+        coord._evaluator_threads = []
+        mon = MagicMock()
+        mon._stop_stats.side_effect = RuntimeError("sqlite busy")
+        coord._monitors = [mon]
+        coord._redundancy_executors = {}
+
+        with patch("eneru.multi_ups.read_upgrade_marker", return_value=None), \
+             patch("eneru.multi_ups.read_shutdown_marker", return_value=None), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.sys.exit"):
+            coord._handle_signal(_signal.SIGTERM, None)
+
+        assert any(
+            "Failed to close monitor stats" in line and "sqlite busy" in line
+            for line in logs
+        )
+
+    @pytest.mark.unit
     def test_handle_signal_skips_lifecycle_notif_during_upgrade(self, tmp_path):
         """An in-flight deb/rpm upgrade (read_upgrade_marker returns truthy)
         means the next daemon will emit 'Upgraded vX → vY' — suppress the
@@ -2410,6 +2458,113 @@ class TestCoordinatorStartServersIdempotent:
             coord._start_mqtt_publisher()
         cls.assert_not_called()
         assert coord._mqtt_publisher is sentinel
+
+
+class TestCoordinatorReloadNotificationWorker:
+    """Notification reload should leave every monitor/executor with a coherent
+    worker reference, including disabled and failed-reload branches."""
+
+    @pytest.mark.unit
+    def test_reload_notification_worker_disabled_clears_existing_refs(
+        self, tmp_path: Path,
+    ) -> None:
+        coord = MultiUPSCoordinator(_coord_config(
+            tmp_path, notifications=NotificationsConfig(enabled=False)))
+        old_worker = MagicMock()
+        coord._notification_worker = old_worker
+        mon = MagicMock()
+        executor = MagicMock()
+        coord._monitors = [mon]
+        coord._redundancy_executors = {"rg": executor}
+        logs = []
+        coord._log = logs.append
+
+        coord._reload_notification_worker()
+
+        old_worker.stop.assert_called_once()
+        assert coord._notification_worker is None
+        assert mon._notification_worker is None
+        assert executor._notification_worker is None
+        assert any("Notifications: disabled" in line for line in logs)
+
+    @pytest.mark.unit
+    def test_reload_notification_worker_logs_when_apprise_missing(
+        self, tmp_path: Path,
+    ) -> None:
+        coord = MultiUPSCoordinator(_coord_config(
+            tmp_path,
+            notifications=NotificationsConfig(enabled=True, urls=["json://x"]),
+        ))
+        logs = []
+        coord._log = logs.append
+
+        with patch("eneru.multi_ups.APPRISE_AVAILABLE", False), \
+             patch("eneru.multi_ups.NotificationWorker") as worker_cls:
+            coord._reload_notification_worker()
+
+        worker_cls.assert_not_called()
+        assert coord._notification_worker is None
+        assert any("apprise not installed" in line for line in logs)
+
+    @pytest.mark.unit
+    def test_reload_notification_worker_start_failure_clears_refs(
+        self, tmp_path: Path,
+    ) -> None:
+        coord = MultiUPSCoordinator(_coord_config(
+            tmp_path,
+            notifications=NotificationsConfig(enabled=True, urls=["json://x"]),
+        ))
+        mon = MagicMock()
+        executor = MagicMock()
+        coord._monitors = [mon]
+        coord._redundancy_executors = {"rg": executor}
+        worker = MagicMock()
+        worker.start.return_value = False
+        logs = []
+        coord._log = logs.append
+
+        with patch("eneru.multi_ups.APPRISE_AVAILABLE", True), \
+             patch("eneru.multi_ups.NotificationWorker", return_value=worker):
+            coord._reload_notification_worker()
+
+        assert coord._notification_worker is None
+        assert mon._notification_worker is None
+        assert executor._notification_worker is None
+        assert any("Failed to reload notifications" in line for line in logs)
+
+    @pytest.mark.unit
+    def test_reload_notification_worker_registers_open_stores(
+        self, tmp_path: Path,
+    ) -> None:
+        coord = MultiUPSCoordinator(_coord_config(
+            tmp_path,
+            notifications=NotificationsConfig(enabled=True, urls=["json://x"]),
+        ))
+        open_store = MagicMock()
+        open_store._conn = object()
+        closed_store = MagicMock()
+        closed_store._conn = None
+        mon_open = MagicMock(_stats_store=open_store)
+        mon_closed = MagicMock(_stats_store=closed_store)
+        executor = MagicMock()
+        coord._monitors = [mon_open, mon_closed]
+        coord._redundancy_executors = {"rg": executor}
+        worker = MagicMock()
+        worker.start.return_value = True
+        worker.get_service_count.return_value = 1
+        logs = []
+        coord._log = logs.append
+
+        with patch("eneru.multi_ups.APPRISE_AVAILABLE", True), \
+             patch("eneru.multi_ups.NotificationWorker", return_value=worker):
+            coord._reload_notification_worker()
+
+        assert coord._notification_worker is worker
+        assert mon_open._notification_worker is worker
+        assert mon_closed._notification_worker is worker
+        assert executor._notification_worker is worker
+        worker.register_store.assert_called_once_with(open_store)
+        assert any("Notifications reloaded" in line for line in logs)
 
 
 class TestRunMonitorCrashStoreSelection:
@@ -2683,6 +2838,84 @@ class TestCoordinatorShutdownJoinAndAudit:
         assert coord._shutdown_join_deadline() == 120
 
     @pytest.mark.unit
+    def test_clear_global_shutdown_flag_logs_unlink_errors(self, tmp_path):
+        coord = MultiUPSCoordinator(self._cfg(tmp_path))
+        logs = []
+        coord._log = logs.append
+
+        with patch.object(
+            type(coord._global_shutdown_flag),
+            "unlink",
+            side_effect=OSError("read-only"),
+        ):
+            coord._clear_global_shutdown_flag("test")
+
+        assert any("Could not clear global shutdown flag" in m for m in logs)
+
+    @pytest.mark.unit
+    def test_global_shutdown_guard_logs_exists_errors(self, tmp_path):
+        coord = MultiUPSCoordinator(self._cfg(tmp_path))
+        logs = []
+        coord._log = logs.append
+
+        with patch.object(
+            type(coord._global_shutdown_flag),
+            "exists",
+            side_effect=OSError("permission denied"),
+        ):
+            assert coord._global_shutdown_guard_active() is False
+
+        assert any("Could not inspect global shutdown flag" in m for m in logs)
+
+    @pytest.mark.unit
+    def test_monitor_shutdown_guard_uses_monitor_helper(self, tmp_path):
+        coord = MultiUPSCoordinator(self._cfg(tmp_path))
+
+        class MonitorWithGuard:
+            def _shutdown_guard_active(self):
+                return True
+
+        assert coord._monitor_shutdown_guard_active(MonitorWithGuard()) is True
+
+    @pytest.mark.unit
+    def test_monitor_shutdown_guard_falls_back_after_helper_error(self, tmp_path):
+        coord = MultiUPSCoordinator(self._cfg(tmp_path))
+        logs = []
+        coord._log = logs.append
+
+        class MonitorWithBrokenGuard:
+            def __init__(self):
+                self._shutdown_in_progress = True
+
+            def _shutdown_guard_active(self):
+                raise RuntimeError("boom")
+
+        assert coord._monitor_shutdown_guard_active(MonitorWithBrokenGuard()) is True
+        assert any("Could not inspect monitor shutdown guard" in m for m in logs)
+
+    @pytest.mark.unit
+    def test_monitor_shutdown_guard_handles_missing_or_unreadable_flag(self, tmp_path):
+        coord = MultiUPSCoordinator(self._cfg(tmp_path))
+        logs = []
+        coord._log = logs.append
+
+        class MonitorWithoutFlag:
+            _shutdown_in_progress = False
+
+        assert coord._monitor_shutdown_guard_active(MonitorWithoutFlag()) is False
+
+        mon = MonitorWithoutFlag()
+        mon._shutdown_flag_path = tmp_path / "flag-ups"
+        with patch.object(
+            type(mon._shutdown_flag_path),
+            "exists",
+            side_effect=OSError("permission denied"),
+        ):
+            assert coord._monitor_shutdown_guard_active(mon) is False
+
+        assert any("Could not inspect monitor shutdown flag" in m for m in logs)
+
+    @pytest.mark.unit
     def test_inflight_recovery_defers_rearm(self, tmp_path):
         """cubic P1: a recovery that races the in-flight window does not drop the
         re-arm -- _clear_local_shutdown_state defers it, and the finally of
@@ -2733,6 +2966,26 @@ class TestCoordinatorShutdownJoinAndAudit:
         coord._threads = []
         coord._evaluator_threads = []
         coord._global_shutdown_flag.touch()  # shutdown in flight
+        with patch("eneru.multi_ups.read_upgrade_marker", return_value=None), \
+             patch("eneru.multi_ups.read_shutdown_marker", return_value=None), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.sys.exit"):
+            coord._handle_signal(15, None)
+        assert any("Shutdown sequence in progress" in m for m in logs), logs
+
+    @pytest.mark.unit
+    def test_handle_signal_in_memory_in_flight_waits_longer(self, tmp_path):
+        """If the global flag write failed, the in-memory in-flight bit still
+        protects the host poweroff thread from a short signal teardown."""
+        coord = MultiUPSCoordinator(self._cfg(tmp_path))
+        logs = []
+        coord._log = lambda m: logs.append(m)
+        coord._notification_worker = None
+        coord._threads = []
+        coord._evaluator_threads = []
+        coord._global_shutdown_flag.unlink(missing_ok=True)
+        with coord._local_shutdown_lock:
+            coord._local_shutdown_in_flight = True
         with patch("eneru.multi_ups.read_upgrade_marker", return_value=None), \
              patch("eneru.multi_ups.read_shutdown_marker", return_value=None), \
              patch("eneru.multi_ups.write_shutdown_marker"), \

@@ -20,7 +20,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from eneru.config import (
     Config,
@@ -32,7 +32,7 @@ from eneru.logger import UPSLogger
 from eneru.notifications import NotificationWorker
 from eneru.shutdown.containers import ContainerShutdownMixin
 from eneru.shutdown.filesystems import FilesystemShutdownMixin
-from eneru.shutdown.remote import RemoteShutdownMixin
+from eneru.shutdown.remote import RemoteShutdownMixin, RemoteShutdownResult
 from eneru.shutdown.vms import VMShutdownMixin
 from eneru.state import MonitorState
 
@@ -40,6 +40,22 @@ from eneru.state import MonitorState
 def _sanitize(name: str) -> str:
     """Sanitize a group name for filesystem flag-file names."""
     return (name or "unnamed").replace("@", "-").replace(":", "-").replace("/", "-")
+
+
+def effective_redundancy_health(group: Any, raw: UPSHealth) -> UPSHealth:
+    """Return how a member's raw health contributes to group quorum."""
+    if raw == UPSHealth.DEGRADED:
+        if getattr(group, "degraded_counts_as", "healthy") == "critical":
+            return UPSHealth.CRITICAL
+        return UPSHealth.HEALTHY
+    if raw == UPSHealth.UNKNOWN:
+        policy = getattr(group, "unknown_counts_as", "critical")
+        if policy == "healthy":
+            return UPSHealth.HEALTHY
+        if policy == "degraded":
+            return effective_redundancy_health(group, UPSHealth.DEGRADED)
+        return UPSHealth.CRITICAL
+    return raw
 
 
 class RedundancyGroupExecutor(
@@ -276,6 +292,30 @@ class RedundancyGroupExecutor(
                 os.close(fd)
             probe.unlink(missing_ok=True)
 
+    @staticmethod
+    def _loopback_poweroff_sent(result: RemoteShutdownResult) -> bool:
+        """True once the delegated host poweroff command was accepted."""
+        return bool(
+            result.completed
+            and result.shutdown_sent
+            and not result.timed_out
+        )
+
+    def _clear_failed_loopback_shutdown_state(self) -> None:
+        """Best-effort re-arm after delegated host poweroff did not happen."""
+        error: Optional[Exception] = None
+        with self._lock:
+            self._shutdown_done = False
+            try:
+                self._shutdown_flag_path.unlink(missing_ok=True)
+            except Exception as exc:
+                error = exc
+        if error is not None:
+            self._log_message(
+                "⚠️ Could not clear redundancy shutdown flag after failed "
+                f"loopback delegation: {error}"
+            )
+
     def clear_shutdown_state(self, *, refuse_active_peer: bool = False) -> None:
         """Reset the in-process and on-disk re-entry guards.
 
@@ -391,6 +431,7 @@ class RedundancyGroupExecutor(
         if self.config.behavior.dry_run:
             self._log_message("🧪 *** DRY-RUN MODE: No actual shutdown will occur ***")
 
+        phase_failed = False
         try:
             delegating = self._uses_loopback_delegate
             if self._group.is_local and not delegating:
@@ -404,6 +445,7 @@ class RedundancyGroupExecutor(
                     try:
                         func()
                     except Exception as exc:
+                        phase_failed = True
                         self._log_message(
                             f"  ❌ {label} failed: {exc}. Continuing shutdown."
                         )
@@ -411,10 +453,13 @@ class RedundancyGroupExecutor(
             try:
                 remote_results = self._shutdown_remote_servers() or []
             except Exception as exc:
+                phase_failed = True
                 self._log_message(
                     f"❌ Remote shutdown phase failed: {exc}. Continuing shutdown."
                 )
                 remote_results = []
+            if any(not result.success for result in remote_results):
+                phase_failed = True
 
             if self._group.is_local and delegating:
                 loopback_results = [
@@ -428,12 +473,13 @@ class RedundancyGroupExecutor(
                     )
                 ]
                 if not loopback_results or not all(
-                    result.success for result in loopback_results
+                    self._loopback_poweroff_sent(result)
+                    for result in loopback_results
                 ):
                     details = "; ".join(
                         result.error or "shutdown command was not sent"
                         for result in loopback_results
-                        if not result.success
+                        if not self._loopback_poweroff_sent(result)
                     ) or "loopback shutdown result missing"
                     self._log_message(
                         "❌ Delegated redundancy host poweroff failed; shutdown "
@@ -446,14 +492,18 @@ class RedundancyGroupExecutor(
                         "failure",
                         category="shutdown_summary",
                     )
-                    self._shutdown_flag_path.unlink(missing_ok=True)
-                    with self._lock:
-                        self._shutdown_done = False
+                    self._clear_failed_loopback_shutdown_state()
                     return False
 
-            self._log_message(
-                f"✅ REDUNDANCY GROUP SHUTDOWN COMPLETE: {self._group.name}"
-            )
+            if phase_failed:
+                self._log_message(
+                    "⚠️ REDUNDANCY GROUP SHUTDOWN FINISHED WITH ERRORS: "
+                    f"{self._group.name}"
+                )
+            else:
+                self._log_message(
+                    f"✅ REDUNDANCY GROUP SHUTDOWN COMPLETE: {self._group.name}"
+                )
             # is_local quorum-loss must also fire the local poweroff.
             # Without this, the executor stops local services and remote
             # peers but leaves the host running. Delegate to the
@@ -476,7 +526,13 @@ class RedundancyGroupExecutor(
         finally:
             # In dry-run we clear the flag so repeated test runs aren't pinned.
             if self.config.behavior.dry_run:
-                self._shutdown_flag_path.unlink(missing_ok=True)
+                try:
+                    self._shutdown_flag_path.unlink(missing_ok=True)
+                except Exception as exc:
+                    self._log_message(
+                        "⚠️ Could not clear redundancy shutdown flag after "
+                        f"dry-run: {exc}"
+                    )
                 with self._lock:
                     self._shutdown_done = False
 
@@ -572,6 +628,7 @@ class RedundancyGroupEvaluator(threading.Thread):
                 pass
         base_grace = max(grace_durations) if grace_durations else 0
         self._readiness_window = self._startup_grace + base_grace + 10
+        self._state_lock = threading.Lock()
         self._ever_reported = set()
         self._start_monotonic = time.monotonic()
         self._cold_start_logged = False
@@ -584,24 +641,33 @@ class RedundancyGroupEvaluator(threading.Thread):
             print(prefixed)
 
     def _map_degraded(self) -> UPSHealth:
-        if self._group.degraded_counts_as == "critical":
-            return UPSHealth.CRITICAL
-        return UPSHealth.HEALTHY
+        return effective_redundancy_health(self._group, UPSHealth.DEGRADED)
 
     def _map_unknown(self) -> UPSHealth:
-        policy = self._group.unknown_counts_as
-        if policy == "healthy":
-            return UPSHealth.HEALTHY
-        if policy == "degraded":
-            return self._map_degraded()
-        return UPSHealth.CRITICAL
+        return effective_redundancy_health(self._group, UPSHealth.UNKNOWN)
 
     def _effective_health(self, raw: UPSHealth) -> UPSHealth:
-        if raw == UPSHealth.UNKNOWN:
-            return self._map_unknown()
-        if raw == UPSHealth.DEGRADED:
-            return self._map_degraded()
-        return raw
+        return effective_redundancy_health(self._group, raw)
+
+    def _mark_reported(self, ups_name: str) -> None:
+        """Remember that a member published at least one real snapshot."""
+        with self._state_lock:
+            self._ever_reported.add(ups_name)
+
+    def cold_start_pending_members(self) -> List[str]:
+        """Return member names still covered by cold-start protection."""
+        with self._state_lock:
+            reported = set(self._ever_reported)
+        return [
+            name for name in self._group.ups_sources
+            if self._monitors.get(name) is not None and name not in reported
+        ]
+
+    def cold_start_hold_active(self) -> bool:
+        """Return True while evaluator quorum-loss firing is startup-held."""
+        return bool(self.cold_start_pending_members()) and (
+            (time.monotonic() - self._start_monotonic) < self._readiness_window
+        )
 
     def evaluate_once(self):
         """Single evaluation pass -- exposed so tests can drive it directly."""
@@ -620,7 +686,7 @@ class RedundancyGroupEvaluator(threading.Thread):
                 # goes stale/FAILED it counts per policy. Only never-reported
                 # members are held back below.
                 if getattr(snap, "last_update_time", 0):
-                    self._ever_reported.add(ups_name)
+                    self._mark_reported(ups_name)
                 check_interval = monitor.config.ups.check_interval
                 max_stale_data_tolerance = (
                     monitor.config.ups.max_stale_data_tolerance
@@ -652,14 +718,8 @@ class RedundancyGroupEvaluator(threading.Thread):
         # triggers protection per policy. A member with NO monitor in the map is
         # a permanent (config/wiring) condition, not a boot delay, so it counts
         # as UNKNOWN immediately and is excluded from the hold.
-        never_reported = [
-            n for n in self._group.ups_sources
-            if self._monitors.get(n) is not None and n not in self._ever_reported
-        ]
-        within_readiness = (
-            (time.monotonic() - self._start_monotonic) < self._readiness_window
-        )
-        cold_start_hold = bool(never_reported) and within_readiness
+        never_reported = self.cold_start_pending_members()
+        cold_start_hold = self.cold_start_hold_active()
         if cold_start_hold and raw_quorum_lost and not self._cold_start_logged:
             self._cold_start_logged = True
             self._log(

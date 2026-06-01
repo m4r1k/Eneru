@@ -55,8 +55,12 @@ h2 { font-size: 1rem; color: var(--muted); text-transform: uppercase;
 .badge.ok { background: rgba(91,214,114,0.15); color: var(--ok); }
 .badge.warn { background: rgba(245,166,35,0.15); color: var(--warn); }
 .badge.crit { background: rgba(255,92,92,0.15); color: var(--crit); }
-.bar { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; margin-top: 0.35rem; }
-.bar > span { display: block; height: 100%; background: var(--accent); }
+meter.bar { -webkit-appearance: none; appearance: none;
+  display: block; width: 100%; height: 8px; margin-top: 0.35rem;
+  border: 0; border-radius: 4px; background: var(--panel-2); }
+meter.bar::-webkit-meter-bar { background: var(--panel-2); border: 0; border-radius: 4px; }
+meter.bar::-webkit-meter-optimum-value { background: var(--accent); border-radius: 4px; }
+meter.bar::-moz-meter-bar { background: var(--accent); border-radius: 4px; }
 .graph-controls, .event-filters { display: flex; gap: 1rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
 .graph-controls label, .event-filters label { color: var(--muted); font-size: 0.9rem; }
 select, input { background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
@@ -115,9 +119,12 @@ footer { padding: 0.6rem 1.25rem; color: var(--muted); font-size: 0.85rem;
 .card .row b.ok, .detail-section .row b.ok { color: var(--ok); }
 .card .row b.warn, .detail-section .row b.warn { color: var(--warn); }
 .card .row b.crit, .detail-section .row b.crit { color: var(--crit); }
-.bar > span.ok { background: var(--ok); }
-.bar > span.warn { background: var(--warn); }
-.bar > span.crit { background: var(--crit); }
+meter.bar.ok::-webkit-meter-optimum-value { background: var(--ok); }
+meter.bar.warn::-webkit-meter-optimum-value { background: var(--warn); }
+meter.bar.crit::-webkit-meter-optimum-value { background: var(--crit); }
+meter.bar.ok::-moz-meter-bar { background: var(--ok); }
+meter.bar.warn::-moz-meter-bar { background: var(--warn); }
+meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 
 /* Event actions row */
 .event-actions { display: flex; gap: 0.6rem; margin-bottom: 0.6rem; }

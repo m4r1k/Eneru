@@ -87,6 +87,52 @@ class MultiUPSCoordinator:
             for name in rg.ups_sources
         }
 
+    def _clear_global_shutdown_flag(self, context: str) -> None:
+        """Best-effort cleanup for the coordinator's cross-process guard."""
+        try:
+            self._global_shutdown_flag.unlink(missing_ok=True)
+        except OSError as exc:
+            self._log(
+                f"⚠️ Could not clear global shutdown flag "
+                f"{self._global_shutdown_flag} during {context}: {exc}"
+            )
+
+    def _global_shutdown_guard_active(self) -> bool:
+        """Return whether the coordinator-level shutdown guard is active."""
+        try:
+            return self._global_shutdown_flag.exists()
+        except OSError as exc:
+            self._log(
+                f"⚠️ Could not inspect global shutdown flag "
+                f"{self._global_shutdown_flag}: {exc}"
+            )
+            return False
+
+    def _monitor_shutdown_guard_active(self, monitor: UPSGroupMonitor) -> bool:
+        """Return whether a child monitor has admitted a shutdown sequence."""
+        guard = getattr(type(monitor), "_shutdown_guard_active", None)
+        if callable(guard):
+            try:
+                return bool(guard(monitor))
+            except Exception as exc:
+                self._log(
+                    "  ⚠️ Could not inspect monitor shutdown guard via helper: "
+                    f"{exc}. Falling back to raw guard fields."
+                )
+
+        if bool(vars(monitor).get("_shutdown_in_progress", False)):
+            return True
+        flag_path = getattr(monitor, "_shutdown_flag_path", None)
+        if flag_path is None:
+            return False
+        try:
+            return bool(flag_path.exists())
+        except OSError as exc:
+            self._log(
+                f"  ⚠️ Could not inspect monitor shutdown flag {flag_path}: {exc}"
+            )
+            return False
+
     def run(self):
         """Start all UPS group monitors and wait for shutdown or signal."""
         try:
@@ -112,7 +158,7 @@ class MultiUPSCoordinator:
             except PermissionError:
                 pass
 
-        self._global_shutdown_flag.unlink(missing_ok=True)
+        self._clear_global_shutdown_flag("startup")
 
         # Initialize shared notification worker
         if self.config.notifications.enabled and APPRISE_AVAILABLE:
@@ -548,7 +594,7 @@ class MultiUPSCoordinator:
                 self._rearm_after_inflight = True
                 return
             self._local_shutdown_initiated = False
-            self._global_shutdown_flag.unlink(missing_ok=True)
+            self._clear_global_shutdown_flag("power recovery")
 
     def _handle_local_shutdown(self, triggered_by: str):
         """Execute local shutdown with defense-in-depth protection."""
@@ -590,7 +636,7 @@ class MultiUPSCoordinator:
                 self._log("🔌 Shutting down local server NOW")
                 if self.config.behavior.dry_run:
                     self._log(f"🧪 [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
-                    self._global_shutdown_flag.unlink(missing_ok=True)
+                    self._clear_global_shutdown_flag("dry-run local shutdown")
                 else:
                     if self._notification_worker:
                         self._notification_worker.send(
@@ -642,7 +688,7 @@ class MultiUPSCoordinator:
                         # H2 failsafe re-fire).
             else:
                 self._log("✅ Local shutdown disabled. Group shutdown complete.")
-                self._global_shutdown_flag.unlink(missing_ok=True)
+                self._clear_global_shutdown_flag("disabled local shutdown")
 
             # Exit if --exit-after-shutdown was specified
             if self._exit_after_shutdown:
@@ -660,7 +706,7 @@ class MultiUPSCoordinator:
                 if self._rearm_after_inflight:
                     self._rearm_after_inflight = False
                     self._local_shutdown_initiated = False
-                    self._global_shutdown_flag.unlink(missing_ok=True)
+                    self._clear_global_shutdown_flag("deferred power recovery")
 
     def _drain_all_groups(self, timeout: int = 120):
         """Shut down all groups' resources, then stop monitor threads.
@@ -699,7 +745,8 @@ class MultiUPSCoordinator:
 
         # Phase 2: run each monitor's shutdown sequence sequentially.
         for monitor in self._monitors:
-            if not monitor._shutdown_flag_path.exists():
+            already_shutting_down = self._monitor_shutdown_guard_active(monitor)
+            if not already_shutting_down:
                 self._log(f"  ➡️ Triggering shutdown for {monitor._log_prefix.strip()}")
                 try:
                     monitor._execute_shutdown_sequence()
@@ -924,9 +971,12 @@ class MultiUPSCoordinator:
         # would kill that thread before the poweroff runs -- a missed shutdown.
         # When in flight, wait a generous, config-derived, bounded deadline so
         # the sequence can finish; otherwise keep the brisk 5 s exit.
+        with self._local_shutdown_lock:
+            local_shutdown_in_flight = self._local_shutdown_in_flight
         shutdown_in_flight = (
-            self._global_shutdown_flag.exists()
-            or any(m._shutdown_flag_path.exists() for m in self._monitors)
+            local_shutdown_in_flight
+            or self._global_shutdown_guard_active()
+            or any(self._monitor_shutdown_guard_active(m) for m in self._monitors)
         )
         if shutdown_in_flight:
             join_budget = self._shutdown_join_deadline()
@@ -1019,8 +1069,11 @@ class MultiUPSCoordinator:
                     store = getattr(monitor, "_stats_store", None)
                     if store is not None:
                         store.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                self._log(
+                    "⚠️ Failed to close monitor stats during coordinator "
+                    f"shutdown: {exc}"
+                )
 
         # Slice 3: tag this exit so the next start can emit "🔄 Restarted"
         # if it comes back within RESTART_DOWNTIME_THRESHOLD_SECS, else
@@ -1041,7 +1094,7 @@ class MultiUPSCoordinator:
                 reason=REASON_SIGNAL,
             )
 
-        self._global_shutdown_flag.unlink(missing_ok=True)
+        self._clear_global_shutdown_flag("signal shutdown")
         # 5.3.0 contract: clear redundancy executor flags too on
         # graceful exit so the next daemon instance starts from a
         # known-clean state. Defensive try-block: a flag-cleanup

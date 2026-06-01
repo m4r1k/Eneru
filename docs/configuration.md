@@ -320,8 +320,8 @@ The API is opt-in and binds to localhost by default when enabled. With `api.auth
 | `api.enabled` | `false` | Start the embedded HTTP API with `eneru run` |
 | `api.bind` | `127.0.0.1` | Listen address |
 | `api.port` | `9191` | Listen port |
-| `api.auth.enabled` | `false` | Opt-in API authentication. When off, the API is read-only and all write surfaces are hard disabled (v5.3 behavior) |
-| `api.auth.require_for_reads` | `false` | When off, read endpoints (incl. `/metrics`) stay open even with auth on; writes always require a credential. Set on to also gate reads |
+| `api.auth.enabled` | unset (`false` until an auth DB user exists) | Opt-in API authentication. When off, the API is read-only and all write surfaces are hard disabled (v5.3 behavior). If omitted, auth auto-activates once the auth DB contains a user |
+| `api.auth.require_for_reads` | `false` | When off, read endpoints (incl. `/metrics`) stay open even with auth on; writes always require a credential. Set on to also gate reads. `/health`, `/ready`, dashboard static files, and `/api/v1/auth/state` stay open for probes/login bootstrap |
 | `api.auth.session_ttl` | `3600` | Dashboard session token lifetime, seconds |
 | `api.auth.db_path` | `/var/lib/eneru/auth.db` | Where local users and API keys are stored (global SQLite DB, separate from per-UPS stats). CLI `--auth-db` overrides |
 | `prometheus.enabled` | `true` | Serve Prometheus text metrics at `/metrics` |
@@ -343,7 +343,7 @@ The API is opt-in and binds to localhost by default when enabled. With `api.auth
 | `nut_control.allowed_variables` | `[]` | Allowlisted writable variables for upsrw. Empty by default — opt in each one |
 | `nut_control.timeout` | `10` | Per-command subprocess timeout (seconds) |
 
-`api.bind` defaults to `127.0.0.1`. If you set it to a non-loopback address, Eneru emits a startup warning because `/api/v1/config` returns server hostnames, SSH usernames, shutdown ordering, and presence flags with no auth. Front-end the API with SSH or a reverse proxy that adds auth before exposing it beyond a trusted boundary.
+`api.bind` defaults to `127.0.0.1`. If you set it to a non-loopback address, Eneru emits a startup warning when auth is off because read endpoints can expose server hostnames, SSH usernames, shutdown ordering, and presence flags. Front-end the API with SSH or a reverse proxy that adds auth, or enable `api.auth.enabled` (and optionally `api.auth.require_for_reads`), before exposing it beyond a trusted boundary.
 
 ## Hot-reload
 

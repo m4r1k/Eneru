@@ -1107,7 +1107,9 @@ class TestExecutorShutdown:
         assert calls == ["vms", "containers", "sync", "unmount", "remote"]
 
     @pytest.mark.unit
-    def test_local_phase_exception_does_not_skip_poweroff_callback(self, tmp_path):
+    def test_local_phase_exception_does_not_skip_poweroff_callback(
+        self, tmp_path: Path,
+    ) -> None:
         callback = MagicMock()
         group = _redundancy_group(
             is_local=True,
@@ -1134,7 +1136,9 @@ class TestExecutorShutdown:
         callback.assert_called_once_with("redundancy:rg")
 
     @pytest.mark.unit
-    def test_loopback_delegate_skips_local_phases_and_callback(self, tmp_path):
+    def test_loopback_delegate_skips_local_phases_and_callback(
+        self, tmp_path: Path,
+    ) -> None:
         """Containerized local redundancy groups delegate host work to SSH.
 
         The remote phase must still run because that is where the loopback
@@ -1181,6 +1185,8 @@ class TestExecutorShutdown:
                                host="127.0.0.1",
                                completed=True,
                                shutdown_sent=True,
+                               crashed=True,
+                               error="local drain failed after poweroff queued",
                            )
                        ])
             assert ex.shutdown(reason="x") is True
@@ -1189,7 +1195,9 @@ class TestExecutorShutdown:
         callback.assert_not_called()
 
     @pytest.mark.unit
-    def test_loopback_delegate_failure_rearms_and_reports_incomplete(self, tmp_path):
+    def test_loopback_delegate_failure_rearms_and_reports_incomplete(
+        self, tmp_path: Path,
+    ) -> None:
         group = _redundancy_group(
             is_local=True,
             remote_servers=[RemoteServerConfig(
@@ -1230,6 +1238,46 @@ class TestExecutorShutdown:
             if call.kwargs.get("category") == "shutdown_summary"
         ]
         assert len(summary_calls) == 1
+
+    @pytest.mark.unit
+    def test_loopback_delegate_failure_unlink_error_still_returns_false(
+        self, tmp_path: Path,
+    ) -> None:
+        group = _redundancy_group(
+            is_local=True,
+            remote_servers=[RemoteServerConfig(
+                name="host-loopback",
+                enabled=True,
+                host="127.0.0.1",
+                user="root",
+                is_host_loopback=True,
+            )],
+        )
+        ex = RedundancyGroupExecutor(
+            group,
+            base_config=_base_config(dry_run=False, tmp_path=tmp_path),
+        )
+        ex.logger = MagicMock()
+        ex._notification_worker = MagicMock()
+
+        with pytest.MonkeyPatch.context() as mp, \
+             patch.object(Path, "unlink", side_effect=PermissionError("no unlink")):
+            mp.setattr("eneru.cli._detect_runtime_context",
+                       lambda: "container (Docker)")
+            mp.setattr(ex, "_shutdown_remote_servers", lambda: [
+                RemoteShutdownResult(
+                    server="host-loopback",
+                    host="127.0.0.1",
+                    completed=True,
+                    shutdown_sent=False,
+                    error="ssh refused",
+                )
+            ])
+            assert ex.shutdown(reason="x") is False
+
+        assert ex._shutdown_done is False
+        logged = " ".join(call.args[0] for call in ex.logger.log.call_args_list)
+        assert "Could not clear redundancy shutdown flag" in logged
 
     @pytest.mark.unit
     def test_logging_uses_prefix(self, tmp_path):
@@ -1374,7 +1422,9 @@ class TestLocalShutdownCallback:
     host still running."""
 
     @pytest.mark.unit
-    def test_callback_fires_on_is_local_quorum_loss(self, tmp_path):
+    def test_callback_fires_on_is_local_quorum_loss(
+        self, tmp_path: Path,
+    ) -> None:
         callback = MagicMock()
         group = _redundancy_group(name="rack-local", is_local=True)
         ex = RedundancyGroupExecutor(
@@ -1414,7 +1464,9 @@ class TestLocalShutdownCallback:
         assert ex.shutdown(reason="quorum lost") is True
 
     @pytest.mark.unit
-    def test_callback_still_fires_when_remote_shutdown_raises(self, tmp_path):
+    def test_callback_still_fires_when_remote_shutdown_raises(
+        self, tmp_path: Path,
+    ) -> None:
         # Remote drain is a best-effort sink. If it breaks, the executor must
         # still notify the coordinator to power off the local host.
         callback = MagicMock()

@@ -35,6 +35,12 @@ def _nfpm_src_paths() -> set:
     return set(re.findall(r"src:\s*(src/eneru/[^\s]+\.py)", text))
 
 
+def _nfpm_all_src_paths() -> set:
+    """Return every ``src: src/eneru/...`` path listed in nfpm.yaml."""
+    text = NFPM_YAML.read_text()
+    return set(re.findall(r"src:\s*(src/eneru/[^\s]+)", text))
+
+
 class TestNfpmModuleListing:
 
     @pytest.mark.unit
@@ -79,3 +85,27 @@ class TestNfpmModuleListing:
             "Stats databases are written there; the deb/rpm package must "
             "create the directory at install time."
         )
+
+    @pytest.mark.unit
+    def test_dashboard_and_completion_assets_are_packaged(self):
+        """deb/rpm and wheel installs must both ship importlib.resources data."""
+        required = {
+            "src/eneru/web/__init__.py",
+            "src/eneru/web/index.html",
+            "src/eneru/web/app.js",
+            "src/eneru/web/style.css",
+            "src/eneru/completion/__init__.py",
+            "src/eneru/completion/eneru.bash",
+            "src/eneru/completion/eneru.zsh",
+            "src/eneru/completion/eneru.fish",
+        }
+        in_nfpm = _nfpm_all_src_paths()
+        missing = sorted(required - in_nfpm)
+        assert not missing, (
+            "nfpm.yaml is missing package data files:\n  "
+            + "\n  ".join(missing)
+        )
+
+        pyproject = (REPO_ROOT / "pyproject.toml").read_text()
+        assert '"eneru.web" = ["*.html", "*.css", "*.js"]' in pyproject
+        assert '"eneru.completion" = ["*.bash", "*.zsh", "*.fish"]' in pyproject
