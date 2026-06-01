@@ -3838,13 +3838,15 @@ class TestStopStatsDefensive:
     @pytest.mark.unit
     def test_writer_cleared_and_close_called(self, tmp_path):
         monitor = make_monitor(tmp_path)
-        monitor._stats_writer = MagicMock()  # truthy
+        writer = MagicMock()  # truthy
+        monitor._stats_writer = writer
         store = MagicMock()
         monitor._stats_store = store
 
         monitor._stop_stats()
 
         assert monitor._stats_writer is None
+        writer.join.assert_called_once_with(timeout=2)
         store.close.assert_called_once()
 
     @pytest.mark.unit

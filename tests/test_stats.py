@@ -67,6 +67,14 @@ class TestSchema:
             s.close()
 
     @pytest.mark.unit
+    def test_open_failure_clears_connection(self, tmp_path):
+        s = StatsStore(tmp_path / "broken.db")
+        with patch.object(s, "_init_schema", side_effect=sqlite3.Error("bad schema")):
+            with pytest.raises(sqlite3.Error):
+                s.open()
+        assert s._conn is None
+
+    @pytest.mark.unit
     def test_open_creates_parent_directory(self, tmp_path):
         # Defensive: pip installs need this.
         path = tmp_path / "nested" / "stats" / "test.db"
@@ -128,6 +136,23 @@ class TestSchema:
         # Bounds writer waits when a slow TUI reader holds the lock.
         cur = store._conn.execute("PRAGMA busy_timeout")
         assert cur.fetchone()[0] == 500
+
+    @pytest.mark.unit
+    def test_safe_alter_only_swallows_duplicate_column(self, tmp_path):
+        class _Conn:
+            def __init__(self, exc):
+                self.exc = exc
+
+            def execute(self, *_a, **_kw):
+                raise self.exc
+
+        s = StatsStore(tmp_path / "x.db")
+        s._conn = _Conn(sqlite3.OperationalError("duplicate column name: status"))
+        s._safe_alter("samples", "status TEXT")
+
+        s._conn = _Conn(sqlite3.OperationalError("database is locked"))
+        with pytest.raises(sqlite3.OperationalError):
+            s._safe_alter("samples", "status TEXT")
 
     @pytest.mark.unit
     def test_busy_timeout_pragma_on_readonly_connection(self, store, tmp_path):
@@ -1198,6 +1223,8 @@ class TestFlush:
         try:
             # Must not raise; must return 0.
             assert store.flush() == 0
+            with store._buffer_lock:
+                assert len(store._buffer) == 1
         finally:
             store._conn = original
 

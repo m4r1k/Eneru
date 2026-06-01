@@ -207,8 +207,13 @@ class UPSGroupMonitor(
 
     def _stop_stats(self):
         """Flush + close the stats store. Safe to call multiple times."""
-        if self._stats_writer is not None:
-            self._stats_writer = None  # daemon thread; stop_event was set
+        writer = self._stats_writer
+        self._stats_writer = None
+        if writer is not None and writer is not threading.current_thread():
+            try:
+                writer.join(timeout=2)
+            except RuntimeError:
+                pass
         try:
             self._stats_store.close()
         except Exception:

@@ -2117,6 +2117,9 @@ ups:
         t2 = MagicMock()
         coord._threads = [t1, t2]
         coord._evaluator_threads = []
+        mon = MagicMock()
+        mon._shutdown_flag_path = tmp_path / "no-monitor-shutdown"
+        coord._monitors = [mon]
         coord._notification_worker = None
         coord._stats_stores = []
         coord._stats_writers = []
@@ -2137,6 +2140,7 @@ ups:
         for thread in (t1, t2):
             thread.join.assert_called_once()
             assert 0 < thread.join.call_args.kwargs["timeout"] <= 5
+        mon._stop_stats.assert_called_once()
 
     @pytest.mark.unit
     def test_handle_signal_skips_lifecycle_notif_during_upgrade(self, tmp_path):

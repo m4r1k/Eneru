@@ -1,6 +1,7 @@
 """Unit tests for the v6.0 API auth middleware + write-path (api.py)."""
 
 import json
+import socket
 import time
 from io import BytesIO
 from unittest.mock import MagicMock
@@ -370,6 +371,18 @@ def test_read_json_body_empty_is_dict(minimal_config):
     assert _handler(minimal_config)._read_json_body() == {}
 
 
+@pytest.mark.unit
+def test_read_json_body_timeout_is_bad_request(minimal_config):
+    class TimeoutBody:
+        def read(self, _length):
+            raise socket.timeout("slow client")
+
+    h = _handler(minimal_config, headers={"Content-Length": "2"})
+    h.rfile = TimeoutBody()
+    with pytest.raises(APIBadRequest):
+        h._read_json_body()
+
+
 # ----- tiered /config + read gating via _route -----
 
 @pytest.mark.unit
@@ -397,6 +410,16 @@ def test_read_gating_blocks_anonymous(minimal_config):
                  path="/api/v1/ups")
     with pytest.raises(APIUnauthorized):
         h._route()
+
+
+@pytest.mark.unit
+def test_auth_state_open_when_reads_require_auth(minimal_config):
+    _enable_auth(minimal_config, require_for_reads=True)
+    h = _handler(minimal_config, sessions=SessionManager(3600),
+                 path="/api/v1/auth/state")
+    status, _, payload = h._route()
+    assert status == 200
+    assert payload == {"enabled": True, "requireForReads": True}
 
 
 @pytest.mark.unit

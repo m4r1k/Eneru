@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from eneru.config import Config, UPSGroupConfig
+from eneru.health_model import UPSHealth, assess_health
 from eneru.remote_health import (
     REMOTE_HEALTH_DISABLED,
     REMOTE_HEALTH_HEALTHY,
@@ -160,16 +161,72 @@ def collect_status(source: Any) -> Dict[str, Any]:
     return payload
 
 
+def _map_redundancy_degraded(group: Any) -> UPSHealth:
+    """Map DEGRADED through the group's quorum policy."""
+    if getattr(group, "degraded_counts_as", "healthy") == "critical":
+        return UPSHealth.CRITICAL
+    return UPSHealth.HEALTHY
+
+
+def _effective_redundancy_health(group: Any, raw: UPSHealth) -> UPSHealth:
+    """Return how a raw UPS health tier contributes to group quorum."""
+    if raw == UPSHealth.DEGRADED:
+        return _map_redundancy_degraded(group)
+    if raw == UPSHealth.UNKNOWN:
+        policy = getattr(group, "unknown_counts_as", "critical")
+        if policy == "healthy":
+            return UPSHealth.HEALTHY
+        if policy == "degraded":
+            return _map_redundancy_degraded(group)
+        return UPSHealth.CRITICAL
+    return raw
+
+
+def _redundancy_member_health(monitor: Any, group: Any) -> UPSHealth:
+    """Assess one redundancy member using the same inputs as the evaluator."""
+    snap = monitor.state.snapshot()
+    ups_cfg = monitor.config.ups
+    grace_cfg = ups_cfg.connection_loss_grace_period
+    return assess_health(
+        snap,
+        group.triggers,
+        ups_cfg.check_interval,
+        max_stale_data_tolerance=ups_cfg.max_stale_data_tolerance,
+        connection_grace_enabled=grace_cfg.enabled,
+        connection_grace_duration=grace_cfg.duration,
+    )
+
+
 def redundancy_group_statuses(source: Any, config: Optional[Config]) -> List[dict]:
     """Return status rows for redundancy groups configured on a coordinator."""
     if config is None:
         return []
     rows = []
+    monitors_by_name = {
+        monitor.config.ups.name: monitor
+        for monitor in iter_monitors(source)
+    }
     live_managers = {
         getattr(manager, "group_label", ""): manager
         for manager in getattr(source, "_redundancy_remote_health_managers", []) or []
     }
     for group in config.redundancy_groups:
+        members = []
+        healthy_count = 0
+        for ups_name in group.ups_sources:
+            monitor = monitors_by_name.get(ups_name)
+            raw = (
+                _redundancy_member_health(monitor, group)
+                if monitor is not None else UPSHealth.UNKNOWN
+            )
+            effective = _effective_redundancy_health(group, raw)
+            if effective == UPSHealth.HEALTHY:
+                healthy_count += 1
+            members.append({
+                "name": ups_name,
+                "health": raw.value,
+                "effectiveHealth": effective.value,
+            })
         label = f"redundancy:{group.name}"
         manager = live_managers.get(label)
         remote_health = (
@@ -184,6 +241,9 @@ def redundancy_group_statuses(source: Any, config: Optional[Config]) -> List[dic
             "name": group.name,
             "upsSources": list(group.ups_sources),
             "minHealthy": group.min_healthy,
+            "healthyCount": healthy_count,
+            "quorumLost": healthy_count < group.min_healthy,
+            "members": members,
             "isLocal": group.is_local,
             "remoteHealth": remote_health,
         })

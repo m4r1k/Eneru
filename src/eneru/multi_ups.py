@@ -1006,6 +1006,22 @@ class MultiUPSCoordinator:
                 except Exception:
                     pass
 
+        # Per-monitor threads normally close their own StatsStore in their
+        # cleanup path. Do it again here after notification drain/scheduling so a
+        # stuck monitor thread cannot leave SQLite handles open at coordinator
+        # exit.
+        for monitor in self._monitors:
+            try:
+                stop_stats = getattr(monitor, "_stop_stats", None)
+                if callable(stop_stats):
+                    stop_stats()
+                else:
+                    store = getattr(monitor, "_stats_store", None)
+                    if store is not None:
+                        store.close()
+            except Exception:
+                pass
+
         # Slice 3: tag this exit so the next start can emit "🔄 Restarted"
         # if it comes back within RESTART_DOWNTIME_THRESHOLD_SECS, else
         # "🚀 Started (last seen Nh ago)". Coordinator mode was missing

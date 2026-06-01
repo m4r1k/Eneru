@@ -172,6 +172,8 @@ def test_dashboard_has_drilldown_and_theme_surfaces(minimal_config):
         "/app.js")[1].decode("utf-8")
     assert "openDetail" in js and "renderDetail" in js
     assert "renderBanner" in js
+    assert "quorumLost" in js
+    assert "/api/v1/auth/state" in js
     assert "applyTheme" in js
     # Drill-down must read the shared snapshot, not fetch per card.
     assert "remoteHealthSnapshot" in js

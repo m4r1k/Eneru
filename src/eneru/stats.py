@@ -197,19 +197,28 @@ class StatsStore:
         # the connection runs in autocommit mode and the `with` blocks
         # become no-ops, so executemany() would have committed every
         # row individually instead of batching the flush.
-        self._conn = sqlite3.connect(
+        conn = sqlite3.connect(
             str(self.db_path),
             check_same_thread=False,
         )
-        self._conn.execute("PRAGMA journal_mode = WAL")
-        self._conn.execute("PRAGMA synchronous = NORMAL")
-        self._conn.execute("PRAGMA temp_store = MEMORY")
-        # Bound the writer's wait if a slow reader (TUI) is mid-query
-        # on slow storage (SD card on a Raspberry Pi). 500 ms is well
-        # under the 10 s flush interval, so a stalled reader can never
-        # hold up the writer thread for longer than that bound.
-        self._conn.execute("PRAGMA busy_timeout = 500")
-        self._init_schema()
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA temp_store = MEMORY")
+            # Bound the writer's wait if a slow reader (TUI) is mid-query
+            # on slow storage (SD card on a Raspberry Pi). 500 ms is well
+            # under the 10 s flush interval, so a stalled reader can never
+            # hold up the writer thread for longer than that bound.
+            conn.execute("PRAGMA busy_timeout = 500")
+            self._conn = conn
+            self._init_schema()
+        except Exception:
+            self._conn = None
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
 
     def apply_reload(self, stats_config) -> bool:
         """Live-apply retention changes from a reloaded config.
@@ -233,16 +242,19 @@ class StatsStore:
         return self._conn is not None
 
     def close(self) -> None:
-        if self._conn is not None:
-            try:
-                self.flush()
-            except Exception:  # pragma: no cover -- defensive
-                pass
-            try:
-                self._conn.close()
-            except Exception:  # pragma: no cover -- defensive
-                pass
+        try:
+            self.flush()
+        except Exception:  # pragma: no cover -- defensive
+            pass
+        with self._db_lock:
+            conn = self._conn
             self._conn = None
+            if conn is None:
+                return
+            try:
+                conn.close()
+            except Exception:  # pragma: no cover -- defensive
+                pass
 
     # ----- schema -----
 
@@ -508,9 +520,11 @@ class StatsStore:
         """Idempotent ``ALTER TABLE ... ADD COLUMN``; ignores duplicates."""
         try:
             self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
             # Column already exists -- benign on retries / partial migrations.
-            pass
+            if "duplicate column name" in str(exc).lower():
+                return
+            raise
 
     # ----- hot path: zero-I/O sample buffering -----
 
@@ -550,15 +564,22 @@ class StatsStore:
             batch: List[Tuple] = list(self._buffer)
             self._buffer.clear()
         try:
-            with self._db_lock, self._conn:
+            with self._db_lock:
+                conn = self._conn
+                if conn is None:
+                    raise sqlite3.Error("connection closed")
                 placeholders = ", ".join("?" for _ in SAMPLE_FIELDS)
-                self._conn.executemany(
-                    f"INSERT INTO samples ({', '.join(SAMPLE_FIELDS)}) "
-                    f"VALUES ({placeholders})",
-                    batch,
-                )
+                with conn:
+                    conn.executemany(
+                        f"INSERT INTO samples ({', '.join(SAMPLE_FIELDS)}) "
+                        f"VALUES ({placeholders})",
+                        batch,
+                    )
             return len(batch)
         except (sqlite3.Error, OSError) as e:
+            with self._buffer_lock:
+                for sample in reversed(batch):
+                    self._buffer.appendleft(sample)
             self._log_error_once(f"stats: flush failed: {e}")
             return 0
 

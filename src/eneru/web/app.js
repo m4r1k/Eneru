@@ -97,7 +97,8 @@ function statusClass(status) {
 // A UPS counts as healthy for a redundancy rollup when it is reachable and not
 // on battery / low / replace-battery.
 function upsHealthy(u) {
-  if (u.connectionState && u.connectionState !== "connected") return false;
+  const state = (u.connectionState || "").toUpperCase();
+  if (state && state !== "OK" && state !== "CONNECTED") return false;
   const s = (u.status || "").toUpperCase();
   return !(s.includes("OB") || s.includes("LB") || s.includes("RB")
            || s.includes("FSD") || s === "");
@@ -156,9 +157,12 @@ function renderUps(payload) {
   rows.forEach((u) => { byName[u.name] = u; });
   groups.forEach((g) => {
     const sources = g.upsSources || [];
-    const healthy = sources.filter((n) => byName[n] && upsHealthy(byName[n])).length;
+    const healthy = (typeof g.healthyCount === "number")
+      ? g.healthyCount
+      : sources.filter((n) => byName[n] && upsHealthy(byName[n])).length;
     const min = g.minHealthy;
-    const cls = healthy < min ? "crit" : (healthy === min ? "warn" : "ok");
+    const quorumLost = (g.quorumLost === true) || healthy < min;
+    const cls = quorumLost ? "crit" : (healthy === min ? "warn" : "ok");
     gwrap.appendChild(el("div", { class: "card" }, [
       el("h3", { text: g.name }),
       el("div", { class: "row" }, [el("span", { text: "Healthy" }),
@@ -288,7 +292,10 @@ function renderBanner() {
   for (const u of rows) {
     const s = (u.status || "").toUpperCase();
     if (s.includes("LB") || s.includes("FSD") || u.triggerActive) {
-      crit = u; break;
+      const groups = lastGroups.filter((g) => (g.upsSources || []).includes(u.name));
+      const causesShutdown = groups.length === 0 || groups.some((g) => g.quorumLost === true);
+      if (causesShutdown) { crit = u; break; }
+      if (!warn) warn = u;
     }
     if (s.includes("OB") && !warn) warn = u;
   }
@@ -718,12 +725,11 @@ function refreshAuthUI() {
   if (authed) who.textContent = "Signed in";
 }
 
-// Learn whether auth is enabled server-side. /api/v1/config is open (sanitized)
-// and reports api.auth.enabled even to anonymous callers.
+// Learn whether auth is enabled server-side. This route stays open even when
+// read endpoints require credentials, so the login form remains reachable.
 async function loadAuthState() {
-  const res = await api("/api/v1/config");
-  authEnabled = !!(res.ok && res.data && res.data.api &&
-                   res.data.api.auth && res.data.api.auth.enabled);
+  const res = await api("/api/v1/auth/state");
+  authEnabled = !!(res.ok && res.data && res.data.enabled);
 }
 
 function openLogin() {
