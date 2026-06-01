@@ -9,12 +9,17 @@ Security model (enforced by the API layer, not here):
   (a config-validation invariant), so control is never reachable unauthenticated.
 - Command/variable names are allowlisted by the caller before reaching here.
 
-Credentials are passed on the argv (``-u``/``-p``), which is visible in ``ps`` —
-an accepted tradeoff (a local user who can read ``ps`` can already do worse), and
-identical to how operators run these CLIs by hand.
+Passwords are not passed on argv. ``upscmd``/``upsrw`` prompt for the password
+when ``-p`` is omitted, so authenticated calls run behind a pseudo-terminal and
+answer that prompt without exposing the reusable secret to ``ps``.
 """
 
+import os
+import pty
 import re
+import select
+import subprocess
+import time
 from typing import Dict, List, Optional, Tuple
 
 from eneru.utils import run_command
@@ -24,9 +29,91 @@ def _creds_args(username: str, password: str) -> List[str]:
     args: List[str] = []
     if username:
         args += ["-u", username]
-    if password:
-        args += ["-p", password]
     return args
+
+
+def _run_auth_command(
+    cmd: List[str],
+    password: str,
+    *,
+    timeout: int = 10,
+) -> Tuple[int, str, str]:
+    """Run a NUT auth command without putting the password in argv."""
+    if not password:
+        return run_command(cmd, timeout=timeout)
+
+    master_fd: Optional[int] = None
+    slave_fd: Optional[int] = None
+    proc: Optional[subprocess.Popen] = None
+    output = bytearray()
+    password_sent = False
+    deadline = time.monotonic() + max(1, int(timeout))
+
+    try:
+        master_fd, slave_fd = pty.openpty()
+        proc = subprocess.Popen(
+            cmd,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+        )
+        os.close(slave_fd)
+        slave_fd = None
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                text = output.decode("utf-8", errors="replace")
+                return 124, text, "Command timed out"
+
+            readable, _, _ = select.select(
+                [master_fd], [], [], min(0.1, remaining)
+            )
+            if readable:
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError:
+                    chunk = b""
+                if chunk:
+                    output.extend(chunk)
+                    if not password_sent and b"password" in output.lower():
+                        os.write(master_fd, (password + "\n").encode("utf-8"))
+                        password_sent = True
+
+            rc = proc.poll()
+            if rc is not None:
+                while True:
+                    try:
+                        chunk = os.read(master_fd, 4096)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                text = output.decode("utf-8", errors="replace")
+                return rc, text, ""
+    except FileNotFoundError as exc:
+        return 127, "", str(exc)
+    except Exception as exc:
+        text = output.decode("utf-8", errors="replace")
+        return 1, text, str(exc)
+    finally:
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        for fd in (master_fd, slave_fd):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
 
 def list_commands(ups_name: str, *, timeout: int = 10) -> Tuple[bool, List[str], str]:
@@ -62,12 +149,12 @@ def run_instant_command(
     ups_name: str, command: str, username: str, password: str,
     *, timeout: int = 10,
 ) -> Tuple[bool, str, str]:
-    """Run an instant command (``upscmd -u … -p … ups command``).
+    """Run an instant command (``upscmd -u … ups command``).
 
     Returns ``(ok, output, error)``.
     """
     cmd = ["upscmd"] + _creds_args(username, password) + [ups_name, command]
-    code, out, err = run_command(cmd, timeout=timeout)
+    code, out, err = _run_auth_command(cmd, password, timeout=timeout)
     if code != 0:
         return False, out.strip(), (err.strip() or f"upscmd exited {code}")
     return True, out.strip(), ""
@@ -117,7 +204,7 @@ def set_variable(
     ups_name: str, variable: str, value: str, username: str, password: str,
     *, timeout: int = 10,
 ) -> Tuple[bool, str, str]:
-    """Write a UPS variable (``upsrw -s var=value -u … -p … ups``).
+    """Write a UPS variable (``upsrw -s var=value -u … ups``).
 
     Returns ``(ok, output, error)``.
 
@@ -129,7 +216,7 @@ def set_variable(
     """
     cmd = (["upsrw", "-s", f"{variable}={value}"]
            + _creds_args(username, password) + [ups_name])
-    code, out, err = run_command(cmd, timeout=timeout)
+    code, out, err = _run_auth_command(cmd, password, timeout=timeout)
     if code != 0:
         return False, out.strip(), (err.strip() or f"upsrw exited {code}")
     return True, out.strip(), ""

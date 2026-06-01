@@ -401,16 +401,16 @@ def readiness(source: Any) -> Dict[str, Any]:
     unachievable — see _capability_achievable() for the per-runtime rules.
     """
     rows = []
-    config = None
+    config = getattr(source, "config", None)
     nut_failed_any = False
     nut_visible_any = False
     for monitor in iter_monitors(source):
-        config = monitor.config
+        monitor_config = monitor.config
         snap = monitor.state.snapshot()
         row = {
-            "groupId": sanitize_name(config.ups.name),
-            "name": config.ups.name,
-            "label": config.ups.label,
+            "groupId": sanitize_name(monitor_config.ups.name),
+            "name": monitor_config.ups.name,
+            "label": monitor_config.ups.label,
             "connectionState": snap.connection_state,
             "lastUpdateTime": snap.last_update_time,
         }

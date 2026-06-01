@@ -569,7 +569,14 @@ class MultiUPSCoordinator:
 
         try:
             # Defense layer 2: filesystem flag
-            self._global_shutdown_flag.touch()
+            try:
+                self._global_shutdown_flag.touch()
+            except OSError as exc:
+                self._log(
+                    f"⚠️ Could not write shutdown flag "
+                    f"{self._global_shutdown_flag}: {exc}. Continuing "
+                    "without the on-disk guard."
+                )
 
             self._log(f"🚨 Local shutdown triggered by {triggered_by}")
 

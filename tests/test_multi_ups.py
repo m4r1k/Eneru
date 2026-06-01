@@ -1286,6 +1286,33 @@ class TestCoordinatorRealLocalShutdown:
         coord._notification_worker.send.assert_called_once()
 
     @pytest.mark.unit
+    def test_flag_write_failure_does_not_skip_local_shutdown(self, tmp_path):
+        config = _coord_config(
+            tmp_path,
+            behavior=BehaviorConfig(dry_run=False),
+            local_shutdown=LocalShutdownConfig(
+                enabled=True,
+                command="/sbin/poweroff",
+            ),
+        )
+        coord = MultiUPSCoordinator(config)
+        logs = []
+        coord._log = logs.append
+        coord._notification_worker = None
+
+        with patch.object(
+            type(coord._global_shutdown_flag),
+            "touch",
+            side_effect=OSError("read-only filesystem"),
+        ), patch("eneru.multi_ups.time.sleep"), \
+             patch("eneru.multi_ups.run_command") as mock_run:
+            coord._handle_local_shutdown("UPS1")
+
+        mock_run.assert_called_once()
+        assert mock_run.call_args.args[0][0] == "/sbin/poweroff"
+        assert any("Could not write shutdown flag" in line for line in logs)
+
+    @pytest.mark.unit
     def test_real_shutdown_without_message(self, tmp_path):
         """Empty message means no extra arg appended to the command."""
         config = _coord_config(

@@ -889,7 +889,27 @@ class UPSGroupMonitor(
                 key, value = line.split(':', 1)
                 ups_data[key.strip()] = value.strip()
 
+        if not ups_data.get('ups.status'):
+            return False, {}, "Missing ups.status"
+
         return True, ups_data, ""
+
+    def _mark_shutdown_in_progress(self, context: str) -> bool:
+        """Best-effort persistent shutdown guard.
+
+        The flag prevents duplicate shutdown sequences. It is still just
+        bookkeeping: if the flag path is unavailable during a power event, the
+        daemon must keep moving toward the actual poweroff.
+        """
+        try:
+            self._shutdown_flag_path.touch()
+            return True
+        except OSError as exc:
+            self._log_message(
+                f"⚠️ Could not write shutdown flag {self._shutdown_flag_path} "
+                f"while {context}: {exc}. Continuing without the on-disk guard."
+            )
+            return False
 
     def _run_upsc(self, args: List[str], *, full_poll: bool) -> Tuple[int, str, str]:
         cmd = ["upsc", self.config.ups.name] + list(args)
@@ -1071,7 +1091,7 @@ class UPSGroupMonitor(
 
     def _execute_shutdown_sequence(self):
         """Execute the controlled shutdown sequence."""
-        self._shutdown_flag_path.touch()
+        self._mark_shutdown_in_progress("starting shutdown sequence")
         sequence_start = time.monotonic()
 
         delegated = self._uses_loopback_delegate
@@ -1338,7 +1358,7 @@ class UPSGroupMonitor(
             )
             return
 
-        self._shutdown_flag_path.touch()
+        self._mark_shutdown_in_progress("triggering immediate shutdown")
 
         # Send notification (non-blocking - fire and forget)
         self._send_notification(
@@ -1493,7 +1513,7 @@ class UPSGroupMonitor(
             self._stop_stats()
             sys.exit(0)
 
-        self._shutdown_flag_path.touch()
+        self._mark_shutdown_in_progress("recording service stop")
 
         self._log_message("🛑 Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
 
@@ -1962,7 +1982,7 @@ class UPSGroupMonitor(
                         )
                     else:
                         self._failsafe_initiated = True
-                        self._shutdown_flag_path.touch()
+                        self._mark_shutdown_in_progress("starting failsafe shutdown")
                         self._log_message(
                             "🚨 FAILSAFE TRIGGERED (FSB): Connection lost or data persistently stale "
                             "while On Battery. Initiating emergency shutdown."

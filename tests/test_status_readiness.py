@@ -218,6 +218,46 @@ class TestReadinessNativeInstall:
             payload = readiness(source)
         assert payload["ready"] is False
         assert any("local_vm_teardown" in r for r in payload["reasons"])
+
+    @pytest.mark.unit
+    def test_coordinator_scores_full_config_not_last_monitor_only(self):
+        full_config = Config(
+            ups_groups=[
+                UPSGroupConfig(
+                    ups=UPSConfig(name="UPS-A@host"),
+                    is_local=True,
+                    virtual_machines=VMConfig(enabled=True),
+                ),
+                UPSGroupConfig(
+                    ups=UPSConfig(name="UPS-B@host"),
+                    is_local=False,
+                ),
+            ],
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
+        )
+        monitor_a = MagicMock()
+        monitor_a.config = Config(
+            ups_groups=[full_config.ups_groups[0]],
+            local_shutdown=full_config.local_shutdown,
+        )
+        monitor_a.state.snapshot.return_value = _ok_snapshot()
+        monitor_b = MagicMock()
+        monitor_b.config = Config(
+            ups_groups=[full_config.ups_groups[1]],
+            local_shutdown=full_config.local_shutdown,
+        )
+        monitor_b.state.snapshot.return_value = _ok_snapshot()
+        source = MagicMock()
+        source.config = full_config
+        source._monitors = [monitor_a, monitor_b]
+
+        with patch("eneru.status._runtime_context_label",
+                   return_value="systemd service"), \
+             patch("eneru.status.command_exists", return_value=False):
+            payload = readiness(source)
+
+        assert payload["ready"] is False
+        assert any("local_vm_teardown" in r for r in payload["reasons"])
         vm_cap = next(
             c for c in payload["capabilities"] if c["id"] == "local_vm_teardown"
         )

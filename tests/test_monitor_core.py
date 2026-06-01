@@ -2703,6 +2703,25 @@ class TestTriggerImmediateShutdown:
 
         monitor._execute_shutdown_sequence.assert_called_once()
 
+    @pytest.mark.unit
+    def test_shutdown_flag_write_failure_does_not_block_shutdown(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        monitor._execute_shutdown_sequence = MagicMock()
+
+        with patch.object(
+            type(monitor._shutdown_flag_path),
+            "touch",
+            side_effect=OSError("read-only filesystem"),
+        ):
+            monitor._trigger_immediate_shutdown("test reason")
+
+        monitor._execute_shutdown_sequence.assert_called_once()
+        assert any(
+            "Could not write shutdown flag" in str(call)
+            for call in monitor.logger.log.call_args_list
+        )
+
 
 class TestCleanupAndExit:
     """`_cleanup_and_exit` handles SIGTERM/SIGINT. Three distinct paths:
@@ -3099,6 +3118,18 @@ class TestGetAllUpsDataFailurePaths:
         assert success is False
         assert data == {}
         assert err == "Data stale"
+
+    @pytest.mark.unit
+    def test_missing_status_returns_failed_poll(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        with patch.object(
+            monitor, "_run_upsc",
+            return_value=(0, "battery.charge: 5\nbattery.runtime: 30\n", ""),
+        ):
+            success, data, err = monitor._get_all_ups_data()
+        assert success is False
+        assert data == {}
+        assert err == "Missing ups.status"
 
 
 class TestRecordRemoteHealthEvent:

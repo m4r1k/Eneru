@@ -37,7 +37,7 @@ def test_parse_variable_list_ignores_orphan_lines():
 
 @pytest.mark.unit
 def test_creds_args():
-    assert nc._creds_args("u", "p") == ["-u", "u", "-p", "p"]
+    assert nc._creds_args("u", "p") == ["-u", "u"]
     assert nc._creds_args("", "") == []
 
 
@@ -58,24 +58,26 @@ def test_list_commands_failure(monkeypatch):
 
 
 @pytest.mark.unit
-def test_run_instant_command_builds_argv(monkeypatch):
+def test_run_instant_command_does_not_put_password_in_argv(monkeypatch):
     captured = {}
 
-    def fake(cmd, timeout=10):
+    def fake(cmd, password, timeout=10):
         captured["cmd"] = cmd
+        captured["password"] = password
         return 0, "done", ""
 
-    monkeypatch.setattr(nc, "run_command", fake)
+    monkeypatch.setattr(nc, "_run_auth_command", fake)
     ok, out, err = nc.run_instant_command("UPS@h", "beeper.toggle", "adm", "pw")
     assert ok and out == "done"
-    assert captured["cmd"] == ["upscmd", "-u", "adm", "-p", "pw",
-                               "UPS@h", "beeper.toggle"]
+    assert captured["cmd"] == ["upscmd", "-u", "adm", "UPS@h", "beeper.toggle"]
+    assert "pw" not in captured["cmd"]
+    assert captured["password"] == "pw"
 
 
 @pytest.mark.unit
 def test_run_instant_command_failure(monkeypatch):
-    monkeypatch.setattr(nc, "run_command",
-                        lambda cmd, timeout=10: (1, "", "access denied"))
+    monkeypatch.setattr(nc, "_run_auth_command",
+                        lambda cmd, password, timeout=10: (1, "", "access denied"))
     ok, out, err = nc.run_instant_command("UPS@h", "x", "u", "p")
     assert ok is False and "access denied" in err
 
@@ -93,23 +95,41 @@ def test_list_variables_success_and_failure(monkeypatch):
 
 
 @pytest.mark.unit
-def test_set_variable_builds_argv(monkeypatch):
+def test_set_variable_does_not_put_password_in_argv(monkeypatch):
     captured = {}
 
-    def fake(cmd, timeout=10):
+    def fake(cmd, password, timeout=10):
         captured["cmd"] = cmd
+        captured["password"] = password
         return 0, "", ""
 
-    monkeypatch.setattr(nc, "run_command", fake)
+    monkeypatch.setattr(nc, "_run_auth_command", fake)
     ok, _, _ = nc.set_variable("UPS@h", "input.transfer.low", "200", "adm", "pw")
     assert ok
     assert captured["cmd"] == ["upsrw", "-s", "input.transfer.low=200",
-                               "-u", "adm", "-p", "pw", "UPS@h"]
+                               "-u", "adm", "UPS@h"]
+    assert "pw" not in captured["cmd"]
+    assert captured["password"] == "pw"
 
 
 @pytest.mark.unit
 def test_set_variable_failure(monkeypatch):
-    monkeypatch.setattr(nc, "run_command",
-                        lambda cmd, timeout=10: (1, "", "out of range"))
+    monkeypatch.setattr(nc, "_run_auth_command",
+                        lambda cmd, password, timeout=10: (1, "", "out of range"))
     ok, _, err = nc.set_variable("UPS@h", "v", "x", "u", "p")
     assert ok is False and "out of range" in err
+
+
+@pytest.mark.unit
+def test_run_auth_command_without_password_uses_regular_runner(monkeypatch):
+    captured = {}
+
+    def fake(cmd, timeout=10):
+        captured["cmd"] = cmd
+        captured["timeout"] = timeout
+        return 0, "ok", ""
+
+    monkeypatch.setattr(nc, "run_command", fake)
+    code, out, err = nc._run_auth_command(["upscmd", "UPS@h", "cmd"], "", timeout=7)
+    assert (code, out, err) == (0, "ok", "")
+    assert captured == {"cmd": ["upscmd", "UPS@h", "cmd"], "timeout": 7}
