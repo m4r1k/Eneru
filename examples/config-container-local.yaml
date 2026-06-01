@@ -89,7 +89,7 @@ remote_servers:
       - "StrictHostKeyChecking=no"
       - "UserKnownHostsFile=/dev/null"
     # use_sudo: true            # non-root plan B with documented sudoers
-    # shutdown_order: 999       # runs LAST — host poweroff kills the container
+    # No shutdown_order needed: loopback actions are bracketed around remotes
 
 logging:
   # Forensic log file. Mount a volume at /var/log/eneru so this survives

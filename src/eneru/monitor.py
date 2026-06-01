@@ -140,6 +140,8 @@ class UPSGroupMonitor(
         # Per-group state file paths (suffix for multi-UPS)
         sfx = f".{state_file_suffix}" if state_file_suffix else ""
         self._shutdown_flag_path = Path(config.logging.shutdown_flag_file + sfx)
+        self._shutdown_in_progress = False
+        self._shutdown_flag_unusable = False
         self._battery_history_path = Path(config.logging.battery_history_file + sfx)
         self._state_file_path = Path(config.logging.state_file + sfx)
         self._remote_health_path = remote_health_sidecar_path(self._state_file_path)
@@ -207,12 +209,47 @@ class UPSGroupMonitor(
 
     def _stop_stats(self):
         """Flush + close the stats store. Safe to call multiple times."""
-        if self._stats_writer is not None:
-            self._stats_writer = None  # daemon thread; stop_event was set
+        writer = self._stats_writer
+        self._stats_writer = None
+        if writer is not None and writer is not threading.current_thread():
+            try:
+                writer.join(timeout=2)
+            except RuntimeError:
+                pass
         try:
             self._stats_store.close()
         except Exception:
             pass
+
+    def _shutdown_guard_active(self) -> bool:
+        """Return whether a shutdown sequence is already admitted."""
+        if self._shutdown_in_progress:
+            return True
+        if self._shutdown_flag_unusable:
+            return False
+        try:
+            return self._shutdown_flag_path.exists()
+        except OSError as exc:
+            self._shutdown_flag_unusable = True
+            self._log_message(
+                f"⚠️ Could not inspect shutdown flag {self._shutdown_flag_path}: "
+                f"{exc}. Ignoring the on-disk guard for this process."
+            )
+            return False
+
+    def _clear_shutdown_in_progress(self) -> None:
+        """Clear both in-memory and on-disk duplicate-shutdown guards."""
+        try:
+            self._shutdown_flag_path.unlink(missing_ok=True)
+            self._shutdown_flag_unusable = False
+        except OSError as exc:
+            self._shutdown_flag_unusable = True
+            self._log_message(
+                f"⚠️ Could not clear shutdown flag {self._shutdown_flag_path}: "
+                f"{exc}. Ignoring the on-disk guard for this process."
+            )
+        finally:
+            self._shutdown_in_progress = False
 
     def _record_advisory_trigger(self, reason: str):
         """Record an advisory trigger for the redundancy-group evaluator.
@@ -289,7 +326,7 @@ class UPSGroupMonitor(
             except PermissionError:
                 pass
 
-        self._shutdown_flag_path.unlink(missing_ok=True)
+        self._clear_shutdown_in_progress()
 
         try:
             self._battery_history_path.write_text("")
@@ -740,7 +777,7 @@ class UPSGroupMonitor(
         # always lands; this only affects whether the operator gets
         # pinged by Apprise). The stats events row records which path
         # we took via notification_sent.
-        skipped_during_shutdown = self._shutdown_flag_path.exists()
+        skipped_during_shutdown = self._shutdown_guard_active()
         always_silent = event in ("VOLTAGE_NORMALIZED", "AVR_INACTIVE",
                                    "VOLTAGE_FLAP_SUPPRESSED",
                                    "VOLTAGE_AUTODETECT_MISMATCH")
@@ -889,7 +926,30 @@ class UPSGroupMonitor(
                 key, value = line.split(':', 1)
                 ups_data[key.strip()] = value.strip()
 
+        if not ups_data.get('ups.status'):
+            return False, {}, "Missing ups.status"
+
         return True, ups_data, ""
+
+    def _mark_shutdown_in_progress(self, context: str) -> bool:
+        """Best-effort persistent shutdown guard.
+
+        The flag prevents duplicate shutdown sequences. It is still just
+        bookkeeping: if the flag path is unavailable during a power event, the
+        daemon must keep moving toward the actual poweroff.
+        """
+        self._shutdown_in_progress = True
+        try:
+            self._shutdown_flag_path.touch()
+            self._shutdown_flag_unusable = False
+            return True
+        except OSError as exc:
+            self._shutdown_flag_unusable = True
+            self._log_message(
+                f"⚠️ Could not write shutdown flag {self._shutdown_flag_path} "
+                f"while {context}: {exc}. Continuing without the on-disk guard."
+            )
+            return False
 
     def _run_upsc(self, args: List[str], *, full_poll: bool) -> Tuple[int, str, str]:
         cmd = ["upsc", self.config.ups.name] + list(args)
@@ -1071,7 +1131,7 @@ class UPSGroupMonitor(
 
     def _execute_shutdown_sequence(self):
         """Execute the controlled shutdown sequence."""
-        self._shutdown_flag_path.touch()
+        self._mark_shutdown_in_progress("starting shutdown sequence")
         sequence_start = time.monotonic()
 
         delegated = self._uses_loopback_delegate
@@ -1185,7 +1245,7 @@ class UPSGroupMonitor(
                 self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE")
                 self._log_message(f"🧪 [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
                 self._log_message("🧪 [DRY-RUN] Shutdown sequence completed successfully (no actual shutdown)")
-                self._shutdown_flag_path.unlink(missing_ok=True)
+                self._clear_shutdown_in_progress()
             else:
                 # Validate the poweroff command BEFORE recording the run as a
                 # completed shutdown (CodeRabbit). Config validation rejects an
@@ -1207,7 +1267,7 @@ class UPSGroupMonitor(
                         self.config.NOTIFY_FAILURE,
                         category="shutdown_summary",
                     )
-                    self._shutdown_flag_path.unlink(missing_ok=True)
+                    self._clear_shutdown_in_progress()
                     return
 
                 record_sequence_complete()
@@ -1279,7 +1339,7 @@ class UPSGroupMonitor(
                 # stays touched because the container is going down with
                 # the host; here the container stays up, so any subsequent
                 # trigger has to be allowed through.
-                self._shutdown_flag_path.unlink(missing_ok=True)
+                self._clear_shutdown_in_progress()
                 return
             record_sequence_complete()
             self._log_message(
@@ -1292,7 +1352,7 @@ class UPSGroupMonitor(
                     "🧪 [DRY-RUN] Would have delegated host poweroff to loopback "
                     "SSH (no actual shutdown performed)."
                 )
-                self._shutdown_flag_path.unlink(missing_ok=True)
+                self._clear_shutdown_in_progress()
             else:
                 self._send_notification(
                     f"✅ **Shutdown Sequence Complete** (took {elapsed}s)\n"
@@ -1317,7 +1377,7 @@ class UPSGroupMonitor(
                 self.config.NOTIFY_INFO,
                 category="shutdown_summary",
             )
-            self._shutdown_flag_path.unlink(missing_ok=True)
+            self._clear_shutdown_in_progress()
 
             # Exit if --exit-after-shutdown was specified
             if self._exit_after_shutdown:
@@ -1326,7 +1386,7 @@ class UPSGroupMonitor(
 
     def _trigger_immediate_shutdown(self, reason: str):
         """Trigger an immediate shutdown if not already in progress."""
-        if self._shutdown_flag_path.exists():
+        if self._shutdown_guard_active():
             # Surface gated re-triggers (bug #4). The early return used
             # to be silent, which made correlating "trigger conditions
             # met but nothing fired" with the stuck flag much harder
@@ -1338,7 +1398,7 @@ class UPSGroupMonitor(
             )
             return
 
-        self._shutdown_flag_path.touch()
+        self._mark_shutdown_in_progress("triggering immediate shutdown")
 
         # Send notification (non-blocking - fire and forget)
         self._send_notification(
@@ -1484,7 +1544,7 @@ class UPSGroupMonitor(
         if self._api_server is not None:
             self._api_server.stop()
 
-        if self._shutdown_flag_path.exists():
+        if self._shutdown_guard_active():
             if self._notification_worker:
                 # Mid-shutdown signal: still try to drain any in-flight
                 # rows; whatever's left persists for the next start.
@@ -1493,7 +1553,7 @@ class UPSGroupMonitor(
             self._stop_stats()
             sys.exit(0)
 
-        self._shutdown_flag_path.touch()
+        self._mark_shutdown_in_progress("recording service stop")
 
         self._log_message("🛑 Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
 
@@ -1599,7 +1659,7 @@ class UPSGroupMonitor(
                 stats_dir, version=__version__, reason=REASON_SIGNAL,
             )
 
-        self._shutdown_flag_path.unlink(missing_ok=True)
+        self._clear_shutdown_in_progress()
         sys.exit(0)
 
     # ==========================================================================
@@ -1775,7 +1835,7 @@ class UPSGroupMonitor(
             # outage's trigger silently no-ops. Clearing the flag here
             # means: "power came back, daemon is still alive ⇒ the
             # previous attempt did not actually halt the host ⇒ re-arm".
-            self._shutdown_flag_path.unlink(missing_ok=True)
+            self._clear_shutdown_in_progress()
             # Coordinator hook: in multi-UPS mode the per-monitor flag
             # above is suffixed; the coordinator owns a separate
             # unsuffixed flag + an in-memory _local_shutdown_initiated
@@ -1962,7 +2022,7 @@ class UPSGroupMonitor(
                         )
                     else:
                         self._failsafe_initiated = True
-                        self._shutdown_flag_path.touch()
+                        self._mark_shutdown_in_progress("starting failsafe shutdown")
                         self._log_message(
                             "🚨 FAILSAFE TRIGGERED (FSB): Connection lost or data persistently stale "
                             "while On Battery. Initiating emergency shutdown."

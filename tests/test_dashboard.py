@@ -137,6 +137,9 @@ def test_dashboard_has_wide_history_surfaces(minimal_config):
     assert "loadOlderEvents" in js
     assert "mergeEvents" in js
     assert "eventKey" in js
+    assert "as < bs ? -1 : as > bs ? 1 : 0" in js
+    assert "localeCompare" not in js
+    assert "event.ups === source" in js
     # Cursor paging must keep the selected lower bound, and rendered rows should
     # still honor the range if older rows are already cached client-side.
     assert 'if (from !== null) q += "&from=" + from' in js
@@ -158,6 +161,8 @@ def test_dashboard_has_event_delete_surface(minimal_config):
     assert "clearSelection" in js
     assert "loadEvents(undefined, true)" in js
     assert "Delete selected (" in js
+    assert "deleted === items.length" in js
+    assert "JSON.stringify({ items })" in js
 
 
 @pytest.mark.unit
@@ -172,6 +177,12 @@ def test_dashboard_has_drilldown_and_theme_surfaces(minimal_config):
         "/app.js")[1].decode("utf-8")
     assert "openDetail" in js and "renderDetail" in js
     assert "renderBanner" in js
+    assert "groupQuorumLost" in js
+    assert "quorumLost" in js
+    assert "/api/v1/auth/state" in js
+    assert "const [authState, cfg, rh]" in js
+    assert "authState.ok" in js
+    assert ".style.width" not in js
     assert "applyTheme" in js
     # Drill-down must read the shared snapshot, not fetch per card.
     assert "remoteHealthSnapshot" in js

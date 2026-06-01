@@ -9,24 +9,261 @@ Security model (enforced by the API layer, not here):
   (a config-validation invariant), so control is never reachable unauthenticated.
 - Command/variable names are allowlisted by the caller before reaching here.
 
-Credentials are passed on the argv (``-u``/``-p``), which is visible in ``ps`` —
-an accepted tradeoff (a local user who can read ``ps`` can already do worse), and
-identical to how operators run these CLIs by hand.
+Passwords are not passed on argv. ``upscmd``/``upsrw`` prompt for the password
+when ``-p`` is omitted, so authenticated calls run behind a pseudo-terminal and
+answer that prompt without exposing the reusable secret to ``ps``.
 """
 
+import os
+import pty
 import re
+import select
+import subprocess
+import time
 from typing import Dict, List, Optional, Tuple
 
 from eneru.utils import run_command
+
+_AUTH_COMMAND_BINARIES = {"upscmd", "upsrw"}
+_SAFE_AUTH_ARG = re.compile(r"\A[A-Za-z0-9 ._:@+%/,\-=\[\]]{1,256}\Z")
+_PASSWORD_PROMPT_RE = re.compile(
+    rb"password[^\r\n]{0,40}[:?]\s*\Z",
+    re.IGNORECASE,
+)
 
 
 def _creds_args(username: str, password: str) -> List[str]:
     args: List[str] = []
     if username:
         args += ["-u", username]
-    if password:
-        args += ["-p", password]
     return args
+
+
+def _safe_auth_data_arg(arg: object) -> Tuple[Optional[str], str]:
+    """Return one validated argv data value, or an error message."""
+    if not isinstance(arg, str) or not arg:
+        return None, "empty NUT control argument"
+    if "\x00" in arg:
+        return None, "NUT control argument contains NUL"
+    if arg.startswith("-"):
+        return None, "NUT control argument looks like an option"
+    if not _SAFE_AUTH_ARG.match(arg):
+        return None, "NUT control argument contains unsupported characters"
+    return arg, ""
+
+
+def _validated_auth_command_argv(cmd: List[str]) -> Tuple[Optional[List[str]], str]:
+    """Build a normalized NUT auth argv before it reaches ``subprocess``.
+
+    The API already allowlists command and variable names, but this wrapper is
+    the last gate before exec. Keeping the binary and option positions fixed
+    makes the invariant visible to readers and static analysis.
+    """
+    if (not cmd or not isinstance(cmd[0], str)
+            or cmd[0] not in _AUTH_COMMAND_BINARIES):
+        return None, "unsupported NUT control binary"
+
+    binary = cmd[0]
+    args = cmd[1:]
+    if binary == "upscmd":
+        if len(args) == 2:
+            ups_name, error = _safe_auth_data_arg(args[0])
+            if error:
+                return None, error
+            command, error = _safe_auth_data_arg(args[1])
+            if error:
+                return None, error
+            return ["upscmd", ups_name, command], ""
+        elif len(args) == 4 and args[0] == "-u":
+            username, error = _safe_auth_data_arg(args[1])
+            if error:
+                return None, error
+            ups_name, error = _safe_auth_data_arg(args[2])
+            if error:
+                return None, error
+            command, error = _safe_auth_data_arg(args[3])
+            if error:
+                return None, error
+            return ["upscmd", "-u", username, ups_name, command], ""
+        else:
+            return None, "invalid upscmd argument shape"
+    elif binary == "upsrw":
+        if len(args) == 3 and args[0] == "-s":
+            assignment, error = _safe_auth_data_arg(args[1])
+            if error:
+                return None, error
+            ups_name, error = _safe_auth_data_arg(args[2])
+            if error:
+                return None, error
+            return ["upsrw", "-s", assignment, ups_name], ""
+        elif len(args) == 5 and args[0] == "-s" and args[2] == "-u":
+            assignment, error = _safe_auth_data_arg(args[1])
+            if error:
+                return None, error
+            username, error = _safe_auth_data_arg(args[3])
+            if error:
+                return None, error
+            ups_name, error = _safe_auth_data_arg(args[4])
+            if error:
+                return None, error
+            return ["upsrw", "-s", assignment, "-u", username, ups_name], ""
+        else:
+            return None, "invalid upsrw argument shape"
+    return None, "unsupported NUT control binary"
+
+
+def _validate_auth_command_argv(cmd: List[str]) -> Tuple[bool, str]:
+    """Validate a NUT auth argv shape."""
+    safe_cmd, error = _validated_auth_command_argv(cmd)
+    return safe_cmd is not None, error
+
+
+def _auth_command_has_username(safe_cmd: List[str]) -> bool:
+    """Return True when a normalized command includes ``-u username``."""
+    if safe_cmd[0] == "upscmd":
+        return len(safe_cmd) == 5 and safe_cmd[1] == "-u"
+    if safe_cmd[0] == "upsrw":
+        return len(safe_cmd) == 6 and safe_cmd[3] == "-u"
+    return False
+
+
+def _popen_validated_auth_command(
+    safe_cmd: List[str],
+    slave_fd: int,
+) -> subprocess.Popen:
+    """Spawn a previously normalized NUT auth command on a PTY.
+
+    CodeQL treats a fully data-derived argv list as command-injection tainted,
+    even after validation. Keep the executable and option positions as fixed
+    literals at each spawn site; only validated data values are copied in.
+    """
+    if safe_cmd[0] == "upscmd":
+        if len(safe_cmd) == 3:
+            return subprocess.Popen(
+                ["upscmd", safe_cmd[1], safe_cmd[2]],
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+            )
+        return subprocess.Popen(
+            ["upscmd", "-u", safe_cmd[2], safe_cmd[3], safe_cmd[4]],
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+        )
+
+    if len(safe_cmd) == 4:
+        return subprocess.Popen(
+            ["upsrw", "-s", safe_cmd[2], safe_cmd[3]],
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+        )
+    return subprocess.Popen(
+        ["upsrw", "-s", safe_cmd[2], "-u", safe_cmd[4], safe_cmd[5]],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+    )
+
+
+def _kill_and_reap(proc: subprocess.Popen) -> None:
+    """Best-effort terminate + wait so timed-out PTY children do not zombie."""
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=1)
+    except Exception:
+        pass
+
+
+def _run_auth_command(
+    cmd: List[str],
+    password: str,
+    *,
+    timeout: int = 10,
+) -> Tuple[int, str, str]:
+    """Run a NUT auth command without putting the password in argv."""
+    safe_cmd, error = _validated_auth_command_argv(cmd)
+    if safe_cmd is None:
+        return 2, "", error
+    has_username = _auth_command_has_username(safe_cmd)
+    if password and not has_username:
+        return 2, "", "NUT control password requires username (-u)"
+    if has_username and not password:
+        return 2, "", "NUT control username requires password (-p)"
+    if not password:
+        return run_command(safe_cmd, timeout=timeout)
+
+    master_fd: Optional[int] = None
+    slave_fd: Optional[int] = None
+    proc: Optional[subprocess.Popen] = None
+    output = bytearray()
+    password_sent = False
+    deadline = time.monotonic() + max(1, int(timeout))
+
+    try:
+        master_fd, slave_fd = pty.openpty()
+        proc = _popen_validated_auth_command(safe_cmd, slave_fd)
+        os.close(slave_fd)
+        slave_fd = None
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _kill_and_reap(proc)
+                proc = None
+                text = output.decode("utf-8", errors="replace")
+                return 124, text, "Command timed out"
+
+            readable, _, _ = select.select(
+                [master_fd], [], [], min(0.1, remaining)
+            )
+            if readable:
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError:
+                    chunk = b""
+                if chunk:
+                    output.extend(chunk)
+                    prompt_tail = bytes(output[-256:])
+                    if (not password_sent
+                            and _PASSWORD_PROMPT_RE.search(prompt_tail)):
+                        os.write(master_fd, (password + "\n").encode("utf-8"))
+                        password_sent = True
+
+            rc = proc.poll()
+            if rc is not None:
+                while True:
+                    try:
+                        chunk = os.read(master_fd, 4096)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                text = output.decode("utf-8", errors="replace")
+                return rc, text, ""
+    except FileNotFoundError as exc:
+        return 127, "", str(exc)
+    except Exception as exc:
+        text = output.decode("utf-8", errors="replace")
+        return 1, text, str(exc)
+    finally:
+        if proc is not None and proc.poll() is None:
+            _kill_and_reap(proc)
+        for fd in (master_fd, slave_fd):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
 
 def list_commands(ups_name: str, *, timeout: int = 10) -> Tuple[bool, List[str], str]:
@@ -62,14 +299,15 @@ def run_instant_command(
     ups_name: str, command: str, username: str, password: str,
     *, timeout: int = 10,
 ) -> Tuple[bool, str, str]:
-    """Run an instant command (``upscmd -u … -p … ups command``).
+    """Run an instant command (``upscmd -u … ups command``).
 
     Returns ``(ok, output, error)``.
     """
     cmd = ["upscmd"] + _creds_args(username, password) + [ups_name, command]
-    code, out, err = run_command(cmd, timeout=timeout)
+    code, out, err = _run_auth_command(cmd, password, timeout=timeout)
     if code != 0:
-        return False, out.strip(), (err.strip() or f"upscmd exited {code}")
+        return False, out.strip(), (err.strip() or out.strip()
+                                    or f"upscmd exited {code}")
     return True, out.strip(), ""
 
 
@@ -117,7 +355,7 @@ def set_variable(
     ups_name: str, variable: str, value: str, username: str, password: str,
     *, timeout: int = 10,
 ) -> Tuple[bool, str, str]:
-    """Write a UPS variable (``upsrw -s var=value -u … -p … ups``).
+    """Write a UPS variable (``upsrw -s var=value -u … ups``).
 
     Returns ``(ok, output, error)``.
 
@@ -129,7 +367,8 @@ def set_variable(
     """
     cmd = (["upsrw", "-s", f"{variable}={value}"]
            + _creds_args(username, password) + [ups_name])
-    code, out, err = run_command(cmd, timeout=timeout)
+    code, out, err = _run_auth_command(cmd, password, timeout=timeout)
     if code != 0:
-        return False, out.strip(), (err.strip() or f"upsrw exited {code}")
+        return False, out.strip(), (err.strip() or out.strip()
+                                    or f"upsrw exited {code}")
     return True, out.strip(), ""

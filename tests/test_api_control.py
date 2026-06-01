@@ -331,6 +331,19 @@ def test_audit_noop_without_log_and_swallows_errors(minimal_config):
     h._audit({"username": "x"}, "command", "t", "ok")  # swallowed
 
 
+@pytest.mark.unit
+def test_audit_logs_when_event_record_fails(minimal_config):
+    h = object.__new__(EneruAPIHandler)
+    logs = []
+    h.api_log = logs.append
+    h.api_source = MagicMock()
+    h.api_source.record_control_event.side_effect = OSError("db locked")
+
+    h._audit({"username": "x"}, "command", "UPS@h:test", "ok")
+
+    assert any("control audit event failed" in msg for msg in logs)
+
+
 # ----- config reload endpoint -----
 
 @pytest.mark.unit

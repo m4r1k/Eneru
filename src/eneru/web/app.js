@@ -97,10 +97,24 @@ function statusClass(status) {
 // A UPS counts as healthy for a redundancy rollup when it is reachable and not
 // on battery / low / replace-battery.
 function upsHealthy(u) {
-  if (u.connectionState && u.connectionState !== "connected") return false;
+  const state = (u.connectionState || "").toUpperCase();
+  if (state && state !== "OK" && state !== "CONNECTED") return false;
   const s = (u.status || "").toUpperCase();
   return !(s.includes("OB") || s.includes("LB") || s.includes("RB")
            || s.includes("FSD") || s === "");
+}
+
+function groupHealthyCount(g, rows) {
+  if (typeof g.healthyCount === "number") return g.healthyCount;
+  const byName = {};
+  rows.forEach((u) => { byName[u.name] = u; });
+  return (g.upsSources || []).filter((n) => byName[n] && upsHealthy(byName[n])).length;
+}
+
+function groupQuorumLost(g, rows) {
+  if (typeof g.quorumLost === "boolean") return g.quorumLost;
+  if (typeof g.minHealthy !== "number") return false;
+  return groupHealthyCount(g, rows) < g.minHealthy;
 }
 
 function batteryClass(charge) {
@@ -120,6 +134,7 @@ function renderUps(payload) {
   sel.replaceChildren();
   rows.forEach((u) => {
     const charge = parseFloat(u.batteryCharge);
+    const barValue = isNaN(charge) ? 0 : Math.max(0, Math.min(100, charge));
     const card = el("div", { class: "card card-click", tabindex: "0",
       role: "button", title: "View details" }, [
       el("h3", { text: u.label || u.name }),
@@ -129,14 +144,16 @@ function renderUps(payload) {
       ]),
       el("div", { class: "row" }, [el("span", { text: "Battery" }),
         el("b", { class: batteryClass(charge), text: isNaN(charge) ? "—" : charge + "%" })]),
-      el("div", { class: "bar" }, [el("span", { class: batteryClass(charge) }, [])]),
+      el("meter", {
+        class: "bar " + batteryClass(charge),
+        min: "0", max: "100", value: String(barValue),
+        "aria-label": "Battery charge",
+      }),
       el("div", { class: "row" }, [el("span", { text: "Runtime" }),
         el("b", { text: u.runtime != null ? u.runtime + "s" : "—" })]),
       el("div", { class: "row" }, [el("span", { text: "Load" }),
         el("b", { text: u.load != null ? u.load + "%" : "—" })]),
     ]);
-    if (!isNaN(charge)) card.querySelector(".bar > span").style.width =
-      Math.max(0, Math.min(100, charge)) + "%";
     card.addEventListener("click", () => openDetail(u.name));
     card.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDetail(u.name); }
@@ -152,13 +169,12 @@ function renderUps(payload) {
   const gwrap = document.getElementById("group-cards");
   gwrap.replaceChildren();
   gsec.hidden = groups.length === 0;
-  const byName = {};
-  rows.forEach((u) => { byName[u.name] = u; });
   groups.forEach((g) => {
     const sources = g.upsSources || [];
-    const healthy = sources.filter((n) => byName[n] && upsHealthy(byName[n])).length;
+    const healthy = groupHealthyCount(g, rows);
     const min = g.minHealthy;
-    const cls = healthy < min ? "crit" : (healthy === min ? "warn" : "ok");
+    const quorumLost = groupQuorumLost(g, rows);
+    const cls = quorumLost ? "crit" : (healthy === min ? "warn" : "ok");
     gwrap.appendChild(el("div", { class: "card" }, [
       el("h3", { text: g.name }),
       el("div", { class: "row" }, [el("span", { text: "Healthy" }),
@@ -288,7 +304,11 @@ function renderBanner() {
   for (const u of rows) {
     const s = (u.status || "").toUpperCase();
     if (s.includes("LB") || s.includes("FSD") || u.triggerActive) {
-      crit = u; break;
+      const groups = lastGroups.filter((g) => (g.upsSources || []).includes(u.name));
+      const causesShutdown = groups.length === 0
+        || groups.some((g) => groupQuorumLost(g, rows));
+      if (causesShutdown) { crit = u; break; }
+      if (!warn) warn = u;
     }
     if (s.includes("OB") && !warn) warn = u;
   }
@@ -324,7 +344,13 @@ function mergeEvents(incoming) {
   for (const e of lastEvents) map.set(eventKey(e), e);
   for (const e of (incoming || [])) map.set(eventKey(e), e);
   lastEvents = Array.from(map.values())
-    .sort((a, b) => (a.ts - b.ts) || ((a.id || 0) - (b.id || 0)));
+    .sort((a, b) => {
+      const as = String(a.source || "");
+      const bs = String(b.source || "");
+      return (a.ts - b.ts) ||
+        (as < bs ? -1 : as > bs ? 1 : 0) ||
+        ((a.id || 0) - (b.id || 0));
+    });
   if (lastEvents.length > 2000) lastEvents = lastEvents.slice(-2000);
   updateEventTypeFilter(lastEvents);
   applyEventFilters();
@@ -399,14 +425,7 @@ function updateEventTypeFilter(rows) {
 
 function eventMatchesSource(event, source) {
   if (!source) return true;
-  const haystack = [
-    event.group || "",
-    event.ups || "",
-    event.source || "",
-    event.detail || "",
-    event.details || "",
-  ].join(" ").toLowerCase();
-  return haystack.includes(source.toLowerCase());
+  return event.ups === source || event.source === source || event.group === source;
 }
 
 // Selected event keys ((source,id)). Preserved across passive polling so an
@@ -510,8 +529,12 @@ async function deleteSelected() {
     const items = evs.map((e) => ({ id: e.id, ts: e.ts, eventType: e.eventType || e.event }));
     const res = await api("/api/v1/ups/" + encodeURIComponent(ups) + "/events",
       { method: "DELETE", body: JSON.stringify({ items }) });
-    if (res.ok) evs.forEach((e) => gone.add(eventKey(e)));
-    else failed += evs.length;
+    const deleted = res.ok && res.data ? Number(res.data.deleted) : 0;
+    if (res.ok && deleted === items.length) {
+      evs.forEach((e) => gone.add(eventKey(e)));
+    } else {
+      failed += evs.length;
+    }
   }
   if (gone.size) lastEvents = lastEvents.filter((e) => !gone.has(eventKey(e)));
   selectedEvents = new Set();
@@ -718,12 +741,11 @@ function refreshAuthUI() {
   if (authed) who.textContent = "Signed in";
 }
 
-// Learn whether auth is enabled server-side. /api/v1/config is open (sanitized)
-// and reports api.auth.enabled even to anonymous callers.
+// Learn whether auth is enabled server-side. This route stays open even when
+// read endpoints require credentials, so the login form remains reachable.
 async function loadAuthState() {
-  const res = await api("/api/v1/config");
-  authEnabled = !!(res.ok && res.data && res.data.api &&
-                   res.data.api.auth && res.data.api.auth.enabled);
+  const res = await api("/api/v1/auth/state");
+  authEnabled = !!(res.ok && res.data && res.data.enabled);
 }
 
 function openLogin() {
@@ -782,16 +804,12 @@ async function loadGraph() {
 async function refresh() {
   // One shared config + remote-health snapshot per cycle so the drill-down reads
   // from memory instead of firing per-card requests.
-  const [cfg, rh] = await Promise.all([
-    api("/api/v1/config"), api("/api/v1/remote-health"),
+  const [authState, cfg, rh] = await Promise.all([
+    api("/api/v1/auth/state"), api("/api/v1/config"), api("/api/v1/remote-health"),
   ]);
+  authEnabled = !!(authState.ok && authState.data && authState.data.enabled);
   if (cfg.ok && cfg.data) {
     cfgSnapshot = cfg.data;
-    // Re-read auth-enabled every poll, not just at init: with dynamic
-    // auto-enable the server can turn auth on at runtime, and the Sign-in button
-    // must appear without a reload.
-    const a = cfg.data.api && cfg.data.api.auth;
-    authEnabled = !!(a && a.enabled);
     // If we hold a token but the server treats us as anonymous (sanitized
     // config), the session was invalidated server-side — e.g. the account was
     // deleted. Reads stay open (no 401 to trip the api() handler), so detect it

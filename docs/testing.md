@@ -69,9 +69,14 @@ Critical-tier outcomes. The headline result: the new v6.0 security surface
 static-asset name check, and a write gate in front of every mutating route)
 held up well; the residual risk was concentrated in the shutdown decision path,
 where a plausible config typo or a slow/wedged subsystem could crash the daemon
-*before* the host poweroff. Every confirmed finding from that audit is fixed in
-the rc10 work, each accompanied by a regression test that fails against the
-pre-fix code, so the same class of bug cannot silently return.
+*before* the host poweroff. rc10 fixed the first Critical/High tranche and opened
+the upstream PR so CI could start immediately. rc11 then closed the remaining
+confirmed Medium/Low/Nit items from the same audit: request-body read bounding/timeouts,
+auth bootstrap under read-gated APIs, redundancy health reporting, SQLite
+lifecycle races, dashboard event identity, password-reset session invalidation,
+package-data drift, and docs/examples drift. Each code finding has a regression
+test that fails against the pre-fix behavior, so the same class of bug cannot
+silently return.
 
 ## CI layout
 
@@ -123,13 +128,13 @@ done
 | Multi-UPS coordinator | Group routing, `is_local`, drain policy, local shutdown locking, signal handling |
 | Redundancy runtime | Quorum evaluation, advisory triggers, connection-grace handling, idempotent group execution |
 | Health monitoring | Voltage thresholds, AVR, bypass, overload, battery anomaly filtering |
-| Notifications | Formatting, retry queue, lifecycle classification, coalescing, suppression rules, container restart/upgrade stop-row deferral |
-| Statistics and TUI | SQLite schema (incl. the v5 `events.id` AUTOINCREMENT table-rebuild migration — column added, rows/version preserved, idempotent, id-not-reused-after-delete), aggregation, event tier filtering, wide-range + composite-cursor event paging across duplicate timestamps, `delete_events` (id+ts+type guard, dedup, per-DB isolation), TUI grouping, graphs, one-shot monitor output |
+| Notifications | Formatting, retry queue, lifecycle classification, coalescing, suppression rules, container restart/upgrade stop-row deferral, deferred stop delivery claim/recovery races and mark-sent failure logging |
+| Statistics and TUI | SQLite schema (incl. the v5 `events.id` AUTOINCREMENT table-rebuild migration — column added, rows/version preserved, idempotent, id-not-reused-after-delete — and the v6 `notifications.delivering_at` migration for stale deferred-delivery claim recovery), stale-claim recovery failure propagation, aggregation, event tier filtering, wide-range + composite-cursor event paging across duplicate timestamps, `delete_events` (id+ts+type guard, dedup, per-DB isolation), TUI grouping, graphs, one-shot monitor output |
 | Observability | API routing, readiness, Prometheus escaping, power-quality metrics, remote-health sidecars, MQTT publishing |
 | Authentication | User/API-key SQLite store (bcrypt hashing, salt uniqueness, truncation, CRUD), `eneru user`/`apikey` CLI lifecycle, password-input safety (getpass/generate/stdin), lazy bcrypt import |
-| API auth middleware | Session manager (TTL/expiry), tiered authorization matrix (reads open vs `require_for_reads`, writes fail-closed when auth off), bearer/API-key resolution, session re-validation against user existence (deleted user signed out; DB error preserves the session), login/logout, body-size + JSON validation, tiered `/config` |
+| API auth middleware | Session manager (TTL/expiry), tiered authorization matrix (reads open vs `require_for_reads`, writes fail-closed when auth off), bearer/API-key resolution, session re-validation against user state (deleted user or password reset signs out; DB error preserves the session), login/logout, body-size + JSON validation including total body-read deadlines and read-error mapping, tiered `/config` |
 | Event management API | `DELETE /api/v1/ups/{name}/events` — authed delete + `EVENTS_DELETED` audit, anonymous 401 / auth-off 403, unknown UPS 404, stats-unavailable 503, malformed-body matrix (400) and oversize (413); monitor/coordinator routing to the live per-UPS store; events `from`/`to`/`before` paging and history `from > to`/`All` validation |
-| UPS control | `upscmd`/`upsrw` wrappers and output parsing, command/variable allowlist enforcement, per-group credential/allowlist overrides, feature-disabled and unknown-UPS handling, NUT-error mapping, fail-closed config validation (control requires auth), value sanitization, audit logging to the events table |
+| UPS control | `upscmd`/`upsrw` wrappers and output parsing (including PTY output on NUT errors), fixed-binary argv validation before subprocess execution, username/password pairing before PTY prompt handling, command/variable allowlist enforcement, per-group credential/allowlist overrides, feature-disabled and unknown-UPS handling, NUT-error mapping, fail-closed config validation (control requires auth), value sanitization, audit logging to the events table |
 | Config hot-reload | Strict load+validate (bad YAML / non-mapping / validation error rejected, running config kept), safe-vs-restart classification, in-place live apply across shared + per-monitor configs, subsystem reload hooks for stats/notifications/MQTT/remote-health, SIGHUP handler and API `/config/reload` endpoint |
 | Web dashboard | Static asset serving via `importlib.resources`, MIME mapping, path-traversal rejection, strict CSP + `nosniff` on HTML, bytes-body responses, dashboard open before the read gate, event filters, control variable forms, `nutControl` exposure in the config summary, and marker guards for the asset-level surfaces with no browser in CI (`[hidden]` reset, resize-safe graph, wide-history range/paging, delete-selected, drill-down, Light/Dark/System theme) |
 | Packaging | nFPM file list, package install paths, wrapper execution, OCI image smoke tests |

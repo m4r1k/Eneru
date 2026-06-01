@@ -1200,8 +1200,8 @@ api:
     db_path: "$AUTH_DB"
 nut_control:
   enabled: true
-  username: "operator"
-  password: "s3cret-pw"
+  username: "admin"
+  password: "testpass"
   allowed_commands: ["beeper.toggle"]
 notifications:
   enabled: false
@@ -1240,25 +1240,34 @@ ANON=$(curl -sS -o /dev/null -w '%{http_code}' \
   http://127.0.0.1:9100/api/v1/ups/TestUPS@localhost:3493/command)
 if [ "$ANON" != "401" ]; then echo "FAIL: anonymous control returned $ANON, expected 401"; exit 1; fi
 
-# An allowlisted command reaches NUT. dummy-ups in dummy mode does not support
-# instant commands, so the expected response is NUT's own CMD-NOT-SUPPORTED
-# error mapped through Eneru as 502. A 401/403 here would mean Eneru blocked the
-# request before NUT; CMD-NOT-SUPPORTED means the allowlisted request crossed
-# the API -> upscmd -> upsd boundary.
+# An allowlisted command reaches NUT. Most dummy-ups versions do not support
+# instant commands, so the normal response is NUT's own CMD-NOT-SUPPORTED
+# error mapped through Eneru as 502. If a future dummy driver accepts the
+# command, a 200 is also proof that the request crossed the API -> upscmd ->
+# upsd boundary. A 401/403 here would mean Eneru blocked the request first.
 ALLOWED=$(curl -sS -o /tmp/test53-allowed.json -w '%{http_code}' \
   -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"command":"beeper.toggle"}' \
   http://127.0.0.1:9100/api/v1/ups/TestUPS@localhost:3493/command)
-if [ "$ALLOWED" != "502" ]; then
-  echo "FAIL: allowed command returned $ALLOWED, expected dummy-ups NUT_ERROR 502"
+if [ "$ALLOWED" = "200" ]; then
+  grep -q '"status": "ok"' /tmp/test53-allowed.json \
+    || { echo "FAIL: allowed command returned 200 without ok status"; cat /tmp/test53-allowed.json; exit 1; }
+elif [ "$ALLOWED" = "502" ]; then
+  grep -q '"code": "NUT_ERROR"' /tmp/test53-allowed.json \
+    || { echo "FAIL: allowed command did not return a NUT_ERROR"; cat /tmp/test53-allowed.json; exit 1; }
+  grep -q 'CMD-NOT-SUPPORTED' /tmp/test53-allowed.json \
+    || { echo "FAIL: allowed command did not expose the expected dummy-ups unsupported-command response"; cat /tmp/test53-allowed.json; exit 1; }
+  if grep -q 'ACCESS-DENIED' /tmp/test53-allowed.json; then
+    echo "FAIL: allowed command used invalid NUT credentials"
+    cat /tmp/test53-allowed.json
+    exit 1
+  fi
+else
+  echo "FAIL: allowed command returned $ALLOWED, expected 200 or dummy-ups NUT_ERROR 502"
   cat /tmp/test53-allowed.json
   cat /tmp/test53-daemon.log
   exit 1
 fi
-grep -q '"code": "NUT_ERROR"' /tmp/test53-allowed.json \
-  || { echo "FAIL: allowed command did not return a NUT_ERROR"; cat /tmp/test53-allowed.json; exit 1; }
-grep -q 'CMD-NOT-SUPPORTED' /tmp/test53-allowed.json \
-  || { echo "FAIL: allowed command did not reach dummy-ups"; cat /tmp/test53-allowed.json; exit 1; }
 
 kill "$DAEMON_PID" 2>/dev/null || true
 wait "$DAEMON_PID" 2>/dev/null || true

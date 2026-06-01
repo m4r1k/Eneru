@@ -17,6 +17,7 @@ from eneru import (
 from eneru.stats import (
     BUCKET_5MIN,
     BUCKET_HOURLY,
+    DELIVERING_RECOVERY_GRACE_SECONDS,
     SAMPLE_FIELDS,
     SCHEMA_VERSION,
 )
@@ -65,6 +66,26 @@ class TestSchema:
             assert path.exists()
         finally:
             s.close()
+
+    @pytest.mark.unit
+    def test_open_failure_clears_connection(self, tmp_path):
+        s = StatsStore(tmp_path / "broken.db")
+        with patch.object(s, "_init_schema", side_effect=sqlite3.Error("bad schema")):
+            with pytest.raises(sqlite3.Error):
+                s.open()
+        assert s._conn is None
+
+    @pytest.mark.unit
+    def test_open_failure_on_delivery_recovery_clears_connection(self, tmp_path):
+        s = StatsStore(tmp_path / "broken-recovery.db")
+        with patch.object(
+            s,
+            "_recover_delivering_notifications",
+            side_effect=sqlite3.Error("recovery failed"),
+        ):
+            with pytest.raises(sqlite3.Error):
+                s.open()
+        assert s._conn is None
 
     @pytest.mark.unit
     def test_open_creates_parent_directory(self, tmp_path):
@@ -128,6 +149,23 @@ class TestSchema:
         # Bounds writer waits when a slow TUI reader holds the lock.
         cur = store._conn.execute("PRAGMA busy_timeout")
         assert cur.fetchone()[0] == 500
+
+    @pytest.mark.unit
+    def test_safe_alter_only_swallows_duplicate_column(self, tmp_path):
+        class _Conn:
+            def __init__(self, exc):
+                self.exc = exc
+
+            def execute(self, *_a, **_kw):
+                raise self.exc
+
+        s = StatsStore(tmp_path / "x.db")
+        s._conn = _Conn(sqlite3.OperationalError("duplicate column name: status"))
+        s._safe_alter("samples", "status TEXT")
+
+        s._conn = _Conn(sqlite3.OperationalError("database is locked"))
+        with pytest.raises(sqlite3.OperationalError):
+            s._safe_alter("samples", "status TEXT")
 
     @pytest.mark.unit
     def test_busy_timeout_pragma_on_readonly_connection(self, store, tmp_path):
@@ -429,7 +467,8 @@ class TestSchemaMigration:
                 )
             }
             assert {"id", "ts", "body", "notify_type", "category",
-                    "status", "attempts", "sent_at", "cancel_reason"} <= cols
+                    "status", "attempts", "sent_at", "delivering_at",
+                    "cancel_reason"} <= cols
         finally:
             s.close()
 
@@ -878,6 +917,84 @@ class TestNotificationQueue:
         finally:
             s.close()
 
+    @pytest.mark.unit
+    def test_open_recovers_inflight_delivering_notifications(self, tmp_path):
+        path = tmp_path / "n.db"
+        s = StatsStore(path)
+        s.open()
+        try:
+            row_id = s.enqueue_notification("body", "warning", "lifecycle", ts=10)
+            stale_claim = int(time.time()) - DELIVERING_RECOVERY_GRACE_SECONDS - 1
+            s._conn.execute(
+                "UPDATE notifications SET status='delivering', delivering_at=? "
+                "WHERE id=?",
+                (stale_claim, row_id),
+            )
+            s._conn.commit()
+        finally:
+            s.close()
+
+        s = StatsStore(path)
+        s.open()
+        try:
+            row = s._conn.execute(
+                "SELECT status, sent_at FROM notifications WHERE id=?",
+                (row_id,),
+            ).fetchone()
+        finally:
+            s.close()
+        assert row == ("pending", None)
+
+    @pytest.mark.unit
+    def test_open_does_not_recover_active_delivery_claims(self, tmp_path):
+        path = tmp_path / "n.db"
+        s = StatsStore(path)
+        s.open()
+        try:
+            row_id = s.enqueue_notification("body", "warning", "lifecycle", ts=10)
+            active_claim = int(time.time())
+            s._conn.execute(
+                "UPDATE notifications SET status='delivering', delivering_at=? "
+                "WHERE id=?",
+                (active_claim, row_id),
+            )
+            s._conn.commit()
+        finally:
+            s.close()
+
+        s = StatsStore(path)
+        s.open()
+        try:
+            row = s._conn.execute(
+                "SELECT status, delivering_at FROM notifications WHERE id=?",
+                (row_id,),
+            ).fetchone()
+        finally:
+            s.close()
+        assert row == ("delivering", active_claim)
+
+    @pytest.mark.unit
+    def test_recovery_failure_is_logged_and_propagated(self, tmp_path):
+        s = StatsStore(tmp_path / "n.db")
+        s.open()
+        original = s._conn
+
+        class _BoomConn:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def execute(self, *a, **k):
+                raise sqlite3.OperationalError("database is locked")
+
+        s._conn = _BoomConn()
+        try:
+            with patch.object(s, "_log_error_once") as log_error:
+                with pytest.raises(sqlite3.OperationalError):
+                    s._recover_delivering_notifications()
+            log_error.assert_called_once()
+        finally:
+            s._conn = original
+            s.close()
+
 
 class TestMetaKV:
     """Generic meta key/value store helpers (for last_seen_version etc)."""
@@ -1198,8 +1315,34 @@ class TestFlush:
         try:
             # Must not raise; must return 0.
             assert store.flush() == 0
+            with store._buffer_lock:
+                assert len(store._buffer) == 1
         finally:
             store._conn = original
+
+    @pytest.mark.unit
+    def test_flush_failure_preserves_newer_samples_when_buffer_is_full(self, tmp_path):
+        store = StatsStore(tmp_path / "x.db", buffer_maxlen=2)
+        store.open()
+        store.buffer_sample(SAMPLE_UPS_DATA, ts=1)
+        store.buffer_sample(SAMPLE_UPS_DATA, ts=2)
+
+        class _BoomConn:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def executemany(self, *a, **k):
+                store.buffer_sample(SAMPLE_UPS_DATA, ts=3)
+                raise sqlite3.OperationalError("disk I/O error")
+
+        original = store._conn
+        store._conn = _BoomConn()
+        try:
+            assert store.flush() == 0
+            with store._buffer_lock:
+                assert [row[0] for row in store._buffer] == [2, 3]
+        finally:
+            store._conn = original
+            store.close()
 
 
 class TestAggregate:
@@ -1550,6 +1693,12 @@ class TestOpenReadonly:
                 roconn.execute("INSERT INTO samples (ts) VALUES (1)")
         finally:
             roconn.close()
+
+    @pytest.mark.unit
+    def test_returns_none_when_sqlite_open_fails(self, tmp_path):
+        path = tmp_path / "broken.db"
+        path.write_text("not sqlite")
+        assert StatsStore.open_readonly(path) is None
 
 
 # ===========================================================================

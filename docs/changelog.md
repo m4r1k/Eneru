@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 v6.0 is a major release that turns the read-only observability API into an
 interactive product: a browser dashboard, authentication, UPS control, and config
 hot-reload. With authentication left off, the API stays read-only exactly as in
-5.x. New features only; no behavior changes to monitoring or shutdown.
+5.x. The rc11 audit fixes below harden shutdown, auth, resource handling, and
+CI coverage before release.
 
 ### Added
 
@@ -52,6 +53,41 @@ hot-reload. With authentication left off, the API stays read-only exactly as in
 
 - **NUT auto-discovery**, previously listed for 6.0, was dropped: it duplicates
   `nut-scanner` and does not fit Eneru's config-first model.
+
+### Fixed (rc11 — audit follow-through)
+
+rc11 closes the remaining confirmed findings from the whole-repository
+pre-release audit after the Critical/High tranche was already in PR review.
+
+- **API/auth hardening:** request-body reads now have a socket timeout, dynamic
+  auth fails closed when an existing auth DB cannot be inspected, `/api/v1/auth/state`
+  stays open so the dashboard can show login even when reads require auth, and
+  password resets invalidate existing user sessions.
+- **Dashboard correctness:** redundancy cards use server-computed quorum health,
+  advisory member triggers no longer show a false shutdown-imminent banner while
+  quorum is intact, event source filtering is exact, event paging sorts by
+  `(ts, source, id)`, partial event-delete responses no longer remove unconfirmed
+  rows, and the battery bar no longer relies on inline style mutation under CSP.
+- **SQLite/resource safety:** stats open failures no longer leave a half-open
+  connection, failed flushes requeue their samples, `_safe_alter()` only swallows
+  duplicate-column migration errors, readonly opens return `None` on SQLite
+  failures, monitor/coordinator shutdown closes stats handles, and deferred
+  stop-notification delivery claims rows as `delivering` rather than `sent`
+  until Apprise succeeds. A v6 stats migration timestamps those claims so daemon
+  startup recovers stale delivery work without stealing a live one-shot helper's
+  active send; recovery failures are surfaced during `open()` instead of leaving
+  delivery rows stuck silently.
+- **Packaging/docs drift:** bumped the pre-release version to `6.0.0-rc11`,
+  listed MQTT in requirements files, added package-data checks for dashboard and
+  completion resources, removed stale loopback `shutdown_order: 999` examples,
+  and updated API/testing docs to match the read-gated auth behavior and audit
+  coverage.
+- **CI/test diagnostics:** the Single UPS control E2E now uses the dummy NUT
+  server's control credential, and PTY-backed `upscmd`/`upsrw` failures preserve
+  NUT's response text instead of collapsing to a generic exit code. The NUT
+  control PTY wrapper now also validates that only fixed `upscmd`/`upsrw` argv
+  shapes reach `subprocess.Popen`, and rejects username-only control attempts
+  before they can hang waiting for a password prompt.
 
 ### Fixed (rc10 — pre-release audit hardening)
 

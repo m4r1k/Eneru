@@ -30,6 +30,7 @@ from eneru import (
 )
 from eneru.state import HealthSnapshot, MonitorState
 from eneru.health_model import assess_health
+from eneru.shutdown.remote import RemoteShutdownResult
 
 
 _IMPOSSIBLE_PID = 999_999_999
@@ -1106,7 +1107,38 @@ class TestExecutorShutdown:
         assert calls == ["vms", "containers", "sync", "unmount", "remote"]
 
     @pytest.mark.unit
-    def test_loopback_delegate_skips_local_phases_and_callback(self, tmp_path):
+    def test_local_phase_exception_does_not_skip_poweroff_callback(
+        self, tmp_path: Path,
+    ) -> None:
+        callback = MagicMock()
+        group = _redundancy_group(
+            is_local=True,
+            containers=ContainersConfig(enabled=True),
+        )
+        ex = RedundancyGroupExecutor(
+            group,
+            base_config=_base_config(tmp_path=tmp_path),
+            local_shutdown_callback=callback,
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            calls = []
+            mp.setattr(ex, "_shutdown_vms", lambda: calls.append("vms"))
+            mp.setattr(
+                ex, "_shutdown_containers",
+                lambda: (_ for _ in ()).throw(RuntimeError("docker wedged")),
+            )
+            mp.setattr(ex, "_sync_filesystems", lambda: calls.append("sync"))
+            mp.setattr(ex, "_unmount_filesystems", lambda: calls.append("unmount"))
+            mp.setattr(ex, "_shutdown_remote_servers", lambda: calls.append("remote"))
+            assert ex.shutdown(reason="x") is True
+
+        assert calls == ["vms", "sync", "unmount", "remote"]
+        callback.assert_called_once_with("redundancy:rg")
+
+    @pytest.mark.unit
+    def test_loopback_delegate_skips_local_phases_and_callback(
+        self, tmp_path: Path,
+    ) -> None:
         """Containerized local redundancy groups delegate host work to SSH.
 
         The remote phase must still run because that is where the loopback
@@ -1147,11 +1179,105 @@ class TestExecutorShutdown:
             mp.setattr(ex, "_unmount_filesystems",
                        lambda: calls.append("unmount"))
             mp.setattr(ex, "_shutdown_remote_servers",
-                       lambda: calls.append("remote"))
+                       lambda: calls.append("remote") or [
+                           RemoteShutdownResult(
+                               server="host-loopback",
+                               host="127.0.0.1",
+                               completed=True,
+                               shutdown_sent=True,
+                               crashed=True,
+                               error="local drain failed after poweroff queued",
+                           )
+                       ])
             assert ex.shutdown(reason="x") is True
 
         assert calls == ["remote"]
         callback.assert_not_called()
+
+    @pytest.mark.unit
+    def test_loopback_delegate_failure_rearms_and_reports_incomplete(
+        self, tmp_path: Path,
+    ) -> None:
+        group = _redundancy_group(
+            is_local=True,
+            remote_servers=[RemoteServerConfig(
+                name="host-loopback",
+                enabled=True,
+                host="127.0.0.1",
+                user="root",
+                is_host_loopback=True,
+            )],
+        )
+        ex = RedundancyGroupExecutor(
+            group,
+            base_config=_base_config(dry_run=False, tmp_path=tmp_path),
+        )
+        ex.logger = MagicMock()
+        ex._notification_worker = MagicMock()
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("eneru.cli._detect_runtime_context",
+                       lambda: "container (Docker)")
+            mp.setattr(ex, "_shutdown_remote_servers", lambda: [
+                RemoteShutdownResult(
+                    server="host-loopback",
+                    host="127.0.0.1",
+                    completed=True,
+                    shutdown_sent=False,
+                    error="ssh refused",
+                )
+            ])
+            assert ex.shutdown(reason="x") is False
+
+        assert not ex._shutdown_flag_path.exists()
+        assert ex._shutdown_done is False
+        logged = " ".join(call.args[0] for call in ex.logger.log.call_args_list)
+        assert "Delegated redundancy host poweroff failed" in logged
+        summary_calls = [
+            call for call in ex._notification_worker.send.call_args_list
+            if call.kwargs.get("category") == "shutdown_summary"
+        ]
+        assert len(summary_calls) == 1
+
+    @pytest.mark.unit
+    def test_loopback_delegate_failure_unlink_error_still_returns_false(
+        self, tmp_path: Path,
+    ) -> None:
+        group = _redundancy_group(
+            is_local=True,
+            remote_servers=[RemoteServerConfig(
+                name="host-loopback",
+                enabled=True,
+                host="127.0.0.1",
+                user="root",
+                is_host_loopback=True,
+            )],
+        )
+        ex = RedundancyGroupExecutor(
+            group,
+            base_config=_base_config(dry_run=False, tmp_path=tmp_path),
+        )
+        ex.logger = MagicMock()
+        ex._notification_worker = MagicMock()
+
+        with pytest.MonkeyPatch.context() as mp, \
+             patch.object(Path, "unlink", side_effect=PermissionError("no unlink")):
+            mp.setattr("eneru.cli._detect_runtime_context",
+                       lambda: "container (Docker)")
+            mp.setattr(ex, "_shutdown_remote_servers", lambda: [
+                RemoteShutdownResult(
+                    server="host-loopback",
+                    host="127.0.0.1",
+                    completed=True,
+                    shutdown_sent=False,
+                    error="ssh refused",
+                )
+            ])
+            assert ex.shutdown(reason="x") is False
+
+        assert ex._shutdown_done is False
+        logged = " ".join(call.args[0] for call in ex.logger.log.call_args_list)
+        assert "Could not clear redundancy shutdown flag" in logged
 
     @pytest.mark.unit
     def test_logging_uses_prefix(self, tmp_path):
@@ -1296,7 +1422,9 @@ class TestLocalShutdownCallback:
     host still running."""
 
     @pytest.mark.unit
-    def test_callback_fires_on_is_local_quorum_loss(self, tmp_path):
+    def test_callback_fires_on_is_local_quorum_loss(
+        self, tmp_path: Path,
+    ) -> None:
         callback = MagicMock()
         group = _redundancy_group(name="rack-local", is_local=True)
         ex = RedundancyGroupExecutor(
@@ -1336,12 +1464,11 @@ class TestLocalShutdownCallback:
         assert ex.shutdown(reason="quorum lost") is True
 
     @pytest.mark.unit
-    def test_callback_skipped_when_remote_shutdown_raises(self, tmp_path):
-        # The callback is positioned AFTER _shutdown_remote_servers
-        # inside the try-block, so an exception in remote shutdown
-        # short-circuits the callback. The coordinator's monitor-side
-        # path can still trigger local shutdown via its own lock; the
-        # redundancy callback is a redundant signal in that scenario.
+    def test_callback_still_fires_when_remote_shutdown_raises(
+        self, tmp_path: Path,
+    ) -> None:
+        # Remote drain is a best-effort sink. If it breaks, the executor must
+        # still notify the coordinator to power off the local host.
         callback = MagicMock()
         group = _redundancy_group(name="rack-local", is_local=True)
         ex = RedundancyGroupExecutor(
@@ -1353,7 +1480,4 @@ class TestLocalShutdownCallback:
                 raise RuntimeError("ssh dead")
             mp.setattr(ex, "_shutdown_remote_servers", boom)
             ex.shutdown(reason="quorum lost")
-        # Exception was caught by the executor's try/except; the
-        # callback was NOT invoked because the raise happened before
-        # the callback line in the try-block.
-        callback.assert_not_called()
+        callback.assert_called_once_with("redundancy:rack-local")

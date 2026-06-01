@@ -45,7 +45,13 @@ SAMPLE_FIELDS: Tuple[str, ...] = (
 # Bump and add a migration block in StatsStore._init_schema whenever the
 # samples / agg_5min / agg_hourly / events / meta / notifications schema
 # gains a column or table. See src/eneru/AGENTS.md "Stats schema evolution".
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+
+# If the daemon or one-shot deferred-delivery helper dies after claiming a
+# notification but before marking it sent/pending, the next daemon open moves
+# the in-flight claim back to pending so it can be retried instead of looking
+# delivered forever.
+DELIVERING_RECOVERY_GRACE_SECONDS = 5 * 60
 
 # Bucket sizes for aggregation tiers.
 BUCKET_5MIN = 5 * 60
@@ -177,12 +183,15 @@ class StatsStore:
 
     # ----- lifecycle -----
 
-    def open(self) -> None:
+    def open(self, *, recover_delivering: bool = True) -> None:
         """Open the SQLite connection and ensure the schema exists.
 
         Creates the parent directory if missing. Pragmas: WAL mode for
         concurrent reads, NORMAL synchronous mode (safe with WAL),
-        foreign_keys off (we have none).
+        foreign_keys off (we have none). Daemon startup should keep
+        ``recover_delivering`` at the default so rows claimed by a crashed
+        process are retried; one-shot helpers that already own a live claim can
+        disable it so their own verification reads do not reset the claim.
         """
         # Defensive: pip installs don't run nfpm's directory entry, so
         # the daemon must be willing to create /var/lib/eneru itself.
@@ -197,19 +206,30 @@ class StatsStore:
         # the connection runs in autocommit mode and the `with` blocks
         # become no-ops, so executemany() would have committed every
         # row individually instead of batching the flush.
-        self._conn = sqlite3.connect(
+        conn = sqlite3.connect(
             str(self.db_path),
             check_same_thread=False,
         )
-        self._conn.execute("PRAGMA journal_mode = WAL")
-        self._conn.execute("PRAGMA synchronous = NORMAL")
-        self._conn.execute("PRAGMA temp_store = MEMORY")
-        # Bound the writer's wait if a slow reader (TUI) is mid-query
-        # on slow storage (SD card on a Raspberry Pi). 500 ms is well
-        # under the 10 s flush interval, so a stalled reader can never
-        # hold up the writer thread for longer than that bound.
-        self._conn.execute("PRAGMA busy_timeout = 500")
-        self._init_schema()
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA temp_store = MEMORY")
+            # Bound the writer's wait if a slow reader (TUI) is mid-query
+            # on slow storage (SD card on a Raspberry Pi). 500 ms is well
+            # under the 10 s flush interval, so a stalled reader can never
+            # hold up the writer thread for longer than that bound.
+            conn.execute("PRAGMA busy_timeout = 500")
+            self._conn = conn
+            self._init_schema()
+            if recover_delivering:
+                self._recover_delivering_notifications()
+        except Exception:
+            self._conn = None
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
 
     def apply_reload(self, stats_config) -> bool:
         """Live-apply retention changes from a reloaded config.
@@ -233,16 +253,19 @@ class StatsStore:
         return self._conn is not None
 
     def close(self) -> None:
-        if self._conn is not None:
-            try:
-                self.flush()
-            except Exception:  # pragma: no cover -- defensive
-                pass
-            try:
-                self._conn.close()
-            except Exception:  # pragma: no cover -- defensive
-                pass
+        try:
+            self.flush()
+        except Exception:  # pragma: no cover -- defensive
+            pass
+        with self._db_lock:
+            conn = self._conn
             self._conn = None
+            if conn is None:
+                return
+            try:
+                conn.close()
+            except Exception:  # pragma: no cover -- defensive
+                pass
 
     # ----- schema -----
 
@@ -329,6 +352,7 @@ class StatsStore:
                     status TEXT NOT NULL DEFAULT 'pending',
                     attempts INTEGER NOT NULL DEFAULT 0,
                     sent_at INTEGER,
+                    delivering_at INTEGER,
                     cancel_reason TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_notifications_status_ts
@@ -415,6 +439,7 @@ class StatsStore:
                     status TEXT NOT NULL DEFAULT 'pending',
                     attempts INTEGER NOT NULL DEFAULT 0,
                     sent_at INTEGER,
+                    delivering_at INTEGER,
                     cancel_reason TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_notifications_status_ts
@@ -429,6 +454,12 @@ class StatsStore:
             # event's id is never handed to a later row -- that's what makes the
             # API's delete-by-id safe.
             self._migrate_events_to_v5()
+
+        if current < 6:
+            # v5 -> v6: timestamp claimed deferred-delivery rows. Startup
+            # recovery only steals stale claims, so a live one-shot helper that
+            # is actively sending a stop notification is not duplicated.
+            self._safe_alter("notifications", "delivering_at INTEGER")
 
     def _migrate_events_to_v5(self) -> None:
         """Rebuild ``events`` with a stable id column.
@@ -504,13 +535,34 @@ class StatsStore:
             for row in self._conn.execute("PRAGMA table_info(events)")
         )
 
+    def _recover_delivering_notifications(self) -> None:
+        """Move abandoned deferred-delivery claims back to pending."""
+        if self._conn is None:
+            return
+        cutoff = int(time.time()) - DELIVERING_RECOVERY_GRACE_SECONDS
+        try:
+            with self._conn:
+                self._conn.execute(
+                    "UPDATE notifications SET status='pending', sent_at=NULL, "
+                    "delivering_at=NULL WHERE status='delivering' "
+                    "AND (delivering_at IS NULL OR delivering_at <= ?)",
+                    (cutoff,),
+                )
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(
+                f"stats: recover notification deliveries failed: {e}"
+            )
+            raise
+
     def _safe_alter(self, table: str, column_def: str) -> None:
         """Idempotent ``ALTER TABLE ... ADD COLUMN``; ignores duplicates."""
         try:
             self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
             # Column already exists -- benign on retries / partial migrations.
-            pass
+            if "duplicate column name" in str(exc).lower():
+                return
+            raise
 
     # ----- hot path: zero-I/O sample buffering -----
 
@@ -547,18 +599,29 @@ class StatsStore:
         with self._buffer_lock:
             if not self._buffer:
                 return 0
-            batch: List[Tuple] = list(self._buffer)
-            self._buffer.clear()
+            in_flight = self._buffer
+            self._buffer = deque(maxlen=in_flight.maxlen)
+            batch: List[Tuple] = list(in_flight)
         try:
-            with self._db_lock, self._conn:
+            with self._db_lock:
+                conn = self._conn
+                if conn is None:
+                    raise sqlite3.Error("connection closed")
                 placeholders = ", ".join("?" for _ in SAMPLE_FIELDS)
-                self._conn.executemany(
-                    f"INSERT INTO samples ({', '.join(SAMPLE_FIELDS)}) "
-                    f"VALUES ({placeholders})",
-                    batch,
-                )
+                with conn:
+                    conn.executemany(
+                        f"INSERT INTO samples ({', '.join(SAMPLE_FIELDS)}) "
+                        f"VALUES ({placeholders})",
+                        batch,
+                    )
             return len(batch)
         except (sqlite3.Error, OSError) as e:
+            with self._buffer_lock:
+                maxlen = self._buffer.maxlen
+                merged = list(in_flight) + list(self._buffer)
+                if maxlen is not None and len(merged) > maxlen:
+                    merged = merged[-maxlen:]
+                self._buffer = deque(merged, maxlen=maxlen)
             self._log_error_once(f"stats: flush failed: {e}")
             return 0
 
@@ -911,7 +974,8 @@ class StatsStore:
         try:
             with self._db_lock, self._conn:
                 self._conn.execute(
-                    "UPDATE notifications SET status='sent', sent_at=? "
+                    "UPDATE notifications SET status='sent', sent_at=?, "
+                    "delivering_at=NULL "
                     "WHERE id=?",
                     (sent_at, int(notification_id)),
                 )
@@ -948,7 +1012,7 @@ class StatsStore:
             with self._db_lock, self._conn:
                 self._conn.execute(
                     "UPDATE notifications SET status='cancelled', "
-                    "cancel_reason=? WHERE id=?",
+                    "sent_at=NULL, delivering_at=NULL, cancel_reason=? WHERE id=?",
                     (str(reason), int(notification_id)),
                 )
         except (sqlite3.Error, OSError) as e:
@@ -1187,11 +1251,24 @@ class StatsStore:
         # filesystems, illegal in a SQLite URI without escaping) doesn't
         # truncate the path or get parsed as the URI's query / fragment.
         uri = f"file:{urlquote(str(path))}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
-        # Same bound as the writer connection: a slow query against the
-        # writer's WAL can't stall the TUI refresh for more than 500 ms.
-        conn.execute("PRAGMA busy_timeout = 500")
-        return conn
+        conn = None
+        try:
+            conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+            # Same bound as the writer connection: a slow query against the
+            # writer's WAL can't stall the TUI refresh for more than 500 ms.
+            conn.execute("PRAGMA busy_timeout = 500")
+            # sqlite3.connect() can return a handle for a corrupt file; force a
+            # schema read now so callers receive None instead of a later
+            # DatabaseError from their first real query.
+            conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+            return conn
+        except (sqlite3.Error, OSError):
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            return None
 
     @classmethod
     def from_connection(cls, conn: sqlite3.Connection) -> "StatsStore":

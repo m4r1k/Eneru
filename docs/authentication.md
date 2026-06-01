@@ -73,11 +73,13 @@ There is deliberately **no `--password VALUE` flag** — a password on the comma
 line leaks into shell history and the process list (`ps`). Use the interactive
 prompt, `--generate`, or `--password-stdin`.
 
-**Deleting a user ends their active sessions.** Dashboard sessions are held in
-memory with a TTL, but the API re-checks on every request that the session's user
-still exists; deleting the account invalidates its session token immediately, so
-an open dashboard is signed out on its next poll. (A transient auth-DB error
-during that check keeps the existing session rather than logging out a valid user.)
+**Deleting a user or resetting their password ends their active sessions.**
+Dashboard sessions are held in memory with a TTL, but the API re-checks on every
+request that the session's user still exists and still has the same
+`password_changed_at` value; deleting the account or running `eneru user passwd`
+invalidates its session token immediately, so an open dashboard is signed out on
+its next poll. (A transient auth-DB error during that check keeps the existing
+session rather than logging out a valid user.)
 
 ## Managing API keys
 
@@ -109,7 +111,7 @@ api:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `api.auth.enabled` | `false` | Turn API authentication on. Off keeps v5.3 read-only behavior |
+| `api.auth.enabled` | unset (`false` until an auth DB user exists) | Turn API authentication on. If omitted, auth auto-activates once the auth DB contains a user; an explicit `false` keeps v5.3 read-only behavior |
 | `api.auth.require_for_reads` | `false` | When off, read endpoints stay open even with auth on; writes always require a credential |
 | `api.auth.session_ttl` | `3600` | Dashboard session token lifetime, in seconds |
 | `api.auth.db_path` | `/var/lib/eneru/auth.db` | Location of the user/API-key store; CLI `--auth-db` overrides |
@@ -141,8 +143,9 @@ The rule is deliberately conservative:
 When the API is enabled but auth is off (no users, or `enabled: false`), the
 daemon logs a one-line notice at startup and the dashboard hides its **Sign-in**
 button — there is nothing to sign into. The dashboard learns the live auth state
-from `/api/v1/config`; if you create the first user while the dashboard is open,
-the **Sign-in** button appears on the next poll, usually within a few seconds.
+from `/api/v1/auth/state`, which stays open even when `require_for_reads` gates
+the read API; if you create the first user while the dashboard is open, the
+**Sign-in** button appears on the next poll, usually within a few seconds.
 
 ## Containers
 

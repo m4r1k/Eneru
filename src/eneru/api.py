@@ -6,6 +6,7 @@ import math
 import os
 import re
 import secrets
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +29,9 @@ from eneru.status import (
 # Cap request bodies so a hostile/accidental huge POST can't exhaust memory in a
 # handler thread. Auth + control payloads are tiny JSON objects.
 MAX_BODY_BYTES = 64 * 1024
+# Bound reads from each client socket. Without this, a client can declare a
+# small Content-Length and drip bytes forever, pinning a non-daemon handler.
+REQUEST_READ_TIMEOUT_SECONDS = 10
 
 # Dashboard static assets (served from the eneru.web package). Only these flat
 # names are servable; the strict name check below makes path traversal impossible.
@@ -165,6 +169,7 @@ API_ENDPOINTS = (
     },
     {"path": "/api/v1/config", "description": "Configuration summary (extended when authenticated)"},
     {"path": "/api/v1/remote-health", "description": "Remote SSH health rows"},
+    {"path": "/api/v1/auth/state", "description": "Effective auth state for dashboard login bootstrap"},
     {"path": "/api/v1/auth/login", "description": "POST username/password for a session token (when auth enabled)"},
     {"path": "/api/v1/auth/logout", "description": "POST to invalidate the current session token"},
     {"path": "/api/v1/ups/{name}/commands", "description": "Allowlisted UPS commands (when nut_control enabled)"},
@@ -183,8 +188,9 @@ def _auth_is_active(config: Any) -> bool:
     left unset, auth is active iff the auth DB already has at least one user — so
     "create a user, then sign in" works **with no restart**, while a fresh
     install with no users stays open (v5.3 read-only behavior). The DB is never
-    created as a side effect of this check, and a broken/unreadable DB fails
-    closed to "inactive" (writes stay hard-disabled).
+    created as a side effect of this check. Once the DB file exists, a
+    broken/unreadable DB fails closed to "active": reads that require auth stay
+    gated and writes require credentials rather than silently reopening.
     """
     auth_cfg = getattr(getattr(config, "api", None), "auth", None)
     if auth_cfg is None:
@@ -198,7 +204,7 @@ def _auth_is_active(config: Any) -> bool:
             return False
         return AuthStore(auth_cfg.db_path).user_count() > 0
     except Exception:
-        return False
+        return True
 
 
 class EneruAPIServer:
@@ -499,7 +505,13 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if not username:
             return "ok"
         try:
-            return "ok" if store.get_user(username) is not None else "gone"
+            user = store.get_user(username)
+            if user is None:
+                return "gone"
+            issued_at = principal.get("password_changed_at")
+            if issued_at is not None and user.get("password_changed_at") != issued_at:
+                return "gone"
+            return "ok"
         except Exception:
             return "unknown"
 
@@ -539,7 +551,53 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if length > MAX_BODY_BYTES:
             raise APIPayloadTooLarge(
                 f"body exceeds {MAX_BODY_BYTES} bytes")
-        raw = self.rfile.read(length) if length else b""
+        deadline = time.monotonic() + REQUEST_READ_TIMEOUT_SECONDS
+        timeout_changed = False
+        previous_timeout = None
+        connection = getattr(self, "connection", None)
+        if length and connection is not None:
+            try:
+                previous_timeout = connection.gettimeout()
+                connection.settimeout(REQUEST_READ_TIMEOUT_SECONDS)
+                timeout_changed = True
+            except Exception:
+                # Tests and uncommon socket wrappers may not expose timeout
+                # controls. Real sockets get the read-specific timeout above.
+                pass
+        try:
+            try:
+                chunks = []
+                remaining = length
+                reader = getattr(self.rfile, "read1", None)
+                if not callable(reader):
+                    reader = self.rfile.read
+                while remaining:
+                    time_left = deadline - time.monotonic()
+                    if time_left <= 0:
+                        raise APIBadRequest("request body timed out")
+                    if timeout_changed:
+                        try:
+                            connection.settimeout(time_left)
+                        except Exception:
+                            pass
+                    chunk = reader(min(remaining, 65536))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                raw = b"".join(chunks) if length else b""
+            except (socket.timeout, TimeoutError):
+                raise APIBadRequest("request body timed out")
+            except OSError:
+                raise APIBadRequest("failed to read request body")
+        finally:
+            if timeout_changed:
+                try:
+                    connection.settimeout(previous_timeout)
+                except Exception:
+                    pass
+        if length and len(raw) != length:
+            raise APIBadRequest("incomplete request body")
         if not raw:
             return {}
         try:
@@ -571,6 +629,19 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if path == "/ready":
             payload = readiness(self.api_source)
             return (200 if payload["ready"] else 503), "application/json", payload
+
+        # Auth bootstrap must stay open even when require_for_reads=true;
+        # otherwise the dashboard cannot learn that it should show the login
+        # form before it has a token.
+        if path == "/api/v1/auth/state":
+            auth_cfg = getattr(self.api_config.api, "auth", None)
+            auth_active = self._auth_active()
+            return 200, "application/json", {
+                "enabled": auth_active,
+                "requireForReads": bool(
+                    auth_active and getattr(auth_cfg, "require_for_reads", False)
+                ),
+            }
 
         # Every remaining GET is a read: open by default, gated when
         # require_for_reads is set. principal is None for anonymous callers.
@@ -975,8 +1046,12 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             try:
                 source.record_control_event(ups, event_type,
                                             f"{label} {target} -> {result}")
-            except Exception:
-                pass
+            except Exception as exc:
+                if self.api_log is not None:
+                    try:
+                        self.api_log(f"⚠️ control audit event failed: {exc}")
+                    except Exception:
+                        pass
 
     @staticmethod
     def _error(code: str, message: str) -> Dict[str, Dict[str, str]]:
@@ -1006,6 +1081,8 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         def _visible(path: str) -> bool:
             if path == "/metrics":
                 return prometheus_enabled
+            if path == "/api/v1/auth/state":
+                return True
             if path.startswith("/api/v1/auth/") or path == "/api/v1/config/reload":
                 return auth_enabled
             if path == "/api/v1/ups/{name}/events":

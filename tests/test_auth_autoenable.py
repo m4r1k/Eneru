@@ -95,16 +95,15 @@ def test_explicit_true_wins_even_with_no_users(tmp_path):
 
 
 @pytest.mark.unit
-def test_inactive_when_unpinned_and_db_unreadable(tmp_path):
-    # Unpinned auth + an unreadable DB -> auth INACTIVE. This is still fail-closed
-    # on the write surface: with auth inactive, reads stay open (as always) but
-    # every write is hard-disabled (403), so a corrupt/unreadable DB can never
-    # open up control. (It is not "auth active with a dead DB", which would only
-    # make every login fail while blocking the same writes.)
+def test_active_when_unpinned_existing_db_is_unreadable(tmp_path):
+    # Unpinned auth + an existing but unreadable/corrupt DB fails closed to
+    # ACTIVE. Think of the DB file as the building's badge reader: if the reader
+    # is present but malfunctioning, keep the secure door locked rather than
+    # treating the building as public.
     cfg, db = _cfg_with_db(tmp_path)
     with open(db, "w") as fh:
         fh.write("not a sqlite database")
-    assert _auth_is_active(cfg) is False
+    assert _auth_is_active(cfg) is True
 
 
 @pytest.mark.unit

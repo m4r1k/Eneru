@@ -117,6 +117,15 @@ def test_set_password_updates_and_missing_raises(store):
 
 
 @pytest.mark.unit
+def test_set_password_bumps_timestamp_inside_same_second(store, monkeypatch):
+    monkeypatch.setattr(auth.time, "time", lambda: 1000)
+    store.create_user("alice", "pw1")
+    before = store.get_user("alice")["password_changed_at"]
+    store.set_password("alice", "pw2")
+    assert store.get_user("alice")["password_changed_at"] == before + 1
+
+
+@pytest.mark.unit
 def test_delete_user_and_missing_raises(store):
     store.create_user("alice", "pw1")
     store.delete_user("alice")
@@ -128,8 +137,11 @@ def test_delete_user_and_missing_raises(store):
 @pytest.mark.unit
 def test_authenticate_paths(store):
     store.create_user("alice", "pw1")
-    assert store.authenticate("alice", "pw1") == {
-        "username": "alice", "role": "admin", "kind": "user"}
+    principal = store.authenticate("alice", "pw1")
+    assert principal["username"] == "alice"
+    assert principal["role"] == "admin"
+    assert principal["kind"] == "user"
+    assert isinstance(principal["password_changed_at"], int)
     assert store.authenticate("alice", "bad") is None
     assert store.authenticate("ghost", "pw1") is None  # dummy-hash path
 

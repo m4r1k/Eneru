@@ -12,6 +12,7 @@ Required capabilities are derived from config. Achievability depends on:
   HEALTHY (or UNKNOWN — probes treated as advisory)
 """
 
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -33,6 +34,7 @@ from eneru.status import (
     live_remote_health,
     query_events,
     query_history,
+    redundancy_group_statuses,
 )
 
 
@@ -63,6 +65,18 @@ def _failed_snapshot():
     snap.connection_state = "FAILED"
     snap.last_update_time = 0
     return snap
+
+
+def _health_snapshot(*, status="OL", trigger_active=False):
+    state = MonitorState()
+    state.latest_status = status
+    state.latest_battery_charge = "100"
+    state.latest_runtime = "3600"
+    state.latest_update_time = time.time()
+    state.connection_state = "OK"
+    state.trigger_active = trigger_active
+    state.trigger_reason = "test trigger" if trigger_active else ""
+    return state.snapshot()
 
 
 def _bare_metal_config():
@@ -202,6 +216,21 @@ class TestReadinessNativeInstall:
         assert any("nut_polling" in r for r in payload["reasons"])
 
     @pytest.mark.unit
+    def test_not_ready_when_source_config_missing_reports_no_config(self):
+        monitor = MagicMock()
+        monitor.config = _bare_metal_config()
+        monitor.state.snapshot.return_value = _ok_snapshot()
+        source = MagicMock()
+        source.config = None
+        source._monitors = [monitor]
+
+        payload = readiness(source)
+
+        assert payload["ready"] is False
+        assert payload["reason"] == "no config"
+        assert payload["ups"][0]["name"] == "UPS@host"
+
+    @pytest.mark.unit
     def test_not_ready_when_local_vm_configured_but_virsh_missing(self):
         config = Config(
             ups_groups=[UPSGroupConfig(
@@ -216,6 +245,46 @@ class TestReadinessNativeInstall:
                    return_value="systemd service"), \
              patch("eneru.status.command_exists", return_value=False):
             payload = readiness(source)
+        assert payload["ready"] is False
+        assert any("local_vm_teardown" in r for r in payload["reasons"])
+
+    @pytest.mark.unit
+    def test_coordinator_scores_full_config_not_last_monitor_only(self):
+        full_config = Config(
+            ups_groups=[
+                UPSGroupConfig(
+                    ups=UPSConfig(name="UPS-A@host"),
+                    is_local=True,
+                    virtual_machines=VMConfig(enabled=True),
+                ),
+                UPSGroupConfig(
+                    ups=UPSConfig(name="UPS-B@host"),
+                    is_local=False,
+                ),
+            ],
+            local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
+        )
+        monitor_a = MagicMock()
+        monitor_a.config = Config(
+            ups_groups=[full_config.ups_groups[0]],
+            local_shutdown=full_config.local_shutdown,
+        )
+        monitor_a.state.snapshot.return_value = _ok_snapshot()
+        monitor_b = MagicMock()
+        monitor_b.config = Config(
+            ups_groups=[full_config.ups_groups[1]],
+            local_shutdown=full_config.local_shutdown,
+        )
+        monitor_b.state.snapshot.return_value = _ok_snapshot()
+        source = MagicMock()
+        source.config = full_config
+        source._monitors = [monitor_a, monitor_b]
+
+        with patch("eneru.status._runtime_context_label",
+                   return_value="systemd service"), \
+             patch("eneru.status.command_exists", return_value=False):
+            payload = readiness(source)
+
         assert payload["ready"] is False
         assert any("local_vm_teardown" in r for r in payload["reasons"])
         vm_cap = next(
@@ -307,6 +376,73 @@ class TestReadinessNativeInstall:
         assert achievable is False
         assert "invalid local shutdown command" in reason
         exists.assert_not_called()
+
+
+class TestRedundancyGroupStatus:
+    """API/dashboard redundancy rollups must mirror evaluator quorum policy."""
+
+    @pytest.mark.unit
+    def test_healthy_count_uses_effective_group_health(self):
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS-A@host")),
+                UPSGroupConfig(ups=UPSConfig(name="UPS-B@host")),
+            ],
+            redundancy_groups=[
+                RedundancyGroupConfig(
+                    name="rack",
+                    ups_sources=["UPS-A@host", "UPS-B@host"],
+                    min_healthy=2,
+                    degraded_counts_as="healthy",
+                    unknown_counts_as="critical",
+                ),
+            ],
+        )
+        monitor_a = MagicMock()
+        monitor_a.config = Config(ups_groups=[config.ups_groups[0]])
+        monitor_a.state.snapshot.return_value = _health_snapshot(status="OB DISCHRG")
+        monitor_b = MagicMock()
+        monitor_b.config = Config(ups_groups=[config.ups_groups[1]])
+        monitor_b.state.snapshot.return_value = _health_snapshot(status="OL")
+        source = MagicMock()
+        source._monitors = [monitor_a, monitor_b]
+        source._redundancy_remote_health_managers = []
+
+        rows = redundancy_group_statuses(source, config)
+
+        assert rows[0]["healthyCount"] == 2
+        assert rows[0]["quorumLost"] is False
+        assert rows[0]["members"][0]["health"] == "degraded"
+        assert rows[0]["members"][0]["effectiveHealth"] == "healthy"
+
+    @pytest.mark.unit
+    def test_quorum_lost_honors_live_evaluator_cold_start_hold(self):
+        group = RedundancyGroupConfig(
+            name="rack",
+            ups_sources=["UPS-A@host"],
+            min_healthy=1,
+            unknown_counts_as="critical",
+        )
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS-A@host"))],
+            redundancy_groups=[group],
+        )
+        monitor = MagicMock()
+        monitor.config = Config(ups_groups=[config.ups_groups[0]])
+        monitor.state.snapshot.return_value = MonitorState().snapshot()
+        evaluator = MagicMock()
+        evaluator._group = group
+        evaluator.cold_start_hold_active.return_value = True
+        source = MagicMock()
+        source._monitors = [monitor]
+        source._redundancy_remote_health_managers = []
+        source._evaluator_threads = [evaluator]
+
+        rows = redundancy_group_statuses(source, config)
+
+        assert rows[0]["healthyCount"] == 0
+        assert rows[0]["quorumLost"] is False
+        assert rows[0]["quorumDeferred"] is True
 
 
 class TestReadinessContainerWithLoopback:

@@ -124,7 +124,7 @@ api:
   # one user, auth turns on automatically (no restart) — so `eneru user create`
   # then sign in "just works". An explicit value (true OR false) always wins.
   auth:
-    enabled: false
+    # enabled: false
     # Tiered reads: when false (default), read endpoints stay open even with
     # auth on (so Prometheus keeps scraping without a token); writes always
     # require a credential. Set true to also require auth for reads.
@@ -490,16 +490,16 @@ remote_servers:
   #   host: 127.0.0.1
   #   user: root
   #   shutdown_command: "shutdown -h now"
-  #   shutdown_order: 999
   #
   # To use the default root loopback path, append id_loopback.pub to
   # /root/.ssh/authorized_keys on the host with no forced command. Do NOT use
   # authorized_keys command="...": sshd would replace Eneru's identity probe
   # and generated shutdown actions with that one forced command.
   #
-  # Write an explicit loopback only when you need to override synthesis. The
-  # loopback shutdown_order must be greater than every other enabled remote in
-  # the same UPS group, because the host must shut down last.
+  # Write an explicit loopback only when you need to override synthesis. Do not
+  # set shutdown_order on loopback delegates: Eneru ignores it and always runs
+  # loopback local actions before regular remotes, then loopback host poweroff
+  # after regular remotes.
   # - name: "host-loopback"
   #   enabled: true
   #   host: "127.0.0.1"
@@ -512,7 +512,6 @@ remote_servers:
   #   # host_identity_command: "cat /etc/machine-id"
   #   # expected_host_identity: auto-populated from /etc/machine-id
   #   shutdown_command: "shutdown -h now"
-  #   shutdown_order: 999
   #
   # Non-root loopback hardening plan B: create a dedicated host user with
   # NOPASSWD sudo for shutdown, virsh, docker, podman, umount, and sync, then
@@ -527,7 +526,6 @@ remote_servers:
   #   use_sudo: true
   #   ssh_key_path: "/var/lib/eneru/ssh/id_loopback"
   #   shutdown_command: "shutdown -h now"
-  #   shutdown_order: 999
   #
   # Leave pre_shutdown_commands unset on loopback entries. Eneru generates the
   # VM, container, compose, rootless Podman, sync, and unmount actions from the

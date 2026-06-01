@@ -250,13 +250,16 @@ class AuthStore:
 
     def set_password(self, username: str, password: str) -> None:
         """Reset a user's password. Raises :class:`UserNotFoundError` if absent."""
-        now = int(time.time())
         pw_hash = hash_password(password)
         with self._session() as conn:
+            # Like moving a one-way turnstile: compute the next marker inside
+            # the UPDATE so concurrent password resets cannot both reuse the
+            # same password_changed_at value and leave an old session valid.
             cur = conn.execute(
-                "UPDATE users SET password_hash = ?, password_changed_at = ? "
+                "UPDATE users SET password_hash = ?, "
+                "password_changed_at = max(?, password_changed_at + 1) "
                 "WHERE username = ?",
-                (pw_hash, now, username),
+                (pw_hash, int(time.time()), username),
             )
             if cur.rowcount == 0:
                 raise UserNotFoundError(f"user {username!r} not found")
@@ -299,7 +302,8 @@ class AuthStore:
         """
         with self._session() as conn:
             row = conn.execute(
-                "SELECT username, password_hash, role FROM users WHERE username = ?",
+                "SELECT username, password_hash, role, password_changed_at "
+                "FROM users WHERE username = ?",
                 (username,),
             ).fetchone()
         if row is None:
@@ -307,7 +311,12 @@ class AuthStore:
             return None
         if not verify_password(password, row["password_hash"]):
             return None
-        return {"username": row["username"], "role": row["role"], "kind": "user"}
+        return {
+            "username": row["username"],
+            "role": row["role"],
+            "password_changed_at": row["password_changed_at"],
+            "kind": "user",
+        }
 
     # ----- api keys -----
 
