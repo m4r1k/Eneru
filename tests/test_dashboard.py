@@ -189,6 +189,10 @@ def test_dashboard_has_drilldown_and_theme_surfaces(minimal_config):
     # Deleted-user / expired session: the client signs out when it holds a token
     # but /config returns the sanitized (anonymous) view.
     assert 'detail === "sanitized"' in js
+    assert "clearAuthState" in js
+    assert 'path !== "/api/v1/auth/login"' in js
+    assert "selectedEvents = new Set()" in js
+    assert 'document.getElementById("control-section")' in js
 
 
 @pytest.mark.unit

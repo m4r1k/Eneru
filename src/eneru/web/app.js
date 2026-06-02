@@ -62,7 +62,7 @@ async function api(path, opts) {
     // instead of an unhandled rejection that silently freezes the poll loop.
     return { ok: false, status: 0, data: null };
   }
-  if (res.status === 401) { setToken(""); refreshAuthUI(); }
+  if (res.status === 401 && path !== "/api/v1/auth/login") clearAuthState();
   let data = null;
   try { data = await res.json(); } catch (_e) { /* non-JSON (static) */ }
   return { ok: res.ok, status: res.status, data };
@@ -731,7 +731,7 @@ async function setVariable(ups, variable, value) {
 // ----- auth UI -----
 
 function refreshAuthUI() {
-  const authed = !!token();
+  const authed = !!token() && authEnabled;
   // Hide Sign-in when already signed in OR when the server has auth disabled
   // (login would just 404 with "Authentication is disabled").
   document.getElementById("loginBtn").hidden = authed || !authEnabled;
@@ -739,6 +739,19 @@ function refreshAuthUI() {
   const who = document.getElementById("who");
   who.hidden = !authed;
   if (authed) who.textContent = "Signed in";
+  else who.textContent = "";
+}
+
+function clearAuthState() {
+  setToken("");
+  selectedEvents = new Set();
+  _controlBuiltKey = null;
+  const control = document.getElementById("control-section");
+  if (control) control.hidden = true;
+  const panel = document.getElementById("control-panel");
+  if (panel) panel.replaceChildren();
+  refreshAuthUI();
+  applyEventFilters();
 }
 
 // Learn whether auth is enabled server-side. This route stays open even when
@@ -775,7 +788,7 @@ async function doLogin(ev) {
 
 async function doLogout() {
   await api("/api/v1/auth/logout", { method: "POST" });
-  setToken(""); selectedEvents = new Set(); refreshAuthUI(); refresh();
+  clearAuthState(); refresh();
 }
 
 // ----- polling -----
@@ -808,6 +821,9 @@ async function refresh() {
     api("/api/v1/auth/state"), api("/api/v1/config"), api("/api/v1/remote-health"),
   ]);
   authEnabled = !!(authState.ok && authState.data && authState.data.enabled);
+  if (!authEnabled && token()) {
+    clearAuthState();
+  }
   if (cfg.ok && cfg.data) {
     cfgSnapshot = cfg.data;
     // If we hold a token but the server treats us as anonymous (sanitized
@@ -815,7 +831,7 @@ async function refresh() {
     // deleted. Reads stay open (no 401 to trip the api() handler), so detect it
     // here and sign out locally instead of showing a stale "Signed in".
     if (token() && cfg.data.detail === "sanitized") {
-      setToken(""); selectedEvents = new Set();
+      clearAuthState();
     }
     refreshAuthUI();
   }
