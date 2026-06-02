@@ -170,14 +170,14 @@ class AuthStore:
         # store must be willing to create its parent dir itself (mirrors stats).
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
-        conn.execute("PRAGMA busy_timeout = 2000")
-        if not self._schema_ready:
-            self._ensure_schema(conn)
-            self._schema_ready = True
         try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA busy_timeout = 2000")
+            if not self._schema_ready:
+                self._ensure_schema(conn)
+                self._schema_ready = True
             with conn:
                 yield conn
         finally:
