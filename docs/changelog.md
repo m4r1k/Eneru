@@ -9,233 +9,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-v6.0 is a major release that turns the read-only observability API into an
-interactive product: a browser dashboard, authentication, UPS control, and config
-hot-reload. With authentication left off, the API stays read-only exactly as in
-5.x. The rc11 audit fixes below harden shutdown, auth, resource handling, and
-CI coverage before release.
+v6.0 turns Eneru from a shutdown daemon with observability into an operator tool
+you can drive from the browser. The API can now serve the dashboard, authenticate
+users and API keys, run allowlisted UPS control actions, delete selected event
+rows, and reload safe config changes without restarting the daemon.
+
+The release also went through two pre-release audit rounds. The first audit
+focused on the shutdown path: like checking that a fire door still opens after
+you stack boxes beside it, it verified that config mistakes, slow drains, and
+thread races could not block the final host poweroff. The second audit focused on
+the new interactive surface: auth fail-closed behavior, dashboard state,
+SQLite/resource handling, package contents, and CI/E2E coverage. The fixes from
+both audits are included below.
 
 ### Added
 
-- **Browser dashboard**, served by the embedded API whenever it is enabled — no
-  extra service, no build step, no third-party JavaScript. Live UPS status cards
-  that open a detail panel (status, power quality, configuration, redundancy
-  membership, remote health), a redundancy healthy/required rollup, an
-  on-battery/shutdown banner, SVG history graphs with a selectable range
-  (1 hour to 1 year, or All), an event timeline with filters, wide-range paging,
-  and (when signed in) selectable deletion, a UPS control panel, and a
-  **Light / Dark / System** theme.
-- **API authentication** (opt-in, tiered). Local users and API keys — bcrypt
-  password hashes, SHA-256 key digests — in a dedicated global SQLite database,
-  managed by `eneru user` and `eneru apikey`. Read endpoints stay open (Prometheus
-  keeps scraping) unless `api.auth.require_for_reads`; every write requires a
-  credential. Clients send a bearer session token or an API key — no cookies, so
-  no CSRF. Auth activates automatically once a user exists (no restart needed); an
-  explicit `api.auth.enabled` always wins.
-- **UPS control via NUT** (`nut_control`): authenticated, allowlisted instant
-  commands and writable variables, wrapping `upscmd`/`upsrw` (no new dependency).
-  Fail-closed — control cannot be enabled while authentication is off.
-- **Event management API.** Events carry a stable, never-reused `id` (stats schema
-  v5); `/api/v1/events` supports wide-range `from`/`to` queries and source-
-  qualified `(ts, source, id)` cursor paging, and an authenticated
-  `DELETE /api/v1/ups/{name}/events` removes
-  selected rows. Existing databases migrate automatically on first start.
-- **Config hot-reload** without restarting the daemon — `systemctl reload eneru`,
-  `SIGHUP` (`docker kill -s HUP`), or an authenticated `POST /api/v1/config/reload`.
-  Safe changes apply live (trigger thresholds, `nut_control`, notifications, MQTT,
-  remote health, Prometheus, stats retention); everything else is reported as
-  restart-required. A bad config never takes the daemon down — it keeps running on
-  the previous configuration and reports the error.
-- **`[auth]` packaging extra** (bcrypt): a hard dependency on the deb package,
-  bundled in the container image, and a soft recommendation on RPM.
+- **Browser dashboard.** The embedded API now serves a no-build, no-third-party
+  JavaScript dashboard when `api.enabled` is on. It includes live UPS cards,
+  drill-down panels, redundancy rollups, a shutdown banner, SVG history graphs,
+  event filters with wide-range paging, signed-in event deletion, UPS control,
+  and Light / Dark / System themes.
+- **Tiered API authentication.** Local users and API keys live in a dedicated
+  SQLite auth DB. User passwords are bcrypt hashes; API keys are stored as
+  SHA-256 digests. Manage them with `eneru user ...` and `eneru apikey ...`.
+  Reads stay open by default so Prometheus and status clients keep working;
+  `api.auth.require_for_reads: true` gates reads too. Every write path requires
+  auth, and UPS control cannot be enabled while auth is off.
+- **New API endpoints and write paths.** Added `GET /api/v1/auth/state`,
+  `POST /api/v1/auth/login`, `POST /api/v1/auth/logout`,
+  `POST /api/v1/config/reload`, `GET /api/v1/ups/{name}/commands`,
+  `POST /api/v1/ups/{name}/command`, `GET /api/v1/ups/{name}/variables`,
+  `PUT /api/v1/ups/{name}/variables/{var}`, and
+  `DELETE /api/v1/ups/{name}/events`.
+- **UPS control via NUT.** `nut_control` wraps the existing `upscmd` and `upsrw`
+  tools for allowlisted instant commands and writable variables. Passwords are
+  answered through a pseudo-terminal instead of being placed on argv.
+- **Event management.** Events now have stable, never-reused IDs. `/api/v1/events`
+  supports `from`/`to` range filters and source-qualified cursor paging, and the
+  dashboard can delete selected rows while preserving rows that the server did
+  not confirm as deleted.
+- **Config hot-reload.** `systemctl reload eneru`, `SIGHUP`, `docker kill -s HUP`,
+  and authenticated `POST /api/v1/config/reload` can apply safe changes live:
+  trigger thresholds, `nut_control`, notifications, MQTT, remote health,
+  Prometheus, and stats retention. Unsafe changes are reported as
+  restart-required. A bad reload keeps the previous config running.
+- **Auth packaging.** Added the `auth` extra for bcrypt. Debian packages depend
+  on `python3-bcrypt`, the OCI image bundles it, and RPM recommends it because
+  EL package availability varies.
 
 ### Removed
 
 - **NUT auto-discovery**, previously listed for 6.0, was dropped: it duplicates
   `nut-scanner` and does not fit Eneru's config-first model.
 
-### Fixed (rc11 — audit follow-through)
+### Fixed
 
-rc11 closes the remaining confirmed findings from the whole-repository
-pre-release audit after the Critical/High tranche was already in PR review.
+- **Shutdown audit hardening.** A group can no longer abort host poweroff by
+  self-joining its own monitor thread during multi-UPS drain. Local drain phases
+  are best-effort, bounded filesystem sync prevents a hung mount from wedging
+  the sequence, remote pre-shutdown commands cannot spend the final poweroff
+  budget, and SIGTERM/SIGINT now waits a bounded, config-derived deadline when a
+  shutdown is already in flight.
+- **Config validation before outage-time crashes.** Shutdown thresholds,
+  depletion settings, extended-time settings, drain timeouts, duplicate UPS
+  names, unknown per-UPS/per-redundancy keys, and empty `local_shutdown.command`
+  values are now rejected at load instead of failing during an outage.
+- **Redundancy and failsafe behavior.** Redundancy groups wait for present
+  members to publish an initial snapshot before making a cold-start quorum
+  decision. On-battery hard NUT failures are debounced by
+  `max_stale_data_tolerance`, and the on-battery failsafe runs once per outage
+  instead of repeating every poll in dry-run, delegated, or non-halting configs.
+- **T3 depletion trigger at slow poll intervals.** The depletion-rate trigger no
+  longer needs a fixed 30 samples. It now derives the needed sample count from
+  `depletion.window / check_interval`, with a floor of two samples, so slower
+  polling does not silently disable the fast-drain trigger.
+- **API/auth hardening.** Request bodies are size-limited and read with a socket
+  deadline. Dynamic auth fails closed when an existing auth DB cannot be
+  inspected. Password resets and user deletion invalidate active user sessions.
+  Write/control paths re-check the account strictly and fail closed during auth
+  DB errors; reads stay lenient unless `require_for_reads` is enabled.
+- **Dashboard correctness.** Redundancy cards use server-computed quorum health,
+  advisory member triggers do not show a false shutdown-imminent banner while
+  quorum is intact, event filtering and paging are source-exact, control panel
+  rebuilds are cached without losing half-typed variable values, and auth state
+  cleanup now clears stale tokens, event selections, and UPS-control UI together.
+- **SQLite and deferred notifications.** Stats open failures no longer leave a
+  half-open connection, failed flushes requeue samples, readonly opens return
+  `None` on SQLite failures, `_safe_alter()` only swallows duplicate-column
+  errors, and monitor/coordinator shutdown closes stats handles. Deferred stop
+  notification delivery now claims rows as `delivering` until Apprise succeeds,
+  with stale-claim recovery on daemon startup.
+- **Packaging, docs, and CI coverage.** Dashboard assets and new Python modules
+  are included in both pip package data and nfpm package contents. Requirements
+  include MQTT/auth extras where needed. E2E coverage exercises auth, UPS
+  control, event deletion, and config reload against the Docker Compose NUT/SSH
+  environment. The Single UPS control E2E uses the dummy NUT server's control
+  credential, and PTY-backed `upscmd`/`upsrw` failures preserve NUT's response
+  text for diagnostics.
 
-- **API/auth hardening:** request-body reads now have a socket timeout, dynamic
-  auth fails closed when an existing auth DB cannot be inspected, `/api/v1/auth/state`
-  stays open so the dashboard can show login even when reads require auth, and
-  password resets invalidate existing user sessions.
-- **Dashboard correctness:** redundancy cards use server-computed quorum health,
-  advisory member triggers no longer show a false shutdown-imminent banner while
-  quorum is intact, event source filtering is exact, event paging sorts by
-  `(ts, source, id)`, partial event-delete responses no longer remove unconfirmed
-  rows, and the battery bar no longer relies on inline style mutation under CSP.
-- **SQLite/resource safety:** stats open failures no longer leave a half-open
-  connection, failed flushes requeue their samples, `_safe_alter()` only swallows
-  duplicate-column migration errors, readonly opens return `None` on SQLite
-  failures, monitor/coordinator shutdown closes stats handles, and deferred
-  stop-notification delivery claims rows as `delivering` rather than `sent`
-  until Apprise succeeds. A v6 stats migration timestamps those claims so daemon
-  startup recovers stale delivery work without stealing a live one-shot helper's
-  active send; recovery failures are surfaced during `open()` instead of leaving
-  delivery rows stuck silently.
-- **Packaging/docs drift:** bumped the pre-release version to `6.0.0-rc11`,
-  listed MQTT in requirements files, added package-data checks for dashboard and
-  completion resources, removed stale loopback `shutdown_order: 999` examples,
-  and updated API/testing docs to match the read-gated auth behavior and audit
-  coverage.
-- **CI/test diagnostics:** the Single UPS control E2E now uses the dummy NUT
-  server's control credential, and PTY-backed `upscmd`/`upsrw` failures preserve
-  NUT's response text instead of collapsing to a generic exit code. The NUT
-  control PTY wrapper now also validates that only fixed `upscmd`/`upsrw` argv
-  shapes reach `subprocess.Popen`, and rejects username-only control attempts
-  before they can hang waiting for a password prompt.
+### Notes For Operators
 
-### Fixed (rc10 — pre-release audit hardening)
-
-A structured whole-repository audit (see `docs/testing.md` → "Pre-release code
-review") hardened the shutdown decision path. The new auth/API/control surface
-held up; the residual risk was a config typo or a slow subsystem crashing the
-daemon *before* the host poweroff. Critical fixes:
-
-- **Multi-UPS drain no longer self-joins its own thread.** With
-  `drain_on_local_shutdown: true`, `_drain_all_groups` ran on the firing group's
-  monitor thread and tried to `join()` that same thread, raising `RuntimeError`
-  and aborting the sequence before the host poweroff — a missed local shutdown.
-  It now skips the current thread, so peers drain and the host still powers off.
-- **Shutdown-trigger thresholds are validated at load.** A non-numeric YAML
-  scalar (e.g. a quoted `"20"`, which templating tools emit routinely) survived
-  parse and raised `TypeError` on the first on-battery poll, killing the monitor
-  loop exactly when a shutdown was due. `low_battery_threshold`,
-  `critical_runtime_threshold`, `depletion.window/critical_rate/grace_period`,
-  and `extended_time.threshold` are now type/range-checked for every UPS and
-  redundancy group, so a bad value is a startup error, not a mid-outage crash.
-- **Empty/null `local_shutdown.command` is rejected at load.** `command:` with
-  no value parsed to `None` (and `""` yielded `run_command([])`), silently
-  skipping the host poweroff after VMs/containers/remotes were already drained.
-  It is now a config error when local shutdown is enabled, with a defensive
-  guard at both call sites.
-
-High fixes:
-
-- **Redundancy cold-start no longer drops a powered rack.** The evaluator's
-  time-based startup grace alone could fire a group shutdown when a member's NUT
-  server was merely slow to publish its first snapshot (UNKNOWN ->
-  unknown_counts_as=critical). It now holds the quorum decision until every
-  present member has reported at least once, bounded by a readiness deadline
-  derived from the per-member connection-loss grace; a member with no monitor at
-  all still counts immediately, and a genuinely dead UPS still fires once the
-  window passes.
-- **On-battery FAILSAFE no longer re-fires every poll.** In non-halting configs
-  (local shutdown disabled, dry-run, or loopback-delegated) the failsafe cleared
-  its flag and re-ran the entire remote/VM/container sequence on each failed
-  poll. A per-outage latch now runs it once per connection-loss event; it
-  re-arms on the next successful poll.
-- **A single transient NUT failure on battery no longer shuts the host down.**
-  Hard poll failures (connection refused, or a 30s upsc timeout) are now
-  debounced by `max_stale_data_tolerance` the same way stale data already was,
-  so a momentary blip can't drop a host riding out a survivable dip. Set
-  `max_stale_data_tolerance: 1` to restore instant fail-closed FSB. Off-battery
-  grace handling is unchanged.
-- **Drain phases can't abort the host poweroff.** Each local drain phase (VMs,
-  containers, sync, unmount) is wrapped so an exception is logged and the
-  sequence still reaches the poweroff -- a wedged libvirt or a bad value no
-  longer leaves the host running on a draining battery.
-- **Bounded filesystem sync.** `os.sync()` (which blocks until every mount
-  flushes) is replaced by a `sync` subprocess with a wall-clock timeout, so a
-  hung NFS/CIFS mount can't wedge the sequence before poweroff; the kernel
-  re-syncs at halt regardless.
-- **Drain-phase timeouts validated at load.** `virtual_machines.max_wait`,
-  `containers.stop_timeout`, and `filesystems.unmount.timeout` are now
-  type/range-checked (a quoted "30s" or a null value previously crashed the
-  phase or made `umount` hang forever); `run_command` also treats a `None`
-  timeout as the default bound.
-- **Remote poweroff can't be starved by a slow pre-shutdown phase.** The final
-  shutdown command now reserves its own budget before pre-shutdown commands
-  spend the phase deadline, and is skipped only if the *full* deadline is blown.
-- **SIGTERM/SIGINT during an in-flight shutdown** now waits a bounded,
-  config-derived deadline for the sequence (incl. the host poweroff) to finish
-  instead of abandoning it after 5s. **Duplicate `ups.name`** and **unknown
-  per-UPS / per-redundancy keys** (e.g. a misspelled `is_local`) are now rejected
-  at load.
-- **Depletion-rate trigger (T3) stays armed at slow poll intervals.** The
-  30-sample floor is now derived from `depletion.window / check_interval`, so a
-  larger `check_interval` no longer silently disables the fast-drain trigger.
-
-Medium fixes:
-
-- **No double local poweroff.** The coordinator's local-shutdown guard is now
-  held "in flight" while the committed sequence runs outside the lock, so an
-  unrelated group's power-restored event can't re-arm it mid-sequence and admit
-  a second poweroff.
-- **Deleted admin can't keep control through a DB blip.** Write/control requests
-  now re-check the session's account strictly and fail closed if the auth DB is
-  unavailable; reads stay lenient and the token survives for when the DB returns.
-- **Stats aggregation no longer corrupts the bucket straddling the retention
-  cutoff.** Purge cutoffs are aligned down to the next-tier bucket boundary so
-  only whole buckets are deleted.
-- **Graceful-exit notification can't block shutdown.** The eager Apprise send
-  from the signal handler runs on a short-lived thread with a hard timeout.
-- **Config safety warnings/validation.** A multi-UPS config with no `is_local`
-  group but `local_shutdown` enabled + `trigger_on: any` now warns; `local_shutdown`
-  gets the same unknown-key sweep as other safety sections.
-- **Health robustness.** Voltage auto-detect only samples on line power (a
-  startup brownout can't latch a depressed nominal); a non-positive NUT nominal
-  falls back to the default instead of flagging everything over-voltage; a
-  worsening battery anomaly no longer resets its own 3-poll confirmation; and the
-  depletion-rate input is clamped to [0, 100] against flaky firmware readings.
-- **Drain phases run best-effort** (shared with the High fix) so a failure can't
-  skip the host poweroff.
-- The dashboard no longer offers a `redundancy:<name>` event-source filter that
-  could never return rows (redundancy events aren't persisted to a stats DB).
-
-Low fixes:
-
-- Config validation now warns when `on_battery_stabilization_delay >=
-  critical_runtime_threshold` (the stabilization window would suppress the
-  runtime trigger for the whole remaining runtime).
-- A SIGTERM/SIGINT re-entrancy guard stops a second signal re-running teardown.
-- The VM-shutdown wait loop bounds each `virsh list` poll so a wedged libvirtd
-  can't blow the `max_wait` budget.
-- A FAILED remote server is no longer re-logged as "degraded" on every poll.
-- `_SAFE_NUT_VALUE` is anchored with `\Z` (a trailing newline no longer slips
-  through the upsrw value filter).
-- `StatsStore.query_range` validates the metric against an internal allowlist
-  before it reaches the interpolated SQL column position (defense-in-depth).
-- Derived `powerQuality` thresholds (nominal / warning band) report `null`
-  before the first poll instead of dataclass defaults that look like real data.
-- The dashboard survives connection loss (fetch errors show a "Connection lost"
-  banner instead of freezing the poll loop) and no longer rebuilds the control
-  panel every poll (which wiped half-typed values and re-fetched per UPS).
-- CLI: `user create` / `passwd` validate the username/role before prompting for
-  a password; `--password-stdin` keeps a password that legitimately ends in a
-  bare carriage return.
-- The hermetic notifications test no longer requires the optional `apprise`
-  extra to be installed; several brittle tests that re-implemented loop/guard
-  logic now drive the real code paths.
-- Docs: README trigger count matches its list; the configuration.md CLI table
-  lists the `user`/`apikey`/`shutdown`/`remote` subcommands.
-
-Evaluated and intentionally left as-is (documented): the per-transition voltage
-event log (a deliberate forensic record, bounded by retention; notifications are
-already hysteresis-gated), the per-poll battery-history file write (a forensic
-record; cross-restart read-back is entangled with the on-battery deque reset),
-the `upsrw` SET timeout (operator-tunable via `nut_control.timeout`), and a
-couple of niche multi-daemon / degenerate-config edges.
-
-Nits:
-
-- `X-Content-Type-Options: nosniff` is now sent on every API response, not just
-  the dashboard HTML.
-- Passwords containing a NUL byte are rejected at creation (guards against older
-  bcrypt builds that truncated at NUL).
-- `nut_control` allowlist entries are validated against the NUT name charset at
-  config load.
-- `StatsStore.from_connection` no longer calls `.close()` on a connection that
-  was never opened (dead code relying on a swallowed exception).
-- The slow-SSH diagnostic no longer records two `REMOTE_SSH_SLOW_RESPONSE` rows
-  in a single cycle when a probe crosses both the log and the sustained-notify
-  thresholds at once.
-- Changelog wording: event paging uses a source-qualified `(ts, source, id)`
-  cursor (was written as `(ts, id)`).
+- With auth disabled, the API remains read-only as in 5.x. The dashboard loads,
+  but sign-in and write controls stay hidden.
+- To enable dashboard login or UPS control, set `api.auth.enabled: true`, create
+  a user with `eneru user create`, and configure `nut_control` allowlists.
+- Existing stats databases migrate automatically on first start. As always, take
+  a backup before upgrading production monitoring hosts.
 
 ---
 
@@ -371,7 +250,7 @@ Nits:
   `/var/lib/eneru` (e.g. `/srv/eneru/state/`) and `chown 10001:10001`
   the files before starting the container. Skip if a clean history
   is acceptable. See
-  [docs/migrate-to-container.md Step 3b](migrate-to-container.md#step-3b-carry-forward-the-existing-stats-db-optional).
+  [Migrate to container](migrate-to-container.md).
 - To remove the deb/rpm package after the container is healthy, copy
   `/etc/ups-monitor/config.yaml` to `/srv/eneru/config.yaml` and point
   the container's bind mount at the copy. Decouples the daemon's

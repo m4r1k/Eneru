@@ -15,11 +15,12 @@
   <img src="https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-diagram.svg" alt="Eneru Architecture" width="600">
 </p>
 
-A Python-based UPS monitoring daemon for [Network UPS Tools (NUT)](https://networkupstools.org/). Monitors one or more UPSes, orchestrates shutdown of VMs, containers, and remote servers during power events, and exposes read-only API, Prometheus, MQTT, and Grafana observability.
+A Python-based UPS monitoring daemon for [Network UPS Tools (NUT)](https://networkupstools.org/). Monitors one or more UPSes, orchestrates shutdown of VMs, containers, and remote servers during power events, and exposes a browser dashboard, authenticated API write paths, UPS control, Prometheus, MQTT, and Grafana observability.
 
 [Documentation](https://eneru.readthedocs.io/) •
 [Getting Started](https://eneru.readthedocs.io/latest/getting-started/) •
 [Configuration](https://eneru.readthedocs.io/latest/configuration/) •
+[Dashboard](https://eneru.readthedocs.io/latest/dashboard/) •
 [Changelog](https://eneru.readthedocs.io/latest/changelog/) •
 [Roadmap](https://eneru.readthedocs.io/latest/roadmap/)
 
@@ -41,13 +42,13 @@ Most UPS shutdown tools handle one machine. If you have more than one, things ge
 | Multiple servers need coordinated shutdown | ✅ Orchestrated multi-server shutdown via SSH |
 | VMs and containers need graceful stop | ✅ Libvirt VM and Docker/Podman container handling |
 | Network mounts hang during power loss | ✅ Timeout-protected unmounting |
-| No visibility during power events | ✅ Real-time TUI dashboard + notifications via 100+ services |
+| No visibility during power events | ✅ Browser dashboard, TUI dashboard, and notifications via 100+ services |
 | Different systems need different commands | ✅ Per-server custom shutdown commands |
 | Hypervisors need VM shutdown before host | ✅ Pre-shutdown actions (Proxmox, ESXi, XCP-ng, libvirt) |
 | Battery estimates are unreliable | ✅ Multi-vector shutdown triggers |
 | Network down during outage | ✅ Non-blocking notifications with persistent retry |
 | Firmware recalibrates battery silently | ✅ Battery anomaly detection and alerts |
-| Need power-quality telemetry | ✅ API, Prometheus, MQTT, Grafana, JSON logs, and SQLite events |
+| Need power-quality telemetry | ✅ Browser dashboard, API, Prometheus, MQTT, Grafana, JSON logs, and SQLite events |
 
 ---
 
@@ -60,6 +61,7 @@ Eneru sits on top of NUT and adds what these tools lack:
 - **Orchestrated multi-resource shutdown**, VMs, compose stacks, containers, remote servers, filesystems, and local system in a coordinated sequence
 - **6 independent shutdown triggers**, including depletion rate (computed from observed battery data, not UPS estimates) and extended time on battery. NUT's 2 triggers miss these failure modes
 - **Multi-UPS coordination**, monitor multiple UPSes with per-group triggers and shutdown policies, each with independent failure handling
+- **Browser dashboard and authenticated control**, live status, event history, event deletion, config reload, and allowlisted NUT `upscmd` / `upsrw` actions from the embedded API
 - **Battery anomaly detection**, catches firmware recalibrations and battery degradation with vendor-specific jitter filtering (APC, CyberPower, Ubiquiti)
 
 See the [full comparison](https://eneru.readthedocs.io/latest/#how-eneru-compares) in the documentation.
@@ -171,13 +173,15 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 ## Features
 
 - Monitor one or more UPSes from a single instance, each with its own shutdown group
+- Browser dashboard served by the embedded API, with authentication, history graphs, event management, and UPS control
 - Real-time TUI dashboard (`eneru monitor`) with color-coded status
 - Shutdown triggers: battery %, runtime, depletion rate, time on battery, FSD flag, and the connection-loss failsafe (six in total)
 - Battery anomaly alerts for unexpected charge drops while on line power, with jitter filtering for APC, CyberPower, and Ubiquiti UniFi UPS units
 - Shuts down VMs, containers, remote servers, filesystems, and the local system in order
 - Notifications to 100+ services (Discord, Slack, Telegram, ntfy, email) via [Apprise](https://github.com/caronc/apprise/wiki)
 - Power quality monitoring: voltage, AVR, bypass, overload
-- Read-only API, Prometheus metrics, outbound MQTT, JSON/syslog logs, and Grafana dashboard
+- API, Prometheus metrics, outbound MQTT, JSON/syslog logs, and Grafana dashboard
+- Config hot-reload by `systemctl reload`, `SIGHUP`, or authenticated API request
 - Official OCI image for both remote-only deployments and full local-host ownership via SSH loopback delegate (v5.5+)
 - Dry-run mode for safe testing
 - Comprehensive test suite across multiple Linux distros, with E2E tests against real NUT, SSH, Docker, and libvirt on every commit
@@ -219,6 +223,9 @@ Full documentation at [eneru.readthedocs.io](https://eneru.readthedocs.io/):
 
 - [Getting Started](https://eneru.readthedocs.io/latest/getting-started/) - installation and basic setup
 - [Configuration](https://eneru.readthedocs.io/latest/configuration/) - full config reference
+- [Dashboard](https://eneru.readthedocs.io/latest/dashboard/) - browser dashboard and event management
+- [Authentication](https://eneru.readthedocs.io/latest/authentication/) - users, API keys, and read gating
+- [NUT Control](https://eneru.readthedocs.io/latest/nut-control/) - authenticated UPS commands and writable variables
 - [Shutdown Triggers](https://eneru.readthedocs.io/latest/triggers/) - how shutdown decisions work
 - [Notifications](https://eneru.readthedocs.io/latest/notifications/) - Discord, Slack, Telegram, etc.
 - [Remote Servers](https://eneru.readthedocs.io/latest/remote-servers/) - SSH setup for NAS and other servers

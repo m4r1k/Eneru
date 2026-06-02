@@ -70,7 +70,7 @@ The **Sign in** button appears whenever auth is enabled — the dashboard re-che
 `/api/v1/config` on every refresh, so it shows up on its own once auth becomes
 active. When auth is off there is nothing to sign into. If a login fails, the
 dashboard shows the server's actual reason. Creating a user with `eneru user
-create` [auto-enables auth](authentication.md#auto-enable-create-a-user-then-just-sign-in)
+create` [auto-enables auth](authentication.md#auto-enable-create-a-user-then-just-sign-in-no-restart)
 **within seconds, no restart**, so signing in works without hand-editing the config.
 
 ## Security
