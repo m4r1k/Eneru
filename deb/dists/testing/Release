@@ -5,13 +5,13 @@ Codename: testing
 Architectures: all
 Components: main
 Description: Eneru UPS Monitor packages (testing)
-Date: Fri, 29 May 2026 21:36:55 +0000
+Date: Tue, 02 Jun 2026 16:22:01 +0000
 MD5Sum:
- 81ea1590f6ba0ecb3d243230fee30256 793 main/binary-all/Packages
- f3bc80cf515c5e2f28fb30bacdf85800 556 main/binary-all/Packages.gz
+ 33bbbdaed081ca3b93fe81e42e2576a4 795 main/binary-all/Packages
+ eccaf84f05c7b6f476ec02b498e378ee 555 main/binary-all/Packages.gz
 SHA1:
- 6a6d90af4011d19347123ac7fb4aaeba1febd4f4 793 main/binary-all/Packages
- f2c266e83ca6ddc7e4521e63a0b7c37e7d37cd78 556 main/binary-all/Packages.gz
+ e9700486dc6690f3cf6207829e717cbf5f3464df 795 main/binary-all/Packages
+ 614bab42eab982f66b6269478968fb2230169b64 555 main/binary-all/Packages.gz
 SHA256:
- 34071d66a1ffda02116c8dce715e09fbfa34b9152ec7fd44089ffaeea7dff6ed 793 main/binary-all/Packages
- 1c13c8e250af106489063eb5f42d37dc1cdcdfd43a39ca3d57ed1570ba2725ff 556 main/binary-all/Packages.gz
+ 3647fea7701da9725cd95bdfc422a2e96add3d0ea2199fc3e9449496c48777f5 795 main/binary-all/Packages
+ 95b3c8b2acd5062aeefc024d19e06622d428dc953a73cb1747f959a393eda1b6 555 main/binary-all/Packages.gz
