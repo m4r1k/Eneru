@@ -1987,29 +1987,21 @@ class ConfigLoader:
                     )
 
         # Sudo guard for ALL remote_servers (loopback and otherwise).
-        # A non-root account is not automatically wrong: NAS appliances often
-        # expose vendor commands (for example synopoweroff) that are valid for
-        # an admin user without sudo. Warn only when Eneru will build privileged
-        # action commands itself, or when the final command is a plain generic
-        # shutdown binary that usually needs sudo on Unix-like hosts.
+        # Think of this as two keys on a keyring. Inline sudo in
+        # shutdown_command unlocks only that final command; it does not unlock
+        # generated pre-shutdown actions that Eneru builds separately from
+        # action templates. Those still need use_sudo: true.
         def _has_generated_remote_actions(srv: RemoteServerConfig) -> bool:
             return any(bool(cmd.action) for cmd in srv.pre_shutdown_commands)
 
-        def _plain_generic_shutdown_command(command: str) -> bool:
+        def _command_invokes_sudo(command: str) -> bool:
             try:
                 parts = shlex.split(command or "")
             except ValueError:
                 return False
             if not parts:
                 return False
-            if Path(parts[0]).name == "sudo":
-                return False
-            binary = Path(parts[0]).name
-            if binary in {"shutdown", "poweroff", "halt", "reboot"}:
-                return True
-            return binary == "systemctl" and len(parts) > 1 and parts[1] in {
-                "poweroff", "halt", "reboot",
-            }
+            return Path(parts[0]).name == "sudo"
 
         def _all_remote_servers():
             for g in config.ups_groups:
@@ -2028,15 +2020,15 @@ class ConfigLoader:
                 and not srv.use_sudo
                 and (
                     _has_generated_remote_actions(srv)
-                    or _plain_generic_shutdown_command(srv.shutdown_command)
+                    or not _command_invokes_sudo(srv.shutdown_command)
                 )
             ):
                 where = f"{owner}/{srv.name or srv.host or '(unnamed)'}"
                 messages.append(
                     f"WARNING: remote_server '{where}' user is {srv.user!r} "
                     "but use_sudo is false. Non-root users typically need "
-                    "use_sudo: true when Eneru generates privileged "
-                    "pre-shutdown actions or sends a plain shutdown command."
+                    "use_sudo: true unless shutdown_command invokes sudo "
+                    "itself and no generated pre-shutdown actions are enabled."
                 )
 
         # --- Redundancy-group validation (Phase 2) ---

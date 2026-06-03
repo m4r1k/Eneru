@@ -272,9 +272,9 @@ class EneruAPIServer:
         )
         self._thread.start()
         self.log_fn(f"📊 API server listening on {addr[0]}:{addr[1]}")
-        # Warn when bound off-loopback without auth: any caller that can reach
-        # the socket can read /api/v1/config. With api.auth enabled, writes are
-        # gated, so the warning softens to a reminder about open read endpoints.
+        # Off-loopback binds still need a trusted network boundary, but auth
+        # disabled is not a write-surface problem in v6.0: write endpoints are
+        # closed, and anonymous /api/v1/config responses are sanitized.
         auth_on = _auth_is_active(self.config)
         if not _is_loopback_bind(self.config.api.bind):
             if auth_on:
@@ -284,9 +284,10 @@ class EneruAPIServer:
                 )
             else:
                 self.log_fn(
-                    f"⚠️ API bound to {addr[0]} with no authentication; enable "
-                    "api.auth or restrict network access before exposing beyond "
-                    "trusted hosts."
+                    f"ℹ️ API bound to {addr[0]} with auth disabled. Write endpoints "
+                    "are disabled, and /api/v1/config returns a sanitized view "
+                    "to anonymous clients; restrict network access before "
+                    "exposing read endpoints beyond trusted hosts."
                 )
         elif not auth_on:
             # Loopback + auth off: the dashboard hides its Sign-in button in this

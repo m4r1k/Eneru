@@ -219,12 +219,11 @@ both audits are included below.
   still fires (it preserves the migration promise), but it re-runs
   in-memory on every container restart and the banner was log noise.
   Behavior is documented in `docs/migrate-to-container.md`.
-- Shortened the non-loopback API security warning to a single line:
-  `API bound to <addr> with no authentication (RBAC planned for
-  v6.0); restrict network access before exposing beyond trusted
-  hosts.` The long enumeration of what `/api/v1/config` exposes was
-  exposition that belonged in the docs, not in the daemon log on
-  every restart.
+- Softened the non-loopback API auth-off log to an info note. With
+  auth disabled in v6.0, write endpoints are disabled and
+  `/api/v1/config` returns the sanitized anonymous view; operators
+  still get a reminder to keep unauthenticated read endpoints on a
+  trusted network.
 - TUI (`eneru tui` / `eneru monitor`) now sees the same legacy-path
   auto-rewrite as the daemon inside a container. `_cmd_monitor` used to
   skip `_prepare_runtime_config`, so the TUI kept reading
