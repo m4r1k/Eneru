@@ -73,6 +73,8 @@ select, input { background: var(--panel-2); color: var(--text); border: 1px soli
 .events { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 .events th, .events td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--line); }
 .events th { color: var(--muted); font-weight: 600; }
+.th-sort { appearance: none; border: 0; background: transparent; color: inherit; font: inherit; font-weight: 600; padding: 0; cursor: pointer; }
+.th-sort:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 button { background: var(--accent); color: var(--on-accent); border: none; border-radius: 6px;
          padding: 0.4rem 0.8rem; font: inherit; font-weight: 600; cursor: pointer; }
 button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }

@@ -166,6 +166,28 @@ def test_dashboard_has_event_delete_surface(minimal_config):
 
 
 @pytest.mark.unit
+def test_dashboard_events_time_header_is_sortable(minimal_config):
+    """The Events Time header should toggle chronological order."""
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+
+    assert 'id="event-sort-time"' in html
+    assert "eventSortDirection" in js
+    assert "toggleEventSort" in js
+
+
+@pytest.mark.unit
+def test_dashboard_remote_health_accepts_uppercase_statuses(minimal_config):
+    """API remote-health status constants are uppercase, e.g. HEALTHY."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+
+    assert "remoteHealthReachable" in js
+    assert 'status === "HEALTHY"' in js
+
+
+@pytest.mark.unit
 def test_dashboard_has_drilldown_and_theme_surfaces(minimal_config):
     # Guard Slice D (drill-down) + Slice E (theme, banner) surfaces.
     html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")

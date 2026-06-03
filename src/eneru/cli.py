@@ -15,6 +15,7 @@ from eneru.multi_ups import MultiUPSCoordinator
 from eneru.notifications import APPRISE_AVAILABLE
 from eneru.redundancy import RedundancyGroupExecutor
 from eneru.remote_health import is_safe_probe_command, run_remote_probe
+from eneru.status import remote_health_for_config
 
 # Optional import for Apprise (needed for test notifications)
 try:
@@ -1158,8 +1159,8 @@ def _format_remote_list_table(rows: list) -> str:
     don't truncate; each column has a minimum that keeps the header
     readable when every row is short.
     """
-    headers = ("NAME", "GROUP", "KIND", "HOST", "ENABLED", "ORDER")
-    minimums = (10, 10, 10, 10, 7, 5)
+    headers = ("NAME", "GROUP", "KIND", "HOST", "ENABLED", "ORDER", "HEALTH")
+    minimums = (10, 10, 10, 10, 7, 5, 7)
     columns = list(zip(*[headers, *rows])) if rows else [(h,) for h in headers]
     widths = [
         max(minimums[i], max(len(str(cell)) for cell in column))
@@ -1179,7 +1180,43 @@ def _format_remote_list_table(rows: list) -> str:
     return "\n".join(lines)
 
 
-def _build_remote_list_rows_for_group(group, group_name: str, kind: str) -> tuple:
+def _remote_health_index(rows: list) -> dict:
+    """Return last-known remote-health status keyed by group/server/host."""
+    out = {}
+    for row in rows or []:
+        group = row.get("group") or ""
+        server = row.get("server") or ""
+        host = row.get("host") or ""
+        status = row.get("status") or "UNKNOWN"
+        if server:
+            out[(group, server)] = status
+        if host:
+            out[(group, host)] = status
+    return out
+
+
+def _remote_health_status_for_server(
+    health_by_key: dict, group, group_name: str, server,
+) -> str:
+    """Return sidecar health for one listed target, or an em dash."""
+    group_candidates = [
+        group_name,
+        getattr(getattr(group, "ups", None), "label", ""),
+        getattr(getattr(group, "ups", None), "name", ""),
+        f"redundancy:{getattr(group, 'name', '')}"
+        if getattr(group, "name", "") else "",
+    ]
+    server_candidates = [server.name or "", server.host or ""]
+    for group_key in group_candidates:
+        for server_key in server_candidates:
+            if group_key and server_key and (group_key, server_key) in health_by_key:
+                return str(health_by_key[(group_key, server_key)])
+    return "—"
+
+
+def _build_remote_list_rows_for_group(
+    group, group_name: str, kind: str, health_by_key: dict = None,
+) -> tuple:
     """Build display rows for one group's remote_servers.
 
     Returns ``(rows, enabled_count)``. ``group_name`` is the value an
@@ -1208,6 +1245,7 @@ def _build_remote_list_rows_for_group(group, group_name: str, kind: str) -> tupl
         id(s): effective
         for effective, s in compute_effective_order(regular_enabled_servers)
     }
+    health_by_key = health_by_key or {}
     rows = []
     for server in group.remote_servers:
         host = f"{server.user}@{server.host}" if server.user else server.host
@@ -1224,6 +1262,7 @@ def _build_remote_list_rows_for_group(group, group_name: str, kind: str) -> tupl
             host,
             "yes" if server.enabled else "no",
             order_text,
+            _remote_health_status_for_server(health_by_key, group, group_name, server),
         ))
     return rows, len(enabled_servers)
 
@@ -1244,19 +1283,22 @@ def _cmd_remote_list(args):
     # shutdown order so the printed sequence matches a real shutdown.
     rows = []
     enabled_count = 0
+    health_by_key = _remote_health_index(
+        remote_health_for_config(config) if config.remote_health.enabled else []
+    )
     for group in config.ups_groups:
         # Use the canonical name when present so the GROUP column is
         # exactly the string `eneru shutdown group --group ...` accepts;
         # fall back to the label only when name is empty.
         group_name = group.ups.name or group.ups.label or "(unnamed)"
         group_rows, group_enabled = _build_remote_list_rows_for_group(
-            group, group_name, "ups",
+            group, group_name, "ups", health_by_key,
         )
         rows.extend(group_rows)
         enabled_count += group_enabled
     for group in config.redundancy_groups:
         group_rows, group_enabled = _build_remote_list_rows_for_group(
-            group, group.name, "redundancy",
+            group, group.name, "redundancy", health_by_key,
         )
         rows.extend(group_rows)
         enabled_count += group_enabled

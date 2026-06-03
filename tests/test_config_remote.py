@@ -155,6 +155,7 @@ remote_servers:
                 "host": "192.168.1.50",
                 "user": "ups",
                 "shutdown_command": "sudo shutdown -h now",
+                "pre_shutdown_commands": [{"action": "sync"}],
             }]
         }
         temp_config_file.write_text(yaml.safe_dump(raw))
@@ -163,6 +164,25 @@ remote_servers:
         messages = ConfigLoader.validate_config(config, raw_data=raw)
 
         assert any("use_sudo: true" in m for m in messages)
+
+    @pytest.mark.unit
+    def test_non_root_custom_shutdown_command_does_not_warn(self, temp_config_file):
+        """Custom vendor commands can be valid for non-root NAS admins."""
+        raw = {
+            "remote_servers": [{
+                "name": "Synology NAS",
+                "enabled": True,
+                "host": "192.168.1.50",
+                "user": "nas-admin",
+                "shutdown_command": "synopoweroff",
+            }]
+        }
+        temp_config_file.write_text(yaml.safe_dump(raw))
+        config = ConfigLoader.load(str(temp_config_file))
+
+        messages = ConfigLoader.validate_config(config, raw_data=raw)
+
+        assert not any("Non-root users typically need use_sudo: true" in m for m in messages)
 
     @pytest.mark.unit
     def test_non_root_with_use_sudo_does_not_warn(self, temp_config_file):

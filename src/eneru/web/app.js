@@ -18,6 +18,7 @@ let cfgSnapshot = null;
 let remoteHealthSnapshot = [];
 let lastUpsRows = [];
 let lastGroups = [];
+let eventSortDirection = "asc";
 
 // ----- theme (light / dark / system) -----
 
@@ -206,6 +207,14 @@ function detailSection(title, rows) {
     [el("h4", { text: title })].concat(rows));
 }
 
+function remoteHealthReachable(row) {
+  const status = String((row && row.status) || "").toUpperCase();
+  return row && (
+    row.healthy === true || row.reachable === true ||
+    status === "HEALTHY" || status === "OK"
+  );
+}
+
 function openDetail(name) {
   detailReturnFocus = document.activeElement;
   openDetailName = name;
@@ -282,8 +291,7 @@ function renderDetail(name) {
   if (rh.length) {
     sections.push(detailSection("Remote health", rh.map((r) => {
       const host = r.server || r.host || "host";
-      const healthy = (r.healthy === true || r.status === "healthy"
-        || r.status === "ok" || r.reachable === true);
+      const healthy = remoteHealthReachable(r);
       return el("div", { class: "row" }, [
         el("span", { text: host }),
         el("span", { class: "badge " + (healthy ? "ok" : "crit"),
@@ -439,7 +447,7 @@ function visibleEvents() {
   const type = document.getElementById("event-type-filter").value;
   const text = document.getElementById("event-text-filter").value.trim().toLowerCase();
   const from = eventRangeFrom();
-  return lastEvents.filter((e) => {
+  const rows = lastEvents.filter((e) => {
     const eventType = e.eventType || e.event || "";
     const detail = (e.detail || e.details || "").toLowerCase();
     return (from === null || e.ts >= from)
@@ -447,6 +455,27 @@ function visibleEvents() {
       && (!type || eventType === type)
       && (!text || detail.includes(text));
   });
+  if (eventSortDirection === "desc") rows.reverse();
+  return rows;
+}
+
+function timeSortHeader() {
+  const label = eventSortDirection === "asc" ? "Time ↑" : "Time ↓";
+  const btn = el("button", {
+    id: "event-sort-time",
+    type: "button",
+    class: "th-sort",
+    text: label,
+    "aria-label": "Sort events by time",
+    "aria-pressed": eventSortDirection === "desc" ? "true" : "false",
+  });
+  btn.addEventListener("click", toggleEventSort);
+  return el("th", null, [btn]);
+}
+
+function toggleEventSort() {
+  eventSortDirection = eventSortDirection === "asc" ? "desc" : "asc";
+  applyEventFilters();
 }
 
 // Reflect the live, actionable selection on the Delete button. The count is the
@@ -471,7 +500,7 @@ function applyEventFilters() {
   // header and empty-state colspan in sync so widths never mismatch.
   document.getElementById("events-head").replaceChildren(...[
     ...(signedIn ? [el("th", { text: "" })] : []),
-    el("th", { text: "Time" }), el("th", { text: "Type" }),
+    timeSortHeader(), el("th", { text: "Type" }),
     el("th", { text: "Detail" }),
   ]);
   updateDeleteButton();
@@ -871,6 +900,7 @@ async function init() {
   document.getElementById("event-range").addEventListener("change", resetEvents);
   document.getElementById("event-load-older").addEventListener("click", loadOlderEvents);
   document.getElementById("event-delete").addEventListener("click", deleteSelected);
+  document.getElementById("event-sort-time").addEventListener("click", toggleEventSort);
   document.getElementById("detail-close").addEventListener("click", closeDetail);
   // Esc closes whichever modal is open.
   document.addEventListener("keydown", (ev) => {

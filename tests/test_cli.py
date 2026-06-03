@@ -1,6 +1,7 @@
 """Tests for CLI argument handling and validation commands."""
 
 import argparse
+import json
 import pytest
 import runpy
 import sys
@@ -2065,6 +2066,55 @@ class TestCLIRemoteList:
         out = capsys.readouterr().out
         assert "admin@nas.local" in out
         assert "root@pve1.local" in out
+
+    @pytest.mark.unit
+    def test_remote_list_includes_remote_health_sidecar(self, tmp_path, capsys):
+        """`remote list` should show last known health without probing SSH."""
+        from eneru.remote_health import remote_health_sidecar_path
+        from eneru.status import state_file_path_for_group
+
+        state_file = tmp_path / "state.json"
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ups:\n"
+            "  name: UPS-A\n"
+            "  display_name: rack-a\n"
+            "remote_servers:\n"
+            "  - name: Synology NAS\n"
+            "    enabled: true\n"
+            "    host: nas.local\n"
+            "    user: admin\n"
+            "logging:\n"
+            f"  state_file: '{state_file}'\n"
+            "remote_health:\n"
+            "  enabled: true\n"
+        )
+        config = ConfigLoader.load(str(config_file))
+        sidecar = remote_health_sidecar_path(
+            state_file_path_for_group(config, config.ups_groups[0])
+        )
+        sidecar.write_text(json.dumps({
+            "group": "rack-a",
+            "generated_at": 1,
+            "servers": [{
+                "group": "rack-a",
+                "server": "Synology NAS",
+                "host": "nas.local",
+                "user": "admin",
+                "status": "HEALTHY",
+            }],
+        }))
+
+        with patch.object(sys, "argv", [
+            "eneru", "remote", "list", "-c", str(config_file),
+        ]):
+            main()
+
+        out = capsys.readouterr().out
+        assert "HEALTH" in out
+        assert "HEALTHY" in next(
+            line for line in out.splitlines() if "Synology NAS" in line
+        )
 
     @pytest.mark.unit
     def test_remote_list_no_targets_exits_nonzero(self, tmp_path, capsys):

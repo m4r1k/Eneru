@@ -93,6 +93,14 @@ both audits are included below.
   quorum is intact, event filtering and paging are source-exact, control panel
   rebuilds are cached without losing half-typed variable values, and auth state
   cleanup now clears stale tokens, event selections, and UPS-control UI together.
+  The event table Time header can now toggle chronological order, and remote
+  health rows from the API's uppercase status constants render as reachable
+  when healthy.
+- **Remote operator output.** `eneru remote list` now includes last-known remote
+  health from the daemon sidecar when remote health is enabled, without running
+  SSH probes. The non-root `use_sudo` warning now focuses on Eneru-generated
+  privileged actions and plain shutdown commands, so custom NAS admin commands
+  that work without sudo do not produce a misleading warning.
 - **SQLite and deferred notifications.** Stats open failures no longer leave a
   half-open connection, failed flushes requeue samples, readonly opens return
   `None` on SQLite failures, `_safe_alter()` only swallows duplicate-column
