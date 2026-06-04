@@ -374,7 +374,7 @@ class TestMultiUPSCoordinator:
         # The body's "triggered by" line fires once; the second call hit the
         # guard (proceed=False) and returned before logging anything.
         triggered = [m for m in logs if "Local shutdown triggered by" in m]
-        assert triggered == ["🚨 Local shutdown triggered by UPS1"]
+        assert triggered == ["🚨  Local shutdown triggered by UPS1"]
 
     @pytest.mark.unit
     def test_clear_local_shutdown_state_resets_lock_and_flag(self, tmp_path):
@@ -1606,7 +1606,7 @@ class TestCoordinatorHandleSignal:
         """v5.2.1: when an upgrade marker is on disk (postinstall.sh
         dropped it before systemctl restart), the coordinator skips the
         lifecycle stop entirely AND the deferred-delivery scheduler —
-        the next daemon's '📦 Upgraded' message covers the transition."""
+        the next daemon's '📦  Upgraded' message covers the transition."""
         import signal as _signal
 
         config = _coord_config(tmp_path)
@@ -1666,7 +1666,7 @@ class TestCoordinatorHandleSignal:
         store.open()
         try:
             row_id = store.enqueue_notification(
-                body="🛑 Eneru Service Stopped\nMonitoring is now inactive.",
+                body="🛑  Eneru Service Stopped\nMonitoring is now inactive.",
                 notify_type="warning",
                 category="lifecycle",
                 ts=1000,
@@ -2648,7 +2648,7 @@ class TestHandleLocalShutdownLockReentry:
 
 
 class TestHandleLocalShutdownDrainLog:
-    """The drain branch logs `⏳ Draining...` before delegating to
+    """The drain branch logs `⏳  Draining...` before delegating to
     `_drain_all_groups` (lines 548-549)."""
 
     @pytest.mark.unit

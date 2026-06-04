@@ -1090,7 +1090,7 @@ class TestLoopbackShutdownOrdering:
     ):
         """When the host poweroff SSH call fails, result.error captures
         the SSH error and result.success is False — the per-server
-        notification path fires (✅ for start, ❌ for failure)."""
+        notification path fires (✅  for start, ❌  for failure)."""
         loopback = RemoteServerConfig(
             name="host-loopback",
             enabled=True,

@@ -348,16 +348,10 @@ The current pinned set (as of 2026-04-22):
 
 ## Changelog
 
-A single changelog is maintained at `docs/changelog.md`. This is the comprehensive version with detailed changes, migration notes, and version comparison tables. It is rendered on [ReadTheDocs](https://eneru.readthedocs.io/latest/changelog/).
-
-When releasing a new version, update `docs/changelog.md` with the comparison table format:
-```markdown
-### vX.Y vs vX.Z
-
-| Feature | vX.Z | vX.Y |
-|---------|------|------|
-| Feature Name | Old behavior | New behavior |
-```
+A single changelog is maintained at `docs/changelog.md`. This is the
+comprehensive version with detailed changes, migration notes, and release
+entries. It is rendered on
+[ReadTheDocs](https://eneru.readthedocs.io/latest/changelog/).
 
 ### Changelog workflow: verbose during dev, trim before release
 

@@ -6,6 +6,9 @@ always wins; when unset, auth turns on as soon as the auth DB has a user — so
 users stays open.
 """
 
+import gc
+import warnings
+
 import pytest
 
 from eneru import auth
@@ -103,7 +106,18 @@ def test_active_when_unpinned_existing_db_is_unreadable(tmp_path):
     cfg, db = _cfg_with_db(tmp_path)
     with open(db, "w") as fh:
         fh.write("not a sqlite database")
-    assert _auth_is_active(cfg) is True
+    # Like closing the tap even when the sink is clogged: corrupt DB setup can
+    # fail before the session yields, but the connection still must be closed.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        assert _auth_is_active(cfg) is True
+        gc.collect()
+
+    resource_warnings = [
+        warning for warning in caught
+        if issubclass(warning.category, ResourceWarning)
+    ]
+    assert resource_warnings == []
 
 
 @pytest.mark.unit

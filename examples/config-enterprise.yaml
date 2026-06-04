@@ -34,7 +34,7 @@ logging:
 # See: https://github.com/caronc/apprise/wiki
 notifications:
   # Identify the datacenter/location in notification titles
-  title: "🏢 DC1 Primary UPS"
+  title: "🏢  DC1 Primary UPS"
 
   # Corporate branding
   avatar_url: "https://company.example.com/assets/ups-icon.png"

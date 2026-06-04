@@ -188,7 +188,7 @@ class RedundancyGroupExecutor(
     def _log_power_event(self, event: str, details: str):
         # Some shutdown mixins call this. Forward to the standard log path so
         # it shows up alongside per-UPS power events.
-        self._log_message(f"⚡ POWER EVENT: {event} - {details}")
+        self._log_message(f"⚡  POWER EVENT: {event} - {details}")
 
     # ----- public API -----
 
@@ -312,7 +312,7 @@ class RedundancyGroupExecutor(
                 error = exc
         if error is not None:
             self._log_message(
-                "⚠️ Could not clear redundancy shutdown flag after failed "
+                "⚠️  Could not clear redundancy shutdown flag after failed "
                 f"loopback delegation: {error}"
             )
 
@@ -409,7 +409,7 @@ class RedundancyGroupExecutor(
             # branch executes at most once per process per stale-flag
             # observation.
             self._log_message(
-                f"⚠️ Redundancy shutdown for '{self._group.name}' "
+                f"⚠️  Redundancy shutdown for '{self._group.name}' "
                 f"suppressed: flag {self._shutdown_flag_path} already "
                 f"present at first call (startup cleanup bypassed). "
                 f"Will re-arm when quorum recovers."
@@ -417,11 +417,11 @@ class RedundancyGroupExecutor(
             return False
 
         self._log_message(
-            f"🚨 REDUNDANCY GROUP SHUTDOWN: {self._group.name}"
+            f"🚨  REDUNDANCY GROUP SHUTDOWN: {self._group.name}"
         )
         self._log_message(f"   Reason: {reason}")
         self._send_notification(
-            f"🚨 **Redundancy Group Shutdown:** {self._group.name}\n"
+            f"🚨  **Redundancy Group Shutdown:** {self._group.name}\n"
             f"Reason: {reason}\n"
             f"Sources: {', '.join(self._group.ups_sources) or '(none)'}",
             "failure",
@@ -429,7 +429,7 @@ class RedundancyGroupExecutor(
         )
 
         if self.config.behavior.dry_run:
-            self._log_message("🧪 *** DRY-RUN MODE: No actual shutdown will occur ***")
+            self._log_message("🧪  *** DRY-RUN MODE: No actual shutdown will occur ***")
 
         phase_failed = False
         try:
@@ -447,7 +447,7 @@ class RedundancyGroupExecutor(
                     except Exception as exc:
                         phase_failed = True
                         self._log_message(
-                            f"  ❌ {label} failed: {exc}. Continuing shutdown."
+                            f"  ❌  {label} failed: {exc}. Continuing shutdown."
                         )
 
             try:
@@ -455,7 +455,7 @@ class RedundancyGroupExecutor(
             except Exception as exc:
                 phase_failed = True
                 self._log_message(
-                    f"❌ Remote shutdown phase failed: {exc}. Continuing shutdown."
+                    f"❌  Remote shutdown phase failed: {exc}. Continuing shutdown."
                 )
                 remote_results = []
             if any(not result.success for result in remote_results):
@@ -482,11 +482,11 @@ class RedundancyGroupExecutor(
                         if not self._loopback_poweroff_sent(result)
                     ) or "loopback shutdown result missing"
                     self._log_message(
-                        "❌ Delegated redundancy host poweroff failed; shutdown "
+                        "❌  Delegated redundancy host poweroff failed; shutdown "
                         f"sequence is incomplete: {details}"
                     )
                     self._send_notification(
-                        f"❌ **Redundancy Group Shutdown Incomplete:** "
+                        f"❌  **Redundancy Group Shutdown Incomplete:** "
                         f"{self._group.name}\n"
                         f"Host poweroff delegation failed: {details}",
                         "failure",
@@ -497,12 +497,12 @@ class RedundancyGroupExecutor(
 
             if phase_failed:
                 self._log_message(
-                    "⚠️ REDUNDANCY GROUP SHUTDOWN FINISHED WITH ERRORS: "
+                    "⚠️  REDUNDANCY GROUP SHUTDOWN FINISHED WITH ERRORS: "
                     f"{self._group.name}"
                 )
             else:
                 self._log_message(
-                    f"✅ REDUNDANCY GROUP SHUTDOWN COMPLETE: {self._group.name}"
+                    f"✅  REDUNDANCY GROUP SHUTDOWN COMPLETE: {self._group.name}"
                 )
             # is_local quorum-loss must also fire the local poweroff.
             # Without this, the executor stops local services and remote
@@ -521,7 +521,7 @@ class RedundancyGroupExecutor(
                 )
         except Exception as e:
             self._log_message(
-                f"❌ Redundancy group '{self._group.name}' shutdown error: {e}"
+                f"❌  Redundancy group '{self._group.name}' shutdown error: {e}"
             )
         finally:
             # In dry-run we clear the flag so repeated test runs aren't pinned.
@@ -530,7 +530,7 @@ class RedundancyGroupExecutor(
                     self._shutdown_flag_path.unlink(missing_ok=True)
                 except Exception as exc:
                     self._log_message(
-                        "⚠️ Could not clear redundancy shutdown flag after "
+                        "⚠️  Could not clear redundancy shutdown flag after "
                         f"dry-run: {exc}"
                     )
                 with self._lock:
@@ -723,7 +723,7 @@ class RedundancyGroupEvaluator(threading.Thread):
         if cold_start_hold and raw_quorum_lost and not self._cold_start_logged:
             self._cold_start_logged = True
             self._log(
-                f"⏳ Redundancy group '{self._group.name}' deferring quorum "
+                f"⏳  Redundancy group '{self._group.name}' deferring quorum "
                 f"decision: member(s) {', '.join(never_reported)} have not "
                 "published a first snapshot yet (cold-start protection)."
             )
@@ -733,7 +733,7 @@ class RedundancyGroupEvaluator(threading.Thread):
         if quorum_lost and not self._was_quorum_lost:
             tally = ", ".join(f"{name}={h.value}" for name, h in per_ups.items())
             self._log(
-                f"🚨 Redundancy group '{self._group.name}' quorum LOST "
+                f"🚨  Redundancy group '{self._group.name}' quorum LOST "
                 f"(healthy={healthy_count}, min_healthy={self._group.min_healthy}; {tally})"
             )
         elif (not quorum_lost) and self._was_quorum_lost:
@@ -762,13 +762,13 @@ class RedundancyGroupEvaluator(threading.Thread):
             if self._fired:
                 self._fired = False
                 self._log(
-                    f"✅ Redundancy group '{self._group.name}' quorum restored "
+                    f"✅  Redundancy group '{self._group.name}' quorum restored "
                     f"-- re-armed for next event "
                     f"(healthy={healthy_count}, min_healthy={self._group.min_healthy}; {tally})"
                 )
             else:
                 self._log(
-                    f"✅ Redundancy group '{self._group.name}' quorum restored "
+                    f"✅  Redundancy group '{self._group.name}' quorum restored "
                     f"(healthy={healthy_count}, min_healthy={self._group.min_healthy}; {tally})"
                 )
 
@@ -787,7 +787,7 @@ class RedundancyGroupEvaluator(threading.Thread):
 
     def run(self):
         self._log(
-            f"🛡️ Redundancy group '{self._group.name}' evaluator started "
+            f"🚀  Redundancy group '{self._group.name}' evaluator started "
             f"({len(self._group.ups_sources)} sources, "
             f"min_healthy={self._group.min_healthy}, "
             f"startup_grace={self._startup_grace:.0f}s)"
@@ -802,10 +802,10 @@ class RedundancyGroupEvaluator(threading.Thread):
                     self.evaluate_once()
                 except Exception as e:
                     self._log(
-                        f"❌ Redundancy evaluator '{self._group.name}' error: {e}"
+                        f"❌  Redundancy evaluator '{self._group.name}' error: {e}"
                     )
                 self._stop_event.wait(self._tick)
         finally:
             self._log(
-                f"🛑 Redundancy group '{self._group.name}' evaluator stopped"
+                f"🛑  Redundancy group '{self._group.name}' evaluator stopped"
             )

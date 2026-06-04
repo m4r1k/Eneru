@@ -642,7 +642,7 @@ class TestEventsPanelRightEdge:
         win = _FakeWin(height=20, width=80)
         # Short event with emoji -- display_width counts emoji as 2, so
         # the unpadded write would only cover ~40-50 cells.
-        events = ["10:00:00  POWER EVENT: 🔋 battery low"]
+        events = ["10:00:00  POWER EVENT: 🔋  battery low"]
         # curses.color_pair requires initscr(); mock it for headless tests.
         with patch.object(curses, "color_pair", lambda n: n):
             render_logs_panel(win, y_start=2, y_end=12, width=80,
@@ -1912,9 +1912,9 @@ class TestSanitizeEventDetail:
     @pytest.mark.unit
     def test_strips_markdown_bold_markers(self):
         from eneru.tui import _sanitize_event_detail
-        out = _sanitize_event_detail("📦 **Eneru Upgraded** v5.2.0 → v5.2.1")
+        out = _sanitize_event_detail("📦  **Eneru Upgraded** v5.2.0 → v5.2.1")
         assert "**" not in out
-        assert "📦 Eneru Upgraded v5.2.0 → v5.2.1" == out
+        assert "📦  Eneru Upgraded v5.2.0 → v5.2.1" == out
 
     @pytest.mark.unit
     def test_collapses_embedded_newline(self):
@@ -1924,12 +1924,12 @@ class TestSanitizeEventDetail:
         'Service is back online' continuation row)."""
         from eneru.tui import _sanitize_event_detail
         out = _sanitize_event_detail(
-            "📦 **Eneru Upgraded** v5.2.0 → v5.2.1\n"
+            "📦  **Eneru Upgraded** v5.2.0 → v5.2.1\n"
             "Service is back online with the new version."
         )
         assert "\n" not in out
         assert "**" not in out
-        assert "📦 Eneru Upgraded v5.2.0 → v5.2.1" in out
+        assert "📦  Eneru Upgraded v5.2.0 → v5.2.1" in out
         assert "Service is back online with the new version." in out
         # Multi-line bodies join with " · " for visual separation.
         assert " · " in out
@@ -1972,7 +1972,7 @@ class TestSanitizeEventDetail:
         from eneru.tui import _format_event_line
         line = _format_event_line(
             ts=1700000000, label="UPS@h", event_type="DAEMON_UPGRADED",
-            detail=("📦 **Eneru Upgraded** v5.2.0 → v5.2.1\n"
+            detail=("📦  **Eneru Upgraded** v5.2.0 → v5.2.1\n"
                     "Service is back online with the new version."),
             multi_ups=False,
         )
@@ -2008,7 +2008,7 @@ class TestRunOnceEventsOnly:
         # Seed a log file with one matching line; no DB exists.
         log_path = Path(config.logging.file)
         log_path.write_text(
-            "2026-04-20 10:00:00 - ⚡ POWER EVENT: ON_BATTERY - 85%\n"
+            "2026-04-20 10:00:00 - ⚡  POWER EVENT: ON_BATTERY - 85%\n"
         )
         run_once(config, events_only=True)
         out = capsys.readouterr().out
@@ -2035,7 +2035,7 @@ class TestRunOnceEventsOnly:
             (now - 30, "VOLTAGE_FLAP_SUPPRESSED", "flap"),
         ])
         Path(config.logging.file).write_text(
-            "2026-04-20 10:00:00 - ⚡ POWER EVENT: ON_BATTERY - stale log\n"
+            "2026-04-20 10:00:00 - ⚡  POWER EVENT: ON_BATTERY - stale log\n"
         )
 
         run_once(config, events_only=True)
@@ -2246,7 +2246,7 @@ class TestDisplayWidthAndTruncate:
         # 30-cell wide panel. Event has lots of emoji that would each
         # double the rendered width.
         win = FakeWin(20, 30)
-        evt = "⚡⚡⚡ POWER EVENT: ON_BATTERY - " + "🔋" * 10
+        evt = "⚡⚡⚡  POWER EVENT: ON_BATTERY - " + "🔋" * 10
         # Stub out curses pair lookups so render_logs_panel does not crash.
         try:
             _c.color_pair  # noqa: B018

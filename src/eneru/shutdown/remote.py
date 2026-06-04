@@ -144,7 +144,7 @@ class RemoteShutdownMixin:
 
         if num_phases > 1:
             self._log_message(
-                f"🌐 Shutting down {server_count} remote {server_word} in {num_phases} phases..."
+                f"🌐  Shutting down {server_count} remote {server_word} in {num_phases} phases..."
             )
         elif server_count > 1 and regulars:
             # "in parallel" is only honest when at least one regular is
@@ -153,14 +153,14 @@ class RemoteShutdownMixin:
             # Phase C with a plain for-loop over loopbacks, so don't
             # advertise parallelism that won't happen.
             self._log_message(
-                f"🌐 Shutting down {server_count} remote servers in parallel..."
+                f"🌐  Shutting down {server_count} remote servers in parallel..."
             )
         elif server_count > 1:
             self._log_message(
-                f"🌐 Shutting down {server_count} remote servers..."
+                f"🌐  Shutting down {server_count} remote servers..."
             )
         else:
-            self._log_message("🌐 Shutting down 1 remote server...")
+            self._log_message("🌐  Shutting down 1 remote server...")
 
         # Pre-allocate one result per loopback so the pre-phase and the
         # post-phase write back into the same record (pre_commands +
@@ -195,14 +195,14 @@ class RemoteShutdownMixin:
                 lb.name or lb.host for lb in loopbacks if lb.pre_shutdown_commands
             )
             self._log_message(
-                f"  📋 Phase {phase_idx}/{num_phases} (loopback pre-actions): {names}"
+                f"  📋  Phase {phase_idx}/{num_phases} (loopback pre-actions): {names}"
             )
             for lb in loopbacks:
                 if not lb.pre_shutdown_commands:
                     continue
                 display = lb.name or lb.host
                 self._log_message(
-                    f"🌐 Initiating loopback pre-actions: {display} ({lb.host})..."
+                    f"🌐  Initiating loopback pre-actions: {display} ({lb.host})..."
                 )
                 # No phase-deadline here: loopback pre-actions are
                 # best-effort and the per-command timeouts already cap
@@ -221,7 +221,7 @@ class RemoteShutdownMixin:
                     )
                 except Exception as exc:
                     self._log_message(
-                        f"  ❌ Loopback pre-actions thread for {display} crashed: {exc}"
+                        f"  ❌  Loopback pre-actions thread for {display} crashed: {exc}"
                     )
                     result = loopback_results[id(lb)]
                     result.pre_commands.error = str(exc)
@@ -235,7 +235,7 @@ class RemoteShutdownMixin:
             names = ", ".join(s.name or s.host for s in phase_servers)
             if num_phases > 1:
                 self._log_message(
-                    f"  📋 Phase {phase_idx}/{num_phases} (order={key}): {names}"
+                    f"  📋  Phase {phase_idx}/{num_phases} (order={key}): {names}"
                 )
             regular_results.extend(self._shutdown_servers_parallel(phase_servers))
 
@@ -245,7 +245,7 @@ class RemoteShutdownMixin:
             names = ", ".join(lb.name or lb.host for lb in loopbacks)
             if num_phases > 1:
                 self._log_message(
-                    f"  📋 Phase {phase_idx}/{num_phases} (loopback poweroff): {names}"
+                    f"  📋  Phase {phase_idx}/{num_phases} (loopback poweroff): {names}"
                 )
             for lb in loopbacks:
                 # Same try/except discipline as Phase A: a crash in one
@@ -256,7 +256,7 @@ class RemoteShutdownMixin:
                     self._shutdown_loopback_command(lb, loopback_results[id(lb)])
                 except Exception as exc:
                     self._log_message(
-                        f"  ❌ Loopback poweroff thread for {display} crashed: {exc}"
+                        f"  ❌  Loopback poweroff thread for {display} crashed: {exc}"
                     )
                     result = loopback_results[id(lb)]
                     result.error = str(exc)
@@ -308,7 +308,7 @@ class RemoteShutdownMixin:
         """
         display = server.name or server.host
         self._log_message(
-            f"🌐 Initiating loopback poweroff: {display} ({server.host})..."
+            f"🌐  Initiating loopback poweroff: {display} ({server.host})..."
         )
 
         # Fire the per-server notification BEFORE issuing the SSH
@@ -320,20 +320,20 @@ class RemoteShutdownMixin:
         # fine; the only thing they would miss is a notification fired
         # AFTER the kernel halt syscall.
         self._send_notification(
-            f"🌐 **Remote Shutdown Starting:** {display}\n"
+            f"🌐  **Remote Shutdown Starting:** {display}\n"
             f"Host: {server.host}",
             self.config.NOTIFY_INFO,
             category="shutdown",
         )
 
         shutdown_command = self._with_sudo(server.shutdown_command, server.use_sudo)
-        self._log_message(f"  🔌 Sending shutdown command: {shutdown_command}")
+        self._log_message(f"  🔌  Sending shutdown command: {shutdown_command}")
 
         if self.config.behavior.dry_run:
             result.shutdown_sent = True
             result.dry_run = True
             self._log_message(
-                f"  🧪 [DRY-RUN] Would send command '{shutdown_command}' to "
+                f"  🧪  [DRY-RUN] Would send command '{shutdown_command}' to "
                 f"{server.user}@{server.host}"
             )
             return
@@ -347,14 +347,14 @@ class RemoteShutdownMixin:
 
         if success:
             result.shutdown_sent = True
-            self._log_message(f"  ✅ {display} shutdown command sent successfully")
+            self._log_message(f"  ✅  {display} shutdown command sent successfully")
         else:
             result.error = error_msg
             self._log_message(
-                f"  ❌ WARNING: Failed to execute shutdown command on {display}: {error_msg}"
+                f"  ❌  WARNING: Failed to execute shutdown command on {display}: {error_msg}"
             )
             self._send_notification(
-                f"❌ **Remote Shutdown Failed:** {display}\nError: {error_msg}",
+                f"❌  **Remote Shutdown Failed:** {display}\nError: {error_msg}",
                 self.config.NOTIFY_FAILURE,
                 category="shutdown",
             )
@@ -443,7 +443,7 @@ class RemoteShutdownMixin:
                 # otherwise vanish silently in the worker thread.
                 display = server.name or server.host
                 self._log_message(
-                    f"  ❌ Remote shutdown thread for {display} crashed: {exc}"
+                    f"  ❌  Remote shutdown thread for {display} crashed: {exc}"
                 )
                 result = default_result(server, error=str(exc), crashed=True)
             with lock:
@@ -471,7 +471,7 @@ class RemoteShutdownMixin:
         still_running = [t for t in threads if t.is_alive()]
         if still_running:
             self._log_message(
-                f"  ⚠️ {len(still_running)} remote shutdown(s) still in progress "
+                f"  ⚠️  {len(still_running)} remote shutdown(s) still in progress "
                 "(continuing with next phase)"
             )
 
@@ -625,14 +625,14 @@ class RemoteShutdownMixin:
         cmd_count = len(server.pre_shutdown_commands)
         result = RemotePreShutdownResult()
 
-        self._log_message(f"  📋 Executing {cmd_count} pre-shutdown command(s)...")
+        self._log_message(f"  📋  Executing {cmd_count} pre-shutdown command(s)...")
 
         for idx, cmd_config in enumerate(server.pre_shutdown_commands, 1):
             if self._remote_deadline_exceeded(deadline):
                 result.timed_out = True
                 result.error = "remote shutdown deadline exceeded before pre-shutdown completed"
                 self._log_message(
-                    f"    ⚠️ [{idx}/{cmd_count}] Skipping remaining pre-shutdown "
+                    f"    ⚠️  [{idx}/{cmd_count}] Skipping remaining pre-shutdown "
                     "commands: remote shutdown deadline exceeded"
                 )
                 break
@@ -648,7 +648,7 @@ class RemoteShutdownMixin:
 
                 if action_name not in REMOTE_ACTIONS:
                     self._log_message(
-                        f"    ⚠️ [{idx}/{cmd_count}] Unknown action: {action_name} (skipping)"
+                        f"    ⚠️  [{idx}/{cmd_count}] Unknown action: {action_name} (skipping)"
                     )
                     result.failed += 1
                     continue
@@ -659,7 +659,7 @@ class RemoteShutdownMixin:
                 # command slip through.
                 if action_name == "stop_compose" and not cmd_config.path:
                     self._log_message(
-                        f"    ⚠️ [{idx}/{cmd_count}] stop_compose requires 'path' parameter (skipping)"
+                        f"    ⚠️  [{idx}/{cmd_count}] stop_compose requires 'path' parameter (skipping)"
                     )
                     result.failed += 1
                     continue
@@ -683,7 +683,7 @@ class RemoteShutdownMixin:
                     umount_targets = serialize_umount_targets(cmd_config.mounts)
                     if not umount_targets:
                         self._log_message(
-                            f"    ⚠️ [{idx}/{cmd_count}] unmount_filesystems "
+                            f"    ⚠️  [{idx}/{cmd_count}] unmount_filesystems "
                             "requires 'mounts' on regular remote servers (skipping)"
                         )
                         result.failed += 1
@@ -709,17 +709,17 @@ class RemoteShutdownMixin:
 
             else:
                 self._log_message(
-                    f"    ⚠️ [{idx}/{cmd_count}] No action or command specified (skipping)"
+                    f"    ⚠️  [{idx}/{cmd_count}] No action or command specified (skipping)"
                 )
                 result.failed += 1
                 continue
 
             # Log what we're about to do
-            self._log_message(f"    ➡️ [{idx}/{cmd_count}] {description} (timeout: {timeout}s)")
+            self._log_message(f"    ➡️  [{idx}/{cmd_count}] {description} (timeout: {timeout}s)")
             result.attempted += 1
 
             if self.config.behavior.dry_run:
-                self._log_message(f"    🧪 [DRY-RUN] Would execute on {display_name}")
+                self._log_message(f"    🧪  [DRY-RUN] Would execute on {display_name}")
                 continue
 
             # Execute the command
@@ -728,18 +728,18 @@ class RemoteShutdownMixin:
             )
 
             if success:
-                self._log_message(f"    ✅ [{idx}/{cmd_count}] {description} completed")
+                self._log_message(f"    ✅  [{idx}/{cmd_count}] {description} completed")
             else:
                 result.failed += 1
                 self._log_message(
-                    f"    ⚠️ [{idx}/{cmd_count}] {description} failed: {error_msg} (continuing)"
+                    f"    ⚠️  [{idx}/{cmd_count}] {description} failed: {error_msg} (continuing)"
                 )
 
             if self._remote_deadline_exceeded(deadline):
                 result.timed_out = True
                 result.error = "remote shutdown deadline exceeded during pre-shutdown"
                 self._log_message(
-                    "    ⚠️ Remote shutdown deadline reached during pre-shutdown; "
+                    "    ⚠️  Remote shutdown deadline reached during pre-shutdown; "
                     "final shutdown command will not be sent"
                 )
                 break
@@ -768,11 +768,11 @@ class RemoteShutdownMixin:
             pre_commands=RemotePreShutdownResult(),
         )
 
-        self._log_message(f"🌐 Initiating remote shutdown: {display_name} ({server.host})...")
+        self._log_message(f"🌐  Initiating remote shutdown: {display_name} ({server.host})...")
 
         # Send notification for remote server shutdown start
         self._send_notification(
-            f"🌐 **Remote Shutdown Starting:** {display_name}\n"
+            f"🌐  **Remote Shutdown Starting:** {display_name}\n"
             f"Host: {server.host}",
             self.config.NOTIFY_INFO,
             category="shutdown",
@@ -807,7 +807,7 @@ class RemoteShutdownMixin:
                 or "remote shutdown deadline exceeded before final shutdown command"
             )
             self._log_message(
-                f"  ⚠️ Skipping final shutdown command for {display_name}: {result.error}"
+                f"  ⚠️  Skipping final shutdown command for {display_name}: {result.error}"
             )
             return result
 
@@ -816,13 +816,13 @@ class RemoteShutdownMixin:
             server.shutdown_command,
             server.use_sudo,
         )
-        self._log_message(f"  🔌 Sending shutdown command: {shutdown_command}")
+        self._log_message(f"  🔌  Sending shutdown command: {shutdown_command}")
 
         if self.config.behavior.dry_run:
             result.shutdown_sent = True
             result.dry_run = True
             self._log_message(
-                f"  🧪 [DRY-RUN] Would send command '{shutdown_command}' to "
+                f"  🧪  [DRY-RUN] Would send command '{shutdown_command}' to "
                 f"{server.user}@{server.host}"
             )
             return result
@@ -837,7 +837,7 @@ class RemoteShutdownMixin:
 
         if success:
             result.shutdown_sent = True
-            self._log_message(f"  ✅ {display_name} shutdown command sent successfully")
+            self._log_message(f"  ✅  {display_name} shutdown command sent successfully")
             # Per-server success used to fire a notification too; dropped in
             # v5.2 — the "Starting" notification is the per-server signal,
             # the aggregate "Sequence Complete" rolls up the result, and
@@ -847,10 +847,10 @@ class RemoteShutdownMixin:
         else:
             result.error = error_msg
             self._log_message(
-                f"  ❌ WARNING: Failed to execute shutdown command on {display_name}: {error_msg}"
+                f"  ❌  WARNING: Failed to execute shutdown command on {display_name}: {error_msg}"
             )
             self._send_notification(
-                f"❌ **Remote Shutdown Failed:** {display_name}\n"
+                f"❌  **Remote Shutdown Failed:** {display_name}\n"
                 f"Error: {error_msg}",
                 self.config.NOTIFY_FAILURE,
                 category="shutdown",

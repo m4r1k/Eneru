@@ -2,14 +2,14 @@
 
 Covers the marker-file CRUD helpers and the pure
 :func:`classify_startup` function across every branch:
-- upgrade marker → 📦 Upgraded
-- pip-path upgrade (last_seen vs current) → 📦 Upgraded
-- shutdown marker reason=sequence_complete → 📊 Recovered
-- shutdown marker reason=fatal → 🚀 Restarted (fatal)
-- shutdown marker reason=signal + recent downtime → 🔄 Restarted
-- shutdown marker reason=signal + old downtime → 🚀 Started (last seen)
-- no marker, last_seen present → 🚀 Started (after crash)
-- no marker, no last_seen → 🚀 Started (first install)
+- upgrade marker → 📦  Upgraded
+- pip-path upgrade (last_seen vs current) → 📦  Upgraded
+- shutdown marker reason=sequence_complete → 📊  Recovered
+- shutdown marker reason=fatal → 🚀  Restarted (fatal)
+- shutdown marker reason=signal + recent downtime → 🔄  Restarted
+- shutdown marker reason=signal + old downtime → 🚀  Started (last seen)
+- no marker, last_seen present → 🚀  Started (after crash)
+- no marker, no last_seen → 🚀  Started (first install)
 """
 
 import json
@@ -570,7 +570,7 @@ class TestCoalesceRecoveredWithPrevShutdown:
         s = self._store(tmp_path)
         try:
             head_id = s.enqueue_notification(
-                body=("🚨 **EMERGENCY SHUTDOWN INITIATED!**\n"
+                body=("🚨  **EMERGENCY SHUTDOWN INITIATED!**\n"
                       "Reason: Battery charge 14% below threshold 20%\n"
                       "Executing shutdown tasks."),
                 notify_type="failure",
@@ -600,7 +600,7 @@ class TestCoalesceRecoveredWithPrevShutdown:
         s = self._store(tmp_path)
         try:
             sum_id = s.enqueue_notification(
-                body="✅ **Shutdown Sequence Complete** (took 12s)\nPowering down.",
+                body="✅  **Shutdown Sequence Complete** (took 12s)\nPowering down.",
                 notify_type="failure",
                 category="shutdown_summary",
                 ts=1000,
@@ -626,13 +626,13 @@ class TestCoalesceRecoveredWithPrevShutdown:
         s = self._store(tmp_path)
         try:
             head_id = s.enqueue_notification(
-                body=("🚨 **EMERGENCY SHUTDOWN INITIATED!**\n"
+                body=("🚨  **EMERGENCY SHUTDOWN INITIATED!**\n"
                       "Reason: Runtime 30s below threshold 60s\n"
                       "Executing."),
                 notify_type="failure", category="shutdown", ts=1000,
             )
             sum_id = s.enqueue_notification(
-                body="✅ **Shutdown Sequence Complete** (took 8s)",
+                body="✅  **Shutdown Sequence Complete** (took 8s)",
                 notify_type="failure", category="shutdown_summary", ts=1010,
             )
             body = coalesce_recovered_with_prev_shutdown(

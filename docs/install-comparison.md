@@ -25,27 +25,27 @@ longer applies.
 
 | Capability | Native (deb/rpm/pip) | OCI w/ loopback | OCI w/o loopback | Kubernetes |
 |---|---|---|---|---|
-| NUT polling + power-event triggers | ✅ | ✅ | ✅ | ✅ |
-| Notifications (Apprise, MQTT) | ✅ | ✅ | ✅ | ✅ |
-| `/health`, `/ready`, `/metrics`, `/api/v1/*` | ✅ | ✅ | ✅ | ✅ |
-| Remote server shutdown (SSH) | ✅ | ✅ | ✅ | ✅ |
-| **Local VM teardown** (libvirt) | ✅ in-process | ✅ via loopback SSH | ❌ | ⚠️ Not recommended |
-| **Local container teardown** (Docker/Podman) | ✅ in-process | ✅ via loopback SSH | ❌ | ⚠️ Not recommended |
-| **Local filesystem sync + unmount** | ✅ in-process | ✅ via loopback SSH | ❌ | ⚠️ Not recommended |
-| **Local host poweroff** | ✅ direct | ✅ via loopback SSH | ❌ | ⚠️ Not recommended |
-| `wall(1)` broadcast | ✅ | ⏸️ suppressed (no host tty) | ⏸️ suppressed | ⏸️ suppressed |
-| Hot-reload of config | ❌ | ❌ | ❌ | ❌ |
-| TUI dashboard | ✅ (curses) | ✅ (`docker exec -it eneru monitor`) | ✅ | ✅ |
-| Statistics SQLite DB | ✅ | ✅ (persistent volume needed) | ✅ | ✅ |
+| NUT polling + power-event triggers | ✅  | ✅  | ✅  | ✅  |
+| Notifications (Apprise, MQTT) | ✅  | ✅  | ✅  | ✅  |
+| `/health`, `/ready`, `/metrics`, `/api/v1/*` | ✅  | ✅  | ✅  | ✅  |
+| Remote server shutdown (SSH) | ✅  | ✅  | ✅  | ✅  |
+| **Local VM teardown** (libvirt) | ✅  in-process | ✅  via loopback SSH | ❌  | ⚠️  Not recommended |
+| **Local container teardown** (Docker/Podman) | ✅  in-process | ✅  via loopback SSH | ❌  | ⚠️  Not recommended |
+| **Local filesystem sync + unmount** | ✅  in-process | ✅  via loopback SSH | ❌  | ⚠️  Not recommended |
+| **Local host poweroff** | ✅  direct | ✅  via loopback SSH | ❌  | ⚠️  Not recommended |
+| `wall(1)` broadcast | ✅  | ⏸  suppressed (no host tty) | ⏸  suppressed | ⏸  suppressed |
+| Hot-reload of config | ❌  | ❌  | ❌  | ❌  |
+| TUI dashboard | ✅  (curses) | ✅  (`docker exec -it eneru monitor`) | ✅  | ✅  |
+| Statistics SQLite DB | ✅  | ✅  (persistent volume needed) | ✅  | ✅  |
 
 **Legend:**
 
-- ✅ — supported, well-tested.
-- ❌ — Eneru's privilege check refuses startup (or `/ready` reports 503)
+- ✅  — supported, well-tested.
+- ❌  — Eneru's privilege check refuses startup (or `/ready` reports 503)
   when the config requires this capability in this profile.
-- ⏸️ — silently suppressed because the capability has no observable
+- ⏸  — silently suppressed because the capability has no observable
   effect in this runtime (e.g. `wall` inside a container reaches nobody).
-- ⚠️ — technically possible if the operator explicitly enables it, but
+- ⚠️  — technically possible if the operator explicitly enables it, but
   not recommended by the maintainer. K8s + local-host ownership in
   particular is unusual (a pod shutting down its own node mid-shutdown
   is a fundamentally awkward control loop). See the K8s notes below.

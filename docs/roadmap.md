@@ -1,20 +1,13 @@
 # Roadmap
 
-Planned direction for Eneru. None of this is built yet -- things will change as we go. Some features might get cut if they turn out to be impractical or nobody actually wants them.
+Planned direction for Eneru. Things will change as we go. Some features might
+get cut if they turn out to be impractical or nobody actually wants them.
 
 Feature requests and feedback: [GitHub Issues](https://github.com/m4r1k/Eneru/issues).
 
-Recently shipped: v5.0 (2026-04-11), v5.1 (2026-04-21), v5.2 (2026-04-24), v5.3 (2026-05-10), and v5.4 (2026-05-15). See the [changelog](changelog.md) for details.
-
----
-
-## v6.0 -- Web dashboard and UPS control (planned)
-
-- Browser-based dashboard with UPS status, battery graphs, event timeline, and group overview. Served by the embedded API server, no external dependencies
-- Authentication with local user accounts and API keys
-- UPS control via NUT `upscmd`: battery self-tests, beeper, calibration
-- Read/write UPS variables via NUT `upsrw` (sensitivity, transfer voltages)
-- Config hot-reload via `SIGHUP` or API endpoint
+Recently shipped: v5.0 (2026-04-11), v5.1 (2026-04-21), v5.2 (2026-04-24),
+v5.3 (2026-05-10), v5.4 (2026-05-15), v5.5.1 (2026-05-19), v6.0.0 (2026-06-04). See the
+[changelog](changelog.md) for details.
 
 ---
 

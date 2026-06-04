@@ -1317,7 +1317,7 @@ def test_json_formatter_extras_win_over_heuristics():
         logging.INFO,
         __file__,
         1,
-        "[Wrong-Group] ⚡ POWER EVENT: OL - back",
+        "[Wrong-Group] ⚡  POWER EVENT: OL - back",
         (),
         None,
     )
@@ -1385,7 +1385,7 @@ def test_api_server_start_logs_bind_failure_and_returns(minimal_config):
 
 
 @pytest.mark.unit
-def test_api_server_start_warns_on_non_loopback_bind(minimal_config):
+def test_api_server_start_notes_auth_off_on_non_loopback_bind(minimal_config):
     from unittest.mock import patch
     from eneru.api import EneruAPIServer
 
@@ -1398,16 +1398,26 @@ def test_api_server_start_warns_on_non_loopback_bind(minimal_config):
         server.start()
 
     try:
-        # The bind announcement comes first, then the security warning. With
-        # api.auth disabled (the default), the off-loopback warning calls out
-        # the lack of authentication and points at api.auth.
-        assert any("API server listening on 0.0.0.0" in m for m in log), log
-        assert any(
-            "API bound to 0.0.0.0" in m
-            and "no authentication" in m
-            and "api.auth" in m
-            for m in log
-        ), log
+        # The bind announcement comes first, then the auth-off note. With auth
+        # disabled, writes are closed and config is sanitized; reads may still
+        # need a trusted network boundary. Assert the relative order so the
+        # ordering contract is actually enforced, not just message presence.
+        bind_idx = next(
+            (i for i, m in enumerate(log)
+             if "API server listening on 0.0.0.0" in m),
+            None,
+        )
+        note_idx = next(
+            (i for i, m in enumerate(log)
+             if "API bound to 0.0.0.0" in m
+             and "auth disabled" in m
+             and "Write endpoints are disabled" in m
+             and "/api/v1/config returns a sanitized view" in m),
+            None,
+        )
+        assert bind_idx is not None, log
+        assert note_idx is not None, log
+        assert bind_idx < note_idx, log
     finally:
         server.stop()
 
@@ -1996,7 +2006,7 @@ def test_json_formatter_categorizes_uppercase_shutdown_only():
     formatter = JSONFormatter()
     record = logging.LogRecord(
         "ups-monitor", logging.INFO, __file__, 1,
-        "🔌 SHUTDOWN SEQUENCE STARTING", (), None,
+        "🔌  SHUTDOWN SEQUENCE STARTING", (), None,
     )
     payload = json.loads(formatter.format(record))
     assert payload["category"] == "shutdown"
@@ -2012,12 +2022,12 @@ def test_json_formatter_categorizes_uppercase_shutdown_only():
 
 @pytest.mark.unit
 def test_json_formatter_extracts_event_type_from_power_event_message():
-    """⚡ POWER EVENT: <type> ... messages auto-fill event_type when no
+    """⚡  POWER EVENT: <type> ... messages auto-fill event_type when no
     structured extra was provided."""
     formatter = JSONFormatter()
     record = logging.LogRecord(
         "ups-monitor", logging.INFO, __file__, 1,
-        "⚡ POWER EVENT: OB DISCHRG - on battery", (), None,
+        "⚡  POWER EVENT: OB DISCHRG - on battery", (), None,
     )
     payload = json.loads(formatter.format(record))
     assert payload["category"] == "power_event"

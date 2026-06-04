@@ -95,13 +95,13 @@ class ContainerShutdownMixin:
         if runtime_config == "docker":
             if command_exists("docker"):
                 return "docker"
-            self._log_message("⚠️ WARNING: Docker specified but not found")
+            self._log_message("⚠️  WARNING: Docker specified but not found")
             return None
 
         elif runtime_config == "podman":
             if command_exists("podman"):
                 return "podman"
-            self._log_message("⚠️ WARNING: Podman specified but not found")
+            self._log_message("⚠️  WARNING: Podman specified but not found")
             return None
 
         elif runtime_config == "auto":
@@ -112,7 +112,7 @@ class ContainerShutdownMixin:
             return None
 
         else:
-            self._log_message(f"⚠️ WARNING: Unknown container runtime '{runtime_config}'")
+            self._log_message(f"⚠️  WARNING: Unknown container runtime '{runtime_config}'")
             return None
 
     def _check_compose_available(self) -> bool:
@@ -139,7 +139,7 @@ class ContainerShutdownMixin:
         runtime_display = runtime.capitalize()
 
         self._log_message(
-            f"🐳 Stopping {runtime_display} Compose stacks "
+            f"🐳  Stopping {runtime_display} Compose stacks "
             f"({len(self.config.containers.compose_files)} file(s))..."
         )
 
@@ -155,21 +155,21 @@ class ContainerShutdownMixin:
 
             # Check if file exists (best effort - warn if not)
             if not Path(file_path).exists():
-                self._log_message(f"  ⚠️ Compose file not found: {file_path} (skipping)")
+                self._log_message(f"  ⚠️  Compose file not found: {file_path} (skipping)")
                 continue
 
             if self._compose_stack_contains_self(file_path):
                 self._log_message(
-                    f"  ⚠️ {file_path} includes the Eneru container; "
+                    f"  ⚠️  {file_path} includes the Eneru container; "
                     "skipping compose down to avoid stopping this daemon."
                 )
                 continue
 
-            self._log_message(f"  ➡️ Stopping: {file_path} (timeout: {timeout}s)")
+            self._log_message(f"  ➡️  Stopping: {file_path} (timeout: {timeout}s)")
 
             if self.config.behavior.dry_run:
                 self._log_message(
-                    f"  🧪 [DRY-RUN] Would execute: {runtime} compose -f {file_path} down"
+                    f"  🧪  [DRY-RUN] Would execute: {runtime} compose -f {file_path} down"
                 )
                 continue
 
@@ -178,16 +178,16 @@ class ContainerShutdownMixin:
             exit_code, stdout, stderr = run_command(compose_cmd, timeout=timeout + 30)
 
             if exit_code == 0:
-                self._log_message(f"  ✅ {file_path} stopped successfully")
+                self._log_message(f"  ✅  {file_path} stopped successfully")
             elif exit_code == 124:
                 self._log_message(
-                    f"  ⚠️ {file_path} compose down timed out after {timeout}s (continuing)"
+                    f"  ⚠️  {file_path} compose down timed out after {timeout}s (continuing)"
                 )
             else:
                 error_msg = stderr.strip() if stderr.strip() else f"exit code {exit_code}"
-                self._log_message(f"  ⚠️ {file_path} compose down failed: {error_msg} (continuing)")
+                self._log_message(f"  ⚠️  {file_path} compose down failed: {error_msg} (continuing)")
 
-        self._log_message("  ✅ Compose stacks shutdown complete")
+        self._log_message("  ✅  Compose stacks shutdown complete")
 
     def _shutdown_containers(self):
         """Stop all containers using detected runtime (Docker/Podman).
@@ -210,15 +210,15 @@ class ContainerShutdownMixin:
 
         # Phase 2: Shutdown all remaining containers
         if not self.config.containers.shutdown_all_remaining_containers:
-            self._log_message(f"🐳 Skipping remaining {runtime_display} container shutdown (disabled)")
+            self._log_message(f"🐳  Skipping remaining {runtime_display} container shutdown (disabled)")
             return
 
-        self._log_message(f"🐳 Stopping all remaining {runtime_display} containers...")
+        self._log_message(f"🐳  Stopping all remaining {runtime_display} containers...")
 
         # Get list of running containers
         exit_code, stdout, _ = run_command([runtime, "ps", "-q"])
         if exit_code != 0:
-            self._log_message(f"  ⚠️ Failed to get {runtime_display} container list")
+            self._log_message(f"  ⚠️  Failed to get {runtime_display} container list")
             return
 
         current_ids = self._current_container_ids()
@@ -235,25 +235,25 @@ class ContainerShutdownMixin:
 
         if skipped_self:
             self._log_message(
-                "  ℹ️ Skipping Eneru's own container during container shutdown"
+                "  ℹ️  Skipping Eneru's own container during container shutdown"
             )
 
         if not container_ids:
-            self._log_message(f"  ℹ️ No running {runtime_display} containers found")
+            self._log_message(f"  ℹ️  No running {runtime_display} containers found")
         else:
             if self.config.behavior.dry_run:
                 # Use the already-filtered ID list so the preview matches exactly
                 # what the real run would stop (Eneru's own container is excluded).
                 ids = " ".join(container_ids)
                 self._log_message(
-                    f"  🧪 [DRY-RUN] Would stop {runtime_display} container IDs: {ids}"
+                    f"  🧪  [DRY-RUN] Would stop {runtime_display} container IDs: {ids}"
                 )
             else:
                 # Stop containers with timeout
                 stop_cmd = [runtime, "stop", "-t", str(self.config.containers.stop_timeout)]
                 stop_cmd.extend(container_ids)
                 run_command(stop_cmd, timeout=self.config.containers.stop_timeout + 30)
-                self._log_message(f"  ✅ {runtime_display} containers stopped")
+                self._log_message(f"  ✅  {runtime_display} containers stopped")
 
         # Handle Podman rootless containers if configured
         if runtime == "podman" and self.config.containers.include_user_containers:
@@ -261,17 +261,17 @@ class ContainerShutdownMixin:
 
     def _shutdown_podman_user_containers(self):
         """Stop Podman containers running as non-root users."""
-        self._log_message("  🔍 Checking for rootless Podman containers...")
+        self._log_message("  🔍  Checking for rootless Podman containers...")
 
         if self.config.behavior.dry_run:
-            self._log_message("  🧪 [DRY-RUN] Would stop rootless Podman containers for all users")
+            self._log_message("  🧪  [DRY-RUN] Would stop rootless Podman containers for all users")
             return
 
         # Get list of users with active Podman containers
         # This requires loginctl and users with linger enabled
         exit_code, stdout, _ = run_command(["loginctl", "list-users", "--no-legend"])
         if exit_code != 0:
-            self._log_message("  ⚠️ Failed to list users for rootless container check")
+            self._log_message("  ⚠️  Failed to list users for rootless container check")
             return
 
         for line in stdout.strip().split('\n'):
@@ -299,7 +299,7 @@ class ContainerShutdownMixin:
                 if exit_code == 0 and stdout.strip():
                     container_ids = [cid.strip() for cid in stdout.strip().split('\n') if cid.strip()]
                     if container_ids:
-                        self._log_message(f"  👤 Stopping {len(container_ids)} container(s) for user '{username}'")
+                        self._log_message(f"  👤  Stopping {len(container_ids)} container(s) for user '{username}'")
                         stop_cmd = [
                             "sudo", "-u", username,
                             "podman", "stop", "-t", str(self.config.containers.stop_timeout)
@@ -307,7 +307,7 @@ class ContainerShutdownMixin:
                         stop_cmd.extend(container_ids)
                         run_command(stop_cmd, timeout=self.config.containers.stop_timeout + 30)
 
-        self._log_message("  ✅ Rootless Podman containers stopped")
+        self._log_message("  ✅  Rootless Podman containers stopped")
 
 
 def _looks_like_container_id(value: str) -> bool:

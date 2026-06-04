@@ -295,6 +295,50 @@ def test_login_success_and_token_usable(minimal_config, tmp_path):
 
 
 @pytest.mark.unit
+def test_login_after_first_user_created_without_restart(
+        minimal_config, tmp_path, monkeypatch):
+    db_path = tmp_path / "auth.db"
+    minimal_config.api.auth.db_path = str(db_path)
+    # Simulate a running daemon that checked auth before any user existed.
+    # Scope the class-level cache mutation with monkeypatch so it is restored
+    # after the test and can't leak a stale "no users" cache into later tests.
+    monkeypatch.setattr(api_module.EneruAPIHandler, "_auth_active_ts", time.time())
+    monkeypatch.setattr(api_module.EneruAPIHandler, "_auth_active_val", False)
+    store = AuthStore(db_path)
+
+    # The first user is created by `eneru user create` while the API keeps
+    # running. Login must refresh the effective-auth probe instead of trusting
+    # the stale "no users" cache.
+    store.create_user("alice", "s3cret")
+    sessions = SessionManager(3600)
+    body = json.dumps({"username": "alice", "password": "s3cret"}).encode()
+    h = _handler(minimal_config, auth_store=store, sessions=sessions,
+                 path="/api/v1/auth/login", body=body)
+
+    status, _, payload = h._route_post()
+
+    assert status == 200
+    assert sessions.validate(payload["token"])["username"] == "alice"
+
+
+@pytest.mark.unit
+def test_auth_state_refreshes_after_first_user_created_without_restart(
+        minimal_config, tmp_path, monkeypatch):
+    db_path = tmp_path / "auth.db"
+    minimal_config.api.auth.db_path = str(db_path)
+    monkeypatch.setattr(api_module.EneruAPIHandler, "_auth_active_ts", time.time())
+    monkeypatch.setattr(api_module.EneruAPIHandler, "_auth_active_val", False)
+
+    AuthStore(db_path).create_user("alice", "s3cret")
+    h = _handler(minimal_config, path="/api/v1/auth/state")
+
+    status, _, payload = h._route()
+
+    assert status == 200
+    assert payload["enabled"] is True
+
+
+@pytest.mark.unit
 def test_login_bad_credentials_401(minimal_config, tmp_path):
     _enable_auth(minimal_config)
     store = AuthStore(tmp_path / "auth.db")

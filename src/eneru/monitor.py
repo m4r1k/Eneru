@@ -192,7 +192,7 @@ class UPSGroupMonitor(
                 self._stats_store.open()
         except Exception as e:
             self._log_message(
-                f"⚠️ WARNING: stats store open failed at {self._stats_db_path}: {e}. "
+                f"⚠️  WARNING: stats store open failed at {self._stats_db_path}: {e}. "
                 "Stats persistence disabled this run."
             )
             self._stats_writer = None
@@ -232,7 +232,7 @@ class UPSGroupMonitor(
         except OSError as exc:
             self._shutdown_flag_unusable = True
             self._log_message(
-                f"⚠️ Could not inspect shutdown flag {self._shutdown_flag_path}: "
+                f"⚠️  Could not inspect shutdown flag {self._shutdown_flag_path}: "
                 f"{exc}. Ignoring the on-disk guard for this process."
             )
             return False
@@ -245,7 +245,7 @@ class UPSGroupMonitor(
         except OSError as exc:
             self._shutdown_flag_unusable = True
             self._log_message(
-                f"⚠️ Could not clear shutdown flag {self._shutdown_flag_path}: "
+                f"⚠️  Could not clear shutdown flag {self._shutdown_flag_path}: "
                 f"{exc}. Ignoring the on-disk guard for this process."
             )
         finally:
@@ -265,7 +265,7 @@ class UPSGroupMonitor(
             self.state.trigger_reason = reason
         if not already_active:
             self._log_message(
-                f"⚠️ Trigger condition met (advisory, redundancy group): {reason}"
+                f"⚠️  Trigger condition met (advisory, redundancy group): {reason}"
             )
 
     def _clear_advisory_trigger(self):
@@ -276,7 +276,7 @@ class UPSGroupMonitor(
             self.state.trigger_reason = ""
         if was_active:
             self._log_message(
-                "✅ Advisory trigger cleared (redundancy group): conditions normal."
+                "✅  Advisory trigger cleared (redundancy group): conditions normal."
             )
 
     def run(self):
@@ -287,14 +287,14 @@ class UPSGroupMonitor(
         except KeyboardInterrupt:
             self._cleanup_and_exit(signal.SIGINT, None)
         except Exception as e:
-            self._log_message(f"❌ FATAL ERROR: {e}")
+            self._log_message(f"❌  FATAL ERROR: {e}")
             self._send_notification(
-                f"❌ **FATAL ERROR**\nError: {e}",
+                f"❌  **FATAL ERROR**\nError: {e}",
                 self.config.NOTIFY_FAILURE,
                 category="lifecycle",
             )
             # Slice 3: tag this exit so the next start emits
-            # "🚀 Restarted (last instance exited fatally)" rather than
+            # "🚀  Restarted (last instance exited fatally)" rather than
             # a generic Started.
             try:
                 from pathlib import Path
@@ -331,14 +331,14 @@ class UPSGroupMonitor(
         try:
             self._battery_history_path.write_text("")
         except PermissionError:
-            self._log_message(f"⚠️ WARNING: Cannot write to {self._battery_history_path}")
+            self._log_message(f"⚠️  WARNING: Cannot write to {self._battery_history_path}")
 
         # Initialize notification worker
         self._initialize_notifications()
 
         self._check_dependencies()
 
-        self._log_message(f"🚀 Eneru v{__version__} starting - monitoring {self.config.ups.name}")
+        self._log_message(f"🚀  Eneru v{__version__} starting - monitoring {self.config.ups.name}")
         # Always invoke — the helper updates meta.last_seen_version for
         # next-start upgrade detection. The actual SEND is suppressed in
         # coordinator mode because the coordinator emits ONE classified
@@ -347,7 +347,7 @@ class UPSGroupMonitor(
         self._emit_lifecycle_startup_notification()
 
         if self.config.behavior.dry_run:
-            self._log_message("🧪 *** RUNNING IN DRY-RUN MODE - NO ACTUAL SHUTDOWN WILL OCCUR ***")
+            self._log_message("🧪  *** RUNNING IN DRY-RUN MODE - NO ACTUAL SHUTDOWN WILL OCCUR ***")
 
         self._log_enabled_features()
         self._wait_for_initial_connection()
@@ -424,7 +424,7 @@ class UPSGroupMonitor(
                 self._stats_store.open()
         except Exception as e:
             self._log_message(
-                f"⚠️ WARNING: stats store open failed at "
+                f"⚠️  WARNING: stats store open failed at "
                 f"{self._stats_db_path}: {e}. Notifications will not "
                 "persist across restarts."
             )
@@ -449,7 +449,7 @@ class UPSGroupMonitor(
                         row[0], "superseded")
             except (sqlite3.Error, OSError) as e:
                 self._log_message(
-                    f"⚠️ WARNING: pre-worker lifecycle sweep failed: {e}"
+                    f"⚠️  WARNING: pre-worker lifecycle sweep failed: {e}"
                 )
 
         if self._notification_worker is not None:
@@ -459,12 +459,12 @@ class UPSGroupMonitor(
             return
 
         if not self.config.notifications.enabled:
-            self._log_message("📢 Notifications: disabled")
+            self._log_message("📢  Notifications: disabled")
             return
 
         if not APPRISE_AVAILABLE:
-            self._log_message("⚠️ WARNING: Notifications enabled but apprise not installed. "
-                              "Install with: pip install apprise")
+            self._log_message("⚠️  WARNING: Notifications enabled but apprise not installed. "
+                              "Install with: uv pip install apprise")
             self.config.notifications.enabled = False
             return
 
@@ -473,22 +473,22 @@ class UPSGroupMonitor(
             if self._stats_store._conn is not None:
                 self._notification_worker.register_store(self._stats_store)
             service_count = self._notification_worker.get_service_count()
-            self._log_message(f"📢 Notifications: enabled ({service_count} service(s))")
+            self._log_message(f"📢  Notifications: enabled ({service_count} service(s))")
         else:
-            self._log_message("⚠️ WARNING: Failed to initialize notifications")
+            self._log_message("⚠️  WARNING: Failed to initialize notifications")
             self.config.notifications.enabled = False
 
     def _emit_lifecycle_startup_notification(self):
         """Update lifecycle meta + (single-UPS only) emit the classified
         startup notification.
 
-        Replaces the v5.1 unconditional ``🚀 Started`` so the user sees:
-        - ``📦 Upgraded vX → vY`` after a deb/rpm upgrade
-        - ``📊 Recovered`` after a power-loss-triggered shutdown
-        - ``🔄 Restarted`` after a quick `systemctl restart`
-        - ``🚀 Started (after crash)`` if the previous instance died
+        Replaces the v5.1 unconditional ``🚀  Started`` so the user sees:
+        - ``📦  Upgraded vX → vY`` after a deb/rpm upgrade
+        - ``📊  Recovered`` after a power-loss-triggered shutdown
+        - ``🔄  Restarted`` after a quick `systemctl restart`
+        - ``🚀  Started (after crash)`` if the previous instance died
           without writing its marker
-        - ``🚀 Started`` on a fresh install
+        - ``🚀  Started`` on a fresh install
 
         In coordinator mode the coordinator emits the single classified
         notification at the multi_ups level (firing per monitor would be
@@ -619,7 +619,7 @@ class UPSGroupMonitor(
         if grace_cfg.enabled:
             features.append(f"Connection Grace ({grace_cfg.duration}s)")
 
-        self._log_message(f"📋 Enabled features: {', '.join(features) if features else 'None'}")
+        self._log_message(f"📋  Enabled features: {', '.join(features) if features else 'None'}")
 
     def _log_message(self, message: str, **extra):
         """Log a message using the logger, with optional prefix for multi-UPS.
@@ -700,7 +700,7 @@ class UPSGroupMonitor(
         silenced here even if a user tried.
         """
         self._log_message(
-            f"⚡ POWER EVENT: {event} - {details}",
+            f"⚡  POWER EVENT: {event} - {details}",
             category="power_event",
             event_type=event,
         )
@@ -713,7 +713,7 @@ class UPSGroupMonitor(
                 # showed up under a different identifier than every
                 # other journal line emitted by the daemon.
                 "logger", "-t", "eneru", "-p", "daemon.warning",
-                f"⚡ POWER EVENT: {event} - {details}"
+                f"⚡  POWER EVENT: {event} - {details}"
             ])
         except Exception:
             pass
@@ -724,51 +724,51 @@ class UPSGroupMonitor(
 
         event_handlers = {
             "ON_BATTERY": (
-                f"⚠️ **POWER FAILURE DETECTED!**\nSystem running on battery.\nDetails: {details}",
+                f"⚠️  **POWER FAILURE DETECTED!**\nSystem running on battery.\nDetails: {details}",
                 self.config.NOTIFY_WARNING
             ),
             "POWER_RESTORED": (
-                f"✅ **POWER RESTORED**\nSystem back on line power/charging.\nDetails: {details}",
+                f"✅  **POWER RESTORED**\nSystem back on line power/charging.\nDetails: {details}",
                 self.config.NOTIFY_SUCCESS
             ),
             "BROWNOUT_DETECTED": (
-                f"⚠️ **VOLTAGE ISSUE:** {event}\nDetails: {details}",
+                f"⚠️  **VOLTAGE ISSUE:** {event}\nDetails: {details}",
                 self.config.NOTIFY_WARNING
             ),
             "OVER_VOLTAGE_DETECTED": (
-                f"⚠️ **VOLTAGE ISSUE:** {event}\nDetails: {details}",
+                f"⚠️  **VOLTAGE ISSUE:** {event}\nDetails: {details}",
                 self.config.NOTIFY_WARNING
             ),
             "AVR_BOOST_ACTIVE": (
-                f"⚡ **AVR ACTIVE:** {event}\nDetails: {details}",
+                f"⚡  **AVR ACTIVE:** {event}\nDetails: {details}",
                 self.config.NOTIFY_WARNING
             ),
             "AVR_TRIM_ACTIVE": (
-                f"⚡ **AVR ACTIVE:** {event}\nDetails: {details}",
+                f"⚡  **AVR ACTIVE:** {event}\nDetails: {details}",
                 self.config.NOTIFY_WARNING
             ),
             "BYPASS_MODE_ACTIVE": (
-                f"⚠️ **UPS IN BYPASS MODE!**\nNo protection active!\nDetails: {details}",
+                f"⚠️  **UPS IN BYPASS MODE!**\nNo protection active!\nDetails: {details}",
                 self.config.NOTIFY_FAILURE
             ),
             "BYPASS_MODE_INACTIVE": (
-                f"✅ **Bypass Mode Inactive**\nProtection restored.\nDetails: {details}",
+                f"✅  **Bypass Mode Inactive**\nProtection restored.\nDetails: {details}",
                 self.config.NOTIFY_SUCCESS
             ),
             "OVERLOAD_ACTIVE": (
-                f"⚠️ **UPS OVERLOAD DETECTED!**\nDetails: {details}",
+                f"⚠️  **UPS OVERLOAD DETECTED!**\nDetails: {details}",
                 self.config.NOTIFY_FAILURE
             ),
             "OVERLOAD_RESOLVED": (
-                f"✅ **Overload Resolved**\nDetails: {details}",
+                f"✅  **Overload Resolved**\nDetails: {details}",
                 self.config.NOTIFY_SUCCESS
             ),
             "CONNECTION_LOST": (
-                f"❌ **ERROR: Connection Lost**\n{details}",
+                f"❌  **ERROR: Connection Lost**\n{details}",
                 self.config.NOTIFY_FAILURE
             ),
             "CONNECTION_RESTORED": (
-                f"✅ **Connection Restored**\n{details}",
+                f"✅  **Connection Restored**\n{details}",
                 self.config.NOTIFY_SUCCESS
             ),
         }
@@ -805,7 +805,7 @@ class UPSGroupMonitor(
             notification = event_handlers[event]
         else:
             notification = (
-                f"⚡ **Event:** {event}\nDetails: {details}",
+                f"⚡  **Event:** {event}\nDetails: {details}",
                 self.config.NOTIFY_INFO
             )
 
@@ -844,13 +844,13 @@ class UPSGroupMonitor(
         missing = [cmd for cmd in required_cmds if not command_exists(cmd)]
 
         if missing:
-            error_msg = f"❌ FATAL ERROR: Missing required commands: {', '.join(missing)}"
+            error_msg = f"❌  FATAL ERROR: Missing required commands: {', '.join(missing)}"
             print(error_msg)
             sys.exit(1)
 
         if not command_exists("logger") and not self._is_container_runtime:
             self._log_message(
-                "⚠️ WARNING: 'logger' not found. Power events will still be "
+                "⚠️  WARNING: 'logger' not found. Power events will still be "
                 "written to Eneru logs, but the legacy syslog side-channel "
                 "will be skipped."
             )
@@ -870,7 +870,7 @@ class UPSGroupMonitor(
             and self.config.virtual_machines.enabled
             and not command_exists("virsh")
         ):
-            self._log_message("⚠️ WARNING: 'virsh' not found but VM shutdown is enabled. VMs will be skipped.")
+            self._log_message("⚠️  WARNING: 'virsh' not found but VM shutdown is enabled. VMs will be skipped.")
             self.config.virtual_machines.enabled = False
 
         # Container runtime detection. Skip entirely when delegating — host
@@ -879,27 +879,27 @@ class UPSGroupMonitor(
         if self.config.containers.enabled and not delegating:
             self._container_runtime = self._detect_container_runtime()
             if self._container_runtime:
-                self._log_message(f"🐳 Container runtime detected: {self._container_runtime}")
+                self._log_message(f"🐳  Container runtime detected: {self._container_runtime}")
                 # Check compose availability if compose_files are configured
                 if self.config.containers.compose_files:
                     self._compose_available = self._check_compose_available()
                     if self._compose_available:
                         self._log_message(
-                            f"🐳 Compose support: enabled ({self._container_runtime} compose, "
+                            f"🐳  Compose support: enabled ({self._container_runtime} compose, "
                             f"{len(self.config.containers.compose_files)} file(s))"
                         )
                     else:
                         self._log_message(
-                            f"⚠️ WARNING: compose_files configured but '{self._container_runtime} compose' "
+                            f"⚠️  WARNING: compose_files configured but '{self._container_runtime} compose' "
                             "not available. Compose shutdown will be skipped."
                         )
             else:
-                self._log_message("⚠️ WARNING: No container runtime found. Container shutdown will be skipped.")
+                self._log_message("⚠️  WARNING: No container runtime found. Container shutdown will be skipped.")
                 self.config.containers.enabled = False
 
         enabled_servers = [s for s in self.config.remote_servers if s.enabled]
         if enabled_servers and not command_exists("ssh"):
-            self._log_message("⚠️ WARNING: 'ssh' not found but remote servers are configured. Remote shutdown will be skipped.")
+            self._log_message("⚠️  WARNING: 'ssh' not found but remote servers are configured. Remote shutdown will be skipped.")
             for server in self.config.remote_servers:
                 server.enabled = False
 
@@ -946,7 +946,7 @@ class UPSGroupMonitor(
         except OSError as exc:
             self._shutdown_flag_unusable = True
             self._log_message(
-                f"⚠️ Could not write shutdown flag {self._shutdown_flag_path} "
+                f"⚠️  Could not write shutdown flag {self._shutdown_flag_path} "
                 f"while {context}: {exc}. Continuing without the on-disk guard."
             )
             return False
@@ -971,7 +971,7 @@ class UPSGroupMonitor(
                 >= self._slow_nut_log_rate_limit_seconds
             ):
                 self._log_message(
-                    f"⚠️ Slow NUT response from {self.config.ups.name}: "
+                    f"⚠️  Slow NUT response from {self.config.ups.name}: "
                     f"{elapsed:.1f}s for {' '.join(cmd)}"
                 )
                 try:
@@ -1011,7 +1011,7 @@ class UPSGroupMonitor(
             >= self._slow_nut_notify_consecutive_polls
         ):
             self._send_notification(
-                f"⚠️ **Sustained slow NUT responses**\n"
+                f"⚠️  **Sustained slow NUT responses**\n"
                 f"UPS: {self.config.ups.name}\n"
                 f"Latest poll took {elapsed:.1f}s. "
                 f"Threshold: {self._slow_nut_notify_threshold_seconds:.1f}s "
@@ -1038,7 +1038,7 @@ class UPSGroupMonitor(
 
     def _wait_for_initial_connection(self):
         """Wait for initial connection to NUT server."""
-        self._log_message(f"⏳ Checking initial connection to {self.config.ups.name}...")
+        self._log_message(f"⏳  Checking initial connection to {self.config.ups.name}...")
 
         max_wait = 30
         wait_interval = 5
@@ -1049,14 +1049,14 @@ class UPSGroupMonitor(
             success, _, _ = self._get_all_ups_data()
             if success:
                 connected = True
-                self._log_message("✅ Initial connection successful.")
+                self._log_message("✅  Initial connection successful.")
                 break
             time.sleep(wait_interval)
             time_waited += wait_interval
 
         if not connected:
             self._log_message(
-                f"⚠️ WARNING: Failed to connect to {self.config.ups.name} "
+                f"⚠️  WARNING: Failed to connect to {self.config.ups.name} "
                 f"within {max_wait}s. Proceeding, but voltage thresholds may default."
             )
 
@@ -1136,10 +1136,10 @@ class UPSGroupMonitor(
 
         delegated = self._uses_loopback_delegate
 
-        self._log_message("🚨 INITIATING EMERGENCY SHUTDOWN SEQUENCE")
+        self._log_message("🚨  INITIATING EMERGENCY SHUTDOWN SEQUENCE")
 
         if self.config.behavior.dry_run:
-            self._log_message("🧪 *** DRY-RUN MODE: No actual shutdown will occur ***")
+            self._log_message("🧪  *** DRY-RUN MODE: No actual shutdown will occur ***")
 
         if delegated:
             # v5.5: emit a distinct event so dashboards / SIEMs can tell
@@ -1152,7 +1152,7 @@ class UPSGroupMonitor(
             except Exception:
                 pass
             self._log_message(
-                "🛰️ Container loopback mode: local actions will be delegated "
+                "🛰️  Container loopback mode: local actions will be delegated "
                 "to the host via SSH (no in-process VM/container/filesystem "
                 "phases, no in-process host poweroff)."
             )
@@ -1163,7 +1163,7 @@ class UPSGroupMonitor(
         if self._should_fire_wall():
             run_command([
                 "wall",
-                "🚨 CRITICAL: Executing emergency UPS shutdown sequence NOW!"
+                "🚨  CRITICAL: Executing emergency UPS shutdown sequence NOW!"
             ])
 
         # Runtime is_local enforcement: only the local UPS group can
@@ -1191,7 +1191,7 @@ class UPSGroupMonitor(
                     phase_fn()
                 except Exception as exc:
                     self._log_message(
-                        f"❌ {phase_name} phase failed: {exc}. Continuing the "
+                        f"❌  {phase_name} phase failed: {exc}. Continuing the "
                         "shutdown sequence -- drain is best-effort, the host "
                         "halt is not."
                     )
@@ -1203,15 +1203,15 @@ class UPSGroupMonitor(
             remote_results = self._shutdown_remote_servers() or []
         except Exception as exc:
             self._log_message(
-                f"❌ remote shutdown phase failed: {exc}. Continuing to the "
+                f"❌  remote shutdown phase failed: {exc}. Continuing to the "
                 "host poweroff."
             )
             remote_results = []
 
         if is_local and self.config.filesystems.sync_enabled and not delegated:
-            self._log_message("💾 Final filesystem sync...")
+            self._log_message("💾  Final filesystem sync...")
             if self.config.behavior.dry_run:
-                self._log_message("  🧪 [DRY-RUN] Would perform final sync")
+                self._log_message("  🧪  [DRY-RUN] Would perform final sync")
             else:
                 # Bounded sync (FilesystemShutdownMixin) so a hung mount can't
                 # wedge the sequence before the host poweroff below.
@@ -1219,7 +1219,7 @@ class UPSGroupMonitor(
 
         # In coordinator mode, notify the coordinator instead of doing local shutdown
         if self._coordinator_mode:
-            self._log_message("✅ GROUP SHUTDOWN SEQUENCE COMPLETE")
+            self._log_message("✅  GROUP SHUTDOWN SEQUENCE COMPLETE")
             if self._shutdown_callback:
                 group = self.config.ups_groups[0] if self.config.ups_groups else None
                 self._shutdown_callback(group)
@@ -1241,10 +1241,10 @@ class UPSGroupMonitor(
         if self.config.local_shutdown.enabled and not delegated:
             if self.config.behavior.dry_run:
                 record_sequence_complete()
-                self._log_message("🔌 Shutting down local server NOW")
-                self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE")
-                self._log_message(f"🧪 [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
-                self._log_message("🧪 [DRY-RUN] Shutdown sequence completed successfully (no actual shutdown)")
+                self._log_message("🔌  Shutting down local server NOW")
+                self._log_message("✅  SHUTDOWN SEQUENCE COMPLETE")
+                self._log_message(f"🧪  [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
+                self._log_message("🧪  [DRY-RUN] Shutdown sequence completed successfully (no actual shutdown)")
                 self._clear_shutdown_in_progress()
             else:
                 # Validate the poweroff command BEFORE recording the run as a
@@ -1257,12 +1257,12 @@ class UPSGroupMonitor(
                 cmd_parts = str(self.config.local_shutdown.command or "").split()
                 if not cmd_parts:
                     self._log_message(
-                        "❌ local_shutdown.command is empty -- host poweroff "
+                        "❌  local_shutdown.command is empty -- host poweroff "
                         "SKIPPED; shutdown sequence INCOMPLETE. Set "
                         "local_shutdown.command to a valid command."
                     )
                     self._send_notification(
-                        f"❌ **Shutdown Sequence Incomplete** (took {elapsed}s)\n"
+                        f"❌  **Shutdown Sequence Incomplete** (took {elapsed}s)\n"
                         "Host poweroff command is empty; the host is still up.",
                         self.config.NOTIFY_FAILURE,
                         category="shutdown_summary",
@@ -1271,13 +1271,13 @@ class UPSGroupMonitor(
                     return
 
                 record_sequence_complete()
-                self._log_message("🔌 Shutting down local server NOW")
-                self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE")
+                self._log_message("🔌  Shutting down local server NOW")
+                self._log_message("✅  SHUTDOWN SEQUENCE COMPLETE")
                 # Single-shot summary notification covering the whole sequence;
                 # the per-phase chatter that used to mirror every log line is
                 # gone in v5.2 (journalctl is the forensic record).
                 self._send_notification(
-                    f"✅ **Shutdown Sequence Complete** (took {elapsed}s)\n"
+                    f"✅  **Shutdown Sequence Complete** (took {elapsed}s)\n"
                     f"Powering down local server NOW.",
                     self.config.NOTIFY_FAILURE,
                     category="shutdown_summary",
@@ -1291,7 +1291,7 @@ class UPSGroupMonitor(
                     self._notification_worker.flush(timeout=5)
 
                 # Slice 3: tag this shutdown as power-loss-triggered so
-                # the next start can emit "📊 Recovered" and (with Slice
+                # the next start can emit "📊  Recovered" and (with Slice
                 # 4 coalescing) fold this run's "Shutdown sequence
                 # complete" notification into one richer message.
                 from pathlib import Path
@@ -1325,11 +1325,11 @@ class UPSGroupMonitor(
                     if not r.success
                 ) or "loopback shutdown result missing"
                 self._log_message(
-                    "❌ Delegated host poweroff failed; shutdown sequence "
+                    "❌  Delegated host poweroff failed; shutdown sequence "
                     f"is incomplete: {details}"
                 )
                 self._send_notification(
-                    f"❌ **Shutdown Sequence Incomplete** (took {elapsed}s)\n"
+                    f"❌  **Shutdown Sequence Incomplete** (took {elapsed}s)\n"
                     f"Host poweroff delegation failed: {details}",
                     self.config.NOTIFY_FAILURE,
                     category="shutdown_summary",
@@ -1343,19 +1343,19 @@ class UPSGroupMonitor(
                 return
             record_sequence_complete()
             self._log_message(
-                "🛰️ Host poweroff delegated to loopback SSH (already sent). "
+                "🛰️  Host poweroff delegated to loopback SSH (already sent). "
                 "Container will terminate when the host goes down."
             )
-            self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE")
+            self._log_message("✅  SHUTDOWN SEQUENCE COMPLETE")
             if self.config.behavior.dry_run:
                 self._log_message(
-                    "🧪 [DRY-RUN] Would have delegated host poweroff to loopback "
+                    "🧪  [DRY-RUN] Would have delegated host poweroff to loopback "
                     "SSH (no actual shutdown performed)."
                 )
                 self._clear_shutdown_in_progress()
             else:
                 self._send_notification(
-                    f"✅ **Shutdown Sequence Complete** (took {elapsed}s)\n"
+                    f"✅  **Shutdown Sequence Complete** (took {elapsed}s)\n"
                     f"Host poweroff delegated to loopback SSH.",
                     self.config.NOTIFY_FAILURE,
                     category="shutdown_summary",
@@ -1370,9 +1370,9 @@ class UPSGroupMonitor(
                 )
         else:
             record_sequence_complete()
-            self._log_message("✅ SHUTDOWN SEQUENCE COMPLETE (local shutdown disabled)")
+            self._log_message("✅  SHUTDOWN SEQUENCE COMPLETE (local shutdown disabled)")
             self._send_notification(
-                f"✅ **Shutdown Sequence Complete** (took {elapsed}s)\n"
+                f"✅  **Shutdown Sequence Complete** (took {elapsed}s)\n"
                 f"Local shutdown is disabled — system stays up.",
                 self.config.NOTIFY_INFO,
                 category="shutdown_summary",
@@ -1381,7 +1381,7 @@ class UPSGroupMonitor(
 
             # Exit if --exit-after-shutdown was specified
             if self._exit_after_shutdown:
-                self._log_message("🛑 Exiting after shutdown sequence")
+                self._log_message("🛑  Exiting after shutdown sequence")
                 self._cleanup_and_exit(None, None)
 
     def _trigger_immediate_shutdown(self, reason: str):
@@ -1392,7 +1392,7 @@ class UPSGroupMonitor(
             # met but nothing fired" with the stuck flag much harder
             # than it should have been.
             self._log_message(
-                f"⚠️ Shutdown trigger fired ({reason}) but a previous "
+                f"⚠️  Shutdown trigger fired ({reason}) but a previous "
                 f"shutdown sequence is already in progress "
                 f"({self._shutdown_flag_path}). Ignoring re-trigger."
             )
@@ -1402,7 +1402,7 @@ class UPSGroupMonitor(
 
         # Send notification (non-blocking - fire and forget)
         self._send_notification(
-            f"🚨 **EMERGENCY SHUTDOWN INITIATED!**\n"
+            f"🚨  **EMERGENCY SHUTDOWN INITIATED!**\n"
             f"Reason: {reason}\n"
             "Executing shutdown tasks (VMs, Containers, Remote Servers).",
             self.config.NOTIFY_FAILURE,
@@ -1419,11 +1419,11 @@ class UPSGroupMonitor(
         except Exception:
             pass  # stats hiccup must not block the safety-critical path
 
-        self._log_message(f"🚨 CRITICAL: Triggering immediate shutdown. Reason: {reason}")
+        self._log_message(f"🚨  CRITICAL: Triggering immediate shutdown. Reason: {reason}")
         if self._should_fire_wall():
             run_command([
                 "wall",
-                f"🚨 CRITICAL: UPS battery critical! Immediate shutdown initiated! Reason: {reason}"
+                f"🚨  CRITICAL: UPS battery critical! Immediate shutdown initiated! Reason: {reason}"
             ])
 
         self._execute_shutdown_sequence()
@@ -1447,7 +1447,7 @@ class UPSGroupMonitor(
             try:
                 self._stats_store.apply_reload(self.config.statistics)
             except Exception as exc:  # pragma: no cover - defensive
-                self._log_message(f"⚠️ stats retention reload failed: {exc}")
+                self._log_message(f"⚠️  stats retention reload failed: {exc}")
         if "notifications" in subsystems and not self._coordinator_mode:
             self._reload_notification_worker()
         if "remote_health" in subsystems:
@@ -1461,12 +1461,12 @@ class UPSGroupMonitor(
             self._notification_worker.stop()
             self._notification_worker = None
         if not self.config.notifications.enabled:
-            self._log_message("📢 Notifications: disabled")
+            self._log_message("📢  Notifications: disabled")
             return
         if not APPRISE_AVAILABLE:
             self._log_message(
-                "⚠️ WARNING: Notifications enabled but apprise not installed. "
-                "Install with: pip install apprise"
+                "⚠️  WARNING: Notifications enabled but apprise not installed. "
+                "Install with: uv pip install apprise"
             )
             return
         worker = NotificationWorker(self.config)
@@ -1475,9 +1475,9 @@ class UPSGroupMonitor(
                 worker.register_store(self._stats_store)
             self._notification_worker = worker
             count = worker.get_service_count()
-            self._log_message(f"📢 Notifications reloaded ({count} service(s))")
+            self._log_message(f"📢  Notifications reloaded ({count} service(s))")
         else:
-            self._log_message("⚠️ WARNING: Failed to reload notifications")
+            self._log_message("⚠️  WARNING: Failed to reload notifications")
 
     def _reload_remote_health(self) -> None:
         """Bounce remote-health with the new interval/probe/thresholds."""
@@ -1485,7 +1485,7 @@ class UPSGroupMonitor(
             self._remote_health_manager.stop()
             self._remote_health_manager = None
         self._start_remote_health()
-        self._log_message("🔄 Remote health checks reloaded")
+        self._log_message("🔄  Remote health checks reloaded")
 
     def _reload_mqtt_publisher(self) -> None:
         """Bounce the MQTT publisher so broker/topic changes take effect."""
@@ -1493,7 +1493,7 @@ class UPSGroupMonitor(
             self._mqtt_publisher.stop()
             self._mqtt_publisher = None
         self._start_mqtt_publisher()
-        self._log_message("🔄 MQTT publisher reloaded")
+        self._log_message("🔄  MQTT publisher reloaded")
 
     def record_control_event(self, ups_name: str, event_type: str,
                              detail: str) -> None:
@@ -1520,11 +1520,11 @@ class UPSGroupMonitor(
         Defensive: a reload must never crash the daemon via the signal handler,
         so any unexpected error is logged and swallowed.
         """
-        self._log_message("🔄 SIGHUP received — reloading configuration")
+        self._log_message("🔄  SIGHUP received — reloading configuration")
         try:
             self.reload_config()
         except Exception as exc:  # pragma: no cover - defensive
-            self._log_message(f"⚠️ Config reload error (ignored): {exc}")
+            self._log_message(f"⚠️  Config reload error (ignored): {exc}")
 
     def _log_reload_report(self, report: dict) -> None:
         from eneru.reload import format_report
@@ -1555,7 +1555,7 @@ class UPSGroupMonitor(
 
         self._mark_shutdown_in_progress("recording service stop")
 
-        self._log_message("🛑 Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
+        self._log_message("🛑  Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
 
         # Mirror to the events table so the TUI's --events-only view
         # shows when the daemon was last cleanly stopped (it already
@@ -1572,7 +1572,7 @@ class UPSGroupMonitor(
         # v5.2.1: postinstall.sh drops the upgrade marker BEFORE invoking
         # `systemctl restart`, so the marker is on disk by the time
         # SIGTERM lands here on a deb/rpm upgrade. The next daemon will
-        # emit a single "📦 Upgraded vX → vY" message that supersedes
+        # emit a single "📦  Upgraded vX → vY" message that supersedes
         # this stop, so suppress the stop entirely — saves a write and
         # avoids the prior-instance "Stopped" leaking through.
         upgrade_in_progress = read_upgrade_marker(stats_dir) is not None
@@ -1586,7 +1586,7 @@ class UPSGroupMonitor(
         # either the next daemon's classifier (within the
         # `schedule_deferred_stop_or_eager_send` window) or delivered
         # by the systemd-run timer if no replacement comes up.
-        body = "🛑 **Eneru Service Stopped**\nMonitoring is now inactive."
+        body = "🛑  **Eneru Service Stopped**\nMonitoring is now inactive."
         notify_type = self.config.NOTIFY_WARNING
 
         # Order matters: flush + stop FIRST, then enqueue. If we enqueued
@@ -1647,7 +1647,7 @@ class UPSGroupMonitor(
         self._stop_stats()
 
         # Slice 3: drop the shutdown marker so the next start can
-        # classify this exit (signal → "🔄 Restarted" if it comes back
+        # classify this exit (signal → "🔄  Restarted" if it comes back
         # within RESTART_DOWNTIME_THRESHOLD_SECS, else cold "Started").
         # Don't downgrade an existing sequence_complete marker — that
         # would mask a power-loss shutdown when systemd's stop signal
@@ -1685,7 +1685,7 @@ class UPSGroupMonitor(
             if self._should_fire_wall():
                 run_command([
                     "wall",
-                    f"⚠️ WARNING: Power failure detected! System running on UPS battery "
+                    f"⚠️  WARNING: Power failure detected! System running on UPS battery "
                     f"({battery_charge}% remaining, {format_seconds(battery_runtime)} runtime)"
                 ])
 
@@ -1705,7 +1705,7 @@ class UPSGroupMonitor(
             if battery_int < self.config.triggers.low_battery_threshold:
                 if stabilizing:
                     self._log_message(
-                        f"🕒 INFO: Low battery reading ({battery_int}% < "
+                        f"🕒  INFO: Low battery reading ({battery_int}% < "
                         f"{self.config.triggers.low_battery_threshold}%) ignored during "
                         f"on-battery stabilization "
                         f"({time_on_battery}s/{stabilization_delay}s)."
@@ -1716,7 +1716,7 @@ class UPSGroupMonitor(
                         f"{self.config.triggers.low_battery_threshold}%"
                     )
         else:
-            self._log_message(f"⚠️ WARNING: Received non-numeric battery charge value: '{battery_charge}'")
+            self._log_message(f"⚠️  WARNING: Received non-numeric battery charge value: '{battery_charge}'")
 
         # T2. Critical runtime remaining
         if not shutdown_reason and is_numeric(battery_runtime):
@@ -1724,7 +1724,7 @@ class UPSGroupMonitor(
             if runtime_int < self.config.triggers.critical_runtime_threshold:
                 if stabilizing:
                     self._log_message(
-                        f"🕒 INFO: Critical runtime reading "
+                        f"🕒  INFO: Critical runtime reading "
                         f"({format_seconds(runtime_int)} < "
                         f"{format_seconds(self.config.triggers.critical_runtime_threshold)}) "
                         "ignored during on-battery stabilization "
@@ -1741,12 +1741,12 @@ class UPSGroupMonitor(
             if depletion_rate > self.config.triggers.depletion.critical_rate:
                 if stabilizing:
                     self._log_message(
-                        f"🕒 INFO: High depletion rate ({depletion_rate}%/min) ignored during "
+                        f"🕒  INFO: High depletion rate ({depletion_rate}%/min) ignored during "
                         f"on-battery stabilization ({time_on_battery}s/{stabilization_delay}s)."
                     )
                 elif time_on_battery < self.config.triggers.depletion.grace_period:
                     self._log_message(
-                        f"🕒 INFO: High depletion rate ({depletion_rate}%/min) ignored during "
+                        f"🕒  INFO: High depletion rate ({depletion_rate}%/min) ignored during "
                         f"grace period ({time_on_battery}s/{self.config.triggers.depletion.grace_period}s)."
                     )
                 else:
@@ -1759,7 +1759,7 @@ class UPSGroupMonitor(
         if not shutdown_reason and time_on_battery > self.config.triggers.extended_time.threshold:
             if stabilizing:
                 self._log_message(
-                    f"🕒 INFO: Extended-time trigger ignored during on-battery "
+                    f"🕒  INFO: Extended-time trigger ignored during on-battery "
                     f"stabilization ({time_on_battery}s/{stabilization_delay}s)."
                 )
             elif self.config.triggers.extended_time.enabled:
@@ -1769,7 +1769,7 @@ class UPSGroupMonitor(
                 )
             elif not self.state.extended_time_logged:
                 self._log_message(
-                    f"⏳ INFO: System on battery for {format_seconds(time_on_battery)} "
+                    f"⏳  INFO: System on battery for {format_seconds(time_on_battery)} "
                     f"exceeded threshold ({format_seconds(self.config.triggers.extended_time.threshold)}) - "
                     "extended time shutdown disabled"
                 )
@@ -1792,7 +1792,7 @@ class UPSGroupMonitor(
         # Log status every 5 seconds
         if int(time.time()) % 5 == 0:
             self._log_message(
-                f"🔋 On battery: {battery_charge}% ({format_seconds(battery_runtime)}), "
+                f"🔋  On battery: {battery_charge}% ({format_seconds(battery_runtime)}), "
                 f"Load: {ups_load}%, Depletion: {depletion_rate}%/min, "
                 f"Time on battery: {format_seconds(time_on_battery)}"
             )
@@ -1816,7 +1816,7 @@ class UPSGroupMonitor(
             if self._should_fire_wall():
                 run_command([
                     "wall",
-                    f"✅ Power has been restored. UPS Status: {ups_status}. "
+                    f"✅  Power has been restored. UPS Status: {ups_status}. "
                     f"Battery at {battery_charge}%."
                 ])
 
@@ -1846,7 +1846,7 @@ class UPSGroupMonitor(
                     self._power_restored_callback()
                 except Exception as exc:  # defensive: never raise into the loop
                     self._log_message(
-                        f"⚠️ power_restored_callback raised: {exc}"
+                        f"⚠️  power_restored_callback raised: {exc}"
                     )
 
             # Power restored on a redundancy-group member: drop any advisory
@@ -1896,13 +1896,13 @@ class UPSGroupMonitor(
                 self.state.connection_lost_time = time.time()
             if "Data stale" in error_msg:
                 self._log_message(
-                    f"⚠️ Connection to UPS {self.config.ups.name} lost "
+                    f"⚠️  Connection to UPS {self.config.ups.name} lost "
                     f"(data stale). Grace period started "
                     f"({grace_cfg.duration}s)."
                 )
             else:
                 self._log_message(
-                    f"⚠️ Connection to UPS {self.config.ups.name} lost. "
+                    f"⚠️  Connection to UPS {self.config.ups.name} lost. "
                     f"Grace period started ({grace_cfg.duration}s)."
                 )
 
@@ -1960,7 +1960,7 @@ class UPSGroupMonitor(
                     self.state.stale_data_count += 1
                     if self.state.connection_state not in ("FAILED", "GRACE_PERIOD"):
                         self._log_message(
-                            f"⚠️ WARNING: Data stale from UPS {self.config.ups.name} "
+                            f"⚠️  WARNING: Data stale from UPS {self.config.ups.name} "
                             f"(Attempt {self.state.stale_data_count}/{tolerance})."
                         )
 
@@ -1971,7 +1971,7 @@ class UPSGroupMonitor(
                     self.state.connection_error_count += 1
                     if self.state.connection_state not in ("FAILED", "GRACE_PERIOD"):
                         self._log_message(
-                            f"❌ ERROR: Cannot connect to UPS {self.config.ups.name} "
+                            f"❌  ERROR: Cannot connect to UPS {self.config.ups.name} "
                             f"(Attempt {self.state.connection_error_count}/"
                             f"{tolerance}). Output: {error_msg}"
                         )
@@ -2017,19 +2017,19 @@ class UPSGroupMonitor(
                             "FAILSAFE (FSB): connection lost while On Battery"
                         )
                         self._log_message(
-                            "🚨 FAILSAFE (advisory, redundancy group): connection lost "
+                            "🚨  FAILSAFE (advisory, redundancy group): connection lost "
                             "while On Battery; deferring to group evaluator."
                         )
                     else:
                         self._failsafe_initiated = True
                         self._mark_shutdown_in_progress("starting failsafe shutdown")
                         self._log_message(
-                            "🚨 FAILSAFE TRIGGERED (FSB): Connection lost or data persistently stale "
+                            "🚨  FAILSAFE TRIGGERED (FSB): Connection lost or data persistently stale "
                             "while On Battery. Initiating emergency shutdown."
                         )
                         # Send notification (non-blocking - fire and forget)
                         self._send_notification(
-                            "🚨 **FAILSAFE (FSB) TRIGGERED!**\n"
+                            "🚨  **FAILSAFE (FSB) TRIGGERED!**\n"
                             "Connection to UPS lost or data stale while system was running On Battery.\n"
                             "Assuming critical failure. Executing immediate shutdown.",
                             self.config.NOTIFY_FAILURE,
@@ -2069,7 +2069,7 @@ class UPSGroupMonitor(
                 # Recovered during grace period: quiet recovery, no notification
                 elapsed = time.time() - self.state.connection_lost_time
                 self._log_message(
-                    f"✅ Connection to UPS {self.config.ups.name} recovered during "
+                    f"✅  Connection to UPS {self.config.ups.name} recovered during "
                     f"grace period ({elapsed:.0f}s elapsed). No notification sent."
                 )
                 with self.state._lock:
@@ -2088,11 +2088,11 @@ class UPSGroupMonitor(
                 grace_cfg = self.config.ups.connection_loss_grace_period
                 if self.state.connection_flap_count >= grace_cfg.flap_threshold:
                     self._log_message(
-                        f"⚠️ NUT server is unstable: connection to UPS {self.config.ups.name} "
+                        f"⚠️  NUT server is unstable: connection to UPS {self.config.ups.name} "
                         f"has flapped {self.state.connection_flap_count} times."
                     )
                     self._send_notification(
-                        f"⚠️ **NUT Server Unstable**\n"
+                        f"⚠️  **NUT Server Unstable**\n"
                         f"Connection to UPS {self.config.ups.name} has flapped "
                         f"{self.state.connection_flap_count} times "
                         f"(recovered within grace period each time). "
@@ -2128,7 +2128,7 @@ class UPSGroupMonitor(
 
             if not ups_status:
                 self._log_message(
-                    "❌ ERROR: Received data from UPS but 'ups.status' is missing. "
+                    "❌  ERROR: Received data from UPS but 'ups.status' is missing. "
                     "Check NUT configuration."
                 )
                 self._stop_event.wait(5)
@@ -2142,7 +2142,7 @@ class UPSGroupMonitor(
                 battery_runtime = ups_data.get('battery.runtime', '')
                 ups_load = ups_data.get('ups.load', '')
                 self._log_message(
-                    f"🔄 Status changed: {self.state.previous_status} -> {ups_status} "
+                    f"🔄  Status changed: {self.state.previous_status} -> {ups_status} "
                     f"(Battery: {battery_charge}%, Runtime: {format_seconds(battery_runtime)}, "
                     f"Load: {ups_load}%)"
                 )

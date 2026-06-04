@@ -429,14 +429,14 @@ class RemoteHealthManager:
         notification_sent = False
         if success and previous in (REMOTE_HEALTH_DEGRADED, REMOTE_HEALTH_FAILED):
             self._notified_failed[key] = False
-            self.log_fn(f"✅ Remote health recovered: {display}")
+            self.log_fn(f"✅  Remote health recovered: {display}")
             if (
                 previous == REMOTE_HEALTH_FAILED
                 and self.config.remote_health.notify_on_recovery
                 and self.notify_fn
             ):
                 self.notify_fn(
-                    f"✅ **Remote SSH Health Recovered:** {display}\nHost: {server.host}",
+                    f"✅  **Remote SSH Health Recovered:** {display}\nHost: {server.host}",
                     self.config.NOTIFY_SUCCESS,
                 )
                 notification_sent = True
@@ -447,13 +447,13 @@ class RemoteHealthManager:
                 # the host-poweroff contract; if it's broken, Eneru cannot
                 # honor a power-loss shutdown in full.
                 self.log_fn(
-                    f"❌ HOST LOOPBACK FAILED: {display} ({server.host}). "
+                    f"❌  HOST LOOPBACK FAILED: {display} ({server.host}). "
                     "Under a real power outage, we cannot shut the system "
                     f"down. Cause: {error}"
                 )
                 if self.config.remote_health.notify_on_failure and self.notify_fn:
                     self.notify_fn(
-                        f"🚨 **Host Loopback FAILED:** {display}\n"
+                        f"🚨  **Host Loopback FAILED:** {display}\n"
                         f"Host: {server.host}\n"
                         "**Under a real power outage, we cannot shut the "
                         "system down.**\n"
@@ -462,10 +462,10 @@ class RemoteHealthManager:
                     )
                     notification_sent = True
             else:
-                self.log_fn(f"❌ Remote health failed: {display}: {error}")
+                self.log_fn(f"❌  Remote health failed: {display}: {error}")
                 if self.config.remote_health.notify_on_failure and self.notify_fn:
                     self.notify_fn(
-                        f"❌ **Remote SSH Health Failed:** {display}\n"
+                        f"❌  **Remote SSH Health Failed:** {display}\n"
                         f"Host: {server.host}\nError: {error}",
                         self.config.NOTIFY_FAILURE,
                     )
@@ -475,7 +475,7 @@ class RemoteHealthManager:
             # (before it crosses failure_threshold). Once it's FAILED we've
             # already logged + notified the failure; relabelling it "degraded"
             # on every subsequent poll is noisy and misleading.
-            self.log_fn(f"⚠️ Remote health degraded: {display}: {error}")
+            self.log_fn(f"⚠️  Remote health degraded: {display}: {error}")
         self._record_slow_ssh_response(
             key, display, server.host, latency_ms, success, now,
         )
@@ -519,7 +519,7 @@ class RemoteHealthManager:
                     f"response: {latency_ms} ms"
                 )
                 self.log_fn(
-                    f"⚠️ Slow remote SSH response from {display} "
+                    f"⚠️  Slow remote SSH response from {display} "
                     f"({host}): {latency_ms} ms"
                 )
                 self._record_event(
@@ -543,7 +543,7 @@ class RemoteHealthManager:
         ):
             if self.notify_fn:
                 self.notify_fn(
-                    f"⚠️ **Sustained slow remote SSH responses:** {display}\n"
+                    f"⚠️  **Sustained slow remote SSH responses:** {display}\n"
                     f"Host: {host}\n"
                     f"Latest probe took {latency_ms / 1000:.1f}s. "
                     f"Threshold: {self._slow_ssh_notify_threshold_ms / 1000:.1f}s "
@@ -616,7 +616,7 @@ class RemoteHealthManager:
             if not self._event_fn_logged_failure:
                 self._event_fn_logged_failure = True
                 self.log_fn(
-                    f"⚠️ Remote health stats event failed (further "
+                    f"⚠️  Remote health stats event failed (further "
                     f"failures will be silent): {exc}"
                 )
 
@@ -636,7 +636,7 @@ class RemoteHealthManager:
             if key not in self._sidecar_write_failed_paths:
                 self._sidecar_write_failed_paths.add(key)
                 self.log_fn(
-                    f"⚠️ Failed to write remote health sidecar for "
+                    f"⚠️  Failed to write remote health sidecar for "
                     f"{self.group_label} at {self.sidecar_path}: {exc}"
                 )
 

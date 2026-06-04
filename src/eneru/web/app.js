@@ -18,6 +18,7 @@ let cfgSnapshot = null;
 let remoteHealthSnapshot = [];
 let lastUpsRows = [];
 let lastGroups = [];
+let eventSortDirection = "asc";
 
 // ----- theme (light / dark / system) -----
 
@@ -62,7 +63,7 @@ async function api(path, opts) {
     // instead of an unhandled rejection that silently freezes the poll loop.
     return { ok: false, status: 0, data: null };
   }
-  if (res.status === 401) { setToken(""); refreshAuthUI(); }
+  if (res.status === 401 && path !== "/api/v1/auth/login") clearAuthState();
   let data = null;
   try { data = await res.json(); } catch (_e) { /* non-JSON (static) */ }
   return { ok: res.ok, status: res.status, data };
@@ -124,6 +125,20 @@ function batteryClass(charge) {
   return "ok";
 }
 
+function formatRuntimeSeconds(value) {
+  if (value === undefined || value === null || value === "") return "—";
+  const seconds = Math.trunc(Number(value));
+  if (!Number.isFinite(seconds)) return "—";
+  if (seconds >= 3600) {
+    return Math.floor(seconds / 3600) + "h " +
+      Math.floor((seconds % 3600) / 60) + "m";
+  }
+  if (seconds >= 60) {
+    return Math.floor(seconds / 60) + "m " + (seconds % 60) + "s";
+  }
+  return seconds + "s";
+}
+
 function renderUps(payload) {
   const wrap = document.getElementById("ups-cards");
   wrap.replaceChildren();
@@ -150,7 +165,7 @@ function renderUps(payload) {
         "aria-label": "Battery charge",
       }),
       el("div", { class: "row" }, [el("span", { text: "Runtime" }),
-        el("b", { text: u.runtime != null ? u.runtime + "s" : "—" })]),
+        el("b", { text: formatRuntimeSeconds(u.runtime) })]),
       el("div", { class: "row" }, [el("span", { text: "Load" }),
         el("b", { text: u.load != null ? u.load + "%" : "—" })]),
     ]);
@@ -206,6 +221,14 @@ function detailSection(title, rows) {
     [el("h4", { text: title })].concat(rows));
 }
 
+function remoteHealthReachable(row) {
+  const status = String((row && row.status) || "").toUpperCase();
+  return row && (
+    row.healthy === true || row.reachable === true ||
+    status === "HEALTHY" || status === "OK"
+  );
+}
+
 function openDetail(name) {
   detailReturnFocus = document.activeElement;
   openDetailName = name;
@@ -238,7 +261,7 @@ function renderDetail(name) {
     el("div", { class: "row" }, [el("span", { text: "Status" }),
       el("span", { class: "badge " + statusClass(u.status), text: u.status || "—" })]),
     detailRow("Battery", u.batteryCharge != null ? u.batteryCharge + "%" : null),
-    detailRow("Runtime", u.runtime != null ? u.runtime + "s" : null),
+    detailRow("Runtime", formatRuntimeSeconds(u.runtime)),
     detailRow("Load", u.load != null ? u.load + "%" : null),
     detailRow("Connection", u.connectionState),
     detailRow("Time on battery", u.timeOnBattery != null ? u.timeOnBattery + "s" : null),
@@ -282,8 +305,7 @@ function renderDetail(name) {
   if (rh.length) {
     sections.push(detailSection("Remote health", rh.map((r) => {
       const host = r.server || r.host || "host";
-      const healthy = (r.healthy === true || r.status === "healthy"
-        || r.status === "ok" || r.reachable === true);
+      const healthy = remoteHealthReachable(r);
       return el("div", { class: "row" }, [
         el("span", { text: host }),
         el("span", { class: "badge " + (healthy ? "ok" : "crit"),
@@ -315,12 +337,12 @@ function renderBanner() {
   if (crit) {
     banner.className = "banner crit";
     const why = crit.triggerReason ? (": " + crit.triggerReason) : "";
-    banner.textContent = "⚠️ Shutdown imminent — " +
+    banner.textContent = "⚠️  Shutdown imminent — " +
       (crit.label || crit.name) + " is on low battery" + why;
     banner.hidden = false;
   } else if (warn) {
     banner.className = "banner warn";
-    banner.textContent = "🔋 On battery — " + (warn.label || warn.name) +
+    banner.textContent = "🔋  On battery — " + (warn.label || warn.name) +
       " is running on battery power";
     banner.hidden = false;
   } else {
@@ -413,14 +435,42 @@ function updateEventSourceFilter(upsRows, groups) {
 }
 
 function updateEventTypeFilter(rows) {
-  const sel = document.getElementById("event-type-filter");
-  const prev = sel.value;
+  const box = document.getElementById("event-type-filter");
+  const prev = selectedEventTypes();
   const types = Array.from(new Set((rows || [])
     .map((e) => e.eventType || e.event || "")
     .filter((v) => v))).sort();
-  sel.replaceChildren(el("option", { value: "", text: "All types" }));
-  types.forEach((type) => sel.appendChild(el("option", { value: type, text: type })));
-  if (types.includes(prev)) sel.value = prev;
+  box.replaceChildren();
+  const kept = new Set();
+  types.forEach((type) => {
+    const input = el("input", { type: "checkbox", value: type });
+    if (prev.has(type)) {
+      input.checked = true;
+      kept.add(type);
+    }
+    box.appendChild(el("label", { class: "event-type-option" }, [
+      input,
+      el("span", { text: type }),
+    ]));
+  });
+  updateEventTypeSummary(kept);
+}
+
+function selectedEventTypes() {
+  const box = document.getElementById("event-type-filter");
+  if (!box) return new Set();
+  return new Set(Array.from(
+    box.querySelectorAll('input[type="checkbox"]:checked'),
+  ).map((input) => input.value));
+}
+
+function updateEventTypeSummary(types) {
+  const summary = document.getElementById("event-type-summary");
+  if (!summary) return;
+  const selected = Array.from(types || selectedEventTypes());
+  if (selected.length === 0) summary.textContent = "All types";
+  else if (selected.length === 1) summary.textContent = selected[0];
+  else summary.textContent = selected.length + " types";
 }
 
 function eventMatchesSource(event, source) {
@@ -436,17 +486,46 @@ let selectedEvents = new Set();
 
 function visibleEvents() {
   const source = document.getElementById("event-source-filter").value;
-  const type = document.getElementById("event-type-filter").value;
+  const types = selectedEventTypes();
   const text = document.getElementById("event-text-filter").value.trim().toLowerCase();
   const from = eventRangeFrom();
-  return lastEvents.filter((e) => {
+  const rows = lastEvents.filter((e) => {
     const eventType = e.eventType || e.event || "";
     const detail = (e.detail || e.details || "").toLowerCase();
     return (from === null || e.ts >= from)
       && eventMatchesSource(e, source)
-      && (!type || eventType === type)
+      && (types.size === 0 || types.has(eventType))
       && (!text || detail.includes(text));
   });
+  if (eventSortDirection === "desc") rows.reverse();
+  return rows;
+}
+
+function timeSortHeader() {
+  const label = eventSortDirection === "asc" ? "Time ↑" : "Time ↓";
+  const btn = el("button", {
+    id: "event-sort-time",
+    type: "button",
+    class: "th-sort",
+    text: label,
+    "aria-label": "Sort events by time",
+    "aria-pressed": eventSortDirection === "desc" ? "true" : "false",
+  });
+  btn.addEventListener("click", toggleEventSort);
+  return el("th", null, [btn]);
+}
+
+function preserveWindowScroll(fn) {
+  const scrollX = window.scrollX;
+  const scrollY = window.scrollY;
+  fn();
+  window.scrollTo(scrollX, scrollY);
+}
+
+function toggleEventSort(ev) {
+  if (ev) ev.preventDefault();
+  eventSortDirection = eventSortDirection === "asc" ? "desc" : "asc";
+  preserveWindowScroll(applyEventFilters);
 }
 
 // Reflect the live, actionable selection on the Delete button. The count is the
@@ -471,7 +550,7 @@ function applyEventFilters() {
   // header and empty-state colspan in sync so widths never mismatch.
   document.getElementById("events-head").replaceChildren(...[
     ...(signedIn ? [el("th", { text: "" })] : []),
-    el("th", { text: "Time" }), el("th", { text: "Type" }),
+    timeSortHeader(), el("th", { text: "Type" }),
     el("th", { text: "Detail" }),
   ]);
   updateDeleteButton();
@@ -590,7 +669,11 @@ function renderGraph(series) {
       t.setAttribute("x", 2); t.setAttribute("y", yy);
       t.setAttribute("class", "lbl"); t.textContent = txt; svg.appendChild(t);
     };
-    lab(max.toFixed(0), 12); lab(min.toFixed(0), H - pad);
+    const metric = document.getElementById("graph-metric").value;
+    const fmt = metric === "runtime"
+      ? formatRuntimeSeconds
+      : (v) => v.toFixed(0);
+    lab(fmt(max), 12); lab(fmt(min), H - pad);
   } else {
     const t = document.createElementNS(SVG_NS, "text");
     t.setAttribute("x", W / 2); t.setAttribute("y", H / 2);
@@ -731,7 +814,7 @@ async function setVariable(ups, variable, value) {
 // ----- auth UI -----
 
 function refreshAuthUI() {
-  const authed = !!token();
+  const authed = !!token() && authEnabled;
   // Hide Sign-in when already signed in OR when the server has auth disabled
   // (login would just 404 with "Authentication is disabled").
   document.getElementById("loginBtn").hidden = authed || !authEnabled;
@@ -739,6 +822,19 @@ function refreshAuthUI() {
   const who = document.getElementById("who");
   who.hidden = !authed;
   if (authed) who.textContent = "Signed in";
+  else who.textContent = "";
+}
+
+function clearAuthState() {
+  setToken("");
+  selectedEvents = new Set();
+  _controlBuiltKey = null;
+  const control = document.getElementById("control-section");
+  if (control) control.hidden = true;
+  const panel = document.getElementById("control-panel");
+  if (panel) panel.replaceChildren();
+  refreshAuthUI();
+  applyEventFilters();
 }
 
 // Learn whether auth is enabled server-side. This route stays open even when
@@ -775,7 +871,7 @@ async function doLogin(ev) {
 
 async function doLogout() {
   await api("/api/v1/auth/logout", { method: "POST" });
-  setToken(""); selectedEvents = new Set(); refreshAuthUI(); refresh();
+  clearAuthState(); refresh();
 }
 
 // ----- polling -----
@@ -808,6 +904,13 @@ async function refresh() {
     api("/api/v1/auth/state"), api("/api/v1/config"), api("/api/v1/remote-health"),
   ]);
   authEnabled = !!(authState.ok && authState.data && authState.data.enabled);
+  // Only sign out when the server explicitly reports auth is OFF. A transient
+  // /api/v1/auth/state failure leaves authState.ok false (and authEnabled
+  // false), which must NOT be mistaken for "auth disabled server-side" — that
+  // would log the operator out on every network blip.
+  if (authState.ok && authState.data && authState.data.enabled === false && token()) {
+    clearAuthState();
+  }
   if (cfg.ok && cfg.data) {
     cfgSnapshot = cfg.data;
     // If we hold a token but the server treats us as anonymous (sanitized
@@ -815,7 +918,7 @@ async function refresh() {
     // deleted. Reads stay open (no 401 to trip the api() handler), so detect it
     // here and sign out locally instead of showing a stale "Signed in".
     if (token() && cfg.data.detail === "sanitized") {
-      setToken(""); selectedEvents = new Set();
+      clearAuthState();
     }
     refreshAuthUI();
   }
@@ -825,7 +928,7 @@ async function refresh() {
   if (ups.ok) {
     renderUps(ups.data); renderControl(ups.data); renderBanner(); showError("");
   } else if (ups.status === 0) {
-    showError("⚠️ Connection lost — retrying…");  // L14: network/daemon down
+    showError("⚠️  Connection lost — retrying…");  // L14: network/daemon down
   } else if (ups.status !== 401) {
     showError("Could not load UPS status (HTTP " + ups.status + ")");
   }
@@ -850,11 +953,15 @@ async function init() {
   document.getElementById("graph-metric").addEventListener("change", loadGraph);
   document.getElementById("graph-range").addEventListener("change", loadGraph);
   document.getElementById("event-source-filter").addEventListener("change", applyEventFilters);
-  document.getElementById("event-type-filter").addEventListener("change", applyEventFilters);
+  document.getElementById("event-type-filter").addEventListener("change", () => {
+    updateEventTypeSummary();
+    applyEventFilters();
+  });
   document.getElementById("event-text-filter").addEventListener("input", applyEventFilters);
   document.getElementById("event-range").addEventListener("change", resetEvents);
   document.getElementById("event-load-older").addEventListener("click", loadOlderEvents);
   document.getElementById("event-delete").addEventListener("click", deleteSelected);
+  document.getElementById("event-sort-time").addEventListener("click", toggleEventSort);
   document.getElementById("detail-close").addEventListener("click", closeDetail);
   // Esc closes whichever modal is open.
   document.addEventListener("keydown", (ev) => {

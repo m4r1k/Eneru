@@ -102,7 +102,7 @@ class MQTTPublisher:
         if not self.config.mqtt.enabled or self._thread is not None:
             return
         if not MQTT_AVAILABLE:
-            self.log_fn("⚠️ MQTT enabled but paho-mqtt is not installed; publisher disabled")
+            self.log_fn("⚠️  MQTT enabled but paho-mqtt is not installed; publisher disabled")
             return
         self._thread = threading.Thread(
             target=self._run,
@@ -152,7 +152,7 @@ class MQTTPublisher:
                     client.disconnect()
                 except Exception as exc:
                     logging.getLogger(__name__).exception("MQTT disconnect failed")
-                    self.log_fn(f"⚠️ MQTT disconnect failed: {exc}")
+                    self.log_fn(f"⚠️  MQTT disconnect failed: {exc}")
             # Stop wins over reconnect — order matters for the "stop
             # requested mid-disconnect" case.
             if self._stopping():
@@ -190,7 +190,7 @@ class MQTTPublisher:
             except Exception as exc:
                 wait = int(backoff)
                 self.log_fn(
-                    f"⚠️ MQTT connection failed: {exc} — retrying in {wait}s"
+                    f"⚠️  MQTT connection failed: {exc} — retrying in {wait}s"
                 )
                 if self._wait(backoff):
                     return None
@@ -199,7 +199,7 @@ class MQTTPublisher:
             # Connection is live. Attach the disconnect callback now so
             # a future broker drop sets _needs_reconnect cleanly.
             client.on_disconnect = self._on_disconnect
-            self.log_fn(f"📡 MQTT connected to {host}:{port}")
+            self.log_fn(f"📡  MQTT connected to {host}:{port}")
             return client
         return None
 
@@ -242,7 +242,7 @@ class MQTTPublisher:
         try:
             info = client.publish(topic, payload, qos=0, retain=False)
         except Exception as exc:
-            self.log_fn(f"⚠️ MQTT publish failed: {exc}; reconnecting")
+            self.log_fn(f"⚠️  MQTT publish failed: {exc}; reconnecting")
             self._needs_reconnect.set()
             return False
         rc = getattr(info, "rc", 0)
@@ -250,7 +250,7 @@ class MQTTPublisher:
             # paho returns MQTT_ERR_NO_CONN (or similar) on a broken
             # connection. Surface it and let the outer loop reconnect
             # rather than silently dropping subsequent publishes.
-            self.log_fn(f"⚠️ MQTT publish returned rc={rc}; reconnecting")
+            self.log_fn(f"⚠️  MQTT publish returned rc={rc}; reconnecting")
             self._needs_reconnect.set()
             return False
         return True
@@ -265,7 +265,7 @@ class MQTTPublisher:
         except (TypeError, ValueError):
             unexpected = bool(rc)
         if unexpected:
-            self.log_fn("⚠️ MQTT disconnected unexpectedly; will reconnect")
+            self.log_fn("⚠️  MQTT disconnected unexpectedly; will reconnect")
             self._needs_reconnect.set()
 
     @staticmethod

@@ -93,7 +93,7 @@ class MultiUPSCoordinator:
             self._global_shutdown_flag.unlink(missing_ok=True)
         except OSError as exc:
             self._log(
-                f"⚠️ Could not clear global shutdown flag "
+                f"⚠️  Could not clear global shutdown flag "
                 f"{self._global_shutdown_flag} during {context}: {exc}"
             )
 
@@ -103,7 +103,7 @@ class MultiUPSCoordinator:
             return self._global_shutdown_flag.exists()
         except OSError as exc:
             self._log(
-                f"⚠️ Could not inspect global shutdown flag "
+                f"⚠️  Could not inspect global shutdown flag "
                 f"{self._global_shutdown_flag}: {exc}"
             )
             return False
@@ -116,7 +116,7 @@ class MultiUPSCoordinator:
                 return bool(guard(monitor))
             except Exception as exc:
                 self._log(
-                    "  ⚠️ Could not inspect monitor shutdown guard via helper: "
+                    "  ⚠️  Could not inspect monitor shutdown guard via helper: "
                     f"{exc}. Falling back to raw guard fields."
                 )
 
@@ -129,7 +129,7 @@ class MultiUPSCoordinator:
             return bool(flag_path.exists())
         except OSError as exc:
             self._log(
-                f"  ⚠️ Could not inspect monitor shutdown flag {flag_path}: {exc}"
+                f"  ⚠️  Could not inspect monitor shutdown flag {flag_path}: {exc}"
             )
             return False
 
@@ -165,16 +165,16 @@ class MultiUPSCoordinator:
             self._notification_worker = NotificationWorker(self.config)
             if self._notification_worker.start():
                 count = self._notification_worker.get_service_count()
-                self._log(f"📢 Notifications: enabled ({count} service(s))")
+                self._log(f"📢  Notifications: enabled ({count} service(s))")
             else:
-                self._log("⚠️ WARNING: Failed to initialize notifications")
+                self._log("⚠️  WARNING: Failed to initialize notifications")
                 self._notification_worker = None
 
         group_count = len(self.config.ups_groups)
-        self._log(f"🚀 Eneru v{__version__} starting - multi-UPS mode ({group_count} groups)")
+        self._log(f"🚀  Eneru v{__version__} starting - multi-UPS mode ({group_count} groups)")
 
         if self.config.behavior.dry_run:
-            self._log("🧪 *** RUNNING IN DRY-RUN MODE - NO ACTUAL SHUTDOWN WILL OCCUR ***")
+            self._log("🧪  *** RUNNING IN DRY-RUN MODE - NO ACTUAL SHUTDOWN WILL OCCUR ***")
 
         # Slice 3: emit ONE classified lifecycle notification at the
         # coordinator level (the per-monitor _emit_lifecycle_startup
@@ -190,7 +190,7 @@ class MultiUPSCoordinator:
         # group's stats DB for meta.last_seen_version. Without this the
         # coordinator passes None and a pip user upgrading via
         # `pip install -U eneru` between runs gets "Restarted" instead
-        # of "📦 Upgraded vX → vY" (caught in pre-push review).
+        # of "📦  Upgraded vX → vY" (caught in pre-push review).
         last_seen = self._read_last_seen_version_from_first_group(stats_dir)
 
         body, notify_type = classify_startup(
@@ -261,14 +261,14 @@ class MultiUPSCoordinator:
                 # the sweep. One log line keeps it best-effort while
                 # giving the operator a thread to pull on.
                 self._log(
-                    f"⚠️ Lifecycle sweep skipped for {db_path.name}: {e}"
+                    f"⚠️  Lifecycle sweep skipped for {db_path.name}: {e}"
                 )
             finally:
                 try:
                     store.close()
                 except (sqlite3.Error, OSError) as e:
                     self._log(
-                        f"⚠️ Failed to close stats DB {db_path.name}: {e}"
+                        f"⚠️  Failed to close stats DB {db_path.name}: {e}"
                     )
 
     def _read_last_seen_version_from_first_group(self, stats_dir):
@@ -382,7 +382,7 @@ class MultiUPSCoordinator:
                     executor.clear_shutdown_state(refuse_active_peer=True)
                 except Exception as e:
                     self._log(
-                        f"❌ FATAL ERROR: Cannot clear redundancy shutdown flag "
+                        f"❌  FATAL ERROR: Cannot clear redundancy shutdown flag "
                         f"for '{rg.name}' at startup: {e}"
                     )
                     sys.exit(1)
@@ -491,7 +491,7 @@ class MultiUPSCoordinator:
                 )
             except Exception as exc:
                 self._log(
-                    f"⚠️ stats: failed to record redundancy remote-health "
+                    f"⚠️  stats: failed to record redundancy remote-health "
                     f"event on {source_name}: {exc}"
                 )
 
@@ -517,7 +517,7 @@ class MultiUPSCoordinator:
             monitor.run()
         except Exception as e:
             label = group.ups.label
-            self._log(f"❌ Monitor thread for {label} crashed: {e}")
+            self._log(f"❌  Monitor thread for {label} crashed: {e}")
             if self._notification_worker:
                 # Pin to the monitor's store ONLY if it actually opened
                 # (the crash may have happened before _initialize_notifications
@@ -528,7 +528,7 @@ class MultiUPSCoordinator:
                 if store is not None and getattr(store, "_conn", None) is None:
                     store = None
                 self._notification_worker.send(
-                    f"❌ **Monitor Crashed:** {label}\nError: {e}",
+                    f"❌  **Monitor Crashed:** {label}\nError: {e}",
                     "failure",
                     category="lifecycle",
                     store=store,
@@ -554,7 +554,7 @@ class MultiUPSCoordinator:
             self._handle_local_shutdown(label)
         elif self._exit_after_shutdown:
             # Non-local group shutdown completed, exit if requested
-            self._log(f"🛑 Group {label} shutdown complete. Exiting (--exit-after-shutdown).")
+            self._log(f"🛑  Group {label} shutdown complete. Exiting (--exit-after-shutdown).")
             self._stop_event.set()
 
     def _clear_local_shutdown_state(self):
@@ -619,28 +619,28 @@ class MultiUPSCoordinator:
                 self._global_shutdown_flag.touch()
             except OSError as exc:
                 self._log(
-                    f"⚠️ Could not write shutdown flag "
+                    f"⚠️  Could not write shutdown flag "
                     f"{self._global_shutdown_flag}: {exc}. Continuing "
                     "without the on-disk guard."
                 )
 
-            self._log(f"🚨 Local shutdown triggered by {triggered_by}")
+            self._log(f"🚨  Local shutdown triggered by {triggered_by}")
 
             # Drain other groups if configured
             if self.config.local_shutdown.drain_on_local_shutdown:
-                self._log("⏳ Draining all UPS groups before local shutdown...")
+                self._log("⏳  Draining all UPS groups before local shutdown...")
                 self._drain_all_groups(timeout=120)
 
             # Execute local shutdown
             if self.config.local_shutdown.enabled:
-                self._log("🔌 Shutting down local server NOW")
+                self._log("🔌  Shutting down local server NOW")
                 if self.config.behavior.dry_run:
-                    self._log(f"🧪 [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
+                    self._log(f"🧪  [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
                     self._clear_global_shutdown_flag("dry-run local shutdown")
                 else:
                     if self._notification_worker:
                         self._notification_worker.send(
-                            "🛑 **Shutdown Sequence Complete**\nShutting down local server NOW.",
+                            "🛑  **Shutdown Sequence Complete**\nShutting down local server NOW.",
                             "failure",
                             category="shutdown_summary",
                         )
@@ -650,7 +650,7 @@ class MultiUPSCoordinator:
                     else:
                         time.sleep(5)
                     # Slice 3: tag this shutdown as power-loss-triggered so
-                    # the next start can emit "📊 Recovered" and the Slice 4
+                    # the next start can emit "📊  Recovered" and the Slice 4
                     # bonus folds the prev shutdown into a richer message.
                     # (Single-UPS path already does this in monitor.py;
                     # coordinator mode was missing it — caught in pre-push
@@ -668,7 +668,7 @@ class MultiUPSCoordinator:
                     cmd_parts = str(self.config.local_shutdown.command or "").split()
                     if not cmd_parts:
                         self._log(
-                            "❌ local_shutdown.command is empty -- cannot power off "
+                            "❌  local_shutdown.command is empty -- cannot power off "
                             "the host. Set local_shutdown.command to a valid command."
                         )
                     else:
@@ -687,12 +687,12 @@ class MultiUPSCoordinator:
                         # non-halting/sandbox config (the multi-UPS analog of the
                         # H2 failsafe re-fire).
             else:
-                self._log("✅ Local shutdown disabled. Group shutdown complete.")
+                self._log("✅  Local shutdown disabled. Group shutdown complete.")
                 self._clear_global_shutdown_flag("disabled local shutdown")
 
             # Exit if --exit-after-shutdown was specified
             if self._exit_after_shutdown:
-                self._log("🛑 Exiting after shutdown sequence (--exit-after-shutdown)")
+                self._log("🛑  Exiting after shutdown sequence (--exit-after-shutdown)")
                 self._stop_event.set()
         finally:
             # The committed sequence is no longer running outside the lock, so
@@ -722,7 +722,7 @@ class MultiUPSCoordinator:
         access to the same shutdown path (notifications, state-file
         writes) inside the peer's poll cycle.
         """
-        self._log("⏳ Draining all UPS groups -- shutting down their resources...")
+        self._log("⏳  Draining all UPS groups -- shutting down their resources...")
 
         # This runs ON one of the monitor threads (the group whose trigger
         # fired calls _handle_local_shutdown -> here, synchronously). That
@@ -747,11 +747,11 @@ class MultiUPSCoordinator:
         for monitor in self._monitors:
             already_shutting_down = self._monitor_shutdown_guard_active(monitor)
             if not already_shutting_down:
-                self._log(f"  ➡️ Triggering shutdown for {monitor._log_prefix.strip()}")
+                self._log(f"  ➡️  Triggering shutdown for {monitor._log_prefix.strip()}")
                 try:
                     monitor._execute_shutdown_sequence()
                 except Exception as e:
-                    self._log(f"  ⚠️ Error during drain shutdown: {e}")
+                    self._log(f"  ⚠️  Error during drain shutdown: {e}")
 
         # Final join window for any threads still wrapping up.
         deadline = time.time() + timeout
@@ -762,7 +762,7 @@ class MultiUPSCoordinator:
             thread.join(timeout=remaining)
         still_running = [t for t in self._threads if t is not me and t.is_alive()]
         if still_running:
-            self._log(f"⚠️ {len(still_running)} monitor(s) still running after drain timeout")
+            self._log(f"⚠️  {len(still_running)} monitor(s) still running after drain timeout")
 
     def _wait_for_completion(self):
         """Block until all monitors finish or a signal is received."""
@@ -800,7 +800,7 @@ class MultiUPSCoordinator:
                     try:
                         store.apply_reload(self.config.statistics)
                     except Exception as exc:  # pragma: no cover - defensive
-                        self._log(f"⚠️ stats retention reload failed: {exc}")
+                        self._log(f"⚠️  stats retention reload failed: {exc}")
         if "notifications" in subsystems:
             self._reload_notification_worker()
         if "remote_health" in subsystems:
@@ -818,17 +818,17 @@ class MultiUPSCoordinator:
         for executor in self._redundancy_executors.values():
             executor._notification_worker = None
         if not self.config.notifications.enabled:
-            self._log("📢 Notifications: disabled")
+            self._log("📢  Notifications: disabled")
             return
         if not APPRISE_AVAILABLE:
             self._log(
-                "⚠️ WARNING: Notifications enabled but apprise not installed. "
-                "Install with: pip install apprise"
+                "⚠️  WARNING: Notifications enabled but apprise not installed. "
+                "Install with: uv pip install apprise"
             )
             return
         worker = NotificationWorker(self.config)
         if not worker.start():
-            self._log("⚠️ WARNING: Failed to reload notifications")
+            self._log("⚠️  WARNING: Failed to reload notifications")
             return
         for mon in self._monitors:
             mon._notification_worker = worker
@@ -839,7 +839,7 @@ class MultiUPSCoordinator:
             executor._notification_worker = worker
         self._notification_worker = worker
         count = worker.get_service_count()
-        self._log(f"📢 Notifications reloaded ({count} service(s))")
+        self._log(f"📢  Notifications reloaded ({count} service(s))")
 
     def _reload_remote_health(self) -> None:
         """Bounce per-UPS and redundancy remote-health managers."""
@@ -852,7 +852,7 @@ class MultiUPSCoordinator:
             monitors_by_name = {m.config.ups.name: m for m in self._monitors}
             for rg in self.config.redundancy_groups:
                 self._start_redundancy_remote_health(rg, monitors_by_name)
-        self._log("🔄 Remote health checks reloaded")
+        self._log("🔄  Remote health checks reloaded")
 
     def _reload_mqtt_publisher(self) -> None:
         """Bounce the coordinator MQTT publisher so broker/topic changes apply."""
@@ -860,7 +860,7 @@ class MultiUPSCoordinator:
             self._mqtt_publisher.stop()
             self._mqtt_publisher = None
         self._start_mqtt_publisher()
-        self._log("🔄 MQTT publisher reloaded")
+        self._log("🔄  MQTT publisher reloaded")
 
     def record_control_event(self, ups_name: str, event_type: str,
                              detail: str) -> None:
@@ -900,11 +900,11 @@ class MultiUPSCoordinator:
 
     def _handle_sighup(self, signum, frame):
         """SIGHUP -> hot-reload config across all groups (never crashes on error)."""
-        self._log("🔄 SIGHUP received — reloading configuration")
+        self._log("🔄  SIGHUP received — reloading configuration")
         try:
             self.reload_config()
         except Exception as exc:  # pragma: no cover - defensive
-            self._log(f"⚠️ Config reload error (ignored): {exc}")
+            self._log(f"⚠️  Config reload error (ignored): {exc}")
 
     def _log_reload_report(self, report: dict) -> None:
         from eneru.reload import format_report
@@ -954,7 +954,7 @@ class MultiUPSCoordinator:
         if self._signal_handling:
             return
         self._signal_handling = True
-        self._log("🛑 Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
+        self._log("🛑  Service stopped by signal (SIGTERM/SIGINT). Monitoring is inactive.")
 
         self._stop_event.set()
 
@@ -981,7 +981,7 @@ class MultiUPSCoordinator:
         if shutdown_in_flight:
             join_budget = self._shutdown_join_deadline()
             self._log(
-                f"⏳ Shutdown sequence in progress; waiting up to {join_budget}s "
+                f"⏳  Shutdown sequence in progress; waiting up to {join_budget}s "
                 "for it to complete (host poweroff) before exit."
             )
         else:
@@ -1000,11 +1000,11 @@ class MultiUPSCoordinator:
         # the speculative lifecycle stop and stop the worker, then hand
         # off to the systemd-run timer (or eager fallback) for delivery.
         # Skip the enqueue entirely when an upgrade is in flight — the
-        # next daemon's "📦 Upgraded" classification covers both ends.
+        # next daemon's "📦  Upgraded" classification covers both ends.
         stats_dir = Path(self.config.statistics.db_directory)
         upgrade_in_progress = read_upgrade_marker(stats_dir) is not None
 
-        body = "🛑 **Eneru Service Stopped**\nMonitoring is now inactive."
+        body = "🛑  **Eneru Service Stopped**\nMonitoring is now inactive."
         notify_type = "warning"
 
         # Order matters: flush + stop the worker FIRST, then enqueue —
@@ -1071,20 +1071,20 @@ class MultiUPSCoordinator:
                         store.close()
             except Exception as exc:
                 self._log(
-                    "⚠️ Failed to close monitor stats during coordinator "
+                    "⚠️  Failed to close monitor stats during coordinator "
                     f"shutdown: {exc}"
                 )
 
-        # Slice 3: tag this exit so the next start can emit "🔄 Restarted"
+        # Slice 3: tag this exit so the next start can emit "🔄  Restarted"
         # if it comes back within RESTART_DOWNTIME_THRESHOLD_SECS, else
-        # "🚀 Started (last seen Nh ago)". Coordinator mode was missing
+        # "🚀  Started (last seen Nh ago)". Coordinator mode was missing
         # this — caught in pre-push review.
         # BUT: don't downgrade an existing sequence_complete marker
         # (Cubic P2). If a power-loss shutdown sequence already wrote
         # it, the SIGTERM handler that fires when systemd shuts the
         # service down should preserve "we shut ourselves down for a
-        # reason" so the next start emits "📊 Recovered" rather than
-        # "🔄 Restarted".
+        # reason" so the next start emits "📊  Recovered" rather than
+        # "🔄  Restarted".
         existing = read_shutdown_marker(stats_dir)
         if not (existing
                 and existing.get("reason") == REASON_SEQUENCE_COMPLETE):
@@ -1106,7 +1106,7 @@ class MultiUPSCoordinator:
                 executor.clear_shutdown_state()
             except Exception as e:
                 self._log(
-                    f"⚠️ Failed to clear redundancy flag for '{name}' "
+                    f"⚠️  Failed to clear redundancy flag for '{name}' "
                     f"during exit: {e}. Next startup will re-clear."
                 )
         sys.exit(0)

@@ -7,235 +7,129 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [6.0.0] - 2026-06-04
 
-v6.0 is a major release that turns the read-only observability API into an
-interactive product: a browser dashboard, authentication, UPS control, and config
-hot-reload. With authentication left off, the API stays read-only exactly as in
-5.x. The rc11 audit fixes below harden shutdown, auth, resource handling, and
-CI coverage before release.
+v6.0 turns Eneru from a shutdown daemon with observability into an operator tool
+you can drive from the browser. The API can now serve the dashboard, authenticate
+users and API keys, run allowlisted UPS control actions, delete selected event
+rows, and reload safe config changes without restarting the daemon.
+
+The release also went through two pre-release audit rounds. The first audit
+focused on the shutdown path: like checking that a fire door still opens after
+you stack boxes beside it, it verified that config mistakes, slow drains, and
+thread races could not block the final host poweroff. The second audit focused on
+the new interactive surface: auth fail-closed behavior, dashboard state,
+SQLite/resource handling, package contents, and CI/E2E coverage. The fixes from
+both audits are included below.
 
 ### Added
 
-- **Browser dashboard**, served by the embedded API whenever it is enabled — no
-  extra service, no build step, no third-party JavaScript. Live UPS status cards
-  that open a detail panel (status, power quality, configuration, redundancy
-  membership, remote health), a redundancy healthy/required rollup, an
-  on-battery/shutdown banner, SVG history graphs with a selectable range
-  (1 hour to 1 year, or All), an event timeline with filters, wide-range paging,
-  and (when signed in) selectable deletion, a UPS control panel, and a
-  **Light / Dark / System** theme.
-- **API authentication** (opt-in, tiered). Local users and API keys — bcrypt
-  password hashes, SHA-256 key digests — in a dedicated global SQLite database,
-  managed by `eneru user` and `eneru apikey`. Read endpoints stay open (Prometheus
-  keeps scraping) unless `api.auth.require_for_reads`; every write requires a
-  credential. Clients send a bearer session token or an API key — no cookies, so
-  no CSRF. Auth activates automatically once a user exists (no restart needed); an
-  explicit `api.auth.enabled` always wins.
-- **UPS control via NUT** (`nut_control`): authenticated, allowlisted instant
-  commands and writable variables, wrapping `upscmd`/`upsrw` (no new dependency).
-  Fail-closed — control cannot be enabled while authentication is off.
-- **Event management API.** Events carry a stable, never-reused `id` (stats schema
-  v5); `/api/v1/events` supports wide-range `from`/`to` queries and source-
-  qualified `(ts, source, id)` cursor paging, and an authenticated
-  `DELETE /api/v1/ups/{name}/events` removes
-  selected rows. Existing databases migrate automatically on first start.
-- **Config hot-reload** without restarting the daemon — `systemctl reload eneru`,
-  `SIGHUP` (`docker kill -s HUP`), or an authenticated `POST /api/v1/config/reload`.
-  Safe changes apply live (trigger thresholds, `nut_control`, notifications, MQTT,
-  remote health, Prometheus, stats retention); everything else is reported as
-  restart-required. A bad config never takes the daemon down — it keeps running on
-  the previous configuration and reports the error.
-- **`[auth]` packaging extra** (bcrypt): a hard dependency on the deb package,
-  bundled in the container image, and a soft recommendation on RPM.
+- **Browser dashboard.** The embedded API now serves a no-build, no-third-party
+  JavaScript dashboard when `api.enabled` is on. It includes live UPS cards,
+  drill-down panels, redundancy rollups, a shutdown banner, SVG history graphs,
+  event filters with multi-type selection and wide-range paging, signed-in
+  event deletion, UPS control, and Light / Dark / System themes.
+- **Tiered API authentication.** Local users and API keys live in a dedicated
+  SQLite auth DB. User passwords are bcrypt hashes; API keys are stored as
+  SHA-256 digests. Manage them with `eneru user ...` and `eneru apikey ...`.
+  Reads stay open by default so Prometheus and status clients keep working;
+  `api.auth.require_for_reads: true` gates reads too. Every write path requires
+  auth, and UPS control cannot be enabled while auth is off.
+- **New API endpoints and write paths.** Added `GET /api/v1/auth/state`,
+  `POST /api/v1/auth/login`, `POST /api/v1/auth/logout`,
+  `POST /api/v1/config/reload`, `GET /api/v1/ups/{name}/commands`,
+  `POST /api/v1/ups/{name}/command`, `GET /api/v1/ups/{name}/variables`,
+  `PUT /api/v1/ups/{name}/variables/{var}`, and
+  `DELETE /api/v1/ups/{name}/events`.
+- **UPS control via NUT.** `nut_control` wraps the existing `upscmd` and `upsrw`
+  tools for allowlisted instant commands and writable variables. Passwords are
+  answered through a pseudo-terminal instead of being placed on argv.
+- **Event management.** Events now have stable, never-reused IDs. `/api/v1/events`
+  supports `from`/`to` range filters and source-qualified cursor paging, and the
+  dashboard can delete selected rows while preserving rows that the server did
+  not confirm as deleted.
+- **Config hot-reload.** `systemctl reload eneru`, `SIGHUP`, `docker kill -s HUP`,
+  and authenticated `POST /api/v1/config/reload` can apply safe changes live:
+  trigger thresholds, `nut_control`, notifications, MQTT, remote health,
+  Prometheus, and stats retention. Unsafe changes are reported as
+  restart-required. A bad reload keeps the previous config running.
+- **Auth packaging.** Added the `auth` extra for bcrypt. Debian packages depend
+  on `python3-bcrypt`, the OCI image bundles it, and RPM recommends it because
+  EL package availability varies.
 
 ### Removed
 
 - **NUT auto-discovery**, previously listed for 6.0, was dropped: it duplicates
   `nut-scanner` and does not fit Eneru's config-first model.
 
-### Fixed (rc11 — audit follow-through)
+### Fixed
 
-rc11 closes the remaining confirmed findings from the whole-repository
-pre-release audit after the Critical/High tranche was already in PR review.
+- **Dashboard first-user sign-in without restart.** Creating the first user with
+  `eneru user create` now refreshes the API's effective-auth probe immediately,
+  so the dashboard can show Sign-in and accept login without restarting the
+  daemon.
+- **Dashboard runtime display.** The web UI now formats UPS runtime as seconds,
+  minutes, or hours/minutes in cards, drill-down details, and runtime graph
+  labels while keeping API responses as raw seconds.
+- **Shutdown audit hardening.** A group can no longer abort host poweroff by
+  self-joining its own monitor thread during multi-UPS drain. Local drain phases
+  are best-effort, bounded filesystem sync prevents a hung mount from wedging
+  the sequence, remote pre-shutdown commands cannot spend the final poweroff
+  budget, and SIGTERM/SIGINT now waits a bounded, config-derived deadline when a
+  shutdown is already in flight.
+- **Config validation before outage-time crashes.** Shutdown thresholds,
+  depletion settings, extended-time settings, drain timeouts, duplicate UPS
+  names, unknown per-UPS/per-redundancy keys, and empty `local_shutdown.command`
+  values are now rejected at load instead of failing during an outage.
+- **Redundancy and failsafe behavior.** Redundancy groups wait for present
+  members to publish an initial snapshot before making a cold-start quorum
+  decision. On-battery hard NUT failures are debounced by
+  `max_stale_data_tolerance`, and the on-battery failsafe runs once per outage
+  instead of repeating every poll in dry-run, delegated, or non-halting configs.
+- **T3 depletion trigger at slow poll intervals.** The depletion-rate trigger no
+  longer needs a fixed 30 samples. It now derives the needed sample count from
+  `depletion.window / check_interval`, with a floor of two samples, so slower
+  polling does not silently disable the fast-drain trigger.
+- **API/auth hardening.** Request bodies are size-limited and read with a socket
+  deadline. Dynamic auth fails closed when an existing auth DB cannot be
+  inspected. Password resets and user deletion invalidate active user sessions.
+  Write/control paths re-check the account strictly and fail closed during auth
+  DB errors; reads stay lenient unless `require_for_reads` is enabled.
+- **Dashboard correctness.** Redundancy cards use server-computed quorum health,
+  advisory member triggers do not show a false shutdown-imminent banner while
+  quorum is intact, event filtering and paging are source-exact, control panel
+  rebuilds are cached without losing half-typed variable values, and auth state
+  cleanup now clears stale tokens, event selections, and UPS-control UI together.
+  The event table Time header can now toggle chronological order, and remote
+  health rows from the API's uppercase status constants render as reachable
+  when healthy.
+- **Remote operator output.** `eneru remote list` now includes last-known remote
+  health from the daemon sidecar when remote health is enabled, without running
+  SSH probes. The non-root `use_sudo` warning now focuses on Eneru-generated
+  privileged actions and plain shutdown commands, so custom NAS admin commands
+  that work without sudo do not produce a misleading warning.
+- **SQLite and deferred notifications.** Stats open failures no longer leave a
+  half-open connection, failed flushes requeue samples, readonly opens return
+  `None` on SQLite failures, `_safe_alter()` only swallows duplicate-column
+  errors, and monitor/coordinator shutdown closes stats handles. Deferred stop
+  notification delivery now claims rows as `delivering` until Apprise succeeds,
+  with stale-claim recovery on daemon startup.
+- **Packaging, docs, and CI coverage.** Dashboard assets and new Python modules
+  are included in both pip package data and nfpm package contents. Requirements
+  include MQTT/auth extras where needed. E2E coverage exercises auth, UPS
+  control, event deletion, and config reload against the Docker Compose NUT/SSH
+  environment. The Single UPS control E2E uses the dummy NUT server's control
+  credential, and PTY-backed `upscmd`/`upsrw` failures preserve NUT's response
+  text for diagnostics.
 
-- **API/auth hardening:** request-body reads now have a socket timeout, dynamic
-  auth fails closed when an existing auth DB cannot be inspected, `/api/v1/auth/state`
-  stays open so the dashboard can show login even when reads require auth, and
-  password resets invalidate existing user sessions.
-- **Dashboard correctness:** redundancy cards use server-computed quorum health,
-  advisory member triggers no longer show a false shutdown-imminent banner while
-  quorum is intact, event source filtering is exact, event paging sorts by
-  `(ts, source, id)`, partial event-delete responses no longer remove unconfirmed
-  rows, and the battery bar no longer relies on inline style mutation under CSP.
-- **SQLite/resource safety:** stats open failures no longer leave a half-open
-  connection, failed flushes requeue their samples, `_safe_alter()` only swallows
-  duplicate-column migration errors, readonly opens return `None` on SQLite
-  failures, monitor/coordinator shutdown closes stats handles, and deferred
-  stop-notification delivery claims rows as `delivering` rather than `sent`
-  until Apprise succeeds. A v6 stats migration timestamps those claims so daemon
-  startup recovers stale delivery work without stealing a live one-shot helper's
-  active send; recovery failures are surfaced during `open()` instead of leaving
-  delivery rows stuck silently.
-- **Packaging/docs drift:** bumped the pre-release version to `6.0.0-rc11`,
-  listed MQTT in requirements files, added package-data checks for dashboard and
-  completion resources, removed stale loopback `shutdown_order: 999` examples,
-  and updated API/testing docs to match the read-gated auth behavior and audit
-  coverage.
-- **CI/test diagnostics:** the Single UPS control E2E now uses the dummy NUT
-  server's control credential, and PTY-backed `upscmd`/`upsrw` failures preserve
-  NUT's response text instead of collapsing to a generic exit code. The NUT
-  control PTY wrapper now also validates that only fixed `upscmd`/`upsrw` argv
-  shapes reach `subprocess.Popen`, and rejects username-only control attempts
-  before they can hang waiting for a password prompt.
+### Notes For Operators
 
-### Fixed (rc10 — pre-release audit hardening)
-
-A structured whole-repository audit (see `docs/testing.md` → "Pre-release code
-review") hardened the shutdown decision path. The new auth/API/control surface
-held up; the residual risk was a config typo or a slow subsystem crashing the
-daemon *before* the host poweroff. Critical fixes:
-
-- **Multi-UPS drain no longer self-joins its own thread.** With
-  `drain_on_local_shutdown: true`, `_drain_all_groups` ran on the firing group's
-  monitor thread and tried to `join()` that same thread, raising `RuntimeError`
-  and aborting the sequence before the host poweroff — a missed local shutdown.
-  It now skips the current thread, so peers drain and the host still powers off.
-- **Shutdown-trigger thresholds are validated at load.** A non-numeric YAML
-  scalar (e.g. a quoted `"20"`, which templating tools emit routinely) survived
-  parse and raised `TypeError` on the first on-battery poll, killing the monitor
-  loop exactly when a shutdown was due. `low_battery_threshold`,
-  `critical_runtime_threshold`, `depletion.window/critical_rate/grace_period`,
-  and `extended_time.threshold` are now type/range-checked for every UPS and
-  redundancy group, so a bad value is a startup error, not a mid-outage crash.
-- **Empty/null `local_shutdown.command` is rejected at load.** `command:` with
-  no value parsed to `None` (and `""` yielded `run_command([])`), silently
-  skipping the host poweroff after VMs/containers/remotes were already drained.
-  It is now a config error when local shutdown is enabled, with a defensive
-  guard at both call sites.
-
-High fixes:
-
-- **Redundancy cold-start no longer drops a powered rack.** The evaluator's
-  time-based startup grace alone could fire a group shutdown when a member's NUT
-  server was merely slow to publish its first snapshot (UNKNOWN ->
-  unknown_counts_as=critical). It now holds the quorum decision until every
-  present member has reported at least once, bounded by a readiness deadline
-  derived from the per-member connection-loss grace; a member with no monitor at
-  all still counts immediately, and a genuinely dead UPS still fires once the
-  window passes.
-- **On-battery FAILSAFE no longer re-fires every poll.** In non-halting configs
-  (local shutdown disabled, dry-run, or loopback-delegated) the failsafe cleared
-  its flag and re-ran the entire remote/VM/container sequence on each failed
-  poll. A per-outage latch now runs it once per connection-loss event; it
-  re-arms on the next successful poll.
-- **A single transient NUT failure on battery no longer shuts the host down.**
-  Hard poll failures (connection refused, or a 30s upsc timeout) are now
-  debounced by `max_stale_data_tolerance` the same way stale data already was,
-  so a momentary blip can't drop a host riding out a survivable dip. Set
-  `max_stale_data_tolerance: 1` to restore instant fail-closed FSB. Off-battery
-  grace handling is unchanged.
-- **Drain phases can't abort the host poweroff.** Each local drain phase (VMs,
-  containers, sync, unmount) is wrapped so an exception is logged and the
-  sequence still reaches the poweroff -- a wedged libvirt or a bad value no
-  longer leaves the host running on a draining battery.
-- **Bounded filesystem sync.** `os.sync()` (which blocks until every mount
-  flushes) is replaced by a `sync` subprocess with a wall-clock timeout, so a
-  hung NFS/CIFS mount can't wedge the sequence before poweroff; the kernel
-  re-syncs at halt regardless.
-- **Drain-phase timeouts validated at load.** `virtual_machines.max_wait`,
-  `containers.stop_timeout`, and `filesystems.unmount.timeout` are now
-  type/range-checked (a quoted "30s" or a null value previously crashed the
-  phase or made `umount` hang forever); `run_command` also treats a `None`
-  timeout as the default bound.
-- **Remote poweroff can't be starved by a slow pre-shutdown phase.** The final
-  shutdown command now reserves its own budget before pre-shutdown commands
-  spend the phase deadline, and is skipped only if the *full* deadline is blown.
-- **SIGTERM/SIGINT during an in-flight shutdown** now waits a bounded,
-  config-derived deadline for the sequence (incl. the host poweroff) to finish
-  instead of abandoning it after 5s. **Duplicate `ups.name`** and **unknown
-  per-UPS / per-redundancy keys** (e.g. a misspelled `is_local`) are now rejected
-  at load.
-- **Depletion-rate trigger (T3) stays armed at slow poll intervals.** The
-  30-sample floor is now derived from `depletion.window / check_interval`, so a
-  larger `check_interval` no longer silently disables the fast-drain trigger.
-
-Medium fixes:
-
-- **No double local poweroff.** The coordinator's local-shutdown guard is now
-  held "in flight" while the committed sequence runs outside the lock, so an
-  unrelated group's power-restored event can't re-arm it mid-sequence and admit
-  a second poweroff.
-- **Deleted admin can't keep control through a DB blip.** Write/control requests
-  now re-check the session's account strictly and fail closed if the auth DB is
-  unavailable; reads stay lenient and the token survives for when the DB returns.
-- **Stats aggregation no longer corrupts the bucket straddling the retention
-  cutoff.** Purge cutoffs are aligned down to the next-tier bucket boundary so
-  only whole buckets are deleted.
-- **Graceful-exit notification can't block shutdown.** The eager Apprise send
-  from the signal handler runs on a short-lived thread with a hard timeout.
-- **Config safety warnings/validation.** A multi-UPS config with no `is_local`
-  group but `local_shutdown` enabled + `trigger_on: any` now warns; `local_shutdown`
-  gets the same unknown-key sweep as other safety sections.
-- **Health robustness.** Voltage auto-detect only samples on line power (a
-  startup brownout can't latch a depressed nominal); a non-positive NUT nominal
-  falls back to the default instead of flagging everything over-voltage; a
-  worsening battery anomaly no longer resets its own 3-poll confirmation; and the
-  depletion-rate input is clamped to [0, 100] against flaky firmware readings.
-- **Drain phases run best-effort** (shared with the High fix) so a failure can't
-  skip the host poweroff.
-- The dashboard no longer offers a `redundancy:<name>` event-source filter that
-  could never return rows (redundancy events aren't persisted to a stats DB).
-
-Low fixes:
-
-- Config validation now warns when `on_battery_stabilization_delay >=
-  critical_runtime_threshold` (the stabilization window would suppress the
-  runtime trigger for the whole remaining runtime).
-- A SIGTERM/SIGINT re-entrancy guard stops a second signal re-running teardown.
-- The VM-shutdown wait loop bounds each `virsh list` poll so a wedged libvirtd
-  can't blow the `max_wait` budget.
-- A FAILED remote server is no longer re-logged as "degraded" on every poll.
-- `_SAFE_NUT_VALUE` is anchored with `\Z` (a trailing newline no longer slips
-  through the upsrw value filter).
-- `StatsStore.query_range` validates the metric against an internal allowlist
-  before it reaches the interpolated SQL column position (defense-in-depth).
-- Derived `powerQuality` thresholds (nominal / warning band) report `null`
-  before the first poll instead of dataclass defaults that look like real data.
-- The dashboard survives connection loss (fetch errors show a "Connection lost"
-  banner instead of freezing the poll loop) and no longer rebuilds the control
-  panel every poll (which wiped half-typed values and re-fetched per UPS).
-- CLI: `user create` / `passwd` validate the username/role before prompting for
-  a password; `--password-stdin` keeps a password that legitimately ends in a
-  bare carriage return.
-- The hermetic notifications test no longer requires the optional `apprise`
-  extra to be installed; several brittle tests that re-implemented loop/guard
-  logic now drive the real code paths.
-- Docs: README trigger count matches its list; the configuration.md CLI table
-  lists the `user`/`apikey`/`shutdown`/`remote` subcommands.
-
-Evaluated and intentionally left as-is (documented): the per-transition voltage
-event log (a deliberate forensic record, bounded by retention; notifications are
-already hysteresis-gated), the per-poll battery-history file write (a forensic
-record; cross-restart read-back is entangled with the on-battery deque reset),
-the `upsrw` SET timeout (operator-tunable via `nut_control.timeout`), and a
-couple of niche multi-daemon / degenerate-config edges.
-
-Nits:
-
-- `X-Content-Type-Options: nosniff` is now sent on every API response, not just
-  the dashboard HTML.
-- Passwords containing a NUL byte are rejected at creation (guards against older
-  bcrypt builds that truncated at NUL).
-- `nut_control` allowlist entries are validated against the NUT name charset at
-  config load.
-- `StatsStore.from_connection` no longer calls `.close()` on a connection that
-  was never opened (dead code relying on a swallowed exception).
-- The slow-SSH diagnostic no longer records two `REMOTE_SSH_SLOW_RESPONSE` rows
-  in a single cycle when a probe crosses both the log and the sustained-notify
-  thresholds at once.
-- Changelog wording: event paging uses a source-qualified `(ts, source, id)`
-  cursor (was written as `(ts, id)`).
+- With auth disabled, the API remains read-only as in 5.x. The dashboard loads,
+  but sign-in and write controls stay hidden.
+- To enable dashboard login or UPS control, set `api.auth.enabled: true`, create
+  a user with `eneru user create`, and configure `nut_control` allowlists.
+- Existing stats databases migrate automatically on first start. As always, take
+  a backup before upgrading production monitoring hosts.
 
 ---
 
@@ -332,12 +226,11 @@ Nits:
   still fires (it preserves the migration promise), but it re-runs
   in-memory on every container restart and the banner was log noise.
   Behavior is documented in `docs/migrate-to-container.md`.
-- Shortened the non-loopback API security warning to a single line:
-  `API bound to <addr> with no authentication (RBAC planned for
-  v6.0); restrict network access before exposing beyond trusted
-  hosts.` The long enumeration of what `/api/v1/config` exposes was
-  exposition that belonged in the docs, not in the daemon log on
-  every restart.
+- Softened the non-loopback API auth-off log to an info note. With
+  auth disabled in v6.0, write endpoints are disabled and
+  `/api/v1/config` returns the sanitized anonymous view; operators
+  still get a reminder to keep unauthenticated read endpoints on a
+  trusted network.
 - TUI (`eneru tui` / `eneru monitor`) now sees the same legacy-path
   auto-rewrite as the daemon inside a container. `_cmd_monitor` used to
   skip `_prepare_runtime_config`, so the TUI kept reading
@@ -371,7 +264,7 @@ Nits:
   `/var/lib/eneru` (e.g. `/srv/eneru/state/`) and `chown 10001:10001`
   the files before starting the container. Skip if a clean history
   is acceptable. See
-  [docs/migrate-to-container.md Step 3b](migrate-to-container.md#step-3b-carry-forward-the-existing-stats-db-optional).
+  [Migrate to container](migrate-to-container.md).
 - To remove the deb/rpm package after the container is healthy, copy
   `/etc/ups-monitor/config.yaml` to `/srv/eneru/config.yaml` and point
   the container's bind mount at the copy. Decouples the daemon's
@@ -496,7 +389,7 @@ Bug-fix release for two v5.2.0 regressions. Drop-in upgrade. See
 
 ### Fixed
 - **Two notifications on every `systemctl restart` / package upgrade**
-  instead of the v5.2-promised single `🔄 Restarted` / `📦 Upgraded`.
+  instead of the v5.2-promised single `🔄  Restarted` / `📦  Upgraded`.
   At SIGTERM the old daemon now picks the cheapest correct path based
   on systemd intent (`systemctl show -p Job eneru.service`):
   `Job=stop` → ship eagerly (instant); `Job=restart` / unknown →
@@ -505,7 +398,7 @@ Bug-fix release for two v5.2.0 regressions. Drop-in upgrade. See
   comes up. Containers / K8s / foreground `eneru run` (no systemd) →
   always eager. New module `deferred_delivery.py` + hidden CLI
   subcommand `eneru _deliver-stop`.
-- **`📦 Upgraded vunknown → v5.2.0` on RPM.** New `preinstall.sh`
+- **`📦  Upgraded vunknown → v5.2.0` on RPM.** New `preinstall.sh`
   captures the outgoing version via `rpm -q eneru` before files unpack
   (RPM doesn't pass it in `$2` the way DEB does). Defensive fallback
   in `lifecycle.classify_startup` covers paths that bypass scriptlets.
@@ -528,14 +421,14 @@ Notifications get a rewrite. v5.1's were stateless and noisy: a `systemctl resta
 
 ### Added
 - **Persistent SQLite-backed notification queue.** Each notification is a `pending` row in the per-UPS stats DB. The worker thread reads and writes through SQLite, so messages survive process death, network outages, and reboots; pending rows ship in age order once the endpoint is reachable. Per-message exponential backoff (capped at `retry_backoff_max`, default 5 min) so the worker doesn't hammer an unreachable endpoint while it's down.
-- **Stateful lifecycle classifier.** Replaces the unconditional "🚀 Started" with one of: `📦 Upgraded vX → vY`, `📊 Recovered` (resumed after a power-loss-triggered shutdown), `🔄 Restarted` (graceful exit, downtime under 30 s), `🚀 Restarted (fatal)`, `🚀 Started (last seen Nh ago)`, `🚀 Started (after crash)`, or plain `🚀 Started`. Uses an on-disk shutdown marker plus `meta.last_seen_version` in the stats DB.
-- **Brief-outage coalescing.** A pending `ON_BATTERY` + `POWER_RESTORED` pair from the same outage gets folded into one `📊 Brief Power Outage: Ns on battery` summary before delivery. Same for the post-power-loss recovery: a `Recovered` notification absorbs the previous instance's pending shutdown headline + summary into one message that includes the trigger reason and the downtime.
+- **Stateful lifecycle classifier.** Replaces the unconditional "🚀  Started" with one of: `📦  Upgraded vX → vY`, `📊  Recovered` (resumed after a power-loss-triggered shutdown), `🔄  Restarted` (graceful exit, downtime under 30 s), `🚀  Restarted (fatal)`, `🚀  Started (last seen Nh ago)`, `🚀  Started (after crash)`, or plain `🚀  Started`. Uses an on-disk shutdown marker plus `meta.last_seen_version` in the stats DB.
+- **Brief-outage coalescing.** A pending `ON_BATTERY` + `POWER_RESTORED` pair from the same outage gets folded into one `📊  Brief Power Outage: Ns on battery` summary before delivery. Same for the post-power-loss recovery: a `Recovered` notification absorbs the previous instance's pending shutdown headline + summary into one message that includes the trigger reason and the downtime.
 - **Outage-survival config knobs:** `notifications.retention_days` (default 7, applies to sent/cancelled only; pending is never pruned by TTL), `max_attempts` (default 0 = unlimited; Apprise's bool can't distinguish "bad URL" from "internet down"), `max_age_days` (default 30, the only cap on pending), `max_pending` (default 10000, backlog overflow), `retry_backoff_max` (default 300, 5 min). Sized for a long weekend with the internet down.
 - **`flush(timeout=5)` drain on shutdown.** Wired into every shutdown path (signal + sequence-complete, single-UPS + coordinator). Closes the v5.1 "1 message pending" SIGTERM race; whatever doesn't drain stays in SQLite for the next start.
 - **TUI events panel: full date.** Rows render `YYYY-MM-DD HH:MM:SS` so multi-day events are distinguishable.
 
 ### Changed
-- **Shutdown notifications: 22 → 2.** Dropped the per-`_log_message` auto-mirror. The channel now carries the headline (`🚨 EMERGENCY SHUTDOWN INITIATED!` with reason) and a single `✅ Shutdown Sequence Complete` summary at the end. The summary now also fires when `local_shutdown.enabled=false`. Per-step detail stays in journalctl.
+- **Shutdown notifications: 22 → 2.** Dropped the per-`_log_message` auto-mirror. The channel now carries the headline (`🚨  EMERGENCY SHUTDOWN INITIATED!` with reason) and a single `✅  Shutdown Sequence Complete` summary at the end. The summary now also fires when `local_shutdown.enabled=false`. Per-step detail stays in journalctl.
 - **`wall(1)` opt-in.** Defaults to off via `local_shutdown.wall: false`. Holdover from the v2 `ups-monitor` era when the shell was the only channel; Apprise covers the modern path.
 - **Schema v3 → v4.** New `notifications` table + index; append-only migration heals partial state via `CREATE TABLE IF NOT EXISTS`. See `src/eneru/AGENTS.md` "Stats schema evolution".
 - **`_send_notification` API.** Adds a `category` keyword (default `general`); used by the coalescer and per-category queries. The `blocking` parameter is now a back-compat shim because the v5.2 queue is always asynchronous.
@@ -547,7 +440,7 @@ Notifications get a rewrite. v5.1's were stateless and noisy: a `systemctl resta
 - Per-server "Remote Shutdown Sent" success notifications, covered by the aggregate summary; failures still notify.
 
 ### Migration notes
-- **deb/rpm upgrades:** postinstall now drops `/var/lib/eneru/.upgrade_marker.json` before `systemctl restart`, so the next start emits a single `📦 Upgraded` notification. Pip users get the same effect via the `meta.last_seen_version` comparison.
+- **deb/rpm upgrades:** postinstall now drops `/var/lib/eneru/.upgrade_marker.json` before `systemctl restart`, so the next start emits a single `📦  Upgraded` notification. Pip users get the same effect via the `meta.last_seen_version` comparison.
 - **Wall broadcasts:** if you relied on the v5.1 default of "wall fires on every shutdown", set `local_shutdown.wall: true` explicitly.
 - **Stats DB:** schema bumps from v3 to v4 on first start. Idempotent and append-only; existing rows are preserved.
 
@@ -1209,254 +1102,3 @@ During power outages, network connectivity is often unreliable. The previous blo
     - Critical runtime threshold
     - Depletion rate threshold
     - Extended time on battery
-
----
-
-## Version Comparison
-
-### v5.3 vs v5.2
-
-| Feature | v5.2 | v5.3 |
-|---------|------|------|
-| Observability | TUI graphs/events and SQLite stats | Read-only API, Prometheus, MQTT, Grafana dashboard, JSON logs, syslog |
-| Power-quality telemetry | TUI/log events for voltage, AVR, bypass, overload | API/MQTT payload fields plus Prometheus metrics and Grafana panels |
-| Remote health | Not available | Safe SSH probe (`true` by default), TUI/API/MQTT/metrics status, SQLite transition events |
-| Manual remote drill | Not available | `eneru shutdown remote --server ...` with dry-run and explicit confirmed execution |
-| Event display | TUI event panel could bury power events in lifecycle/diagnostic noise | Power / Diagnostics / Lifecycle verbosity tiers with Power preserved first |
-| Slow NUT diagnostics | Brief stale/slow polls were hard to distinguish from healthy polling | Rate-limited slow-`upsc` logs plus sustained slowness notification gate |
-| Redundancy re-arm | Could stay blocked by stale group flag after no-op/test shutdowns | Daemon-managed flags clear on startup, recovery, and graceful exit |
-| Runtime NUT flaps in redundancy | Could become `UNKNOWN` before connection grace expired | Fresh members remain `DEGRADED` during grace, then follow configured unknown policy |
-| On-battery transfer handling | Charge/runtime triggers could act on immediate transient readings | 30 s stabilization for charge/runtime/depletion/extended-time triggers |
-| Test count | 871 | 1162 (+45 numbered E2E cases) |
-
-### v5.2 vs v5.1
-
-| Feature | v5.1 | v5.2 |
-|---------|------|------|
-| Notification queue | In-memory FIFO; messages dropped on shutdown | Persistent SQLite-backed; lossless across restarts and prolonged outages |
-| Lifecycle messaging | Always `🚀 Started` + `🛑 Stopped` (2 unrelated events per restart) | Stateful classifier: `Started` / `Restarted` / `Recovered` / `Upgraded` |
-| Power-loss recovery | Stop + Start (2 messages, no context) | Single `📊 Recovered` message folding the trigger reason + downtime |
-| Brief power outages | 2 separate messages (on_battery + on_line) | Coalesced into 1 `📊 Brief Power Outage` summary if both still pending |
-| Shutdown noise | ~22 mid-flight `ℹ️ Shutdown Detail` lines per sequence | 2 messages: headline + summary; journalctl carries the rest |
-| `wall(1)` broadcasts | Always-on (legacy from v2 ups-monitor era) | Opt-in via `local_shutdown.wall: false` |
-| Long-outage delivery | Best-effort retries; can drop on shutdown | Per-message exponential backoff capped at 5min, default 30-day max age |
-| Schema version | v3 (raw NUT + agg + events.notification_sent) | v4 (notifications table) |
-| TUI events panel | `HH:MM:SS` only | Full `YYYY-MM-DD HH:MM:SS` (multi-day rows distinguishable) |
-| Test count | 615 | 871 (+1 new E2E for panic-attack coalescing) |
-
-### v5.1 vs v5.0
-
-| Feature | v5.0 | v5.1 |
-|---------|------|------|
-| Redundancy groups | Not available | Quorum-based via `min_healthy`; supports A+B PSU pairs and dual-feed racks |
-| UPS health model | Implicit (per-poll status) | `HEALTHY` / `DEGRADED` / `CRITICAL` / `UNKNOWN` with configurable mapping |
-| Stats persistence | Not available | Per-UPS SQLite DB with 13 raw NUT metrics + Eneru-derived; tier-aware retention (24h raw / 30d 5-min / 5y hourly) |
-| TUI graphs | Not available | Braille time-series for any tracked metric, blended live (state-file → SQLite) |
-| TUI events panel | Log-tail parsing only | SQLite events table with arrow-key scroll (5.1.1) |
-| Voltage warning thresholds | Hardcoded `±10% / EN 50160 envelope` | Per-UPS-group `voltage_sensitivity` preset: `tight` / `normal` / `loose` (5.1.2) |
-| Schema version | N/A | v3 (raw NUT + agg tiers + events.notification_sent audit trail) |
-| Module decomposition | Single `monitor.py` (~1900 lines) | Split into `shutdown/` (4 mixins) + `health/` (2 mixins); `monitor.py` ~830 lines |
-| E2E test scenarios | 18 (single + multi-UPS) | 33 (+ stats, redundancy, voltage-autodetect groups) |
-| Test count | 300 | 615 |
-
-### v5.0 vs v4.11
-
-| Feature | v4.11 | v5.0 |
-|---------|-------|------|
-| UPS Support | Single UPS only | Multiple UPS with per-group resources |
-| UPS Ownership | N/A | `is_local` flag defines host UPS |
-| Per-UPS Triggers | N/A | Override global defaults per UPS group |
-| TUI Dashboard | Not available | `eneru monitor` with real-time status |
-| Battery Anomaly Detection | Not available | Charge drop detection with jitter filtering |
-| CLI Interface | Flat flags (`--validate-config`) | Subcommands (`eneru run`, `validate`, `monitor`) |
-| Bare `eneru` | Starts daemon | Shows help (safe default) |
-| Config Reference Location | `config.yaml` (root) | `examples/config-reference.yaml` |
-| Service File Location | Root directory | `packaging/eneru.service` |
-| Thread Model | 2 threads (monitor + notifications) | N+2 threads (N UPS monitors + notifications + main) |
-| Shutdown Coordination | N/A | Lock + flag file (defense-in-depth) |
-| E2E Test Scenarios | 7 (single-UPS) | 18 (single + multi-UPS) |
-| Test Count | 216 tests | 300 tests |
-
-### v4.11 vs v4.10
-
-| Feature | v4.10 | v4.11 |
-|---------|-------|-------|
-| Connection Loss Handling | Immediate notification on every failure | Configurable grace period (default 60s) |
-| Flap Detection | Not available | WARNING after N recoveries within 24h |
-| Transient Failure Handling | None | Grace period skips notifications for brief outages |
-| Connection States | `OK`, `FAILED` | `OK`, `GRACE_PERIOD`, `FAILED` |
-| Failsafe (FSB) | Immediate shutdown on battery | Unchanged (grace period bypassed) |
-| Apprise Minimum | 1.9.6 | 1.9.7 |
-| CI Python Versions | 3.9-3.14 | 3.9-3.15-dev |
-| CI Integration Distros | 7 (Debian 12-13, Ubuntu 24.04-26.04, RHEL 8-10) | 9 (+ Debian 11, Ubuntu 22.04) |
-| Test Count | 190 tests | 216 tests |
-
-### v4.10 vs v4.9
-
-| Feature | v4.9 | v4.10 |
-|---------|------|-------|
-| Code Structure | Single `monitor.py` (~2500 lines) | 9 focused modules |
-| Module Count | 1 main module | 9 modules (`version`, `config`, `state`, `logger`, `notifications`, `utils`, `actions`, `monitor`, `cli`) |
-| Developer Documentation | Basic emoji list | Comprehensive categorized emoji reference |
-| Emoji Reference | 11 emojis listed | 20+ emojis with semantic meanings |
-| Test Count | 190 tests | 190 tests |
-| Breaking Changes | N/A | None (backwards compatible imports) |
-
-### v4.9 vs v4.8
-
-| Feature | v4.8 | v4.9 |
-|---------|------|------|
-| E2E Testing | Not available | Full E2E suite with NUT, SSH, Docker |
-| UPS Simulation | Manual testing only | 8 automated scenarios (dummy driver) |
-| `--exit-after-shutdown` | Not available | Exit after shutdown for scripting/testing |
-| Dry-run Wall Broadcast | Sent wall messages | Skipped in dry-run mode |
-| CI Workflows | 4 (validate, integration, release, pypi) | 5 (+ e2e) |
-| Test Automation | Unit + package install | Unit + package install + E2E |
-
-### v4.8 vs v4.7
-
-| Feature | v4.7 | v4.8 |
-|---------|------|------|
-| PyPI Distribution | Not available | `pip install eneru` |
-| Installation Methods | deb/rpm packages only | PyPI + deb/rpm packages |
-| Integration Testing | Unit tests only | Package install on 7 distros |
-| Python Versions | 3.8+ | 3.9+ (3.8 dropped) |
-| Manual Install Script | `install.sh` available | Removed (use pip or packages) |
-| Testing Documentation | Not documented | Dedicated Testing page |
-| CI Workflows | 2 (validate, release) | 4 (+ integration, pypi) |
-
-### v4.7 vs v4.6
-
-| Feature | v4.6 | v4.7 |
-|---------|------|------|
-| Notification Retry | Fire-and-forget (dropped on failure) | Persistent retry until success |
-| Network Outage Handling | Notifications lost during outage | Notifications queued and retried |
-| Message Ordering | N/A (no retry) | FIFO order preserved |
-| Retry Configuration | None | `notifications.retry_interval` (default: 5s) |
-| Queue Monitoring | Basic queue size | `get_queue_size()` + `get_retry_count()` |
-| Stop Behavior | Logs pending count | Logs pending + current retry number |
-| Test Count | 178 tests | 185 tests |
-
-### v4.6 vs v4.5
-
-| Feature | v4.5 | v4.6 |
-|---------|------|------|
-| Package Structure | Single file at root (`ups_monitor.py`) | Python package (`src/eneru/`) |
-| Installation | Script copy only | pip installable (`pip install .`) + script |
-| Entry Points | `python3 ups_monitor.py` | `eneru` command, `python -m eneru` |
-| Installed Script Path | `/opt/ups-monitor/ups_monitor.py` | `/opt/ups-monitor/eneru.py` |
-| Packaging Config | None | `pyproject.toml` (PEP 517/518) |
-| Optional Dependencies | Manual installation | `[notifications]`, `[dev]`, `[docs]` extras |
-| Test Count | ~98 tests | 178 tests |
-| Test Imports | `from ups_monitor import ...` | `from eneru import ...` |
-| Module Invocation | Not supported | `python -m eneru` supported |
-| Public API | Direct script import | `__init__.py` exports all public APIs |
-
-### v4.5 vs v4.4
-
-| Feature | v4.4 | v4.5 |
-|---------|------|------|
-| Compose Shutdown | Not supported | Ordered compose file shutdown with per-file timeout |
-| Container Shutdown | Stop all containers | Compose first -> remaining containers (configurable) |
-| Remote Pre-Shutdown | Direct shutdown only | Pre-shutdown commands (actions + custom) |
-| Remote Shutdown | Sequential | Parallel (threaded) with `parallel` option |
-| Predefined Actions | None | 8 actions (stop_containers, stop_vms, stop_proxmox_*, etc.) |
-| Dependency Ordering | Not possible | `parallel: false` for sequential servers |
-| Filesystem Sync | `os.sync()` only | `os.sync()` + 2s sleep for controller cache flush |
-
-### v4.4 vs v4.3
-
-| Feature | v4.3 | v4.4 |
-|---------|------|------|
-| Documentation | README only (~1200 lines) | Read The Docs + slim README (~145 lines) |
-| Documentation Theme | GitHub markdown | MkDocs Material (dark mode) |
-| Documentation Search | None | Full-text search |
-| Code Blocks | Basic | Copy buttons, syntax highlighting |
-| Installation Docs | Single section | Tabbed by distro |
-| Upgrade/Uninstall | Undocumented | Dedicated instructions |
-| Content Organization | Monolithic README | 7 focused pages |
-| Navigation | Scroll through README | Sidebar navigation |
-
-### v4.3 vs v4.2
-
-| Feature | v4.2 | v4.3 |
-|---------|------|------|
-| Installation Method | Manual (install.sh) | Native packages (.deb/.rpm) |
-| Package Repository | None | GitHub Pages (GPG signed) |
-| Version Display | None | `-v`/`--version` flag |
-| Service Auto-Start | Yes (via install.sh) | No (manual enable required) |
-| Config on Upgrade | May overwrite | Preserved (conffile) |
-| Discord @ Mentions | Could trigger false mentions | Escaped with zero-width space |
-| Build System | None | nFPM + GitHub Actions |
-| Distribution | GitHub clone only | apt/dnf + GitHub releases |
-
-### v4.2 vs v4.1
-
-| Feature | v4.1 | v4.2 |
-|---------|------|------|
-| Notification Backend | Native Discord (requests) | Apprise (100+ services) |
-| Supported Services | Discord only | Discord, Slack, Telegram, ntfy, Email, 100+ more |
-| Notification Behavior | Blocking during shutdown | Non-blocking (fire-and-forget) |
-| Network Failure Impact | Delays shutdown 10-30s+ | Zero delay |
-| Test Command | None | `--test-notifications` |
-| Avatar Support | Hardcoded | Configurable per-service |
-| Title Support | Hardcoded | Optional, configurable |
-| Test Suite | None | 80+ pytest tests |
-| Code Coverage | None | Codecov integration |
-| Script Filename | `ups-monitor.py` | `ups_monitor.py` |
-
-### v4.1 vs v4.0
-
-| Feature | v4.0 | v4.1 |
-|---------|------|------|
-| Container Runtime | Docker only | Docker + Podman |
-| Runtime Detection | N/A | Auto-detect (prefers Podman) |
-| Rootless Containers | No | Yes (Podman) |
-| Project Name | UPS Tower | Eneru |
-| Trigger Documentation | Basic | Comprehensive with examples |
-| Changelog Format | Basic | Keep a Changelog format |
-
-### v4.0 vs v3.0
-
-| Feature | v3.0 | v4.0 |
-|---------|------|------|
-| Configuration | Python dataclass in code | External YAML file |
-| Remote Servers | Single hardcoded NAS | Multiple configurable servers |
-| Shutdown Commands | Hardcoded per system type | Customizable per server |
-| Feature Toggles | Edit source code | Enable/disable in config |
-| CLI Options | None | `--config`, `--dry-run`, `--validate-config` |
-| Dependencies | Hard failure if missing | Graceful degradation |
-| Installation | Overwrites config | Preserves existing config |
-| Documentation | Basic README | Comprehensive docs, examples, guides |
-| Community | None | Issue templates, PR templates, CI |
-| License | Apache 2.0 | MIT |
-
-### v3.0 vs v2.0
-
-| Feature | v2.0 (Bash) | v3.0 (Python) |
-|---------|-------------|---------------|
-| Language | Bash 4.0+ | Python 3.9+ |
-| JSON Handling | External `jq` | Native (`requests`) |
-| Math Operations | External `bc` | Native |
-| Configuration | Shell variables | Python dataclass |
-| State Management | File-based with shell parsing | In-memory + file |
-| Type Safety | None | Full type hints |
-| Error Handling | Shell traps | Python exceptions |
-| String Formatting | Shell variable expansion | Python f-strings |
-
-### v2.0 vs v1.0
-
-| Feature | v1.0 | v2.0 |
-|---------|------|------|
-| Notifications | None | Discord webhooks with rich embeds |
-| Event Tracking | Basic logging | Stateful tracking (prevents spam) |
-| VM Shutdown | Fixed 10s wait | Dynamic up to 30s + force destroy |
-| NAS Auth | Password (`sshpass`) | SSH keys (no passwords) |
-| Unmounting | Basic | Timeout-protected (hang-proof) |
-| Voltage Monitoring | Relative | Absolute thresholds |
-| Depletion Rate | 60s window, 15 samples | 300s window, 30 samples + grace period |
-| AVR Monitoring | None | Boost/Trim detection |
-| Connection Handling | Basic retry | Stale detection + failsafe |
-| Crisis Reporting | None | Elevated notifications during shutdown |
-| Shutdown Triggers | 4 triggers | 4 triggers + FSD flag |
-| Bypass/Overload | None | Full detection + resolution tracking |

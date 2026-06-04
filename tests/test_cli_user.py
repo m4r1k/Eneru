@@ -42,6 +42,21 @@ def test_user_create_password_stdin(db, capsys, monkeypatch):
 
 
 @pytest.mark.unit
+def test_user_create_password_stdin_tty_prompts_hidden(db, capsys, monkeypatch):
+    class _TTY:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr("sys.stdin", _TTY())
+    monkeypatch.setattr(getpass, "getpass", lambda prompt: "hiddenpw")
+
+    cli._cmd_user_create(_ns(username="bob", auth_db=db, password_stdin=True))
+
+    capsys.readouterr()
+    assert auth.AuthStore(db).authenticate("bob", "hiddenpw") is not None
+
+
+@pytest.mark.unit
 def test_user_create_interactive(db, capsys, monkeypatch):
     monkeypatch.setattr(getpass, "getpass", lambda *a, **k: "interactivepw")
     cli._cmd_user_create(_ns(username="carol", auth_db=db))

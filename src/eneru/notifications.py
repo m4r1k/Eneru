@@ -142,7 +142,7 @@ class NotificationWorker:
                 # Informational, not an error: the rows aren't lost,
                 # they just go out on the next start.
                 print(
-                    f"ℹ️ Notification worker stopping with {pending} "
+                    f"ℹ️  Notification worker stopping with {pending} "
                     f"message(s) still pending in the persistent queue "
                     f"— they will deliver on the next start."
                 )
@@ -273,7 +273,7 @@ class NotificationWorker:
         del self._memory_buffer[:excess]
         if not getattr(self, "_buffer_overflow_warned", False):
             print(
-                f"⚠️ Notification memory buffer exceeded {cap} entries — "
+                f"⚠️  Notification memory buffer exceeded {cap} entries — "
                 "oldest dropped. Stats DB unreachable? Check "
                 f"{self.config.statistics.db_directory if hasattr(self.config, 'statistics') else '/var/lib/eneru'} "
                 "is writable."
@@ -417,7 +417,7 @@ class NotificationWorker:
             start_str = datetime.fromtimestamp(ob_ts).strftime("%H:%M:%S")
             end_str = datetime.fromtimestamp(ol_ts).strftime("%H:%M:%S")
             summary_body = (
-                f"📊 **Brief Power Outage**\n"
+                f"⚡  **Brief Power Outage**\n"
                 f"On battery for {format_seconds(duration)} "
                 f"({start_str} → {end_str})."
             )

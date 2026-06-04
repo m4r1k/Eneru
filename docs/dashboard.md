@@ -5,6 +5,10 @@ no external service, build toolchain, or third-party JavaScript. It is a thin
 client over the REST API: every value it shows comes from an endpoint, and all
 logic stays server-side.
 
+<p align="center">
+  <img src="images/eneru-webui.png" alt="Eneru browser dashboard" width="900">
+</p>
+
 ## Enabling it
 
 The dashboard is served automatically whenever the API is enabled. There is no
@@ -70,7 +74,7 @@ The **Sign in** button appears whenever auth is enabled — the dashboard re-che
 `/api/v1/config` on every refresh, so it shows up on its own once auth becomes
 active. When auth is off there is nothing to sign into. If a login fails, the
 dashboard shows the server's actual reason. Creating a user with `eneru user
-create` [auto-enables auth](authentication.md#auto-enable-create-a-user-then-just-sign-in)
+create` [auto-enables auth](authentication.md#auto-enable-create-a-user-then-just-sign-in-no-restart)
 **within seconds, no restart**, so signing in works without hand-editing the config.
 
 ## Security

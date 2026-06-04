@@ -15,6 +15,7 @@ from eneru.multi_ups import MultiUPSCoordinator
 from eneru.notifications import APPRISE_AVAILABLE
 from eneru.redundancy import RedundancyGroupExecutor
 from eneru.remote_health import is_safe_probe_command, run_remote_probe
+from eneru.status import remote_health_for_config
 
 # Optional import for Apprise (needed for test notifications)
 try:
@@ -1015,7 +1016,7 @@ def _cmd_validate(args):
             print(f"    Retry interval: {config.notifications.retry_interval}s")
         else:
             print(f"    Apprise not installed - notifications disabled")
-            print(f"    Install with: pip install apprise")
+            print(f"    Install with: uv pip install apprise")
     else:
         print(f"    Disabled")
 
@@ -1059,7 +1060,7 @@ def _cmd_test_notifications(args):
 
     if not APPRISE_AVAILABLE:
         print("Apprise is not installed.")
-        print("   Install with: pip install apprise")
+        print("   Install with: uv pip install apprise")
         sys.exit(1)
 
     apobj = apprise.Apprise()
@@ -1158,8 +1159,8 @@ def _format_remote_list_table(rows: list) -> str:
     don't truncate; each column has a minimum that keeps the header
     readable when every row is short.
     """
-    headers = ("NAME", "GROUP", "KIND", "HOST", "ENABLED", "ORDER")
-    minimums = (10, 10, 10, 10, 7, 5)
+    headers = ("NAME", "GROUP", "KIND", "HOST", "ENABLED", "ORDER", "HEALTH")
+    minimums = (10, 10, 10, 10, 7, 5, 7)
     columns = list(zip(*[headers, *rows])) if rows else [(h,) for h in headers]
     widths = [
         max(minimums[i], max(len(str(cell)) for cell in column))
@@ -1179,7 +1180,49 @@ def _format_remote_list_table(rows: list) -> str:
     return "\n".join(lines)
 
 
-def _build_remote_list_rows_for_group(group, group_name: str, kind: str) -> tuple:
+def _remote_health_index(rows: list) -> dict:
+    """Return last-known remote-health status keyed by group/server/host."""
+    out = {}
+    for row in rows or []:
+        # Sidecar rows come from an on-disk JSON file that an older/newer
+        # daemon — or a corrupted write — may have shaped differently. The
+        # reader only guarantees a list, not dict elements, so skip anything
+        # that isn't a mapping rather than crashing `remote list`.
+        if not isinstance(row, dict):
+            continue
+        group = row.get("group") or ""
+        server = row.get("server") or ""
+        host = row.get("host") or ""
+        status = row.get("status") or "UNKNOWN"
+        if server:
+            out[(group, server)] = status
+        if host:
+            out[(group, host)] = status
+    return out
+
+
+def _remote_health_status_for_server(
+    health_by_key: dict, group, group_name: str, server,
+) -> str:
+    """Return sidecar health for one listed target, or an em dash."""
+    group_candidates = [
+        group_name,
+        getattr(getattr(group, "ups", None), "label", ""),
+        getattr(getattr(group, "ups", None), "name", ""),
+        f"redundancy:{getattr(group, 'name', '')}"
+        if getattr(group, "name", "") else "",
+    ]
+    server_candidates = [server.name or "", server.host or ""]
+    for group_key in group_candidates:
+        for server_key in server_candidates:
+            if group_key and server_key and (group_key, server_key) in health_by_key:
+                return str(health_by_key[(group_key, server_key)])
+    return "—"
+
+
+def _build_remote_list_rows_for_group(
+    group, group_name: str, kind: str, health_by_key: dict = None,
+) -> tuple:
     """Build display rows for one group's remote_servers.
 
     Returns ``(rows, enabled_count)``. ``group_name`` is the value an
@@ -1208,6 +1251,7 @@ def _build_remote_list_rows_for_group(group, group_name: str, kind: str) -> tupl
         id(s): effective
         for effective, s in compute_effective_order(regular_enabled_servers)
     }
+    health_by_key = health_by_key or {}
     rows = []
     for server in group.remote_servers:
         host = f"{server.user}@{server.host}" if server.user else server.host
@@ -1224,6 +1268,7 @@ def _build_remote_list_rows_for_group(group, group_name: str, kind: str) -> tupl
             host,
             "yes" if server.enabled else "no",
             order_text,
+            _remote_health_status_for_server(health_by_key, group, group_name, server),
         ))
     return rows, len(enabled_servers)
 
@@ -1244,19 +1289,22 @@ def _cmd_remote_list(args):
     # shutdown order so the printed sequence matches a real shutdown.
     rows = []
     enabled_count = 0
+    health_by_key = _remote_health_index(
+        remote_health_for_config(config) if config.remote_health.enabled else []
+    )
     for group in config.ups_groups:
         # Use the canonical name when present so the GROUP column is
         # exactly the string `eneru shutdown group --group ...` accepts;
         # fall back to the label only when name is empty.
         group_name = group.ups.name or group.ups.label or "(unnamed)"
         group_rows, group_enabled = _build_remote_list_rows_for_group(
-            group, group_name, "ups",
+            group, group_name, "ups", health_by_key,
         )
         rows.extend(group_rows)
         enabled_count += group_enabled
     for group in config.redundancy_groups:
         group_rows, group_enabled = _build_remote_list_rows_for_group(
-            group, group.name, "redundancy",
+            group, group.name, "redundancy", health_by_key,
         )
         rows.extend(group_rows)
         enabled_count += group_enabled
@@ -1571,14 +1619,23 @@ def _resolve_auth_store(args):
 def _resolve_password(args):
     """Resolve a password without ever accepting it as a CLI argument value.
 
-    Order: ``--generate`` -> ``--password-stdin`` -> interactive ``getpass``
-    (which always asks twice and checks the two entries match). Returns
-    ``(password, generated)``. A bare ``--password VALUE`` flag is deliberately
-    absent: it would leak into shell history and ``ps``.
+    Order: ``--generate`` -> ``--password-stdin`` -> interactive ``getpass``.
+    ``--password-stdin`` reads piped data for automation, but prompts once
+    without echo when stdin is a terminal so humans are not left staring at a
+    silent blocking read. The plain interactive path asks twice and checks the
+    two entries match. Returns ``(password, generated)``. A bare ``--password
+    VALUE`` flag is deliberately absent: it would leak into shell history and
+    ``ps``.
     """
     if getattr(args, "generate", False):
         return auth.generate_password(), True
     if getattr(args, "password_stdin", False):
+        if sys.stdin.isatty():
+            import getpass
+            password = getpass.getpass("Password: ")
+            if not password:
+                raise SystemExit("ERROR: empty password")
+            return password, False
         data = sys.stdin.read()
         # Strip a single trailing LINE TERMINATOR (CRLF from Windows/CI pipes,
         # or LF), preserving every other character. L20: a BARE trailing "\r"
@@ -1620,7 +1677,7 @@ def _cmd_user_create(args):
         store.create_user(args.username, password, role=args.role)
     except auth.AuthError as exc:
         raise SystemExit(f"ERROR: {exc}")
-    print(f"✅ Created user '{args.username}' (role: {args.role}).")
+    print(f"✅  Created user '{args.username}' (role: {args.role}).")
     if generated:
         # Intentional: a generated secret must reach its creator exactly once;
         # printing it is the only delivery channel. (CodeQL FP.)
@@ -1643,7 +1700,7 @@ def _cmd_user_passwd(args):
         store.set_password(args.username, password)
     except auth.AuthError as exc:
         raise SystemExit(f"ERROR: {exc}")
-    print(f"✅ Updated password for '{args.username}'.")
+    print(f"✅  Updated password for '{args.username}'.")
     if generated:
         # Intentional: a generated secret must reach its creator exactly once;
         # printing it is the only delivery channel. (CodeQL FP.)
@@ -1685,7 +1742,7 @@ def _cmd_user_delete(args):
         store.delete_user(args.username)
     except auth.AuthError as exc:
         raise SystemExit(f"ERROR: {exc}")
-    print(f"✅ Deleted user '{args.username}'.")
+    print(f"✅  Deleted user '{args.username}'.")
 
 
 def _cmd_apikey_create(args):
@@ -1695,7 +1752,7 @@ def _cmd_apikey_create(args):
         key_id, key = store.create_api_key(args.label, role=args.role)
     except auth.AuthError as exc:
         raise SystemExit(f"ERROR: {exc}")
-    print(f"✅ Created API key #{key_id} (label: {args.label!r}, role: {args.role}).")
+    print(f"✅  Created API key #{key_id} (label: {args.label!r}, role: {args.role}).")
     # Intentional: the key is shown exactly once and never stored in plaintext.
     print(f"API key: {key}")  # lgtm[py/clear-text-logging-sensitive-data]
     print("Store it now — only its hash is kept; it cannot be shown again.")
@@ -1723,7 +1780,7 @@ def _cmd_apikey_revoke(args):
         store.revoke_api_key(args.id)
     except auth.AuthError as exc:
         raise SystemExit(f"ERROR: {exc}")
-    print(f"✅ Revoked API key #{args.id}.")
+    print(f"✅  Revoked API key #{args.id}.")
 
 
 def _cmd_version(args):
@@ -1834,7 +1891,14 @@ def main():
         ),
     )
 
-    subparsers = parser.add_subparsers(dest="command")
+    public_subcommands = (
+        "run", "shutdown", "remote", "user", "apikey", "validate", "monitor",
+        "tui", "test-notifications", "version", "completion",
+    )
+    subparsers = parser.add_subparsers(
+        dest="command",
+        metavar="{" + ",".join(public_subcommands) + "}",
+    )
 
     # --- run ---
     run_parser = subparsers.add_parser("run", help="Start the monitoring daemon")
@@ -1943,7 +2007,7 @@ def main():
                          help="Generate a strong random password and print it once")
         grp.add_argument("--password-stdin", dest="password_stdin",
                          action="store_true",
-                         help="Read the password from stdin (for automation)")
+                         help="Read password from stdin; prompt hidden when run from a terminal")
 
     user_parser = subparsers.add_parser(
         "user", help="Manage local API user accounts")
@@ -2078,9 +2142,25 @@ def main():
     # Hidden from the --help listing on purpose: this is invoked by a
     # systemd-run transient timer scheduled by the previous daemon's
     # _cleanup_and_exit / _handle_signal, never by users directly.
-    ds_parser = subparsers.add_parser("_deliver-stop", help=argparse.SUPPRESS)
-    ds_parser.add_argument("--notification-id", required=True, type=int)
-    ds_parser.add_argument("--db-path", required=True)
+    # No `help=` is passed on purpose. argparse only adds a subcommand to the
+    # help listing when it is given help text, so omitting it keeps the parser
+    # registered and fully invokable while leaving it out of the customer-facing
+    # `--help` output — the public-API way to hide a subcommand. (The curated
+    # `metavar` on add_subparsers above already keeps it out of the `{...}`
+    # command line.) `help=argparse.SUPPRESS` is NOT used: it leaks a literal
+    # `==SUPPRESS==` row into --help on current CPython.
+    ds_parser = subparsers.add_parser(
+        "_deliver-stop",
+        description=(
+            "Internal helper used by Eneru's systemd transient timer to deliver "
+            "a pending service-stop notification after the restart window. "
+            "Operators should not run this directly."
+        ),
+    )
+    ds_parser.add_argument("--notification-id", required=True, type=int,
+                           help="Pending notification row id to deliver")
+    ds_parser.add_argument("--db-path", required=True,
+                           help="SQLite stats DB containing the pending row")
     ds_parser.add_argument("-c", "--config", required=True,
                            help="Path to configuration file")
     ds_parser.set_defaults(func=_cmd_deliver_stop)

@@ -255,7 +255,7 @@ class EneruAPIServer:
         try:
             self._httpd = ThreadingHTTPServer(addr, Handler)
         except OSError as exc:
-            self.log_fn(f"⚠️ API server failed to bind {addr[0]}:{addr[1]}: {exc}")
+            self.log_fn(f"⚠️  API server failed to bind {addr[0]}:{addr[1]}: {exc}")
             return
         # v6.0: worker threads are NON-daemon. The API now has non-idempotent
         # write endpoints (control commands, config reload), so a worker must
@@ -271,29 +271,30 @@ class EneruAPIServer:
             daemon=True,
         )
         self._thread.start()
-        self.log_fn(f"📊 API server listening on {addr[0]}:{addr[1]}")
-        # Warn when bound off-loopback without auth: any caller that can reach
-        # the socket can read /api/v1/config. With api.auth enabled, writes are
-        # gated, so the warning softens to a reminder about open read endpoints.
+        self.log_fn(f"📊  API server listening on {addr[0]}:{addr[1]}")
+        # Off-loopback binds still need a trusted network boundary, but auth
+        # disabled is not a write-surface problem in v6.0: write endpoints are
+        # closed, and anonymous /api/v1/config responses are sanitized.
         auth_on = _auth_is_active(self.config)
         if not _is_loopback_bind(self.config.api.bind):
             if auth_on:
                 self.log_fn(
-                    f"ℹ️ API bound to {addr[0]} with auth enabled. Read endpoints "
+                    f"ℹ️  API bound to {addr[0]} with auth enabled. Read endpoints "
                     "stay open unless api.auth.require_for_reads is set."
                 )
             else:
                 self.log_fn(
-                    f"⚠️ API bound to {addr[0]} with no authentication; enable "
-                    "api.auth or restrict network access before exposing beyond "
-                    "trusted hosts."
+                    f"ℹ️  API bound to {addr[0]} with auth disabled. Write endpoints "
+                    "are disabled, and /api/v1/config returns a sanitized view "
+                    "to anonymous clients; restrict network access before "
+                    "exposing read endpoints beyond trusted hosts."
                 )
         elif not auth_on:
             # Loopback + auth off: the dashboard hides its Sign-in button in this
             # state, so spell out why and how to enable login/control. (The
             # off-loopback branch already warns above.)
             self.log_fn(
-                "ℹ️ API authentication is disabled; the dashboard is read-only "
+                "ℹ️  API authentication is disabled; the dashboard is read-only "
                 "and Sign-in is hidden. Set api.auth.enabled: true and run "
                 "`eneru user create` to enable login and UPS control."
             )
@@ -416,9 +417,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     # writes of a float and a bool, worst case a redundant probe.
     _auth_active_ts: float = 0.0
     _auth_active_val: bool = False
+    _auth_active_key: Optional[str] = None
     _AUTH_ACTIVE_TTL: float = 5.0
 
-    def _auth_active(self) -> bool:
+    def _auth_active(self, *, refresh: bool = False) -> bool:
         """Effective auth state for this request (see :func:`_auth_is_active`).
 
         Explicit/enabled cases are resolved instantly with no I/O; only the
@@ -435,9 +437,15 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             return True
         base = EneruAPIHandler
         now = time.time()
-        if now - base._auth_active_ts > base._AUTH_ACTIVE_TTL:
+        cache_key = str(getattr(auth_cfg, "db_path", ""))
+        if (
+            refresh
+            or base._auth_active_key != cache_key
+            or now - base._auth_active_ts > base._AUTH_ACTIVE_TTL
+        ):
             base._auth_active_val = _auth_is_active(self.api_config)
             base._auth_active_ts = now
+            base._auth_active_key = cache_key
         return base._auth_active_val
 
     def _bearer_token(self) -> Optional[str]:
@@ -635,7 +643,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         # form before it has a token.
         if path == "/api/v1/auth/state":
             auth_cfg = getattr(self.api_config.api, "auth", None)
-            auth_active = self._auth_active()
+            # This is the dashboard bootstrap signal. Refresh it immediately so
+            # `eneru user create` can make the Sign-in button appear without a
+            # daemon restart or waiting for the read-path cache to expire.
+            auth_active = self._auth_active(refresh=True)
             return 200, "application/json", {
                 "enabled": auth_active,
                 "requireForReads": bool(
@@ -830,7 +841,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         return 404, "application/json", self._not_found("Endpoint not found")
 
     def _handle_login(self) -> Tuple[int, str, Any]:
-        if not self._auth_active():
+        # Refresh the first-user probe here too: a user may create the initial
+        # account in another shell and submit the login form before any
+        # background dashboard poll has refreshed /auth/state.
+        if not self._auth_active(refresh=True):
             return 404, "application/json", self._not_found("Authentication is disabled")
         data = self._read_json_body()
         username = data.get("username")
@@ -1031,7 +1045,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         (v7.0 adds a tamper-evident audit log; this is the groundwork)."""
         label = self._scrub(self._principal_label(principal))
         target = self._scrub(target)
-        line = f"🔌 control: {label} {kind} {target} -> {result}"
+        line = f"🔌  control: {label} {kind} {target} -> {result}"
         if self.api_log is not None:
             try:
                 self.api_log(line)
@@ -1049,7 +1063,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 if self.api_log is not None:
                     try:
-                        self.api_log(f"⚠️ control audit event failed: {exc}")
+                        self.api_log(f"⚠️  control audit event failed: {exc}")
                     except Exception:
                         pass
 

@@ -46,7 +46,7 @@ class FilesystemShutdownMixin:
                 [_SYNC_BIN], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except (OSError, ValueError) as exc:
             self._log_message(
-                f"  ⚠️ {label}: could not start `sync` ({exc}); proceeding.")
+                f"  ⚠️  {label}: could not start `sync` ({exc}); proceeding.")
             return
         deadline = time.monotonic() + _SYNC_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
@@ -63,15 +63,15 @@ class FilesystemShutdownMixin:
             except Exception:
                 pass
             self._log_message(
-                f"  ⚠️ {label} did not finish within {_SYNC_TIMEOUT_SECONDS}s "
+                f"  ⚠️  {label} did not finish within {_SYNC_TIMEOUT_SECONDS}s "
                 "(a hung mount?); proceeding without waiting -- the kernel "
                 "re-syncs during halt."
             )
         elif rc == 0:
-            self._log_message(f"  ✅ {label} complete")
+            self._log_message(f"  ✅  {label} complete")
         else:
             self._log_message(
-                f"  ⚠️ {label} reported an error (exit {rc}); proceeding."
+                f"  ⚠️  {label} reported an error (exit {rc}); proceeding."
             )
 
     def _sync_filesystems(self):
@@ -85,9 +85,9 @@ class FilesystemShutdownMixin:
         if not self.config.filesystems.sync_enabled:
             return
 
-        self._log_message("💾 Syncing all filesystems...")
+        self._log_message("💾  Syncing all filesystems...")
         if self.config.behavior.dry_run:
-            self._log_message("  🧪 [DRY-RUN] Would sync filesystems")
+            self._log_message("  🧪  [DRY-RUN] Would sync filesystems")
         else:
             self._bounded_sync("Filesystem sync")
             time.sleep(2)  # Allow storage controller caches to flush
@@ -101,7 +101,7 @@ class FilesystemShutdownMixin:
             return
 
         timeout = self.config.filesystems.unmount.timeout
-        self._log_message(f"📤 Unmounting filesystems (Max wait: {timeout}s)...")
+        self._log_message(f"📤  Unmounting filesystems (Max wait: {timeout}s)...")
 
         for mount in self.config.filesystems.unmount.mounts:
             mount_point = mount.get('path', '')
@@ -111,7 +111,7 @@ class FilesystemShutdownMixin:
                 continue
 
             options_display = f" {options}" if options else ""
-            self._log_message(f"  ➡️ Unmounting {mount_point}{options_display}")
+            self._log_message(f"  ➡️  Unmounting {mount_point}{options_display}")
 
             # Build the argv up-front so the dry-run log can render the
             # exact tokens that would be exec'd (was: the dry-run line
@@ -125,7 +125,7 @@ class FilesystemShutdownMixin:
                     opt_args = shlex.split(options)
                 except ValueError as exc:
                     self._log_message(
-                        f"  ❌ Invalid umount options for {mount_point}: "
+                        f"  ❌  Invalid umount options for {mount_point}: "
                         f"{exc}. Skipping this mount."
                     )
                     continue
@@ -134,25 +134,25 @@ class FilesystemShutdownMixin:
             if self.config.behavior.dry_run:
                 rendered = " ".join(shlex.quote(a) for a in cmd)
                 self._log_message(
-                    f"  🧪 [DRY-RUN] Would execute: timeout {timeout}s {rendered}"
+                    f"  🧪  [DRY-RUN] Would execute: timeout {timeout}s {rendered}"
                 )
                 continue
 
             exit_code, _, stderr = run_command(cmd, timeout=timeout)
 
             if exit_code == 0:
-                self._log_message(f"  ✅ {mount_point} unmounted successfully")
+                self._log_message(f"  ✅  {mount_point} unmounted successfully")
             elif exit_code == 124:
                 self._log_message(
-                    f"  ⚠️ {mount_point} unmount timed out "
+                    f"  ⚠️  {mount_point} unmount timed out "
                     "(device may be busy/unreachable). Proceeding anyway."
                 )
             else:
                 check_code, _, _ = run_command(["mountpoint", "-q", mount_point])
                 if check_code == 0:
                     self._log_message(
-                        f"  ❌ Failed to unmount {mount_point} "
+                        f"  ❌  Failed to unmount {mount_point} "
                         f"(Error code {exit_code}). Proceeding anyway."
                     )
                 else:
-                    self._log_message(f"  ℹ️ {mount_point} was likely not mounted.")
+                    self._log_message(f"  ℹ️  {mount_point} was likely not mounted.")

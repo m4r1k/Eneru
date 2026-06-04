@@ -1,5 +1,6 @@
 """Configuration classes and loader for Eneru."""
 
+import shlex
 from dataclasses import dataclass, field
 from difflib import get_close_matches
 from pathlib import Path
@@ -873,7 +874,7 @@ class ConfigLoader:
                     return int(v)
                 except (TypeError, ValueError):
                     print(
-                        f"⚠️ Notifications config: {key}={v!r} not numeric; "
+                        f"⚠️  Notifications config: {key}={v!r} not numeric; "
                         f"using default {default}"
                     )
                     return default
@@ -1525,7 +1526,7 @@ class ConfigLoader:
         if config.notifications.enabled and not APPRISE_AVAILABLE:
             messages.append(
                 "WARNING: Notifications enabled but apprise package not installed. "
-                "Notifications will be disabled. Install with: pip install apprise"
+                "Notifications will be disabled. Install with: uv pip install apprise"
             )
 
         if config.logging.format not in ("text", "json"):
@@ -1985,9 +1986,23 @@ class ConfigLoader:
                         "'cat /etc/machine-id'."
                     )
 
-        # Sudo guard for ALL remote_servers (loopback and otherwise):
-        # non-root user without sudo in shutdown_command is almost always a
-        # misconfiguration. WARNING, not ERROR — operators may have unusual setups.
+        # Sudo guard for ALL remote_servers (loopback and otherwise).
+        # Think of this as two keys on a keyring. Inline sudo in
+        # shutdown_command unlocks only that final command; it does not unlock
+        # generated pre-shutdown actions that Eneru builds separately from
+        # action templates. Those still need use_sudo: true.
+        def _has_generated_remote_actions(srv: RemoteServerConfig) -> bool:
+            return any(bool(cmd.action) for cmd in srv.pre_shutdown_commands)
+
+        def _command_invokes_sudo(command: str) -> bool:
+            try:
+                parts = shlex.split(command or "")
+            except ValueError:
+                return False
+            if not parts:
+                return False
+            return Path(parts[0]).name == "sudo"
+
         def _all_remote_servers():
             for g in config.ups_groups:
                 for s in g.remote_servers:
@@ -2003,13 +2018,17 @@ class ConfigLoader:
                 user
                 and user != "root"
                 and not srv.use_sudo
+                and (
+                    _has_generated_remote_actions(srv)
+                    or not _command_invokes_sudo(srv.shutdown_command)
+                )
             ):
                 where = f"{owner}/{srv.name or srv.host or '(unnamed)'}"
                 messages.append(
                     f"WARNING: remote_server '{where}' user is {srv.user!r} "
                     "but use_sudo is false. Non-root users typically need "
-                    "use_sudo: true so generated pre-shutdown actions and "
-                    "the final shutdown command run with sudo."
+                    "use_sudo: true unless shutdown_command invokes sudo "
+                    "itself and no generated pre-shutdown actions are enabled."
                 )
 
         # --- Redundancy-group validation (Phase 2) ---

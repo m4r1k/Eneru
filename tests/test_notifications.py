@@ -643,12 +643,12 @@ class TestPowerEventCoalescing:
         # body wording is irrelevant to the coalescer (intentionally —
         # it doesn't grep user-visible strings).
         registered_store.enqueue_notification(
-            body="⚠️ **POWER FAILURE DETECTED!**\nDetails: Battery 80%",
+            body="⚠️  **POWER FAILURE DETECTED!**\nDetails: Battery 80%",
             notify_type="warning",
             category="power_event_on_battery", ts=1000,
         )
         registered_store.enqueue_notification(
-            body="✅ **POWER RESTORED**\nDetails: Outage 60s",
+            body="✅  **POWER RESTORED**\nDetails: Outage 60s",
             notify_type="success",
             category="power_event_on_line", ts=1060,
         )
@@ -690,7 +690,7 @@ class TestPowerEventCoalescing:
         worker.stop()
 
         registered_store.enqueue_notification(
-            body="⚠️ **POWER FAILURE DETECTED!**\nDetails: Battery 80%",
+            body="⚠️  **POWER FAILURE DETECTED!**\nDetails: Battery 80%",
             notify_type="warning",
             category="power_event_on_battery", ts=1000,
         )

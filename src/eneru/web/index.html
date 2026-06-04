@@ -8,7 +8,7 @@
 </head>
 <body>
   <header>
-    <h1>⚡ Eneru</h1>
+    <h1>⚡  Eneru</h1>
     <div id="authbox" class="authbox">
       <label class="theme-pick">Theme
         <select id="theme-select" aria-label="Color theme">
@@ -45,7 +45,7 @@
           <select id="graph-metric">
             <option value="charge">Battery charge (%)</option>
             <option value="load">Load (%)</option>
-            <option value="runtime">Runtime (s)</option>
+            <option value="runtime">Runtime</option>
             <option value="voltage">Input voltage (V)</option>
           </select>
         </label>
@@ -72,11 +72,14 @@
             <option value="">All sources</option>
           </select>
         </label>
-        <label>Type
-          <select id="event-type-filter">
-            <option value="">All types</option>
-          </select>
-        </label>
+        <div class="filter-field">
+          <span id="event-type-label">Type</span>
+          <details class="event-type-picker">
+            <summary id="event-type-summary">All types</summary>
+            <div id="event-type-filter" class="event-type-options"
+                 role="group" aria-labelledby="event-type-label"></div>
+          </details>
+        </div>
         <label>Text <input id="event-text-filter" type="search" placeholder="Filter details"></label>
         <label>Range
           <select id="event-range">
@@ -93,7 +96,7 @@
         <button type="button" id="event-load-older">Load older</button>
       </div>
       <table id="events" class="events">
-        <thead><tr id="events-head"><th>Time</th><th>Type</th><th>Detail</th></tr></thead>
+        <thead><tr id="events-head"><th><button id="event-sort-time" type="button" class="th-sort">Time ↑</button></th><th>Type</th><th>Detail</th></tr></thead>
         <tbody></tbody>
       </table>
     </section>
