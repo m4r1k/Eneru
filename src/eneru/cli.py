@@ -1876,7 +1876,14 @@ def main():
         ),
     )
 
-    subparsers = parser.add_subparsers(dest="command")
+    public_subcommands = (
+        "run", "shutdown", "remote", "user", "apikey", "validate", "monitor",
+        "tui", "test-notifications", "version", "completion",
+    )
+    subparsers = parser.add_subparsers(
+        dest="command",
+        metavar="{" + ",".join(public_subcommands) + "}",
+    )
 
     # --- run ---
     run_parser = subparsers.add_parser("run", help="Start the monitoring daemon")
@@ -2120,9 +2127,26 @@ def main():
     # Hidden from the --help listing on purpose: this is invoked by a
     # systemd-run transient timer scheduled by the previous daemon's
     # _cleanup_and_exit / _handle_signal, never by users directly.
-    ds_parser = subparsers.add_parser("_deliver-stop", help=argparse.SUPPRESS)
-    ds_parser.add_argument("--notification-id", required=True, type=int)
-    ds_parser.add_argument("--db-path", required=True)
+    ds_parser = subparsers.add_parser(
+        "_deliver-stop",
+        help="Internal helper for deferred service-stop notification delivery",
+        description=(
+            "Internal helper used by Eneru's systemd transient timer to deliver "
+            "a pending service-stop notification after the restart window. "
+            "Operators should not run this directly."
+        ),
+    )
+    # argparse has no public "hidden subcommand" switch. Remove only the help
+    # row while keeping the parser registered, like leaving a service hatch in
+    # the machine but taking it off the customer-facing control panel.
+    subparsers._choices_actions = [  # pylint: disable=protected-access
+        action for action in subparsers._choices_actions  # pylint: disable=protected-access
+        if action.dest != "_deliver-stop"
+    ]
+    ds_parser.add_argument("--notification-id", required=True, type=int,
+                           help="Pending notification row id to deliver")
+    ds_parser.add_argument("--db-path", required=True,
+                           help="SQLite stats DB containing the pending row")
     ds_parser.add_argument("-c", "--config", required=True,
                            help="Path to configuration file")
     ds_parser.set_defaults(func=_cmd_deliver_stop)

@@ -3684,6 +3684,33 @@ class TestDeliverStopSubcommand:
     """Cover lines 1452-1456 — internal `_deliver-stop` subcommand."""
 
     @pytest.mark.unit
+    def test_deliver_stop_hidden_from_top_level_help(self, capsys):
+        """The internal timer helper must not show as a public command."""
+        with patch.object(sys, "argv", ["eneru", "--help"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        assert "_deliver-stop" not in out
+        assert "==SUPPRESS==" not in out
+
+    @pytest.mark.unit
+    def test_deliver_stop_help_explains_internal_use(self, capsys):
+        """Direct help is still useful when debugging deferred delivery."""
+        with patch.object(sys, "argv", ["eneru", "_deliver-stop", "--help"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        assert "Internal helper" in out
+        assert "Operators should not run" in out
+        assert "this directly" in out
+        assert "--notification-id" in out
+        assert "--db-path" in out
+
+    @pytest.mark.unit
     def test_deliver_stop_invokes_deferred_delivery(self, tmp_path):
         config_file = tmp_path / "config.yaml"
         config_file.write_text(
