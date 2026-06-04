@@ -1613,14 +1613,23 @@ def _resolve_auth_store(args):
 def _resolve_password(args):
     """Resolve a password without ever accepting it as a CLI argument value.
 
-    Order: ``--generate`` -> ``--password-stdin`` -> interactive ``getpass``
-    (which always asks twice and checks the two entries match). Returns
-    ``(password, generated)``. A bare ``--password VALUE`` flag is deliberately
-    absent: it would leak into shell history and ``ps``.
+    Order: ``--generate`` -> ``--password-stdin`` -> interactive ``getpass``.
+    ``--password-stdin`` reads piped data for automation, but prompts once
+    without echo when stdin is a terminal so humans are not left staring at a
+    silent blocking read. The plain interactive path asks twice and checks the
+    two entries match. Returns ``(password, generated)``. A bare ``--password
+    VALUE`` flag is deliberately absent: it would leak into shell history and
+    ``ps``.
     """
     if getattr(args, "generate", False):
         return auth.generate_password(), True
     if getattr(args, "password_stdin", False):
+        if sys.stdin.isatty():
+            import getpass
+            password = getpass.getpass("Password: ")
+            if not password:
+                raise SystemExit("ERROR: empty password")
+            return password, False
         data = sys.stdin.read()
         # Strip a single trailing LINE TERMINATOR (CRLF from Windows/CI pipes,
         # or LF), preserving every other character. L20: a BARE trailing "\r"
@@ -1992,7 +2001,7 @@ def main():
                          help="Generate a strong random password and print it once")
         grp.add_argument("--password-stdin", dest="password_stdin",
                          action="store_true",
-                         help="Read the password from stdin (for automation)")
+                         help="Read password from stdin; prompt hidden when run from a terminal")
 
     user_parser = subparsers.add_parser(
         "user", help="Manage local API user accounts")
