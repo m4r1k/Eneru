@@ -464,7 +464,7 @@ class UPSGroupMonitor(
 
         if not APPRISE_AVAILABLE:
             self._log_message("⚠️  WARNING: Notifications enabled but apprise not installed. "
-                              "Install with: pip install apprise")
+                              "Install with: uv pip install apprise")
             self.config.notifications.enabled = False
             return
 
@@ -1466,7 +1466,7 @@ class UPSGroupMonitor(
         if not APPRISE_AVAILABLE:
             self._log_message(
                 "⚠️  WARNING: Notifications enabled but apprise not installed. "
-                "Install with: pip install apprise"
+                "Install with: uv pip install apprise"
             )
             return
         worker = NotificationWorker(self.config)

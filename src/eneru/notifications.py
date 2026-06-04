@@ -417,7 +417,7 @@ class NotificationWorker:
             start_str = datetime.fromtimestamp(ob_ts).strftime("%H:%M:%S")
             end_str = datetime.fromtimestamp(ol_ts).strftime("%H:%M:%S")
             summary_body = (
-                f"📊  **Brief Power Outage**\n"
+                f"⚡  **Brief Power Outage**\n"
                 f"On battery for {format_seconds(duration)} "
                 f"({start_str} → {end_str})."
             )

@@ -101,6 +101,56 @@ def test_per_group_inherits_global_but_empty_list_denies():
 
 
 @pytest.mark.unit
+def test_notifications_non_numeric_value_warns_and_falls_back(capsys):
+    """A non-numeric notifications int field must not crash parsing: it prints
+    a warning and falls back to the default (covers the _as_int ValueError
+    guard in _parse_notifications)."""
+    cfg, _ = _validate(
+        "ups:\n  name: U@h\n"
+        "notifications:\n  enabled: true\n  retention_days: not-a-number\n")
+    out = capsys.readouterr().out
+    assert "not numeric" in out
+    assert "retention_days" in out
+    # Fell back to a usable integer default rather than carrying the string.
+    assert isinstance(cfg.notifications.retention_days, int)
+
+
+@pytest.mark.unit
+def test_non_root_remote_unparseable_shutdown_command_still_warns_use_sudo():
+    """A shutdown_command that can't be shell-split (unbalanced quote) is
+    treated as "does not invoke sudo", so a non-root server with use_sudo:false
+    still earns the use_sudo warning (covers the shlex.split ValueError guard
+    in _command_invokes_sudo)."""
+    _, errs = _validate(
+        "ups:\n  name: U@h\n"
+        "remote_servers:\n"
+        "  - name: nas\n"
+        "    enabled: true\n"
+        "    host: 10.0.0.5\n"
+        "    user: admin\n"
+        "    use_sudo: false\n"
+        "    shutdown_command: 'sudo \"unbalanced'\n")
+    assert any("use_sudo is false" in e for e in errs), errs
+
+
+@pytest.mark.unit
+def test_non_root_remote_empty_shutdown_command_still_warns_use_sudo():
+    """A whitespace-only shutdown_command yields no argv[0], so it cannot be
+    invoking sudo; the non-root server still needs use_sudo (covers the
+    empty-parts guard in _command_invokes_sudo)."""
+    _, errs = _validate(
+        "ups:\n  name: U@h\n"
+        "remote_servers:\n"
+        "  - name: nas\n"
+        "    enabled: true\n"
+        "    host: 10.0.0.5\n"
+        "    user: admin\n"
+        "    use_sudo: false\n"
+        "    shutdown_command: '   '\n")
+    assert any("use_sudo is false" in e for e in errs), errs
+
+
+@pytest.mark.unit
 def test_valid_v6_config_has_no_errors():
     cfg, errs = _validate(
         "ups:\n  name: U@h\n"

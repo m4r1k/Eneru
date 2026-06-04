@@ -787,7 +787,7 @@ class RedundancyGroupEvaluator(threading.Thread):
 
     def run(self):
         self._log(
-            f"🛡️  Redundancy group '{self._group.name}' evaluator started "
+            f"🚀  Redundancy group '{self._group.name}' evaluator started "
             f"({len(self._group.ups_sources)} sources, "
             f"min_healthy={self._group.min_healthy}, "
             f"startup_grace={self._startup_grace:.0f}s)"

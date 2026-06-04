@@ -1481,3 +1481,18 @@ class TestLocalShutdownCallback:
             mp.setattr(ex, "_shutdown_remote_servers", boom)
             ex.shutdown(reason="quorum lost")
         callback.assert_called_once_with("redundancy:rack-local")
+
+
+class TestExecutorLogging:
+    """The executor satisfies the shutdown-mixin logging contract."""
+
+    @pytest.mark.unit
+    def test_log_power_event_forwards_to_log_message(self, tmp_path, capsys):
+        """``_log_power_event`` is called by shared shutdown mixins; it must
+        route through the standard log path with the ⚡ POWER EVENT marker so
+        redundancy-group power events read like the per-UPS ones."""
+        ex = RedundancyGroupExecutor(
+            _redundancy_group(), base_config=_base_config(tmp_path=tmp_path),
+        )
+        ex._log_power_event("ON_BATTERY", "mains lost")
+        assert "⚡  POWER EVENT: ON_BATTERY - mains lost" in capsys.readouterr().out

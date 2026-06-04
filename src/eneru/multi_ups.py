@@ -823,7 +823,7 @@ class MultiUPSCoordinator:
         if not APPRISE_AVAILABLE:
             self._log(
                 "⚠️  WARNING: Notifications enabled but apprise not installed. "
-                "Install with: pip install apprise"
+                "Install with: uv pip install apprise"
             )
             return
         worker = NotificationWorker(self.config)

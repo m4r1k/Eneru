@@ -32,7 +32,7 @@ class VMShutdownMixin:
             return
 
         for vm in running_vms:
-            self._log_message(f"  ⏹  Shutting down VM: {vm}")
+            self._log_message(f"  ⏹️  Shutting down VM: {vm}")
             if self.config.behavior.dry_run:
                 self._log_message(f"  🧪  [DRY-RUN] Would shutdown VM: {vm}")
             else:

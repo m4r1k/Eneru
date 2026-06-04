@@ -227,12 +227,12 @@ def schedule_deferred_stop_or_eager_send(
     if not _running_under_systemd():
         if _running_in_container():
             log_fn(
-                "📤  Container runtime without systemd — leaving stop "
+                "🛑  Container runtime without systemd — leaving stop "
                 "notification pending so the next daemon can supersede it"
             )
             return
         log_fn(
-            "📤  Not running under systemd — shipping stop notification "
+            "🛑  Not running under systemd — shipping stop notification "
             "eagerly via Apprise"
         )
         _eager_send(
@@ -250,7 +250,7 @@ def schedule_deferred_stop_or_eager_send(
     #    mechanism gets a chance to win.
     if _detect_systemd_stop_intent():
         log_fn(
-            "📤  systemctl stop detected — shipping stop notification "
+            "🛑  systemctl stop detected — shipping stop notification "
             "eagerly (no replacement daemon coming)"
         )
         _eager_send(

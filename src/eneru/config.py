@@ -1526,7 +1526,7 @@ class ConfigLoader:
         if config.notifications.enabled and not APPRISE_AVAILABLE:
             messages.append(
                 "WARNING: Notifications enabled but apprise package not installed. "
-                "Notifications will be disabled. Install with: pip install apprise"
+                "Notifications will be disabled. Install with: uv pip install apprise"
             )
 
         if config.logging.format not in ("text", "json"):

@@ -1400,15 +1400,24 @@ def test_api_server_start_notes_auth_off_on_non_loopback_bind(minimal_config):
     try:
         # The bind announcement comes first, then the auth-off note. With auth
         # disabled, writes are closed and config is sanitized; reads may still
-        # need a trusted network boundary.
-        assert any("API server listening on 0.0.0.0" in m for m in log), log
-        assert any(
-            "API bound to 0.0.0.0" in m
-            and "auth disabled" in m
-            and "Write endpoints are disabled" in m
-            and "/api/v1/config returns a sanitized view" in m
-            for m in log
-        ), log
+        # need a trusted network boundary. Assert the relative order so the
+        # ordering contract is actually enforced, not just message presence.
+        bind_idx = next(
+            (i for i, m in enumerate(log)
+             if "API server listening on 0.0.0.0" in m),
+            None,
+        )
+        note_idx = next(
+            (i for i, m in enumerate(log)
+             if "API bound to 0.0.0.0" in m
+             and "auth disabled" in m
+             and "Write endpoints are disabled" in m
+             and "/api/v1/config returns a sanitized view" in m),
+            None,
+        )
+        assert bind_idx is not None, log
+        assert note_idx is not None, log
+        assert bind_idx < note_idx, log
     finally:
         server.stop()
 

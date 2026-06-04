@@ -386,6 +386,31 @@ def test_monitor_reload_notification_worker_restarts_and_registers(monkeypatch):
 
 
 @pytest.mark.unit
+def test_monitor_reload_notification_worker_warns_when_apprise_missing(monkeypatch):
+    """Reload with notifications on but apprise absent must log the uv-pip
+    install hint and leave the worker unset (covers the APPRISE_AVAILABLE=False
+    branch of _reload_notification_worker)."""
+    import eneru.monitor as monitormod
+
+    mon = object.__new__(UPSGroupMonitor)
+    mon.config = Config()
+    mon.config.notifications.enabled = True
+    mon._notification_worker = MagicMock()
+    mon._stats_store = MagicMock()
+    mon._log_message = MagicMock()
+    monkeypatch.setattr(monitormod, "APPRISE_AVAILABLE", False)
+
+    old = mon._notification_worker
+    mon._reload_notification_worker()
+
+    old.stop.assert_called_once()
+    assert mon._notification_worker is None
+    logged = " ".join(str(c.args[0]) for c in mon._log_message.call_args_list)
+    assert "apprise not installed" in logged
+    assert "uv pip install apprise" in logged
+
+
+@pytest.mark.unit
 def test_monitor_reload_remote_health_and_mqtt_bounce_workers():
     mon = object.__new__(UPSGroupMonitor)
     mon._remote_health_manager = MagicMock()

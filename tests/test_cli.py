@@ -2132,6 +2132,65 @@ class TestCLIRemoteList:
         assert "No remote targets configured" in capsys.readouterr().out
 
 
+class TestRemoteHealthIndex:
+    """Unit coverage for ``_remote_health_index`` -- the sidecar-rows ->
+    lookup-table helper behind the HEALTH column of ``eneru remote list``."""
+
+    @pytest.mark.unit
+    def test_indexes_row_by_both_server_and_host(self):
+        from eneru.cli import _remote_health_index
+
+        idx = _remote_health_index([
+            {"group": "rack-a", "server": "nas", "host": "nas.local",
+             "status": "HEALTHY"},
+        ])
+        assert idx[("rack-a", "nas")] == "HEALTHY"
+        assert idx[("rack-a", "nas.local")] == "HEALTHY"
+
+    @pytest.mark.unit
+    def test_server_only_and_host_only_rows(self):
+        """A row may carry only a server name or only a host; each indexes the
+        key it has and skips the empty one (exercises both the ``if server``
+        and ``if host`` false branches)."""
+        from eneru.cli import _remote_health_index
+
+        idx = _remote_health_index([
+            {"group": "g", "server": "srv-only", "status": "DEGRADED"},
+            {"group": "g", "host": "host-only.lan", "status": "UNREACHABLE"},
+        ])
+        assert idx == {
+            ("g", "srv-only"): "DEGRADED",
+            ("g", "host-only.lan"): "UNREACHABLE",
+        }
+
+    @pytest.mark.unit
+    def test_missing_status_defaults_to_unknown(self):
+        from eneru.cli import _remote_health_index
+
+        idx = _remote_health_index([{"group": "g", "server": "s"}])
+        assert idx[("g", "s")] == "UNKNOWN"
+
+    @pytest.mark.unit
+    def test_non_dict_rows_are_skipped(self):
+        """A corrupted or version-skewed sidecar write can leave non-mapping
+        items in the ``servers`` list. They must be skipped, not crash
+        ``remote list`` with an AttributeError on ``row.get``."""
+        from eneru.cli import _remote_health_index
+
+        idx = _remote_health_index([
+            "bogus", 123, None, ["x"],
+            {"group": "g", "server": "good", "status": "HEALTHY"},
+        ])
+        assert idx == {("g", "good"): "HEALTHY"}
+
+    @pytest.mark.unit
+    def test_empty_and_none_inputs(self):
+        from eneru.cli import _remote_health_index
+
+        assert _remote_health_index([]) == {}
+        assert _remote_health_index(None) == {}
+
+
 class TestCLIShutdownGroupRehearsal:
     """`eneru shutdown group --group ...` full-sequence rehearsal."""
 

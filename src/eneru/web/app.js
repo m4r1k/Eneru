@@ -904,7 +904,11 @@ async function refresh() {
     api("/api/v1/auth/state"), api("/api/v1/config"), api("/api/v1/remote-health"),
   ]);
   authEnabled = !!(authState.ok && authState.data && authState.data.enabled);
-  if (!authEnabled && token()) {
+  // Only sign out when the server explicitly reports auth is OFF. A transient
+  // /api/v1/auth/state failure leaves authState.ok false (and authEnabled
+  // false), which must NOT be mistaken for "auth disabled server-side" — that
+  // would log the operator out on every network blip.
+  if (authState.ok && authState.data && authState.data.enabled === false && token()) {
     clearAuthState();
   }
   if (cfg.ok && cfg.data) {

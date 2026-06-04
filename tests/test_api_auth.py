@@ -295,12 +295,15 @@ def test_login_success_and_token_usable(minimal_config, tmp_path):
 
 
 @pytest.mark.unit
-def test_login_after_first_user_created_without_restart(minimal_config, tmp_path):
+def test_login_after_first_user_created_without_restart(
+        minimal_config, tmp_path, monkeypatch):
     db_path = tmp_path / "auth.db"
     minimal_config.api.auth.db_path = str(db_path)
     # Simulate a running daemon that checked auth before any user existed.
-    api_module.EneruAPIHandler._auth_active_ts = time.time()
-    api_module.EneruAPIHandler._auth_active_val = False
+    # Scope the class-level cache mutation with monkeypatch so it is restored
+    # after the test and can't leak a stale "no users" cache into later tests.
+    monkeypatch.setattr(api_module.EneruAPIHandler, "_auth_active_ts", time.time())
+    monkeypatch.setattr(api_module.EneruAPIHandler, "_auth_active_val", False)
     store = AuthStore(db_path)
 
     # The first user is created by `eneru user create` while the API keeps
@@ -320,11 +323,11 @@ def test_login_after_first_user_created_without_restart(minimal_config, tmp_path
 
 @pytest.mark.unit
 def test_auth_state_refreshes_after_first_user_created_without_restart(
-        minimal_config, tmp_path):
+        minimal_config, tmp_path, monkeypatch):
     db_path = tmp_path / "auth.db"
     minimal_config.api.auth.db_path = str(db_path)
-    api_module.EneruAPIHandler._auth_active_ts = time.time()
-    api_module.EneruAPIHandler._auth_active_val = False
+    monkeypatch.setattr(api_module.EneruAPIHandler, "_auth_active_ts", time.time())
+    monkeypatch.setattr(api_module.EneruAPIHandler, "_auth_active_val", False)
 
     AuthStore(db_path).create_user("alice", "s3cret")
     h = _handler(minimal_config, path="/api/v1/auth/state")

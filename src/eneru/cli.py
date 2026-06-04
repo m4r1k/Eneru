@@ -1016,7 +1016,7 @@ def _cmd_validate(args):
             print(f"    Retry interval: {config.notifications.retry_interval}s")
         else:
             print(f"    Apprise not installed - notifications disabled")
-            print(f"    Install with: pip install apprise")
+            print(f"    Install with: uv pip install apprise")
     else:
         print(f"    Disabled")
 
@@ -1060,7 +1060,7 @@ def _cmd_test_notifications(args):
 
     if not APPRISE_AVAILABLE:
         print("Apprise is not installed.")
-        print("   Install with: pip install apprise")
+        print("   Install with: uv pip install apprise")
         sys.exit(1)
 
     apobj = apprise.Apprise()
@@ -1184,6 +1184,12 @@ def _remote_health_index(rows: list) -> dict:
     """Return last-known remote-health status keyed by group/server/host."""
     out = {}
     for row in rows or []:
+        # Sidecar rows come from an on-disk JSON file that an older/newer
+        # daemon — or a corrupted write — may have shaped differently. The
+        # reader only guarantees a list, not dict elements, so skip anything
+        # that isn't a mapping rather than crashing `remote list`.
+        if not isinstance(row, dict):
+            continue
         group = row.get("group") or ""
         server = row.get("server") or ""
         host = row.get("host") or ""
@@ -2136,22 +2142,21 @@ def main():
     # Hidden from the --help listing on purpose: this is invoked by a
     # systemd-run transient timer scheduled by the previous daemon's
     # _cleanup_and_exit / _handle_signal, never by users directly.
+    # No `help=` is passed on purpose. argparse only adds a subcommand to the
+    # help listing when it is given help text, so omitting it keeps the parser
+    # registered and fully invokable while leaving it out of the customer-facing
+    # `--help` output — the public-API way to hide a subcommand. (The curated
+    # `metavar` on add_subparsers above already keeps it out of the `{...}`
+    # command line.) `help=argparse.SUPPRESS` is NOT used: it leaks a literal
+    # `==SUPPRESS==` row into --help on current CPython.
     ds_parser = subparsers.add_parser(
         "_deliver-stop",
-        help="Internal helper for deferred service-stop notification delivery",
         description=(
             "Internal helper used by Eneru's systemd transient timer to deliver "
             "a pending service-stop notification after the restart window. "
             "Operators should not run this directly."
         ),
     )
-    # argparse has no public "hidden subcommand" switch. Remove only the help
-    # row while keeping the parser registered, like leaving a service hatch in
-    # the machine but taking it off the customer-facing control panel.
-    subparsers._choices_actions = [  # pylint: disable=protected-access
-        action for action in subparsers._choices_actions  # pylint: disable=protected-access
-        if action.dest != "_deliver-stop"
-    ]
     ds_parser.add_argument("--notification-id", required=True, type=int,
                            help="Pending notification row id to deliver")
     ds_parser.add_argument("--db-path", required=True,
