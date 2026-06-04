@@ -7,7 +7,9 @@
 Eneru monitors UPSes through [Network UPS Tools](https://networkupstools.org/) and coordinates shutdown before the batteries are exhausted. It is built for hosts that run more than one thing: VMs, containers, NAS mounts, remote servers, and multiple UPS groups. v6.0 adds a browser dashboard, authenticated API write paths, UPS control, and config hot-reload on top of the existing shutdown daemon.
 
 <p align="center">
-  <img src="images/eneru-mon.gif" alt="Eneru monitor dashboard" width="700">
+  <img src="images/eneru-mon.gif" alt="Eneru TUI monitor dashboard" height="260">
+  <img src="images/eneru-webui.png" alt="Eneru browser dashboard" height="260">
+  <img src="images/grafana.png" alt="Eneru Grafana dashboard" height="260">
 </p>
 
 ## What Eneru does

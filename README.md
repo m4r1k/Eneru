@@ -27,7 +27,9 @@ A Python-based UPS monitoring daemon for [Network UPS Tools (NUT)](https://netwo
 </div>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-mon.gif" alt="Eneru Monitor Dashboard" width="400">
+  <img src="https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-mon.gif" alt="Eneru TUI monitor dashboard" height="280">
+  <img src="https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-webui.png" alt="Eneru browser dashboard" height="280">
+  <img src="https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/grafana.png" alt="Eneru Grafana dashboard" height="280">
 </p>
 
 ---

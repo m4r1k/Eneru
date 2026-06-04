@@ -167,6 +167,10 @@ brownout is visible directly on the Input/output voltage panel — no extra
 Grafana plugin required. Exact SQLite event rows with their full detail
 text remain available from `/api/v1/events` if you want a tabular feed.
 
+<p align="center">
+  <img src="images/grafana.png" alt="Eneru Grafana dashboard" width="900">
+</p>
+
 ## Remote SSH health
 
 Remote healthchecks are enabled by default for configured remote servers. They run a separate harmless probe command, default `"true"`.
