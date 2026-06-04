@@ -417,9 +417,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     # writes of a float and a bool, worst case a redundant probe.
     _auth_active_ts: float = 0.0
     _auth_active_val: bool = False
+    _auth_active_key: Optional[str] = None
     _AUTH_ACTIVE_TTL: float = 5.0
 
-    def _auth_active(self) -> bool:
+    def _auth_active(self, *, refresh: bool = False) -> bool:
         """Effective auth state for this request (see :func:`_auth_is_active`).
 
         Explicit/enabled cases are resolved instantly with no I/O; only the
@@ -436,9 +437,15 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             return True
         base = EneruAPIHandler
         now = time.time()
-        if now - base._auth_active_ts > base._AUTH_ACTIVE_TTL:
+        cache_key = str(getattr(auth_cfg, "db_path", ""))
+        if (
+            refresh
+            or base._auth_active_key != cache_key
+            or now - base._auth_active_ts > base._AUTH_ACTIVE_TTL
+        ):
             base._auth_active_val = _auth_is_active(self.api_config)
             base._auth_active_ts = now
+            base._auth_active_key = cache_key
         return base._auth_active_val
 
     def _bearer_token(self) -> Optional[str]:
@@ -636,7 +643,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         # form before it has a token.
         if path == "/api/v1/auth/state":
             auth_cfg = getattr(self.api_config.api, "auth", None)
-            auth_active = self._auth_active()
+            # This is the dashboard bootstrap signal. Refresh it immediately so
+            # `eneru user create` can make the Sign-in button appear without a
+            # daemon restart or waiting for the read-path cache to expire.
+            auth_active = self._auth_active(refresh=True)
             return 200, "application/json", {
                 "enabled": auth_active,
                 "requireForReads": bool(
@@ -831,7 +841,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         return 404, "application/json", self._not_found("Endpoint not found")
 
     def _handle_login(self) -> Tuple[int, str, Any]:
-        if not self._auth_active():
+        # Refresh the first-user probe here too: a user may create the initial
+        # account in another shell and submit the login form before any
+        # background dashboard poll has refreshed /auth/state.
+        if not self._auth_active(refresh=True):
             return 404, "application/json", self._not_found("Authentication is disabled")
         data = self._read_json_body()
         username = data.get("username")

@@ -64,6 +64,10 @@ both audits are included below.
 
 ### Fixed
 
+- **Dashboard first-user sign-in without restart.** Creating the first user with
+  `eneru user create` now refreshes the API's effective-auth probe immediately,
+  so the dashboard can show Sign-in and accept login without restarting the
+  daemon.
 - **Dashboard runtime display.** The web UI now formats UPS runtime as seconds,
   minutes, or hours/minutes in cards, drill-down details, and runtime graph
   labels while keeping API responses as raw seconds.
