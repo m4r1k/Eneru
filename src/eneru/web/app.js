@@ -323,12 +323,12 @@ function renderBanner() {
   if (crit) {
     banner.className = "banner crit";
     const why = crit.triggerReason ? (": " + crit.triggerReason) : "";
-    banner.textContent = "⚠️ Shutdown imminent — " +
+    banner.textContent = "⚠️  Shutdown imminent — " +
       (crit.label || crit.name) + " is on low battery" + why;
     banner.hidden = false;
   } else if (warn) {
     banner.className = "banner warn";
-    banner.textContent = "🔋 On battery — " + (warn.label || warn.name) +
+    banner.textContent = "🔋  On battery — " + (warn.label || warn.name) +
       " is running on battery power";
     banner.hidden = false;
   } else {
@@ -878,7 +878,7 @@ async function refresh() {
   if (ups.ok) {
     renderUps(ups.data); renderControl(ups.data); renderBanner(); showError("");
   } else if (ups.status === 0) {
-    showError("⚠️ Connection lost — retrying…");  // L14: network/daemon down
+    showError("⚠️  Connection lost — retrying…");  // L14: network/daemon down
   } else if (ups.status !== 401) {
     showError("Could not load UPS status (HTTP " + ups.status + ")");
   }

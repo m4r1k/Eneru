@@ -874,7 +874,7 @@ class ConfigLoader:
                     return int(v)
                 except (TypeError, ValueError):
                     print(
-                        f"⚠️ Notifications config: {key}={v!r} not numeric; "
+                        f"⚠️  Notifications config: {key}={v!r} not numeric; "
                         f"using default {default}"
                     )
                     return default

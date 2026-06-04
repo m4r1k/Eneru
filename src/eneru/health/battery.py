@@ -59,7 +59,7 @@ class BatteryMonitorMixin:
             # is the source of truth and a single failed write doesn't break
             # depletion calculations. Log so silent disk errors are visible.
             self._log_message(
-                f"⚠️ Battery history persist failed: {exc}"
+                f"⚠️  Battery history persist failed: {exc}"
             )
 
         # Historically this required a flat 30 samples. But the deque is first
@@ -185,12 +185,12 @@ class BatteryMonitorMixin:
             self.state.pending_anomaly_count = 0
 
             self._log_message(
-                f"⚠️ WARNING: Battery charge dropped from {anomaly_prev:.0f}% to "
+                f"⚠️  WARNING: Battery charge dropped from {anomaly_prev:.0f}% to "
                 f"{current_charge:.0f}% ({anomaly_drop:.0f}% drop) while on line power. "
                 f"Possible firmware recalibration, battery aging, or hardware issue."
             )
             self._send_notification(
-                f"⚠️ **Battery Anomaly Detected**\n"
+                f"⚠️  **Battery Anomaly Detected**\n"
                 f"Charge dropped from {anomaly_prev:.0f}% to {current_charge:.0f}% "
                 f"({anomaly_drop:.0f}% drop in {anomaly_elapsed:.0f}s) while on line power.\n"
                 f"Possible causes: firmware recalibration, battery aging, or hardware issue.",

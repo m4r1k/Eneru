@@ -123,7 +123,7 @@ def block_journal_side_channels(request, monkeypatch):
     1464, 1594). In an isolated unit-test environment those shells
     actually execute on the developer's host and produce lines like::
 
-        May 18 18:40:10 host eneru[NNN]: ⚡ POWER EVENT: ON_BATTERY ...
+        May 18 18:40:10 host eneru[NNN]: ⚡  POWER EVENT: ON_BATTERY ...
 
     in ``journalctl -u eneru`` on the dev box, mixed in with real
     operational logs. That's the kind of test pollution that's quietly

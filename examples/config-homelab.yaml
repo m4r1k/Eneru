@@ -19,7 +19,7 @@ triggers:
 # ==============================================================================
 notifications:
   # Custom title to identify this system in notifications
-  title: "⚡ Homelab UPS"
+  title: "⚡  Homelab UPS"
 
   # Custom avatar for Discord/Slack
   avatar_url: "https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-avatar.png"

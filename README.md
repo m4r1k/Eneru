@@ -1,6 +1,6 @@
 <div align="center">
 
-# ⚡ Eneru
+# ⚡  Eneru
 
 **UPS monitoring and shutdown orchestration for NUT**
 
@@ -38,17 +38,17 @@ Most UPS shutdown tools handle one machine. If you have more than one, things ge
 
 | Challenge | Eneru Solution |
 |-----------|----------------|
-| Multiple UPSes powering different servers | ✅ Multi-UPS monitoring from a single instance |
-| Multiple servers need coordinated shutdown | ✅ Orchestrated multi-server shutdown via SSH |
-| VMs and containers need graceful stop | ✅ Libvirt VM and Docker/Podman container handling |
-| Network mounts hang during power loss | ✅ Timeout-protected unmounting |
-| No visibility during power events | ✅ Browser dashboard, TUI dashboard, and notifications via 100+ services |
-| Different systems need different commands | ✅ Per-server custom shutdown commands |
-| Hypervisors need VM shutdown before host | ✅ Pre-shutdown actions (Proxmox, ESXi, XCP-ng, libvirt) |
-| Battery estimates are unreliable | ✅ Multi-vector shutdown triggers |
-| Network down during outage | ✅ Non-blocking notifications with persistent retry |
-| Firmware recalibrates battery silently | ✅ Battery anomaly detection and alerts |
-| Need power-quality telemetry | ✅ Browser dashboard, API, Prometheus, MQTT, Grafana, JSON logs, and SQLite events |
+| Multiple UPSes powering different servers | ✅  Multi-UPS monitoring from a single instance |
+| Multiple servers need coordinated shutdown | ✅  Orchestrated multi-server shutdown via SSH |
+| VMs and containers need graceful stop | ✅  Libvirt VM and Docker/Podman container handling |
+| Network mounts hang during power loss | ✅  Timeout-protected unmounting |
+| No visibility during power events | ✅  Browser dashboard, TUI dashboard, and notifications via 100+ services |
+| Different systems need different commands | ✅  Per-server custom shutdown commands |
+| Hypervisors need VM shutdown before host | ✅  Pre-shutdown actions (Proxmox, ESXi, XCP-ng, libvirt) |
+| Battery estimates are unreliable | ✅  Multi-vector shutdown triggers |
+| Network down during outage | ✅  Non-blocking notifications with persistent retry |
+| Firmware recalibrates battery silently | ✅  Battery anomaly detection and alerts |
+| Need power-quality telemetry | ✅  Browser dashboard, API, Prometheus, MQTT, Grafana, JSON logs, and SQLite events |
 
 ---
 

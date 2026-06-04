@@ -704,7 +704,7 @@ class TestDelegatedRealRunPath:
 
 
 class TestNativeFinalSyncBranch:
-    """Native (non-delegated) shutdown logs the `💾 Final filesystem sync...`
+    """Native (non-delegated) shutdown logs the `💾  Final filesystem sync...`
     line and either runs `os.sync()` or prints the dry-run preview."""
 
     @pytest.mark.unit

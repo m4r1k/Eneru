@@ -194,7 +194,7 @@ nut_control:
 notifications:
   # Optional title - omit or set to null for no title
   # Useful for multi-instance deployments to identify the source system
-  title: "⚡ Homelab UPS"  # or null for no title
+  title: "⚡  Homelab UPS"  # or null for no title
 
   # Avatar/icon URL (supported by Discord, Slack, and others)
   avatar_url: "https://raw.githubusercontent.com/m4r1k/Eneru/main/docs/images/eneru-avatar.png"

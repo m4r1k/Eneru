@@ -14,27 +14,27 @@ class VMShutdownMixin:
         if not self.config.virtual_machines.enabled:
             return
 
-        self._log_message("🖥️ Shutting down all libvirt virtual machines...")
+        self._log_message("🖥️  Shutting down all libvirt virtual machines...")
 
         if not command_exists("virsh"):
-            self._log_message("  ℹ️ virsh not available, skipping VM shutdown")
+            self._log_message("  ℹ️  virsh not available, skipping VM shutdown")
             return
 
         exit_code, stdout, _ = run_command(["virsh", "list", "--name", "--state-running"])
         if exit_code != 0:
-            self._log_message("  ⚠️ Failed to get VM list")
+            self._log_message("  ⚠️  Failed to get VM list")
             return
 
         running_vms = [vm.strip() for vm in stdout.strip().split('\n') if vm.strip()]
 
         if not running_vms:
-            self._log_message("  ℹ️ No running VMs found")
+            self._log_message("  ℹ️  No running VMs found")
             return
 
         for vm in running_vms:
-            self._log_message(f"  ⏹️ Shutting down VM: {vm}")
+            self._log_message(f"  ⏹  Shutting down VM: {vm}")
             if self.config.behavior.dry_run:
-                self._log_message(f"  🧪 [DRY-RUN] Would shutdown VM: {vm}")
+                self._log_message(f"  🧪  [DRY-RUN] Would shutdown VM: {vm}")
             else:
                 exit_code, stdout, stderr = run_command(["virsh", "shutdown", vm])
                 if stdout.strip():
@@ -44,7 +44,7 @@ class VMShutdownMixin:
             return
 
         max_wait = self.config.virtual_machines.max_wait
-        self._log_message(f"  ⏳ Waiting up to {max_wait}s for VMs to shutdown gracefully...")
+        self._log_message(f"  ⏳  Waiting up to {max_wait}s for VMs to shutdown gracefully...")
         wait_interval = 5
         # L7 / CodeRabbit: use a WALL-CLOCK deadline rather than counting only
         # the sleeps. The old loop advanced `time_waited` only after sleep(), so
@@ -71,7 +71,7 @@ class VMShutdownMixin:
                 # and re-poll on the next interval. If we exhaust max_wait
                 # the force-destroy pass below still fires.
                 self._log_message(
-                    f"  ⚠️ virsh list returned exit {exit_code}; keeping prior "
+                    f"  ⚠️  virsh list returned exit {exit_code}; keeping prior "
                     f"remaining VMs ({len(remaining_vms)}) and retrying"
                 )
             else:
@@ -79,18 +79,18 @@ class VMShutdownMixin:
                 remaining_vms = [vm for vm in running_vms if vm in still_running]
 
                 if not remaining_vms:
-                    self._log_message("  ✅ All VMs stopped gracefully.")
+                    self._log_message("  ✅  All VMs stopped gracefully.")
                     break
 
-                self._log_message(f"  🕒 Still waiting for: {' '.join(remaining_vms)}")
+                self._log_message(f"  🕒  Still waiting for: {' '.join(remaining_vms)}")
 
             # Sleep only up to the remaining budget so we don't overshoot.
             time.sleep(max(0, min(wait_interval, deadline - time.monotonic())))
 
         if remaining_vms:
-            self._log_message("  ⚠️ Timeout reached. Force destroying remaining VMs.")
+            self._log_message("  ⚠️  Timeout reached. Force destroying remaining VMs.")
             for vm in remaining_vms:
-                self._log_message(f"  ⚡ Force destroying VM: {vm}")
+                self._log_message(f"  ⚡  Force destroying VM: {vm}")
                 run_command(["virsh", "destroy", vm])
 
-        self._log_message("  ✅ All VMs shutdown complete")
+        self._log_message("  ✅  All VMs shutdown complete")

@@ -217,7 +217,7 @@ class VoltageMonitorMixin:
         self.state.voltage_warning_high = _derive_warning_high(nom, pct)
 
         self._log_message(
-            f"📊 Voltage Monitoring Active.\n"
+            f"📊  Voltage Monitoring Active.\n"
             f"   Nominal: {nom}V ({origin}).\n"
             f"   Grid-quality warnings: {self.state.voltage_warning_low}V"
             f" / {self.state.voltage_warning_high}V"
@@ -276,7 +276,7 @@ class VoltageMonitorMixin:
             sides.append(f"high {legacy_high}V→{new_high}V ({verb})")
         delta = "; ".join(sides) if sides else "(no change)"
         self._log_message(
-            f"⚠️ Voltage warning band changed from v5.1.1 on this UPS: "
+            f"⚠️  Voltage warning band changed from v5.1.1 on this UPS: "
             f"{delta}. v5.1.2 dropped the tighter-of-percentage-or-transfer "
             f"clamp in favour of a single percentage-band formula (issue #4). "
             f"Current band is ±{int(self.state.voltage_deviation_pct * 100)}% "
@@ -323,7 +323,7 @@ class VoltageMonitorMixin:
             self.state.voltage_warning_low = _derive_warning_low(new_nominal, pct)
             self.state.voltage_warning_high = _derive_warning_high(new_nominal, pct)
             self._log_message(
-                f"📊 Voltage auto-detect re-snap: NUT={old_nominal}V "
+                f"📊  Voltage auto-detect re-snap: NUT={old_nominal}V "
                 f"disagreed with observed median {median:.1f}V "
                 f"(window={list(self.state.voltage_observed)}V). "
                 f"Re-snapped to {new_nominal}V; "
@@ -577,7 +577,7 @@ class VoltageMonitorMixin:
         # calling _send_notification directly; we already wrote the log
         # row when the state transitioned, and we're explicitly
         # bypassing _log_power_event to avoid double-logging.
-        body = f"⚠️ **VOLTAGE ISSUE:** {event}\nDetails: {detail}"
+        body = f"⚠️  **VOLTAGE ISSUE:** {event}\nDetails: {detail}"
         try:
             self._send_notification(
                 body, self.config.NOTIFY_WARNING, category="voltage",

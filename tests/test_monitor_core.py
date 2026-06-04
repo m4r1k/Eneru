@@ -837,7 +837,7 @@ class TestNotificationPolicyV52:
         """Regression guard for the v5.1 ``_log_message`` auto-mirror
         block (lines 325-331 before its v5.2 removal): every log line
         emitted during shutdown got wrapped as
-        ``ℹ️ **Shutdown Detail:** <line>`` and pushed through
+        ``ℹ️  **Shutdown Detail:** <line>`` and pushed through
         ``_send_notification``, which produced ~22 notifications per
         shutdown sequence. v5.2 deletes the block; this test fires
         ``_log_message`` with the shutdown flag set and asserts the
@@ -1005,7 +1005,7 @@ class TestNotificationPolicyV52:
 
     @pytest.mark.unit
     def test_summary_notification_fires_when_local_shutdown_disabled(self, tmp_path):
-        """The "✅ Shutdown Sequence Complete" summary used to fire only
+        """The "✅  Shutdown Sequence Complete" summary used to fire only
         when local_shutdown.enabled=true (because the system was about
         to halt and the user needed a goodbye). The disabled path
         finished silently. v5.2 always summarises so users running Eneru
@@ -1102,7 +1102,7 @@ class TestEventsTableMirroring:
         """v5.2.1: when postinstall.sh has dropped the upgrade marker
         before invoking systemctl restart, the SIGTERM that lands here
         comes from the upgrade. The next daemon will emit a single
-        '📦 Upgraded' message that supersedes the stop, so the stop
+        '📦  Upgraded' message that supersedes the stop, so the stop
         notification must NOT be enqueued."""
         monitor = make_monitor(tmp_path)
         monitor._stats_store = MagicMock()
@@ -1160,7 +1160,7 @@ class TestEventsTableMirroring:
     def test_cleanup_and_exit_skips_schedule_on_upgrade(self, tmp_path):
         """v5.2.1: with an upgrade marker on disk, the lifecycle stop is
         suppressed entirely — no notification enqueued, no systemd-run
-        timer scheduled. The next daemon's '📦 Upgraded' covers both."""
+        timer scheduled. The next daemon's '📦  Upgraded' covers both."""
         monitor = make_monitor(tmp_path)
         monitor._stats_store = MagicMock()
         marker = {"old_version": "5.2.0", "new_version": "5.2.1"}
@@ -1197,7 +1197,7 @@ class TestEventsTableMirroring:
     @pytest.mark.unit
     def test_emit_lifecycle_logs_recovered_after_sequence_complete(self, tmp_path):
         """sequence_complete shutdown marker → DAEMON_RECOVERED in the
-        events table, mirroring the user's '📊 Recovered' notification."""
+        events table, mirroring the user's '📊  Recovered' notification."""
         from eneru.lifecycle import REASON_SEQUENCE_COMPLETE
         from eneru.version import __version__
         monitor = make_monitor(tmp_path)
@@ -2115,7 +2115,7 @@ class TestStartHelpersIdempotent:
 
 
 class TestLogEnabledFeatures:
-    """Lock the `📋 Enabled features:` log-line construction.
+    """Lock the `📋  Enabled features:` log-line construction.
 
     This line is the operator's single source of truth for what the daemon
     is configured to do at startup; if a feature is silently dropped from
@@ -2125,7 +2125,7 @@ class TestLogEnabledFeatures:
         log = []
         monitor._log_message = log.append
         monitor._log_enabled_features()
-        return next(m for m in log if m.startswith("📋 Enabled features:"))
+        return next(m for m in log if m.startswith("📋  Enabled features:"))
 
     @pytest.mark.unit
     def test_no_features_enabled_reports_none(self, tmp_path):
@@ -2232,7 +2232,7 @@ class TestInitializeNotifications:
         monitor._initialize_notifications()
 
         assert monitor._notification_worker is None
-        assert any("📢 Notifications: disabled" in m for m in log), log
+        assert any("📢  Notifications: disabled" in m for m in log), log
 
     @pytest.mark.unit
     def test_notifications_apprise_unavailable_logs_warning(self, tmp_path):
@@ -3427,11 +3427,11 @@ class TestEmitLifecycleStartupExceptionalPaths:
              patch("eneru.monitor.delete_shutdown_marker"), \
              patch("eneru.monitor.delete_upgrade_marker"), \
              patch("eneru.monitor.coalesce_recovered_with_prev_shutdown",
-                   return_value="🪄 coalesced summary"):
+                   return_value="🪄  coalesced summary"):
             monitor._emit_lifecycle_startup_notification()
 
         sent_body = monitor._send_notification.call_args.args[0]
-        assert sent_body == "🪄 coalesced summary"
+        assert sent_body == "🪄  coalesced summary"
 
 
 class TestLogEnabledFeaturesExplicitRuntime:
@@ -3519,7 +3519,7 @@ class TestLogPowerEventDefensiveBranches:
     @pytest.mark.unit
     def test_unmapped_event_uses_generic_info_notification(self, tmp_path):
         """An event name not in the per-event mapping falls through to
-        the generic `⚡ **Event:** ...` body with NOTIFY_INFO."""
+        the generic `⚡  **Event:** ...` body with NOTIFY_INFO."""
         monitor = make_monitor(tmp_path)
         monitor._stats_store = MagicMock()
         monitor._shutdown_flag_path.unlink(missing_ok=True)
@@ -3528,7 +3528,7 @@ class TestLogPowerEventDefensiveBranches:
             monitor._log_power_event("CUSTOM_TELEMETRY", "value=42")
 
         send_kwargs = monitor._notification_worker.send.call_args.kwargs
-        assert "⚡ **Event:** CUSTOM_TELEMETRY" in send_kwargs["body"]
+        assert "⚡  **Event:** CUSTOM_TELEMETRY" in send_kwargs["body"]
         assert send_kwargs["category"] == "power_event"
 
 
@@ -3685,7 +3685,7 @@ class TestHandleOnBatteryDefensive:
     @pytest.mark.unit
     def test_status_log_every_five_seconds(self, tmp_path):
         """At ``int(time.time()) % 5 == 0`` the handler emits the
-        periodic `🔋 On battery` heartbeat line."""
+        periodic `🔋  On battery` heartbeat line."""
         monitor = make_monitor(
             tmp_path,
             triggers=TriggersConfig(on_battery_stabilization_delay=0),
@@ -3707,7 +3707,7 @@ class TestHandleOnBatteryDefensive:
                           return_value=1.5):
             monitor._handle_on_battery(ups_data)
 
-        assert any(m.startswith("🔋 On battery:") for m in log), log
+        assert any(m.startswith("🔋  On battery:") for m in log), log
 
 
 class TestMainLoopBranchCoverage:
@@ -3849,7 +3849,7 @@ class TestT3DepletionRateBranches:
     @pytest.mark.unit
     def test_extended_time_ignored_during_stabilization(self, tmp_path):
         """T4: extended-time exceedance during the stabilization window
-        logs the `🕒 INFO` stabilization line rather than triggering."""
+        logs the `🕒  INFO` stabilization line rather than triggering."""
         monitor = make_monitor(
             tmp_path,
             triggers=TriggersConfig(

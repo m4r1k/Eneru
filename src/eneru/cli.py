@@ -1662,7 +1662,7 @@ def _cmd_user_create(args):
         store.create_user(args.username, password, role=args.role)
     except auth.AuthError as exc:
         raise SystemExit(f"ERROR: {exc}")
-    print(f"✅ Created user '{args.username}' (role: {args.role}).")
+    print(f"✅  Created user '{args.username}' (role: {args.role}).")
     if generated:
         # Intentional: a generated secret must reach its creator exactly once;
         # printing it is the only delivery channel. (CodeQL FP.)
@@ -1685,7 +1685,7 @@ def _cmd_user_passwd(args):
         store.set_password(args.username, password)
     except auth.AuthError as exc:
         raise SystemExit(f"ERROR: {exc}")
-    print(f"✅ Updated password for '{args.username}'.")
+    print(f"✅  Updated password for '{args.username}'.")
     if generated:
         # Intentional: a generated secret must reach its creator exactly once;
         # printing it is the only delivery channel. (CodeQL FP.)
@@ -1727,7 +1727,7 @@ def _cmd_user_delete(args):
         store.delete_user(args.username)
     except auth.AuthError as exc:
         raise SystemExit(f"ERROR: {exc}")
-    print(f"✅ Deleted user '{args.username}'.")
+    print(f"✅  Deleted user '{args.username}'.")
 
 
 def _cmd_apikey_create(args):
@@ -1737,7 +1737,7 @@ def _cmd_apikey_create(args):
         key_id, key = store.create_api_key(args.label, role=args.role)
     except auth.AuthError as exc:
         raise SystemExit(f"ERROR: {exc}")
-    print(f"✅ Created API key #{key_id} (label: {args.label!r}, role: {args.role}).")
+    print(f"✅  Created API key #{key_id} (label: {args.label!r}, role: {args.role}).")
     # Intentional: the key is shown exactly once and never stored in plaintext.
     print(f"API key: {key}")  # lgtm[py/clear-text-logging-sensitive-data]
     print("Store it now — only its hash is kept; it cannot be shown again.")
@@ -1765,7 +1765,7 @@ def _cmd_apikey_revoke(args):
         store.revoke_api_key(args.id)
     except auth.AuthError as exc:
         raise SystemExit(f"ERROR: {exc}")
-    print(f"✅ Revoked API key #{args.id}.")
+    print(f"✅  Revoked API key #{args.id}.")
 
 
 def _cmd_version(args):

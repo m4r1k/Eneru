@@ -162,18 +162,18 @@ def perform_reload(primary: Config, monitor_configs: List[Config],
 def format_report(report: Dict) -> List[str]:
     """Render a reload report into log lines (shared by monitor + coordinator)."""
     if not report.get("reloaded"):
-        lines = ["⚠️ Config reload failed; keeping running config:"]
+        lines = ["⚠️  Config reload failed; keeping running config:"]
         lines += [f"   {e}" for e in report.get("errors", [])]
         return lines
     applied = report.get("applied") or []
     restart = report.get("restartRequired") or []
     lines = []
     if applied:
-        lines.append(f"✅ Config reloaded; applied live: {', '.join(applied)}")
+        lines.append(f"✅  Config reloaded; applied live: {', '.join(applied)}")
     if restart:
-        lines.append(f"ℹ️ Config changes that need a restart: {', '.join(restart)}")
+        lines.append(f"ℹ️  Config changes that need a restart: {', '.join(restart)}")
     if not applied and not restart:
-        lines.append("ℹ️ Config reload: no changes detected")
+        lines.append("ℹ️  Config reload: no changes detected")
     return lines
 
 

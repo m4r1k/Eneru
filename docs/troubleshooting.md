@@ -195,7 +195,7 @@ Remove flags only after confirming no real shutdown is in progress.
 If you see this warning in the logs:
 
 ```
-⚠️ Shutdown trigger fired (...) but a previous shutdown sequence is already
+⚠️  Shutdown trigger fired (...) but a previous shutdown sequence is already
    in progress (/var/run/ups-shutdown-scheduled). Ignoring re-trigger.
 ```
 

@@ -216,7 +216,7 @@ If the daemon ever sees the flag at first call (someone touched it manually,
 exact line below — operators can grep their journal for it verbatim:
 
 ```text
-⚠️ Redundancy shutdown for '{group}' suppressed: flag /var/run/ups-shutdown-redundancy-{group} already present at first call (startup cleanup bypassed). Will re-arm when quorum recovers.
+⚠️  Redundancy shutdown for '{group}' suppressed: flag /var/run/ups-shutdown-redundancy-{group} already present at first call (startup cleanup bypassed). Will re-arm when quorum recovers.
 ```
 
 Pre-5.3.0 the suppression was silent and cost some operators (issue #4) hours of
@@ -232,4 +232,4 @@ files, or a previous instance that didn't exit cleanly.
 | Advisory log appears but no shutdown | Another member still satisfies quorum |
 | Group never starts | `ups_sources` names do not match exactly |
 | Repeated tests do not fire | Pre-5.3.0 only: stale `/var/run/ups-shutdown-redundancy-*` from a prior run. 5.3.0+ clears these automatically at startup |
-| `⚠️ Redundancy shutdown … suppressed` log line | The startup-cleanup contract was bypassed — see Operational notes above |
+| `⚠️  Redundancy shutdown … suppressed` log line | The startup-cleanup contract was bypassed — see Operational notes above |

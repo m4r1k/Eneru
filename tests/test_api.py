@@ -1317,7 +1317,7 @@ def test_json_formatter_extras_win_over_heuristics():
         logging.INFO,
         __file__,
         1,
-        "[Wrong-Group] ⚡ POWER EVENT: OL - back",
+        "[Wrong-Group] ⚡  POWER EVENT: OL - back",
         (),
         None,
     )
@@ -1997,7 +1997,7 @@ def test_json_formatter_categorizes_uppercase_shutdown_only():
     formatter = JSONFormatter()
     record = logging.LogRecord(
         "ups-monitor", logging.INFO, __file__, 1,
-        "🔌 SHUTDOWN SEQUENCE STARTING", (), None,
+        "🔌  SHUTDOWN SEQUENCE STARTING", (), None,
     )
     payload = json.loads(formatter.format(record))
     assert payload["category"] == "shutdown"
@@ -2013,12 +2013,12 @@ def test_json_formatter_categorizes_uppercase_shutdown_only():
 
 @pytest.mark.unit
 def test_json_formatter_extracts_event_type_from_power_event_message():
-    """⚡ POWER EVENT: <type> ... messages auto-fill event_type when no
+    """⚡  POWER EVENT: <type> ... messages auto-fill event_type when no
     structured extra was provided."""
     formatter = JSONFormatter()
     record = logging.LogRecord(
         "ups-monitor", logging.INFO, __file__, 1,
-        "⚡ POWER EVENT: OB DISCHRG - on battery", (), None,
+        "⚡  POWER EVENT: OB DISCHRG - on battery", (), None,
     )
     payload = json.loads(formatter.format(record))
     assert payload["category"] == "power_event"

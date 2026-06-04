@@ -322,7 +322,7 @@ class TestScheduleDeferred:
                 notification_id=42,
                 db_path=tmp_path / "ups.db",
                 config_path="/etc/ups-monitor/config.yaml",
-                body="🛑 Stopped",
+                body="🛑  Stopped",
                 notify_type="warning",
                 worker=worker,
                 log_fn=log,
@@ -385,12 +385,12 @@ class TestScheduleDeferred:
                 notification_id=7,
                 db_path=tmp_path / "ups.db",
                 config_path="/etc/cfg.yaml",
-                body="🛑 Stopped",
+                body="🛑  Stopped",
                 notify_type="warning",
                 worker=worker,
                 log_fn=log,
             )
-        worker._send_via_apprise_bounded.assert_called_once_with("🛑 Stopped", "warning")
+        worker._send_via_apprise_bounded.assert_called_once_with("🛑  Stopped", "warning")
         assert any("falling back" in c.args[0].lower()
                    for c in log.call_args_list)
 
@@ -490,11 +490,11 @@ class TestScheduleShortCircuits:
                 notification_id=1,
                 db_path=tmp_path / "ups.db",
                 config_path="/etc/cfg.yaml",
-                body="🛑 stop", notify_type="warning",
+                body="🛑  stop", notify_type="warning",
                 worker=worker, log_fn=log,
             )
         run.assert_not_called()
-        worker._send_via_apprise_bounded.assert_called_once_with("🛑 stop", "warning")
+        worker._send_via_apprise_bounded.assert_called_once_with("🛑  stop", "warning")
         assert any("Not running under systemd" in c.args[0]
                    for c in log.call_args_list)
 
@@ -516,7 +516,7 @@ class TestScheduleShortCircuits:
                 notification_id=1,
                 db_path=tmp_path / "ups.db",
                 config_path="/etc/cfg.yaml",
-                body="🛑 stop", notify_type="warning",
+                body="🛑  stop", notify_type="warning",
                 worker=worker, log_fn=log,
             )
         run.assert_not_called()
@@ -544,14 +544,14 @@ class TestScheduleShortCircuits:
                 notification_id=1,
                 db_path=tmp_path / "ups.db",
                 config_path="/etc/cfg.yaml",
-                body="🛑 stop", notify_type="warning",
+                body="🛑  stop", notify_type="warning",
                 worker=worker, log_fn=log,
             )
         # subprocess.run is mocked but _detect_systemd_stop_intent
         # is also mocked, so subprocess.run shouldn't have been
         # called (the systemd-run path is what would call it).
         run.assert_not_called()
-        worker._send_via_apprise_bounded.assert_called_once_with("🛑 stop", "warning")
+        worker._send_via_apprise_bounded.assert_called_once_with("🛑  stop", "warning")
         assert any("systemctl stop detected" in c.args[0]
                    for c in log.call_args_list)
 
@@ -583,7 +583,7 @@ class TestEagerSend:
         log = MagicMock()
         _eager_send(
             notification_id=row_id, db_path=db_path,
-            body="🛑 stop", notify_type="warning",
+            body="🛑  stop", notify_type="warning",
             worker=worker, log_fn=log,
         )
         # Re-open and verify status.
@@ -616,7 +616,7 @@ class TestEagerSend:
         log = MagicMock()
         _eager_send(
             notification_id=row_id, db_path=db_path,
-            body="🛑 stop", notify_type="warning",
+            body="🛑  stop", notify_type="warning",
             worker=worker, log_fn=log,
         )
         store = StatsStore(db_path)
@@ -648,7 +648,7 @@ class TestEagerSend:
 
 class TestDeliverPendingStop:
 
-    def _make_pending_row(self, db_path, body="🛑 Stopped", status="pending"):
+    def _make_pending_row(self, db_path, body="🛑  Stopped", status="pending"):
         store = StatsStore(db_path)
         store.open()
         try:
@@ -713,7 +713,7 @@ class TestDeliverPendingStop:
                 notification_id=row_id, db_path=db_path, config=cfg,
             )
         assert rc == 0
-        worker._send_via_apprise.assert_called_once_with("🛑 Stopped", "warning")
+        worker._send_via_apprise.assert_called_once_with("🛑  Stopped", "warning")
         worker.stop.assert_called_once()
         # Verify row is now sent.
         store = StatsStore(db_path)
@@ -913,7 +913,7 @@ class TestDeliverPendingStop:
         store.open()
         try:
             row_id = store.enqueue_notification(
-                body="🛑 Stopped", notify_type="warning",
+                body="🛑  Stopped", notify_type="warning",
                 category="lifecycle", ts=1000,
             )
             store.cancel_notification(row_id, "superseded")
@@ -957,7 +957,7 @@ class TestDeliverPendingStop:
         store.open()
         try:
             row_id = store.enqueue_notification(
-                body="🛑 Stopped", notify_type="warning",
+                body="🛑  Stopped", notify_type="warning",
                 category="lifecycle", ts=1000,
             )
         finally:
@@ -1032,7 +1032,7 @@ class TestDeliverPendingStopErrorBranches:
         store.open()
         try:
             return store.enqueue_notification(
-                body="🛑 Stopped", notify_type="warning",
+                body="🛑  Stopped", notify_type="warning",
                 category="lifecycle", ts=1000,
             )
         finally:
@@ -1230,11 +1230,11 @@ class TestEagerSendMarkSentFailure:
         _eager_send(
             notification_id=42,
             db_path=object(),
-            body="🛑 Stopped",
+            body="🛑  Stopped",
             notify_type="warning",
             worker=worker,
             log_fn=log,
         )
 
-        worker._send_via_apprise_bounded.assert_called_once_with("🛑 Stopped", "warning")
+        worker._send_via_apprise_bounded.assert_called_once_with("🛑  Stopped", "warning")
         assert any("mark_sent failed" in c.args[0] for c in log.call_args_list)

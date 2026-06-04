@@ -1,7 +1,7 @@
 """Stateful lifecycle classifier + coalescing helpers for v5.2.
 
 Today's startup is stateless: every ``_initialize()`` emits a generic
-"🚀 Started" notification regardless of how the previous instance
+"🚀  Started" notification regardless of how the previous instance
 exited. v5.2 distinguishes:
 
 - **Started**: cold start (no marker, fresh install or first ever boot).
@@ -11,7 +11,7 @@ exited. v5.2 distinguishes:
   the system went down and confirms it's back.
 - **Upgraded**: deb/rpm postinstall set the upgrade marker before
   ``systemctl restart``; the daemon reads it and emits a single
-  "📦 Upgraded vX → vY" message instead of stop+start.
+  "📦  Upgraded vX → vY" message instead of stop+start.
 - **Started after crash**: marker absent but ``meta.last_seen_version``
   is set — the previous instance died without writing its marker.
 
@@ -189,7 +189,7 @@ def classify_startup(*, current_version: str,
         )
         new = str(upgrade_marker.get("new_version", current_version))
         return (
-            f"📦 **Eneru Upgraded** v{old} → v{new}\n"
+            f"📦  **Eneru Upgraded** v{old} → v{new}\n"
             "Service is back online with the new version.",
             "success",
         )
@@ -202,7 +202,7 @@ def classify_startup(*, current_version: str,
         # otherwise the marker's classification (Restarted / Recovered)
         # is more informative.
         return (
-            f"📦 **Eneru Upgraded** v{last_seen_version} → v{current_version}\n"
+            f"📦  **Eneru Upgraded** v{last_seen_version} → v{current_version}\n"
             "Service is back online with the new version.",
             "success",
         )
@@ -224,14 +224,14 @@ def classify_startup(*, current_version: str,
         # is the bigger story, the shutdown reason is secondary.
         if (last_seen_version and last_seen_version != current_version):
             return (
-                f"📦 **Eneru Upgraded** v{last_seen_version} → v{current_version}\n"
+                f"📦  **Eneru Upgraded** v{last_seen_version} → v{current_version}\n"
                 f"Resumed after {format_seconds(downtime)} downtime.",
                 "success",
             )
 
         if reason == REASON_SEQUENCE_COMPLETE:
             return (
-                f"📊 **Eneru Recovered**\n"
+                f"📊  **Eneru Recovered**\n"
                 f"Resumed after {format_seconds(downtime)} downtime "
                 f"following a power-loss-triggered shutdown "
                 f"(was v{prev_version}).",
@@ -239,7 +239,7 @@ def classify_startup(*, current_version: str,
             )
         if reason == REASON_FATAL:
             return (
-                f"🚀 **Eneru Restarted**\n"
+                f"🚀  **Eneru Restarted**\n"
                 f"Last instance exited fatally; back up after "
                 f"{format_seconds(downtime)} (was v{prev_version}).",
                 "warning",
@@ -248,12 +248,12 @@ def classify_startup(*, current_version: str,
         # a true cold start (manual stop, then later start).
         if downtime < RESTART_DOWNTIME_THRESHOLD_SECS:
             return (
-                f"🔄 **Eneru Restarted** (downtime: "
+                f"🔄  **Eneru Restarted** (downtime: "
                 f"{format_seconds(downtime)})\nService is back online.",
                 "info",
             )
         return (
-            f"🚀 **Eneru Started** (last seen "
+            f"🚀  **Eneru Started** (last seen "
             f"{format_seconds(downtime)} ago)\nResumed monitoring.",
             "info",
         )
@@ -262,12 +262,12 @@ def classify_startup(*, current_version: str,
     #    either) or a hard crash that didn't get to write a marker.
     if last_seen_version:
         return (
-            f"🚀 **Eneru v{current_version} Started** (after crash)\n"
+            f"🚀  **Eneru v{current_version} Started** (after crash)\n"
             f"Last clean run was v{last_seen_version}.",
             "warning",
         )
     return (
-        f"🚀 **Eneru v{current_version} Started**\n"
+        f"🚀  **Eneru v{current_version} Started**\n"
         "Monitoring active.",
         "info",
     )
@@ -399,7 +399,7 @@ def coalesce_recovered_with_prev_shutdown(
         shutdown_str = datetime.fromtimestamp(head_ts).strftime("%H:%M:%S")
         recovered_str = datetime.fromtimestamp(now).strftime("%H:%M:%S")
         body = (
-            f"📊 **Eneru Recovered**\n"
+            f"📊  **Eneru Recovered**\n"
             f"Power outage triggered shutdown at {shutdown_str} "
             f"({reason}); recovered at {recovered_str} after "
             f"{format_seconds(downtime_secs)} downtime."
@@ -419,7 +419,7 @@ def coalesce_recovered_with_prev_shutdown(
     shutdown_str = datetime.fromtimestamp(head_ts).strftime("%H:%M:%S")
     recovered_str = datetime.fromtimestamp(now).strftime("%H:%M:%S")
     body = (
-        f"📊 **Eneru Recovered**\n"
+        f"📊  **Eneru Recovered**\n"
         f"Shutdown completed at {shutdown_str}; recovered at "
         f"{recovered_str} after {format_seconds(downtime_secs)} downtime."
     )

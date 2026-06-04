@@ -24,11 +24,11 @@ When the timer fires:
   pending row (via ``_emit_lifecycle_startup_notification``'s supersede
   block, fired BEFORE the worker can deliver), the deliver helper sees
   ``status != 'pending'`` and exits silently. The user gets a single
-  ``🔄 Restarted`` notification.
+  ``🔄  Restarted`` notification.
 - If no replacement came up (``systemctl stop``), the row is still
   ``pending``. The deliver helper claims it as ``delivering``, opens the
   per-UPS Apprise instance, sends the row, and marks it ``sent``. The user gets a single
-  ``🛑 Service Stopped`` notification.
+  ``🛑  Service Stopped`` notification.
 
 Fallback path: when ``systemd-run`` isn't available in a foreground
 non-container run, the helper falls back to shipping the stop
@@ -217,7 +217,7 @@ def schedule_deferred_stop_or_eager_send(
     can see in the log which path was taken.
     """
     # v5.2.1: short-circuit to eager send in two cases — both produce
-    # an INSTANT 🛑 Stopped notification with no 15-second wait.
+    # an INSTANT 🛑  Stopped notification with no 15-second wait.
     #
     # 1. Not running under systemd. Foreground non-container runs get an
     #    eager stop because no replacement manager exists. Containers
@@ -227,12 +227,12 @@ def schedule_deferred_stop_or_eager_send(
     if not _running_under_systemd():
         if _running_in_container():
             log_fn(
-                "📤 Container runtime without systemd — leaving stop "
+                "📤  Container runtime without systemd — leaving stop "
                 "notification pending so the next daemon can supersede it"
             )
             return
         log_fn(
-            "📤 Not running under systemd — shipping stop notification "
+            "📤  Not running under systemd — shipping stop notification "
             "eagerly via Apprise"
         )
         _eager_send(
@@ -250,7 +250,7 @@ def schedule_deferred_stop_or_eager_send(
     #    mechanism gets a chance to win.
     if _detect_systemd_stop_intent():
         log_fn(
-            "📤 systemctl stop detected — shipping stop notification "
+            "📤  systemctl stop detected — shipping stop notification "
             "eagerly (no replacement daemon coming)"
         )
         _eager_send(
@@ -281,28 +281,28 @@ def schedule_deferred_stop_or_eager_send(
             )
             if result.returncode == 0:
                 log_fn(
-                    f"📅 Stop notification scheduled for delivery in "
+                    f"📅  Stop notification scheduled for delivery in "
                     f"{delay_secs}s (will be superseded if a new "
                     "daemon's classifier cancels the row first)"
                 )
                 return
             stderr = result.stderr.decode("utf-8", errors="replace").strip()
             log_fn(
-                f"⚠️ systemd-run rc={result.returncode}: "
+                f"⚠️  systemd-run rc={result.returncode}: "
                 f"{stderr[:200]} — falling back to eager delivery"
             )
         except FileNotFoundError:
             log_fn(
-                "⚠️ systemd-run not on PATH — falling back to eager "
+                "⚠️  systemd-run not on PATH — falling back to eager "
                 "delivery (restart-coalescing won't apply on this host)"
             )
         except subprocess.TimeoutExpired:
             log_fn(
-                "⚠️ systemd-run timed out — falling back to eager delivery"
+                "⚠️  systemd-run timed out — falling back to eager delivery"
             )
     else:
         log_fn(
-            "⚠️ No config_path on Config — falling back to eager "
+            "⚠️  No config_path on Config — falling back to eager "
             "delivery (deferred path needs to re-load config out-of-process)"
         )
 
@@ -328,7 +328,7 @@ def _eager_send(
     """Fallback: ship the stop notification synchronously via the
     worker's Apprise instance, then mark the row sent."""
     if worker is None:
-        log_fn("⚠️ No worker — stop notification will stay pending")
+        log_fn("⚠️  No worker — stop notification will stay pending")
         return
     try:
         # _send_via_apprise is the worker's private synchronous-send
@@ -339,7 +339,7 @@ def _eager_send(
         # endpoint must not block daemon exit. Times out -> row stays pending.
         success = worker._send_via_apprise_bounded(body, notify_type)
     except Exception as e:  # pragma: no cover -- defensive
-        log_fn(f"⚠️ Eager-send via Apprise raised: {e}")
+        log_fn(f"⚠️  Eager-send via Apprise raised: {e}")
         return
     if not success:
         # At-least-once by design (cubic): a bounded send that TIMED OUT may
@@ -350,7 +350,7 @@ def _eager_send(
         # loss, and we must not block daemon exit to learn the orphan thread's
         # real outcome (the whole point of the bounded send, M6).
         log_fn(
-            "⚠️ Eager-send via Apprise returned False/timed out (network down?) "
+            "⚠️  Eager-send via Apprise returned False/timed out (network down?) "
             "— stop notification stays pending for the next start "
             "(a duplicate is possible if a timed-out send later completes)"
         )
@@ -370,7 +370,7 @@ def _eager_send(
         # status didn't update. Worst case: the same row gets re-tried
         # by the next start, harmless duplicate.
         log_fn(
-            f"⚠️ Eager-send shipped via Apprise but mark_sent failed: "
+            f"⚠️  Eager-send shipped via Apprise but mark_sent failed: "
             f"{e} (row stays pending; harmless duplicate possible)"
         )
 
