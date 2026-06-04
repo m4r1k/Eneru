@@ -65,7 +65,7 @@ meter.bar::-moz-meter-bar { background: var(--accent); border-radius: 4px; }
 .graph-controls label, .event-filters label, .filter-field { color: var(--muted); font-size: 0.9rem; }
 select, input:not([type="checkbox"]) { background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
         border-radius: 6px; padding: 0.3rem 0.5rem; font: inherit; }
-.filter-field { display: flex; flex-direction: column; gap: 0.15rem; }
+.filter-field { display: inline-flex; align-items: center; gap: 0.35rem; }
 .event-type-picker { position: relative; min-width: 12rem; }
 .event-type-picker summary { list-style: none; background: var(--panel-2); color: var(--text);
   border: 1px solid var(--line); border-radius: 6px; padding: 0.3rem 0.5rem;
