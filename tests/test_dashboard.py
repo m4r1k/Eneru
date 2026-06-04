@@ -196,6 +196,25 @@ def test_dashboard_events_time_header_is_sortable(minimal_config):
 
 
 @pytest.mark.unit
+def test_dashboard_event_type_filter_supports_multiple_selection(minimal_config):
+    """The Events Type filter should allow selecting more than one event type."""
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+
+    assert 'id="event-type-summary"' in html
+    assert 'role="group" aria-labelledby="event-type-label"' in html
+    assert "selectedEventTypes" in js
+    assert "types.size === 0 || types.has(eventType)" in js
+    assert 'input[type="checkbox"]:checked' in js
+    assert 'selected.length + " types"' in js
+    assert ".event-type-picker" in css
+    assert ".event-type-option" in css
+
+
+@pytest.mark.unit
 def test_dashboard_remote_health_accepts_uppercase_statuses(minimal_config):
     """API remote-health status constants are uppercase, e.g. HEALTHY."""
     js = _handler(minimal_config, path="/app.js")._serve_static(

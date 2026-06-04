@@ -27,8 +27,8 @@ both audits are included below.
 - **Browser dashboard.** The embedded API now serves a no-build, no-third-party
   JavaScript dashboard when `api.enabled` is on. It includes live UPS cards,
   drill-down panels, redundancy rollups, a shutdown banner, SVG history graphs,
-  event filters with wide-range paging, signed-in event deletion, UPS control,
-  and Light / Dark / System themes.
+  event filters with multi-type selection and wide-range paging, signed-in
+  event deletion, UPS control, and Light / Dark / System themes.
 - **Tiered API authentication.** Local users and API keys live in a dedicated
   SQLite auth DB. User passwords are bcrypt hashes; API keys are stored as
   SHA-256 digests. Manage them with `eneru user ...` and `eneru apikey ...`.

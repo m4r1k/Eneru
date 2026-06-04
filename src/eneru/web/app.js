@@ -435,14 +435,42 @@ function updateEventSourceFilter(upsRows, groups) {
 }
 
 function updateEventTypeFilter(rows) {
-  const sel = document.getElementById("event-type-filter");
-  const prev = sel.value;
+  const box = document.getElementById("event-type-filter");
+  const prev = selectedEventTypes();
   const types = Array.from(new Set((rows || [])
     .map((e) => e.eventType || e.event || "")
     .filter((v) => v))).sort();
-  sel.replaceChildren(el("option", { value: "", text: "All types" }));
-  types.forEach((type) => sel.appendChild(el("option", { value: type, text: type })));
-  if (types.includes(prev)) sel.value = prev;
+  box.replaceChildren();
+  const kept = new Set();
+  types.forEach((type) => {
+    const input = el("input", { type: "checkbox", value: type });
+    if (prev.has(type)) {
+      input.checked = true;
+      kept.add(type);
+    }
+    box.appendChild(el("label", { class: "event-type-option" }, [
+      input,
+      el("span", { text: type }),
+    ]));
+  });
+  updateEventTypeSummary(kept);
+}
+
+function selectedEventTypes() {
+  const box = document.getElementById("event-type-filter");
+  if (!box) return new Set();
+  return new Set(Array.from(
+    box.querySelectorAll('input[type="checkbox"]:checked'),
+  ).map((input) => input.value));
+}
+
+function updateEventTypeSummary(types) {
+  const summary = document.getElementById("event-type-summary");
+  if (!summary) return;
+  const selected = Array.from(types || selectedEventTypes());
+  if (selected.length === 0) summary.textContent = "All types";
+  else if (selected.length === 1) summary.textContent = selected[0];
+  else summary.textContent = selected.length + " types";
 }
 
 function eventMatchesSource(event, source) {
@@ -458,7 +486,7 @@ let selectedEvents = new Set();
 
 function visibleEvents() {
   const source = document.getElementById("event-source-filter").value;
-  const type = document.getElementById("event-type-filter").value;
+  const types = selectedEventTypes();
   const text = document.getElementById("event-text-filter").value.trim().toLowerCase();
   const from = eventRangeFrom();
   const rows = lastEvents.filter((e) => {
@@ -466,7 +494,7 @@ function visibleEvents() {
     const detail = (e.detail || e.details || "").toLowerCase();
     return (from === null || e.ts >= from)
       && eventMatchesSource(e, source)
-      && (!type || eventType === type)
+      && (types.size === 0 || types.has(eventType))
       && (!text || detail.includes(text));
   });
   if (eventSortDirection === "desc") rows.reverse();
@@ -921,7 +949,10 @@ async function init() {
   document.getElementById("graph-metric").addEventListener("change", loadGraph);
   document.getElementById("graph-range").addEventListener("change", loadGraph);
   document.getElementById("event-source-filter").addEventListener("change", applyEventFilters);
-  document.getElementById("event-type-filter").addEventListener("change", applyEventFilters);
+  document.getElementById("event-type-filter").addEventListener("change", () => {
+    updateEventTypeSummary();
+    applyEventFilters();
+  });
   document.getElementById("event-text-filter").addEventListener("input", applyEventFilters);
   document.getElementById("event-range").addEventListener("change", resetEvents);
   document.getElementById("event-load-older").addEventListener("click", loadOlderEvents);

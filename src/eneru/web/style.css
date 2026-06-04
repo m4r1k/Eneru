@@ -62,9 +62,24 @@ meter.bar::-webkit-meter-bar { background: var(--panel-2); border: 0; border-rad
 meter.bar::-webkit-meter-optimum-value { background: var(--accent); border-radius: 4px; }
 meter.bar::-moz-meter-bar { background: var(--accent); border-radius: 4px; }
 .graph-controls, .event-filters { display: flex; gap: 1rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
-.graph-controls label, .event-filters label { color: var(--muted); font-size: 0.9rem; }
-select, input { background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+.graph-controls label, .event-filters label, .filter-field { color: var(--muted); font-size: 0.9rem; }
+select, input:not([type="checkbox"]) { background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
         border-radius: 6px; padding: 0.3rem 0.5rem; font: inherit; }
+.filter-field { display: flex; flex-direction: column; gap: 0.15rem; }
+.event-type-picker { position: relative; min-width: 12rem; }
+.event-type-picker summary { list-style: none; background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px; padding: 0.3rem 0.5rem;
+  cursor: pointer; user-select: none; }
+.event-type-picker summary::after { content: "▾"; float: right; color: var(--muted); margin-left: 1rem; }
+.event-type-picker[open] summary::after { content: "▴"; }
+.event-type-picker summary::-webkit-details-marker { display: none; }
+.event-type-options { position: absolute; z-index: 5; top: calc(100% + 0.25rem); left: 0;
+  min-width: 100%; max-height: 16rem; overflow: auto; padding: 0.35rem;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  box-shadow: 0 0.35rem 1rem rgba(0,0,0,0.24); }
+.event-type-option { display: flex; align-items: center; gap: 0.45rem;
+  padding: 0.25rem 0.35rem; color: var(--text); white-space: nowrap; }
+.event-type-option input { margin: 0; accent-color: var(--accent); }
 .graph { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem; }
 .graph svg { width: 100%; height: 220px; display: block; }
 .graph .axis { stroke: var(--line); stroke-width: 1; }
