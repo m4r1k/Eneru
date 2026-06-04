@@ -473,9 +473,17 @@ function timeSortHeader() {
   return el("th", null, [btn]);
 }
 
-function toggleEventSort() {
+function preserveWindowScroll(fn) {
+  const scrollX = window.scrollX;
+  const scrollY = window.scrollY;
+  fn();
+  window.scrollTo(scrollX, scrollY);
+}
+
+function toggleEventSort(ev) {
+  if (ev) ev.preventDefault();
   eventSortDirection = eventSortDirection === "asc" ? "desc" : "asc";
-  applyEventFilters();
+  preserveWindowScroll(applyEventFilters);
 }
 
 // Reflect the live, actionable selection on the Delete button. The count is the

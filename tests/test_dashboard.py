@@ -175,6 +175,8 @@ def test_dashboard_events_time_header_is_sortable(minimal_config):
     assert 'id="event-sort-time"' in html
     assert "eventSortDirection" in js
     assert "toggleEventSort" in js
+    assert "window.scrollY" in js
+    assert "window.scrollTo(scrollX, scrollY)" in js
 
 
 @pytest.mark.unit
