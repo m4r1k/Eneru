@@ -125,6 +125,20 @@ function batteryClass(charge) {
   return "ok";
 }
 
+function formatRuntimeSeconds(value) {
+  if (value === undefined || value === null || value === "") return "—";
+  const seconds = Math.trunc(Number(value));
+  if (!Number.isFinite(seconds)) return "—";
+  if (seconds >= 3600) {
+    return Math.floor(seconds / 3600) + "h " +
+      Math.floor((seconds % 3600) / 60) + "m";
+  }
+  if (seconds >= 60) {
+    return Math.floor(seconds / 60) + "m " + (seconds % 60) + "s";
+  }
+  return seconds + "s";
+}
+
 function renderUps(payload) {
   const wrap = document.getElementById("ups-cards");
   wrap.replaceChildren();
@@ -151,7 +165,7 @@ function renderUps(payload) {
         "aria-label": "Battery charge",
       }),
       el("div", { class: "row" }, [el("span", { text: "Runtime" }),
-        el("b", { text: u.runtime != null ? u.runtime + "s" : "—" })]),
+        el("b", { text: formatRuntimeSeconds(u.runtime) })]),
       el("div", { class: "row" }, [el("span", { text: "Load" }),
         el("b", { text: u.load != null ? u.load + "%" : "—" })]),
     ]);
@@ -247,7 +261,7 @@ function renderDetail(name) {
     el("div", { class: "row" }, [el("span", { text: "Status" }),
       el("span", { class: "badge " + statusClass(u.status), text: u.status || "—" })]),
     detailRow("Battery", u.batteryCharge != null ? u.batteryCharge + "%" : null),
-    detailRow("Runtime", u.runtime != null ? u.runtime + "s" : null),
+    detailRow("Runtime", formatRuntimeSeconds(u.runtime)),
     detailRow("Load", u.load != null ? u.load + "%" : null),
     detailRow("Connection", u.connectionState),
     detailRow("Time on battery", u.timeOnBattery != null ? u.timeOnBattery + "s" : null),
@@ -627,7 +641,11 @@ function renderGraph(series) {
       t.setAttribute("x", 2); t.setAttribute("y", yy);
       t.setAttribute("class", "lbl"); t.textContent = txt; svg.appendChild(t);
     };
-    lab(max.toFixed(0), 12); lab(min.toFixed(0), H - pad);
+    const metric = document.getElementById("graph-metric").value;
+    const fmt = metric === "runtime"
+      ? formatRuntimeSeconds
+      : (v) => v.toFixed(0);
+    lab(fmt(max), 12); lab(fmt(min), H - pad);
   } else {
     const t = document.createElementNS(SVG_NS, "text");
     t.setAttribute("x", W / 2); t.setAttribute("y", H / 2);

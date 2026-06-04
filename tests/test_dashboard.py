@@ -147,6 +147,22 @@ def test_dashboard_has_wide_history_surfaces(minimal_config):
 
 
 @pytest.mark.unit
+def test_dashboard_formats_runtime_for_humans(minimal_config):
+    """Web UI formats runtime seconds without changing API values."""
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+
+    assert '<option value="runtime">Runtime</option>' in html
+    assert "function formatRuntimeSeconds" in js
+    assert 'return Math.floor(seconds / 3600) + "h "' in js
+    assert 'return Math.floor(seconds / 60) + "m " + (seconds % 60) + "s"' in js
+    assert 'text: formatRuntimeSeconds(u.runtime)' in js
+    assert 'detailRow("Runtime", formatRuntimeSeconds(u.runtime))' in js
+    assert 'metric === "runtime"' in js
+
+
+@pytest.mark.unit
 def test_dashboard_has_event_delete_surface(minimal_config):
     # Guard the Slice C delete-selected surface (auth-gated in JS, server-enforced).
     html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")

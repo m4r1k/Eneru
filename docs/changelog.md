@@ -64,6 +64,9 @@ both audits are included below.
 
 ### Fixed
 
+- **Dashboard runtime display.** The web UI now formats UPS runtime as seconds,
+  minutes, or hours/minutes in cards, drill-down details, and runtime graph
+  labels while keeping API responses as raw seconds.
 - **Shutdown audit hardening.** A group can no longer abort host poweroff by
   self-joining its own monitor thread during multi-UPS drain. Local drain phases
   are best-effort, bounded filesystem sync prevents a hung mount from wedging
