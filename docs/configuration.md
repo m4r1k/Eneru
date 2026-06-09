@@ -479,8 +479,8 @@ mounts:
 | `parallel` | unset | Legacy mode. `false` runs before the default parallel batch. Mutually exclusive with `shutdown_order` |
 | `shutdown_safety_margin` | `60` | Extra wait budget for parallel server threads |
 | `is_host_loopback` | `false` | **v5.5.** Mark this entry as the host-loopback delegate for the containerized OCI deployment. See [Remote servers](remote-servers.md#v55-host-loopback-delegate-container-only) |
-| `host_identity_command` | `cat /etc/machine-id` | **v5.5.** Safe SSH probe used to verify the loopback target is really this container's host. Only used when `is_host_loopback: true` |
-| `expected_host_identity` | auto-populated from `/etc/machine-id` inside the container | **v5.5.** Expected output of `host_identity_command`. Auto-populated at startup so operators bind-mount `/etc/machine-id` instead of supplying a value |
+| `host_identity_command` | `cat /etc/machine-id` | **v5.5.** Safe SSH probe used to verify the loopback target is really this container's host. Only used when `is_host_loopback: true`. On hosts without `/etc/machine-id` (Alpine, non-systemd), point it at a marker file — see [Containers and Kubernetes](containers-kubernetes.md#no-systemd-no-machine-id-alpine-consumer-hosts) |
+| `expected_host_identity` | auto-populated from the `host_identity_command` path inside the container | **v5.5** (extended in **6.1**). Expected output of `host_identity_command`. When the command is a simple `cat /absolute/path` (the default `/etc/machine-id`, or any marker file), Eneru reads that same path locally and auto-populates this at startup — so you bind-mount the file instead of supplying a value. For non-`cat` commands, set it explicitly |
 
 ### Pre-shutdown action templates
 
