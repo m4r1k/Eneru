@@ -621,7 +621,7 @@ def test_loopback_auto_populates_expected_identity_from_etc_machine_id(tmp_path)
     config.remote_health.enabled = True
     server = _make_loopback_server(expected_host_identity=None)
 
-    with patch("eneru.remote_health._read_container_machine_id",
+    with patch("eneru.remote_health._read_identity_from_path",
                return_value="aabbcc-host-id"):
         RemoteHealthManager(
             config=config,
@@ -632,6 +632,58 @@ def test_loopback_auto_populates_expected_identity_from_etc_machine_id(tmp_path)
             log_fn=lambda msg: None,
         )
     assert server.expected_host_identity == "aabbcc-host-id"
+
+
+@pytest.mark.unit
+def test_loopback_auto_populates_expected_identity_from_custom_cat_path(tmp_path):
+    """Issue #70: custom ``host_identity_command: cat /path`` should use
+    the same container-side path for the expected identity."""
+    config = Config()
+    config.remote_health.enabled = True
+    marker = tmp_path / "eneru-machine-id"
+    marker.write_text("alpine-host-id\n", encoding="utf-8")
+    server = _make_loopback_server(
+        host_identity_command=f"cat {marker}",
+        expected_host_identity=None,
+    )
+
+    RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+    )
+
+    assert server.expected_host_identity == "alpine-host-id"
+
+
+@pytest.mark.unit
+def test_loopback_non_cat_identity_command_requires_explicit_expected(tmp_path):
+    """Non-``cat /path`` commands cannot be safely inferred locally."""
+    config = Config()
+    config.remote_health.enabled = True
+    server = _make_loopback_server(
+        host_identity_command="hostname",
+        expected_host_identity=None,
+    )
+
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+    )
+
+    assert server.expected_host_identity is None
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(True, "", 8)):
+        rows = manager.check_once()
+    assert rows[0]["status"] == REMOTE_HEALTH_DEGRADED
+    assert "expected_host_identity" in rows[0]["last_error"]
 
 
 @pytest.mark.unit
@@ -737,7 +789,7 @@ def test_empty_machine_id_fails_with_setup_hint(tmp_path):
     config.remote_health.enabled = True
     config.remote_health.failure_threshold = 1
     server = _make_loopback_server(expected_host_identity=None)
-    with patch("eneru.remote_health._read_container_machine_id", return_value=None):
+    with patch("eneru.remote_health._read_identity_from_path", return_value=None):
         manager = RemoteHealthManager(
             config=config,
             group_label="Rack",
