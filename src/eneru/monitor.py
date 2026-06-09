@@ -915,7 +915,7 @@ class UPSGroupMonitor(
         exit_code, stdout, stderr = self._run_upsc([], full_poll=True)
 
         if exit_code != 0:
-            return False, {}, stderr
+            return False, {}, self._format_upsc_error(stdout, stderr)
 
         if "Data stale" in stdout or "Data stale" in stderr:
             return False, {}, "Data stale"
@@ -954,10 +954,29 @@ class UPSGroupMonitor(
     def _run_upsc(self, args: List[str], *, full_poll: bool) -> Tuple[int, str, str]:
         cmd = ["upsc", self.config.ups.name] + list(args)
         started = time.monotonic()
-        result = run_command(cmd)
+        # NUT's NSS-backed libupsclient can emit "Init SSL without certificate
+        # database" on stderr even for plain read-only polling. Suppress that
+        # upstream noise so real connection/UPS-name errors stay visible.
+        result = run_command(cmd, env_overrides={"NUT_QUIET_INIT_SSL": "true"})
         elapsed = time.monotonic() - started
         self._record_upsc_latency(elapsed, cmd, full_poll=full_poll)
         return result
+
+    def _format_upsc_error(self, stdout: str, stderr: str) -> str:
+        """Return an operator-facing error from a failed ``upsc`` call."""
+        parts = []
+        for stream in (stderr, stdout):
+            for line in (stream or "").splitlines():
+                text = line.strip()
+                if not text:
+                    continue
+                if text == "Init SSL without certificate database":
+                    continue
+                if text not in parts:
+                    parts.append(text)
+        if parts:
+            return " | ".join(parts)
+        return (stderr or stdout or "upsc exited without output").strip()
 
     def _record_upsc_latency(self, elapsed: float, cmd: List[str], *, full_poll: bool):
         now = time.time()

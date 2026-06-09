@@ -3182,6 +3182,34 @@ class TestGetAllUpsDataFailurePaths:
         assert err == "no such ups"
 
     @pytest.mark.unit
+    def test_nonzero_exit_filters_nut_ssl_init_noise(self, tmp_path):
+        """Issue #71: the NSS SSL-init line is not the actual NUT failure."""
+        monitor = make_monitor(tmp_path)
+        with patch.object(
+            monitor, "_run_upsc",
+            return_value=(
+                1,
+                "Error: Unknown UPS\n",
+                "Init SSL without certificate database\n",
+            ),
+        ):
+            success, data, err = monitor._get_all_ups_data()
+        assert success is False
+        assert data == {}
+        assert err == "Error: Unknown UPS"
+
+    @pytest.mark.unit
+    def test_run_upsc_suppresses_nut_ssl_init_noise(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        with patch("eneru.monitor.run_command",
+                   return_value=(0, "ups.status: OL\n", "")) as run:
+            monitor._run_upsc([], full_poll=True)
+        run.assert_called_once_with(
+            ["upsc", "TestUPS@localhost"],
+            env_overrides={"NUT_QUIET_INIT_SSL": "true"},
+        )
+
+    @pytest.mark.unit
     def test_stale_data_marker_returns_failure(self, tmp_path):
         monitor = make_monitor(tmp_path)
         with patch.object(monitor, "_run_upsc",

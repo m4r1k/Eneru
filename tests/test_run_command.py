@@ -102,6 +102,18 @@ class TestRunCommand:
         assert "C" in stdout
 
     @pytest.mark.unit
+    def test_command_with_env_overrides(self):
+        """Callers can add process-local environment without mutating os.environ."""
+        exit_code, stdout, stderr = run_command(
+            ["sh", "-c", "echo $NUT_QUIET_INIT_SSL:$LC_NUMERIC"],
+            env_overrides={"NUT_QUIET_INIT_SSL": "true"},
+        )
+
+        assert exit_code == 0
+        assert "true:C" in stdout
+        assert stderr == ""
+
+    @pytest.mark.unit
     def test_default_timeout(self):
         """Test that default timeout is applied (command should complete quickly)."""
         # A quick command should work with default timeout
