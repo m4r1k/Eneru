@@ -256,19 +256,6 @@ def _read_identity_from_path(path: Path) -> Optional[str]:
         return None
 
 
-def _read_container_machine_id() -> Optional[str]:
-    """Read the container-side /etc/machine-id, or None if unavailable.
-
-    Used to auto-populate ``RemoteServerConfig.expected_host_identity`` on
-    loopback entries. When the operator bind-mounts the host's machine-id
-    at the same path, this value matches what the host's SSH probe will
-    return — the identity guard passes. When the bind-mount is missing,
-    this returns the container's own (random) machine-id and the guard
-    fails closed on the first probe.
-    """
-    return _read_identity_from_path(Path("/etc/machine-id"))
-
-
 def _read_expected_identity_for_command(command: str) -> Optional[str]:
     """Auto-populate expected identity for simple local ``cat /path`` probes.
 

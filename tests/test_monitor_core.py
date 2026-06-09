@@ -3253,23 +3253,42 @@ class TestNutNameAutodiscovery:
         assert monitor._parse_nut_name("UPS") == "UPS"
 
     @pytest.mark.unit
-    def test_discover_filters_ssl_and_banner_lines(self, tmp_path):
-        """Only bare ups.conf section names survive; banners are dropped."""
+    def test_discover_returns_names_with_banners_on_stderr(self, tmp_path):
+        """Real NUT prints names on stdout; SSL/connection banners go to
+        stderr, which is discarded."""
         monitor = make_monitor(tmp_path)
-        stdout = (
+        stderr = (
+            "Init SSL without certificate database\n"
             "Connected to NUT server 192.168.178.11 in SSL\n"
             "Certificate verification is disabled\n"
-            "UPS\n"
         )
         with patch("eneru.monitor.run_command",
-                   return_value=(0, stdout, "")) as run:
+                   return_value=(0, "UPS\nUPS2\n", stderr)) as run:
             names = monitor._discover_ups_names("192.168.178.11")
-        assert names == ["UPS"]
+        assert names == ["UPS", "UPS2"]
         run.assert_called_once_with(
             ["upsc", "-l", "192.168.178.11"],
             timeout=10,
             env_overrides={"NUT_QUIET_INIT_SSL": "true"},
         )
+
+    @pytest.mark.unit
+    def test_discover_filter_is_defensive_against_stdout_decoration(self, tmp_path):
+        """Defense-in-depth: blank, whitespace, and colon lines on stdout are
+        dropped, and duplicate names are de-duplicated."""
+        monitor = make_monitor(tmp_path)
+        stdout = (
+            "\n"                        # blank -> dropped
+            "ups-a\n"
+            "Connected to X in SSL\n"   # internal space -> dropped
+            "two\twords\n"             # internal tab -> dropped
+            "key: value\n"             # colon -> dropped
+            "ups-a\n"                   # duplicate -> de-duplicated
+            "ups-b\n"
+        )
+        with patch("eneru.monitor.run_command", return_value=(0, stdout, "")):
+            names = monitor._discover_ups_names("h")
+        assert names == ["ups-a", "ups-b"]
 
     @pytest.mark.unit
     def test_discover_returns_empty_on_failure(self, tmp_path):
@@ -3376,6 +3395,47 @@ class TestNutNameAutodiscovery:
         with patch.object(monitor, "_run_ups_name_diagnostic") as diag:
             _run_one_iteration(monitor, (False, {}, "Network error"))
         diag.assert_not_called()
+
+    @pytest.mark.unit
+    def test_diagnostic_skipped_on_fsb_path_while_on_battery(self, tmp_path):
+        """The up-to-10s discovery probe must never sit in front of an FSB:
+        on battery with tolerance=1, the shutdown fires and discovery is
+        skipped entirely."""
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = False
+        monitor.config.ups.max_stale_data_tolerance = 1
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.connection_state = "OK"
+        monitor.state.connection_error_count = 0
+        with patch.object(monitor, "_run_ups_name_diagnostic") as diag, \
+             patch.object(monitor, "_execute_shutdown_sequence") as exec_seq:
+            _run_one_iteration(monitor, (False, {}, "Network error"))
+        diag.assert_not_called()
+        exec_seq.assert_called_once()
+
+
+class TestFormatUpscError:
+    """`_format_upsc_error` joins real error lines from both streams, drops the
+    benign SSL-init noise, de-duplicates, and never resurfaces filtered noise."""
+
+    @pytest.mark.unit
+    def test_filters_blank_dedups_and_joins_both_streams(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        out = monitor._format_upsc_error(
+            stdout="Error: Unknown UPS\n\nError: Unknown UPS\n",   # blank + dup
+            stderr="Init SSL without certificate database\n"
+                   "Error: Driver not connected\n",
+        )
+        # stderr is scanned first; the SSL line is dropped; the duplicate
+        # stdout line is collapsed.
+        assert out == "Error: Driver not connected | Error: Unknown UPS"
+
+    @pytest.mark.unit
+    def test_only_ssl_noise_falls_back_without_resurfacing_it(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        out = monitor._format_upsc_error(
+            stdout="", stderr="Init SSL without certificate database\n")
+        assert out == "upsc exited without output"
 
 
 class TestRecordRemoteHealthEvent:

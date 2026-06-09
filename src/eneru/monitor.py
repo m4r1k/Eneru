@@ -985,7 +985,9 @@ class UPSGroupMonitor(
                     parts.append(text)
         if parts:
             return " | ".join(parts)
-        return (stderr or stdout or "upsc exited without output").strip()
+        # All output was blank or filtered noise (e.g. only the SSL-init line):
+        # do not resurface what we just stripped.
+        return "upsc exited without output"
 
     @staticmethod
     def _parse_nut_host(target: str) -> str:
@@ -1024,9 +1026,11 @@ class UPSGroupMonitor(
         names = []
         for line in (stdout or "").splitlines():
             token = line.strip()
-            # Real UPS names are ups.conf section names: no whitespace, no
-            # colon. This drops banners like "Connected to NUT server X in SSL"
-            # and "Certificate verification is disabled".
+            # `upsc -l` prints bare UPS names (ups.conf section names) one per
+            # line on stdout; SSL/connection banners go to stderr and are
+            # already discarded above. This filter is defensive against any
+            # unexpected stdout decoration: real names never contain whitespace
+            # or a colon, so dropping such lines cannot lose a valid name.
             if not token or " " in token or "\t" in token or ":" in token:
                 continue
             if token not in names:
@@ -1080,8 +1084,9 @@ class UPSGroupMonitor(
             self._log_message(
                 f"⚠️  UPS '{configured_name}' was not found on {host}; the only "
                 f"UPS there is '{discovered}'. Auto-correcting this session to "
-                f"poll '{self._poll_target}'. Please fix ups.name in your "
-                f"config so this is not needed on restart. {name_hint}"
+                f"poll '{self._poll_target}'. Please fix ups.name in your config "
+                f"so this is not needed on restart (NUT control commands keep "
+                f"using the configured name until then). {name_hint}"
             )
             return
 
@@ -2110,7 +2115,12 @@ class UPSGroupMonitor(
                     # Diagnose once per failure episode (the counter resets to 0
                     # on the next successful poll): list the server's real UPS
                     # names and self-heal an obviously-wrong ups.name (issue #71).
-                    if self.state.connection_error_count == 1:
+                    # Skip while On Battery: the discovery subprocess (up to 10s)
+                    # must never sit in front of an FSB emergency shutdown, and a
+                    # wrong ups.name could not have produced an "OB" status in the
+                    # first place, so there is nothing to discover on that path.
+                    if (self.state.connection_error_count == 1
+                            and "OB" not in self.state.previous_status):
                         self._run_ups_name_diagnostic(error_msg)
                     self.state.stale_data_count = 0
                     # Off-battery: first hard error feeds the grace period as
