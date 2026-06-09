@@ -3,7 +3,7 @@
 import math
 import subprocess
 import os
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def is_numeric(value: Any) -> bool:
@@ -32,7 +32,8 @@ def is_numeric(value: Any) -> bool:
 def run_command(
     cmd: List[str],
     timeout: int = 30,
-    capture_output: bool = True
+    capture_output: bool = True,
+    env_overrides: Optional[Dict[str, str]] = None,
 ) -> Tuple[int, str, str]:
     """Run a shell command and return (exit_code, stdout, stderr)."""
     # A None timeout means "wait forever" to subprocess.run. No caller wants
@@ -47,7 +48,7 @@ def run_command(
             capture_output=capture_output,
             text=True,
             timeout=timeout,
-            env={**os.environ, 'LC_NUMERIC': 'C'}
+            env={**os.environ, 'LC_NUMERIC': 'C', **(env_overrides or {})}
         )
         # subprocess.run returns stdout/stderr=None when capture_output
         # is False; normalize to empty strings so callers can always

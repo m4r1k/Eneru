@@ -39,7 +39,10 @@ Before swapping in the container, on the **host** that will run it:
    ```bash
    cat /etc/machine-id
    ```
-   If empty, run `systemd-machine-id-setup`.
+   If empty, run `systemd-machine-id-setup`. On hosts without systemd
+   (Alpine, other musl/non-systemd setups) there is no `/etc/machine-id`;
+   use a marker file instead — see
+   [No systemd / no machine-id](containers-kubernetes.md#no-systemd-no-machine-id-alpine-consumer-hosts).
 
 4. Notification URLs, NUT credentials, and everything else from your
    YAML carry over unchanged. They live in the config file you'll

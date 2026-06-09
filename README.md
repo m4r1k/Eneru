@@ -96,7 +96,7 @@ docker run -d --name eneru \
   --api --api-bind 0.0.0.0 --api-port 9191
 ```
 
-Use `ghcr.io/m4r1k/eneru:testing` for pre-release builds. v5.5+ supports the OCI image for **both** remote-only and local-host deployments. For full local-host ownership from a container (host poweroff, VM teardown, container stop, filesystem unmount), add `--network host`, `-v /etc/machine-id:/etc/machine-id:ro`, and a loopback SSH key. See [Choose your install](https://eneru.readthedocs.io/latest/install-comparison/) for the three deployment profiles and [Migrate to container](https://eneru.readthedocs.io/latest/migrate-to-container/) for the step-by-step.
+Use `ghcr.io/m4r1k/eneru:testing` for pre-release builds. v5.5+ supports the OCI image for **both** remote-only and local-host deployments. For full local-host ownership from a container (host poweroff, VM teardown, container stop, filesystem unmount), add `--network host`, `-v /etc/machine-id:/etc/machine-id:ro`, and a loopback SSH key. Hosts without systemd (Alpine, musl) have no `/etc/machine-id` — use a [marker file](https://eneru.readthedocs.io/latest/containers-kubernetes/#no-systemd-no-machine-id-alpine-consumer-hosts) instead. See [Choose your install](https://eneru.readthedocs.io/latest/install-comparison/) for the three deployment profiles and [Migrate to container](https://eneru.readthedocs.io/latest/migrate-to-container/) for the step-by-step.
 
 **PyPI:**
 ```bash

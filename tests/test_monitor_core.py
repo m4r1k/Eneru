@@ -3182,6 +3182,34 @@ class TestGetAllUpsDataFailurePaths:
         assert err == "no such ups"
 
     @pytest.mark.unit
+    def test_nonzero_exit_filters_nut_ssl_init_noise(self, tmp_path):
+        """Issue #71: the NSS SSL-init line is not the actual NUT failure."""
+        monitor = make_monitor(tmp_path)
+        with patch.object(
+            monitor, "_run_upsc",
+            return_value=(
+                1,
+                "Error: Unknown UPS\n",
+                "Init SSL without certificate database\n",
+            ),
+        ):
+            success, data, err = monitor._get_all_ups_data()
+        assert success is False
+        assert data == {}
+        assert err == "Error: Unknown UPS"
+
+    @pytest.mark.unit
+    def test_run_upsc_suppresses_nut_ssl_init_noise(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        with patch("eneru.monitor.run_command",
+                   return_value=(0, "ups.status: OL\n", "")) as run:
+            monitor._run_upsc([], full_poll=True)
+        run.assert_called_once_with(
+            ["upsc", "TestUPS@localhost"],
+            env_overrides={"NUT_QUIET_INIT_SSL": "true"},
+        )
+
+    @pytest.mark.unit
     def test_stale_data_marker_returns_failure(self, tmp_path):
         monitor = make_monitor(tmp_path)
         with patch.object(monitor, "_run_upsc",
@@ -3202,6 +3230,212 @@ class TestGetAllUpsDataFailurePaths:
         assert success is False
         assert data == {}
         assert err == "Missing ups.status"
+
+
+class TestNutNameAutodiscovery:
+    """Issue #71: on a hard NUT connection failure, list the server's real UPS
+    names (``upsc -l``), warn clearly, and self-heal an obviously-wrong
+    ``ups.name`` (e.g. a NUT username placed where the UPS name belongs)."""
+
+    @pytest.mark.unit
+    def test_parse_nut_host(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        assert monitor._parse_nut_host("upsmon@10.13.0.8:3493") == "10.13.0.8:3493"
+        assert monitor._parse_nut_host("UPS@server") == "server"
+        assert monitor._parse_nut_host("UPS") == "localhost"
+        assert monitor._parse_nut_host("UPS@") == "localhost"
+        assert monitor._parse_nut_host("") == "localhost"
+
+    @pytest.mark.unit
+    def test_parse_nut_name(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        assert monitor._parse_nut_name("upsmon@10.13.0.8:3493") == "upsmon"
+        assert monitor._parse_nut_name("UPS") == "UPS"
+
+    @pytest.mark.unit
+    def test_discover_returns_names_with_banners_on_stderr(self, tmp_path):
+        """Real NUT prints names on stdout; SSL/connection banners go to
+        stderr, which is discarded."""
+        monitor = make_monitor(tmp_path)
+        stderr = (
+            "Init SSL without certificate database\n"
+            "Connected to NUT server 192.168.178.11 in SSL\n"
+            "Certificate verification is disabled\n"
+        )
+        with patch("eneru.monitor.run_command",
+                   return_value=(0, "UPS\nUPS2\n", stderr)) as run:
+            names = monitor._discover_ups_names("192.168.178.11")
+        assert names == ["UPS", "UPS2"]
+        run.assert_called_once_with(
+            ["upsc", "-l", "192.168.178.11"],
+            timeout=10,
+            env_overrides={"NUT_QUIET_INIT_SSL": "true"},
+        )
+
+    @pytest.mark.unit
+    def test_discover_filter_is_defensive_against_stdout_decoration(self, tmp_path):
+        """Defense-in-depth: blank, whitespace, and colon lines on stdout are
+        dropped, and duplicate names are de-duplicated."""
+        monitor = make_monitor(tmp_path)
+        stdout = (
+            "\n"                        # blank -> dropped
+            "ups-a\n"
+            "Connected to X in SSL\n"   # internal space -> dropped
+            "two\twords\n"             # internal tab -> dropped
+            "key: value\n"             # colon -> dropped
+            "ups-a\n"                   # duplicate -> de-duplicated
+            "ups-b\n"
+        )
+        with patch("eneru.monitor.run_command", return_value=(0, stdout, "")):
+            names = monitor._discover_ups_names("h")
+        assert names == ["ups-a", "ups-b"]
+
+    @pytest.mark.unit
+    def test_discover_returns_empty_on_failure(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        with patch("eneru.monitor.run_command",
+                   return_value=(1, "", "Connection failure")):
+            assert monitor._discover_ups_names("10.0.0.9") == []
+
+    @pytest.mark.unit
+    def test_self_heals_single_ups(self, tmp_path):
+        """Wrong name + exactly one real UPS -> auto-correct the poll target."""
+        monitor = make_monitor(tmp_path)
+        monitor._poll_target = "upsmon@10.13.0.8:3493"
+        with patch("eneru.monitor.run_command",
+                   return_value=(0, "UPS\n", "")):
+            monitor._run_ups_name_diagnostic("Init SSL without certificate database")
+        assert monitor._poll_target == "UPS@10.13.0.8:3493"
+        assert monitor._ups_name_autocorrected is True
+        # config.ups.name (display/state identity) is untouched.
+        assert monitor.config.ups.name == "TestUPS@localhost"
+        logged = " ".join(str(c) for c in monitor.logger.log.call_args_list)
+        assert "Auto-correcting" in logged
+
+    @pytest.mark.unit
+    def test_self_heal_runs_only_once(self, tmp_path):
+        """A second failure episode must not flip the target again."""
+        monitor = make_monitor(tmp_path)
+        monitor._poll_target = "upsmon@10.13.0.8:3493"
+        with patch("eneru.monitor.run_command", return_value=(0, "UPS\n", "")):
+            monitor._run_ups_name_diagnostic("err")
+            healed = monitor._poll_target
+            # Even if a different single UPS appears later, do not re-correct.
+            with patch("eneru.monitor.run_command",
+                       return_value=(0, "OTHER\n", "")):
+                monitor._run_ups_name_diagnostic("err")
+        assert monitor._poll_target == healed == "UPS@10.13.0.8:3493"
+
+    @pytest.mark.unit
+    def test_multiple_names_no_heal_lists_them(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._poll_target = "upsmon@10.13.0.8:3493"
+        with patch("eneru.monitor.run_command",
+                   return_value=(0, "ups-a\nups-b\n", "")):
+            monitor._run_ups_name_diagnostic("err")
+        assert monitor._poll_target == "upsmon@10.13.0.8:3493"  # unchanged
+        assert monitor._ups_name_autocorrected is False
+        logged = " ".join(str(c) for c in monitor.logger.log.call_args_list)
+        assert "ups-a" in logged and "ups-b" in logged
+
+    @pytest.mark.unit
+    def test_configured_name_present_no_heal(self, tmp_path):
+        """Name exists but poll still fails -> point at auth, not the name."""
+        monitor = make_monitor(tmp_path)
+        monitor._poll_target = "UPS@10.13.0.8:3493"
+        with patch("eneru.monitor.run_command",
+                   return_value=(0, "UPS\n", "")):
+            monitor._run_ups_name_diagnostic("ERR ACCESS-DENIED")
+        assert monitor._poll_target == "UPS@10.13.0.8:3493"  # unchanged
+        assert monitor._ups_name_autocorrected is False
+        logged = " ".join(str(c) for c in monitor.logger.log.call_args_list)
+        assert "exists" in logged
+
+    @pytest.mark.unit
+    def test_discovery_failure_warns_unverified(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._poll_target = "upsmon@10.13.0.8:3493"
+        with patch("eneru.monitor.run_command",
+                   return_value=(1, "", "Connection failure")):
+            monitor._run_ups_name_diagnostic("err")
+        assert monitor._poll_target == "upsmon@10.13.0.8:3493"  # unchanged
+        logged = " ".join(str(c) for c in monitor.logger.log.call_args_list)
+        assert "Could not list" in logged
+
+    @pytest.mark.unit
+    def test_run_upsc_uses_healed_poll_target(self, tmp_path):
+        """After a self-heal, polling uses the corrected name."""
+        monitor = make_monitor(tmp_path)
+        monitor._poll_target = "UPS@10.13.0.8:3493"
+        with patch("eneru.monitor.run_command",
+                   return_value=(0, "ups.status: OL\n", "")) as run:
+            monitor._run_upsc([], full_poll=True)
+        run.assert_called_once_with(
+            ["upsc", "UPS@10.13.0.8:3493"],
+            env_overrides={"NUT_QUIET_INIT_SSL": "true"},
+        )
+
+    @pytest.mark.unit
+    def test_diagnostic_fires_once_on_first_hard_error(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.state.previous_status = "OL CHRG"
+        monitor.state.connection_state = "OK"
+        monitor.state.connection_error_count = 0
+        with patch.object(monitor, "_run_ups_name_diagnostic") as diag:
+            _run_one_iteration(monitor, (False, {}, "Network error"))
+        diag.assert_called_once()
+
+    @pytest.mark.unit
+    def test_diagnostic_skipped_mid_episode(self, tmp_path):
+        """It runs only when connection_error_count reaches 1 (episode start)."""
+        monitor = make_monitor(tmp_path)
+        monitor.state.previous_status = "OL CHRG"
+        monitor.state.connection_state = "GRACE_PERIOD"
+        monitor.state.connection_error_count = 5
+        with patch.object(monitor, "_run_ups_name_diagnostic") as diag:
+            _run_one_iteration(monitor, (False, {}, "Network error"))
+        diag.assert_not_called()
+
+    @pytest.mark.unit
+    def test_diagnostic_skipped_on_fsb_path_while_on_battery(self, tmp_path):
+        """The up-to-10s discovery probe must never sit in front of an FSB:
+        on battery with tolerance=1, the shutdown fires and discovery is
+        skipped entirely."""
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = False
+        monitor.config.ups.max_stale_data_tolerance = 1
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.connection_state = "OK"
+        monitor.state.connection_error_count = 0
+        with patch.object(monitor, "_run_ups_name_diagnostic") as diag, \
+             patch.object(monitor, "_execute_shutdown_sequence") as exec_seq:
+            _run_one_iteration(monitor, (False, {}, "Network error"))
+        diag.assert_not_called()
+        exec_seq.assert_called_once()
+
+
+class TestFormatUpscError:
+    """`_format_upsc_error` joins real error lines from both streams, drops the
+    benign SSL-init noise, de-duplicates, and never resurfaces filtered noise."""
+
+    @pytest.mark.unit
+    def test_filters_blank_dedups_and_joins_both_streams(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        out = monitor._format_upsc_error(
+            stdout="Error: Unknown UPS\n\nError: Unknown UPS\n",   # blank + dup
+            stderr="Init SSL without certificate database\n"
+                   "Error: Driver not connected\n",
+        )
+        # stderr is scanned first; the SSL line is dropped; the duplicate
+        # stdout line is collapsed.
+        assert out == "Error: Driver not connected | Error: Unknown UPS"
+
+    @pytest.mark.unit
+    def test_only_ssl_noise_falls_back_without_resurfacing_it(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        out = monitor._format_upsc_error(
+            stdout="", stderr="Init SSL without certificate database\n")
+        assert out == "upsc exited without output"
 
 
 class TestRecordRemoteHealthEvent:

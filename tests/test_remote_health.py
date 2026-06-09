@@ -621,7 +621,7 @@ def test_loopback_auto_populates_expected_identity_from_etc_machine_id(tmp_path)
     config.remote_health.enabled = True
     server = _make_loopback_server(expected_host_identity=None)
 
-    with patch("eneru.remote_health._read_container_machine_id",
+    with patch("eneru.remote_health._read_identity_from_path",
                return_value="aabbcc-host-id"):
         RemoteHealthManager(
             config=config,
@@ -635,13 +635,65 @@ def test_loopback_auto_populates_expected_identity_from_etc_machine_id(tmp_path)
 
 
 @pytest.mark.unit
+def test_loopback_auto_populates_expected_identity_from_custom_cat_path(tmp_path):
+    """Issue #70: custom ``host_identity_command: cat /path`` should use
+    the same container-side path for the expected identity."""
+    config = Config()
+    config.remote_health.enabled = True
+    marker = tmp_path / "eneru-machine-id"
+    marker.write_text("alpine-host-id\n", encoding="utf-8")
+    server = _make_loopback_server(
+        host_identity_command=f"cat {marker}",
+        expected_host_identity=None,
+    )
+
+    RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+    )
+
+    assert server.expected_host_identity == "alpine-host-id"
+
+
+@pytest.mark.unit
+def test_loopback_non_cat_identity_command_requires_explicit_expected(tmp_path):
+    """Non-``cat /path`` commands cannot be safely inferred locally."""
+    config = Config()
+    config.remote_health.enabled = True
+    server = _make_loopback_server(
+        host_identity_command="hostname",
+        expected_host_identity=None,
+    )
+
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+    )
+
+    assert server.expected_host_identity is None
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(True, "", 8)):
+        rows = manager.check_once()
+    assert rows[0]["status"] == REMOTE_HEALTH_DEGRADED
+    assert "expected_host_identity" in rows[0]["last_error"]
+
+
+@pytest.mark.unit
 def test_loopback_explicit_expected_identity_not_overwritten(tmp_path):
     """If the operator set it explicitly, the auto-populate must not clobber."""
     config = Config()
     config.remote_health.enabled = True
     server = _make_loopback_server(expected_host_identity="operator-set-id")
 
-    with patch("eneru.remote_health._read_container_machine_id",
+    with patch("eneru.remote_health._read_expected_identity_for_command",
                return_value="DIFFERENT"):
         RemoteHealthManager(
             config=config,
@@ -737,7 +789,7 @@ def test_empty_machine_id_fails_with_setup_hint(tmp_path):
     config.remote_health.enabled = True
     config.remote_health.failure_threshold = 1
     server = _make_loopback_server(expected_host_identity=None)
-    with patch("eneru.remote_health._read_container_machine_id", return_value=None):
+    with patch("eneru.remote_health._read_identity_from_path", return_value=None):
         manager = RemoteHealthManager(
             config=config,
             group_label="Rack",
@@ -961,34 +1013,56 @@ def test_identity_probe_mismatch_reports_bind_mount_hint(tmp_path):
 
 
 @pytest.mark.unit
-def test_read_container_machine_id_returns_value_when_readable(monkeypatch):
-    """When /etc/machine-id is readable, _read_container_machine_id
-    returns its stripped contents (remote_health.py lines 222-223)."""
+def test_read_identity_from_path_returns_value_when_readable(tmp_path):
+    """A readable identity file yields its stripped contents."""
     from eneru import remote_health as rh
-    fake_value = "machine-id-from-bind-mount\n"
-
-    class _FakePath:
-        def __init__(self, p): self.p = p
-        def read_text(self, encoding="utf-8"):
-            return fake_value
-
-    monkeypatch.setattr(rh, "Path", _FakePath)
-    assert rh._read_container_machine_id() == "machine-id-from-bind-mount"
+    marker = tmp_path / "marker"
+    marker.write_text("machine-id-from-bind-mount\n", encoding="utf-8")
+    assert rh._read_identity_from_path(marker) == "machine-id-from-bind-mount"
 
 
 @pytest.mark.unit
-def test_read_container_machine_id_returns_none_on_oserror(monkeypatch):
-    """OSError reading /etc/machine-id yields None
-    (remote_health.py lines 224-225)."""
+def test_read_identity_from_path_returns_none_on_oserror(tmp_path):
+    """A missing/unreadable identity file yields None (OSError swallowed)."""
     from eneru import remote_health as rh
+    assert rh._read_identity_from_path(tmp_path / "does-not-exist") is None
 
-    class _FakePath:
-        def __init__(self, p): self.p = p
-        def read_text(self, encoding="utf-8"):
-            raise OSError("file not found")
 
-    monkeypatch.setattr(rh, "Path", _FakePath)
-    assert rh._read_container_machine_id() is None
+@pytest.mark.unit
+def test_read_identity_from_path_returns_none_when_empty(tmp_path):
+    """An empty file yields None (blank machine-id is not a valid identity)."""
+    from eneru import remote_health as rh
+    marker = tmp_path / "empty"
+    marker.write_text("", encoding="utf-8")
+    assert rh._read_identity_from_path(marker) is None
+
+
+@pytest.mark.unit
+def test_identity_path_from_cat_command_accepts_simple_cat():
+    """`cat /abs/path` (with or without a full path to cat) is recognized."""
+    from eneru import remote_health as rh
+    from pathlib import Path
+    assert rh._identity_path_from_cat_command(
+        "cat /etc/machine-id") == Path("/etc/machine-id")
+    assert rh._identity_path_from_cat_command(
+        "/bin/cat /etc/eneru-machine-id") == Path("/etc/eneru-machine-id")
+
+
+@pytest.mark.unit
+def test_identity_path_from_cat_command_rejects_non_cat_and_relative():
+    """Anything that isn't exactly `cat <absolute-path>` is rejected."""
+    from eneru import remote_health as rh
+    assert rh._identity_path_from_cat_command("hostname") is None          # 1 token
+    assert rh._identity_path_from_cat_command("cat a b") is None           # != 2 tokens
+    assert rh._identity_path_from_cat_command("echo /etc/machine-id") is None  # not cat
+    assert rh._identity_path_from_cat_command("cat relative/path") is None     # relative
+
+
+@pytest.mark.unit
+def test_identity_path_from_cat_command_handles_bad_quoting():
+    """A command that fails shell-tokenization yields None, not an exception."""
+    from eneru import remote_health as rh
+    assert rh._identity_path_from_cat_command('cat "unterminated') is None
 
 
 @pytest.mark.unit

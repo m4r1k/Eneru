@@ -218,6 +218,49 @@ remote_servers:
     expected_host_identity: "host-rack-3a-2026-05"   # any stable string
 ```
 
+### No systemd / no machine-id (Alpine, consumer hosts)
+
+`/etc/machine-id` is created by systemd (or `dbus`) and is the expected,
+enterprise-tested baseline. Some hosts don't have it — most commonly
+**Alpine Linux** and other non-systemd / musl setups. There, the default
+`cat /etc/machine-id` probe has nothing to read, and the loopback fails
+closed. The fix is a **stable marker file** you create once and bind-mount
+at the **same path** on both sides.
+
+1. On the host, generate a stable identity (run once; it persists):
+
+   ```sh
+   cat /proc/sys/kernel/random/uuid | tr -d '-' > /etc/eneru-machine-id
+   ```
+
+2. Bind-mount that file read-only into the container **at the same path**,
+   and point the probe at it:
+
+   ```sh
+   docker run ... \
+     -v /etc/eneru-machine-id:/etc/eneru-machine-id:ro \
+     ...
+   ```
+
+   ```yaml
+   remote_servers:
+     - is_host_loopback: true
+       host_identity_command: "cat /etc/eneru-machine-id"
+   ```
+
+That's all. Because `host_identity_command` is a simple `cat /absolute/path`,
+Eneru reads the **same path locally** inside the container and auto-populates
+`expected_host_identity` for you — no need to copy the value into YAML. The
+SSH probe reads the host's copy, the local read sees the bind-mounted copy,
+the two match, and the guard passes. (If you use a non-`cat` command Eneru
+cannot infer the expected output, so set `expected_host_identity` explicitly,
+as in the marker-file example above.)
+
+> The same `:ro` rule applies as for `/etc/machine-id`: never add `:Z`/`:z`
+> to a host file other services also read. A file you created solely for
+> Eneru (like `/etc/eneru-machine-id`) is safe to relabel, but plain `:ro`
+> is all you need.
+
 ## Network mode decision table
 
 | Container network mode | Loopback `host:` value | Notes |

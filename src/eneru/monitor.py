@@ -175,6 +175,15 @@ class UPSGroupMonitor(
         self._slow_nut_poll_streak = 0
         self._slow_nut_poll_notified = False
 
+        # Effective target passed to ``upsc`` (``upsname@host:port``). Normally
+        # identical to ``config.ups.name``, but the autodiscovery diagnostic may
+        # self-heal it to the real UPS name when the configured one is wrong
+        # (issue #71). Only ``_run_upsc`` reads this; every display/log/state
+        # path keeps using ``config.ups.name`` so operator-facing identity and
+        # on-disk state never fragment.
+        self._poll_target = self.config.ups.name
+        self._ups_name_autocorrected = False
+
     def _start_stats(self):
         """Open the per-UPS stats DB (if not already open) and start the
         background writer.
@@ -915,7 +924,7 @@ class UPSGroupMonitor(
         exit_code, stdout, stderr = self._run_upsc([], full_poll=True)
 
         if exit_code != 0:
-            return False, {}, stderr
+            return False, {}, self._format_upsc_error(stdout, stderr)
 
         if "Data stale" in stdout or "Data stale" in stderr:
             return False, {}, "Data stale"
@@ -952,12 +961,140 @@ class UPSGroupMonitor(
             return False
 
     def _run_upsc(self, args: List[str], *, full_poll: bool) -> Tuple[int, str, str]:
-        cmd = ["upsc", self.config.ups.name] + list(args)
+        cmd = ["upsc", self._poll_target, *args]
         started = time.monotonic()
-        result = run_command(cmd)
+        # NUT's NSS-backed libupsclient can emit "Init SSL without certificate
+        # database" on stderr even for plain read-only polling. Suppress that
+        # upstream noise so real connection/UPS-name errors stay visible.
+        result = run_command(cmd, env_overrides={"NUT_QUIET_INIT_SSL": "true"})
         elapsed = time.monotonic() - started
         self._record_upsc_latency(elapsed, cmd, full_poll=full_poll)
         return result
+
+    def _format_upsc_error(self, stdout: str, stderr: str) -> str:
+        """Return an operator-facing error from a failed ``upsc`` call."""
+        parts = []
+        for stream in (stderr, stdout):
+            for line in (stream or "").splitlines():
+                text = line.strip()
+                if not text:
+                    continue
+                if text == "Init SSL without certificate database":
+                    continue
+                if text not in parts:
+                    parts.append(text)
+        if parts:
+            return " | ".join(parts)
+        # All output was blank or filtered noise (e.g. only the SSL-init line):
+        # do not resurface what we just stripped.
+        return "upsc exited without output"
+
+    @staticmethod
+    def _parse_nut_host(target: str) -> str:
+        """Extract the ``host[:port]`` part of an ``upsname@host:port`` target.
+
+        A NUT UPS name cannot contain ``@``, so the first ``@`` separates the
+        UPS name from the host spec. Returns ``localhost`` when no host is
+        given (bare ``upsname``), matching NUT's own default.
+        """
+        if "@" in (target or ""):
+            host = target.split("@", 1)[1].strip()
+            return host or "localhost"
+        return "localhost"
+
+    @staticmethod
+    def _parse_nut_name(target: str) -> str:
+        """Extract the UPS-name part (before ``@``) of a poll target."""
+        return (target or "").split("@", 1)[0].strip()
+
+    def _discover_ups_names(self, host: str) -> List[str]:
+        """List the UPS names a NUT server actually exposes via ``upsc -l``.
+
+        Called directly (not through ``_run_upsc``, which would prepend the
+        configured UPS name). Returns the discovered names, or an empty list if
+        the server is unreachable / returns nothing. SSL-init noise is silenced
+        and connection/SSL banner lines are filtered out so only bare UPS names
+        (no whitespace, no ``:``) survive.
+        """
+        exit_code, stdout, _ = run_command(
+            ["upsc", "-l", host],
+            timeout=10,
+            env_overrides={"NUT_QUIET_INIT_SSL": "true"},
+        )
+        if exit_code != 0:
+            return []
+        names = []
+        for line in (stdout or "").splitlines():
+            token = line.strip()
+            # `upsc -l` prints bare UPS names (ups.conf section names) one per
+            # line on stdout; SSL/connection banners go to stderr and are
+            # already discarded above. This filter is defensive against any
+            # unexpected stdout decoration: real names never contain whitespace
+            # or a colon, so dropping such lines cannot lose a valid name.
+            if not token or " " in token or "\t" in token or ":" in token:
+                continue
+            if token not in names:
+                names.append(token)
+        return names
+
+    def _run_ups_name_diagnostic(self, error_msg: str) -> None:
+        """On a hard NUT connection failure, help the operator (issue #71).
+
+        The benign ``Init SSL without certificate database`` line used to mask
+        the real cause, which is most often a wrong ``ups.name`` — e.g. a NUT
+        login *username* placed where the UPS *device name* belongs. We probe
+        the server with ``upsc -l`` to list the real names and:
+          * self-heal the poll target when exactly one UPS exists and the
+            configured name is not it (unambiguous), or
+          * tell the operator which names are available otherwise.
+        """
+        host = self._parse_nut_host(self._poll_target)
+        configured_name = self._parse_nut_name(self._poll_target)
+        names = self._discover_ups_names(host)
+
+        if not names:
+            self._log_message(
+                f"🔎  Could not list UPS names on {host} (server unreachable, "
+                f"access-restricted, or network issue), so the configured name "
+                f"'{configured_name}' could not be verified. Check that NUT "
+                f"(upsd) is running and reachable there."
+            )
+            return
+
+        # Educational note for the classic username-vs-UPS-name mix-up.
+        name_hint = (
+            "Note: the value before '@' in ups.name must be the UPS device "
+            "name from the server's ups.conf, not a NUT login username. If you "
+            "meant it as a control credential, set nut_control.username instead."
+        )
+
+        if configured_name in names:
+            self._log_message(
+                f"🔎  UPS '{configured_name}' exists on {host} "
+                f"(available: {', '.join(names)}), so this failure is likely "
+                f"access control (ERR ACCESS-DENIED) or transient, not the "
+                f"UPS name. Last error: {error_msg}"
+            )
+            return
+
+        if len(names) == 1 and not self._ups_name_autocorrected:
+            discovered = names[0]
+            self._poll_target = f"{discovered}@{host}"
+            self._ups_name_autocorrected = True
+            self._log_message(
+                f"⚠️  UPS '{configured_name}' was not found on {host}; the only "
+                f"UPS there is '{discovered}'. Auto-correcting this session to "
+                f"poll '{self._poll_target}'. Please fix ups.name in your config "
+                f"so this is not needed on restart (NUT control commands keep "
+                f"using the configured name until then). {name_hint}"
+            )
+            return
+
+        self._log_message(
+            f"⚠️  UPS '{configured_name}' was not found on {host}. Available "
+            f"UPS names: {', '.join(names)}. Set ups.name to one of these "
+            f"(as '<name>@{host}'). {name_hint}"
+        )
 
     def _record_upsc_latency(self, elapsed: float, cmd: List[str], *, full_poll: bool):
         now = time.time()
@@ -1975,6 +2112,16 @@ class UPSGroupMonitor(
                             f"(Attempt {self.state.connection_error_count}/"
                             f"{tolerance}). Output: {error_msg}"
                         )
+                    # Diagnose once per failure episode (the counter resets to 0
+                    # on the next successful poll): list the server's real UPS
+                    # names and self-heal an obviously-wrong ups.name (issue #71).
+                    # Skip while On Battery: the discovery subprocess (up to 10s)
+                    # must never sit in front of an FSB emergency shutdown, and a
+                    # wrong ups.name could not have produced an "OB" status in the
+                    # first place, so there is nothing to discover on that path.
+                    if (self.state.connection_error_count == 1
+                            and "OB" not in self.state.previous_status):
+                        self._run_ups_name_diagnostic(error_msg)
                     self.state.stale_data_count = 0
                     # Off-battery: first hard error feeds the grace period as
                     # before. On-battery (H3): require max_stale_data_tolerance

@@ -13,7 +13,9 @@ config and stats history carry forward.
 - A working NUT server (`upsc <UPS@host>` must answer).
 - `/etc/machine-id` populated on the host. Most systemd distros put
   one there at first boot; if `cat /etc/machine-id` returns empty,
-  run `sudo systemd-machine-id-setup`.
+  run `sudo systemd-machine-id-setup`. No systemd (Alpine, musl)? There
+  is no `/etc/machine-id` — use a marker file instead, see
+  [No systemd / no machine-id](containers-kubernetes.md#no-systemd-no-machine-id-alpine-consumer-hosts).
 - Root access on the host long enough to authorize the loopback SSH key
   and create the writable directories below.
 

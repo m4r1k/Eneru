@@ -95,6 +95,8 @@ container):
   the container generates its own random machine-id, the identity
   probe fails on the first health check, the loopback is marked
   FAILED, and `/ready` returns 503. **Fails closed by construction.**
+  No `/etc/machine-id` (Alpine, non-systemd)? Use a marker file —
+  [No systemd / no machine-id](containers-kubernetes.md#no-systemd-no-machine-id-alpine-consumer-hosts).
 - `-v /srv/eneru/ssh:/var/lib/eneru/ssh:ro` — SSH private key for the
   loopback. Defaults to `/var/lib/eneru/ssh/id_loopback` inside the
   container; the host's `authorized_keys` for the matching user holds

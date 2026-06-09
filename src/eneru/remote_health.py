@@ -5,6 +5,7 @@ and never execute configured pre-shutdown or final shutdown commands.
 """
 
 import json
+import shlex
 import time
 import threading
 from dataclasses import dataclass, asdict
@@ -203,40 +204,72 @@ def run_loopback_identity_probe(
         ), latency_ms
     expected = (server.expected_host_identity or "").strip()
     if not expected:
+        source = _describe_identity_source(server.host_identity_command)
         return False, (
-            "host identity unknown: container-side /etc/machine-id was not "
+            f"host identity unknown: container-side {source} was not "
             "readable at startup and no explicit expected_host_identity was "
-            "configured. Bind-mount the host's /etc/machine-id read-only "
-            "(-v /etc/machine-id:/etc/machine-id:ro for Docker; hostPath "
-            "volume for Kubernetes). If /etc/machine-id is empty on the "
-            "host, initialize it with systemd-machine-id-setup."
+            "configured. Bind-mount the host identity file read-only at the "
+            "same container path or set expected_host_identity explicitly. "
+            "If using the default /etc/machine-id path and it is empty on "
+            "the host, initialize it with systemd-machine-id-setup."
         ), latency_ms
     if actual != expected:
+        source = _describe_identity_source(server.host_identity_command)
         return False, (
             f"host identity mismatch: probe returned {actual!r} but expected "
-            f"{expected!r}. Most likely cause: /etc/machine-id is NOT "
-            "bind-mounted from the host into the container, so Eneru sees a "
-            "different machine-id locally than what the loopback SSH target "
-            "reports. Fix: bind-mount /etc/machine-id from the host "
-            "(-v /etc/machine-id:/etc/machine-id:ro for Docker)."
+            f"{expected!r}. Most likely cause: {source} is NOT bind-mounted "
+            "from the host into the container, so Eneru sees a different "
+            "identity locally than what the loopback SSH target reports. "
+            "Fix: bind-mount the same host identity file read-only into the "
+            "container or set expected_host_identity explicitly."
         ), latency_ms
     return True, "", latency_ms
 
 
-def _read_container_machine_id() -> Optional[str]:
-    """Read the container-side /etc/machine-id, or None if unavailable.
-
-    Used to auto-populate ``RemoteServerConfig.expected_host_identity`` on
-    loopback entries. When the operator bind-mounts the host's machine-id
-    at the same path, this value matches what the host's SSH probe will
-    return — the identity guard passes. When the bind-mount is missing,
-    this returns the container's own (random) machine-id and the guard
-    fails closed on the first probe.
-    """
+def _identity_path_from_cat_command(command: str) -> Optional[Path]:
+    """Return the local path for simple ``cat /path`` identity probes."""
     try:
-        return Path("/etc/machine-id").read_text(encoding="utf-8").strip() or None
+        parts = shlex.split(command or "")
+    except ValueError:
+        return None
+    if len(parts) != 2:
+        return None
+    if Path(parts[0]).name != "cat":
+        return None
+    path = Path(parts[1])
+    if not path.is_absolute():
+        return None
+    return path
+
+
+def _describe_identity_source(command: str) -> str:
+    path = _identity_path_from_cat_command(command)
+    if path is not None:
+        return str(path)
+    return "the configured host_identity_command output"
+
+
+def _read_identity_from_path(path: Path) -> Optional[str]:
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
     except OSError:
         return None
+
+
+def _read_expected_identity_for_command(command: str) -> Optional[str]:
+    """Auto-populate expected identity for simple local ``cat /path`` probes.
+
+    The loopback identity check compares what SSH reports from the host with
+    what the container can read locally. For the default ``cat /etc/machine-id``
+    and for Alpine-style marker files mounted at the same path, reading the
+    same local path gives the expected value without asking the operator to
+    duplicate it in YAML. Non-``cat /path`` commands still require an explicit
+    ``expected_host_identity`` because Eneru cannot safely infer their output.
+    """
+    path = _identity_path_from_cat_command(command)
+    if path is None:
+        return None
+    return _read_identity_from_path(path)
 
 
 class RemoteHealthManager:
@@ -288,7 +321,9 @@ class RemoteHealthManager:
         # clear bind-mount hint.
         for server in self.servers:
             if server.is_host_loopback is True and not server.expected_host_identity:
-                server.expected_host_identity = _read_container_machine_id()
+                server.expected_host_identity = _read_expected_identity_for_command(
+                    server.host_identity_command
+                )
         self._statuses: Dict[str, RemoteHealthStatus] = {
             self._key(server): RemoteHealthStatus(
                 group=group_label,
@@ -383,12 +418,14 @@ class RemoteHealthManager:
 
         probe = self._validated_probe_command
         if server.is_host_loopback is True and not (server.expected_host_identity or "").strip():
+            source = _describe_identity_source(server.host_identity_command)
             success, error, latency_ms = False, (
-                "host identity unknown: container-side /etc/machine-id was not "
+                f"host identity unknown: container-side {source} was not "
                 "readable at startup and no explicit expected_host_identity was "
-                "configured. Bind-mount the host's /etc/machine-id read-only. "
-                "If /etc/machine-id is empty on the host, initialize it with "
-                "systemd-machine-id-setup."
+                "configured. Bind-mount the host identity file read-only at the "
+                "same container path or set expected_host_identity explicitly. "
+                "If using the default /etc/machine-id path and it is empty on "
+                "the host, initialize it with systemd-machine-id-setup."
             ), 0
         elif probe is None:
             success, error, latency_ms = False, "unsafe probe command rejected", 0
