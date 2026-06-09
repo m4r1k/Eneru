@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.0-rc1] - 2026-06-09
+
+### Added
+
+- **NUT name autodiscovery (issue #71).** When a poll can't reach the configured
+  UPS, Eneru now runs `upsc -l <host>` to list the UPS names the server actually
+  exposes and logs them. If exactly one UPS exists and the configured name is not
+  it (the classic case of a NUT *login username* placed where the UPS *device
+  name* belongs), Eneru self-heals for the session and tells you to fix
+  `ups.name`. With multiple UPSes it lists the choices instead of guessing. The
+  operator-configured name, display, and on-disk state are never mutated.
+
+### Changed
+
+- **`expected_host_identity` auto-populates from any `cat /absolute/path`
+  (issue #70).** Previously the container-side identity read was hardcoded to
+  `/etc/machine-id`, so marker-file setups had to duplicate the value or mount
+  over `/etc/machine-id`. Now a simple `host_identity_command: "cat /path"` reads
+  the same path locally and fills in the expected value automatically. Non-`cat`
+  commands still require an explicit `expected_host_identity`.
+- **Quieter NUT polling.** `upsc` runs with `NUT_QUIET_INIT_SSL=true` and the
+  benign `Init SSL without certificate database` line is filtered from failure
+  output, so real errors stay visible.
+- **Docs for non-systemd / no-`machine-id` hosts.** New end-to-end marker-file
+  recipe for Alpine and other consumer/non-systemd setups, linked from the
+  install, migration, and troubleshooting pages. deb and rpm remain the published
+  packages; the OCI image stays a first-class citizen.
+
 ## [6.0.0] - 2026-06-04
 
 v6.0 turns Eneru from a shutdown daemon with observability into an operator tool
