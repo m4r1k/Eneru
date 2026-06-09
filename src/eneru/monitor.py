@@ -961,7 +961,7 @@ class UPSGroupMonitor(
             return False
 
     def _run_upsc(self, args: List[str], *, full_poll: bool) -> Tuple[int, str, str]:
-        cmd = ["upsc", self._poll_target] + list(args)
+        cmd = ["upsc", self._poll_target, *args]
         started = time.monotonic()
         # NUT's NSS-backed libupsclient can emit "Init SSL without certificate
         # database" on stderr even for plain read-only polling. Suppress that
