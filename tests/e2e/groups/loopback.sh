@@ -414,10 +414,16 @@ YAML
     # missing/wrong key the probe would land in FAILED, never HEALTHY.
     # collect_status serializes with sort_keys=True, so within each
     # remoteHealth entry "server" sits immediately before "status".
+    # Poll for up to 75s (150 tries x 0.5s): the startup probe normally
+    # marks HEALTHY within seconds, but remote_health re-probes only every
+    # max(60, interval) seconds, so the window must clear one full retry
+    # cycle to survive a missed first probe instead of flaking. A match
+    # returns immediately, so this costs nothing on the happy path.
     if ! poll_http_pattern \
         "http://127.0.0.1:${port}/api/v1/ups" \
         "/tmp/e2e-strict-known-hosts-${attempt}-health.json" \
-        '"server"[[:space:]]*:[[:space:]]*"strict-ssh-target"[[:space:]]*,[[:space:]]*"status"[[:space:]]*:[[:space:]]*"HEALTHY"'; then
+        '"server"[[:space:]]*:[[:space:]]*"strict-ssh-target"[[:space:]]*,[[:space:]]*"status"[[:space:]]*:[[:space:]]*"HEALTHY"' \
+        150; then
       echo "FAIL: strict known_hosts remote SSH probe never reached HEALTHY after ${attempt} start"
       cat "/tmp/e2e-strict-known-hosts-${attempt}-health.json" || true
       docker logs "$name" || true
