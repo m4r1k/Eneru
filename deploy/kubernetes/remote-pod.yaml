@@ -28,6 +28,11 @@ spec:
         - 0.0.0.0
         - --api-port
         - "9191"
+      env:
+        # /var/lib/eneru/ssh is a read-only Secret mount in Kubernetes.
+        # Store learned accept-new host keys on the writable state volume.
+        - name: ENERU_SSH_KNOWN_HOSTS_FILE
+          value: /var/lib/eneru/known_hosts
       ports:
         - name: http
           containerPort: 9191
@@ -68,6 +73,10 @@ spec:
     - name: config
       configMap:
         name: eneru-config
+    # Ephemeral: fine for a throwaway Pod, but accept-new host-key trust
+    # (/var/lib/eneru/known_hosts) and the stats/auth DBs are re-learned/reset
+    # on every restart. For persistence use a PersistentVolumeClaim here, as in
+    # remote-deployment.yaml.
     - name: state
       emptyDir: {}
     - name: runtime

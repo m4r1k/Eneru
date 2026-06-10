@@ -6,6 +6,10 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 
+CONTAINER_DEFAULT_KNOWN_HOSTS_FILE = "/var/lib/eneru/ssh/known_hosts"
+KNOWN_HOSTS_ENV = "ENERU_SSH_KNOWN_HOSTS_FILE"
+
+
 def is_numeric(value: Any) -> bool:
     """Check if a value is numeric (int or float).
 
@@ -64,6 +68,74 @@ def run_command(
         return 127, "", f"Command not found: {cmd[0]}"
     except Exception as e:
         return 1, "", str(e)
+
+
+def running_in_container() -> bool:
+    """Best-effort check for Docker/Podman/Kubernetes runtime context."""
+    if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+        return True
+    if os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return True
+    if os.environ.get("container", "").strip():
+        return True
+    try:
+        with open("/proc/1/cgroup", encoding="utf-8") as fh:
+            cgroup_text = fh.read()
+    except OSError:
+        cgroup_text = ""
+    return any(marker in cgroup_text for marker in (
+        "docker", "kubepods", "containerd", "lxc",
+    ))
+
+
+def ssh_option_configured(ssh_options: List[str], option_name: str) -> bool:
+    """Return True when an OpenSSH option is already set by the user."""
+    needle = option_name.lower()
+    pending_o = False
+    for opt in ssh_options:
+        if not isinstance(opt, str):
+            continue
+        value = opt.strip()
+        lower = value.lower()
+        if pending_o:
+            if _ssh_option_matches(lower, needle):
+                return True
+            pending_o = False
+            continue
+        if lower == "-o":
+            pending_o = True
+            continue
+        if lower.startswith("-o "):
+            value = value.split(None, 1)[1]
+            lower = value.lower()
+        if _ssh_option_matches(lower, needle):
+            return True
+    return False
+
+
+def _ssh_option_matches(value: str, option_name: str) -> bool:
+    return (
+        value == option_name
+        or value.startswith(f"{option_name}=")
+        or value.startswith(f"{option_name} ")
+    )
+
+
+def runtime_default_ssh_options(ssh_options: List[str]) -> List[str]:
+    """Return SSH defaults that depend on the runtime environment.
+
+    Bare-metal installs should use the running user's normal OpenSSH trust
+    store. Containers keep Eneru's documented SSH mount contract instead:
+    `/srv/eneru/ssh` on the host maps to `/var/lib/eneru/ssh` in the
+    container, so accept-new host keys are written there unless an explicit
+    override is configured.
+    """
+    known_hosts = os.environ.get(KNOWN_HOSTS_ENV, "").strip()
+    if not known_hosts and running_in_container():
+        known_hosts = CONTAINER_DEFAULT_KNOWN_HOSTS_FILE
+    if known_hosts and not ssh_option_configured(ssh_options, "UserKnownHostsFile"):
+        return [f"UserKnownHostsFile={known_hosts}"]
+    return []
 
 
 def command_exists(cmd: str) -> bool:

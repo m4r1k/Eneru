@@ -37,7 +37,7 @@ docker run -d --name eneru \
   -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro \
   -v /srv/eneru/state:/var/lib/eneru \
   -v /srv/eneru/run:/var/run/eneru \
-  -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro \
+  -v /srv/eneru/ssh:/var/lib/eneru/ssh:rw \
   ghcr.io/m4r1k/eneru:latest \
   run --config /etc/ups-monitor/config.yaml \
   --api --api-bind 0.0.0.0 --api-port 9191
@@ -56,9 +56,8 @@ ups:
         host: "nas.example.lan"
         user: "ups"
         ssh_key_path: "/var/lib/eneru/ssh/id_ups_shutdown"
-        ssh_options:
-          - "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
-          - "StrictHostKeyChecking=yes"
+        # No ssh_options needed: Eneru defaults to StrictHostKeyChecking=
+        # accept-new and records keys in /var/lib/eneru/ssh/known_hosts.
         shutdown_command: "sudo shutdown -h now"
 
 local_shutdown:
@@ -86,7 +85,7 @@ docker run -d --name eneru \
   -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro \
   -v /srv/eneru/state:/var/lib/eneru \
   -v /srv/eneru/run:/var/run/eneru \
-  -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro \
+  -v /srv/eneru/ssh:/var/lib/eneru/ssh:rw \
   ghcr.io/m4r1k/eneru:latest
 ```
 
@@ -158,28 +157,16 @@ This matches the synthesized defaults: `user: root`,
 `shutdown_command: "shutdown -h now"`, and key path
 `/var/lib/eneru/ssh/id_loopback`.
 
-For ordinary remote targets from the container, put their trusted host
-keys in the same bind-mounted directory instead of accepting them from
-inside a disposable container:
-
-```bash
-# On the Eneru host:
-ssh-keyscan -H nas.example.lan > /srv/eneru/ssh/known_hosts
-chown 10001:10001 /srv/eneru/ssh/known_hosts
-chmod 0644 /srv/eneru/ssh/known_hosts
-ssh-keygen -l -f /srv/eneru/ssh/known_hosts
-```
-
-Verify the printed fingerprint out-of-band, then configure the remote
-entry with `UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts`. The
-remote-only sample at the top of this page shows the full shape.
-With `StrictHostKeyChecking=yes`, the file can stay read-only in the
-container because SSH never appends new keys. Add new remotes by
-updating `/srv/eneru/ssh/known_hosts` on the host after verifying the
-new fingerprint. If you deliberately choose
-`StrictHostKeyChecking=accept-new`, then the mounted `known_hosts` file
-must be writable by uid `10001`; that is more convenient, but it lets
-the daemon trust a first-seen key during an outage path.
+Ordinary remote targets need no host-key setup. Eneru defaults remotes to
+`StrictHostKeyChecking=accept-new`, so on the first probe SSH records each
+host key in `/var/lib/eneru/ssh/known_hosts` and pins it; a later key
+*change* fails closed. Keep `/srv/eneru/ssh` persistent and writable, while
+the private key file itself stays mode `0400`. Kubernetes uses a PVC-backed
+known_hosts path instead because `/var/lib/eneru/ssh` is a read-only Secret
+mount there. `accept-new` trusts the first connection, so do that first start
+on a network you trust. Confirm with
+`curl -s http://localhost:9191/api/v1/ups | jq '.ups[].remoteHealth'`
+(every remote should read `"status": "HEALTHY"`).
 
 ### Option B: dedicated user + sudoers
 
@@ -340,7 +327,7 @@ podman run -d --name eneru \
   -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
   -v /srv/eneru/state:/var/lib/eneru:Z \
   -v /srv/eneru/run:/var/run/eneru:Z \
-  -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z \
+  -v /srv/eneru/ssh:/var/lib/eneru/ssh:Z \
   ghcr.io/m4r1k/eneru:latest
 ```
 

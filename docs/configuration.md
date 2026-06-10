@@ -472,7 +472,7 @@ mounts:
 | `shutdown_command` | `sudo shutdown -h now` | Final shutdown command |
 | `use_sudo` | `false` | Prefix generated privileged actions and non-sudo final shutdown commands with `sudo -n`. Useful for non-root loopback or remote users with NOPASSWD sudo |
 | `ssh_key_path` | `null` | Optional SSH private-key path, useful for container/Kubernetes volume mounts |
-| `ssh_options` | `[]` | Extra SSH options. For containers, prefer `UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts` over accepting keys inside the container. Avoid disabling host-key checks in production |
+| `ssh_options` | `[]` | Extra SSH options. Eneru defaults each remote to `StrictHostKeyChecking=accept-new` (learns and pins the host key on first use; bare metal uses the running user's `~/.ssh/known_hosts`, Docker/Podman uses `/var/lib/eneru/ssh/known_hosts`, Kubernetes samples set a PVC-backed path), so no entry is needed for normal use. Set your own `StrictHostKeyChecking` or `UserKnownHostsFile` to override; avoid `StrictHostKeyChecking=no` in production |
 | `pre_shutdown_commands` | `[]` | Pre-shutdown actions or commands. For loopback entries Eneru generates these from the local config — don't duplicate |
 | `pre_shutdown_commands[].mounts` | `[]` | Mounts for `action: unmount_filesystems` on ordinary remote servers. Loopback entries derive mounts from `filesystems.unmount.mounts` |
 | `shutdown_order` | unset | Explicit phase. Same value runs in parallel; higher values run later |

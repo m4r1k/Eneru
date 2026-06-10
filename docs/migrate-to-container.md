@@ -136,16 +136,15 @@ cp /root/.ssh/id_rsa.pub /srv/eneru/ssh/id_rsa.pub
 chown 10001:10001 /srv/eneru/ssh/id_rsa /srv/eneru/ssh/id_rsa.pub
 chmod 0400 /srv/eneru/ssh/id_rsa
 
-# Preserve the host-key trust store too. If /root/.ssh/known_hosts is
-# missing, build a new one from the remote hosts named in your config.
+# Preserve the host-key trust store so your already-verified remotes stay
+# trusted after the move. Docker/Podman containers keep SSH trust in the
+# /var/lib/eneru/ssh mount. If it is absent, skip this: accept-new records
+# each key on the first probe.
 if [ -f /root/.ssh/known_hosts ]; then
   cp /root/.ssh/known_hosts /srv/eneru/ssh/known_hosts
-else
-  ssh-keyscan -H 192.168.x.y > /srv/eneru/ssh/known_hosts
+  chown 10001:10001 /srv/eneru/ssh/known_hosts
+  chmod 0600 /srv/eneru/ssh/known_hosts
 fi
-chown 10001:10001 /srv/eneru/ssh/known_hosts
-chmod 0644 /srv/eneru/ssh/known_hosts
-ssh-keygen -l -f /srv/eneru/ssh/known_hosts
 ```
 
 Then add `ssh_key_path` to each existing `remote_servers` entry in your
@@ -158,24 +157,22 @@ remote_servers:
     host: 192.168.x.y
     user: nas-admin
     ssh_key_path: /var/lib/eneru/ssh/id_rsa   # ADD THIS
-    ssh_options:
-      - "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
-      - "StrictHostKeyChecking=yes"
     shutdown_command: "shutdown -h now"
 ```
 
 The container-side path `/var/lib/eneru/ssh/id_rsa` resolves to the host
-file via the `-v /srv/eneru/ssh:/var/lib/eneru/ssh:ro` mount in Step 6.
-The `known_hosts` path resolves the same way. With
-`StrictHostKeyChecking=yes`, the file can stay read-only in the
-container because SSH never appends new keys; add new remotes by
-updating `/srv/eneru/ssh/known_hosts` on the host after verifying the
-new fingerprint. The `ssh-keygen -l` output above is the fingerprint
-to compare against the remote server's console or inventory before you
-trust it. If you deliberately choose `StrictHostKeyChecking=accept-new`,
-then the mounted `known_hosts` file must be writable by uid `10001`;
-that is more convenient, but it lets the daemon trust a first-seen key
-during an outage path.
+file via the `-v /srv/eneru/ssh:/var/lib/eneru/ssh` mount in Step 6. No
+`ssh_options` are needed: Eneru defaults to
+`StrictHostKeyChecking=accept-new` and uses
+`/var/lib/eneru/ssh/known_hosts`. Copying your existing `known_hosts`
+above keeps every current remote trusted immediately; any new remote is
+learned and pinned on its first probe, while a later key *change* still
+fails closed.
+After starting, confirm each remote reads `"status": "HEALTHY"`:
+
+```bash
+curl -s http://localhost:9191/api/v1/ups | jq '.ups[].remoteHealth'
+```
 
 ## Step 3: Stop the native service
 
@@ -269,7 +266,7 @@ docker run --rm \
     --network host \
     -v /etc/machine-id:/etc/machine-id:ro \
     -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
-    -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z \
+    -v /srv/eneru/ssh:/var/lib/eneru/ssh:Z \
     ghcr.io/m4r1k/eneru:latest \
     validate --config /etc/ups-monitor/config.yaml
 ```
@@ -298,7 +295,7 @@ docker run --rm \
     --network host \
     -v /etc/machine-id:/etc/machine-id:ro \
     -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
-    -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z \
+    -v /srv/eneru/ssh:/var/lib/eneru/ssh:Z \
     ghcr.io/m4r1k/eneru:latest \
     shutdown group --group "<your-ups-name>" --dry-run \
     --config /etc/ups-monitor/config.yaml
@@ -315,7 +312,7 @@ docker run -d --name eneru \
     --network host \
     -v /etc/machine-id:/etc/machine-id:ro \
     -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
-    -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z \
+    -v /srv/eneru/ssh:/var/lib/eneru/ssh:Z \
     -v /srv/eneru/state:/var/lib/eneru:Z \
     -v /srv/eneru/run:/var/run/eneru:Z \
     -v /srv/eneru/logs:/var/log/eneru:Z \
@@ -363,7 +360,7 @@ services:
     volumes:
       - /etc/machine-id:/etc/machine-id:ro   # NEVER :Z — see warning above
       - /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z
-      - /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z
+      - /srv/eneru/ssh:/var/lib/eneru/ssh:Z
       - /srv/eneru/state:/var/lib/eneru:Z
       - /srv/eneru/run:/var/run/eneru:Z
       - /srv/eneru/logs:/var/log/eneru:Z
@@ -448,7 +445,7 @@ row is folded by the next start.
 | `-v /srv/eneru/state:/var/lib/eneru` | SQLite stats DB (samples, events, notifications). Persistent; do not skip. |
 | `-v /srv/eneru/run:/var/run/eneru` | Per-run state (battery history, shutdown flag, monitor state file). |
 | `-v /srv/eneru/logs:/var/log/eneru` | Forensic log file. |
-| `-v /srv/eneru/ssh:/var/lib/eneru/ssh:ro` | Loopback + operator SSH keys (read-only). |
+| `-v /srv/eneru/ssh:/var/lib/eneru/ssh` | Loopback/operator SSH keys plus `known_hosts`; directory is writable, private key files stay `0400`. |
 
 ## Troubleshooting
 

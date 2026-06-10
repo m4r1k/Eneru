@@ -98,7 +98,7 @@ docker run -d --name eneru \
     --network host \
     -v /etc/machine-id:/etc/machine-id:ro \
     -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
-    -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z \
+    -v /srv/eneru/ssh:/var/lib/eneru/ssh:Z \
     -v /srv/eneru/state:/var/lib/eneru:Z \
     -v /srv/eneru/run:/var/run/eneru:Z \
     -v /srv/eneru/logs:/var/log/eneru:Z \
@@ -130,7 +130,7 @@ services:
     volumes:
       - /etc/machine-id:/etc/machine-id:ro   # NEVER :Z — shared host file (see install-comparison.md)
       - /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z
-      - /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z
+      - /srv/eneru/ssh:/var/lib/eneru/ssh:Z
       - /srv/eneru/state:/var/lib/eneru:Z
       - /srv/eneru/run:/var/run/eneru:Z
       - /srv/eneru/logs:/var/log/eneru:Z

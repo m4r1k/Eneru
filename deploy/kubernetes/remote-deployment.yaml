@@ -26,12 +26,31 @@ data:
     statistics:
       db_directory: "/var/lib/eneru"
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: eneru-state
+spec:
+  # Persists the writable state volume across pod restarts: the stats SQLite
+  # DB, the auth DB, and the accept-new known_hosts file. The SSH private key
+  # stays a read-only Secret; only this writable claim persists.
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName: ""   # pin a class here, or omit to use the cluster default
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: eneru
 spec:
   replicas: 1
+  # Singleton owning a ReadWriteOnce PVC: terminate the old pod before the new
+  # one starts so the two never contend for the volume during a rollout.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: eneru
@@ -63,6 +82,11 @@ spec:
             - 0.0.0.0
             - --api-port
             - "9191"
+          env:
+            # /var/lib/eneru/ssh is a read-only Secret mount in Kubernetes.
+            # Store learned accept-new host keys on the writable state PVC.
+            - name: ENERU_SSH_KNOWN_HOSTS_FILE
+              value: /var/lib/eneru/known_hosts
           ports:
             - name: http
               containerPort: 9191
@@ -106,7 +130,8 @@ spec:
           configMap:
             name: eneru-config
         - name: state
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: eneru-state
         - name: runtime
           emptyDir: {}
         - name: logs

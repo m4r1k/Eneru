@@ -1,10 +1,10 @@
 """Tests for run_command and command_exists helper functions."""
 
 import pytest
-from unittest.mock import patch, MagicMock
-import subprocess
+from unittest.mock import mock_open, patch
 
 from eneru import run_command, command_exists
+from eneru import utils as eneru_utils
 
 
 class TestRunCommand:
@@ -177,3 +177,100 @@ class TestCommandExists:
             result = command_exists("missing_cmd")
 
             assert result is False
+
+
+class TestRuntimeSshOptions:
+    """Test runtime-dependent SSH defaults."""
+
+    @pytest.mark.unit
+    def test_running_in_container_detects_container_files(self, monkeypatch):
+        monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+        monkeypatch.delenv("container", raising=False)
+        with patch(
+            "eneru.utils.os.path.exists",
+            side_effect=lambda path: path == "/.dockerenv",
+        ):
+            assert eneru_utils.running_in_container() is True
+
+    @pytest.mark.unit
+    def test_running_in_container_detects_kubernetes_env(self, monkeypatch):
+        monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+        with patch("eneru.utils.os.path.exists", return_value=False):
+            assert eneru_utils.running_in_container() is True
+
+    @pytest.mark.unit
+    def test_running_in_container_detects_cgroup_marker(self, monkeypatch):
+        monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+        monkeypatch.delenv("container", raising=False)
+        with patch("eneru.utils.os.path.exists", return_value=False), patch(
+            "builtins.open", mock_open(read_data="0::/kubepods.slice/pod123")
+        ):
+            assert eneru_utils.running_in_container() is True
+
+    @pytest.mark.unit
+    def test_running_in_container_returns_false_without_markers(self, monkeypatch):
+        monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+        monkeypatch.delenv("container", raising=False)
+        with patch("eneru.utils.os.path.exists", return_value=False), patch(
+            "builtins.open", side_effect=OSError("missing cgroup")
+        ):
+            assert eneru_utils.running_in_container() is False
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("ssh_options", [
+        ["UserKnownHostsFile=/tmp/known_hosts"],
+        ["-o UserKnownHostsFile=/tmp/known_hosts"],
+        ["-o", "UserKnownHostsFile=/tmp/known_hosts"],
+    ])
+    def test_ssh_option_configured_detects_user_known_hosts_file(self, ssh_options):
+        assert eneru_utils.ssh_option_configured(
+            ssh_options, "UserKnownHostsFile"
+        ) is True
+
+    @pytest.mark.unit
+    def test_ssh_option_configured_ignores_non_matching_entries(self):
+        assert eneru_utils.ssh_option_configured(
+            [42, "GlobalKnownHostsFile=/tmp/global"], "UserKnownHostsFile"
+        ) is False
+
+    @pytest.mark.unit
+    def test_runtime_default_ssh_options_bare_metal_uses_openssh_default(
+        self, monkeypatch
+    ):
+        monkeypatch.delenv(eneru_utils.KNOWN_HOSTS_ENV, raising=False)
+        monkeypatch.setattr(eneru_utils, "running_in_container", lambda: False)
+
+        assert eneru_utils.runtime_default_ssh_options([]) == []
+
+    @pytest.mark.unit
+    def test_runtime_default_ssh_options_container_uses_ssh_mount(
+        self, monkeypatch
+    ):
+        monkeypatch.delenv(eneru_utils.KNOWN_HOSTS_ENV, raising=False)
+        monkeypatch.setattr(eneru_utils, "running_in_container", lambda: True)
+
+        assert eneru_utils.runtime_default_ssh_options([]) == [
+            "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
+        ]
+
+    @pytest.mark.unit
+    def test_runtime_default_ssh_options_env_overrides_runtime(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv(eneru_utils.KNOWN_HOSTS_ENV, "/var/lib/eneru/kh")
+        monkeypatch.setattr(eneru_utils, "running_in_container", lambda: False)
+
+        assert eneru_utils.runtime_default_ssh_options([]) == [
+            "UserKnownHostsFile=/var/lib/eneru/kh"
+        ]
+
+    @pytest.mark.unit
+    def test_runtime_default_ssh_options_preserves_explicit_file(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv(eneru_utils.KNOWN_HOSTS_ENV, "/var/lib/eneru/kh")
+        monkeypatch.setattr(eneru_utils, "running_in_container", lambda: True)
+
+        assert eneru_utils.runtime_default_ssh_options([
+            "UserKnownHostsFile=/custom/known_hosts"
+        ]) == []

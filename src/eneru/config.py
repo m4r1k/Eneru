@@ -354,6 +354,30 @@ class RemoteServerConfig:
     host_identity_command: str = "cat /etc/machine-id"
     expected_host_identity: Optional[str] = None
 
+    def __post_init__(self):
+        # Default remote host-key checking to accept-new. OpenSSH's own default
+        # (StrictHostKeyChecking=ask) fails closed under BatchMode when a host
+        # key is unknown, so a remote with no ssh_options would never connect on
+        # first contact (issue #73). accept-new learns and pins the key on the
+        # first probe and still fails closed if the key later changes. The key
+        # is recorded in the active OpenSSH known_hosts file. Bare-metal runs
+        # use the running user's default ~/.ssh/known_hosts; the SSH command
+        # builders add a container-only UserKnownHostsFile default so Docker
+        # keeps using the documented /var/lib/eneru/ssh mount. Any operator-supplied
+        # StrictHostKeyChecking directive is preserved verbatim, including the
+        # loopback delegate's explicit "no" (127.0.0.1 is MITM-safe). The
+        # default is prepended, not appended, so a trailing dangling flag in
+        # ssh_options (e.g. a bare "-i") stays trailing and is still rejected by
+        # build_ssh_probe_command instead of silently consuming this value.
+        if not isinstance(self.ssh_options, list):
+            self.ssh_options = []
+        if not any(
+            isinstance(opt, str) and "stricthostkeychecking" in opt.lower()
+            for opt in self.ssh_options
+        ):
+            self.ssh_options = ["StrictHostKeyChecking=accept-new",
+                                *self.ssh_options]
+
 
 @dataclass
 class LocalShutdownConfig:
@@ -1430,6 +1454,19 @@ class ConfigLoader:
                     messages.extend(cls._unknown_key_errors(
                         server_section, entry, remote_server_keys,
                     ))
+                    ssh_options = entry.get("ssh_options")
+                    if ssh_options is not None:
+                        if not isinstance(ssh_options, list):
+                            messages.append(
+                                f"ERROR: {server_section}.ssh_options must be a list"
+                            )
+                        else:
+                            for opt_idx, opt in enumerate(ssh_options):
+                                if not isinstance(opt, str):
+                                    messages.append(
+                                        f"ERROR: {server_section}.ssh_options"
+                                        f"[{opt_idx}] must be a string"
+                                    )
                     pre_cmds = entry.get("pre_shutdown_commands", []) or []
                     if not isinstance(pre_cmds, list):
                         continue

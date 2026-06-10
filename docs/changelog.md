@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.0-rc3] - 2026-06-10
+
+### Changed
+
+- **Remote SSH host-key checking now defaults to `accept-new` (issue #73).**
+  Previously a `remote_servers` entry with no `ssh_options` inherited OpenSSH's
+  `StrictHostKeyChecking=ask`, which fails closed under `BatchMode` when a host
+  key is unknown — so a fresh remote could never connect on first contact, and
+  the rc2 workaround (hand-run `ssh-keyscan` + `StrictHostKeyChecking=yes`) was
+  easy to get wrong (a missing/empty/mismatched `known_hosts` failed closed
+  silently until a power event). Eneru now injects
+  `StrictHostKeyChecking=accept-new` into any remote that does not set a
+  `StrictHostKeyChecking` directive of its own. Bare-metal installs use the
+  running user's normal `~/.ssh/known_hosts`; Docker/Podman containers use the
+  documented `/var/lib/eneru/ssh/known_hosts` path; Kubernetes samples set
+  `ENERU_SSH_KNOWN_HOSTS_FILE=/var/lib/eneru/known_hosts` because SSH keys live
+  in a read-only Secret and learned trust belongs on the writable PVC. Any
+  explicit `StrictHostKeyChecking` or `UserKnownHostsFile` you set is preserved
+  verbatim, including the loopback delegate's `no`. No `ssh_options` are needed
+  for the common case.
+- **Containers keep the existing SSH mount contract.** Docker/Podman still use
+  `/srv/eneru/ssh:/var/lib/eneru/ssh`; the directory is writable so
+  `accept-new` can write `known_hosts`, while the private key files remain mode
+  `0400`. The shipped Kubernetes Deployment
+  (`deploy/kubernetes/remote-deployment.yaml`) backs `state` with a
+  `PersistentVolumeClaim` (instead of `emptyDir`) so learned keys — and the
+  stats/auth databases — survive pod restarts; it uses the `Recreate` strategy
+  to avoid two pods contending for the ReadWriteOnce volume. The container docs
+  drop the manual `ssh-keyscan` setup accordingly, and E2E Test 57 proves the
+  no-`ssh_options` default learns and preserves trust across a container
+  recreate.
+
 ## [6.1.0-rc2] - 2026-06-10
 
 ### Changed

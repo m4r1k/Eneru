@@ -15,7 +15,7 @@
 #     -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro \
 #     -v /srv/eneru/state:/var/lib/eneru \
 #     -v /srv/eneru/run:/var/run/eneru \
-#     -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro \
+#     -v /srv/eneru/ssh:/var/lib/eneru/ssh \
 #     ghcr.io/m4r1k/eneru:latest \
 #     run --config /etc/ups-monitor/config.yaml \
 #     --api --api-bind 0.0.0.0 --api-port 9191

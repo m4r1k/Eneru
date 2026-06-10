@@ -56,22 +56,19 @@ prepare_loopback_key() {
   sudo chmod 0400 /tmp/e2e-loopback-key
 }
 
-prepare_strict_remote_ssh_material() {
-  install -m 0755 -d /tmp/e2e-strict-ssh
-  cp /tmp/e2e-ssh-key /tmp/e2e-strict-ssh/id_remote
-  sudo chown 10001:10001 /tmp/e2e-strict-ssh/id_remote
-  sudo chmod 0400 /tmp/e2e-strict-ssh/id_remote
-  # Scan from inside the same Docker network because the container connects
-  # to the service name, not the host-published localhost port. Override the
-  # entrypoint: the image's ENTRYPOINT is ["/usr/bin/tini","--","eneru"], so
-  # without --entrypoint the args become `eneru ssh-keyscan ...` (an invalid
-  # eneru subcommand that exits non-zero) instead of running the ssh-keyscan
-  # binary shipped by openssh-client.
-  docker run --rm --network "$NETWORK" --entrypoint ssh-keyscan eneru:e2e \
-    -H ssh-target > /tmp/e2e-strict-ssh/known_hosts
-  sudo chown 10001:10001 /tmp/e2e-strict-ssh/known_hosts
-  sudo chmod 0644 /tmp/e2e-strict-ssh/known_hosts
-  ssh-keygen -l -f /tmp/e2e-strict-ssh/known_hosts
+prepare_accept_new_ssh_material() {
+  # Mirror the shipped Docker/Podman layout: /srv/eneru/ssh is mounted at
+  # /var/lib/eneru/ssh and is writable for known_hosts, while the private key
+  # file itself stays 0400. With the built-in StrictHostKeyChecking=accept-new
+  # default and no ssh_options, the daemon must learn the host key into
+  # /var/lib/eneru/ssh/known_hosts.
+  # sudo: a previous run may have left these owned by uid 10001 (ssh writes
+  # ~/.ssh as root-of-the-container 0700), which the runner user cannot remove.
+  sudo rm -rf /tmp/e2e-accept-new-key /tmp/e2e-accept-new-state
+  install -m 0755 -d /tmp/e2e-accept-new-key /tmp/e2e-accept-new-state
+  cp /tmp/e2e-ssh-key /tmp/e2e-accept-new-key/id_remote
+  sudo chown -R 10001:10001 /tmp/e2e-accept-new-key /tmp/e2e-accept-new-state
+  sudo chmod 0400 /tmp/e2e-accept-new-key/id_remote
 }
 
 write_loopback_config() {
@@ -348,24 +345,30 @@ YAML
   docker rm -f "$name" >/dev/null 2>&1 || true
 }
 
-strict_known_hosts_remote() {
-  local config="/tmp/e2e-strict-known-hosts.yaml"
-  local name="eneru-e2e-strict-known-hosts"
+accept_new_known_hosts_remote() {
+  local config="/tmp/e2e-accept-new.yaml"
+  local name="eneru-e2e-accept-new"
   local port="$1"
+  local state_dir="/tmp/e2e-accept-new-state"
+  local key_dir="/tmp/e2e-accept-new-key"
+  # The container default stores learned trust under /var/lib/eneru/ssh, which
+  # maps to this host path.
+  local kh="${key_dir}/known_hosts"
+  # Start clean so the first run genuinely has no key to trust yet.
+  sudo rm -f "$kh" /tmp/e2e-accept-new-known-hosts.first
   cat >"$config" <<'YAML'
 ups:
   - name: "TestUPS@nut-server"
-    display_name: "Strict SSH Trust E2E UPS"
+    display_name: "Accept-New (default) SSH Trust E2E UPS"
     is_local: false
     remote_servers:
-      - name: strict-ssh-target
+      - name: accept-new-ssh-target
         enabled: true
         host: ssh-target
         user: root
         ssh_key_path: /var/lib/eneru/ssh/id_remote
-        ssh_options:
-          - "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
-          - "StrictHostKeyChecking=yes"
+        # No ssh_options: rely on the built-in StrictHostKeyChecking=accept-new
+        # plus the container UserKnownHostsFile default.
         shutdown_command: "shutdown -h now"
 local_shutdown:
   enabled: false
@@ -386,53 +389,80 @@ YAML
 
   for attempt in first recreated; do
     docker rm -f "$name" >/dev/null 2>&1 || true
-    echo "  Starting strict known_hosts container (${attempt})"
+    if [ "$attempt" = "first" ] && [ -e "$kh" ]; then
+      echo "FAIL: known_hosts must not exist before the first accept-new start"
+      exit 1
+    fi
+    echo "  Starting accept-new (default) container (${attempt})"
+    # The state volume backs /var/lib/eneru; the nested SSH directory is
+    # writable for known_hosts, while id_remote itself is mode 0400.
     docker run -d --name "$name" \
       --network "$NETWORK" \
       -p "127.0.0.1:${port}:9191" \
       -v "$config":/etc/ups-monitor/config.yaml:ro \
-      -v /tmp/e2e-strict-ssh:/var/lib/eneru/ssh:ro \
+      -v "${state_dir}":/var/lib/eneru:rw \
+      -v /tmp/e2e-accept-new-key:/var/lib/eneru/ssh:rw \
       eneru:e2e \
       run --config /etc/ups-monitor/config.yaml \
       --api --api-bind 0.0.0.0 --api-port 9191 >/dev/null
 
     if ! poll_http_pattern \
         "http://127.0.0.1:${port}/ready" \
-        "/tmp/e2e-strict-known-hosts-${attempt}.json" \
+        "/tmp/e2e-accept-new-${attempt}.json" \
         '"ready"[[:space:]]*:[[:space:]]*true'; then
-      echo "FAIL: strict known_hosts remote was not ready after ${attempt} start"
-      cat "/tmp/e2e-strict-known-hosts-${attempt}.json" || true
+      echo "FAIL: accept-new remote was not ready after ${attempt} start"
+      cat "/tmp/e2e-accept-new-${attempt}.json" || true
       docker logs "$name" || true
       exit 1
     fi
-    echo "  PASS: strict known_hosts remote ready after ${attempt} start"
+    echo "  PASS: accept-new remote ready after ${attempt} start"
 
-    # Readiness alone is not enough: /ready can flip true on the successful
-    # NUT poll while the remote SSH probe is still UNKNOWN (it runs in a
-    # background thread and readiness treats UNKNOWN as achievable). Assert
-    # the remote target actually reaches HEALTHY so this test proves the
-    # mounted known_hosts satisfied StrictHostKeyChecking=yes -- with a
-    # missing/wrong key the probe would land in FAILED, never HEALTHY.
-    # collect_status serializes with sort_keys=True, so within each
-    # remoteHealth entry "server" sits immediately before "status".
-    # Poll for up to 75s (150 tries x 0.5s): the startup probe normally
-    # marks HEALTHY within seconds. The config pins remote_health.interval
-    # to 60, so if the first probe is missed the next one fires at ~60s,
-    # inside this window, keeping the test deterministic instead of flaky.
+    # Readiness alone can flip true on the NUT poll while the SSH probe is
+    # still UNKNOWN (background thread; readiness treats UNKNOWN as
+    # achievable). Wait for the remote target to actually reach HEALTHY so
+    # this proves the SSH probe succeeded. collect_status serializes with
+    # sort_keys=True, so within each remoteHealth entry "server" sits
+    # immediately before "status". Poll up to 75s (150 x 0.5s): the startup
+    # probe is normally HEALTHY within seconds, and remote_health.interval is
+    # pinned to 60 so a missed first probe still retries inside the window.
     # A match returns immediately, so this costs nothing on the happy path.
     if ! poll_http_pattern \
         "http://127.0.0.1:${port}/api/v1/ups" \
-        "/tmp/e2e-strict-known-hosts-${attempt}-health.json" \
-        '"server"[[:space:]]*:[[:space:]]*"strict-ssh-target"[[:space:]]*,[[:space:]]*"status"[[:space:]]*:[[:space:]]*"HEALTHY"' \
+        "/tmp/e2e-accept-new-${attempt}-health.json" \
+        '"server"[[:space:]]*:[[:space:]]*"accept-new-ssh-target"[[:space:]]*,[[:space:]]*"status"[[:space:]]*:[[:space:]]*"HEALTHY"' \
         150; then
-      echo "FAIL: strict known_hosts remote SSH probe never reached HEALTHY after ${attempt} start"
-      cat "/tmp/e2e-strict-known-hosts-${attempt}-health.json" || true
+      echo "FAIL: accept-new remote SSH probe never reached HEALTHY after ${attempt} start"
+      cat "/tmp/e2e-accept-new-${attempt}-health.json" || true
       docker logs "$name" || true
       exit 1
     fi
-    echo "  PASS: strict known_hosts remote SSH target HEALTHY after ${attempt} start"
+
+    # The whole point: the built-in accept-new default must LEARN the host key
+    # on the first probe and write it to /var/lib/eneru/ssh/known_hosts --
+    # no ssh_options and no pre-seeding. The private key file stays 0400.
+    if ! sudo test -s "$kh"; then
+      echo "FAIL: accept-new default did not record /var/lib/eneru/ssh/known_hosts on the ${attempt} start"
+      sudo ls -la "$key_dir" 2>/dev/null || true
+      docker logs "$name" || true
+      exit 1
+    fi
+    [ "$attempt" = "first" ] && sudo cp "$kh" /tmp/e2e-accept-new-known-hosts.first
+    echo "  PASS: accept-new remote HEALTHY and host key recorded after ${attempt} start"
     docker rm -f "$name" >/dev/null 2>&1 || true
   done
+
+  # The learned key must survive the recreate. Do not require byte-for-byte
+  # equality: after a successful trusted connection OpenSSH may append extra
+  # host-key material (for example via UpdateHostKeys). The invariant issue #73
+  # needs is that the first run's trust anchors are still present after the
+  # container was recreated.
+  if ! sudo awk 'NR == FNR { seen[$0] = 1; next } { delete seen[$0] } END { for (line in seen) exit 1 }' \
+      /tmp/e2e-accept-new-known-hosts.first "$kh"; then
+    echo "FAIL: first-run known_hosts entries were not preserved across recreate"
+    sudo diff -u /tmp/e2e-accept-new-known-hosts.first "$kh" || true
+    exit 1
+  fi
+  echo "  PASS: learned host key persisted across container recreate"
 }
 
 echo ">>> Building Eneru OCI image for loopback E2E"
@@ -446,8 +476,8 @@ fi
 echo ">>> Using Docker network: ${NETWORK}"
 prepare_loopback_key
 echo ">>> Prepared loopback private key at /tmp/e2e-loopback-key"
-prepare_strict_remote_ssh_material
-echo ">>> Prepared strict remote SSH key and known_hosts at /tmp/e2e-strict-ssh"
+prepare_accept_new_ssh_material
+echo ">>> Prepared accept-new remote SSH key (read-only) + writable state dir at /tmp/e2e-accept-new-{key,state}"
 
 echo ">>> Running: Test 47: E2E Loopback Root"
 run_loopback_case root root false 19191
@@ -457,7 +487,7 @@ echo ">>> Running: Test 49: E2E Loopback missing machine-id readiness"
 negative_missing_machine_id
 echo ">>> Running: Test 50: E2E Loopback missing delegate startup failure"
 negative_missing_loopback
-echo ">>> Running: Test 57: E2E container remote strict known_hosts survives recreate"
-strict_known_hosts_remote 19194
+echo ">>> Running: Test 57: E2E container remote accept-new learns host key and survives recreate"
+accept_new_known_hosts_remote 19194
 
-echo "PASS: E2E loopback root/sudo, strict SSH trust, and negative readiness checks passed"
+echo "PASS: E2E loopback root/sudo, accept-new SSH trust, and negative readiness checks passed"
