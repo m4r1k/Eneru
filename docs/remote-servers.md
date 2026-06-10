@@ -199,6 +199,49 @@ Accept host keys deliberately before relying on shutdown:
 sudo ssh user@remote-server "echo OK"
 ```
 
+For Docker, Podman, or Kubernetes, do not accept the key interactively
+inside a running container. A container is like a hotel room: anything
+you tape to the wall is gone when housekeeping recreates it. Store the
+trusted host keys on the host and bind-mount them with the SSH private
+key:
+
+```bash
+# On the Eneru host:
+install -d -o 10001 -g 10001 -m 0755 /srv/eneru/ssh
+ssh-keyscan -H remote-server > /srv/eneru/ssh/known_hosts
+chown 10001:10001 /srv/eneru/ssh/known_hosts
+chmod 0644 /srv/eneru/ssh/known_hosts
+```
+
+Compare the scanned fingerprint against the target's console or out-of-band
+inventory before trusting it:
+
+```bash
+ssh-keygen -l -f /srv/eneru/ssh/known_hosts
+```
+
+Then point OpenSSH at the mounted file:
+
+```yaml
+remote_servers:
+  - name: "NAS"
+    enabled: true
+    host: "nas.example.lan"
+    user: "ups"
+    ssh_key_path: "/var/lib/eneru/ssh/id_ups_shutdown"
+    ssh_options:
+      - "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
+      - "StrictHostKeyChecking=yes"
+```
+
+With `StrictHostKeyChecking=yes`, the file can stay read-only in the
+container because SSH never appends new keys. To add another remote,
+update `/srv/eneru/ssh/known_hosts` on the host after verifying that
+remote's fingerprint. If you deliberately choose
+`StrictHostKeyChecking=accept-new`, then the mounted `known_hosts` file
+must be writable by uid `10001`; that is more convenient, but it lets
+the daemon trust a first-seen key during an outage path.
+
 Do not leave `StrictHostKeyChecking=no` in production. If a host key changes unexpectedly, SSH should fail closed instead of sending shutdown commands to an untrusted host.
 
 ## Passwordless sudo
