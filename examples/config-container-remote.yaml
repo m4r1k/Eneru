@@ -13,12 +13,17 @@ ups:
     # Uncomment and adapt to drive remote shutdowns from this Eneru container.
     # The ssh_key_path below points at a file mounted from a Kubernetes Secret
     # or a Docker bind mount so the private key never lives in the image.
+    # Put trusted host keys in the same mounted directory as known_hosts;
+    # accepting them interactively inside a container is lost on recreate.
     # remote_servers:
     #   - name: "nas"
     #     enabled: true
     #     host: "nas.example.lan"
     #     user: "ups"
     #     ssh_key_path: "/var/lib/eneru/ssh/id_eneru"
+    #     ssh_options:
+    #       - "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
+    #       - "StrictHostKeyChecking=yes"
     #     shutdown_command: "sudo shutdown -h now"
 
 local_shutdown:

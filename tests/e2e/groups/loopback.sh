@@ -56,6 +56,24 @@ prepare_loopback_key() {
   sudo chmod 0400 /tmp/e2e-loopback-key
 }
 
+prepare_strict_remote_ssh_material() {
+  install -m 0755 -d /tmp/e2e-strict-ssh
+  cp /tmp/e2e-ssh-key /tmp/e2e-strict-ssh/id_remote
+  sudo chown 10001:10001 /tmp/e2e-strict-ssh/id_remote
+  sudo chmod 0400 /tmp/e2e-strict-ssh/id_remote
+  # Scan from inside the same Docker network because the container connects
+  # to the service name, not the host-published localhost port. Override the
+  # entrypoint: the image's ENTRYPOINT is ["/usr/bin/tini","--","eneru"], so
+  # without --entrypoint the args become `eneru ssh-keyscan ...` (an invalid
+  # eneru subcommand that exits non-zero) instead of running the ssh-keyscan
+  # binary shipped by openssh-client.
+  docker run --rm --network "$NETWORK" --entrypoint ssh-keyscan eneru:e2e \
+    -H ssh-target > /tmp/e2e-strict-ssh/known_hosts
+  sudo chown 10001:10001 /tmp/e2e-strict-ssh/known_hosts
+  sudo chmod 0644 /tmp/e2e-strict-ssh/known_hosts
+  ssh-keygen -l -f /tmp/e2e-strict-ssh/known_hosts
+}
+
 write_loopback_config() {
   local path="$1" user="$2" use_sudo="$3" identity="$4"
   cat >"$path" <<YAML
@@ -330,6 +348,86 @@ YAML
   docker rm -f "$name" >/dev/null 2>&1 || true
 }
 
+strict_known_hosts_remote() {
+  local config="/tmp/e2e-strict-known-hosts.yaml"
+  local name="eneru-e2e-strict-known-hosts"
+  local port="$1"
+  cat >"$config" <<'YAML'
+ups:
+  - name: "TestUPS@nut-server"
+    display_name: "Strict SSH Trust E2E UPS"
+    is_local: false
+    remote_servers:
+      - name: strict-ssh-target
+        enabled: true
+        host: ssh-target
+        user: root
+        ssh_key_path: /var/lib/eneru/ssh/id_remote
+        ssh_options:
+          - "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
+          - "StrictHostKeyChecking=yes"
+        shutdown_command: "shutdown -h now"
+local_shutdown:
+  enabled: false
+  trigger_on: none
+remote_health:
+  enabled: true
+  startup_check: true
+  failure_threshold: 1
+logging:
+  file: null
+  state_file: "/var/run/eneru/ups-monitor.state"
+  battery_history_file: "/var/run/eneru/ups-battery-history"
+  shutdown_flag_file: "/var/run/eneru/ups-shutdown-scheduled"
+statistics:
+  db_directory: "/var/lib/eneru"
+YAML
+
+  for attempt in first recreated; do
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    echo "  Starting strict known_hosts container (${attempt})"
+    docker run -d --name "$name" \
+      --network "$NETWORK" \
+      -p "127.0.0.1:${port}:9191" \
+      -v "$config":/etc/ups-monitor/config.yaml:ro \
+      -v /tmp/e2e-strict-ssh:/var/lib/eneru/ssh:ro \
+      eneru:e2e \
+      run --config /etc/ups-monitor/config.yaml \
+      --api --api-bind 0.0.0.0 --api-port 9191 >/dev/null
+
+    if ! poll_http_pattern \
+        "http://127.0.0.1:${port}/ready" \
+        "/tmp/e2e-strict-known-hosts-${attempt}.json" \
+        '"ready"[[:space:]]*:[[:space:]]*true'; then
+      echo "FAIL: strict known_hosts remote was not ready after ${attempt} start"
+      cat "/tmp/e2e-strict-known-hosts-${attempt}.json" || true
+      docker logs "$name" || true
+      exit 1
+    fi
+    echo "  PASS: strict known_hosts remote ready after ${attempt} start"
+
+    # Readiness alone is not enough: /ready can flip true on the successful
+    # NUT poll while the remote SSH probe is still UNKNOWN (it runs in a
+    # background thread and readiness treats UNKNOWN as achievable). Assert
+    # the remote target actually reaches HEALTHY so this test proves the
+    # mounted known_hosts satisfied StrictHostKeyChecking=yes -- with a
+    # missing/wrong key the probe would land in FAILED, never HEALTHY.
+    # collect_status serializes with sort_keys=True, so within each
+    # remoteHealth entry "server" sits immediately before "status".
+    if ! poll_http_pattern \
+        "http://127.0.0.1:${port}/api/v1/ups" \
+        "/tmp/e2e-strict-known-hosts-${attempt}-health.json" \
+        '"server"[[:space:]]*:[[:space:]]*"strict-ssh-target"[[:space:]]*,[[:space:]]*"status"[[:space:]]*:[[:space:]]*"HEALTHY"'; then
+      echo "FAIL: strict known_hosts remote SSH probe never reached HEALTHY after ${attempt} start"
+      cat "/tmp/e2e-strict-known-hosts-${attempt}-health.json" || true
+      docker logs "$name" || true
+      exit 1
+    fi
+    echo "  PASS: strict known_hosts remote SSH target HEALTHY after ${attempt} start"
+    docker rm -f "$name" >/dev/null 2>&1 || true
+  done
+}
+
 echo ">>> Building Eneru OCI image for loopback E2E"
 docker build -t eneru:e2e .
 NETWORK="$(network_name)"
@@ -341,6 +439,8 @@ fi
 echo ">>> Using Docker network: ${NETWORK}"
 prepare_loopback_key
 echo ">>> Prepared loopback private key at /tmp/e2e-loopback-key"
+prepare_strict_remote_ssh_material
+echo ">>> Prepared strict remote SSH key and known_hosts at /tmp/e2e-strict-ssh"
 
 echo ">>> Running: Test 47: E2E Loopback Root"
 run_loopback_case root root false 19191
@@ -350,5 +450,7 @@ echo ">>> Running: Test 49: E2E Loopback missing machine-id readiness"
 negative_missing_machine_id
 echo ">>> Running: Test 50: E2E Loopback missing delegate startup failure"
 negative_missing_loopback
+echo ">>> Running: Test 57: E2E container remote strict known_hosts survives recreate"
+strict_known_hosts_remote 19194
 
-echo "PASS: E2E loopback root/sudo and negative readiness checks passed"
+echo "PASS: E2E loopback root/sudo, strict SSH trust, and negative readiness checks passed"

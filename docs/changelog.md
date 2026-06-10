@@ -21,6 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Container SSH host-key setup (issue #73).** A container is a hotel room:
+  anything learned interactively inside it disappears when the room is rebuilt.
+  The container docs now tell operators to mount both the private key and a
+  pre-seeded `known_hosts` file from `/srv/eneru/ssh`, then configure
+  `UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts` with
+  `StrictHostKeyChecking=yes` so remote-server trust survives
+  Docker/Podman/Kubernetes recreates without disabling host-key checks. The same
+  pass makes the uid `10001` private-key ownership and mode guidance consistent
+  across the container walkthroughs.
+- **E2E coverage for issue #71 and issue #73.** The CI matrix now includes a
+  real NUT autodiscovery regression that proves a wrong single-UPS name
+  self-heals for the running session, plus a container SSH regression that uses
+  a mounted private key and mounted `known_hosts` with strict host-key checking
+  across container recreation.
 - **`expected_host_identity` auto-populates from any `cat /absolute/path`
   (issue #70).** Previously the container-side identity read was hardcoded to
   `/etc/machine-id`, so marker-file setups had to duplicate the value or mount

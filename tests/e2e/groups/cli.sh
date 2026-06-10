@@ -273,5 +273,120 @@ fi
 echo "PASS: auth user + apikey CLI lifecycle"
 )
 
+# ======================================================================
+# Test 58: NUT name autodiscovery self-heals single exposed UPS
+# ======================================================================
+# Issue #71: when ups.name uses a wrong NUT device name but the target
+# server exposes exactly one UPS, Eneru should list names with `upsc -l`,
+# auto-correct only the runtime poll target, and tell the operator to fix
+# config. This uses a separate temporary single-UPS NUT container so
+# the shared E2E compose services remain untouched.
+(
+echo ""
+echo ">>> Running: Test 58: NUT name autodiscovery self-heals single exposed UPS"
+
+docker build -t eneru:e2e-nut-single "$E2E_DIR/nut-dummy"
+docker rm -f eneru-e2e-nut-single >/dev/null 2>&1 || true
+docker run -d --name eneru-e2e-nut-single \
+  -p 127.0.0.1:3494:3493 \
+  --entrypoint /bin/bash \
+  eneru:e2e-nut-single \
+  -c '
+set -e
+cat >/etc/nut/ups.conf <<EOF
+[TestUPS]
+    driver = dummy-ups
+    port = TestUPS.dev
+    desc = "Eneru E2E Test UPS (single autodiscovery)"
+EOF
+chown nut:nut /etc/nut/ups.conf /etc/nut/TestUPS.dev
+chmod 640 /etc/nut/ups.conf
+nohup /usr/lib/nut/dummy-ups -a TestUPS -D >/tmp/e2e-test58-dummy.log 2>&1 &
+sleep 2
+exec /usr/sbin/upsd -D -F
+' >/dev/null
+cleanup_test58() {
+  docker rm -f eneru-e2e-nut-single >/dev/null 2>&1 || true
+}
+trap cleanup_test58 EXIT
+
+nut_single_ready=false
+for _ in $(seq 1 30); do
+  if upsc TestUPS@localhost:3494 2>/dev/null | grep -q "ups.status"; then
+    nut_single_ready=true
+    break
+  fi
+  sleep 1
+done
+if [ "$nut_single_ready" != "true" ]; then
+  echo "FAIL: temporary single-UPS NUT container never became ready"
+  docker logs eneru-e2e-nut-single || true
+  exit 1
+fi
+
+NAMES="$(upsc -l localhost:3494 2>/dev/null | tr -d '\r')"
+if [ "$NAMES" != "TestUPS" ]; then
+  echo "FAIL: expected temporary NUT server to expose exactly TestUPS"
+  printf 'Observed names:\n%s\n' "$NAMES"
+  docker logs eneru-e2e-nut-single || true
+  exit 1
+fi
+echo "PASS: temporary NUT server exposes exactly one UPS name"
+
+cat >/tmp/config-e2e-nut-name-autodiscovery.yaml <<'YAML'
+ups:
+  name: upsmon@localhost:3494
+  display_name: "E2E Wrong NUT Name"
+  check_interval: 1
+  max_stale_data_tolerance: 5
+behavior:
+  dry_run: true
+local_shutdown:
+  enabled: false
+  trigger_on: none
+remote_health:
+  enabled: false
+statistics:
+  db_directory: /tmp/e2e-test58-stats
+logging:
+  file: null
+  state_file: /tmp/e2e-test58-state
+  battery_history_file: /tmp/e2e-test58-history
+  shutdown_flag_file: /tmp/e2e-test58-shutdown-flag
+YAML
+
+set +e
+timeout 55s eneru run --config /tmp/config-e2e-nut-name-autodiscovery.yaml \
+  >/tmp/test58.log 2>&1
+rc=$?
+set -e
+cat /tmp/test58.log
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+  echo "FAIL: autodiscovery daemon exited unexpectedly with status $rc"
+  exit 1
+fi
+
+if ! grep -q "Auto-correcting this session" /tmp/test58.log; then
+  echo "FAIL: autodiscovery did not log session auto-correction"
+  exit 1
+fi
+if ! grep -q "poll 'TestUPS@localhost:3494'" /tmp/test58.log; then
+  echo "FAIL: autodiscovery did not switch runtime poll target to TestUPS"
+  exit 1
+fi
+if ! grep -q "Please fix ups.name in your config" /tmp/test58.log; then
+  echo "FAIL: autodiscovery did not tell the operator to fix config"
+  exit 1
+fi
+if ! grep -q "value before '@' in ups.name must be the UPS device name" /tmp/test58.log; then
+  echo "FAIL: autodiscovery did not include the username-vs-device-name hint"
+  exit 1
+fi
+
+echo "PASS: NUT name autodiscovery self-healed the single-UPS target"
+cleanup_test58
+trap - EXIT
+)
+
 echo ""
 echo "=== Group 'cli' completed successfully ==="

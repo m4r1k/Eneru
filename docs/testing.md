@@ -161,13 +161,13 @@ The workflow is split into six parallel matrix groups:
 | UPS Multi | Independent UPS groups and local-drain policies |
 | Redundancy | Quorum behavior, advisory triggers, and runtime NUT-visibility regressions |
 | Stats | SQLite, graphs, events, notification coalescing |
-| Loopback | Containerized local-host ownership through root and sudo SSH loopback, including generated local VM/container/sync/unmount actions |
+| Loopback | Containerized local-host ownership through root and sudo SSH loopback, including generated local VM/container/sync/unmount actions and strict container SSH trust |
 
 The scenario files simulate online, on-battery, low-battery, FSD, brownout, overload, hot-grid, and nominal-voltage-mismatch states.
 
 ### E2E test inventory
 
-The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 56 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
+The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 58 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
 
 | Test | Group | What it proves |
 |------|-------|----------------|
@@ -229,6 +229,8 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 56 numb
 | 54 | UPS Single | Config hot-reload: SIGHUP applies a threshold change live, the authenticated `/config/reload` endpoint returns a report (anonymous is 401), and a broken config is rejected without dropping the daemon |
 | 55 | UPS Single | Browser dashboard: the embedded API serves the SPA shell and assets with a strict CSP, and rejects path traversal / unknown assets with 404 |
 | 56 | UPS Single | Event management: a wide-range `/api/v1/events` query returns source-qualified rows, an authenticated `DELETE` removes a real event (anonymous is 401), and a history `from > to` is 400 |
+| 57 | Loopback | Containerized remote SSH uses a mounted private key plus mounted `known_hosts` with `StrictHostKeyChecking=yes`; the remote health probe reaches `HEALTHY` (proving the host key was trusted, not just that NUT was reachable) and the daemon stays ready after the container is recreated |
+| 58 | CLI | NUT name autodiscovery (issue #71) lists a single exposed UPS with `upsc -l`, auto-corrects the runtime poll target, and logs the `ups.name` fix hint |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
 
 Every commit on the protected workflow has to prove the daemon works against real services. That means real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.

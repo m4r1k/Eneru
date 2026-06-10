@@ -56,6 +56,9 @@ ups:
         host: "nas.example.lan"
         user: "ups"
         ssh_key_path: "/var/lib/eneru/ssh/id_ups_shutdown"
+        ssh_options:
+          - "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
+          - "StrictHostKeyChecking=yes"
         shutdown_command: "sudo shutdown -h now"
 
 local_shutdown:
@@ -130,7 +133,9 @@ mkdir -p /srv/eneru/ssh
 ssh-keygen -t ed25519 -N '' \
     -f /srv/eneru/ssh/id_loopback \
     -C "eneru-loopback@$(hostname)"
-chmod 600 /srv/eneru/ssh/id_loopback
+chown 10001:10001 /srv/eneru/ssh/id_loopback /srv/eneru/ssh/id_loopback.pub
+chmod 0400 /srv/eneru/ssh/id_loopback
+chmod 0644 /srv/eneru/ssh/id_loopback.pub
 ```
 
 Then authorize either the default root loopback key, or a dedicated
@@ -152,6 +157,29 @@ chmod 600 /root/.ssh/authorized_keys
 This matches the synthesized defaults: `user: root`,
 `shutdown_command: "shutdown -h now"`, and key path
 `/var/lib/eneru/ssh/id_loopback`.
+
+For ordinary remote targets from the container, put their trusted host
+keys in the same bind-mounted directory instead of accepting them from
+inside a disposable container:
+
+```bash
+# On the Eneru host:
+ssh-keyscan -H nas.example.lan > /srv/eneru/ssh/known_hosts
+chown 10001:10001 /srv/eneru/ssh/known_hosts
+chmod 0644 /srv/eneru/ssh/known_hosts
+ssh-keygen -l -f /srv/eneru/ssh/known_hosts
+```
+
+Verify the printed fingerprint out-of-band, then configure the remote
+entry with `UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts`. The
+remote-only sample at the top of this page shows the full shape.
+With `StrictHostKeyChecking=yes`, the file can stay read-only in the
+container because SSH never appends new keys. Add new remotes by
+updating `/srv/eneru/ssh/known_hosts` on the host after verifying the
+new fingerprint. If you deliberately choose
+`StrictHostKeyChecking=accept-new`, then the mounted `known_hosts` file
+must be writable by uid `10001`; that is more convenient, but it lets
+the daemon trust a first-seen key during an outage path.
 
 ### Option B: dedicated user + sudoers
 

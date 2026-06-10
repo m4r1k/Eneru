@@ -102,6 +102,7 @@ jobs:
           grep -Eq "^[[:space:]]*run_loopback_case[[:space:]]+sudo[[:space:]]+testuser[[:space:]]+true[[:space:]]+19192[[:space:]]*$" tests/e2e/groups/loopback.sh
           grep -Eq "^[[:space:]]*negative_missing_machine_id[[:space:]]*$" tests/e2e/groups/loopback.sh
           grep -Eq "^[[:space:]]*negative_missing_loopback[[:space:]]*$" tests/e2e/groups/loopback.sh
+          grep -Eq "^[[:space:]]*strict_known_hosts_remote[[:space:]]+19194[[:space:]]*$" tests/e2e/groups/loopback.sh
           grep -q "stop_vms" tests/e2e/groups/loopback.sh
           grep -q "stop_compose" tests/e2e/groups/loopback.sh
           grep -q "stop_containers_rootless" tests/e2e/groups/loopback.sh
@@ -114,6 +115,7 @@ jobs:
           # tiered config / write gating (single-ups) must stay present.
           if [ "${{ matrix.group }}" = "cli" ]; then
             grep -q "Test 51: auth user + apikey CLI lifecycle" tests/e2e/groups/cli.sh
+            grep -q "Test 58: NUT name autodiscovery self-heals single exposed UPS" tests/e2e/groups/cli.sh
           else
             grep -q "Test 52: API authentication login + tiered config + write gating" tests/e2e/groups/single-ups.sh
             grep -q "Test 53: UPS control fail-closed + allowlist enforcement" tests/e2e/groups/single-ups.sh
