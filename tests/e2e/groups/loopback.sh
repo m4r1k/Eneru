@@ -57,16 +57,16 @@ prepare_loopback_key() {
 }
 
 prepare_accept_new_ssh_material() {
-  # Writable SSH dir holding only the private key. known_hosts is left
-  # absent on purpose: with StrictHostKeyChecking=accept-new the daemon must
-  # learn the host key on its first probe and write it here, so the directory
-  # has to be owned by and writable for uid 10001 (the container user).
-  rm -rf /tmp/e2e-accept-new-ssh
-  install -m 0755 -d /tmp/e2e-accept-new-ssh
-  cp /tmp/e2e-ssh-key /tmp/e2e-accept-new-ssh/id_remote
-  sudo chown -R 10001:10001 /tmp/e2e-accept-new-ssh
-  sudo chmod 0755 /tmp/e2e-accept-new-ssh
-  sudo chmod 0400 /tmp/e2e-accept-new-ssh/id_remote
+  # Mirror the shipped container/Kubernetes layout: a READ-ONLY key dir
+  # (private key only) plus a separate writable, empty state dir. With the
+  # built-in StrictHostKeyChecking=accept-new default and no ssh_options, the
+  # daemon must learn the host key into ~/.ssh/known_hosts on the writable
+  # state volume (/var/lib/eneru); the key mount never needs to be writable.
+  rm -rf /tmp/e2e-accept-new-key /tmp/e2e-accept-new-state
+  install -m 0755 -d /tmp/e2e-accept-new-key /tmp/e2e-accept-new-state
+  cp /tmp/e2e-ssh-key /tmp/e2e-accept-new-key/id_remote
+  sudo chown -R 10001:10001 /tmp/e2e-accept-new-key /tmp/e2e-accept-new-state
+  sudo chmod 0400 /tmp/e2e-accept-new-key/id_remote
 }
 
 write_loopback_config() {
@@ -347,14 +347,16 @@ accept_new_known_hosts_remote() {
   local config="/tmp/e2e-accept-new.yaml"
   local name="eneru-e2e-accept-new"
   local port="$1"
-  local ssh_dir="/tmp/e2e-accept-new-ssh"
-  local kh="${ssh_dir}/known_hosts"
+  local state_dir="/tmp/e2e-accept-new-state"
+  # OpenSSH's default known_hosts lives in the home dir (~ = /var/lib/eneru),
+  # which is the writable state mount -> this host path.
+  local kh="${state_dir}/.ssh/known_hosts"
   # Start clean so the first run genuinely has no key to trust yet.
-  rm -f "$kh"
+  rm -rf "${state_dir}/.ssh"
   cat >"$config" <<'YAML'
 ups:
   - name: "TestUPS@nut-server"
-    display_name: "Accept-New SSH Trust E2E UPS"
+    display_name: "Accept-New (default) SSH Trust E2E UPS"
     is_local: false
     remote_servers:
       - name: accept-new-ssh-target
@@ -362,9 +364,8 @@ ups:
         host: ssh-target
         user: root
         ssh_key_path: /var/lib/eneru/ssh/id_remote
-        ssh_options:
-          - "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
-          - "StrictHostKeyChecking=accept-new"
+        # No ssh_options: rely on the built-in StrictHostKeyChecking=accept-new
+        # default and OpenSSH's ~/.ssh/known_hosts on the state volume.
         shutdown_command: "shutdown -h now"
 local_shutdown:
   enabled: false
@@ -389,13 +390,15 @@ YAML
       echo "FAIL: known_hosts must not exist before the first accept-new start"
       exit 1
     fi
-    echo "  Starting accept-new container (${attempt})"
-    # Mount the SSH dir read-write so accept-new can record the learned key.
+    echo "  Starting accept-new (default) container (${attempt})"
+    # Private-key mount is READ-ONLY (like the shipped layout); the writable
+    # state volume at /var/lib/eneru is where ~/.ssh/known_hosts is recorded.
     docker run -d --name "$name" \
       --network "$NETWORK" \
       -p "127.0.0.1:${port}:9191" \
       -v "$config":/etc/ups-monitor/config.yaml:ro \
-      -v "${ssh_dir}":/var/lib/eneru/ssh:rw \
+      -v /tmp/e2e-accept-new-key:/var/lib/eneru/ssh:ro \
+      -v "${state_dir}":/var/lib/eneru:rw \
       eneru:e2e \
       run --config /etc/ups-monitor/config.yaml \
       --api --api-bind 0.0.0.0 --api-port 9191 >/dev/null
@@ -431,12 +434,12 @@ YAML
       exit 1
     fi
 
-    # The whole point of accept-new: SSH must have LEARNED the host key on
-    # the first probe and written it to the writable mount -- no ssh-keyscan,
-    # no pre-seeding.
+    # The whole point: the built-in accept-new default must LEARN the host key
+    # on the first probe and write it to ~/.ssh/known_hosts on the writable
+    # state volume -- no ssh_options, no pre-seeding, key mount read-only.
     if [ ! -s "$kh" ]; then
-      echo "FAIL: accept-new did not record known_hosts on the ${attempt} start"
-      ls -la "$ssh_dir" || true
+      echo "FAIL: accept-new default did not record ~/.ssh/known_hosts on the ${attempt} start"
+      ls -la "${state_dir}" "${state_dir}/.ssh" 2>/dev/null || true
       docker logs "$name" || true
       exit 1
     fi
@@ -467,7 +470,7 @@ echo ">>> Using Docker network: ${NETWORK}"
 prepare_loopback_key
 echo ">>> Prepared loopback private key at /tmp/e2e-loopback-key"
 prepare_accept_new_ssh_material
-echo ">>> Prepared accept-new remote SSH key (writable dir, no pre-seeded known_hosts) at /tmp/e2e-accept-new-ssh"
+echo ">>> Prepared accept-new remote SSH key (read-only) + writable state dir at /tmp/e2e-accept-new-{key,state}"
 
 echo ">>> Running: Test 47: E2E Loopback Root"
 run_loopback_case root root false 19191

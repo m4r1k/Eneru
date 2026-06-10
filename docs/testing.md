@@ -229,7 +229,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 58 numb
 | 54 | UPS Single | Config hot-reload: SIGHUP applies a threshold change live, the authenticated `/config/reload` endpoint returns a report (anonymous is 401), and a broken config is rejected without dropping the daemon |
 | 55 | UPS Single | Browser dashboard: the embedded API serves the SPA shell and assets with a strict CSP, and rejects path traversal / unknown assets with 404 |
 | 56 | UPS Single | Event management: a wide-range `/api/v1/events` query returns source-qualified rows, an authenticated `DELETE` removes a real event (anonymous is 401), and a history `from > to` is 400 |
-| 57 | Loopback | Containerized remote SSH with `StrictHostKeyChecking=accept-new` and a writable mount learns the host key on the first probe (no pre-seeded `known_hosts`), reaches `HEALTHY`, and reuses the recorded key unchanged after the container is recreated |
+| 57 | Loopback | Containerized remote SSH with **no** `ssh_options` relies on the built-in `StrictHostKeyChecking=accept-new` default: it learns the host key on the first probe into `~/.ssh/known_hosts` on the writable state volume (the key mount stays read-only), reaches `HEALTHY`, and reuses the recorded key unchanged after the container is recreated |
 | 58 | CLI | NUT name autodiscovery (issue #71) lists a single exposed UPS with `upsc -l`, auto-corrects the runtime poll target, and logs the `ups.name` fix hint |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
 

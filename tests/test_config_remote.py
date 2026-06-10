@@ -92,6 +92,72 @@ remote_servers:
         assert server.ssh_options == ["StrictHostKeyChecking=yes"]
 
     @pytest.mark.unit
+    def test_ssh_options_default_accept_new(self, temp_config_file):
+        """A remote with no ssh_options defaults to accept-new (issue #73)."""
+        config_data = """
+remote_servers:
+  - name: "NAS"
+    enabled: true
+    host: "192.168.1.50"
+    user: "admin"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+        assert config.remote_servers[0].ssh_options == [
+            "StrictHostKeyChecking=accept-new"
+        ]
+
+    @pytest.mark.unit
+    def test_ssh_options_explicit_strict_preserved(self, temp_config_file):
+        """An explicit StrictHostKeyChecking is never overridden by the default."""
+        config_data = """
+remote_servers:
+  - name: "yes-form"
+    enabled: true
+    host: "192.168.1.50"
+    user: "admin"
+    ssh_options:
+      - "StrictHostKeyChecking=yes"
+  - name: "dash-o-no-form"
+    enabled: true
+    host: "192.168.1.51"
+    user: "admin"
+    ssh_options:
+      - "-o StrictHostKeyChecking=no"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+        assert config.remote_servers[0].ssh_options == ["StrictHostKeyChecking=yes"]
+        assert config.remote_servers[1].ssh_options == ["-o StrictHostKeyChecking=no"]
+        for server in config.remote_servers:
+            assert "accept-new" not in " ".join(server.ssh_options)
+
+    @pytest.mark.unit
+    def test_ssh_options_default_preserves_other_options(self, temp_config_file):
+        """The accept-new default is appended alongside unrelated options."""
+        config_data = """
+remote_servers:
+  - name: "NAS"
+    enabled: true
+    host: "192.168.1.50"
+    user: "admin"
+    ssh_options:
+      - "-o ConnectTimeout=5"
+"""
+        temp_config_file.write_text(config_data)
+        config = ConfigLoader.load(str(temp_config_file))
+        opts = config.remote_servers[0].ssh_options
+        assert "-o ConnectTimeout=5" in opts
+        assert "StrictHostKeyChecking=accept-new" in opts
+
+    @pytest.mark.unit
+    def test_ssh_options_default_on_direct_construction(self):
+        """RemoteServerConfig applies the default outside the YAML parser too."""
+        assert RemoteServerConfig().ssh_options == ["StrictHostKeyChecking=accept-new"]
+        explicit = RemoteServerConfig(ssh_options=["StrictHostKeyChecking=no"])
+        assert explicit.ssh_options == ["StrictHostKeyChecking=no"]
+
+    @pytest.mark.unit
     def test_remote_server_use_sudo(self, temp_config_file):
         """use_sudo is parsed for any remote server, not just loopback."""
         config_data = """

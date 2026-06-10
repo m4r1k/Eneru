@@ -964,7 +964,9 @@ remote_servers:
         assert server.connect_timeout == 10  # default
         assert server.command_timeout == 30  # default
         assert server.shutdown_command == "sudo shutdown -h now"  # default
-        assert server.ssh_options == []  # default
+        # Remote host-key checking defaults to accept-new (issue #73) so a
+        # remote with no ssh_options can still connect on first contact.
+        assert server.ssh_options == ["StrictHostKeyChecking=accept-new"]
         assert server.pre_shutdown_commands == []  # default
         assert server.parallel is None  # default (unset; behaves as parallel batch)
         assert server.shutdown_safety_margin == 60  # default

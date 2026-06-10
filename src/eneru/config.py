@@ -354,6 +354,27 @@ class RemoteServerConfig:
     host_identity_command: str = "cat /etc/machine-id"
     expected_host_identity: Optional[str] = None
 
+    def __post_init__(self):
+        # Default remote host-key checking to accept-new. OpenSSH's own default
+        # (StrictHostKeyChecking=ask) fails closed under BatchMode when a host
+        # key is unknown, so a remote with no ssh_options would never connect on
+        # first contact (issue #73). accept-new learns and pins the key on the
+        # first probe and still fails closed if the key later changes. The key
+        # is recorded in OpenSSH's default ~/.ssh/known_hosts, which resolves to
+        # the writable, persistent state volume both on bare-metal and inside a
+        # container (HOME=/var/lib/eneru), so no UserKnownHostsFile is forced and
+        # the same default works everywhere. Any operator-supplied
+        # StrictHostKeyChecking directive is preserved verbatim, including the
+        # loopback delegate's explicit "no" (127.0.0.1 is MITM-safe). The
+        # default is prepended, not appended, so a trailing dangling flag in
+        # ssh_options (e.g. a bare "-i") stays trailing and is still rejected by
+        # build_ssh_probe_command instead of silently consuming this value.
+        if not any(
+            "stricthostkeychecking" in opt.lower() for opt in self.ssh_options
+        ):
+            self.ssh_options = ["StrictHostKeyChecking=accept-new",
+                                *self.ssh_options]
+
 
 @dataclass
 class LocalShutdownConfig:

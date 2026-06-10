@@ -73,6 +73,18 @@ def test_probe_command_builder_preserves_ssh_option_arguments(remote_server):
 
 
 @pytest.mark.unit
+def test_probe_command_builder_emits_default_accept_new():
+    """A remote with no configured ssh_options gets accept-new in the argv (issue #73)."""
+    server = RemoteServerConfig(
+        name="nas", enabled=True, host="nas.example", user="ups",
+    )
+    cmd = build_ssh_probe_command(server, "true")
+    assert "StrictHostKeyChecking=accept-new" in cmd
+    # Bare "KEY=VALUE" defaults are emitted as "-o KEY=VALUE".
+    assert cmd[cmd.index("StrictHostKeyChecking=accept-new") - 1] == "-o"
+
+
+@pytest.mark.unit
 def test_probe_safety_rejects_obvious_shutdown_commands():
     assert is_safe_probe_command("true")
     assert not is_safe_probe_command("sudo shutdown -h now")

@@ -68,6 +68,10 @@ spec:
     - name: config
       configMap:
         name: eneru-config
+    # Ephemeral: fine for a throwaway Pod, but the accept-new host-key trust in
+    # ~/.ssh/known_hosts (and the stats/auth DBs) is re-learned/reset on every
+    # restart. For persistence use a PersistentVolumeClaim here, as in
+    # remote-deployment.yaml.
     - name: state
       emptyDir: {}
     - name: runtime

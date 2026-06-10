@@ -199,55 +199,35 @@ Accept host keys deliberately before relying on shutdown:
 sudo ssh user@remote-server "echo OK"
 ```
 
-For Docker, Podman, or Kubernetes, the container filesystem is
-disposable: a host key accepted inside a running container is gone the
-moment it is recreated. Keep `known_hosts` on a **persistent, writable**
-bind-mount so SSH learns the key on the first connection and reuses it
-across recreates, with no manual key handling.
+For Docker, Podman, or Kubernetes you don't configure host-key trust at
+all. Eneru defaults every remote to `StrictHostKeyChecking=accept-new`:
+on the first connection it records the remote's host key and reuses it
+afterward, failing closed only if that key later changes. The keys go to
+OpenSSH's default `~/.ssh/known_hosts`, which in a container is
+`/var/lib/eneru/.ssh/known_hosts` on the **state** volume.
 
-Create a writable directory for the SSH material, owned by the
-container's uid (`10001`), and place the private key there:
-
-```bash
-# On the Eneru host:
-install -d -o 10001 -g 10001 -m 0755 /srv/eneru/ssh
-# put the private key here too, e.g. id_ups_shutdown, owned 10001:10001, chmod 0400
-```
-
-Mount that directory **read-write** and let OpenSSH record the host key
-on first use:
+So the only requirement is that the state volume is **persistent and
+writable** — a bind mount for Docker/Podman, a `PersistentVolumeClaim`
+for Kubernetes (see `deploy/kubernetes/remote-deployment.yaml`). The SSH
+*private key* mount stays read-only; nothing is written there.
 
 ```yaml
-# docker-compose.yaml (or the equivalent volume / Kubernetes mount)
-volumes:
-  - /srv/eneru/ssh:/var/lib/eneru/ssh:rw
-```
-
-```yaml
-# config.yaml
+# config.yaml — no ssh_options needed
 remote_servers:
   - name: "NAS"
     enabled: true
     host: "nas.example.lan"
     user: "ups"
     ssh_key_path: "/var/lib/eneru/ssh/id_ups_shutdown"
-    ssh_options:
-      - "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
-      - "StrictHostKeyChecking=accept-new"
 ```
 
-On the first health-check probe SSH writes the target's host key to the
-mounted `known_hosts` and pins it. Because the mount is persistent the
-key survives recreates, and because `accept-new` still rejects a
-*changed* key, a later host-key swap fails closed. `accept-new` trusts
-whatever answers on that first connection (trust-on-first-use), so run
-the first start on a network you trust.
+`accept-new` trusts whatever answers on that first connection
+(trust-on-first-use), so do the first start on a network you trust. To
+pre-verify keys out of band instead, set `StrictHostKeyChecking=yes` with
+a pre-populated `UserKnownHostsFile` per remote — Eneru leaves any
+`StrictHostKeyChecking` you set untouched.
 
-The mount must be writable by uid `10001`; if it is read-only, SSH cannot
-record the key and every probe fails with `Host key verification failed`.
-
-After the first start, confirm the target is actually trusted before you
-rely on it:
+After the first start, confirm each target is trusted:
 
 ```bash
 curl -s http://localhost:9191/api/v1/ups \

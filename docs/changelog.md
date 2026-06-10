@@ -7,22 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [6.1.0-rc3] - 2026-06-10
 
 ### Changed
 
-- **Container SSH host-key trust now uses `accept-new`, not a pre-seeded
-  `known_hosts` (issue #73 follow-up).** The rc2 guidance asked operators to
-  `ssh-keyscan` and verify a `known_hosts` file by hand and pin it read-only
-  with `StrictHostKeyChecking=yes`. That was easy to get wrong: a missing,
-  empty, or hostname/IP-mismatched file made every probe and shutdown fail
-  closed, silently, until a power event — and it could break setups that
-  already worked via the persistent `~/.ssh/known_hosts`. The container docs
-  now mount the SSH directory read-write and use
-  `StrictHostKeyChecking=accept-new`, so SSH records each host key on the
-  first probe and reuses it across recreates, while a later key *change* still
-  fails closed. The E2E (Test 57) was reworked to prove the auto-learn and
-  cross-recreate persistence path. Docs only; no behavior change in the daemon.
+- **Remote SSH host-key checking now defaults to `accept-new` (issue #73).**
+  Previously a `remote_servers` entry with no `ssh_options` inherited OpenSSH's
+  `StrictHostKeyChecking=ask`, which fails closed under `BatchMode` when a host
+  key is unknown — so a fresh remote could never connect on first contact, and
+  the rc2 workaround (hand-run `ssh-keyscan` + `StrictHostKeyChecking=yes`) was
+  easy to get wrong (a missing/empty/mismatched `known_hosts` failed closed
+  silently until a power event). Eneru now injects
+  `StrictHostKeyChecking=accept-new` into any remote that does not set a
+  `StrictHostKeyChecking` directive of its own: the host key is learned and
+  pinned on the first probe and recorded in OpenSSH's default
+  `~/.ssh/known_hosts`, while a later key *change* still fails closed. Any
+  explicit `StrictHostKeyChecking` you set is preserved verbatim, including the
+  loopback delegate's `no`. No `ssh_options` are needed for the common case.
+- **Containers persist host-key trust on the state volume.** `~/.ssh/known_hosts`
+  resolves to `/var/lib/eneru/.ssh/known_hosts` (HOME=`/var/lib/eneru`), so trust
+  persists wherever the state volume is persistent and the SSH **private key**
+  mount stays read-only. The shipped Kubernetes Deployment
+  (`deploy/kubernetes/remote-deployment.yaml`) now backs `state` with a
+  `PersistentVolumeClaim` (instead of `emptyDir`) so learned keys — and the
+  stats/auth databases — survive pod restarts; it uses the `Recreate` strategy
+  to avoid two pods contending for the ReadWriteOnce volume. The container docs
+  drop the manual `known_hosts`/`UserKnownHostsFile` setup accordingly, and the
+  E2E (Test 57) proves the no-`ssh_options` default learns and persists the key
+  across a container recreate with a read-only key mount.
 
 ## [6.1.0-rc2] - 2026-06-10
 

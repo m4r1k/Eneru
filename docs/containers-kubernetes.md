@@ -37,7 +37,7 @@ docker run -d --name eneru \
   -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro \
   -v /srv/eneru/state:/var/lib/eneru \
   -v /srv/eneru/run:/var/run/eneru \
-  -v /srv/eneru/ssh:/var/lib/eneru/ssh:rw \
+  -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro \
   ghcr.io/m4r1k/eneru:latest \
   run --config /etc/ups-monitor/config.yaml \
   --api --api-bind 0.0.0.0 --api-port 9191
@@ -56,9 +56,8 @@ ups:
         host: "nas.example.lan"
         user: "ups"
         ssh_key_path: "/var/lib/eneru/ssh/id_ups_shutdown"
-        ssh_options:
-          - "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
-          - "StrictHostKeyChecking=accept-new"
+        # No ssh_options needed: Eneru defaults to StrictHostKeyChecking=
+        # accept-new and records keys in ~/.ssh/known_hosts on the state volume.
         shutdown_command: "sudo shutdown -h now"
 
 local_shutdown:
@@ -158,32 +157,15 @@ This matches the synthesized defaults: `user: root`,
 `shutdown_command: "shutdown -h now"`, and key path
 `/var/lib/eneru/ssh/id_loopback`.
 
-For ordinary remote targets from the container, keep their `known_hosts`
-in the same bind-mounted directory and let SSH learn the key on first
-use, so trust survives container recreates without accepting keys inside
-a disposable container. Mount the directory **read-write** (so SSH can
-record the key) and use `StrictHostKeyChecking=accept-new`:
-
-```yaml
-# docker-compose.yaml
-volumes:
-  - /srv/eneru/ssh:/var/lib/eneru/ssh:rw
-```
-
-```yaml
-# config.yaml (remote entry; the sample at the top of this page shows the full shape)
-    ssh_options:
-      - "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
-      - "StrictHostKeyChecking=accept-new"
-```
-
-On the first probe SSH writes the host key to
-`/srv/eneru/ssh/known_hosts` and pins it; it persists across recreates,
-and a later key *change* fails closed. `accept-new` trusts the first
-connection, so do that first start on a network you trust. The mount
-must be writable by uid `10001`, otherwise SSH cannot record the key and
-the probe fails with `Host key verification failed`. Confirm the result
-with `curl -s http://localhost:9191/api/v1/ups | jq '.ups[].remoteHealth'`
+Ordinary remote targets need no host-key setup. Eneru defaults remotes to
+`StrictHostKeyChecking=accept-new`, so on the first probe SSH records each
+host key in `~/.ssh/known_hosts` (`/var/lib/eneru/.ssh/known_hosts`, on the
+**state** volume) and pins it; a later key *change* fails closed. Keep the
+state volume persistent and writable — `/srv/eneru/state` for Docker, a
+`PersistentVolumeClaim` for Kubernetes — and the SSH **private key** mount
+stays read-only. `accept-new` trusts the first connection, so do that first
+start on a network you trust. Confirm with
+`curl -s http://localhost:9191/api/v1/ups | jq '.ups[].remoteHealth'`
 (every remote should read `"status": "HEALTHY"`).
 
 ### Option B: dedicated user + sudoers

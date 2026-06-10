@@ -137,12 +137,15 @@ chown 10001:10001 /srv/eneru/ssh/id_rsa /srv/eneru/ssh/id_rsa.pub
 chmod 0400 /srv/eneru/ssh/id_rsa
 
 # Preserve the host-key trust store so your already-verified remotes stay
-# trusted after the move. If it is absent, skip this: accept-new (below)
-# records each key on the first probe.
+# trusted after the move. It belongs in the container's ~/.ssh, i.e. the
+# writable state volume (/var/lib/eneru -> /srv/eneru/state), not the
+# read-only key mount. If it is absent, skip this: accept-new records each
+# key on the first probe.
 if [ -f /root/.ssh/known_hosts ]; then
-  cp /root/.ssh/known_hosts /srv/eneru/ssh/known_hosts
-  chown 10001:10001 /srv/eneru/ssh/known_hosts
-  chmod 0644 /srv/eneru/ssh/known_hosts
+  install -d -o 10001 -g 10001 -m 0700 /srv/eneru/state/.ssh
+  cp /root/.ssh/known_hosts /srv/eneru/state/.ssh/known_hosts
+  chown 10001:10001 /srv/eneru/state/.ssh/known_hosts
+  chmod 0600 /srv/eneru/state/.ssh/known_hosts
 fi
 ```
 
@@ -156,21 +159,17 @@ remote_servers:
     host: 192.168.x.y
     user: nas-admin
     ssh_key_path: /var/lib/eneru/ssh/id_rsa   # ADD THIS
-    ssh_options:
-      - "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
-      - "StrictHostKeyChecking=accept-new"
     shutdown_command: "shutdown -h now"
 ```
 
 The container-side path `/var/lib/eneru/ssh/id_rsa` resolves to the host
-file via the `-v /srv/eneru/ssh:/var/lib/eneru/ssh` mount in Step 6, and
-`known_hosts` resolves the same way. Copying your existing `known_hosts`
-keeps every current remote trusted, so the read-only mount in Step 6 is
-enough for them. To add a *new* remote later, mount the directory
-read-write (`:rw`); `StrictHostKeyChecking=accept-new` then records the
-new host key on its first probe and pins it, while a later key *change*
-still fails closed. After starting, confirm each remote reads
-`"status": "HEALTHY"`:
+file via the read-only `-v /srv/eneru/ssh:/var/lib/eneru/ssh` mount in
+Step 6. No `ssh_options` are needed: Eneru defaults to
+`StrictHostKeyChecking=accept-new` and uses `~/.ssh/known_hosts` on the
+writable state volume. Copying your existing `known_hosts` above keeps
+every current remote trusted immediately; any new remote is learned and
+pinned on its first probe, while a later key *change* still fails closed.
+After starting, confirm each remote reads `"status": "HEALTHY"`:
 
 ```bash
 curl -s http://localhost:9191/api/v1/ups | jq '.ups[].remoteHealth'
