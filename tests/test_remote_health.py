@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from eneru import utils as eneru_utils
 from eneru import Config, RemoteServerConfig
 from eneru.remote_health import (
     REMOTE_HEALTH_DEGRADED,
@@ -82,6 +83,54 @@ def test_probe_command_builder_emits_default_accept_new():
     assert "StrictHostKeyChecking=accept-new" in cmd
     # Bare "KEY=VALUE" defaults are emitted as "-o KEY=VALUE".
     assert cmd[cmd.index("StrictHostKeyChecking=accept-new") - 1] == "-o"
+
+
+@pytest.mark.unit
+def test_probe_command_builder_container_uses_ssh_mount_known_hosts(monkeypatch):
+    """Containers keep host-key trust under the documented SSH mount."""
+    monkeypatch.delenv(eneru_utils.KNOWN_HOSTS_ENV, raising=False)
+    monkeypatch.setattr(eneru_utils, "running_in_container", lambda: True)
+    server = RemoteServerConfig(
+        name="nas", enabled=True, host="nas.example", user="ups",
+    )
+
+    cmd = build_ssh_probe_command(server, "true")
+
+    assert "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts" in cmd
+    assert cmd[cmd.index("UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts") - 1] == "-o"
+
+
+@pytest.mark.unit
+def test_probe_command_builder_env_known_hosts_override(monkeypatch):
+    """Kubernetes can point learned host keys at a PVC-backed file."""
+    monkeypatch.setenv(eneru_utils.KNOWN_HOSTS_ENV, "/var/lib/eneru/known_hosts")
+    monkeypatch.setattr(eneru_utils, "running_in_container", lambda: False)
+    server = RemoteServerConfig(
+        name="nas", enabled=True, host="nas.example", user="ups",
+    )
+
+    cmd = build_ssh_probe_command(server, "true")
+
+    assert "UserKnownHostsFile=/var/lib/eneru/known_hosts" in cmd
+
+
+@pytest.mark.unit
+def test_probe_command_builder_preserves_explicit_user_known_hosts(monkeypatch):
+    """An explicit UserKnownHostsFile suppresses the container default."""
+    monkeypatch.delenv(eneru_utils.KNOWN_HOSTS_ENV, raising=False)
+    monkeypatch.setattr(eneru_utils, "running_in_container", lambda: True)
+    server = RemoteServerConfig(
+        name="nas",
+        enabled=True,
+        host="nas.example",
+        user="ups",
+        ssh_options=["UserKnownHostsFile=/custom/known_hosts"],
+    )
+
+    cmd = build_ssh_probe_command(server, "true")
+
+    assert "UserKnownHostsFile=/custom/known_hosts" in cmd
+    assert "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts" not in cmd
 
 
 @pytest.mark.unit

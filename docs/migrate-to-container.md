@@ -137,15 +137,13 @@ chown 10001:10001 /srv/eneru/ssh/id_rsa /srv/eneru/ssh/id_rsa.pub
 chmod 0400 /srv/eneru/ssh/id_rsa
 
 # Preserve the host-key trust store so your already-verified remotes stay
-# trusted after the move. It belongs in the container's ~/.ssh, i.e. the
-# writable state volume (/var/lib/eneru -> /srv/eneru/state), not the
-# read-only key mount. If it is absent, skip this: accept-new records each
-# key on the first probe.
+# trusted after the move. Docker/Podman containers keep SSH trust in the
+# /var/lib/eneru/ssh mount. If it is absent, skip this: accept-new records
+# each key on the first probe.
 if [ -f /root/.ssh/known_hosts ]; then
-  install -d -o 10001 -g 10001 -m 0700 /srv/eneru/state/.ssh
-  cp /root/.ssh/known_hosts /srv/eneru/state/.ssh/known_hosts
-  chown 10001:10001 /srv/eneru/state/.ssh/known_hosts
-  chmod 0600 /srv/eneru/state/.ssh/known_hosts
+  cp /root/.ssh/known_hosts /srv/eneru/ssh/known_hosts
+  chown 10001:10001 /srv/eneru/ssh/known_hosts
+  chmod 0600 /srv/eneru/ssh/known_hosts
 fi
 ```
 
@@ -163,12 +161,13 @@ remote_servers:
 ```
 
 The container-side path `/var/lib/eneru/ssh/id_rsa` resolves to the host
-file via the read-only `-v /srv/eneru/ssh:/var/lib/eneru/ssh` mount in
-Step 6. No `ssh_options` are needed: Eneru defaults to
-`StrictHostKeyChecking=accept-new` and uses `~/.ssh/known_hosts` on the
-writable state volume. Copying your existing `known_hosts` above keeps
-every current remote trusted immediately; any new remote is learned and
-pinned on its first probe, while a later key *change* still fails closed.
+file via the `-v /srv/eneru/ssh:/var/lib/eneru/ssh` mount in Step 6. No
+`ssh_options` are needed: Eneru defaults to
+`StrictHostKeyChecking=accept-new` and uses
+`/var/lib/eneru/ssh/known_hosts`. Copying your existing `known_hosts`
+above keeps every current remote trusted immediately; any new remote is
+learned and pinned on its first probe, while a later key *change* still
+fails closed.
 After starting, confirm each remote reads `"status": "HEALTHY"`:
 
 ```bash
@@ -267,7 +266,7 @@ docker run --rm \
     --network host \
     -v /etc/machine-id:/etc/machine-id:ro \
     -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
-    -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z \
+    -v /srv/eneru/ssh:/var/lib/eneru/ssh:Z \
     ghcr.io/m4r1k/eneru:latest \
     validate --config /etc/ups-monitor/config.yaml
 ```
@@ -296,7 +295,7 @@ docker run --rm \
     --network host \
     -v /etc/machine-id:/etc/machine-id:ro \
     -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
-    -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z \
+    -v /srv/eneru/ssh:/var/lib/eneru/ssh:Z \
     ghcr.io/m4r1k/eneru:latest \
     shutdown group --group "<your-ups-name>" --dry-run \
     --config /etc/ups-monitor/config.yaml
@@ -313,7 +312,7 @@ docker run -d --name eneru \
     --network host \
     -v /etc/machine-id:/etc/machine-id:ro \
     -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
-    -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z \
+    -v /srv/eneru/ssh:/var/lib/eneru/ssh:Z \
     -v /srv/eneru/state:/var/lib/eneru:Z \
     -v /srv/eneru/run:/var/run/eneru:Z \
     -v /srv/eneru/logs:/var/log/eneru:Z \
@@ -361,7 +360,7 @@ services:
     volumes:
       - /etc/machine-id:/etc/machine-id:ro   # NEVER :Z — see warning above
       - /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z
-      - /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z
+      - /srv/eneru/ssh:/var/lib/eneru/ssh:Z
       - /srv/eneru/state:/var/lib/eneru:Z
       - /srv/eneru/run:/var/run/eneru:Z
       - /srv/eneru/logs:/var/log/eneru:Z
@@ -446,7 +445,7 @@ row is folded by the next start.
 | `-v /srv/eneru/state:/var/lib/eneru` | SQLite stats DB (samples, events, notifications). Persistent; do not skip. |
 | `-v /srv/eneru/run:/var/run/eneru` | Per-run state (battery history, shutdown flag, monitor state file). |
 | `-v /srv/eneru/logs:/var/log/eneru` | Forensic log file. |
-| `-v /srv/eneru/ssh:/var/lib/eneru/ssh:ro` | Loopback + operator SSH keys (read-only). |
+| `-v /srv/eneru/ssh:/var/lib/eneru/ssh` | Loopback/operator SSH keys plus `known_hosts`; directory is writable, private key files stay `0400`. |
 
 ## Troubleshooting
 

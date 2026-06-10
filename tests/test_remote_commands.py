@@ -13,6 +13,7 @@ from eneru import (
     FilesystemsConfig,
     UnmountConfig,
 )
+from eneru import utils as eneru_utils
 from eneru.shutdown.remote import RemoteShutdownResult
 
 
@@ -1376,6 +1377,27 @@ class TestRunRemoteCommand:
                 "-i",
                 "/var/lib/eneru/ssh/id_ups_shutdown",
             ]
+
+    @pytest.mark.unit
+    def test_run_remote_command_container_uses_ssh_mount_known_hosts(
+        self, ssh_monitor, monkeypatch
+    ):
+        """Shutdown SSH commands use the same container known_hosts default."""
+        monkeypatch.delenv(eneru_utils.KNOWN_HOSTS_ENV, raising=False)
+        monkeypatch.setattr(eneru_utils, "running_in_container", lambda: True)
+        server = RemoteServerConfig(
+            name="Test",
+            host="192.168.1.50",
+            user="admin",
+        )
+
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (0, "", "")
+
+            ssh_monitor._run_remote_command(server, "echo test", 30, "test")
+
+            call_args = mock_run.call_args[0][0]
+            assert "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts" in call_args
 
     @pytest.mark.unit
     def test_run_remote_command_success(self, ssh_monitor):

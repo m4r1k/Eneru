@@ -411,11 +411,10 @@ remote_servers:
     # Docker/Podman container or Kubernetes pod. If omitted, OpenSSH
     # defaults and ssh_options are used as before.
     # ssh_key_path: "/var/lib/eneru/ssh/id_ups_shutdown"
-    # SSH options (optional). Production deployments should rely on the
-    # default StrictHostKeyChecking=ask + a populated known_hosts so a
-    # MITM cannot replace the remote host's key without operator notice.
-    # The commented-out line below is for ephemeral testing only — DO
-    # NOT use in production.
+    # SSH options (optional). Eneru defaults to
+    # StrictHostKeyChecking=accept-new, which learns the host key on first
+    # contact and fails closed if the key changes later. Override only when
+    # you need a custom UserKnownHostsFile or a stricter pre-pinned setup.
     # ssh_options:
     #   - "-o StrictHostKeyChecking=no"  # testing only — DO NOT use in production
     # Shutdown order (optional, positive integer >= 1)

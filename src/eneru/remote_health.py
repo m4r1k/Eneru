@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from eneru.config import Config, RemoteServerConfig
+from eneru import utils as eneru_utils
 from eneru.utils import run_command
 
 
@@ -107,7 +108,8 @@ def build_ssh_probe_command(server: RemoteServerConfig,
         ssh_cmd.extend(["-i", server.ssh_key_path])
 
     pending_arg = False
-    for opt in server.ssh_options:
+    for opt in [*eneru_utils.runtime_default_ssh_options(server.ssh_options),
+                *server.ssh_options]:
         if pending_arg:
             ssh_cmd.append(opt)
             pending_arg = False

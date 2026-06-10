@@ -360,10 +360,10 @@ class RemoteServerConfig:
         # key is unknown, so a remote with no ssh_options would never connect on
         # first contact (issue #73). accept-new learns and pins the key on the
         # first probe and still fails closed if the key later changes. The key
-        # is recorded in OpenSSH's default ~/.ssh/known_hosts, which resolves to
-        # the writable, persistent state volume both on bare-metal and inside a
-        # container (HOME=/var/lib/eneru), so no UserKnownHostsFile is forced and
-        # the same default works everywhere. Any operator-supplied
+        # is recorded in the active OpenSSH known_hosts file. Bare-metal runs
+        # use the running user's default ~/.ssh/known_hosts; the SSH command
+        # builders add a container-only UserKnownHostsFile default so Docker
+        # keeps using the documented /var/lib/eneru/ssh mount. Any operator-supplied
         # StrictHostKeyChecking directive is preserved verbatim, including the
         # loopback delegate's explicit "no" (127.0.0.1 is MITM-safe). The
         # default is prepended, not appended, so a trailing dangling flag in

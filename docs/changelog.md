@@ -19,22 +19,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   easy to get wrong (a missing/empty/mismatched `known_hosts` failed closed
   silently until a power event). Eneru now injects
   `StrictHostKeyChecking=accept-new` into any remote that does not set a
-  `StrictHostKeyChecking` directive of its own: the host key is learned and
-  pinned on the first probe and recorded in OpenSSH's default
-  `~/.ssh/known_hosts`, while a later key *change* still fails closed. Any
-  explicit `StrictHostKeyChecking` you set is preserved verbatim, including the
-  loopback delegate's `no`. No `ssh_options` are needed for the common case.
-- **Containers persist host-key trust on the state volume.** `~/.ssh/known_hosts`
-  resolves to `/var/lib/eneru/.ssh/known_hosts` (HOME=`/var/lib/eneru`), so trust
-  persists wherever the state volume is persistent and the SSH **private key**
-  mount stays read-only. The shipped Kubernetes Deployment
-  (`deploy/kubernetes/remote-deployment.yaml`) now backs `state` with a
+  `StrictHostKeyChecking` directive of its own. Bare-metal installs use the
+  running user's normal `~/.ssh/known_hosts`; Docker/Podman containers use the
+  documented `/var/lib/eneru/ssh/known_hosts` path; Kubernetes samples set
+  `ENERU_SSH_KNOWN_HOSTS_FILE=/var/lib/eneru/known_hosts` because SSH keys live
+  in a read-only Secret and learned trust belongs on the writable PVC. Any
+  explicit `StrictHostKeyChecking` or `UserKnownHostsFile` you set is preserved
+  verbatim, including the loopback delegate's `no`. No `ssh_options` are needed
+  for the common case.
+- **Containers keep the existing SSH mount contract.** Docker/Podman still use
+  `/srv/eneru/ssh:/var/lib/eneru/ssh`; the directory is writable so
+  `accept-new` can write `known_hosts`, while the private key files remain mode
+  `0400`. The shipped Kubernetes Deployment
+  (`deploy/kubernetes/remote-deployment.yaml`) backs `state` with a
   `PersistentVolumeClaim` (instead of `emptyDir`) so learned keys — and the
   stats/auth databases — survive pod restarts; it uses the `Recreate` strategy
   to avoid two pods contending for the ReadWriteOnce volume. The container docs
-  drop the manual `known_hosts`/`UserKnownHostsFile` setup accordingly, and the
-  E2E (Test 57) proves the no-`ssh_options` default learns and persists the key
-  across a container recreate with a read-only key mount.
+  drop the manual `ssh-keyscan` setup accordingly, and E2E Test 57 proves the
+  no-`ssh_options` default learns and preserves trust across a container
+  recreate.
 
 ## [6.1.0-rc2] - 2026-06-10
 

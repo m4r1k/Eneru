@@ -32,9 +32,8 @@ metadata:
   name: eneru-state
 spec:
   # Persists the writable state volume across pod restarts: the stats SQLite
-  # DB, the auth DB, and ~/.ssh/known_hosts (where StrictHostKeyChecking=
-  # accept-new records each remote's host key on first contact). The SSH
-  # private key stays a read-only Secret; only this writable claim persists.
+  # DB, the auth DB, and the accept-new known_hosts file. The SSH private key
+  # stays a read-only Secret; only this writable claim persists.
   accessModes:
     - ReadWriteOnce
   resources:
@@ -83,6 +82,11 @@ spec:
             - 0.0.0.0
             - --api-port
             - "9191"
+          env:
+            # /var/lib/eneru/ssh is a read-only Secret mount in Kubernetes.
+            # Store learned accept-new host keys on the writable state PVC.
+            - name: ENERU_SSH_KNOWN_HOSTS_FILE
+              value: /var/lib/eneru/known_hosts
           ports:
             - name: http
               containerPort: 9191

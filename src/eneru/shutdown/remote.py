@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 from eneru.actions import REMOTE_ACTIONS, render_action, serialize_umount_targets
 from eneru.config import RemoteServerConfig
+from eneru import utils as eneru_utils
 from eneru.utils import run_command
 
 # Per-command wall-clock buffer added on top of the configured timeout to absorb
@@ -518,7 +519,8 @@ class RemoteShutdownMixin:
         #      unchanged. Multi-token flags like "-i /path/key" must be
         #      provided as separate ssh_options entries by the user.
         #   3. Bare "KEY=VALUE": prepend "-o" as the implicit form.
-        for opt in server.ssh_options:
+        for opt in [*eneru_utils.runtime_default_ssh_options(server.ssh_options),
+                    *server.ssh_options]:
             if opt.startswith("-o "):
                 ssh_cmd.extend(opt.split(None, 1))
             elif opt.startswith("-"):

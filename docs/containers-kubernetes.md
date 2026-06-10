@@ -37,7 +37,7 @@ docker run -d --name eneru \
   -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro \
   -v /srv/eneru/state:/var/lib/eneru \
   -v /srv/eneru/run:/var/run/eneru \
-  -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro \
+  -v /srv/eneru/ssh:/var/lib/eneru/ssh:rw \
   ghcr.io/m4r1k/eneru:latest \
   run --config /etc/ups-monitor/config.yaml \
   --api --api-bind 0.0.0.0 --api-port 9191
@@ -57,7 +57,7 @@ ups:
         user: "ups"
         ssh_key_path: "/var/lib/eneru/ssh/id_ups_shutdown"
         # No ssh_options needed: Eneru defaults to StrictHostKeyChecking=
-        # accept-new and records keys in ~/.ssh/known_hosts on the state volume.
+        # accept-new and records keys in /var/lib/eneru/ssh/known_hosts.
         shutdown_command: "sudo shutdown -h now"
 
 local_shutdown:
@@ -85,7 +85,7 @@ docker run -d --name eneru \
   -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro \
   -v /srv/eneru/state:/var/lib/eneru \
   -v /srv/eneru/run:/var/run/eneru \
-  -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro \
+  -v /srv/eneru/ssh:/var/lib/eneru/ssh:rw \
   ghcr.io/m4r1k/eneru:latest
 ```
 
@@ -159,12 +159,12 @@ This matches the synthesized defaults: `user: root`,
 
 Ordinary remote targets need no host-key setup. Eneru defaults remotes to
 `StrictHostKeyChecking=accept-new`, so on the first probe SSH records each
-host key in `~/.ssh/known_hosts` (`/var/lib/eneru/.ssh/known_hosts`, on the
-**state** volume) and pins it; a later key *change* fails closed. Keep the
-state volume persistent and writable — `/srv/eneru/state` for Docker, a
-`PersistentVolumeClaim` for Kubernetes — and the SSH **private key** mount
-stays read-only. `accept-new` trusts the first connection, so do that first
-start on a network you trust. Confirm with
+host key in `/var/lib/eneru/ssh/known_hosts` and pins it; a later key
+*change* fails closed. Keep `/srv/eneru/ssh` persistent and writable, while
+the private key file itself stays mode `0400`. Kubernetes uses a PVC-backed
+known_hosts path instead because `/var/lib/eneru/ssh` is a read-only Secret
+mount there. `accept-new` trusts the first connection, so do that first start
+on a network you trust. Confirm with
 `curl -s http://localhost:9191/api/v1/ups | jq '.ups[].remoteHealth'`
 (every remote should read `"status": "HEALTHY"`).
 
@@ -327,7 +327,7 @@ podman run -d --name eneru \
   -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
   -v /srv/eneru/state:/var/lib/eneru:Z \
   -v /srv/eneru/run:/var/run/eneru:Z \
-  -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z \
+  -v /srv/eneru/ssh:/var/lib/eneru/ssh:Z \
   ghcr.io/m4r1k/eneru:latest
 ```
 

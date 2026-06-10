@@ -90,11 +90,14 @@ docker run -d --name eneru \
   -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro \
   -v /srv/eneru/state:/var/lib/eneru \
   -v /srv/eneru/run:/var/run/eneru \
-  -v /srv/eneru/ssh:/var/lib/eneru/ssh:ro \
+  -v /srv/eneru/ssh:/var/lib/eneru/ssh \
   ghcr.io/m4r1k/eneru:latest \
   run --config /etc/ups-monitor/config.yaml \
   --api --api-bind 0.0.0.0 --api-port 9191
 ```
+
+Keep private key files in `/srv/eneru/ssh` mode `0400`. The directory itself
+stays writable so Eneru can persist learned SSH host keys in `known_hosts`.
 
 Use `ghcr.io/m4r1k/eneru:testing` for pre-release builds. v5.5+ supports the OCI image for **both** remote-only and local-host deployments. For full local-host ownership from a container (host poweroff, VM teardown, container stop, filesystem unmount), add `--network host`, `-v /etc/machine-id:/etc/machine-id:ro`, and a loopback SSH key. Hosts without systemd (Alpine, musl) have no `/etc/machine-id` — use a [marker file](https://eneru.readthedocs.io/latest/containers-kubernetes/#no-systemd-no-machine-id-alpine-consumer-hosts) instead. See [Choose your install](https://eneru.readthedocs.io/latest/install-comparison/) for the three deployment profiles and [Migrate to container](https://eneru.readthedocs.io/latest/migrate-to-container/) for the step-by-step.
 

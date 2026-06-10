@@ -158,6 +158,24 @@ remote_servers:
         assert explicit.ssh_options == ["StrictHostKeyChecking=no"]
 
     @pytest.mark.unit
+    def test_ssh_options_default_on_non_list_direct_construction(self):
+        """Malformed direct construction is normalized before default injection."""
+        server = RemoteServerConfig(ssh_options="StrictHostKeyChecking=no")
+
+        assert server.ssh_options == ["StrictHostKeyChecking=accept-new"]
+
+    @pytest.mark.unit
+    def test_ssh_options_default_ignores_non_string_direct_entries(self):
+        """Non-string entries do not crash the accept-new default check."""
+        server = RemoteServerConfig(ssh_options=[42, "ConnectTimeout=5"])
+
+        assert server.ssh_options == [
+            "StrictHostKeyChecking=accept-new",
+            42,
+            "ConnectTimeout=5",
+        ]
+
+    @pytest.mark.unit
     def test_remote_server_use_sudo(self, temp_config_file):
         """use_sudo is parsed for any remote server, not just loopback."""
         config_data = """

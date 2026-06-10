@@ -202,14 +202,16 @@ sudo ssh user@remote-server "echo OK"
 For Docker, Podman, or Kubernetes you don't configure host-key trust at
 all. Eneru defaults every remote to `StrictHostKeyChecking=accept-new`:
 on the first connection it records the remote's host key and reuses it
-afterward, failing closed only if that key later changes. The keys go to
-OpenSSH's default `~/.ssh/known_hosts`, which in a container is
-`/var/lib/eneru/.ssh/known_hosts` on the **state** volume.
+afterward, failing closed only if that key later changes.
 
-So the only requirement is that the state volume is **persistent and
-writable** — a bind mount for Docker/Podman, a `PersistentVolumeClaim`
-for Kubernetes (see `deploy/kubernetes/remote-deployment.yaml`). The SSH
-*private key* mount stays read-only; nothing is written there.
+Bare-metal installs use the running user's normal OpenSSH trust store
+(`~/.ssh/known_hosts`, such as `/root/.ssh/known_hosts` when the daemon
+runs as root). Containers keep the documented SSH mount contract: the
+Docker/Podman bind mount `/srv/eneru/ssh:/var/lib/eneru/ssh` stores both
+the private key and `known_hosts`, with the private key itself locked down
+to mode `0400`. Kubernetes keeps the private key in a read-only Secret and
+sets `ENERU_SSH_KNOWN_HOSTS_FILE=/var/lib/eneru/known_hosts`, which is on
+the writable state PVC.
 
 ```yaml
 # config.yaml — no ssh_options needed

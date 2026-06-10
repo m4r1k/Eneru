@@ -97,12 +97,13 @@ container):
   FAILED, and `/ready` returns 503. **Fails closed by construction.**
   No `/etc/machine-id` (Alpine, non-systemd)? Use a marker file —
   [No systemd / no machine-id](containers-kubernetes.md#no-systemd-no-machine-id-alpine-consumer-hosts).
-- `-v /srv/eneru/ssh:/var/lib/eneru/ssh:ro` — SSH private key for the
+- `-v /srv/eneru/ssh:/var/lib/eneru/ssh` — SSH private key for the
   loopback. Defaults to `/var/lib/eneru/ssh/id_loopback` inside the
   container; the host's `authorized_keys` for the matching user holds
-  the public key. Do not use `authorized_keys command="..."`; it
-  rewrites Eneru's identity probe and generated shutdown actions. See
-  [Containers and Kubernetes](containers-kubernetes.md).
+  the public key. The directory is writable so `accept-new` can persist
+  `known_hosts`; keep private key files mode `0400`. Do not use
+  `authorized_keys command="..."`; it rewrites Eneru's identity probe
+  and generated shutdown actions. See [Containers and Kubernetes](containers-kubernetes.md).
 - A user on the host with the privileges needed for every delegated action. Either:
   - SSH as `root` (one-line setup, larger blast radius), OR
   - SSH as a dedicated user with `use_sudo: true` and sudo NOPASSWD for
@@ -120,7 +121,7 @@ read them. Use `:Z` to relabel:
 
 ```bash
 -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z
--v /srv/eneru/ssh:/var/lib/eneru/ssh:ro,Z
+-v /srv/eneru/ssh:/var/lib/eneru/ssh:Z
 -v /srv/eneru/state:/var/lib/eneru:Z
 ```
 
