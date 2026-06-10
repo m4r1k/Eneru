@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **Container SSH host-key trust now uses `accept-new`, not a pre-seeded
+  `known_hosts` (issue #73 follow-up).** The rc2 guidance asked operators to
+  `ssh-keyscan` and verify a `known_hosts` file by hand and pin it read-only
+  with `StrictHostKeyChecking=yes`. That was easy to get wrong: a missing,
+  empty, or hostname/IP-mismatched file made every probe and shutdown fail
+  closed, silently, until a power event — and it could break setups that
+  already worked via the persistent `~/.ssh/known_hosts`. The container docs
+  now mount the SSH directory read-write and use
+  `StrictHostKeyChecking=accept-new`, so SSH records each host key on the
+  first probe and reuses it across recreates, while a later key *change* still
+  fails closed. The E2E (Test 57) was reworked to prove the auto-learn and
+  cross-recreate persistence path. Docs only; no behavior change in the daemon.
+
 ## [6.1.0-rc2] - 2026-06-10
 
 ### Changed

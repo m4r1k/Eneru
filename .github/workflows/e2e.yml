@@ -102,7 +102,7 @@ jobs:
           grep -Eq "^[[:space:]]*run_loopback_case[[:space:]]+sudo[[:space:]]+testuser[[:space:]]+true[[:space:]]+19192[[:space:]]*$" tests/e2e/groups/loopback.sh
           grep -Eq "^[[:space:]]*negative_missing_machine_id[[:space:]]*$" tests/e2e/groups/loopback.sh
           grep -Eq "^[[:space:]]*negative_missing_loopback[[:space:]]*$" tests/e2e/groups/loopback.sh
-          grep -Eq "^[[:space:]]*strict_known_hosts_remote[[:space:]]+19194[[:space:]]*$" tests/e2e/groups/loopback.sh
+          grep -Eq "^[[:space:]]*accept_new_known_hosts_remote[[:space:]]+19194[[:space:]]*$" tests/e2e/groups/loopback.sh
           grep -q "stop_vms" tests/e2e/groups/loopback.sh
           grep -q "stop_compose" tests/e2e/groups/loopback.sh
           grep -q "stop_containers_rootless" tests/e2e/groups/loopback.sh

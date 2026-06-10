@@ -136,16 +136,14 @@ cp /root/.ssh/id_rsa.pub /srv/eneru/ssh/id_rsa.pub
 chown 10001:10001 /srv/eneru/ssh/id_rsa /srv/eneru/ssh/id_rsa.pub
 chmod 0400 /srv/eneru/ssh/id_rsa
 
-# Preserve the host-key trust store too. If /root/.ssh/known_hosts is
-# missing, build a new one from the remote hosts named in your config.
+# Preserve the host-key trust store so your already-verified remotes stay
+# trusted after the move. If it is absent, skip this: accept-new (below)
+# records each key on the first probe.
 if [ -f /root/.ssh/known_hosts ]; then
   cp /root/.ssh/known_hosts /srv/eneru/ssh/known_hosts
-else
-  ssh-keyscan -H 192.168.x.y > /srv/eneru/ssh/known_hosts
+  chown 10001:10001 /srv/eneru/ssh/known_hosts
+  chmod 0644 /srv/eneru/ssh/known_hosts
 fi
-chown 10001:10001 /srv/eneru/ssh/known_hosts
-chmod 0644 /srv/eneru/ssh/known_hosts
-ssh-keygen -l -f /srv/eneru/ssh/known_hosts
 ```
 
 Then add `ssh_key_path` to each existing `remote_servers` entry in your
@@ -160,22 +158,23 @@ remote_servers:
     ssh_key_path: /var/lib/eneru/ssh/id_rsa   # ADD THIS
     ssh_options:
       - "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
-      - "StrictHostKeyChecking=yes"
+      - "StrictHostKeyChecking=accept-new"
     shutdown_command: "shutdown -h now"
 ```
 
 The container-side path `/var/lib/eneru/ssh/id_rsa` resolves to the host
-file via the `-v /srv/eneru/ssh:/var/lib/eneru/ssh:ro` mount in Step 6.
-The `known_hosts` path resolves the same way. With
-`StrictHostKeyChecking=yes`, the file can stay read-only in the
-container because SSH never appends new keys; add new remotes by
-updating `/srv/eneru/ssh/known_hosts` on the host after verifying the
-new fingerprint. The `ssh-keygen -l` output above is the fingerprint
-to compare against the remote server's console or inventory before you
-trust it. If you deliberately choose `StrictHostKeyChecking=accept-new`,
-then the mounted `known_hosts` file must be writable by uid `10001`;
-that is more convenient, but it lets the daemon trust a first-seen key
-during an outage path.
+file via the `-v /srv/eneru/ssh:/var/lib/eneru/ssh` mount in Step 6, and
+`known_hosts` resolves the same way. Copying your existing `known_hosts`
+keeps every current remote trusted, so the read-only mount in Step 6 is
+enough for them. To add a *new* remote later, mount the directory
+read-write (`:rw`); `StrictHostKeyChecking=accept-new` then records the
+new host key on its first probe and pins it, while a later key *change*
+still fails closed. After starting, confirm each remote reads
+`"status": "HEALTHY"`:
+
+```bash
+curl -s http://localhost:9191/api/v1/ups | jq '.ups[].remoteHealth'
+```
 
 ## Step 3: Stop the native service
 

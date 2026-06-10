@@ -199,30 +199,32 @@ Accept host keys deliberately before relying on shutdown:
 sudo ssh user@remote-server "echo OK"
 ```
 
-For Docker, Podman, or Kubernetes, do not accept the key interactively
-inside a running container. A container is like a hotel room: anything
-you tape to the wall is gone when housekeeping recreates it. Store the
-trusted host keys on the host and bind-mount them with the SSH private
-key:
+For Docker, Podman, or Kubernetes, the container filesystem is
+disposable: a host key accepted inside a running container is gone the
+moment it is recreated. Keep `known_hosts` on a **persistent, writable**
+bind-mount so SSH learns the key on the first connection and reuses it
+across recreates, with no manual key handling.
+
+Create a writable directory for the SSH material, owned by the
+container's uid (`10001`), and place the private key there:
 
 ```bash
 # On the Eneru host:
 install -d -o 10001 -g 10001 -m 0755 /srv/eneru/ssh
-ssh-keyscan -H remote-server > /srv/eneru/ssh/known_hosts
-chown 10001:10001 /srv/eneru/ssh/known_hosts
-chmod 0644 /srv/eneru/ssh/known_hosts
+# put the private key here too, e.g. id_ups_shutdown, owned 10001:10001, chmod 0400
 ```
 
-Compare the scanned fingerprint against the target's console or out-of-band
-inventory before trusting it:
-
-```bash
-ssh-keygen -l -f /srv/eneru/ssh/known_hosts
-```
-
-Then point OpenSSH at the mounted file:
+Mount that directory **read-write** and let OpenSSH record the host key
+on first use:
 
 ```yaml
+# docker-compose.yaml (or the equivalent volume / Kubernetes mount)
+volumes:
+  - /srv/eneru/ssh:/var/lib/eneru/ssh:rw
+```
+
+```yaml
+# config.yaml
 remote_servers:
   - name: "NAS"
     enabled: true
@@ -231,16 +233,27 @@ remote_servers:
     ssh_key_path: "/var/lib/eneru/ssh/id_ups_shutdown"
     ssh_options:
       - "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
-      - "StrictHostKeyChecking=yes"
+      - "StrictHostKeyChecking=accept-new"
 ```
 
-With `StrictHostKeyChecking=yes`, the file can stay read-only in the
-container because SSH never appends new keys. To add another remote,
-update `/srv/eneru/ssh/known_hosts` on the host after verifying that
-remote's fingerprint. If you deliberately choose
-`StrictHostKeyChecking=accept-new`, then the mounted `known_hosts` file
-must be writable by uid `10001`; that is more convenient, but it lets
-the daemon trust a first-seen key during an outage path.
+On the first health-check probe SSH writes the target's host key to the
+mounted `known_hosts` and pins it. Because the mount is persistent the
+key survives recreates, and because `accept-new` still rejects a
+*changed* key, a later host-key swap fails closed. `accept-new` trusts
+whatever answers on that first connection (trust-on-first-use), so run
+the first start on a network you trust.
+
+The mount must be writable by uid `10001`; if it is read-only, SSH cannot
+record the key and every probe fails with `Host key verification failed`.
+
+After the first start, confirm the target is actually trusted before you
+rely on it:
+
+```bash
+curl -s http://localhost:9191/api/v1/ups \
+  | jq '.ups[].remoteHealth[] | {server, host, status}'
+# every remote you depend on must report "status": "HEALTHY"
+```
 
 Do not leave `StrictHostKeyChecking=no` in production. If a host key changes unexpectedly, SSH should fail closed instead of sending shutdown commands to an untrusted host.
 

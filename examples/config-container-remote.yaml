@@ -13,8 +13,10 @@ ups:
     # Uncomment and adapt to drive remote shutdowns from this Eneru container.
     # The ssh_key_path below points at a file mounted from a Kubernetes Secret
     # or a Docker bind mount so the private key never lives in the image.
-    # Put trusted host keys in the same mounted directory as known_hosts;
-    # accepting them interactively inside a container is lost on recreate.
+    # Keep known_hosts in the same mounted directory and mount it read-write
+    # (-v /srv/eneru/ssh:/var/lib/eneru/ssh:rw). With accept-new, SSH records
+    # the host key on the first probe and reuses it across container recreates;
+    # a later key change still fails closed.
     # remote_servers:
     #   - name: "nas"
     #     enabled: true
@@ -23,7 +25,7 @@ ups:
     #     ssh_key_path: "/var/lib/eneru/ssh/id_eneru"
     #     ssh_options:
     #       - "UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts"
-    #       - "StrictHostKeyChecking=yes"
+    #       - "StrictHostKeyChecking=accept-new"
     #     shutdown_command: "sudo shutdown -h now"
 
 local_shutdown:
