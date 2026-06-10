@@ -7,17 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [6.1.0-rc1] - 2026-06-09
-
-### Added
-
-- **NUT name autodiscovery (issue #71).** When a poll can't reach the configured
-  UPS, Eneru now runs `upsc -l <host>` to list the UPS names the server actually
-  exposes and logs them. If exactly one UPS exists and the configured name is not
-  it (the classic case of a NUT *login username* placed where the UPS *device
-  name* belongs), Eneru self-heals for the session and tells you to fix
-  `ups.name`. With multiple UPSes it lists the choices instead of guessing. The
-  operator-configured name, display, and on-disk state are never mutated.
+## [6.1.0-rc2] - 2026-06-10
 
 ### Changed
 
@@ -35,6 +25,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   self-heals for the running session, plus a container SSH regression that uses
   a mounted private key and mounted `known_hosts` with strict host-key checking
   across container recreation.
+
+## [6.1.0-rc1] - 2026-06-09
+
+### Added
+
+- **NUT name autodiscovery (issue #71).** When a poll can't reach the configured
+  UPS, Eneru now runs `upsc -l <host>` to list the UPS names the server actually
+  exposes and logs them. If exactly one UPS exists and the configured name is not
+  it (the classic case of a NUT *login username* placed where the UPS *device
+  name* belongs), Eneru self-heals for the session and tells you to fix
+  `ups.name`. With multiple UPSes it lists the choices instead of guessing. The
+  operator-configured name, display, and on-disk state are never mutated.
+
+### Changed
+
 - **`expected_host_identity` auto-populates from any `cat /absolute/path`
   (issue #70).** Previously the container-side identity read was hardcoded to
   `/etc/machine-id`, so marker-file setups had to duplicate the value or mount
