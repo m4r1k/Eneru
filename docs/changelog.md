@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-seeded `known_hosts` file from `/srv/eneru/ssh`, then configure
   `UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts` with
   `StrictHostKeyChecking=yes` so remote-server trust survives
-  Docker/Podman/Kubernetes recreates without disabling host-key checks. The same
+  Docker/Podman/Kubernetes recreation without disabling host-key checks. The same
   pass makes the uid `10001` private-key ownership and mode guidance consistent
   across the container walkthroughs.
 - **E2E coverage for issue #71 and issue #73.** The CI matrix now includes a

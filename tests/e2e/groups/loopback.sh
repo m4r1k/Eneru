@@ -373,6 +373,7 @@ local_shutdown:
 remote_health:
   enabled: true
   startup_check: true
+  interval: 60   # minimum; the 3600 default would outlast the HEALTHY poll below
   failure_threshold: 1
 logging:
   file: null
@@ -415,10 +416,10 @@ YAML
     # collect_status serializes with sort_keys=True, so within each
     # remoteHealth entry "server" sits immediately before "status".
     # Poll for up to 75s (150 tries x 0.5s): the startup probe normally
-    # marks HEALTHY within seconds, but remote_health re-probes only every
-    # max(60, interval) seconds, so the window must clear one full retry
-    # cycle to survive a missed first probe instead of flaking. A match
-    # returns immediately, so this costs nothing on the happy path.
+    # marks HEALTHY within seconds. The config pins remote_health.interval
+    # to 60, so if the first probe is missed the next one fires at ~60s,
+    # inside this window, keeping the test deterministic instead of flaky.
+    # A match returns immediately, so this costs nothing on the happy path.
     if ! poll_http_pattern \
         "http://127.0.0.1:${port}/api/v1/ups" \
         "/tmp/e2e-strict-known-hosts-${attempt}-health.json" \
