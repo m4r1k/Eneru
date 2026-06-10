@@ -62,7 +62,9 @@ prepare_accept_new_ssh_material() {
   # built-in StrictHostKeyChecking=accept-new default and no ssh_options, the
   # daemon must learn the host key into ~/.ssh/known_hosts on the writable
   # state volume (/var/lib/eneru); the key mount never needs to be writable.
-  rm -rf /tmp/e2e-accept-new-key /tmp/e2e-accept-new-state
+  # sudo: a previous run may have left these owned by uid 10001 (ssh writes
+  # ~/.ssh as root-of-the-container 0700), which the runner user cannot remove.
+  sudo rm -rf /tmp/e2e-accept-new-key /tmp/e2e-accept-new-state
   install -m 0755 -d /tmp/e2e-accept-new-key /tmp/e2e-accept-new-state
   cp /tmp/e2e-ssh-key /tmp/e2e-accept-new-key/id_remote
   sudo chown -R 10001:10001 /tmp/e2e-accept-new-key /tmp/e2e-accept-new-state
@@ -351,8 +353,9 @@ accept_new_known_hosts_remote() {
   # OpenSSH's default known_hosts lives in the home dir (~ = /var/lib/eneru),
   # which is the writable state mount -> this host path.
   local kh="${state_dir}/.ssh/known_hosts"
-  # Start clean so the first run genuinely has no key to trust yet.
-  rm -rf "${state_dir}/.ssh"
+  # Start clean so the first run genuinely has no key to trust yet (sudo: the
+  # dir is created by ssh as 0700 owned by uid 10001).
+  sudo rm -rf "${state_dir}/.ssh"
   cat >"$config" <<'YAML'
 ups:
   - name: "TestUPS@nut-server"
@@ -437,13 +440,15 @@ YAML
     # The whole point: the built-in accept-new default must LEARN the host key
     # on the first probe and write it to ~/.ssh/known_hosts on the writable
     # state volume -- no ssh_options, no pre-seeding, key mount read-only.
-    if [ ! -s "$kh" ]; then
+    # known_hosts lands in ~/.ssh (mode 0700, owned by uid 10001), which the
+    # unprivileged CI runner cannot read -- use sudo for every check on it.
+    if ! sudo test -s "$kh"; then
       echo "FAIL: accept-new default did not record ~/.ssh/known_hosts on the ${attempt} start"
-      ls -la "${state_dir}" "${state_dir}/.ssh" 2>/dev/null || true
+      sudo ls -la "${state_dir}" "${state_dir}/.ssh" 2>/dev/null || true
       docker logs "$name" || true
       exit 1
     fi
-    [ "$attempt" = "first" ] && cp "$kh" /tmp/e2e-accept-new-known-hosts.first
+    [ "$attempt" = "first" ] && sudo cp "$kh" /tmp/e2e-accept-new-known-hosts.first
     echo "  PASS: accept-new remote HEALTHY and host key recorded after ${attempt} start"
     docker rm -f "$name" >/dev/null 2>&1 || true
   done
@@ -451,7 +456,7 @@ YAML
   # The learned key must survive the recreate unchanged: the second start
   # reused the persisted file instead of re-learning. That cross-recreate
   # persistence is exactly what issue #73 was missing.
-  if ! cmp -s /tmp/e2e-accept-new-known-hosts.first "$kh"; then
+  if ! sudo cmp -s /tmp/e2e-accept-new-known-hosts.first "$kh"; then
     echo "FAIL: known_hosts changed across recreate (host key was not persisted/reused)"
     exit 1
   fi

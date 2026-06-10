@@ -582,6 +582,25 @@ mqtt: 42
         assert not any("remote_servers['nas']" in e and "unknown" in e.lower()
                        for e in errors), errors
 
+    @pytest.mark.unit
+    def test_remote_ssh_options_entries_must_be_strings(self):
+        """Malformed ssh_options should validate cleanly instead of crashing."""
+        errors = self._errors({
+            "ups": {"name": "UPS@localhost"},
+            "remote_servers": [{
+                "name": "nas",
+                "enabled": True,
+                "host": "nas.lan",
+                "user": "ups",
+                "ssh_options": [42],
+            }],
+        })
+
+        assert any(
+            "remote_servers['nas'].ssh_options[0] must be a string" in e
+            for e in errors
+        ), errors
+
 
 class TestNotificationsSuppressValidation:
     """Issue #27 / B3: per-event notification suppression with safety blocklist."""

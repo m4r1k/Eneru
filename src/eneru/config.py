@@ -369,8 +369,11 @@ class RemoteServerConfig:
         # default is prepended, not appended, so a trailing dangling flag in
         # ssh_options (e.g. a bare "-i") stays trailing and is still rejected by
         # build_ssh_probe_command instead of silently consuming this value.
+        if not isinstance(self.ssh_options, list):
+            self.ssh_options = []
         if not any(
-            "stricthostkeychecking" in opt.lower() for opt in self.ssh_options
+            isinstance(opt, str) and "stricthostkeychecking" in opt.lower()
+            for opt in self.ssh_options
         ):
             self.ssh_options = ["StrictHostKeyChecking=accept-new",
                                 *self.ssh_options]
@@ -1451,6 +1454,19 @@ class ConfigLoader:
                     messages.extend(cls._unknown_key_errors(
                         server_section, entry, remote_server_keys,
                     ))
+                    ssh_options = entry.get("ssh_options")
+                    if ssh_options is not None:
+                        if not isinstance(ssh_options, list):
+                            messages.append(
+                                f"ERROR: {server_section}.ssh_options must be a list"
+                            )
+                        else:
+                            for opt_idx, opt in enumerate(ssh_options):
+                                if not isinstance(opt, str):
+                                    messages.append(
+                                        f"ERROR: {server_section}.ssh_options"
+                                        f"[{opt_idx}] must be a string"
+                                    )
                     pre_cmds = entry.get("pre_shutdown_commands", []) or []
                     if not isinstance(pre_cmds, list):
                         continue
