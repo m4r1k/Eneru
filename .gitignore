@@ -37,6 +37,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*uv.lock
 
 # Virtual environments
 venv/
@@ -157,3 +158,6 @@ id_ups_shutdown
 # Webhook URLs or tokens
 secrets.yaml
 secrets.json
+
+# Claude local permission settings
+.claude
