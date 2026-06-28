@@ -236,6 +236,49 @@ def _safe_alter(self, table: str, column_def: str) -> None:
    idempotent on repeated open, one that proves existing rows are
    preserved.
 
+## Periodic scheduling (v6.1)
+
+`scheduler.py` is the one place that answers "is this job due yet?". It is
+**pure + threadless**: `Schedule` does interval / daily / weekly / monthly
+due-time math (calendar kinds take an injectable `tz` so tests pin UTC),
+and `PeriodicScheduler` runs due jobs and persists each job's last-run to
+the stats `meta` table via injected `get_meta`/`set_meta` callables. Nothing
+here spawns a thread — owners tick it from a loop they already run.
+
+ELI5: it's a fridge whiteboard of chores. Each chore has a rule ("every
+hour", "the 1st at 08:00") and a last-done date written on the board (the
+`meta` table, *not* a kitchen timer). Because the date is on the board and
+not a timer, a chore due "every 30 days" still happens on day 30 even if
+the power blipped and the timer would have reset — that's why self-test
+uses this and not `time.monotonic`.
+
+**Where jobs are ticked (do NOT add a new thread):**
+
+- **Per-UPS jobs** (battery-health update, self-test issue/poll): each
+  `UPSGroupMonitor` owns a `PeriodicScheduler`, built once stats is open,
+  and ticks it at the END of `_main_loop` (just before the
+  `self._stop_event.wait(check_interval)`), wrapped in try/except so a
+  scheduler hiccup can never touch the shutdown path. last-run persists via
+  that monitor's `self._stats_store`.
+- **Daemon-wide jobs** (periodic reports — one digest, not N copies): a
+  single owner ticks from the `MultiUPSCoordinator._wait_for_completion`
+  loop (multi-UPS) or the single monitor's loop (single-UPS). It persists
+  to one stats store (the coordinator uses the first monitor's).
+
+**Reload:** `scheduler` schedules come from config (`self_test`, `reports`,
+`battery_health`); on a hot-reload the owner calls
+`PeriodicScheduler.clear()` then re-registers jobs from the new config so
+next-run times recompute. Classify those sections per `reload.py` (see the
+v6.1 additions there) — `self_test`/`reports` are SUBSYSTEM (need the
+re-register hook); `energy`/`battery_health` are SAFE (read live).
+
+**Last-run semantics:** the owner stamps last-run *before* invoking the job
+body, so a job that raises is logged and not re-attempted until its next
+occurrence (no retry storm, no re-issuing a self-test every second).
+Interval jobs fire on first sight (`fire_on_first=True`); calendar jobs
+seed a baseline on first sight and fire at the *next* occurrence, so a
+restart never blasts a report or kicks off a self-test.
+
 ## Conventions specific to this package
 
 - Emoji semantics in log messages are documented in the root `AGENTS.md`
