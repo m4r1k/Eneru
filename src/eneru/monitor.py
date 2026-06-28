@@ -25,6 +25,7 @@ from eneru.api import EneruAPIServer
 from eneru.mqtt import MQTTPublisher
 from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
 from eneru import self_test as selftest
+from eneru import reports as reports_mod
 from eneru.config import NutControlConfig
 from eneru.lifecycle import (
     EVENT_TYPE_DAEMON_START,
@@ -2100,6 +2101,19 @@ class UPSGroupMonitor(
             self._run_self_test_task()
         except Exception as exc:
             self._log_message(f"⚠️  self-test task failed: {exc}")
+        # Reports are daemon-wide (one digest). In multi-UPS mode the
+        # coordinator owns them; a per-group monitor must not send N copies.
+        try:
+            if not self._coordinator_mode and self.config.reports.enabled:
+                reports_mod.maybe_send_due_reports(
+                    self.config, getattr(self, "_stats_store", None),
+                    self.config.ups.name, self._enqueue_report)
+        except Exception as exc:
+            self._log_message(f"⚠️  reports task failed: {exc}")
+
+    def _enqueue_report(self, body: str, notify_type: str, category: str) -> None:
+        """Adapter so reports.py can deliver via the notification queue."""
+        self._send_notification(body, notify_type, category=category)
 
     def _resolve_self_test_config(self):
         """Per-UPS self_test override if present, else the global config."""

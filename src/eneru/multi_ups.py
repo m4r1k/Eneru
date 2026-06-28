@@ -781,9 +781,30 @@ class MultiUPSCoordinator:
                 alive += [t for t in self._evaluator_threads if t.is_alive()]
                 if not alive:
                     break
+                # Daemon-wide periodic reports: ONE digest for the whole daemon
+                # (per-group monitors skip reports in coordinator mode). Cheap +
+                # meta-gated, so ticking each ~1s loop is fine.
+                self._maybe_send_reports()
                 self._stop_event.wait(1)
         except KeyboardInterrupt:
             self._handle_signal(signal.SIGINT, None)
+
+    def _maybe_send_reports(self) -> None:
+        """Send any due daemon-wide reports (multi-UPS). Failure-isolated."""
+        try:
+            if not self.config.reports.enabled or not self._monitors:
+                return
+            primary = self._monitors[0]
+            from eneru import reports as reports_mod
+            reports_mod.maybe_send_due_reports(
+                self.config,
+                getattr(primary, "_stats_store", None),
+                primary.config.ups.name,
+                lambda body, ntype, cat: primary._send_notification(
+                    body, ntype, category=cat),
+            )
+        except Exception as exc:
+            self._log(f"⚠️  reports task failed: {exc}")
 
     def reload_config(self) -> dict:
         """Re-read config and apply the safe subset live to every group.
