@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.0-rc6] - 2026-06-28
+
+### Added
+
+- **Tabbed dashboard (Nutify-style).** The web UI is now a tabbed SPA —
+  Overview / Power / Battery / Energy / Events / Control / Config — built as
+  real ARIA tabs (roving tabindex, arrow-key nav, URL-hash routing), still
+  vanilla JS + SVG with no build toolchain. Per-tab charts gain **input-voltage
+  threshold bands** (a reference overlay of the live config) and **power-event
+  overlay markers** (color-coded, capped so dense windows stay readable), and
+  the Battery/Energy tabs surface the v6.1 score / replacement / self-test and
+  kWh / cost widgets directly.
+- **Self-test CLI.** `eneru self-test run` (defaults to the daemon API so the
+  daemon owns the audit + record; `--direct` issues via NUT with no daemon) and
+  `eneru self-test status`. Both honor the `nut_control` allowlist. Shell
+  completions updated.
+- **Feature documentation.** New `battery-health`, `self-test`, `reports`, and
+  `energy-tracking` pages (and mkdocs nav).
+- **More history metrics.** `/history` now serves output voltage, input/output
+  frequency, battery voltage, temperature, and real power (already aggregated
+  across all retention tiers) so the new charts plot them at every range.
+
+### Fixed
+
+- Reports honor `format: csv` on delivery — the CSV block now rides under the
+  text summary instead of being silently dropped.
+- Per-UPS `battery_health` / `self_test` / `nut_control` overrides now
+  hot-reload live (they are read each tick by the v6.1 resolvers) instead of
+  being misclassified as restart-required.
+- The dashboard self-test button debounces, so a double-click can't enqueue
+  multiple non-idempotent hardware self-tests.
+- E2E: `apply_scenario` is now a hard synchronization point (fails the test on a
+  >20s unconfirmed apply rather than running against stale dummy state); Test 55
+  asserts the tab nav is served and exercises real path-traversal payloads.
+
 ## [6.1.0-rc5] - 2026-06-28
 
 ### Added

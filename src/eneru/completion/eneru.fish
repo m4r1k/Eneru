@@ -104,8 +104,16 @@ complete -c eneru -n '__eneru_no_subcommand' -f -a 'validate' -d 'Validate confi
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'monitor' -d 'Launch real-time TUI dashboard'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'tui' -d 'Alias for monitor'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'test-notifications' -d 'Send a test notification'
+complete -c eneru -n '__eneru_no_subcommand' -f -a 'self-test' -d 'Issue or inspect a UPS battery self-test'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'completion' -d 'Print shell completion script'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'version' -d 'Show version information'
+
+# `self-test` subcommands.
+complete -c eneru -n '__eneru_using self-test' -f -a 'run' -d 'Issue a self-test'
+complete -c eneru -n '__eneru_using self-test' -f -a 'status' -d 'Show the latest self-test result'
+complete -c eneru -n '__eneru_using self-test' -l ups -r -d 'UPS name'
+complete -c eneru -n '__eneru_using self-test' -s c -l config -r -d 'Path to configuration file'
+complete -c eneru -n '__eneru_using self-test' -l direct -d 'Issue directly via NUT (no daemon)'
 
 # Global options.
 complete -c eneru -s h -l help -d 'Show help and exit'

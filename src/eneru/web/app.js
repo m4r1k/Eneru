@@ -3,6 +3,11 @@
 // logic stays server-side. The auth token (session or API key) lives in
 // sessionStorage and is sent as a Bearer header, so there is no cookie and thus
 // no CSRF surface.
+//
+// v6.1: the UI is a tabbed SPA (Overview / Power / Battery / Energy / Events /
+// Control / Config). Tabs are real ARIA tabs (arrow-key nav + hash routing).
+// Charts are a reusable vanilla-SVG factory (makeChart) with optional voltage
+// threshold bands and power-event overlays. Zero build toolchain.
 
 const TOKEN_KEY = "eneru_token";
 const THEME_KEY = "eneru_theme";
@@ -86,6 +91,12 @@ function showError(msg) {
   box.textContent = msg; box.hidden = false;
 }
 
+function numOrNull(v) {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 function statusClass(status) {
   const s = (status || "").toUpperCase();
   if (s.includes("OB") || s.includes("LB") || s.includes("FSD")) return "crit";
@@ -139,14 +150,25 @@ function formatRuntimeSeconds(value) {
   return seconds + "s";
 }
 
+// Populate every per-chart UPS <select> with the current UPS list, preserving
+// the operator's existing selection where it still exists.
+function populateChartUpsSelects(rows) {
+  ["power-ups", "battery-ups", "energy-ups"].forEach((id) => {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    const prev = sel.value;
+    sel.replaceChildren();
+    rows.forEach((u) =>
+      sel.appendChild(el("option", { value: u.name, text: u.label || u.name })));
+    if (rows.some((u) => u.name === prev)) sel.value = prev;
+  });
+}
+
 function renderUps(payload) {
   const wrap = document.getElementById("ups-cards");
   wrap.replaceChildren();
   const rows = (payload && payload.ups) || [];
   lastUpsRows = rows;
-  const sel = document.getElementById("graph-ups");
-  const prev = sel.value;
-  sel.replaceChildren();
   rows.forEach((u) => {
     const charge = parseFloat(u.batteryCharge);
     const barValue = isNaN(charge) ? 0 : Math.max(0, Math.min(100, charge));
@@ -174,9 +196,8 @@ function renderUps(payload) {
       if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDetail(u.name); }
     });
     wrap.appendChild(card);
-    sel.appendChild(el("option", { value: u.name, text: u.label || u.name }));
   });
-  if (prev) sel.value = prev;
+  populateChartUpsSelects(rows);
 
   const groups = (payload && payload.redundancyGroups) || [];
   lastGroups = groups;
@@ -248,6 +269,36 @@ function closeDetail() {
   detailReturnFocus = null;
 }
 
+// Build the v6.1 battery-health rows shared by the detail modal and the Battery
+// tab. "unknown" is shown honestly rather than a fake high score.
+function batteryHealthRows(bh) {
+  const rows = [
+    detailRow("Score", bh.score != null ? Math.round(bh.score) + "/100" : "unknown"),
+    detailRow("Confidence",
+      bh.confidence != null ? Math.round(bh.confidence * 100) + "%" : null),
+  ];
+  if (bh.replacementDaysRemaining != null) {
+    rows.push(detailRow("Replace in", "~" + Math.round(bh.replacementDaysRemaining) + " days"));
+  }
+  if ((bh.availableTerms || []).length) {
+    rows.push(detailRow("Terms", bh.availableTerms.join(", ")));
+  }
+  return rows;
+}
+
+// Build the v6.1 energy rows shared by the detail modal and the Energy tab.
+function energyRows(en) {
+  const rows = [
+    detailRow("Today", en.todayKwh != null ? en.todayKwh.toFixed(3) + " kWh" : "unknown"),
+    detailRow("Month", en.monthKwh != null ? en.monthKwh.toFixed(3) + " kWh" : "unknown"),
+  ];
+  if (en.todayCostFormatted) rows.push(detailRow("Today cost", en.todayCostFormatted));
+  if (en.monthCostFormatted) rows.push(detailRow("Month cost", en.monthCostFormatted));
+  if (en.estimated) rows.push(detailRow("Note", "estimated (no real-power reading)"));
+  if (en.partial) rows.push(detailRow("Coverage", "partial (data gaps in window)"));
+  return rows;
+}
+
 function renderDetail(name) {
   const u = lastUpsRows.find((r) => r.name === name);
   const body = document.getElementById("detail-body");
@@ -276,38 +327,14 @@ function renderDetail(name) {
     detailRow("Temperature", pq.temperature != null ? pq.temperature + " °C" : null),
   ]));
 
-  // v6.1 Battery health (score/terms/replacement). "unknown" is shown
-  // honestly rather than a fake high score.
-  const bh = u.batteryHealth;
-  if (bh) {
-    const bhRows = [
-      detailRow("Score", bh.score != null ? Math.round(bh.score) + "/100" : "unknown"),
-      detailRow("Confidence",
-        bh.confidence != null ? Math.round(bh.confidence * 100) + "%" : null),
-    ];
-    if (bh.replacementDaysRemaining != null) {
-      bhRows.push(detailRow("Replace in",
-        "~" + Math.round(bh.replacementDaysRemaining) + " days"));
-    }
-    if ((bh.availableTerms || []).length) {
-      bhRows.push(detailRow("Terms", bh.availableTerms.join(", ")));
-    }
-    sections.push(detailSection("Battery health", bhRows));
+  // v6.1 Battery health (score/terms/replacement).
+  if (u.batteryHealth) {
+    sections.push(detailSection("Battery health", batteryHealthRows(u.batteryHealth)));
   }
-
   // v6.1 Energy (today/month kWh + optional cost; cost hidden when disabled).
-  const en = u.energy;
-  if (en) {
-    const enRows = [
-      detailRow("Today", en.todayKwh != null ? en.todayKwh.toFixed(3) + " kWh" : "unknown"),
-      detailRow("Month", en.monthKwh != null ? en.monthKwh.toFixed(3) + " kWh" : "unknown"),
-    ];
-    if (en.todayCostFormatted) enRows.push(detailRow("Today cost", en.todayCostFormatted));
-    if (en.monthCostFormatted) enRows.push(detailRow("Month cost", en.monthCostFormatted));
-    if (en.estimated) enRows.push(detailRow("Note", "estimated (no real-power reading)"));
-    sections.push(detailSection("Energy", enRows));
+  if (u.energy) {
+    sections.push(detailSection("Energy", energyRows(u.energy)));
   }
-
   // v6.1 Self-test (latest normalized result).
   const st = u.selfTest;
   if (st) {
@@ -662,85 +689,362 @@ async function deleteSelected() {
   applyEventFilters();
 }
 
-// Cache the last series so a resize can redraw without refetching.
-let lastGraphSeries = null;
+// ----- charts (v6.1) -------------------------------------------------------
+// A reusable SVG plotter. Each chart instance owns its DOM hosts + cached
+// series, so the Power / Battery / Energy tabs draw independently. Optional
+// voltage threshold bands and power-event overlays layer on top of the line.
 
-function renderGraph(series) {
-  if (series !== undefined) lastGraphSeries = series;
-  const host = document.getElementById("graph");
-  // Size the viewBox to the host's real pixel width so the coordinate system maps
-  // 1:1 to screen pixels (no horizontal stretch -> no distorted line/labels).
-  // When the host is hidden or not yet laid out, clientWidth is 0; skip rather
-  // than emit a broken viewBox — the ResizeObserver redraws once it has width.
+// Marker color class by event type, for the chart overlays.
+function eventMarkerClass(type) {
+  const t = (type || "").toUpperCase();
+  if (t.includes("SHUTDOWN") || t.includes("FSD") || t === "ON_BATTERY"
+      || t.includes("BROWNOUT") || t.includes("CRITICAL")) return "ev-crit";
+  if (t.includes("OVER_VOLTAGE") || t.includes("OVERLOAD") || t.includes("BYPASS")
+      || t.includes("AVR") || t.includes("WARNING") || t.includes("ANOMALY")) return "ev-warn";
+  return "ev-info";
+}
+
+function isVoltageMetric(metric) {
+  return metric === "voltage" || metric === "output_voltage"
+      || metric === "battery_voltage";
+}
+
+// Draw `series` (a /history payload) into the host element, with optional
+// `bands` (voltage thresholds) and `events` (overlay markers).
+function drawChart(hostId, series, options) {
+  options = options || {};
+  const host = document.getElementById(hostId);
+  if (!host) return;
+  // Size the viewBox to the host's real pixel width so the coordinate system
+  // maps 1:1 to screen pixels. When hidden/zero-width the ResizeObserver redraws
+  // once it has width.
   const W = host.clientWidth;
   if (!W) return;
   host.replaceChildren();
-  const pts = (lastGraphSeries && lastGraphSeries.data) || [];
-  const H = 220, pad = 30;
+  const pts = (series && series.data) || [];
+  const H = 220, pad = 34;
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  const axis = (x1, y1, x2, y2) => {
+  const line = (x1, y1, x2, y2, cls) => {
     const l = document.createElementNS(SVG_NS, "line");
     l.setAttribute("x1", x1); l.setAttribute("y1", y1);
     l.setAttribute("x2", x2); l.setAttribute("y2", y2);
-    l.setAttribute("class", "axis");
+    l.setAttribute("class", cls);
     l.setAttribute("vector-effect", "non-scaling-stroke");
     svg.appendChild(l);
   };
-  axis(pad, H - pad, W - 5, H - pad);
-  axis(pad, 5, pad, H - pad);
+  line(pad, H - pad, W - 5, H - pad, "axis");
+  line(pad, 5, pad, H - pad, "axis");
+
   const vals = pts.map((p) => p.value).filter((v) => typeof v === "number" && !isNaN(v));
-  if (vals.length >= 2) {
-    const min = Math.min(...vals), max = Math.max(...vals);
-    const span = max - min || 1;
-    const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts, tspan = (t1 - t0) || 1;
-    const x = (t) => pad + ((t - t0) / tspan) * (W - pad - 5);
-    const y = (v) => (H - pad) - ((v - min) / span) * (H - pad - 5);
-    let d = "";
-    pts.forEach((p) => {
-      if (typeof p.value !== "number" || isNaN(p.value)) return;
-      d += (d ? " L" : "M") + x(p.ts).toFixed(1) + " " + y(p.value).toFixed(1);
-    });
-    const path = document.createElementNS(SVG_NS, "path");
-    path.setAttribute("d", d); path.setAttribute("class", "plot");
-    path.setAttribute("vector-effect", "non-scaling-stroke");
-    svg.appendChild(path);
-    const lab = (txt, yy) => {
-      const t = document.createElementNS(SVG_NS, "text");
-      t.setAttribute("x", 2); t.setAttribute("y", yy);
-      t.setAttribute("class", "lbl"); t.textContent = txt; svg.appendChild(t);
-    };
-    const metric = document.getElementById("graph-metric").value;
-    const fmt = metric === "runtime"
-      ? formatRuntimeSeconds
-      : (v) => v.toFixed(0);
-    lab(fmt(max), 12); lab(fmt(min), H - pad);
-  } else {
+  const bands = options.bands || null;
+  const metric = options.metric;
+  const wantBand = bands && isVoltageMetric(metric)
+    && (bands.low != null || bands.high != null || bands.nominal != null);
+
+  if (vals.length < 2) {
     const t = document.createElementNS(SVG_NS, "text");
     t.setAttribute("x", W / 2); t.setAttribute("y", H / 2);
     t.setAttribute("text-anchor", "middle"); t.setAttribute("class", "lbl");
     t.textContent = "Not enough data yet"; svg.appendChild(t);
+    host.appendChild(svg);
+    return;
   }
+
+  // Extend the value range to include the band so shaded thresholds are visible
+  // even when readings sit inside them.
+  let min = Math.min(...vals), max = Math.max(...vals);
+  if (wantBand) {
+    [bands.low, bands.high, bands.nominal].forEach((v) => {
+      if (v != null) { min = Math.min(min, v); max = Math.max(max, v); }
+    });
+  }
+  const span = (max - min) || 1;
+  const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts, tspan = (t1 - t0) || 1;
+  const x = (t) => pad + ((t - t0) / tspan) * (W - pad - 5);
+  const y = (v) => (H - pad) - ((v - min) / span) * (H - pad - 5);
+
+  // Voltage threshold band (reference overlay of the CURRENT config, not
+  // historical truth — labelled as such by the caller's note line).
+  if (wantBand && bands.low != null && bands.high != null) {
+    const yHigh = y(bands.high), yLow = y(bands.low);
+    const rect = document.createElementNS(SVG_NS, "rect");
+    rect.setAttribute("x", pad); rect.setAttribute("y", yHigh.toFixed(1));
+    rect.setAttribute("width", (W - pad - 5).toFixed(1));
+    rect.setAttribute("height", Math.max(0, yLow - yHigh).toFixed(1));
+    rect.setAttribute("class", "band");
+    svg.appendChild(rect);
+  }
+  if (wantBand && bands.nominal != null) {
+    line(pad, y(bands.nominal).toFixed(1), W - 5, y(bands.nominal).toFixed(1), "band-nominal");
+  }
+
+  // Event overlays: vertical guides at each event timestamp inside the range,
+  // colored by type. Cap markers so a dense window doesn't drown the SVG.
+  const events = options.events || [];
+  if (events.length) {
+    const inRange = events.filter((e) => e.ts >= t0 && e.ts <= t1);
+    const MAX = 100;
+    const shown = inRange.length > MAX
+      ? inRange.filter((_e, i) => i % Math.ceil(inRange.length / MAX) === 0)
+      : inRange;
+    shown.forEach((e) => {
+      const ex = x(e.ts);
+      line(ex.toFixed(1), 5, ex.toFixed(1), (H - pad).toFixed(1),
+        "ev-line " + eventMarkerClass(e.eventType || e.event));
+      const dot = document.createElementNS(SVG_NS, "circle");
+      dot.setAttribute("cx", ex.toFixed(1)); dot.setAttribute("cy", "8");
+      dot.setAttribute("r", "3");
+      dot.setAttribute("class", "ev-dot " + eventMarkerClass(e.eventType || e.event));
+      const title = document.createElementNS(SVG_NS, "title");
+      const when = e.ts ? new Date(e.ts * 1000).toLocaleString() : "";
+      title.textContent = (e.eventType || e.event || "event") + " — " + when
+        + (e.detail ? ("\n" + e.detail) : "");
+      dot.appendChild(title);
+      svg.appendChild(dot);
+    });
+    if (inRange.length > shown.length) {
+      const note = document.createElementNS(SVG_NS, "text");
+      note.setAttribute("x", W - 8); note.setAttribute("y", H - pad - 4);
+      note.setAttribute("text-anchor", "end"); note.setAttribute("class", "lbl");
+      note.textContent = inRange.length + " events (showing " + shown.length + ")";
+      svg.appendChild(note);
+    }
+  }
+
+  // The data line.
+  let d = "";
+  pts.forEach((p) => {
+    if (typeof p.value !== "number" || isNaN(p.value)) return;
+    d += (d ? " L" : "M") + x(p.ts).toFixed(1) + " " + y(p.value).toFixed(1);
+  });
+  const path = document.createElementNS(SVG_NS, "path");
+  path.setAttribute("d", d); path.setAttribute("class", "plot");
+  path.setAttribute("vector-effect", "non-scaling-stroke");
+  svg.appendChild(path);
+
+  // Min/max axis labels.
+  const fmt = (metric === "runtime") ? formatRuntimeSeconds : (v) => v.toFixed(0);
+  const lab = (txt, yy) => {
+    const t = document.createElementNS(SVG_NS, "text");
+    t.setAttribute("x", 2); t.setAttribute("y", yy);
+    t.setAttribute("class", "lbl"); t.textContent = txt; svg.appendChild(t);
+  };
+  lab(fmt(max), 12); lab(fmt(min), H - pad);
   host.appendChild(svg);
 }
 
-// One global observer redraws the cached graph on layout changes (window resize,
-// the host going from hidden/zero-width to visible). Registered once in init();
-// never recreated by the polling refresh. A rAF coalesces bursts of events.
-let _graphRedrawPending = false;
-function observeGraphResize() {
-  const host = document.getElementById("graph");
-  if (!host) return;
-  const redraw = () => {
-    if (_graphRedrawPending) return;
-    _graphRedrawPending = true;
-    requestAnimationFrame(() => { _graphRedrawPending = false; renderGraph(); });
-  };
-  if (typeof ResizeObserver !== "undefined") {
-    new ResizeObserver(redraw).observe(host);
-  } else {
-    window.addEventListener("resize", redraw);
+// Per-instance chart over the /history series. Owns its DOM hosts + caches and
+// is driven by the tab controller (load on activate, redraw on resize).
+function makeChart(opts) {
+  const state = { series: null, events: [], thresholds: null };
+
+  function metric() {
+    if (opts.metricSelId) {
+      const sel = document.getElementById(opts.metricSelId);
+      if (sel) return sel.value;
+    }
+    return opts.fixedMetric;
   }
+  function upsName() {
+    const sel = document.getElementById(opts.upsSelId);
+    return sel ? sel.value : "";
+  }
+  function rangeSeconds() {
+    const sel = document.getElementById(opts.rangeSelId);
+    const v = sel ? sel.value : "86400";
+    return (v === "all") ? null : parseInt(v, 10);
+  }
+
+  async function load() {
+    const host = document.getElementById(opts.hostId);
+    if (!host) return;
+    const ups = upsName();
+    if (!ups) { state.series = null; state.events = []; draw(); return; }
+    const m = metric();
+    let q = "metric=" + encodeURIComponent(m);
+    const range = rangeSeconds();
+    let from = null, to = null;
+    if (range !== null) {
+      to = Math.floor(Date.now() / 1000);
+      from = to - range;
+      q += "&to=" + to + "&from=" + from;
+    }
+    const res = await api("/api/v1/ups/" + encodeURIComponent(ups) + "/history?" + q);
+    state.series = res.ok ? res.data : null;
+    if (opts.events) {
+      let eq = "limit=500";
+      if (from !== null) eq += "&from=" + from;
+      if (to !== null) eq += "&to=" + to;
+      const ev = await api("/api/v1/events?" + eq);
+      const rows = (ev.ok && ev.data && ev.data.events) || [];
+      state.events = rows.filter((e) => eventMatchesSource(e, ups));
+    }
+    if (opts.bands) {
+      const u = lastUpsRows.find((r) => r.name === ups);
+      const pq = (u && u.powerQuality) || {};
+      state.thresholds = {
+        nominal: numOrNull(pq.nominalVoltage),
+        low: numOrNull(pq.warningLow),
+        high: numOrNull(pq.warningHigh),
+      };
+    }
+    draw();
+  }
+
+  function draw() {
+    drawChart(opts.hostId, state.series, {
+      metric: metric(),
+      bands: opts.bands ? state.thresholds : null,
+      events: opts.events ? state.events : null,
+    });
+    if (opts.noteId) {
+      const note = document.getElementById(opts.noteId);
+      if (note) {
+        const th = state.thresholds;
+        const showBand = !!opts.bands && isVoltageMetric(metric()) && th
+          && (th.low != null || th.high != null);
+        note.hidden = !showBand;
+        if (showBand) {
+          note.textContent =
+            "Shaded band = currently configured voltage warning thresholds "
+            + "(reference overlay, not per-sample history).";
+        }
+      }
+    }
+  }
+
+  function observe() {
+    const host = document.getElementById(opts.hostId);
+    if (!host) return;
+    let pending = false;
+    const redraw = () => {
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(() => { pending = false; draw(); });
+    };
+    if (typeof ResizeObserver !== "undefined") new ResizeObserver(redraw).observe(host);
+    else window.addEventListener("resize", redraw);
+  }
+
+  return { load, draw, observe };
+}
+
+// Chart instances, created in init(). Keyed by the tab they live on.
+const charts = {};
+
+// ----- battery-health + energy tab widgets (v6.1) --------------------------
+
+function widgetCard(title, rows, opts) {
+  opts = opts || {};
+  const head = [el("h3", { text: title })];
+  if (opts.badge) head.push(el("span", { class: "badge " + (opts.badgeClass || "ok"),
+    text: opts.badge }));
+  return el("div", { class: "card" }, [
+    el("div", { class: "card-head" }, head),
+    ...rows,
+  ]);
+}
+
+function scoreClass(score) {
+  if (score == null) return "warn";        // unknown -> caution, never "ok"
+  if (score < 40) return "crit";
+  if (score < 70) return "warn";
+  return "ok";
+}
+
+function renderBatteryHealthTab() {
+  const wrap = document.getElementById("battery-health");
+  if (!wrap) return;
+  wrap.replaceChildren();
+  const rows = lastUpsRows;
+  if (!rows.length) {
+    wrap.appendChild(el("p", { class: "chart-note", text: "No UPS data yet." }));
+    return;
+  }
+  rows.forEach((u) => {
+    const bh = u.batteryHealth;
+    const st = u.selfTest;
+    const cardRows = [];
+    if (bh) {
+      const scoreTxt = bh.score != null ? Math.round(bh.score) + "/100" : "unknown";
+      cardRows.push(...batteryHealthRows(bh));
+      const card = widgetCard(u.label || u.name, cardRows,
+        { badge: scoreTxt, badgeClass: scoreClass(bh.score) });
+      if (st) {
+        card.appendChild(el("div", { class: "row" }, [
+          el("span", { text: "Last self-test" }),
+          el("b", { text: (st.result || "unknown") + (st.date ? (" · " + st.date) : "") }),
+        ]));
+      }
+      wrap.appendChild(card);
+    } else {
+      wrap.appendChild(widgetCard(u.label || u.name,
+        [el("p", { class: "chart-note", text: "Battery health not available." })]));
+    }
+  });
+}
+
+function renderEnergyTab() {
+  const wrap = document.getElementById("energy-cards");
+  if (!wrap) return;
+  wrap.replaceChildren();
+  const rows = lastUpsRows;
+  if (!rows.length) {
+    wrap.appendChild(el("p", { class: "chart-note", text: "No UPS data yet." }));
+    return;
+  }
+  let anyCost = false;
+  rows.forEach((u) => {
+    const en = u.energy;
+    if (en) {
+      if (en.todayCostFormatted || en.monthCostFormatted) anyCost = true;
+      wrap.appendChild(widgetCard(u.label || u.name, energyRows(en)));
+    } else {
+      wrap.appendChild(widgetCard(u.label || u.name,
+        [el("p", { class: "chart-note", text: "Energy tracking not available." })]));
+    }
+  });
+  if (!anyCost) {
+    wrap.appendChild(el("p", { class: "chart-note",
+      text: "Set energy.cost_per_kwh in the config to enable cost tracking." }));
+  }
+}
+
+// ----- config tab ----------------------------------------------------------
+
+function configKv(label, value) {
+  return el("div", { class: "row" }, [
+    el("span", { text: label }),
+    el("b", { text: (value === undefined || value === null || value === "")
+      ? "—" : String(value) }),
+  ]);
+}
+
+function renderConfigTab() {
+  const body = document.getElementById("config-body");
+  if (!body) return;
+  body.replaceChildren();
+  const cfg = cfgSnapshot;
+  if (!cfg) { body.appendChild(el("p", { class: "chart-note", text: "Loading…" })); return; }
+  const cards = [];
+  (cfg.ups || []).forEach((c) => {
+    cards.push(widgetCard(c.label || c.name, [
+      configKv("Name", c.name),
+      configKv("Local host", c.isLocal ? "yes" : "no"),
+      configKv("Remote servers", (c.remoteServers || []).length),
+    ]));
+  });
+  const features = [];
+  if (cfg.nutControl) features.push(configKv("UPS control",
+    cfg.nutControl.enabled ? "enabled" : "disabled"));
+  if (cfg.detail === "sanitized") {
+    features.push(el("p", { class: "chart-note",
+      text: "Sign in to see the full configuration." }));
+  }
+  if (features.length) cards.push(widgetCard("Features", features));
+  const grid = el("div", { class: "cards" }, cards);
+  body.replaceChildren(grid);
 }
 
 // ----- control panel (5c) -----
@@ -753,16 +1057,24 @@ let _controlBuiltKey = null;
 
 async function renderControl(payload) {
   const sec = document.getElementById("control-section");
+  const empty = document.getElementById("control-empty");
   const panel = document.getElementById("control-panel");
   // Control is only meaningful when authenticated and nut_control is enabled.
   const nutEnabled = cfgSnapshot && cfgSnapshot.nutControl &&
     cfgSnapshot.nutControl.enabled;
-  if (!token() || !nutEnabled) {
+  // The Control TAB visibility tracks availability too, so it isn't an empty
+  // panel for anonymous / read-only users.
+  const available = !!token() && !!nutEnabled;
+  const tab = document.getElementById("tab-control");
+  if (tab) tab.hidden = !available;
+  if (!available) {
     sec.hidden = true;
+    if (empty) empty.hidden = false;
     _controlBuiltKey = null;  // rebuild when control becomes available again
     return;
   }
   sec.hidden = false;
+  if (empty) empty.hidden = true;
   const rows = (payload && payload.ups) || [];
   // Key on token + UPS set AND the allowlists, so a live config reload that
   // changes allowed commands/variables (without changing token or UPS set)
@@ -803,7 +1115,7 @@ async function renderControl(payload) {
     box.appendChild(el("h4", { text: "Self-test" }));
     const stBox = el("div", { class: "cmds" });
     const stBtn = el("button", { type: "button", text: "Run self-test" });
-    stBtn.addEventListener("click", () => runSelfTest(u.name));
+    stBtn.addEventListener("click", () => runSelfTest(u.name, stBtn));
     stBox.appendChild(stBtn);
     box.appendChild(stBox);
     frag.appendChild(box);
@@ -847,15 +1159,23 @@ async function runCommand(ups, command) {
   else setStatus("Ran " + command + " on " + ups);
 }
 
-async function runSelfTest(ups) {
+async function runSelfTest(ups, btn) {
+  // A self-test is a non-idempotent hardware action; disable the button while
+  // the POST is in flight so a double-click can't enqueue several tests.
+  if (btn && btn.disabled) return;
+  if (btn) btn.disabled = true;
   showError("");
-  const res = await api("/api/v1/ups/" + encodeURIComponent(ups) + "/self-test",
-    { method: "POST", body: "{}" });
-  if (!res.ok) {
-    showError("Self-test failed: " +
-      ((res.data && res.data.error && res.data.error.message) || res.status));
-  } else {
-    setStatus("Self-test issued on " + ups);
+  try {
+    const res = await api("/api/v1/ups/" + encodeURIComponent(ups) + "/self-test",
+      { method: "POST", body: "{}" });
+    if (!res.ok) {
+      showError("Self-test failed: " +
+        ((res.data && res.data.error && res.data.error.message) || res.status));
+    } else {
+      setStatus("Self-test issued on " + ups);
+    }
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -893,6 +1213,10 @@ function clearAuthState() {
   if (control) control.hidden = true;
   const panel = document.getElementById("control-panel");
   if (panel) panel.replaceChildren();
+  const tab = document.getElementById("tab-control");
+  if (tab) tab.hidden = true;
+  // If the operator was on the now-hidden Control tab, fall back to Overview.
+  if (activeTab === "control") selectTab("overview");
   refreshAuthUI();
   applyEventFilters();
 }
@@ -934,27 +1258,87 @@ async function doLogout() {
   clearAuthState(); refresh();
 }
 
+// ----- tabs (v6.1) ---------------------------------------------------------
+// Real ARIA tabs: roving tabindex, arrow-key nav, and URL-hash routing so views
+// are linkable. The 10s refresh redraws only the active tab's chart/widgets.
+
+const TAB_IDS = ["overview", "power", "battery", "energy", "events", "control", "config"];
+let activeTab = "overview";
+
+function tabButtons() {
+  return TAB_IDS.map((id) => document.getElementById("tab-" + id)).filter(Boolean);
+}
+
+function selectTab(name, opts) {
+  opts = opts || {};
+  if (!TAB_IDS.includes(name)) name = "overview";
+  const btn = document.getElementById("tab-" + name);
+  // A hidden tab (e.g. Control when signed out) is not selectable.
+  if (!btn || btn.hidden) name = "overview";
+  activeTab = name;
+  TAB_IDS.forEach((id) => {
+    const b = document.getElementById("tab-" + id);
+    const panel = document.getElementById("panel-" + id);
+    const selected = id === name;
+    if (b) {
+      b.setAttribute("aria-selected", selected ? "true" : "false");
+      b.tabIndex = selected ? 0 : -1;
+    }
+    if (panel) panel.hidden = !selected;
+  });
+  if (opts.focus && btn) btn.focus();
+  // Keep the hash in sync without adding history entries on every poll-driven
+  // call (only user/explicit switches pass updateHash).
+  if (opts.updateHash && ("#" + name) !== location.hash) {
+    location.hash = name;
+  }
+  onTabActivated(name);
+}
+
+// Draw/refresh whatever the freshly-activated tab needs from the latest data.
+function onTabActivated(name) {
+  if (name === "power" && charts.power) charts.power.load();
+  else if (name === "battery") { renderBatteryHealthTab(); if (charts.battery) charts.battery.load(); }
+  else if (name === "energy") { renderEnergyTab(); if (charts.energy) charts.energy.load(); }
+  else if (name === "config") renderConfigTab();
+}
+
+function initTabs() {
+  const list = document.getElementById("tabs");
+  if (!list) return;
+  tabButtons().forEach((btn) => {
+    btn.addEventListener("click", () =>
+      selectTab(btn.dataset.tab, { updateHash: true }));
+  });
+  // Arrow-key navigation across the visible tabs (WAI-ARIA tabs pattern).
+  list.addEventListener("keydown", (ev) => {
+    const visible = tabButtons().filter((b) => !b.hidden);
+    const idx = visible.findIndex((b) => b.dataset.tab === activeTab);
+    if (idx < 0) return;
+    let next = null;
+    if (ev.key === "ArrowRight" || ev.key === "ArrowDown") next = visible[(idx + 1) % visible.length];
+    else if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") next = visible[(idx - 1 + visible.length) % visible.length];
+    else if (ev.key === "Home") next = visible[0];
+    else if (ev.key === "End") next = visible[visible.length - 1];
+    if (next) {
+      ev.preventDefault();
+      selectTab(next.dataset.tab, { updateHash: true, focus: true });
+    }
+  });
+  // Hash routing: load the requested tab, and follow back/forward navigation.
+  const fromHash = () => {
+    const name = (location.hash || "").replace(/^#/, "");
+    selectTab(TAB_IDS.includes(name) ? name : "overview");
+  };
+  window.addEventListener("hashchange", fromHash);
+  fromHash();
+}
+
 // ----- polling -----
 
 function setStatus(msg) {
   document.getElementById("status-line").textContent =
     msg + " · " + new Date().toLocaleTimeString();
-}
-
-async function loadGraph() {
-  const ups = document.getElementById("graph-ups").value;
-  const metric = document.getElementById("graph-metric").value;
-  if (!ups) { renderGraph(null); return; }
-  let q = "metric=" + encodeURIComponent(metric);
-  const range = document.getElementById("graph-range").value;
-  if (range !== "all") {
-    const to = Math.floor(Date.now() / 1000);
-    q += "&to=" + to + "&from=" + (to - parseInt(range, 10));
-  }
-  // range "all" omits `from`; the server clamps it to the retention horizon.
-  const res = await api("/api/v1/ups/" + encodeURIComponent(ups) +
-    "/history?" + q);
-  renderGraph(res.ok ? res.data : null);
 }
 
 async function refresh() {
@@ -993,7 +1377,8 @@ async function refresh() {
     showError("Could not load UPS status (HTTP " + ups.status + ")");
   }
   await loadEvents();        // merges fresh recent events into the accumulated list
-  await loadGraph();
+  // Redraw only the active tab's chart/widgets (the others redraw on activate).
+  onTabActivated(activeTab);
   // If a detail modal is open, keep it live with the fresh snapshot.
   if (!document.getElementById("detail-modal").hidden && openDetailName) {
     renderDetail(openDetailName);
@@ -1009,9 +1394,26 @@ async function init() {
   document.getElementById("logoutBtn").addEventListener("click", doLogout);
   document.getElementById("login-cancel").addEventListener("click", closeLogin);
   document.getElementById("login-form").addEventListener("submit", doLogin);
-  document.getElementById("graph-ups").addEventListener("change", loadGraph);
-  document.getElementById("graph-metric").addEventListener("change", loadGraph);
-  document.getElementById("graph-range").addEventListener("change", loadGraph);
+
+  // Charts (one per data-bearing tab). Power carries voltage bands + event
+  // overlays; Battery + Energy carry event overlays.
+  charts.power = makeChart({ hostId: "power-graph", upsSelId: "power-ups",
+    metricSelId: "power-metric", rangeSelId: "power-range", bands: true,
+    events: true, noteId: "power-note" });
+  charts.battery = makeChart({ hostId: "battery-graph", upsSelId: "battery-ups",
+    metricSelId: "battery-metric", rangeSelId: "battery-range", events: true });
+  charts.energy = makeChart({ hostId: "energy-graph", upsSelId: "energy-ups",
+    fixedMetric: "load", rangeSelId: "energy-range", events: true });
+  Object.values(charts).forEach((c) => c.observe());
+
+  // Chart controls reload their own chart on change.
+  [["power-ups", "power"], ["power-metric", "power"], ["power-range", "power"],
+   ["battery-ups", "battery"], ["battery-metric", "battery"], ["battery-range", "battery"],
+   ["energy-ups", "energy"], ["energy-range", "energy"]].forEach(([id, chart]) => {
+    const node = document.getElementById(id);
+    if (node) node.addEventListener("change", () => charts[chart] && charts[chart].load());
+  });
+
   document.getElementById("event-source-filter").addEventListener("change", applyEventFilters);
   document.getElementById("event-type-filter").addEventListener("change", () => {
     updateEventTypeSummary();
@@ -1029,7 +1431,7 @@ async function init() {
     if (!document.getElementById("detail-modal").hidden) closeDetail();
     if (!document.getElementById("login-modal").hidden) closeLogin();
   });
-  observeGraphResize();
+  initTabs();
   refresh();
   setInterval(refresh, 10000);
 }

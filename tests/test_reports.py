@@ -135,6 +135,21 @@ class TestMaybeSend:
         assert periods == [] and sent == []
 
     @pytest.mark.unit
+    def test_csv_format_delivers_csv_block(self, store):
+        # reports.format: csv must actually deliver the CSV (the channel is
+        # text-only, so it rides under the summary) — not silently send text.
+        cfg = _config("ups:\n  name: U@h\n"
+                      "reports:\n  enabled: true\n  daily: true\n  time: '08:00'\n"
+                      "  format: csv\n")
+        bodies = []
+        now = time.time()
+        store.set_meta("last_report_sent_daily", str(int(now - 2 * DAY)))
+        reports.maybe_send_due_reports(
+            cfg, store, "U@h", lambda b, t, c: bodies.append(b), now=now)
+        assert bodies and "--- CSV ---" in bodies[0]
+        assert "timestamp,event_type,detail" in bodies[0]
+
+    @pytest.mark.unit
     def test_first_sight_seeds_without_sending(self, store):
         cfg = self._cfg()
         sent = []

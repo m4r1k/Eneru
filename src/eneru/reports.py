@@ -128,8 +128,7 @@ def build_report(period: str, sources: Dict, *, include: List[str],
 
 
 def gather_report_sources(store, ups_name: str, energy_config, *,
-                          period: str, now: float,
-                          expected_interval_s: float = 1.0) -> Dict:
+                          period: str, now: float) -> Dict:
     """Fetch the report sources for one UPS/store over the period window."""
     window = PERIOD_WINDOW_SECONDS.get(period, 24 * 3600)
     start = int(now - window)
@@ -168,7 +167,6 @@ def gather_report_sources(store, ups_name: str, energy_config, *,
 def maybe_send_due_reports(config, store, ups_name: str,
                            enqueue: Callable[[str, str, str], object], *,
                            now: Optional[float] = None,
-                           expected_interval_s: float = 1.0,
                            tz=None) -> List[str]:
     """Send any due periodic reports. Returns the periods sent.
 
@@ -203,10 +201,15 @@ def maybe_send_due_reports(config, store, ups_name: str,
             continue
         store.set_meta(key, str(int(now)))  # stamp before send (no retry storm)
         sources = gather_report_sources(
-            store, ups_name, config.energy, period=period, now=now,
-            expected_interval_s=expected_interval_s)
+            store, ups_name, config.energy, period=period, now=now)
         content = build_report(period, sources, include=reports.include,
                                fmt=reports.format)
-        enqueue(content["body"], "info", "report")
+        # Honor `reports.format: csv` on delivery: the notification channel is
+        # text-only (no attachments), so append the machine-readable CSV block
+        # under the human summary rather than silently dropping it.
+        message = content["body"]
+        if content.get("csv"):
+            message = message + "\n\n--- CSV ---\n" + content["csv"]
+        enqueue(message, "info", "report")
         sent.append(period)
     return sent

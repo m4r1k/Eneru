@@ -19,6 +19,7 @@ _eneru() {
         'monitor:Launch real-time TUI dashboard'
         'tui:Alias for monitor -- launch real-time TUI dashboard'
         'test-notifications:Send a test notification and exit'
+        'self-test:Issue or inspect a UPS battery self-test'
         'completion:Print shell completion script (bash/zsh/fish)'
         'version:Show version information'
     )

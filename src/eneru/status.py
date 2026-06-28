@@ -24,6 +24,15 @@ HISTORY_METRICS = {
     "runtime": "battery_runtime",
     "load": "ups_load",
     "voltage": "input_voltage",
+    # v6.1: the dashboard's Power/Energy tabs chart these. Every column below is
+    # both a raw `samples` column and an aggregated `*_avg` on agg_5min/agg_hourly
+    # (see _init_schema), so query_range resolves them across all retention tiers.
+    "output_voltage": "output_voltage",
+    "frequency": "input_frequency",
+    "output_frequency": "output_frequency",
+    "battery_voltage": "battery_voltage",
+    "temperature": "ups_temperature",
+    "real_power": "real_power",
     "depletion": "depletion_rate",
 }
 POWER_EVENT_TYPES = {

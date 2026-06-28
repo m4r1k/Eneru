@@ -31,10 +31,13 @@
 #   number once upsd is serving the new ups.status (see
 #   tests/e2e/nut-dummy/entrypoint.sh apply_one).
 #
-#   A timeout (~10s) is a soft warning, not a hard failure: we fall
-#   through like the old sleep did and let the test's own assertions
-#   catch a genuinely-unapplied scenario, rather than converting a slow
-#   apply into a spurious red build.
+#   A timeout (~20s) is a HARD failure: the watcher publishes the marker
+#   only once upsd is actually serving the new ups.status, so a timeout
+#   means the scenario did not go live and every downstream assertion would
+#   be running against stale state. Returning non-zero trips the group's
+#   `set -euo pipefail` and fails the test loudly at the apply boundary
+#   instead of as a confusing assertion failure three steps later. The
+#   window is generous so a loaded runner doesn't flake.
 apply_scenario() {
     local scenario="$1"
     local ups="${2:-TestUPS}"
@@ -66,20 +69,18 @@ apply_scenario() {
         return 1
     fi
 
-    # Poll up to ~10s (50 * 0.2s) for the dummy to confirm + mark applied.
-    for i in $(seq 1 50); do
+    # Poll up to ~20s (100 * 0.2s) for the dummy to confirm + mark applied.
+    for i in $(seq 1 100); do
         if [ -f "$marker" ]; then
             return 0
         fi
         sleep 0.2
     done
 
-    # Soft timeout: like the old blind `sleep 3`, fall through and let the
-    # test's own assertions catch a genuinely-unapplied scenario. The
-    # watcher only publishes the marker once the new state is actually
-    # served, so reaching here means the apply did not confirm in 10s --
-    # loud on stderr, but not a hard fail (a slow apply on a loaded runner
-    # must not become a spurious red build).
-    echo "WARN: apply_scenario '${scenario}' -> ${ups} timed out (~10s) waiting for the applied marker" >&2
-    return 0
+    # Hard timeout: the watcher publishes the marker only once the new state
+    # is actually served, so reaching here means the apply never went live in
+    # 20s. Fail at the apply boundary (set -e trips on the non-zero return)
+    # rather than letting the test run on against stale dummy state.
+    echo "FAIL: apply_scenario '${scenario}' -> ${ups} timed out (~20s) waiting for the applied marker" >&2
+    return 1
 }

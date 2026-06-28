@@ -11,7 +11,54 @@ from eneru.api import render_prometheus_metrics
 from eneru.monitor import UPSGroupMonitor
 from eneru.state import MonitorState
 from eneru.stats import StatsStore
-from eneru.status import collect_status, monitor_status
+from eneru.status import (
+    _battery_health_for_monitor,
+    _energy_for_monitor,
+    _self_test_for_monitor,
+    collect_status,
+    monitor_status,
+)
+
+
+class TestStatusHelperGuards:
+    """The v6.1 status helpers fail soft (return None) so a stats/store hiccup
+    never breaks the status payload."""
+
+    @pytest.mark.unit
+    def test_self_test_no_store_is_none(self):
+        from types import SimpleNamespace
+        assert _self_test_for_monitor(SimpleNamespace(_stats_store=None)) is None
+
+    @pytest.mark.unit
+    def test_self_test_store_error_is_none(self):
+        from types import SimpleNamespace
+
+        class _S:
+            def latest_self_test(self):
+                raise RuntimeError("db gone")
+        assert _self_test_for_monitor(SimpleNamespace(_stats_store=_S())) is None
+
+    @pytest.mark.unit
+    def test_energy_error_is_none(self):
+        from types import SimpleNamespace
+
+        class _S:
+            def power_samples(self, *a):
+                raise RuntimeError("db gone")
+        cfg = SimpleNamespace(energy=SimpleNamespace(
+            enabled=True, cost_per_kwh=None, currency="USD", cost_format=None))
+        mon = SimpleNamespace(_stats_store=_S(), config=cfg)
+        assert _energy_for_monitor(mon) is None
+
+    @pytest.mark.unit
+    def test_battery_health_error_is_none(self):
+        from types import SimpleNamespace
+        # A state whose _lock blows up -> guarded -> None.
+        bad_lock = SimpleNamespace(
+            __enter__=lambda *a: (_ for _ in ()).throw(RuntimeError("x")),
+            __exit__=lambda *a: False)
+        mon = SimpleNamespace(state=SimpleNamespace(_lock=bad_lock))
+        assert _battery_health_for_monitor(mon) is None
 
 
 def _series_names(text):

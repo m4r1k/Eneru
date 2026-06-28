@@ -133,7 +133,12 @@ def apply_reload(primary: Config, monitor_configs: List[Config],
     if primary.redundancy_groups != new.redundancy_groups:
         restart.append("redundancy_groups")
 
-    # --- per-group triggers (safe) + other per-group fields (restart) ---
+    # --- per-group SAFE fields (live) + other per-group fields (restart) ---
+    # The daemon reads these per-group fields live each tick/request:
+    #   triggers (poll loop), and the v6.1 resolvers for nut_control / battery_health
+    #   / self_test (_resolve_*_config read self.config.ups_groups[*] fresh). So a
+    #   per-UPS override of any of them swaps in place, exactly like the top-level
+    #   counterparts -- not restart-required.
     new_by_name = {g.ups.name: g for g in new.ups_groups}
     for cfg in configs:
         for grp in cfg.ups_groups:
@@ -143,10 +148,21 @@ def apply_reload(primary: Config, monitor_configs: List[Config],
             if grp.triggers != ng.triggers:
                 grp.triggers = ng.triggers
                 _add(applied, f"triggers:{grp.ups.name}")
+            if grp.nut_control != ng.nut_control:
+                grp.nut_control = ng.nut_control
+                _add(applied, f"nut_control:{grp.ups.name}")
+            if grp.battery_health != ng.battery_health:
+                grp.battery_health = ng.battery_health
+                _add(applied, f"battery_health:{grp.ups.name}")
+            if grp.self_test != ng.self_test:
+                grp.self_test = ng.self_test
+                _add(applied, f"self_test:{grp.ups.name}")
             # Anything else changed on the group (VMs, containers, remote
             # servers, ...) is captured by the shutdown path at run time and is
             # reported as restart-required.
-            if replace(grp, triggers=ng.triggers) != ng:
+            if replace(grp, triggers=ng.triggers, nut_control=ng.nut_control,
+                       battery_health=ng.battery_health,
+                       self_test=ng.self_test) != ng:
                 _add(restart, f"ups_groups:{grp.ups.name}")
 
     return {"applied": applied, "restartRequired": restart,

@@ -120,7 +120,7 @@ class TestIssue:
 
         monkeypatch.setattr(self_test.nutctl, "run_instant_command", fake_run)
         self_test.issue_self_test("U@h", "test.battery.start",
-                                  _nc(username="bob", password="s3cret",
+                                  _nc(username="bob", password="s3cret",  # noqa: S106
                                       timeout=9), store)
         assert captured == {"ups": "U@h", "cmd": "test.battery.start",
                             "user": "bob", "pw": "s3cret", "timeout": 9}

@@ -147,6 +147,46 @@ def test_apply_reload_group_non_trigger_change_restart(tmp_path):
 
 
 @pytest.mark.unit
+def test_apply_reload_per_ups_v61_overrides_live(tmp_path):
+    # Per-UPS battery_health / self_test overrides are read live by the v6.1
+    # resolvers each tick, so a reload must apply them IN PLACE — not punt the
+    # whole group to restart-required (the original B1a gap CodeRabbit flagged).
+    base = (
+        "api:\n  auth:\n    enabled: true\n"
+        "nut_control:\n  enabled: true\n  allowed_commands: [test.battery.start]\n"
+        "ups:\n"
+        "  - name: U1@h\n"
+        "    battery_health:\n      expected_life_years: {y}\n"
+        "    self_test:\n      schedule: {sch}\n      command: test.battery.start\n"
+        "  - name: U2@h\n"
+    )
+    live = _load(_write(tmp_path / "a.yaml", base.format(y=5, sch="monthly")))
+    new = _load(_write(tmp_path / "b.yaml", base.format(y=3, sch="weekly")))
+    report = reloadmod.apply_reload(live, [live], new)
+    assert "battery_health:U1@h" in report["applied"]
+    assert "self_test:U1@h" in report["applied"]
+    # The whole group must NOT be punted to restart-required for a live field.
+    assert "ups_groups:U1@h" not in report["restartRequired"]
+    g1 = next(g for g in live.ups_groups if g.ups.name == "U1@h")
+    assert g1.battery_health.expected_life_years == 3
+    assert g1.self_test.schedule == "weekly"
+
+
+@pytest.mark.unit
+def test_apply_reload_per_ups_other_field_still_restart(tmp_path):
+    # A per-UPS change OUTSIDE the live set (e.g. virtual_machines) is still
+    # restart-required even alongside a live battery_health change.
+    base = ("ups:\n  - name: U@h\n"
+            "    battery_health:\n      expected_life_years: {y}\n"
+            "    virtual_machines:\n      enabled: {vm}\n")
+    live = _load(_write(tmp_path / "a.yaml", base.format(y=5, vm="false")))
+    new = _load(_write(tmp_path / "b.yaml", base.format(y=3, vm="true")))
+    report = reloadmod.apply_reload(live, [live], new)
+    assert "battery_health:U@h" in report["applied"]
+    assert "ups_groups:U@h" in report["restartRequired"]
+
+
+@pytest.mark.unit
 def test_apply_reload_dedups_trigger_tag_across_configs(tmp_path):
     primary = _load(_write(tmp_path / "a.yaml",
                            "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 20\n"))

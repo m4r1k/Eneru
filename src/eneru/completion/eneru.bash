@@ -14,7 +14,7 @@ _eneru() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local subcommands="run shutdown remote validate monitor tui test-notifications completion version"
+    local subcommands="run shutdown remote validate monitor tui test-notifications self-test completion version"
     local global_opts="-h --help"
     local config_opts="-c --config"
     local monitor_opts="--once --interval --graph --time --events-only -v --verbose --length"

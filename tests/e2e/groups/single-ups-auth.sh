@@ -327,8 +327,10 @@ RELOAD_HTTP=$(curl -sS -o /tmp/test54-reload.json -w '%{http_code}' \
   -X POST -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:9100/api/v1/config/reload)
 [ "$RELOAD_HTTP" = "200" ] || { echo "FAIL: API reload returned $RELOAD_HTTP"; cat /tmp/test54-reload.json; exit 1; }
-python3 -c "import json;assert json.load(open('/tmp/test54-reload.json'))['reloaded'] is True" \
-  || { echo "FAIL: API reload report not reloaded"; cat /tmp/test54-reload.json; exit 1; }
+# Assert the threshold change (55 -> 60) was actually APPLIED live, not just that
+# the reload path ran: a no-op reload would leave `applied` empty and fail here.
+python3 -c "import json;r=json.load(open('/tmp/test54-reload.json'));assert r['reloaded'] is True and any(a.startswith('triggers') for a in r['applied']), r" \
+  || { echo "FAIL: API reload did not apply the triggers change"; cat /tmp/test54-reload.json; exit 1; }
 
 # Anonymous reload is rejected.
 ANON=$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:9100/api/v1/config/reload)
@@ -376,6 +378,9 @@ curl -fsS http://127.0.0.1:9100/ > /tmp/test55-index.html \
   || { echo "FAIL: dashboard index not served"; cat /tmp/test55-daemon.log; exit 1; }
 grep -q "<title>Eneru</title>" /tmp/test55-index.html \
   || { echo "FAIL: dashboard index missing title"; cat /tmp/test55-index.html; exit 1; }
+# v6.1: the dashboard is a tabbed SPA — the tab nav must be served.
+grep -q 'role="tablist"' /tmp/test55-index.html \
+  || { echo "FAIL: dashboard tab nav not served"; cat /tmp/test55-index.html; exit 1; }
 curl -fsS http://127.0.0.1:9100/app.js   >/dev/null || { echo "FAIL: app.js not served"; exit 1; }
 curl -fsS http://127.0.0.1:9100/style.css >/dev/null || { echo "FAIL: style.css not served"; exit 1; }
 
@@ -384,9 +389,21 @@ HDRS=$(curl -fsS -D - -o /dev/null http://127.0.0.1:9100/)
 echo "$HDRS" | grep -qi "Content-Type: text/html" || { echo "FAIL: index not text/html"; echo "$HDRS"; exit 1; }
 echo "$HDRS" | grep -qi "Content-Security-Policy" || { echo "FAIL: missing CSP header"; echo "$HDRS"; exit 1; }
 
-# Path traversal / unknown asset -> 404.
+# Unknown asset -> 404.
 TRAV=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:9100/nope.js")
 [ "$TRAV" = "404" ] || { echo "FAIL: unknown asset returned $TRAV, expected 404"; exit 1; }
+
+# Actual path-traversal payloads (raw and percent-encoded) must be rejected,
+# never serve a file outside the web root. --path-as-is keeps curl from
+# normalizing the ../ away client-side so the server's guard is what's tested.
+for payload in "/../config.py" "/..%2f..%2fconfig.py" "/%2e%2e/%2e%2e/etc/passwd"; do
+  CODE=$(curl -sS --path-as-is -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:9100${payload}")
+  case "$CODE" in
+    200) echo "FAIL: traversal '${payload}' served content (HTTP 200)"; exit 1 ;;
+    *) : ;;  # 400/403/404 are all acceptable rejections
+  esac
+done
 
 kill "$DAEMON_PID" 2>/dev/null || true
 wait "$DAEMON_PID" 2>/dev/null || true

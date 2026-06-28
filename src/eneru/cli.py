@@ -1783,6 +1783,207 @@ def _cmd_apikey_revoke(args):
     print(f"✅  Revoked API key #{args.id}.")
 
 
+# ---------------------------------------------------------------------------
+# self-test (v6.1)
+#
+# `eneru self-test run` defaults to an API-client command against the running
+# daemon (so the daemon owns the audit record + the self_tests row in its state
+# DB). `--direct` issues the command straight via nut_control creds with no
+# daemon, recording the row in the configured stats DB. The direct path is NOT
+# exempt from the nut_control allowlist. `eneru self-test status` reads the
+# latest recorded row from the local stats DB.
+# ---------------------------------------------------------------------------
+
+def _self_test_find_group(config, name):
+    """Resolve a UPS group by exact or sanitized name; default to the sole UPS
+    when ``name`` is omitted. Returns the group or ``None``."""
+    from eneru.status import sanitize_name
+    groups = config.ups_groups
+    if not name:
+        return groups[0] if len(groups) == 1 else None
+    for group in groups:
+        if group.ups.name == name:
+            return group
+    target = sanitize_name(name)
+    for group in groups:
+        if sanitize_name(group.ups.name) == target:
+            return group
+    return None
+
+
+def _self_test_no_ups(name):
+    if name:
+        print(f"No UPS named {name!r} in the configuration.")
+    else:
+        print("Multiple UPS configured; specify which with --ups NAME.")
+    sys.exit(2)
+
+
+def _self_test_api_base(config, args):
+    """Base URL for the running daemon's API (loopback when bound to a wildcard)."""
+    if getattr(args, "url", None):
+        return args.url.rstrip("/")
+    bind = config.api.bind or "127.0.0.1"
+    if bind in ("0.0.0.0", "::", ""):
+        bind = "127.0.0.1"
+    return f"http://{bind}:{config.api.port}"
+
+
+def _self_test_token(args):
+    return (getattr(args, "token", None)
+            or getattr(args, "api_key", None)
+            or os.environ.get("ENERU_API_TOKEN")
+            or os.environ.get("ENERU_API_KEY")
+            or "")
+
+
+def _http_json(method, url, token=None, body=None, timeout=15):
+    """Minimal stdlib JSON HTTP client. Returns ``(status, data)``; status 0
+    means the request never reached the server. Factored into one function so
+    tests mock a single seam."""
+    import json as _json
+    import urllib.error
+    import urllib.request
+    data = _json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    if token:
+        req.add_header("Authorization", "Bearer " + token)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+            return resp.status, (_json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as exc:
+        raw = ""
+        try:
+            raw = exc.read().decode("utf-8")
+        except Exception:
+            pass
+        try:
+            return exc.code, _json.loads(raw)
+        except Exception:
+            return exc.code, {"error": {"message": raw or str(exc.reason)}}
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return 0, {"error": {"message": str(getattr(exc, "reason", exc))}}
+
+
+def _error_message(data):
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict) and err.get("message"):
+            return err["message"]
+        if isinstance(err, str):
+            return err
+    return None
+
+
+def _open_stats_store(config, group):
+    """Open the per-UPS stats store for CLI read/write, or ``None`` on failure."""
+    from eneru.stats import StatsStore
+    from eneru.status import stats_db_path_for_group
+    db_path = stats_db_path_for_group(config, group)
+    try:
+        return StatsStore(
+            db_path,
+            retention_raw_hours=config.statistics.retention.raw_hours,
+            retention_5min_days=config.statistics.retention.agg_5min_days,
+            retention_hourly_days=config.statistics.retention.agg_hourly_days,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"  (could not open stats DB {db_path}: {exc})")
+        return None
+
+
+def _cmd_self_test_run(args):
+    """Issue a UPS battery self-test (daemon API by default; --direct via NUT)."""
+    config = _load_config(args)
+    group = _self_test_find_group(config, getattr(args, "ups", None))
+    if group is None:
+        _self_test_no_ups(getattr(args, "ups", None))   # exits
+    name = group.ups.name
+    if getattr(args, "direct", False):
+        _self_test_run_direct(config, group, name)
+    else:
+        _self_test_run_api(config, name, args)
+
+
+def _self_test_run_api(config, name, args):
+    from urllib.parse import quote
+    token = _self_test_token(args)
+    if not token:
+        print("No API token. Pass --token / --api-key, set ENERU_API_TOKEN, or "
+              "use --direct to issue without the daemon.")
+        sys.exit(2)
+    url = (_self_test_api_base(config, args)
+           + "/api/v1/ups/" + quote(name, safe="") + "/self-test")
+    status, data = _http_json("POST", url, token=token, body={})
+    if 200 <= status < 300:
+        print(f"✅  Self-test issued on {name} via the daemon API.")
+        return
+    if status == 0:
+        print(f"Could not reach the daemon API at {url}: "
+              f"{_error_message(data) or 'connection failed'}")
+    else:
+        print(f"Self-test request failed (HTTP {status}): "
+              f"{_error_message(data) or data}")
+    sys.exit(1)
+
+
+def _self_test_run_direct(config, group, name):
+    from eneru import self_test as selftest
+    from eneru.nut_control import command_allowed
+    nc = group.nut_control or config.nut_control
+    if not nc.enabled:
+        print("nut_control is not enabled. --direct issues a real command via "
+              "NUT and needs nut_control credentials + allowlist in the config.")
+        sys.exit(2)
+    command = config.self_test.command
+    if not command_allowed(command, nc.allowed_commands):
+        print(f"self_test.command {command!r} is not in "
+              "nut_control.allowed_commands; refusing (the direct path is not "
+              "exempt from the control allowlist).")
+        sys.exit(2)
+    cmd = selftest.discover_self_test_command(name, command, timeout=nc.timeout)
+    if cmd is None:
+        print(f"UPS {name} does not expose {command!r} (upscmd -l); nothing to do.")
+        sys.exit(1)
+    store = _open_stats_store(config, group)
+    result = selftest.issue_self_test(name, cmd, nc, store, source="cli")
+    if result.get("ok"):
+        print(f"✅  Self-test issued on {name} (command {cmd}).")
+        print("   Re-run `eneru self-test status` once the test completes.")
+    else:
+        print(f"Self-test failed: {result.get('error')}")
+        sys.exit(1)
+
+
+def _cmd_self_test_status(args):
+    """Show the latest recorded self-test result for a UPS."""
+    config = _load_config(args)
+    group = _self_test_find_group(config, getattr(args, "ups", None))
+    if group is None:
+        _self_test_no_ups(getattr(args, "ups", None))   # exits
+    name = group.ups.name
+    store = _open_stats_store(config, group)
+    row = store.latest_self_test() if store is not None else None
+    if not row:
+        print(f"No self-test on record for {name}.")
+        return
+    when = "—"
+    if row.get("started_ts"):
+        when = datetime.fromtimestamp(row["started_ts"]).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"Latest self-test for {name}:")
+    print(f"  Result : {row.get('result_enum') or 'unknown'}")
+    if row.get("result_raw"):
+        print(f"  Raw    : {row['result_raw']}")
+    print(f"  Started: {when}")
+    if row.get("result_date"):
+        print(f"  Tested : {row['result_date']}")
+    print(f"  Command: {row.get('command')}")
+    print(f"  Source : {row.get('source')}")
+
+
 def _cmd_version(args):
     """Print version and exit."""
     print(f"Eneru v{__version__}")
@@ -1879,6 +2080,7 @@ def main():
             "  validate             Validate configuration and show overview\n"
             "  monitor / tui        Launch real-time TUI dashboard\n"
             "  test-notifications   Send a test notification\n"
+            "  self-test            Issue / inspect a UPS battery self-test\n"
             "  completion           Print shell completion script (bash/zsh/fish)\n"
             "  version              Show version information\n"
             "\nExamples:\n"
@@ -1893,7 +2095,7 @@ def main():
 
     public_subcommands = (
         "run", "shutdown", "remote", "user", "apikey", "validate", "monitor",
-        "tui", "test-notifications", "version", "completion",
+        "tui", "test-notifications", "self-test", "version", "completion",
     )
     subparsers = parser.add_subparsers(
         dest="command",
@@ -2125,6 +2327,29 @@ def main():
                                       help="Send a test notification and exit")
     tn_parser.add_argument("-c", "--config", help="Path to configuration file", default=None)
     tn_parser.set_defaults(func=_cmd_test_notifications)
+
+    # --- self-test (v6.1) ---
+    st_parser = subparsers.add_parser(
+        "self-test", help="Issue or inspect a UPS battery self-test")
+    st_sub = st_parser.add_subparsers(dest="self_test_command")
+    st_run = st_sub.add_parser(
+        "run", help="Issue a self-test (via the daemon API by default)")
+    st_run.add_argument("--ups", help="UPS name (default: the only configured UPS)")
+    st_run.add_argument("-c", "--config", default=None, help="Path to configuration file")
+    st_run.add_argument("--direct", action="store_true",
+                        help="Issue directly via NUT (nut_control creds), no daemon")
+    st_run.add_argument("--url", help="Daemon API base URL (default: from api.bind/port)")
+    st_run.add_argument("--token", help="Bearer session token for the daemon API")
+    st_run.add_argument("--api-key", help="API key for the daemon API (sent as Bearer)")
+    st_run.set_defaults(func=_cmd_self_test_run)
+    st_status = st_sub.add_parser(
+        "status", help="Show the latest recorded self-test result")
+    st_status.add_argument("--ups", help="UPS name (default: the only configured UPS)")
+    st_status.add_argument("-c", "--config", default=None,
+                           help="Path to configuration file")
+    st_status.set_defaults(func=_cmd_self_test_status)
+    # Bare `eneru self-test` (no subcommand) -> status.
+    st_parser.set_defaults(func=_cmd_self_test_status, ups=None, config=None)
 
     # --- version ---
     ver_parser = subparsers.add_parser("version", help="Show version information")

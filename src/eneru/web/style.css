@@ -159,8 +159,46 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
                        padding: 0.15rem 0; color: var(--muted); }
 .detail-section .row b { color: var(--text); font-weight: 600; }
 
+/* ----- Tabbed SPA (v6.1) ------------------------------------------------- */
+.tabs {
+  display: flex; gap: 0.25rem; flex-wrap: wrap;
+  padding: 0 1.25rem; background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  max-width: 1100px; margin: 0 auto; box-sizing: content-box;
+}
+.tab {
+  background: transparent; color: var(--muted); border: 0;
+  border-bottom: 2px solid transparent; border-radius: 0;
+  padding: 0.6rem 0.9rem; font-weight: 600; cursor: pointer;
+}
+.tab:hover { color: var(--text); }
+.tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.panel { outline: none; }
+.panel:focus-visible { outline: none; }
+.panel > h2:first-child { margin-top: 0; }
+
+/* Widget cards with a title + status badge (Battery / Energy tabs) */
+.card-head { display: flex; align-items: center; justify-content: space-between;
+             gap: 0.5rem; margin-bottom: 0.5rem; }
+.card-head h3 { margin: 0; font-size: 1.05rem; }
+.card .card-head + .row { margin-top: 0.1rem; }
+.chart-note { color: var(--muted); font-size: 0.85rem; margin: 0.5rem 0 0; }
+
+/* Chart overlays: voltage threshold band + nominal line + event markers */
+.graph .band { fill: var(--ok); opacity: 0.10; }
+.graph .band-nominal { stroke: var(--ok); stroke-width: 1; stroke-dasharray: 4 3;
+                       opacity: 0.7; }
+.graph .ev-line { stroke-width: 1; opacity: 0.45; }
+.graph .ev-dot { stroke: var(--bg); stroke-width: 0.5; }
+.graph .ev-crit { stroke: var(--crit); fill: var(--crit); }
+.graph .ev-warn { stroke: var(--warn); fill: var(--warn); }
+.graph .ev-info { stroke: var(--accent); fill: var(--accent); }
+
 @media (max-width: 640px) {
   .var-form { grid-template-columns: 1fr; }
   header { flex-wrap: wrap; gap: 0.5rem; }
   .authbox { flex-wrap: wrap; }
+  .tabs { padding: 0 0.5rem; }
+  .tab { padding: 0.5rem 0.6rem; }
 }

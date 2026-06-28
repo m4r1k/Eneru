@@ -122,26 +122,34 @@ def test_dashboard_js_contains_v61_surfaces(minimal_config):
     assert "u.energy" in text
     assert "runSelfTest(" in text
     assert "/self-test" in text
+    # The self-test button must debounce: a non-idempotent hardware POST can't be
+    # double-clicked into multiple tests.
+    assert "if (btn) btn.disabled = true" in text
 
 
 @pytest.mark.unit
 def test_dashboard_js_graph_is_resize_safe(minimal_config):
     # Guard the graph-scaling fix (no browser in CI): the renderer must size the
-    # viewBox to the host width, use non-scaling strokes, and register a single
-    # resize observer rather than stretching a fixed viewBox.
+    # viewBox to the host width, use non-scaling strokes, and register a resize
+    # observer per chart rather than stretching a fixed viewBox. v6.1: the single
+    # global graph became the reusable makeChart factory (one instance per tab).
     text = _handler(minimal_config, path="/app.js")._serve_static(
         "/app.js")[1].decode("utf-8")
-    assert "observeGraphResize" in text
+    assert "function makeChart" in text
+    assert "function drawChart" in text
+    assert "new ResizeObserver(redraw)" in text
     assert "non-scaling-stroke" in text
     assert "host.clientWidth" in text
 
 
 @pytest.mark.unit
 def test_dashboard_has_wide_history_surfaces(minimal_config):
-    # Guard the Slice B surfaces: graph + event range selectors and the
-    # "load older" paging that drives wide-history viewing.
+    # Guard the Slice B surfaces: per-tab chart + event range selectors and the
+    # "load older" paging that drives wide-history viewing. v6.1 split the single
+    # History graph into per-tab charts (power/battery/energy ranges).
     html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
-    assert 'id="graph-range"' in html
+    assert 'id="battery-range"' in html
+    assert 'id="power-range"' in html
     assert 'id="event-range"' in html
     assert 'id="event-load-older"' in html
     js = _handler(minimal_config, path="/app.js")._serve_static(
@@ -273,6 +281,52 @@ def test_dashboard_theme_palette_supports_light_dark_system(minimal_config):
     assert 'data-theme="light"' in css
     assert 'data-theme="dark"' in css
     assert "prefers-color-scheme: light" in css
+
+
+@pytest.mark.unit
+def test_dashboard_serves_tabbed_shell(minimal_config):
+    # v6.1: the dashboard is a tabbed SPA. The tab nav + every panel must be in
+    # the served markup with real ARIA roles, and the JS must own the tab logic
+    # (arrow-key nav + hash routing). No browser in CI, so assert the surfaces.
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    assert 'role="tablist"' in html
+    for tab in ("overview", "power", "battery", "energy", "events", "control", "config"):
+        assert f'id="tab-{tab}"' in html
+        assert f'id="panel-{tab}"' in html
+    assert 'role="tab"' in html
+    assert 'role="tabpanel"' in html
+    assert 'aria-controls="panel-overview"' in html
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    assert "function selectTab" in js
+    assert "function initTabs" in js
+    assert "aria-selected" in js
+    assert "ArrowRight" in js and "ArrowLeft" in js
+    assert "hashchange" in js
+    # The Control tab is hidden until authenticated + nut_control enabled.
+    assert 'id="tab-control"' in html and "tab.hidden = !available" in js
+
+
+@pytest.mark.unit
+def test_dashboard_charts_have_bands_and_event_overlays(minimal_config):
+    # v6.1 B9b: the Power chart carries voltage threshold bands (reference
+    # overlay of the live config) and charts carry power-event overlay markers.
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    assert "isVoltageMetric" in js
+    assert "eventMarkerClass" in js
+    assert "nominalVoltage" in js and "warningLow" in js and "warningHigh" in js
+    # Band is presented as a reference overlay, not historical truth.
+    assert "reference overlay" in js
+    # Marker count is bounded so a dense window doesn't drown the SVG.
+    assert "const MAX = 100" in js
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    assert ".band" in css and ".ev-line" in css
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    assert 'id="power-graph"' in html
+    assert 'id="battery-health"' in html
+    assert 'id="energy-cards"' in html
 
 
 @pytest.mark.unit
