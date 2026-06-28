@@ -343,6 +343,8 @@ The current pinned set (as of 2026-04-22):
 | `github/codeql-action` | `v4` | `b25d0ebf…` |
 | `pypa/gh-action-pypi-publish` | `release/v1` | `cef22109…` |
 | `softprops/action-gh-release` | `v3` | `b4309332…` |
+| `docker/setup-buildx-action` | `v3` | `8d2750c6…` |
+| `docker/build-push-action` | `v6` | `10e90e36…` |
 
 `nFPM` is similarly pinned (`NFPM_VERSION` env var in `release.yml` and `integration.yml`) and verified against the goreleaser-published `checksums.txt` before extraction. Bump the version constant and the checksum check still verifies the new download.
 

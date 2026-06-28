@@ -7,6 +7,11 @@ services:
     build:
       context: ./nut-dummy
       dockerfile: Dockerfile
+    # Explicit image tag so the pre-built (buildx, gha-cached) image is
+    # found under `docker compose up --no-build`. Without it Compose
+    # invents a name from the project + service and can't match what
+    # buildx --load put in the daemon. See .github/actions/e2e-setup.
+    image: eneru-e2e-nut-dummy:ci
     container_name: eneru-e2e-nut
     ports:
       - "3493:3493"
@@ -20,6 +25,9 @@ services:
     build:
       context: ./ssh-target
       dockerfile: Dockerfile
+    # All three ssh-target* services share one build context, so one
+    # pre-built image (eneru-e2e-ssh-target:ci) serves all of them.
+    image: eneru-e2e-ssh-target:ci
     container_name: eneru-e2e-ssh
     ports:
       - "2222:22"
@@ -36,6 +44,7 @@ services:
     build:
       context: ./ssh-target
       dockerfile: Dockerfile
+    image: eneru-e2e-ssh-target:ci
     container_name: eneru-e2e-ssh-2
     ports:
       - "2223:22"
@@ -48,6 +57,7 @@ services:
     build:
       context: ./ssh-target
       dockerfile: Dockerfile
+    image: eneru-e2e-ssh-target:ci
     container_name: eneru-e2e-ssh-3
     ports:
       - "2224:22"
