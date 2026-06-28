@@ -41,6 +41,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - E2E: `apply_scenario` is now a hard synchronization point (fails the test on a
   >20s unconfirmed apply rather than running against stale dummy state); Test 55
   asserts the tab nav is served and exercises real path-traversal payloads.
+- Energy `_median` now averages the two middle values for even-length series, so
+  the inferred sample spacing (and thus `integrate_kwh`'s gap cap) isn't inflated.
+- The battery-health status block is cleared on a reload to
+  `battery_health.enabled: false` instead of leaving a stale score on the API.
+- An auto-learned nominal runtime is no longer persisted when the config already
+  pins `nominal_runtime_seconds`.
+- The self-test API and the in-loop self-test task honor per-UPS
+  `self_test.command`; `/self-test` is hidden from `availableEndpoints` unless
+  auth + `nut_control` are both on; and an in-flight self-test is persisted to
+  `meta` and recovered after a restart so a `running` row is never orphaned.
 
 ## [6.1.0-rc5] - 2026-06-28
 

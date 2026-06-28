@@ -161,6 +161,24 @@ class TestPeriodicUpdate:
         assert mon.state.latest_battery_health is None
 
     @pytest.mark.unit
+    def test_disable_clears_previously_published_block(self, store):
+        # A reload to enabled:false must clear any stale block from the status
+        # surfaces, not leave the last score frozen forever.
+        cfg = _config("ups:\n  name: U@h\nbattery_health:\n  enabled: false\n")
+        mon = _Mon(cfg, store)
+        mon.state.latest_battery_health = {"score": 88}   # left over from when on
+        mon._update_battery_health_periodic(time.time())
+        assert mon.state.latest_battery_health is None
+
+    @pytest.mark.unit
+    def test_nominal_not_learned_when_config_pins_it(self, store):
+        cfg = _config("ups:\n  name: U@h\n"
+                      "battery_health:\n  nominal_runtime_seconds: 1800\n")
+        mon = _Mon(cfg, store)
+        mon._maybe_learn_nominal_runtime(100.0, 2400.0)   # full charge, but pinned
+        assert store.get_meta(_META_NOMINAL_RUNTIME) is None
+
+    @pytest.mark.unit
     def test_no_store_is_safe(self):
         mon = _Mon(_config(), None)
         mon.state.latest_battery_charge = "100"

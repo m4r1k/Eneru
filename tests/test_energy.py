@@ -4,12 +4,29 @@ import pytest
 
 from eneru.energy import (
     EnergyResult,
+    _median,
     compute_cost,
     format_cost,
     integrate_kwh,
     power_sample_w,
     summarize,
 )
+
+
+class TestMedian:
+    @pytest.mark.unit
+    def test_odd_length(self):
+        assert _median([3.0, 1.0, 2.0]) == 2.0
+
+    @pytest.mark.unit
+    def test_even_length_averages_middle(self):
+        # The bug: [1, 3600] used to return 3600 (upper-middle), inflating the
+        # inferred sample spacing and loosening integrate_kwh's gap cap.
+        assert _median([1.0, 3600.0]) == 1800.5
+
+    @pytest.mark.unit
+    def test_empty_is_none(self):
+        assert _median([]) is None
 
 
 # --------------------------------------------------------------------------

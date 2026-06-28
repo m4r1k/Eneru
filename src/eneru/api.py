@@ -809,7 +809,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if real is None:
             return 404, "application/json", self._not_found("UPS not found")
         nc = self._effective_nut_control(real)
-        command = self.api_config.self_test.command
+        command = self._effective_self_test(real).command
         if not nutctl.command_allowed(command, nc.allowed_commands):
             self._audit(principal, "self-test", f"{real}:{command}", "denied")
             raise APIForbidden(
@@ -974,6 +974,16 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     allowed_variables=override.allowed_variables,
                     timeout=override.timeout,
                 )
+        return glob
+
+    def _effective_self_test(self, ups_name: str):
+        """Resolve the self_test config for one UPS (per-group override if set),
+        mirroring _effective_nut_control so a per-UPS `self_test.command` is
+        honored instead of always using the global command."""
+        glob = self.api_config.self_test
+        for group in getattr(self.api_config, "ups_groups", []):
+            if group.ups.name == ups_name and getattr(group, "self_test", None):
+                return group.self_test
         return glob
 
     def _list_commands(self, ups_name: str) -> Tuple[int, str, Any]:
@@ -1148,6 +1158,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/v1/ups/{name}/command") or \
                     path.startswith("/api/v1/ups/{name}/variables"):
                 return nut_enabled
+            if path == "/api/v1/ups/{name}/self-test":
+                # POST self-test needs auth (write) AND nut_control, exactly like
+                # the manual control path.
+                return auth_enabled and nut_enabled
             return True
 
         return [dict(e) for e in API_ENDPOINTS if _visible(e["path"])]

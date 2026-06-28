@@ -6,8 +6,49 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
-from eneru.api import render_prometheus_metrics
+from eneru.api import EneruAPIHandler, render_prometheus_metrics
+from eneru.config import ConfigLoader
+
+
+def _parse_cfg(text):
+    return ConfigLoader._parse_config(yaml.safe_load(text))
+
+
+class TestSelfTestApiResolution:
+    @pytest.mark.unit
+    def test_effective_self_test_honors_per_ups_command(self):
+        cfg = _parse_cfg(
+            "self_test:\n  command: test.battery.start\n"
+            "ups:\n  - name: U1@h\n    self_test:\n      command: test.battery.start.quick\n"
+            "  - name: U2@h\n")
+        h = object.__new__(EneruAPIHandler)
+        h.api_config = cfg
+        assert h._effective_self_test("U1@h").command == "test.battery.start.quick"
+        assert h._effective_self_test("U2@h").command == "test.battery.start"
+
+    @pytest.mark.unit
+    def test_self_test_endpoint_hidden_when_nut_control_off(self):
+        # POST self-test needs auth AND nut_control; with nut_control off it must
+        # not be advertised in availableEndpoints.
+        h = object.__new__(EneruAPIHandler)
+        h.api_config = _parse_cfg(
+            "api:\n  auth:\n    enabled: true\n"
+            "nut_control:\n  enabled: false\n"
+            "ups:\n  name: U@h\n")
+        paths = {e["path"] for e in h._available_endpoints()}
+        assert "/api/v1/ups/{name}/self-test" not in paths
+
+    @pytest.mark.unit
+    def test_self_test_endpoint_visible_when_callable(self):
+        h = object.__new__(EneruAPIHandler)
+        h.api_config = _parse_cfg(
+            "api:\n  auth:\n    enabled: true\n"
+            "nut_control:\n  enabled: true\n  allowed_commands: [test.battery.start]\n"
+            "ups:\n  name: U@h\n")
+        paths = {e["path"] for e in h._available_endpoints()}
+        assert "/api/v1/ups/{name}/self-test" in paths
 from eneru.monitor import UPSGroupMonitor
 from eneru.state import MonitorState
 from eneru.stats import StatsStore

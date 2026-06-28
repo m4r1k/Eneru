@@ -292,3 +292,38 @@ class TestRunSelfTestTask:
         mon._self_test_poll_due_mono = time.monotonic() + 1000   # not yet
         mon._run_self_test_task()
         assert mon._self_test_pending_id == 3      # still pending, nothing issued
+
+    @pytest.mark.unit
+    def test_issue_persists_pending_id_for_restart(self, store, monkeypatch):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        store.set_meta("self_test_last_run", "0")
+        monkeypatch.setattr(selftest, "discover_self_test_command",
+                            lambda *a, **k: "test.battery.start")
+        monkeypatch.setattr(selftest, "issue_self_test",
+                            lambda *a, **k: {"ok": True, "test_id": 9, "error": ""})
+        mon._run_self_test_task()
+        assert store.get_meta("self_test_pending_id") == "9"
+
+    @pytest.mark.unit
+    def test_recovers_in_flight_test_after_restart(self, store, monkeypatch):
+        # Simulate a restart: a pending id is in meta but the in-memory fields
+        # are fresh (None). The next tick must adopt + finalize it.
+        store.set_meta("self_test_pending_id", "11")
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        mon._get_ups_var = lambda var: {"ups.test.result": "Done and passed",
+                                        "ups.test.date": "2026-06-28"}.get(var)
+        recorded = {}
+        monkeypatch.setattr(selftest, "record_self_test_result",
+                            lambda s, tid, raw, date: recorded.setdefault("id", tid) or "passed")
+        mon._run_self_test_task()
+        assert recorded["id"] == 11                # adopted the persisted id
+        assert mon._self_test_pending_id is None   # finalized
+        assert store.get_meta("self_test_pending_id") == ""   # cleared
+
+    @pytest.mark.unit
+    def test_corrupt_pending_id_is_cleared(self, store):
+        store.set_meta("self_test_pending_id", "not-an-int")
+        store.set_meta("self_test_last_run", str(int(time.time())))  # not due -> stop early
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        mon._run_self_test_task()
+        assert store.get_meta("self_test_pending_id") == ""   # corrupt value scrubbed

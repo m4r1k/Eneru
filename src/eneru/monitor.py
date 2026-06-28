@@ -2161,6 +2161,20 @@ class UPSGroupMonitor(
         if not nc.enabled:
             return
 
+        # 0) Recover an in-flight test persisted before a restart. The pending id
+        # lives in meta (the monotonic poll timer resets across restarts), so a
+        # crash between "issued" and "result polled" would otherwise orphan the
+        # ``running`` row forever. Adopt it and poll on this tick — the test was
+        # issued before the restart, so its result is almost certainly ready.
+        if self._self_test_pending_id is None and store is not None:
+            pend = store.get_meta("self_test_pending_id")
+            if pend:
+                try:
+                    self._self_test_pending_id = int(pend)
+                    self._self_test_poll_due_mono = time.monotonic()
+                except (TypeError, ValueError):
+                    store.set_meta("self_test_pending_id", "")
+
         # 1) Finalise a pending test once its poll window has elapsed.
         if (self._self_test_pending_id is not None
                 and self._self_test_poll_due_mono is not None):
@@ -2172,6 +2186,8 @@ class UPSGroupMonitor(
                 self._log_message(f"🔋 Self-test result: {enum} ({raw!r})")
                 self._self_test_pending_id = None
                 self._self_test_poll_due_mono = None
+                if store is not None:
+                    store.set_meta("self_test_pending_id", "")  # cleared
             return  # never issue while one is in flight
 
         # 2) Due? (calendar/interval via the shared scheduler helpers)
@@ -2207,6 +2223,9 @@ class UPSGroupMonitor(
             self._self_test_pending_id = result["test_id"]
             self._self_test_poll_due_mono = (
                 time.monotonic() + max(1, int(cfg.result_poll_after)))
+            if store is not None and result["test_id"] is not None:
+                # Persist so a restart before the poll can recover + finalise it.
+                store.set_meta("self_test_pending_id", str(result["test_id"]))
             self._log_message(
                 f"🔋 Self-test issued ({cmd}); polling result in "
                 f"{cfg.result_poll_after}s")

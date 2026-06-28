@@ -81,9 +81,17 @@ def power_sample_w(real_power: Optional[float],
 
 def _median(values: List[float]) -> Optional[float]:
     s = sorted(values)
-    if not s:
+    n = len(s)
+    if not n:
         return None
-    return s[len(s) // 2]
+    mid = n // 2
+    if n % 2:
+        return s[mid]
+    # Even length: average the two middle values. Returning the upper-middle
+    # (the old behaviour) over-estimated the typical sample spacing, which made
+    # integrate_kwh's gap cap too loose and could count a real outage as a valid
+    # power window.
+    return (s[mid - 1] + s[mid]) / 2.0
 
 
 def integrate_kwh(samples: List[PowerSample], *,

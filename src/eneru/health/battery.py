@@ -244,6 +244,12 @@ class BatteryMonitorMixin:
         store = getattr(self, "_stats_store", None)
         if store is None or charge is None or runtime_s is None:
             return
+        # If the config pins a nominal runtime, _compute_battery_health prefers
+        # it anyway — don't pollute meta with an auto-learned value that will
+        # never be used (and would resurface if the pin is later removed).
+        cfg = self._resolve_battery_health_config()
+        if getattr(cfg, "nominal_runtime_seconds", None):
+            return
         if charge >= 99.0 and runtime_s > 0 and not self._learned_nominal_runtime():
             store.set_meta(_META_NOMINAL_RUNTIME, str(int(runtime_s)))
 
@@ -314,6 +320,10 @@ class BatteryMonitorMixin:
             now = time.time()
         cfg = self._resolve_battery_health_config()
         if not cfg.enabled:
+            # Clear any previously-published block so a reload to disabled does
+            # not leave a stale score on the API/MQTT/status surfaces.
+            with self.state._lock:
+                self.state.latest_battery_health = None
             return
         health = self._compute_battery_health(cfg, now)
         store = getattr(self, "_stats_store", None)
