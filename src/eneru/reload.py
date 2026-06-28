@@ -28,12 +28,20 @@ import yaml
 from eneru.config import Config, ConfigLoader
 
 # Top-level sections the running daemon reads live and can swap in place.
-SAFE_TOP_SECTIONS = ("behavior", "nut_control", "prometheus")
+# v6.1: energy + battery_health are read live each computation (the energy
+# integrator and the per-UPS battery-health hook read config fresh, including
+# the update cadence), so a swap is enough -- no cached schedule to re-register.
+SAFE_TOP_SECTIONS = ("behavior", "nut_control", "prometheus",
+                     "energy", "battery_health")
 # Sections that are swapped in place but ALSO need a subsystem hook to re-init
 # cached state (the daemon calls subsystem.apply_reload after the swap). NOTE:
 # `statistics` is handled specially below (only `retention` is live-appliable;
 # a `db_directory` change is restart-required).
-SUBSYSTEM_SECTIONS = ("statistics", "notifications", "mqtt", "remote_health")
+# v6.1: self_test + reports drive the periodic scheduler; after the swap the
+# scheduler owner re-registers its jobs so next-run times recompute from the
+# new schedule (see the scheduler apply_reload wiring in monitor/coordinator).
+SUBSYSTEM_SECTIONS = ("statistics", "notifications", "mqtt", "remote_health",
+                      "self_test", "reports")
 # Top-level sections captured at startup whose live re-init is deliberately not
 # supported. API bind/port and logging own process-level sockets/handlers;
 # local_shutdown dependency checks happen at startup. These changes need a
