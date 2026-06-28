@@ -18,6 +18,9 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
+# Shared E2E helpers (apply_scenario: poll-until-applied scenario swaps).
+. "$E2E_DIR/groups/lib.sh"
+
 # ======================================================================
 # Test 2: Monitor normal state (no shutdown triggered)
 # ======================================================================
@@ -28,8 +31,7 @@ echo ">>> Running: Test 2: Monitor normal state (no shutdown triggered)"
 echo "=== Test 2: Normal State Monitoring ==="
 
 # Ensure UPS is in online state
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-sleep 3
+apply_scenario online-charging
 
 # Run Eneru for 5 seconds — should NOT trigger shutdown.
 # Capture eneru's exit code explicitly; the previous `|| true` masked
@@ -71,8 +73,7 @@ echo "=== Test 3: Power Failure Detection ==="
 rm -f /tmp/eneru-e2e-shutdown-flag
 
 # Switch to low battery scenario
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply.dev
-sleep 3
+apply_scenario low-battery
 
 # Run Eneru in dry-run mode. With --exit-after-shutdown, eneru should
 # exit 0 once the dry-run shutdown sequence completes; anything else
@@ -120,8 +121,7 @@ docker compose exec -T ssh-target sh -c "rm -f /var/run/shutdown-triggered && to
 rm -f /tmp/eneru-e2e-shutdown-flag
 
 # Switch to low battery scenario
-cp scenarios/low-battery.dev scenarios/apply.dev
-sleep 3
+apply_scenario low-battery
 
 # Run Eneru briefly - will trigger shutdown and send SSH command
 eneru run --config config-e2e.yaml --exit-after-shutdown 2>&1 | tee /tmp/test4.log || true
@@ -159,8 +159,7 @@ echo "=== Test 5: FSD Trigger ==="
 rm -f /tmp/eneru-e2e-shutdown-flag
 
 # Switch to FSD scenario
-cp $E2E_DIR/scenarios/fsd.dev $E2E_DIR/scenarios/apply.dev
-sleep 3
+apply_scenario fsd
 
 # Run Eneru in dry-run mode
 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test5.log || true
@@ -468,8 +467,7 @@ if ! echo "$OL_STATUS" | grep -q "OL"; then
 fi
 
 # Start with healthy mains so the daemon enters the loop in OL.
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-sleep 3
+apply_scenario online-charging
 
 # Daemon in background. NO --exit-after-shutdown; we want it to stay
 # alive across all three transitions.
@@ -573,8 +571,7 @@ STAB_CFG=/tmp/config-e2e-stabilization.yaml
 sed '/on_battery_stabilization_delay/d' "$E2E_DIR/config-e2e-dry-run.yaml" > "$STAB_CFG"
 
 rm -f /tmp/eneru-e2e-shutdown-flag
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply.dev
-sleep 3
+apply_scenario low-battery
 
 set +e
 timeout 10s eneru run --config "$STAB_CFG" --exit-after-shutdown 2>&1 | tee /tmp/test39.log
@@ -958,8 +955,7 @@ mqtt:
 YAML
 
 rm -f /tmp/test45-mqtt.json /tmp/test45-subscriber.log
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-sleep 3
+apply_scenario online-charging
 python3 - <<'PY' > /tmp/test45-subscriber.log 2>&1 &
 import json
 import os

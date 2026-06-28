@@ -31,6 +31,9 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
+# Shared E2E helpers (apply_scenario: poll-until-applied scenario swaps).
+. "$E2E_DIR/groups/lib.sh"
+
 # Timestamped step markers. The redundancy regressions chain many
 # fixed-duration sleeps with docker-compose calls; when CI runners are slow
 # the script can be SIGTERMed mid-flight with no idea where it hung. dbg()
@@ -81,10 +84,9 @@ restart_redundancy_nut_server() {
   )
   dbg "restart_redundancy_nut_server: docker compose restart returned"
   wait_for_redundancy_nut
-  cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply-UPS1.dev"
-  cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply-UPS2.dev"
-  sleep 3
-  dbg "restart_redundancy_nut_server: settle sleep done"
+  apply_scenario online-charging UPS1
+  apply_scenario online-charging UPS2
+  dbg "restart_redundancy_nut_server: UPS1+UPS2 reset to online (scenarios confirmed live)"
 }
 
 stop_redundancy_nut_drivers() {

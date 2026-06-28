@@ -31,6 +31,9 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
+# Shared E2E helpers (apply_scenario: poll-until-applied scenario swaps).
+. "$E2E_DIR/groups/lib.sh"
+
 # Timestamped step markers. The redundancy regressions chain many
 # fixed-duration sleeps with docker-compose calls; when CI runners are slow
 # the script can be SIGTERMed mid-flight with no idea where it hung. dbg()
@@ -81,10 +84,9 @@ restart_redundancy_nut_server() {
   )
   dbg "restart_redundancy_nut_server: docker compose restart returned"
   wait_for_redundancy_nut
-  cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply-UPS1.dev"
-  cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply-UPS2.dev"
-  sleep 3
-  dbg "restart_redundancy_nut_server: settle sleep done"
+  apply_scenario online-charging UPS1
+  apply_scenario online-charging UPS2
+  dbg "restart_redundancy_nut_server: UPS1+UPS2 reset to online (scenarios confirmed live)"
 }
 
 stop_redundancy_nut_drivers() {
@@ -117,9 +119,8 @@ echo ">>> Running: Test 21: Redundancy quorum holds when 1 of 2 healthy"
 
 echo "=== Test 21: Quorum holds ==="
 # UPS1 critical (low battery), UPS2 healthy
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario low-battery UPS1
+apply_scenario online-charging UPS2
 
 # 1 healthy member meets min_healthy=1 -- the evaluator must NOT fire.
 # Use a finite timeout since --exit-after-shutdown wouldn't trigger.
@@ -154,9 +155,8 @@ echo ""
 echo ">>> Running: Test 22: Both UPSes critical → redundancy shutdown fires"
 
 echo "=== Test 22: Quorum exhausted ==="
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario low-battery UPS1
+apply_scenario low-battery UPS2
 
 # Grace ~10s, then evaluator ticks each second.
 timeout 30s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test22.log || true
@@ -172,9 +172,8 @@ if ! grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test22.log; then
   exit 1
 fi
 # Restore for downstream tests
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 2
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 echo "PASS: Redundancy shutdown fired on exhausted quorum"
 )
 
@@ -190,9 +189,8 @@ echo "=== Test 23: UNKNOWN handling ==="
 # the goal is to confirm UNKNOWN is *handled*, not to force it).
 # We assert the handling indirectly via Test 22's matching log lines
 # already covering UNKNOWN→CRITICAL via unknown_counts_as.
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 2
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 
 # Long enough to clear the startup grace and confirm steady state.
 timeout 18s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test23.log || true
@@ -224,9 +222,8 @@ echo "=== Test 24: Both UNKNOWN ==="
 # combination "OB + dropped data" is hard to provoke with the
 # dummy. We rely on the same low-battery scenario as Test 22,
 # which the evaluator treats as CRITICAL via trigger_active.
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario low-battery UPS1
+apply_scenario low-battery UPS2
 
 timeout 30s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test24.log || true
 
@@ -236,9 +233,8 @@ if ! grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test24.log; then
   exit 1
 fi
 # Restore
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 2
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 echo "PASS: Fail-safe shutdown fired"
 )
 
@@ -254,9 +250,8 @@ echo "=== Test 25: Cross-group cascade ==="
 # the redundancy group. UPS2 is healthy. The redundancy evaluator
 # must NOT fire (1 of 2 healthy >= min_healthy=1) regardless of
 # the independent group's behavior.
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario low-battery UPS1
+apply_scenario online-charging UPS2
 
 timeout 18s eneru run --config $E2E_DIR/config-e2e-redundancy-cross-group.yaml --exit-after-shutdown 2>&1 | tee /tmp/test25.log || true
 
@@ -267,8 +262,7 @@ if grep -q "rack-1-dual-psu.* quorum LOST" /tmp/test25.log; then
   exit 1
 fi
 # Restore
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-sleep 2
+apply_scenario online-charging UPS1
 echo "PASS: Cross-group cascade behaved correctly"
 )
 
@@ -281,9 +275,8 @@ echo ">>> Running: Test 26: Advisory-mode log signature"
 
 echo "=== Test 26: Advisory-mode log signature ==="
 # UPS1 critical (only it is in the redundancy group); UPS2 healthy.
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario low-battery UPS1
+apply_scenario online-charging UPS2
 
 timeout 18s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test26.log || true
 
@@ -300,8 +293,7 @@ if grep -q "Triggering immediate shutdown" /tmp/test26.log; then
   exit 1
 fi
 # Restore
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-sleep 2
+apply_scenario online-charging UPS1
 echo "PASS: Advisory-mode log signature verified"
 )
 
@@ -317,10 +309,9 @@ echo "=== Test 27: Separate-Eneru-UPS ==="
 # (powers remote rack). The redundancy shutdown must fire for
 # the rack, but TestUPS is unaffected, so the Eneru host stays
 # up (local_shutdown.enabled=false in the config anyway).
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario online-charging
+apply_scenario low-battery UPS1
+apply_scenario low-battery UPS2
 
 timeout 35s eneru run --config $E2E_DIR/config-e2e-redundancy-separate-eneru.yaml --exit-after-shutdown 2>&1 | tee /tmp/test27.log || true
 
@@ -342,9 +333,8 @@ if grep -q "Eneru Host UPS.*Triggering immediate shutdown" /tmp/test27.log; then
   exit 1
 fi
 # Restore
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 2
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 echo "PASS: Separate-Eneru-UPS topology verified"
 )
 
@@ -369,9 +359,8 @@ echo "=== Test 37: re-arm ==="
 
 # Start from a known-healthy quorum so the evaluator's startup grace
 # elapses without firing.
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 2
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 
 # Run eneru in background -- we need to drive scenarios in flight,
 # so --exit-after-shutdown is intentionally omitted. Budget: 13s
@@ -387,19 +376,19 @@ trap 'kill "$ENERU_PID" 2>/dev/null || true' EXIT
 sleep 13
 
 # Phase 1: drop both UPSes critical -> first quorum-loss shutdown.
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
+apply_scenario low-battery UPS1
+apply_scenario low-battery UPS2
 sleep 8
 
 # Phase 2: restore both -> evaluator must log "quorum restored -- re-armed"
 # AND clear the executor's re-entry guard.
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 sleep 8
 
 # Phase 3: drop both critical again -> SECOND quorum-loss shutdown.
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
+apply_scenario low-battery UPS1
+apply_scenario low-battery UPS2
 sleep 8
 
 kill "$ENERU_PID" 2>/dev/null || true
@@ -439,9 +428,8 @@ if grep -q "suppressed: flag .* startup cleanup bypassed" /tmp/test37.log; then
 fi
 
 # Restore for downstream tests
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 2
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 echo "PASS: redundancy re-arm verified across two consecutive quorum-loss events"
 )
 
@@ -459,9 +447,8 @@ echo "=== Test 38: stale flag restart ==="
 # This uses the real redundancy flag path derived from
 # logging.shutdown_flag_file's parent plus the group name.
 printf "stale-pre-rc4-flag\n" > /tmp/ups-shutdown-redundancy-rack-1-dual-psu
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario low-battery UPS1
+apply_scenario low-battery UPS2
 
 timeout 30s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown \
   > /tmp/test38.log 2>&1 || true
@@ -480,9 +467,8 @@ if grep -q "suppressed: flag .* startup cleanup bypassed" /tmp/test38.log; then
 fi
 
 # Restore for downstream tests
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 2
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 echo "PASS: stale restart flag was cleared before redundancy shutdown"
 )
 

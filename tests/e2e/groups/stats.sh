@@ -18,6 +18,9 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
+# Shared E2E helpers (apply_scenario: poll-until-applied scenario swaps).
+. "$E2E_DIR/groups/lib.sh"
+
 # ======================================================================
 # Test 28: SQLite stats persistence
 # ======================================================================
@@ -29,8 +32,7 @@ echo "=== Test 28: SQLite stats persistence ==="
 rm -rf /tmp/eneru-e2e-stats /tmp/eneru-e2e-stats-*
 mkdir -p /tmp/eneru-e2e-stats
 
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-sleep 3
+apply_scenario online-charging
 
 # Pre-check: NUT must answer for TestUPS@localhost:3493 before we
 # start the daemon, otherwise its `_wait_for_initial_connection`
@@ -113,7 +115,7 @@ local_shutdown:
   enabled: false
 EOF
 
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+apply_scenario online-charging
 sleep 2
 
 timeout 10s eneru run --config /tmp/config-e2e-stats-broken.yaml --exit-after-shutdown 2>&1 | tee /tmp/test29.log || true
@@ -150,8 +152,7 @@ if [ ! -f "$DB" ] || [ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM samples')" -lt 1 ]
   rm -rf /tmp/eneru-e2e-stats /tmp/eneru-e2e-stats-*
   mkdir -p /tmp/eneru-e2e-stats
 
-  cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-  sleep 3
+  apply_scenario online-charging
 
   for i in {1..15}; do
     if upsc TestUPS@localhost:3493 ups.status 2>/dev/null | grep -q .; then
@@ -201,8 +202,7 @@ DB="/tmp/eneru-e2e-stats/default.db"
 if [ ! -f "$DB" ]; then
   echo "  no DB from earlier tests; seeding fresh..."
   mkdir -p /tmp/eneru-e2e-stats
-  cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-  sleep 3
+  apply_scenario online-charging
   for i in {1..15}; do
     if upsc TestUPS@localhost:3493 ups.status 2>/dev/null | grep -q .; then
       break
@@ -333,9 +333,7 @@ echo "=== Test 32: Voltage auto-detect (issue #27) ==="
 
 # Activate the US-grid mis-report scenario: NUT exposes
 # input.voltage.nominal=230 but input.voltage stays at ~120V.
-cp $E2E_DIR/scenarios/us-grid-misreport.dev \
-   $E2E_DIR/scenarios/apply.dev
-sleep 3
+apply_scenario us-grid-misreport
 
 # Verify the dummy is serving the new scenario.
 upsc TestUPS@localhost:3493 input.voltage 2>&1 | head -1
@@ -414,8 +412,7 @@ fi
 echo "PASS (32d): meta.schema_version=$ver"
 
 # Restore for downstream tests
-cp $E2E_DIR/scenarios/online-charging.dev \
-   $E2E_DIR/scenarios/apply.dev
+apply_scenario online-charging
 
 echo ""
 echo "=== Test 32 PASSED: voltage auto-detect verified ==="
@@ -443,8 +440,7 @@ mkdir -p /tmp/eneru-e2e-coalesce
 rm -f /tmp/eneru-e2e-coalesce-shutdown-flag
 
 # Start from on-line.
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-sleep 3
+apply_scenario online-charging
 
 # Run eneru in the background — we drive the NUT scenario from the
 # foreground while the worker thread cycles through events.
@@ -453,10 +449,10 @@ ENERU_PID=$!
 sleep 5  # let _initialize finish + register store + reach steady state
 
 # Trigger the outage.
-cp "$E2E_DIR/scenarios/on-battery.dev" "$E2E_DIR/scenarios/apply.dev"
+apply_scenario on-battery
 sleep 5  # ON_BATTERY event fires + lands in DB pending
 # Restore power.
-cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
+apply_scenario online-charging
 sleep 2  # POWER_RESTORED fires + lands in DB
 
 # Poll for the coalesced state instead of a fixed sleep — we don't
@@ -552,8 +548,7 @@ rm -f /tmp/eneru-e2e-restart-shutdown-flag
 
 # Start from on-line so the daemon doesn't try to trigger anything
 # unrelated while we're testing the lifecycle path.
-cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
-sleep 3
+apply_scenario online-charging
 
 # --- First run: clean start, then SIGTERM. ---
 eneru run --config "$E2E_DIR/config-e2e-restart.yaml" > /tmp/test35-run1.log 2>&1 &

@@ -8,6 +8,9 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
+# Shared E2E helpers (apply_scenario: poll-until-applied scenario swaps).
+. "$E2E_DIR/groups/lib.sh"
+
 ROOT_DIR="$(cd "$E2E_DIR/../.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -163,7 +166,7 @@ run_loopback_case() {
   write_loopback_config "$config" "$user" "$use_sudo" "$identity"
   assert_loopback_config_shape "$config"
 
-  cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
+  apply_scenario online-charging
   docker rm -f "$name" >/dev/null 2>&1 || true
   echo "  Starting Eneru container '${name}' as SSH user '${user}' (use_sudo=${use_sudo})"
   cid=$(docker run -d --name "$name" \
@@ -192,7 +195,7 @@ run_loopback_case() {
   echo
 
   echo "  Applying low-battery scenario and waiting for delegated dry-run shutdown"
-  cp "$E2E_DIR/scenarios/low-battery.dev" "$E2E_DIR/scenarios/apply.dev"
+  apply_scenario low-battery
   if [ "$use_sudo" = "true" ]; then
     expected="Would send command 'sudo -n shutdown -h now'"
   else
@@ -223,7 +226,7 @@ run_loopback_case() {
   echo "  PASS: delegated local action list observed for ${label}"
 
   docker rm -f "$name" >/dev/null 2>&1 || true
-  cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
+  apply_scenario online-charging
   echo "  PASS: ${label} loopback case complete"
 }
 
