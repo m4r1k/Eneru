@@ -976,7 +976,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if real is None:
             return 404, "application/json", self._not_found("UPS not found")
         nc = self._effective_nut_control(real)
-        if command not in set(nc.allowed_commands):
+        if not nutctl.command_allowed(command, nc.allowed_commands):
             self._audit(principal, "command", f"{real}:{command}", "denied")
             raise APIForbidden(f"command {command!r} is not in allowed_commands")
         with _ups_lock(real):

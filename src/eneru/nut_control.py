@@ -295,6 +295,16 @@ def _parse_command_list(text: str) -> List[str]:
     return commands
 
 
+def command_allowed(command: str, allowed_commands) -> bool:
+    """Is ``command`` on the control allowlist?
+
+    The single membership check shared by the API control path AND the v6.1
+    self-test scheduler, so a scheduled test can never be a back door around
+    the v6.0 allowlist. An empty/unset allowlist denies everything.
+    """
+    return bool(command) and command in set(allowed_commands or [])
+
+
 def run_instant_command(
     ups_name: str, command: str, username: str, password: str,
     *, timeout: int = 10,

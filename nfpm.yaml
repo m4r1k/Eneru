@@ -221,6 +221,13 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/self_test.py
+    dst: /opt/ups-monitor/eneru/self_test.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   - src: src/eneru/api.py
     dst: /opt/ups-monitor/eneru/api.py
     file_info:

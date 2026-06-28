@@ -24,6 +24,8 @@ from eneru.remote_health import RemoteHealthManager, remote_health_sidecar_path
 from eneru.api import EneruAPIServer
 from eneru.mqtt import MQTTPublisher
 from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
+from eneru import self_test as selftest
+from eneru.config import NutControlConfig
 from eneru.lifecycle import (
     EVENT_TYPE_DAEMON_START,
     REASON_FATAL,
@@ -2094,7 +2096,103 @@ class UPSGroupMonitor(
                     self._update_battery_health_periodic()
         except Exception as exc:
             self._log_message(f"⚠️  battery-health task failed: {exc}")
-        # B6 self-test hook is appended here.
+        try:
+            self._run_self_test_task()
+        except Exception as exc:
+            self._log_message(f"⚠️  self-test task failed: {exc}")
+
+    def _resolve_self_test_config(self):
+        """Per-UPS self_test override if present, else the global config."""
+        glob = self.config.self_test
+        try:
+            name = self.config.ups.name
+            for group in getattr(self.config, "ups_groups", None) or []:
+                if (getattr(group.ups, "name", None) == name
+                        and getattr(group, "self_test", None)):
+                    return group.self_test
+        except Exception:
+            pass
+        return glob
+
+    def _resolve_nut_control_config(self) -> NutControlConfig:
+        """Per-UPS nut_control override if present, else the global config."""
+        glob = self.config.nut_control
+        try:
+            name = self.config.ups.name
+            for group in getattr(self.config, "ups_groups", None) or []:
+                if (getattr(group.ups, "name", None) == name
+                        and getattr(group, "nut_control", None)):
+                    return group.nut_control
+        except Exception:
+            pass
+        return glob
+
+    def _run_self_test_task(self) -> None:
+        """Issue / poll the scheduled UPS self-test (v6.1).
+
+        Wall-clock + meta-persisted due check (survives restarts, unlike a
+        monotonic timer that would reset and never reach a 30-day cadence);
+        the short result poll uses monotonic time. Self-disables if the UPS
+        doesn't expose the command. Validation already guarantees nut_control
+        + api.auth are enabled whenever self_test is.
+        """
+        cfg = self._resolve_self_test_config()
+        if not cfg.enabled:
+            return
+        store = getattr(self, "_stats_store", None)
+        nc = self._resolve_nut_control_config()
+
+        # 1) Finalise a pending test once its poll window has elapsed.
+        if (self._self_test_pending_id is not None
+                and self._self_test_poll_due_mono is not None):
+            if time.monotonic() >= self._self_test_poll_due_mono:
+                raw = self._get_ups_var("ups.test.result")
+                date = self._get_ups_var("ups.test.date")
+                enum = selftest.record_self_test_result(
+                    store, self._self_test_pending_id, raw, date)
+                self._log_message(f"🔋 Self-test result: {enum} ({raw!r})")
+                self._self_test_pending_id = None
+                self._self_test_poll_due_mono = None
+            return  # never issue while one is in flight
+
+        # 2) Due? (calendar/interval via the shared scheduler helpers)
+        try:
+            schedule = selftest.parse_schedule(cfg.schedule, cfg.time)
+        except ValueError as exc:
+            self._log_message(f"⚠️  invalid self_test.schedule: {exc}")
+            return
+        now = time.time()
+        last_raw = store.get_meta("self_test_last_run") if store else None
+        try:
+            last = float(last_raw) if last_raw else None
+        except (TypeError, ValueError):
+            last = None
+        if not schedule.due(now, last):
+            if last is None and store is not None:
+                store.set_meta("self_test_last_run", str(int(now)))  # seed baseline
+            return
+
+        # 3) Issue (self-disable if the UPS doesn't expose the command).
+        if store is not None:
+            store.set_meta("self_test_last_run", str(int(now)))
+        cmd = selftest.discover_self_test_command(
+            self._poll_target, cfg.command, timeout=nc.timeout)
+        if cmd is None:
+            self._log_message(
+                f"⚠️  self_test command '{cfg.command}' not exposed by "
+                f"{self._poll_target}; skipping this cycle")
+            return
+        result = selftest.issue_self_test(
+            self._poll_target, cmd, nc, store, source="scheduler")
+        if result["ok"]:
+            self._self_test_pending_id = result["test_id"]
+            self._self_test_poll_due_mono = (
+                time.monotonic() + max(1, int(cfg.result_poll_after)))
+            self._log_message(
+                f"🔋 Self-test issued ({cmd}); polling result in "
+                f"{cfg.result_poll_after}s")
+        else:
+            self._log_message(f"⚠️  self-test issue failed: {result['error']}")
 
     def _main_loop(self):
         """Main monitoring loop."""
