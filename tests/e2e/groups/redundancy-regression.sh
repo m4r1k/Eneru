@@ -80,7 +80,7 @@ restart_redundancy_nut_server() {
   dbg "restart_redundancy_nut_server: docker compose restart nut-server"
   (
     cd "$E2E_DIR"
-    docker compose restart nut-server >/dev/null
+    docker compose restart -t 2 nut-server >/dev/null
   )
   dbg "restart_redundancy_nut_server: docker compose restart returned"
   wait_for_redundancy_nut
@@ -136,12 +136,19 @@ stop_redundancy_nut_drivers
 
 # Old behavior could turn the stale snapshots UNKNOWN after ~5s and fire
 # quorum loss before the connection grace expired. Recover inside grace.
-dbg "R1 step 5/8: sleep 7 (stay inside the 40s connection grace)"
+dbg "R1 step 5/8: sleep 7 (stay inside the 25s connection grace)"
 sleep 7
 dbg "R1 step 6/8: restart_redundancy_nut_server (recover NUT inside grace)"
 restart_redundancy_nut_server
-dbg "R1 step 7/8: sleep 10 (let monitor observe recovery)"
-sleep 10
+# Poll (<=30s) for the monitor to log recovery inside grace instead of a
+# blind sleep 10. This is exactly the line R1 asserts below, so once it
+# appears the verification is guaranteed to pass; if it never does we fall
+# through to the assertions, which fail with the captured log.
+dbg "R1 step 7/8: poll for 'recovered during grace period'"
+for _i in $(seq 1 150); do
+  grep -q "recovered during grace period" /tmp/test-r1.log && break
+  sleep 0.2
+done
 
 dbg "R1 step 8/8: kill eneru and verify"
 kill "$ENERU_PID" 2>/dev/null || true
@@ -198,10 +205,16 @@ sleep 13
 dbg "R2 step 4/8: stop_redundancy_nut_drivers (induce visibility loss)"
 stop_redundancy_nut_drivers
 
-# Hold loss longer than connection grace. Fail-safe UNKNOWN handling must
-# still fire once the member monitors mark the connection FAILED.
-dbg "R2 step 5/8: sleep 55 (hold loss past 40s grace + headroom)"
-sleep 55
+# Hold the loss until the fail-safe fires. With the 25s grace the
+# redundancy shutdown lands ~30s after the loss; poll (<=50s) for that
+# exact line instead of a blind sleep 55 so we return as soon as it fires
+# and still bound the worst case. If it never fires we fall through to the
+# assertions below, which fail with the captured log.
+dbg "R2 step 5/8: poll for 'REDUNDANCY GROUP SHUTDOWN' (hold loss past grace)"
+for _i in $(seq 1 250); do
+  grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test-r2.log && break
+  sleep 0.2
+done
 dbg "R2 step 6/8: kill eneru"
 kill "$ENERU_PID" 2>/dev/null || true
 wait "$ENERU_PID" 2>/dev/null || true

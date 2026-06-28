@@ -80,7 +80,7 @@ restart_redundancy_nut_server() {
   dbg "restart_redundancy_nut_server: docker compose restart nut-server"
   (
     cd "$E2E_DIR"
-    docker compose restart nut-server >/dev/null
+    docker compose restart -t 2 nut-server >/dev/null
   )
   dbg "restart_redundancy_nut_server: docker compose restart returned"
   wait_for_redundancy_nut
