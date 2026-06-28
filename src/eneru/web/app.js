@@ -276,6 +276,47 @@ function renderDetail(name) {
     detailRow("Temperature", pq.temperature != null ? pq.temperature + " °C" : null),
   ]));
 
+  // v6.1 Battery health (score/terms/replacement). "unknown" is shown
+  // honestly rather than a fake high score.
+  const bh = u.batteryHealth;
+  if (bh) {
+    const bhRows = [
+      detailRow("Score", bh.score != null ? Math.round(bh.score) + "/100" : "unknown"),
+      detailRow("Confidence",
+        bh.confidence != null ? Math.round(bh.confidence * 100) + "%" : null),
+    ];
+    if (bh.replacementDaysRemaining != null) {
+      bhRows.push(detailRow("Replace in",
+        "~" + Math.round(bh.replacementDaysRemaining) + " days"));
+    }
+    if ((bh.availableTerms || []).length) {
+      bhRows.push(detailRow("Terms", bh.availableTerms.join(", ")));
+    }
+    sections.push(detailSection("Battery health", bhRows));
+  }
+
+  // v6.1 Energy (today/month kWh + optional cost; cost hidden when disabled).
+  const en = u.energy;
+  if (en) {
+    const enRows = [
+      detailRow("Today", en.todayKwh != null ? en.todayKwh.toFixed(3) + " kWh" : "unknown"),
+      detailRow("Month", en.monthKwh != null ? en.monthKwh.toFixed(3) + " kWh" : "unknown"),
+    ];
+    if (en.todayCostFormatted) enRows.push(detailRow("Today cost", en.todayCostFormatted));
+    if (en.monthCostFormatted) enRows.push(detailRow("Month cost", en.monthCostFormatted));
+    if (en.estimated) enRows.push(detailRow("Note", "estimated (no real-power reading)"));
+    sections.push(detailSection("Energy", enRows));
+  }
+
+  // v6.1 Self-test (latest normalized result).
+  const st = u.selfTest;
+  if (st) {
+    sections.push(detailSection("Self-test", [
+      detailRow("Result", st.result || "unknown"),
+      detailRow("When", st.date || null),
+    ]));
+  }
+
   // Configuration (from the shared /api/v1/config snapshot).
   const cfgUps = ((cfgSnapshot && cfgSnapshot.ups) || []).find((c) => c.name === name);
   if (cfgUps) {
@@ -758,6 +799,13 @@ async function renderControl(payload) {
     const vres = await renderVariableForms(u.name);
     if (!vres.ok) builtOk = false;
     box.appendChild(vres.node);
+    // v6.1: self-test trigger (auth-gated; goes through the control allowlist).
+    box.appendChild(el("h4", { text: "Self-test" }));
+    const stBox = el("div", { class: "cmds" });
+    const stBtn = el("button", { type: "button", text: "Run self-test" });
+    stBtn.addEventListener("click", () => runSelfTest(u.name));
+    stBox.appendChild(stBtn);
+    box.appendChild(stBox);
     frag.appendChild(box);
   }
   panel.replaceChildren(frag);
@@ -797,6 +845,18 @@ async function runCommand(ups, command) {
     { method: "POST", body: JSON.stringify({ command }) });
   if (!res.ok) showError("Command failed: " + ((res.data && res.data.error && res.data.error.message) || res.status));
   else setStatus("Ran " + command + " on " + ups);
+}
+
+async function runSelfTest(ups) {
+  showError("");
+  const res = await api("/api/v1/ups/" + encodeURIComponent(ups) + "/self-test",
+    { method: "POST", body: "{}" });
+  if (!res.ok) {
+    showError("Self-test failed: " +
+      ((res.data && res.data.error && res.data.error.message) || res.status));
+  } else {
+    setStatus("Self-test issued on " + ups);
+  }
 }
 
 async function setVariable(ups, variable, value) {

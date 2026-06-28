@@ -113,6 +113,18 @@ def test_dashboard_js_contains_plan_control_surfaces(minimal_config):
 
 
 @pytest.mark.unit
+def test_dashboard_js_contains_v61_surfaces(minimal_config):
+    # The v6.1 battery-health / energy / self-test wiring must stay present in
+    # the served dashboard so the new sensors remain visible + actionable.
+    body = _handler(minimal_config, path="/app.js")._serve_static("/app.js")[1]
+    text = body.decode("utf-8")
+    assert "batteryHealth" in text
+    assert "u.energy" in text
+    assert "runSelfTest(" in text
+    assert "/self-test" in text
+
+
+@pytest.mark.unit
 def test_dashboard_js_graph_is_resize_safe(minimal_config):
     # Guard the graph-scaling fix (no browser in CI): the renderer must size the
     # viewBox to the host width, use non-scaling strokes, and register a single
