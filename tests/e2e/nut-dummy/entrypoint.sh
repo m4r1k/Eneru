@@ -36,14 +36,21 @@ upsc TestUPS@localhost 2>/dev/null | grep -E "ups.status|battery.charge" || true
 # live", a far tighter signal than the old blind host-side `sleep 3`.
 #
 # How we confirm "live" without a fixed settle: dummy-ups re-reads its
-# .dev on its pollinterval (now 1s, see ups.conf), so we poll upsc until
-# the served ups.status matches the status in the file we just copied.
-# Every scenario sets ups.status, and the blind-sleep sites this replaces
-# were all status transitions, so this resolves in ~1s. A rare
-# same-status apply finds the status already matching (returns at once)
-# or, if ups.status is somehow absent, falls back to the ~3s poll cap --
-# never worse than the old behaviour. We clear the stale marker up front
-# so a crash between cp and touch can't leave a false positive behind.
+# .dev on its pollinterval (now 1s, see ups.conf). The cheap, generic
+# signal is ups.status, which every scenario sets and which changes for
+# the status transitions this replaces -- so we poll upsc until the served
+# status flips to the new file's status, which proves the driver re-read
+# the WHOLE file (all fields update atomically on reload).
+#
+# But some swaps keep ups.status identical while changing other fields
+# (e.g. online-charging -> us-grid-misreport: both "OL CHRG", but
+# input.voltage 230 -> 120.5). For those, a status match can't tell us the
+# reload happened, so we instead wait out one full pollinterval (+margin)
+# so non-status fields are current too before we mark the scenario live.
+# We detect the same-status case by sampling the served status BEFORE the
+# reload can have landed: if it already equals the new status, the swap
+# doesn't move ups.status. We clear the stale marker up front so a crash
+# between cp and touch can't leave a false positive behind.
 apply_one() {
     local trigger="$1" ups="$2"
     [ -f "/scenarios/$trigger" ] || return 0
@@ -56,13 +63,24 @@ apply_one() {
     local want served i
     want="$(grep -E '^ups\.status:' "/etc/nut/$ups.dev" | head -1 | cut -d: -f2- \
             | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    for i in $(seq 1 30); do
-        served="$(upsc "$ups@localhost" ups.status 2>/dev/null || true)"
-        if [ -n "$want" ] && [ "$served" = "$want" ]; then
-            break
-        fi
-        sleep 0.1
-    done
+    # Sample now, before dummy-ups can have re-read the new file.
+    served="$(upsc "$ups@localhost" ups.status 2>/dev/null || true)"
+    if [ -n "$want" ] && [ "$served" != "$want" ]; then
+        # Status changes with this scenario: poll until upsd serves the new
+        # status, which proves the full-file reload landed.
+        for i in $(seq 1 30); do
+            served="$(upsc "$ups@localhost" ups.status 2>/dev/null || true)"
+            if [ "$served" = "$want" ]; then
+                break
+            fi
+            sleep 0.1
+        done
+    else
+        # Same-status swap (or no ups.status to key off): status can't
+        # signal the reload, so wait out one pollinterval (1s) + margin so
+        # non-status fields (voltage, charge, runtime) are current too.
+        sleep 1.3
+    fi
 
     upsc "$ups@localhost" 2>/dev/null | grep -E "ups.status|battery.charge|battery.runtime" || true
     touch "/scenarios/applied-$ups"

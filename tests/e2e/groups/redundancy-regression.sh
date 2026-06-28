@@ -136,7 +136,7 @@ stop_redundancy_nut_drivers
 
 # Old behavior could turn the stale snapshots UNKNOWN after ~5s and fire
 # quorum loss before the connection grace expired. Recover inside grace.
-dbg "R1 step 5/8: sleep 7 (stay inside the 25s connection grace)"
+dbg "R1 step 5/8: sleep 7 (stay inside the 30s connection grace)"
 sleep 7
 dbg "R1 step 6/8: restart_redundancy_nut_server (recover NUT inside grace)"
 restart_redundancy_nut_server
