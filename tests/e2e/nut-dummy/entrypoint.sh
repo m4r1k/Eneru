@@ -60,21 +60,31 @@ apply_one() {
     chown nut:nut "/etc/nut/$ups.dev"
     rm -f "/scenarios/$trigger"
 
-    local want served i
+    local want served i confirmed
     want="$(grep -E '^ups\.status:' "/etc/nut/$ups.dev" | head -1 | cut -d: -f2- \
             | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
     # Sample now, before dummy-ups can have re-read the new file.
     served="$(upsc "$ups@localhost" ups.status 2>/dev/null || true)"
     if [ -n "$want" ] && [ "$served" != "$want" ]; then
-        # Status changes with this scenario: poll until upsd serves the new
-        # status, which proves the full-file reload landed.
-        for i in $(seq 1 30); do
+        # Status changes with this scenario: poll (~8s) until upsd serves the
+        # new status, which proves the full-file reload landed. If it never
+        # does, the apply genuinely failed -- do NOT publish the marker, so
+        # the host helper never sees a false "applied" for an unconfirmed
+        # swap (it will time out and its own assertion will catch it).
+        confirmed=0
+        for i in $(seq 1 80); do
             served="$(upsc "$ups@localhost" ups.status 2>/dev/null || true)"
             if [ "$served" = "$want" ]; then
+                confirmed=1
                 break
             fi
             sleep 0.1
         done
+        if [ "$confirmed" -ne 1 ]; then
+            echo "WARN: $ups scenario not live after ~8s (ups.status '$served' != '$want'); leaving applied-$ups unset"
+            upsc "$ups@localhost" 2>/dev/null | grep -E "ups.status|battery.charge|battery.runtime" || true
+            return 0
+        fi
     else
         # Same-status swap (or no ups.status to key off): status can't
         # signal the reload, so wait out one pollinterval (1s) + margin so

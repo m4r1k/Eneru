@@ -88,7 +88,7 @@ silently return.
 | Release | `.github/workflows/release.yml` | Release package build |
 | PyPI | `.github/workflows/pypi.yml` | PyPI publish from release tags |
 
-The protected `main` branch requires the validate matrix and eight E2E matrix jobs.
+The protected `main` branch requires the `3.9` and `3.12` validate jobs plus the eight E2E matrix jobs.
 
 ## Local test environment
 

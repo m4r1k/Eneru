@@ -53,9 +53,18 @@ apply_scenario() {
     rm -f "$marker"
 
     # Atomic publish: write a temp in the same dir, then rename, so the
-    # container-side watcher never copies a half-written trigger file.
-    cp "$sdir/${scenario}.dev" "$sdir/${trigger}.tmp"
-    mv -f "$sdir/${trigger}.tmp" "$sdir/${trigger}"
+    # container-side watcher never copies a half-written trigger file. A
+    # publish failure (e.g. a typo'd scenario name) is a test bug, not a
+    # slow apply -- fail hard immediately instead of falling through to the
+    # soft timeout below and silently running against the previous scenario.
+    if ! cp "$sdir/${scenario}.dev" "$sdir/${trigger}.tmp"; then
+        echo "ERROR: apply_scenario: cannot read scenario '$sdir/${scenario}.dev'" >&2
+        return 1
+    fi
+    if ! mv -f "$sdir/${trigger}.tmp" "$sdir/${trigger}"; then
+        echo "ERROR: apply_scenario: cannot publish trigger '$sdir/${trigger}'" >&2
+        return 1
+    fi
 
     # Poll up to ~10s (50 * 0.2s) for the dummy to confirm + mark applied.
     for i in $(seq 1 50); do
@@ -65,6 +74,12 @@ apply_scenario() {
         sleep 0.2
     done
 
+    # Soft timeout: like the old blind `sleep 3`, fall through and let the
+    # test's own assertions catch a genuinely-unapplied scenario. The
+    # watcher only publishes the marker once the new state is actually
+    # served, so reaching here means the apply did not confirm in 10s --
+    # loud on stderr, but not a hard fail (a slow apply on a loaded runner
+    # must not become a spurious red build).
     echo "WARN: apply_scenario '${scenario}' -> ${ups} timed out (~10s) waiting for the applied marker" >&2
     return 0
 }

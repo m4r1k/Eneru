@@ -132,6 +132,7 @@ jobs:
             grep -q "Test 53: UPS control fail-closed + allowlist enforcement" tests/e2e/groups/single-ups-auth.sh
             grep -q "Test 54: Config hot-reload via SIGHUP and API" tests/e2e/groups/single-ups-auth.sh
             grep -q "Test 55: Browser dashboard served by embedded API" tests/e2e/groups/single-ups-auth.sh
+            grep -q "Test 56: Event management" tests/e2e/groups/single-ups-auth.sh
           fi
 
       - name: Collect logs on failure

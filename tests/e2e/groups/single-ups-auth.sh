@@ -18,6 +18,9 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
+# Shared E2E helpers (apply_scenario: poll-until-applied scenario swaps).
+. "$E2E_DIR/groups/lib.sh"
+
 # ======================================================================
 # Test 52: API authentication — login, tiered config, write gating (v6.0)
 # ======================================================================
@@ -57,7 +60,7 @@ local_shutdown:
   enabled: false
 YAML
 
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+apply_scenario online-charging
 timeout 15s eneru run --config /tmp/config-e2e-auth.yaml > /tmp/test52-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
@@ -183,7 +186,7 @@ local_shutdown:
   enabled: false
 YAML
 
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+apply_scenario online-charging
 timeout 15s eneru run --config /tmp/config-e2e-control.yaml > /tmp/test53-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
@@ -290,7 +293,7 @@ YAML
 }
 
 write_cfg 20
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+apply_scenario online-charging
 # Generous timeout: this test does login + two reloads + a bad reload, each with
 # its own poll budget. Too short a timeout kills the daemon mid-test.
 PYTHONUNBUFFERED=1 timeout 60s eneru run --config "$CFG" > /tmp/test54-daemon.log 2>&1 &
@@ -358,7 +361,7 @@ echo "PASS: config hot-reload via SIGHUP and API verified"
 echo ""
 echo ">>> Running: Test 55: Browser dashboard served by embedded API"
 
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+apply_scenario online-charging
 timeout 12s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml \
   > /tmp/test55-daemon.log 2>&1 &
 DAEMON_PID=$!
@@ -427,7 +430,7 @@ local_shutdown:
   enabled: false
 YAML
 
-cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
+apply_scenario online-charging
 timeout 20s eneru run --config /tmp/config-e2e-events.yaml > /tmp/test56-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT

@@ -245,7 +245,7 @@ This repo deliberately keeps individual files small (`monitor.py` is now ~830 li
    slice / logical unit of work) — NOT one commit per push (CI flood,
    AI-reviewer quota burn) and NOT "20 commits → finally open PR" (single
    huge CI run, hard to bisect when something breaks)
-6. CI checks must pass (all 12) before merge
+6. CI checks must pass (all required: 8 E2E + validate 3.9/3.12) before merge
 7. Merge via GitHub (branch auto-deletes)
 ```
 
@@ -305,7 +305,7 @@ Two reasons:
 - Single-line typo fixes
 - Pure dependency upgrades with no code changes
 
-For trivial PRs the CI gates (validate × 6 + E2E × 6) are sufficient. Saves quota for substantive changes.
+For trivial PRs the CI gates (validate 3.9/3.12 + E2E × 8) are sufficient. Saves quota for substantive changes.
 
 **Configuration:**
 - **CodeRabbit:** `.coderabbit.yaml` at repo root sets `reviews.auto_review.enabled: false`. The file also documents the manual-trigger phrase.
