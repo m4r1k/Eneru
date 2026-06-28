@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.0-rc5] - 2026-06-28
+
+### Added
+
+- **Battery intelligence.** A composite battery-health score (0-100) built
+  from five terms — capacity (runtime trend), runtime-vs-nominal, last
+  self-test, confirmed anomalies, and battery age — each carrying an
+  availability flag so missing telemetry reports as *unknown* rather than a
+  false high score. Least-squares replacement prediction warns (once per
+  horizon) when the score is trending toward the configured threshold. New
+  `battery_health` config section (per-UPS overridable) and a
+  `BATTERY_REPLACEMENT_PREDICTED` event.
+- **Energy tracking.** kWh integration from `ups.realpower` (falling back to
+  `load% × power.nominal`, flagged "estimated") with daemon-down gaps capped,
+  plus optional cost with per-currency formatting. New `energy` config section;
+  `cost_per_kwh` unset disables cost tracking entirely.
+- **Scheduled self-test.** Issues a UPS battery self-test on a schedule and
+  records the normalized result, gated behind the same `nut_control` allowlist
+  + API auth as manual control. New `self_test` section (per-UPS overridable),
+  an auth-gated `POST /api/v1/ups/{name}/self-test`, and a dashboard trigger.
+  Adapts to whatever `upscmd -l` exposes; self-disables otherwise.
+- **Periodic reports.** Daily/weekly/monthly digests (events, battery health,
+  energy, uptime; optional CSV) delivered through the notification channel.
+  New `reports` section.
+- **Shared periodic scheduler** (`scheduler.py`) underpinning the above, with
+  last-run state persisted in the stats `meta` table so infrequent jobs fire
+  correctly across restarts.
+- **Surfacing.** New status blocks (`batteryHealth`, `energy`, `selfTest`) on
+  the API/MQTT status, Prometheus gauges (`eneru_ups_battery_health_score`,
+  `eneru_ups_energy_kwh`/`_cost` with a `period` label, `eneru_ups_self_test_result`,
+  `eneru_ups_replacement_days_remaining`; unknown series omitted), and the web
+  dashboard detail view.
+
+### Changed
+
+- **Stats schema v7** (additive, idempotent): `real_power` / `power_nominal`
+  sample columns (+ aggregates) and `battery_health` / `self_tests` tables.
+- **CI / E2E speedup.** E2E image builds are cached with buildx + the GitHub
+  Actions cache; the two long-pole groups are split into eight parallel matrix
+  jobs; scenario switches poll-until-applied instead of fixed `sleep 3`;
+  grace-tied redundancy waits are trimmed; and `validate` runs `pytest-xdist`
+  with a reduced PR Python matrix. (Operator: branch-protection required-check
+  names updated accordingly.)
+
 ## [6.1.0-rc3] - 2026-06-10
 
 ### Changed
