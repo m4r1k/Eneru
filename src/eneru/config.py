@@ -1712,6 +1712,8 @@ class ConfigLoader:
                 "max_stale_data_tolerance", "connection_loss_grace_period",
                 "is_local", "triggers", "remote_servers", "virtual_machines",
                 "containers", "filesystems", "nut_control",
+                # v6.1 per-UPS overrides
+                "battery_health", "self_test",
             }
             redundancy_entry_keys = {
                 "name", "ups_sources", "min_healthy", "degraded_counts_as",
@@ -2573,6 +2575,27 @@ class ConfigLoader:
                     "nut_control.allowed_commands — a scheduled test must not "
                     "bypass the control allowlist. Add it to "
                     "nut_control.allowed_commands.")
+
+        # Per-UPS self_test overrides get the SAME gates, so a per-UPS enable
+        # can't slip past the global check above.
+        for group in config.ups_groups:
+            st = getattr(group, "self_test", None)
+            if st is None or not st.enabled:
+                continue
+            name = group.ups.name
+            nc = group.nut_control or config.nut_control
+            if not nc.enabled:
+                messages.append(
+                    f"ERROR: self_test for UPS '{name}' requires "
+                    "nut_control.enabled (per-UPS or global).")
+            if not config.api.auth.enabled:
+                messages.append(
+                    f"ERROR: self_test for UPS '{name}' requires "
+                    "api.auth.enabled.")
+            if st.command and st.command not in nc.allowed_commands:
+                messages.append(
+                    f"ERROR: self_test.command '{st.command}' for UPS "
+                    f"'{name}' is not in its nut_control.allowed_commands.")
 
         # Energy cost: cost_per_kwh, when set, must be a non-negative number.
         # None/unset is valid and disables cost tracking entirely (B3).

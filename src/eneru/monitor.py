@@ -2155,6 +2155,11 @@ class UPSGroupMonitor(
             return
         store = getattr(self, "_stats_store", None)
         nc = self._resolve_nut_control_config()
+        # Defense-in-depth: never issue a control command unless nut_control is
+        # enabled (validation requires this for the global case; this also
+        # covers a per-UPS self_test override paired with control disabled).
+        if not nc.enabled:
+            return
 
         # 1) Finalise a pending test once its poll window has elapsed.
         if (self._self_test_pending_id is not None

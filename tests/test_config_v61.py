@@ -173,6 +173,27 @@ class TestCrossFieldValidation:
         assert any("not in nut_control.allowed_commands" in e for e in errs)
 
     @pytest.mark.unit
+    def test_per_ups_self_test_override_is_validated(self):
+        # Global self_test disabled, but a per-UPS override enables it with a
+        # non-allowlisted command and no auth -> must be caught.
+        _, errs = _validate(
+            "self_test:\n  enabled: false\n"
+            "ups:\n  - name: U1@h\n    self_test:\n      enabled: true\n"
+            "      command: shutdown.return\n")
+        assert any("U1@h" in e and "nut_control.enabled" in e for e in errs)
+        assert any("U1@h" in e and "api.auth.enabled" in e for e in errs)
+        assert any("shutdown.return" in e and "U1@h" in e for e in errs)
+
+    @pytest.mark.unit
+    def test_per_ups_self_test_override_valid(self):
+        _, errs = _validate(
+            "api:\n  auth:\n    enabled: true\n"
+            "nut_control:\n  enabled: true\n  allowed_commands: [test.battery.start]\n"
+            "self_test:\n  enabled: false\n"
+            "ups:\n  - name: U1@h\n    self_test:\n      enabled: true\n")
+        assert errs == []
+
+    @pytest.mark.unit
     def test_self_test_valid_setup_no_errors(self):
         _, errs = _validate(
             "ups:\n  name: U@h\napi:\n  auth:\n    enabled: true\n"

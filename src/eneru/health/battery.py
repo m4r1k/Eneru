@@ -361,14 +361,6 @@ class BatteryMonitorMixin:
             last = 0.0
         if now - last < rep.horizon_days * 86400:
             return result
-        # Dedup: at most one prediction notification per horizon window.
-        last_raw = store.get_meta(_META_REPLACEMENT_PREDICTED)
-        try:
-            last = float(last_raw) if last_raw else 0.0
-        except (TypeError, ValueError):
-            last = 0.0
-        if now - last < rep.horizon_days * 86400:
-            return result
         store.set_meta(_META_REPLACEMENT_PREDICTED, str(int(now)))
         days = result.get("days_remaining")
         days_txt = f"~{days:.0f} days" if days else "imminently"
