@@ -88,7 +88,7 @@ silently return.
 | Release | `.github/workflows/release.yml` | Release package build |
 | PyPI | `.github/workflows/pypi.yml` | PyPI publish from release tags |
 
-The protected `main` branch requires the validate matrix and six E2E matrix jobs.
+The protected `main` branch requires the validate matrix and eight E2E matrix jobs.
 
 ## Local test environment
 
@@ -152,16 +152,25 @@ Eneru under test
   -> target containers and test mounts
 ```
 
-The workflow is split into six parallel matrix groups:
+The workflow is split into eight parallel matrix groups (v6.1 split the
+two long poles — `UPS Single` and `Redundancy` — each into two so the
+matrix wall-clock is bounded by a smaller slowest group):
 
 | Group | Focus |
 |-------|-------|
 | CLI | Validation, bare command safety, one-shot output |
-| UPS Single | Single UPS events and shutdown paths |
+| UPS Single Core | Single UPS events, shutdown paths, embedded API, MQTT |
+| UPS Single Auth | v6.0 auth, UPS control, hot-reload, dashboard, event management (tests 52–56) |
 | UPS Multi | Independent UPS groups and local-drain policies |
-| Redundancy | Quorum behavior, advisory triggers, and runtime NUT-visibility regressions |
+| Redundancy Quorum | Quorum behavior and advisory triggers (tests 21–27, 37, 38) |
+| Redundancy Regression | Runtime NUT-visibility regressions (R1, R2) |
 | Stats | SQLite, graphs, events, notification coalescing |
 | Loopback | Containerized local-host ownership through root and sudo SSH loopback, including generated local VM/container/sync/unmount actions and strict container SSH trust |
+
+In the inventory below the **Group** column shows the original coarse
+focus area; *UPS Single* rows now run in **UPS Single Core** or **UPS
+Single Auth**, and *Redundancy* rows in **Redundancy Quorum** (21–27,
+37, 38) or **Redundancy Regression** (R1, R2), per the table above.
 
 The scenario files simulate online, on-battery, low-battery, FSD, brownout, overload, hot-grid, and nominal-voltage-mismatch states.
 

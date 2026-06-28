@@ -22,21 +22,29 @@ env:
 # parallel. Total wall-clock is bounded by the slowest group instead
 # of the previous ~6+ minute single sequential job.
 #
-# v5.1.2 split the previous `Redundancy and Stats` job into two
-# (`Redundancy` runs tests 21-27 + 37/38 + R1/R2, `Stats` runs tests
-# 28-32 + 34/35) so the heaviest group no longer gates the matrix on
-# its own.
+# v5.1.2 split the previous `Redundancy and Stats` job into two so the
+# heaviest group no longer gated the matrix on its own. v6.1 split the
+# two remaining long poles: `UPS Single` -> `UPS Single Core` +
+# `UPS Single Auth`, and `Redundancy` -> `Redundancy Quorum` +
+# `Redundancy Regression`, bringing the matrix to EIGHT parallel E2E
+# jobs. (Image builds are also cached across groups now via buildx +
+# the GitHub Actions cache; see .github/actions/e2e-setup.)
 #
-# OPERATOR ACTION REQUIRED when this PR's branch protection updates:
-# the required checks on `main` are now SIX E2E jobs. Add `E2E Loopback`
-# alongside the existing five E2E jobs. The validate matrix (×6) is
-# unchanged. Total required checks: 12.
+# OPERATOR ACTION REQUIRED before merge: branch protection on `main`
+# still lists the old check names, so PRs wedge on "expected, never
+# reported" until it is updated. Remove required checks `E2E UPS Single`
+# and `E2E Redundancy`; add the four new jobs. The eight required E2E
+# checks are then:
 #   - E2E CLI
-#   - E2E UPS Single
+#   - E2E UPS Single Core
+#   - E2E UPS Single Auth
 #   - E2E UPS Multi
-#   - E2E Redundancy
+#   - E2E Redundancy Quorum
+#   - E2E Redundancy Regression
 #   - E2E Stats
 #   - E2E Loopback
+# (The validate side also changes in v6.1 — reduced PR matrix; make only
+# the 3.9 + 3.12 validate checks required. See validate.yml.)
 jobs:
   e2e:
     name: "E2E ${{ matrix.label }}"
@@ -46,12 +54,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { group: cli,        label: "CLI" }
-          - { group: single-ups, label: "UPS Single" }
-          - { group: multi-ups,  label: "UPS Multi" }
-          - { group: redundancy, label: "Redundancy" }
-          - { group: stats,      label: "Stats" }
-          - { group: loopback,   label: "Loopback" }
+          - { group: cli,                   label: "CLI" }
+          - { group: single-ups-core,       label: "UPS Single Core" }
+          - { group: single-ups-auth,       label: "UPS Single Auth" }
+          - { group: multi-ups,             label: "UPS Multi" }
+          - { group: redundancy-quorum,     label: "Redundancy Quorum" }
+          - { group: redundancy-regression, label: "Redundancy Regression" }
+          - { group: stats,                 label: "Stats" }
+          - { group: loopback,              label: "Loopback" }
     steps:
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -63,7 +73,7 @@ jobs:
 
       - name: "Run E2E group: ${{ matrix.label }}"
         env:
-          # Test 7 (single-ups.sh) needs this secret to actually verify
+          # Test 7 (single-ups-core.sh) needs this secret to actually verify
           # notification delivery; without it the test SKIPs. The per-
           # step env was dropped when this workflow was split into the
           # matrix groups in commit ade1d16 — restoring it on every
@@ -80,20 +90,21 @@ jobs:
         run: bash tests/e2e/groups/${{ matrix.group }}.sh
 
       - name: Verify v5.3 E2E coverage is wired
-        if: matrix.group == 'single-ups'
+        if: matrix.group == 'single-ups-core'
         run: |
           # This step is a wiring guard for v5.3's E2E cases. The tests
           # themselves run in the group script above; these greps catch a
           # workflow/script mismatch where the release-critical cases were
-          # renamed, moved, or accidentally dropped from the single-UPS job.
-          grep -q "Test 39: On-battery stabilization suppresses transient critical readings" tests/e2e/groups/single-ups.sh
-          grep -q "Test 40: Remote SSH healthcheck is harmless" tests/e2e/groups/single-ups.sh
-          grep -q "Test 41: Manual remote dry-run executes no configured commands" tests/e2e/groups/single-ups.sh
-          grep -q "Test 42: Manual confirmed remote shutdown reaches selected target" tests/e2e/groups/single-ups.sh
-          grep -q "Test 43: Embedded API health/readiness/metrics" tests/e2e/groups/single-ups.sh
-          grep -q "Test 44: Unreachable remote shutdown is bounded" tests/e2e/groups/single-ups.sh
-          grep -q "Test 45: MQTT status publishes power-quality metrics" tests/e2e/groups/single-ups.sh
-          grep -q "Test 46: OCI image runs with API enabled by CLI flags" tests/e2e/groups/single-ups.sh
+          # renamed, moved, or accidentally dropped from the single-UPS
+          # core job (split from single-ups in v6.1).
+          grep -q "Test 39: On-battery stabilization suppresses transient critical readings" tests/e2e/groups/single-ups-core.sh
+          grep -q "Test 40: Remote SSH healthcheck is harmless" tests/e2e/groups/single-ups-core.sh
+          grep -q "Test 41: Manual remote dry-run executes no configured commands" tests/e2e/groups/single-ups-core.sh
+          grep -q "Test 42: Manual confirmed remote shutdown reaches selected target" tests/e2e/groups/single-ups-core.sh
+          grep -q "Test 43: Embedded API health/readiness/metrics" tests/e2e/groups/single-ups-core.sh
+          grep -q "Test 44: Unreachable remote shutdown is bounded" tests/e2e/groups/single-ups-core.sh
+          grep -q "Test 45: MQTT status publishes power-quality metrics" tests/e2e/groups/single-ups-core.sh
+          grep -q "Test 46: OCI image runs with API enabled by CLI flags" tests/e2e/groups/single-ups-core.sh
 
       - name: Verify v5.5 loopback E2E coverage is wired
         if: matrix.group == 'loopback'
@@ -109,18 +120,18 @@ jobs:
           grep -q "unmount_filesystems" tests/e2e/groups/loopback.sh
 
       - name: Verify v6.0 E2E coverage is wired
-        if: matrix.group == 'cli' || matrix.group == 'single-ups'
+        if: matrix.group == 'cli' || matrix.group == 'single-ups-auth'
         run: |
           # v6.0 wiring guard: auth CLI lifecycle (cli) and API auth login /
-          # tiered config / write gating (single-ups) must stay present.
+          # tiered config / write gating (single-ups-auth) must stay present.
           if [ "${{ matrix.group }}" = "cli" ]; then
             grep -q "Test 51: auth user + apikey CLI lifecycle" tests/e2e/groups/cli.sh
             grep -q "Test 58: NUT name autodiscovery self-heals single exposed UPS" tests/e2e/groups/cli.sh
           else
-            grep -q "Test 52: API authentication login + tiered config + write gating" tests/e2e/groups/single-ups.sh
-            grep -q "Test 53: UPS control fail-closed + allowlist enforcement" tests/e2e/groups/single-ups.sh
-            grep -q "Test 54: Config hot-reload via SIGHUP and API" tests/e2e/groups/single-ups.sh
-            grep -q "Test 55: Browser dashboard served by embedded API" tests/e2e/groups/single-ups.sh
+            grep -q "Test 52: API authentication login + tiered config + write gating" tests/e2e/groups/single-ups-auth.sh
+            grep -q "Test 53: UPS control fail-closed + allowlist enforcement" tests/e2e/groups/single-ups-auth.sh
+            grep -q "Test 54: Config hot-reload via SIGHUP and API" tests/e2e/groups/single-ups-auth.sh
+            grep -q "Test 55: Browser dashboard served by embedded API" tests/e2e/groups/single-ups-auth.sh
           fi
 
       - name: Collect logs on failure

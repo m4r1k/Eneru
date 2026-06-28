@@ -225,7 +225,7 @@ This repo deliberately keeps individual files small (`monitor.py` is now ~830 li
 `main` is protected. All changes go through feature branches and pull requests.
 
 **Branch protection on `main`:**
-- Required CI checks before merge: `validate` (Python 3.9-3.14, 6 jobs) + 6 parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy`, `E2E Stats`, `E2E Loopback`) — **12 checks total**
+- Required CI checks before merge: `validate` (v6.1 reduced PR matrix — runs `3.9`, `3.12`, `3.15-dev` on PRs, full set on push-to-`main`; only `3.9` + `3.12` are required checks) + **8** parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single Core`, `E2E UPS Single Auth`, `E2E UPS Multi`, `E2E Redundancy Quorum`, `E2E Redundancy Regression`, `E2E Stats`, `E2E Loopback`). The branch-protection required-check *names* must be updated by the operator when v6.1 merges — see the `e2e.yml` and `validate.yml` header comments.
 - Strict mode: branch must be up-to-date with main before merge
 - Enforce admins: maintainers follow the same rules
 - No force pushes, no branch deletion
@@ -270,7 +270,7 @@ This repo uses **three layers of AI review**: a pre-push review via the `agent-s
 **Why manual:**
 - **CodeRabbit** free tier allows one review per 45 minutes. Per-commit auto-review burns the quota fast and produces noisy partial reviews against intermediate diffs.
 - **cubic.dev** free tier allows 40 reviews per month. Same problem.
-- We deliberately push commits early so the GitHub Actions E2E suite (`E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy`, `E2E Stats`, `E2E Loopback`) gates work-in-progress and gives feedback fast on real-world scenarios. That CI feedback loop must stay cheap; AI review should not bottleneck it.
+- We deliberately push commits early so the GitHub Actions E2E suite (`E2E CLI`, `E2E UPS Single Core`, `E2E UPS Single Auth`, `E2E UPS Multi`, `E2E Redundancy Quorum`, `E2E Redundancy Regression`, `E2E Stats`, `E2E Loopback`) gates work-in-progress and gives feedback fast on real-world scenarios. That CI feedback loop must stay cheap; AI review should not bottleneck it.
 
 **Pre-push: spawn `agent-skills:code-reviewer` as a SUBAGENT**
 
