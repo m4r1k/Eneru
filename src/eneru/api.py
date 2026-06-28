@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 from eneru import nut_control as nutctl
+from eneru import self_test as selftest
 from eneru.auth import AuthStore
 from eneru.status import (
     HISTORY_METRICS,
@@ -177,6 +178,9 @@ API_ENDPOINTS = (
     {"path": "/api/v1/ups/{name}/variables", "description": "Allowlisted writable UPS variables (upsrw)"},
     {"path": "/api/v1/ups/{name}/variables/{var}", "description": "PUT {value} to set an allowlisted upsrw variable"},
     {"path": "/api/v1/ups/{name}/events", "description": "DELETE selected events {items:[{id,ts,eventType}]} (auth required)"},
+    {"path": "/api/v1/ups/{name}/battery-health", "description": "Battery-health score, terms, and replacement projection (v6.1)"},
+    {"path": "/api/v1/ups/{name}/energy", "description": "Energy (kWh) and optional cost, today/month (v6.1)"},
+    {"path": "/api/v1/ups/{name}/self-test", "description": "POST to issue a UPS self-test (auth required, allowlisted) (v6.1)"},
     {"path": "/api/v1/config/reload", "description": "POST to re-read config and apply the safe subset live"},
 )
 
@@ -711,6 +715,15 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 return self._list_commands(ups_name)
             if len(parts) == 6 and parts[5] == "variables":
                 return self._list_variables(ups_name)
+            if len(parts) == 6 and parts[5] in ("battery-health", "energy"):
+                # v6.1 read endpoints (same data the /status row carries).
+                payload = collect_status(self.api_source)
+                row = find_status(payload, ups_name)
+                if row is None:
+                    return 404, "application/json", self._not_found("UPS not found")
+                key = "batteryHealth" if parts[5] == "battery-health" else "energy"
+                return 200, "application/json", {"ups": row["name"],
+                                                 key: row.get(key)}
 
         if path == "/api/v1/events":
             # Cap ``limit`` so a hostile or accidental ``?limit=10000000``
@@ -779,8 +792,39 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if len(parts) == 6 and parts[1:4] == ["api", "v1", "ups"] \
                 and parts[5] == "command":
             return self._run_instant_command(unquote(parts[4]))
+        # POST /api/v1/ups/{name}/self-test (v6.1)
+        if len(parts) == 6 and parts[1:4] == ["api", "v1", "ups"] \
+                and parts[5] == "self-test":
+            return self._run_self_test(unquote(parts[4]))
 
         return 404, "application/json", self._not_found("Endpoint not found")
+
+    def _run_self_test(self, ups_name: str) -> Tuple[int, str, Any]:
+        """Issue a UPS self-test (auth-gated, audited). Goes through the same
+        nut_control allowlist as the manual command path -- the self-test
+        command must be allowlisted."""
+        principal = self._authorize(write=True)
+        self._require_nut_control()
+        real = self._resolve_ups_name(ups_name)
+        if real is None:
+            return 404, "application/json", self._not_found("UPS not found")
+        nc = self._effective_nut_control(real)
+        command = self.api_config.self_test.command
+        if not nutctl.command_allowed(command, nc.allowed_commands):
+            self._audit(principal, "self-test", f"{real}:{command}", "denied")
+            raise APIForbidden(
+                f"self_test.command {command!r} is not in allowed_commands")
+        store = self._store_for_ups(real)
+        with _ups_lock(real):
+            result = selftest.issue_self_test(
+                real, command, nc, store, source="api")
+        self._audit(principal, "self-test", f"{real}:{command}",
+                    "ok" if result["ok"] else "failed")
+        if not result["ok"]:
+            return 502, "application/json", self._error("NUT_ERROR", result["error"])
+        return 200, "application/json", {"ups": real, "command": command,
+                                         "status": "issued",
+                                         "testId": result["test_id"]}
 
     def _route_delete(self) -> Tuple[int, str, Any]:
         parsed = urlparse(self.path)
@@ -1249,6 +1293,21 @@ _METRIC_CATALOGUE = (
      "Remote SSH target status indicator (1 per status label combination)."),
     ("eneru_remote_health_consecutive_failures", "gauge",
      "Consecutive failed remote-health probes for this SSH target."),
+    # v6.1
+    ("eneru_ups_battery_health_score", "gauge",
+     "Composite battery-health score 0-100 (omitted when unknown)."),
+    ("eneru_ups_replacement_days_remaining", "gauge",
+     "Projected days until the battery-health score crosses the replacement "
+     "threshold (omitted when not projectable)."),
+    ("eneru_ups_energy_kwh", "gauge",
+     "Energy consumed in kWh, by period label (today|month). A gauge, NOT a "
+     "_total: it is recomputed per window and is not monotonic."),
+    ("eneru_ups_energy_cost", "gauge",
+     "Energy cost by period label (today|month); omitted entirely when "
+     "energy.cost_per_kwh is unset."),
+    ("eneru_ups_self_test_result", "gauge",
+     "Latest self-test result, one series per normalized result label "
+     "(passed|failed|running|unknown|unsupported)."),
 )
 
 
@@ -1303,6 +1362,32 @@ def render_prometheus_metrics(source: Any) -> str:
             labels,
             1 if row["triggerActive"] else 0,
         ))
+        # v6.1: battery health, replacement, energy, self-test. Omit a series
+        # when its value is unknown rather than emitting a misleading 0.
+        bh = row.get("batteryHealth") or {}
+        if bh.get("score") is not None:
+            lines.append(_metric_line(
+                "eneru_ups_battery_health_score", labels, bh["score"]))
+        if bh.get("replacementDaysRemaining") is not None:
+            lines.append(_metric_line(
+                "eneru_ups_replacement_days_remaining", labels,
+                bh["replacementDaysRemaining"]))
+        energy = row.get("energy") or {}
+        for period, kwh_key, cost_key in (("today", "todayKwh", "todayCost"),
+                                          ("month", "monthKwh", "monthCost")):
+            if energy.get(kwh_key) is not None:
+                lines.append(_metric_line(
+                    "eneru_ups_energy_kwh", {**labels, "period": period},
+                    energy[kwh_key]))
+            if energy.get(cost_key) is not None:
+                lines.append(_metric_line(
+                    "eneru_ups_energy_cost", {**labels, "period": period},
+                    energy[cost_key]))
+        st = row.get("selfTest") or {}
+        if st.get("result"):
+            lines.append(_metric_line(
+                "eneru_ups_self_test_result",
+                {**labels, "result": st["result"]}, 1))
         for server in row.get("remoteHealth", []):
             s_labels = {
                 "ups": row["name"],

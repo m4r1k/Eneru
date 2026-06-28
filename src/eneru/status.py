@@ -89,6 +89,56 @@ def iter_monitors(source: Any) -> List[Any]:
     return [source]
 
 
+def _battery_health_for_monitor(monitor: Any):
+    """Latest computed battery-health block (v6.1), or None."""
+    try:
+        with monitor.state._lock:
+            return monitor.state.latest_battery_health
+    except Exception:
+        return None
+
+
+def _energy_for_monitor(monitor: Any):
+    """Live energy block (v6.1) for one monitor, or None when disabled."""
+    store = getattr(monitor, "_stats_store", None)
+    cfg = getattr(monitor.config, "energy", None)
+    if store is None or cfg is None or not getattr(cfg, "enabled", False):
+        return None
+    try:
+        from eneru import energy as energy_mod
+        now = time.time()
+        today = store.power_samples(int(now - 86400), int(now))
+        month = store.power_samples(int(now - 30 * 86400), int(now))
+        # expected_interval is inferred per window (raw ~check_interval vs
+        # aggregated 300s/3600s tiers), so we don't force one here.
+        return energy_mod.summarize(
+            today, month, cost_per_kwh=cfg.cost_per_kwh,
+            currency=cfg.currency, cost_format=cfg.cost_format)
+    except Exception:
+        return None
+
+
+def _self_test_for_monitor(monitor: Any):
+    """Latest self-test row (v6.1) as a status block, or None."""
+    store = getattr(monitor, "_stats_store", None)
+    if store is None:
+        return None
+    try:
+        latest = store.latest_self_test()
+    except Exception:
+        return None
+    if not latest:
+        return None
+    return {
+        "result": latest["result_enum"],
+        "raw": latest["result_raw"],
+        "date": latest["result_date"],
+        "startedTs": latest["started_ts"],
+        "command": latest["command"],
+        "source": latest["source"],
+    }
+
+
 def monitor_status(monitor: Any) -> Dict[str, Any]:
     """Return one monitor's live status as a JSON-serializable dict."""
     config = monitor.config
@@ -138,6 +188,9 @@ def monitor_status(monitor: Any) -> Dict[str, Any]:
         "triggerReason": snap.trigger_reason,
         "staleDataCount": snap.stale_data_count,
         "remoteHealth": remote_health_for_monitor(monitor),
+        "batteryHealth": _battery_health_for_monitor(monitor),
+        "energy": _energy_for_monitor(monitor),
+        "selfTest": _self_test_for_monitor(monitor),
     }
 
 

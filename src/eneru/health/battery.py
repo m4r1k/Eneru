@@ -317,6 +317,7 @@ class BatteryMonitorMixin:
             return
         health = self._compute_battery_health(cfg, now)
         store = getattr(self, "_stats_store", None)
+        # Persist FIRST so the prediction trend includes this fresh point.
         if store is not None:
             store.record_battery_health(
                 health["score"], health["terms"],
@@ -324,16 +325,20 @@ class BatteryMonitorMixin:
                         "runtime_s": health["runtime_s"],
                         "nominalRuntime": health["nominalRuntime"]},
                 ts=int(now))
+        # Prediction feeds both the published block and the (deduped) warning.
+        pred = self._maybe_predict_replacement(cfg, now)
+        health["replacementDaysRemaining"] = pred.get("days_remaining")
+        health["replacementDue"] = bool(pred.get("due"))
         with self.state._lock:
             self.state.latest_battery_health = health
-        self._maybe_predict_replacement(cfg, now)
 
-    def _maybe_predict_replacement(self, cfg, now: float) -> None:
-        """Trend the stored score series and warn once per period if the
-        battery is projected to need replacement within the horizon."""
+    def _maybe_predict_replacement(self, cfg, now: float) -> Dict:
+        """Trend the stored score series; warn once per period if the battery
+        is projected to need replacement within the horizon. Returns the
+        prediction result dict (used to enrich the status block)."""
         store = getattr(self, "_stats_store", None)
         if store is None:
-            return
+            return {"due": False, "days_remaining": None}
         rep = cfg.replacement
         rows = store.query_battery_health(
             int(now - 365 * 86400), int(now))
@@ -347,7 +352,7 @@ class BatteryMonitorMixin:
             now=now,
         )
         if not result["due"]:
-            return
+            return result
         # Dedup: at most one prediction notification per horizon window.
         last_raw = store.get_meta(_META_REPLACEMENT_PREDICTED)
         try:
@@ -355,7 +360,15 @@ class BatteryMonitorMixin:
         except (TypeError, ValueError):
             last = 0.0
         if now - last < rep.horizon_days * 86400:
-            return
+            return result
+        # Dedup: at most one prediction notification per horizon window.
+        last_raw = store.get_meta(_META_REPLACEMENT_PREDICTED)
+        try:
+            last = float(last_raw) if last_raw else 0.0
+        except (TypeError, ValueError):
+            last = 0.0
+        if now - last < rep.horizon_days * 86400:
+            return result
         store.set_meta(_META_REPLACEMENT_PREDICTED, str(int(now)))
         days = result.get("days_remaining")
         days_txt = f"~{days:.0f} days" if days else "imminently"
@@ -373,3 +386,4 @@ class BatteryMonitorMixin:
         store.log_event(
             "BATTERY_REPLACEMENT_PREDICTED",
             f"health trend crosses {rep.threshold_score:.0f} in {days_txt}")
+        return result

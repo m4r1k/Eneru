@@ -159,8 +159,7 @@ def gather_report_sources(store, ups_name: str, energy_config, *,
             today, month,
             cost_per_kwh=energy_config.cost_per_kwh,
             currency=energy_config.currency,
-            cost_format=energy_config.cost_format,
-            expected_interval_s=expected_interval_s)
+            cost_format=energy_config.cost_format)
     else:
         sources["energy"] = {}
     return sources

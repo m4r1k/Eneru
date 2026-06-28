@@ -79,12 +79,28 @@ def power_sample_w(real_power: Optional[float],
     return None, False
 
 
+def _median(values: List[float]) -> Optional[float]:
+    s = sorted(values)
+    if not s:
+        return None
+    return s[len(s) // 2]
+
+
 def integrate_kwh(samples: List[PowerSample], *,
-                  expected_interval_s: float,
+                  expected_interval_s: Optional[float] = None,
                   gap_factor: float = 2.0) -> EnergyResult:
-    """Integrate a single-tier power series into kWh (see module contract)."""
-    if expected_interval_s <= 0:
-        expected_interval_s = 1.0
+    """Integrate a single-tier power series into kWh (see module contract).
+
+    ``expected_interval_s`` sets the gap cap (a dt above ``gap_factor`` x it is
+    treated as missing data). When ``None`` (the usual case) it is INFERRED
+    from the data as the median consecutive dt -- so the same code handles the
+    raw tier (~1s) and the aggregate tiers (300s / 3600s) without the caller
+    having to know which tier it fetched.
+    """
+    if expected_interval_s is None or expected_interval_s <= 0:
+        dts = [nxt[0] - cur[0] for cur, nxt in zip(samples, samples[1:])
+               if nxt[0] - cur[0] > 0]
+        expected_interval_s = _median(dts) or 1.0
     cap = gap_factor * expected_interval_s
     total = 0.0
     used_any = False
@@ -144,7 +160,7 @@ def summarize(today_samples: List[PowerSample],
               cost_per_kwh: Optional[float],
               currency: str = "USD",
               cost_format: Optional[str] = None,
-              expected_interval_s: float = 1.0) -> Dict:
+              expected_interval_s: Optional[float] = None) -> Dict:
     """Build the live ``energy`` status block from two windows' samples.
 
     Shape: ``{todayKwh, monthKwh, currency, estimated, partial}`` plus, only
