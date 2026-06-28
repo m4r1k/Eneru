@@ -693,6 +693,294 @@ class TestSchemaMigration:
             s.close()
 
 
+class TestSchemaMigrationV7:
+    """v6 -> v7: energy columns + battery_health / self_tests tables."""
+
+    @staticmethod
+    def _build_v6_db(path: Path) -> None:
+        """Synthesize a v6-shaped DB by hand (no v7 energy cols/tables)."""
+        c = sqlite3.connect(str(path), isolation_level=None)
+        c.execute("PRAGMA journal_mode = WAL")
+        # samples: v1 base + v2 additions == the full v6 column set.
+        c.execute(
+            "CREATE TABLE samples ("
+            "ts INTEGER NOT NULL, status TEXT, battery_charge REAL, "
+            "battery_runtime REAL, ups_load REAL, input_voltage REAL, "
+            "output_voltage REAL, depletion_rate REAL, time_on_battery INTEGER, "
+            "connection_state TEXT, battery_voltage REAL, ups_temperature REAL, "
+            "input_frequency REAL, output_frequency REAL)"
+        )
+        c.execute("CREATE INDEX idx_samples_ts ON samples(ts)")
+        for table in ("agg_5min", "agg_hourly"):
+            c.execute(
+                f"CREATE TABLE {table} ("
+                "ts INTEGER PRIMARY KEY, battery_charge_avg REAL, "
+                "battery_charge_min REAL, battery_charge_max REAL, "
+                "battery_runtime_avg REAL, ups_load_avg REAL, ups_load_max REAL, "
+                "input_voltage_avg REAL, input_voltage_min REAL, "
+                "input_voltage_max REAL, samples_count INTEGER, "
+                "output_voltage_avg REAL, battery_voltage_avg REAL, "
+                "ups_temperature_avg REAL, ups_temperature_min REAL, "
+                "ups_temperature_max REAL, input_frequency_avg REAL, "
+                "output_frequency_avg REAL)"
+            )
+        c.execute(
+            "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "ts INTEGER NOT NULL, event_type TEXT NOT NULL, detail TEXT, "
+            "notification_sent INTEGER DEFAULT 1)"
+        )
+        c.execute(
+            "CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "ts INTEGER NOT NULL, body TEXT NOT NULL, notify_type TEXT NOT NULL, "
+            "category TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', "
+            "attempts INTEGER NOT NULL DEFAULT 0, sent_at INTEGER, "
+            "delivering_at INTEGER, cancel_reason TEXT)"
+        )
+        c.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        c.execute("INSERT INTO meta(key,value) VALUES ('schema_version','6')")
+        # Seed a v6 sample so we can prove preservation across the v7 migration.
+        c.execute(
+            "INSERT INTO samples (ts, status, battery_charge, battery_runtime, "
+            "ups_load, input_voltage, output_voltage, depletion_rate, "
+            "time_on_battery, connection_state, battery_voltage, ups_temperature, "
+            "input_frequency, output_frequency) VALUES "
+            "(1000,'OL',95.0,1800.0,15.0,230.0,231.0,0.0,0,'OK',54.0,35.0,50.0,50.0)"
+        )
+        c.close()
+
+    @pytest.mark.unit
+    def test_v6_db_adds_energy_columns_to_samples(self, tmp_path):
+        path = tmp_path / "v6.db"
+        self._build_v6_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            cols = {r[1] for r in s._conn.execute("PRAGMA table_info(samples)")}
+            assert {"real_power", "power_nominal"} <= cols
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v6_db_adds_energy_avg_to_agg_tables(self, tmp_path):
+        path = tmp_path / "v6.db"
+        self._build_v6_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            for table in ("agg_5min", "agg_hourly"):
+                cols = {r[1] for r in s._conn.execute(
+                    f"PRAGMA table_info({table})")}
+                assert {"real_power_avg", "power_nominal_avg"} <= cols
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v6_db_creates_v7_tables(self, tmp_path):
+        path = tmp_path / "v6.db"
+        self._build_v6_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            tables = {r[0] for r in s._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            assert {"battery_health", "self_tests"} <= tables
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v6_data_preserved_after_v7_migration(self, tmp_path):
+        path = tmp_path / "v6.db"
+        self._build_v6_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            row = s._conn.execute(
+                "SELECT ts, status, battery_charge, real_power, power_nominal "
+                "FROM samples"
+            ).fetchone()
+            # Pre-existing row preserved; new energy columns NULL until next sample.
+            assert row == (1000, "OL", 95.0, None, None)
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v6_to_v7_bumps_meta(self, tmp_path):
+        path = tmp_path / "v6.db"
+        self._build_v6_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            sv = s._conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            assert int(sv[0]) == SCHEMA_VERSION == 7
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v7_migration_idempotent_on_reopen(self, tmp_path):
+        path = tmp_path / "v6.db"
+        self._build_v6_db(path)
+        open_and_close_store(path)
+        # Second open must not raise (ALTERs wrapped, tables IF NOT EXISTS).
+        s = StatsStore(path)
+        s.open()
+        try:
+            cols = {r[1] for r in s._conn.execute("PRAGMA table_info(samples)")}
+            assert {"real_power", "power_nominal"} <= cols
+            assert s._conn.execute("SELECT ts FROM samples").fetchone() == (1000,)
+        finally:
+            s.close()
+
+
+class TestV7StoreMethods:
+    """v7: battery_health / self_tests / power_samples store API."""
+
+    @staticmethod
+    def _open(tmp_path):
+        s = StatsStore(tmp_path / "v7.db")
+        s.open()
+        return s
+
+    @pytest.mark.unit
+    def test_record_and_query_battery_health(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            s.record_battery_health(
+                82.5,
+                {"capacity": 80.0, "runtime": 90.0, "self_test": None,
+                 "anomaly": 100.0, "age": 70.0},
+                detail={"confidence": 0.8, "weights": {"age": 0.2}},
+                ts=1000,
+            )
+            s.record_battery_health(None, {"capacity": None}, ts=2000)
+            rows = s.query_battery_health(0, 9999)
+            assert [r["ts"] for r in rows] == [1000, 2000]
+            assert rows[0]["score"] == 82.5
+            assert rows[0]["self_test"] is None      # unavailable kept as NULL
+            assert rows[0]["anomaly"] == 100.0
+            assert rows[0]["detail"]["confidence"] == 0.8
+            assert rows[1]["score"] is None          # unknown score kept as NULL
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_query_battery_health_empty_range(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            assert s.query_battery_health(0, 100) == []
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_record_battery_health_unserializable_detail(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            s.record_battery_health(50.0, {"capacity": 50.0},
+                                    detail={"bad": object()}, ts=1000)
+            assert s.query_battery_health(0, 9999)[0]["detail"] is None
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_query_battery_health_tolerates_corrupt_detail(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            with s._conn:
+                s._conn.execute(
+                    "INSERT INTO battery_health (ts, score, detail) VALUES (?,?,?)",
+                    (1000, 50.0, "{not valid json"),
+                )
+            assert s.query_battery_health(0, 9999)[0]["detail"] is None
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_record_self_test_and_latest(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            tid = s.record_self_test("test.battery.start", "scheduler",
+                                     started_ts=1000)
+            assert isinstance(tid, int)
+            latest = s.latest_self_test()
+            assert latest["id"] == tid
+            assert latest["command"] == "test.battery.start"
+            assert latest["result_enum"] == "running"
+            assert latest["source"] == "scheduler"
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_update_self_test_result(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            tid = s.record_self_test("test.battery.start", "api", started_ts=1000)
+            s.update_self_test_result(
+                tid, result_raw="Done and passed",
+                result_enum="passed", result_date="2026-06-28",
+            )
+            latest = s.latest_self_test()
+            assert latest["result_enum"] == "passed"
+            assert latest["result_raw"] == "Done and passed"
+            assert latest["result_date"] == "2026-06-28"
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_latest_self_test_none_when_empty(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            assert s.latest_self_test() is None
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_power_samples_reads_energy_columns(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            s.buffer_sample(
+                {"ups.status": "OL", "ups.load": "40",
+                 "ups.realpower": "120", "ups.power.nominal": "300"},
+                ts=1000,
+            )
+            s.buffer_sample(
+                {"ups.status": "OL", "ups.load": "50"},  # no realpower/nominal
+                ts=1001,
+            )
+            s.flush()
+            rows = s.power_samples(0, 9999, prefer_tier="samples")
+            assert rows[0] == (1000, 120.0, 40.0, 300.0)
+            assert rows[1] == (1001, None, 50.0, None)  # NULL cells preserved
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v7_methods_safe_on_closed_store(self, tmp_path):
+        # Never opened -> _conn is None. Every v7 method must no-op / return a
+        # safe default, never raise (failure-isolation contract).
+        s = StatsStore(tmp_path / "closed.db")
+        s.record_battery_health(50.0, {"capacity": 50.0})
+        assert s.query_battery_health(0, 100) == []
+        assert s.record_self_test("test.battery.start", "cli") is None
+        s.update_self_test_result(1, result_raw="x", result_enum="passed")
+        assert s.latest_self_test() is None
+        assert s.power_samples(0, 100) == []
+
+    @pytest.mark.unit
+    def test_v7_methods_swallow_db_errors(self, tmp_path):
+        # _conn is set but the underlying connection is closed, so execute
+        # raises sqlite3.ProgrammingError. The failure-isolation contract says
+        # swallow + log + return the safe default, never raise into the daemon.
+        s = self._open(tmp_path)
+        s._conn.close()
+        s.record_battery_health(50.0, {"capacity": 50.0}, ts=1000)
+        assert s.query_battery_health(0, 9999) == []
+        assert s.record_self_test("test.battery.start", "cli") is None
+        s.update_self_test_result(1, result_raw="x", result_enum="passed")
+        assert s.latest_self_test() is None
+        assert s.power_samples(0, 9999) == []
+
+
 class TestNotificationQueue:
     """v4: persistent notification queue CRUD + TTL/cap/age rules."""
 
