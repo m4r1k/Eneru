@@ -99,6 +99,12 @@ class MonitorState:
     pending_anomaly_prev_charge: float = 0.0
     pending_anomaly_time: float = 0.0
     pending_anomaly_count: int = 0  # consecutive polls confirming the anomaly
+    # v6.1: running count of CONFIRMED battery anomalies (feeds the battery-
+    # health anomaly term). Resets on restart -- a recent-health indicator.
+    confirmed_anomaly_count: int = 0
+    # v6.1: latest computed battery-health block (score/terms/confidence) or
+    # None until the first periodic computation. Published to monitor_status.
+    latest_battery_health: Optional[dict] = None
 
     # Voltage notification hysteresis (#27 / B2). The state log line is
     # always written immediately on a NORMAL→HIGH/LOW transition; the

@@ -328,6 +328,13 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/health/prediction.py
+    dst: /opt/ups-monitor/eneru/health/prediction.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   - src: src/eneru/cli.py
     dst: /opt/ups-monitor/eneru/cli.py
     file_info:

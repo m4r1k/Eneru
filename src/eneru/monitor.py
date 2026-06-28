@@ -174,6 +174,13 @@ class UPSGroupMonitor(
         self._last_slow_nut_log_time = 0.0
         self._slow_nut_poll_streak = 0
         self._slow_nut_poll_notified = False
+        # v6.1: monotonic gate for the per-UPS battery-health update (interval
+        # read live from config.battery_health -> SAFE reload). None = run on
+        # the first loop iteration.
+        self._last_health_update_mono: Optional[float] = None
+        # v6.1: per-UPS self-test issue/poll timing (set up in B6).
+        self._self_test_pending_id: Optional[int] = None
+        self._self_test_poll_due_mono: Optional[float] = None
 
         # Effective target passed to ``upsc`` (``upsname@host:port``). Normally
         # identical to ``config.ups.name``, but the autodiscovery diagnostic may
@@ -2068,6 +2075,27 @@ class UPSGroupMonitor(
 
         # If connection_state == "FAILED": already notified, nothing to do
 
+    def _run_periodic_tasks(self) -> None:
+        """End-of-iteration per-UPS periodic tasks (v6.1).
+
+        Time-gated and fully failure-isolated: any exception here is logged
+        and swallowed so a scheduler/health hiccup can never interrupt the
+        poll loop or the shutdown path. The battery-health interval is read
+        live from config (SAFE hot-reload). Self-test is wired in B6.
+        """
+        try:
+            bh = self._resolve_battery_health_config()
+            if bh.enabled:
+                interval = max(1, int(bh.update_interval))
+                now_mono = time.monotonic()
+                if (self._last_health_update_mono is None
+                        or now_mono - self._last_health_update_mono >= interval):
+                    self._last_health_update_mono = now_mono
+                    self._update_battery_health_periodic()
+        except Exception as exc:
+            self._log_message(f"⚠️  battery-health task failed: {exc}")
+        # B6 self-test hook is appended here.
+
     def _main_loop(self):
         """Main monitoring loop."""
         while not self._stop_event.is_set():
@@ -2349,5 +2377,10 @@ class UPSGroupMonitor(
                 )
                 self.state.latest_update_time = time.time()
                 self.state.previous_status = ups_status
+
+            # v6.1: time-gated per-UPS periodic tasks (battery-health update,
+            # self-test). Failure-isolated so a scheduler hiccup can never
+            # touch the poll/shutdown path.
+            self._run_periodic_tasks()
 
             self._stop_event.wait(self.config.ups.check_interval)

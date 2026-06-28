@@ -8,13 +8,19 @@ firmware jitter from APC / CyberPower / UniFi UPS units).
 
 import time
 from collections import deque
-from typing import Dict
+from typing import Dict, Optional
 
+from eneru.health import prediction
 from eneru.utils import is_numeric
+
+# meta keys for cross-restart battery-health bookkeeping.
+_META_NOMINAL_RUNTIME = "battery_nominal_runtime"
+_META_REPLACEMENT_PREDICTED = "battery_replacement_predicted_ts"
 
 
 class BatteryMonitorMixin:
-    """Mixin: battery depletion-rate calculation and anomaly detection."""
+    """Mixin: battery depletion-rate calculation, anomaly detection, and the
+    v6.1 battery-health score + replacement prediction."""
 
     def _calculate_depletion_rate(self, current_battery: str) -> float:
         """Calculate battery depletion rate based on history."""
@@ -183,6 +189,8 @@ class BatteryMonitorMixin:
             anomaly_elapsed = current_time - self.state.pending_anomaly_time
             self.state.pending_anomaly_charge = -1.0
             self.state.pending_anomaly_count = 0
+            # v6.1: feed the battery-health anomaly term.
+            self.state.confirmed_anomaly_count += 1
 
             self._log_message(
                 f"⚠️  WARNING: Battery charge dropped from {anomaly_prev:.0f}% to "
@@ -197,3 +205,171 @@ class BatteryMonitorMixin:
                 self.config.NOTIFY_WARNING,
                 category="health",
             )
+
+    # ----- v6.1: battery-health score + replacement prediction -----
+
+    def _resolve_battery_health_config(self):
+        """Per-UPS battery_health override if present, else the global config.
+
+        Mirrors the API's per-group nut_control resolution; the override is
+        already merged-with-global at parse time, so it is the effective config.
+        """
+        glob = self.config.battery_health
+        try:
+            name = self.config.ups.name
+            for group in getattr(self.config, "ups_groups", None) or []:
+                if (getattr(group.ups, "name", None) == name
+                        and getattr(group, "battery_health", None)):
+                    return group.battery_health
+        except Exception:
+            pass
+        return glob
+
+    def _learned_nominal_runtime(self) -> Optional[float]:
+        """Read the nominal full-charge runtime learned at a 100%-charge poll
+        (persisted in meta so it survives restarts)."""
+        store = getattr(self, "_stats_store", None)
+        if store is None:
+            return None
+        raw = store.get_meta(_META_NOMINAL_RUNTIME)
+        try:
+            return float(raw) if raw else None
+        except (TypeError, ValueError):
+            return None
+
+    def _maybe_learn_nominal_runtime(self, charge: Optional[float],
+                                     runtime_s: Optional[float]) -> None:
+        """At full charge, record runtime as the nominal once (if not already
+        learned and not configured)."""
+        store = getattr(self, "_stats_store", None)
+        if store is None or charge is None or runtime_s is None:
+            return
+        if charge >= 99.0 and runtime_s > 0 and not self._learned_nominal_runtime():
+            store.set_meta(_META_NOMINAL_RUNTIME, str(int(runtime_s)))
+
+    def _battery_runtime_history(self, now: float, days: int = 60):
+        """[(ts, runtime_s)] from stored battery_health detail, for the
+        capacity trend term."""
+        store = getattr(self, "_stats_store", None)
+        if store is None:
+            return []
+        out = []
+        for row in store.query_battery_health(int(now - days * 86400), int(now)):
+            detail = row.get("detail") or {}
+            rt = detail.get("runtime_s")
+            if rt is not None:
+                out.append((float(row["ts"]), float(rt)))
+        return out
+
+    def _compute_battery_health(self, cfg, now: float) -> Dict:
+        """Compute the weighted battery-health block. Unknown terms stay
+        unavailable (None) -- thin telemetry never yields a confident score."""
+        def _num(value):
+            try:
+                return float(value) if is_numeric(value) else None
+            except (TypeError, ValueError):
+                return None
+
+        with self.state._lock:
+            charge = _num(self.state.latest_battery_charge)
+            runtime_s = _num(self.state.latest_runtime)
+            anomaly_count = self.state.confirmed_anomaly_count
+
+        self._maybe_learn_nominal_runtime(charge, runtime_s)
+        nominal = cfg.nominal_runtime_seconds
+        if nominal is None:
+            nominal = self._learned_nominal_runtime()
+
+        st = None
+        store = getattr(self, "_stats_store", None)
+        if store is not None:
+            latest = store.latest_self_test()
+            st = latest.get("result_enum") if latest else None
+
+        terms = prediction.compute_terms(
+            current_runtime_s=runtime_s,
+            nominal_runtime_s=nominal,
+            runtime_history=self._battery_runtime_history(now),
+            self_test_result=st,
+            anomaly_count=anomaly_count,
+            battery_install_date=cfg.battery_install_date,
+            expected_life_years=cfg.expected_life_years,
+            now=now,
+        )
+        score, confidence, available = prediction.composite_score(terms)
+        return {
+            "score": score,
+            "confidence": round(confidence, 3),
+            "availableTerms": available,
+            "terms": terms,
+            "runtime_s": runtime_s,
+            "nominalRuntime": nominal,
+            "ts": int(now),
+        }
+
+    def _update_battery_health_periodic(self, now: Optional[float] = None) -> None:
+        """Compute + persist the battery-health score and run replacement
+        prediction. Called on the battery_health.update_interval cadence."""
+        if now is None:
+            now = time.time()
+        cfg = self._resolve_battery_health_config()
+        if not cfg.enabled:
+            return
+        health = self._compute_battery_health(cfg, now)
+        store = getattr(self, "_stats_store", None)
+        if store is not None:
+            store.record_battery_health(
+                health["score"], health["terms"],
+                detail={"confidence": health["confidence"],
+                        "runtime_s": health["runtime_s"],
+                        "nominalRuntime": health["nominalRuntime"]},
+                ts=int(now))
+        with self.state._lock:
+            self.state.latest_battery_health = health
+        self._maybe_predict_replacement(cfg, now)
+
+    def _maybe_predict_replacement(self, cfg, now: float) -> None:
+        """Trend the stored score series and warn once per period if the
+        battery is projected to need replacement within the horizon."""
+        store = getattr(self, "_stats_store", None)
+        if store is None:
+            return
+        rep = cfg.replacement
+        rows = store.query_battery_health(
+            int(now - 365 * 86400), int(now))
+        history = [(float(r["ts"]), float(r["score"]))
+                   for r in rows if r.get("score") is not None]
+        result = prediction.predict_replacement(
+            history,
+            threshold_score=rep.threshold_score,
+            horizon_days=rep.horizon_days,
+            min_history_days=rep.min_history_days,
+            now=now,
+        )
+        if not result["due"]:
+            return
+        # Dedup: at most one prediction notification per horizon window.
+        last_raw = store.get_meta(_META_REPLACEMENT_PREDICTED)
+        try:
+            last = float(last_raw) if last_raw else 0.0
+        except (TypeError, ValueError):
+            last = 0.0
+        if now - last < rep.horizon_days * 86400:
+            return
+        store.set_meta(_META_REPLACEMENT_PREDICTED, str(int(now)))
+        days = result.get("days_remaining")
+        days_txt = f"~{days:.0f} days" if days else "imminently"
+        self._log_message(
+            f"🔋 Battery replacement predicted: health trending below "
+            f"{rep.threshold_score:.0f} in {days_txt}.")
+        self._send_notification(
+            f"🔋 **Battery Replacement Predicted**\n"
+            f"The battery-health score is projected to cross "
+            f"{rep.threshold_score:.0f} in {days_txt}. Plan a replacement.",
+            self.config.NOTIFY_WARNING,
+            category="health",
+        )
+        # store is guaranteed non-None here (early return above).
+        store.log_event(
+            "BATTERY_REPLACEMENT_PREDICTED",
+            f"health trend crosses {rep.threshold_score:.0f} in {days_txt}")

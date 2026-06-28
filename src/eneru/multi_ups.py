@@ -322,6 +322,14 @@ class MultiUPSCoordinator:
                 prometheus=self.config.prometheus,
                 remote_health=self.config.remote_health,
                 mqtt=self.config.mqtt,
+                nut_control=self.config.nut_control,
+                # v6.1: per-monitor battery-health / self-test / energy read
+                # these. The per-UPS override (if any) rides on `group` in
+                # ups_groups above; these globals are the inheritance base.
+                battery_health=self.config.battery_health,
+                self_test=self.config.self_test,
+                reports=self.config.reports,
+                energy=self.config.energy,
             )
 
             # Sanitize UPS name for file paths
