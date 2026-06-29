@@ -481,6 +481,67 @@ class TestMultiUPSCoordinator:
 
 
 # ==============================================================================
+# DAEMON-WIDE REPORTS
+# ==============================================================================
+
+class TestCoordinatorReportSender:
+    """The fleet-wide report sender must NOT borrow a per-UPS log prefix."""
+
+    def _coord_with_monitors(self):
+        config = Config(ups_groups=[
+            UPSGroupConfig(ups=UPSConfig(name="UPS-A@h"), is_local=True),
+            UPSGroupConfig(ups=UPSConfig(name="UPS-B@h"), is_local=False),
+        ])
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        primary = MagicMock()
+        primary._stats_store = object()
+        # A real monitor would prefix the body with its group; assert we DON'T
+        # route through it.
+        primary._send_notification = MagicMock(
+            side_effect=AssertionError("must not use per-UPS _send_notification"))
+        coord._monitors = [primary, MagicMock()]
+        coord._notification_worker = MagicMock()
+        return coord, primary
+
+    @pytest.mark.unit
+    def test_send_report_notification_has_no_per_ups_prefix(self):
+        coord, primary = self._coord_with_monitors()
+        coord._send_report_notification("Fleet digest body", "info", "report")
+        # Routed straight through the worker with the PRIMARY store, never the
+        # prefixing per-monitor _send_notification.
+        primary._send_notification.assert_not_called()
+        coord._notification_worker.send.assert_called_once()
+        kwargs = coord._notification_worker.send.call_args.kwargs
+        assert kwargs["category"] == "report"
+        assert kwargs["store"] is primary._stats_store
+        # body carries no "[UPS-A]" prefix; @ is escaped to avoid mentions.
+        assert kwargs["body"].startswith("Fleet digest body")
+
+    @pytest.mark.unit
+    def test_send_report_notification_escapes_at(self):
+        coord, _ = self._coord_with_monitors()
+        coord._send_report_notification("covers UPS-A@h and UPS-B@h", "info", "report")
+        body = coord._notification_worker.send.call_args.kwargs["body"]
+        assert "@​" in body and "@h" not in body.replace("@​", "")
+
+    @pytest.mark.unit
+    def test_send_report_notification_no_worker_is_safe(self):
+        coord, _ = self._coord_with_monitors()
+        coord._notification_worker = None
+        coord._send_report_notification("x", "info", "report")   # must not raise
+
+    @pytest.mark.unit
+    def test_maybe_send_reports_uses_coordinator_sender(self):
+        import inspect
+        from eneru import multi_ups as mu_mod
+        src = inspect.getsource(mu_mod.MultiUPSCoordinator._maybe_send_reports)
+        assert "self._send_report_notification" in src
+        # and the old prefixing path is gone
+        assert "primary._send_notification" not in src
+
+
+# ==============================================================================
 # UPS MONITOR COORDINATOR MODE
 # ==============================================================================
 

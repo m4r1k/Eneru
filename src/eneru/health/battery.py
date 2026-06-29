@@ -221,8 +221,13 @@ class BatteryMonitorMixin:
                 if (getattr(group.ups, "name", None) == name
                         and getattr(group, "battery_health", None)):
                     return group.battery_health
-        except Exception:
-            pass
+        except AttributeError as e:
+            # A malformed config shape (e.g. ups/name missing) is a real bug, not
+            # something to swallow silently — surface it, then fall back to the
+            # global config so health tracking still runs.
+            self._log_message(
+                f"battery-health config resolution failed, using global "
+                f"config: {e}")
         return glob
 
     def _learned_nominal_runtime(self) -> Optional[float]:

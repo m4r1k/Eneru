@@ -2580,7 +2580,14 @@ class ConfigLoader:
                 messages.append(
                     f"ERROR: self_test for UPS '{name}' requires "
                     "api.auth.enabled — a scheduled self-test is privileged.")
-            if st.command and st.command not in nc.allowed_commands:
+            cmd = (st.command or "").strip() if st.command else ""
+            if not cmd:
+                messages.append(
+                    f"ERROR: self_test for UPS '{name}' is enabled but has no "
+                    "command — set self_test.command (per-UPS or global) to a "
+                    "command on nut_control.allowed_commands "
+                    "(e.g. 'test.battery.start').")
+            elif cmd not in nc.allowed_commands:
                 messages.append(
                     f"ERROR: self_test.command '{st.command}' for UPS '{name}' "
                     "is not in nut_control.allowed_commands — a scheduled test "
@@ -2589,7 +2596,8 @@ class ConfigLoader:
 
         # Battery-health numeric fields must be numbers (a quoted/typo'd YAML
         # value would otherwise blow up the runtime int()/float() coercions).
-        def _check_num(label, val, *, allow_none=True, minimum=None):
+        def _check_num(label, val, *, allow_none=True, minimum=None,
+                       maximum=None):
             if val is None:
                 if not allow_none:
                     messages.append(f"ERROR: {label} must be set to a number")
@@ -2598,6 +2606,8 @@ class ConfigLoader:
                 messages.append(f"ERROR: {label} must be a number, got {val!r}")
             elif minimum is not None and val < minimum:
                 messages.append(f"ERROR: {label} must be >= {minimum}, got {val!r}")
+            elif maximum is not None and val > maximum:
+                messages.append(f"ERROR: {label} must be <= {maximum}, got {val!r}")
 
         for label_prefix, bh in (
             ("battery_health", config.battery_health),
@@ -2613,6 +2623,16 @@ class ConfigLoader:
                        bh.expected_life_years, minimum=0)
             _check_num(f"{label_prefix}.update_interval",
                        bh.update_interval, minimum=1)
+            # Nested replacement-prediction fields share the runtime int()/float()
+            # coercion risk as the parent — validate them the same way.
+            rep = getattr(bh, "replacement", None)
+            if rep is not None:
+                _check_num(f"{label_prefix}.replacement.threshold_score",
+                           rep.threshold_score, minimum=0, maximum=100)
+                _check_num(f"{label_prefix}.replacement.horizon_days",
+                           rep.horizon_days, minimum=1)
+                _check_num(f"{label_prefix}.replacement.min_history_days",
+                           rep.min_history_days, minimum=1)
 
         # Energy cost: cost_per_kwh, when set, must be a non-negative number.
         # None/unset is valid and disables cost tracking entirely (B3).

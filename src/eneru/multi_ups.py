@@ -789,13 +789,32 @@ class MultiUPSCoordinator:
         except KeyboardInterrupt:
             self._handle_signal(signal.SIGINT, None)
 
+    def _send_report_notification(self, body: str, notify_type: str,
+                                  category: str) -> None:
+        """Deliver a daemon-wide (fleet) report via the shared worker.
+
+        Unlike ``UPSGroupMonitor._send_notification`` this prepends NO per-UPS
+        log prefix: a fleet-wide digest already carries its own per-UPS sections,
+        so stamping it with just the FIRST group's prefix would be misleading.
+        The store is the primary monitor's (a single deterministic place that
+        also owns the dedup meta). ``@`` is still escaped to avoid Discord
+        mentions in UPS names like ``ups@host``.
+        """
+        if not self._notification_worker or not self._monitors:
+            return
+        escaped = body.replace("@", "@​")   # zero-width space after @
+        self._notification_worker.send(
+            body=escaped, notify_type=notify_type, category=category,
+            store=getattr(self._monitors[0], "_stats_store", None),
+        )
+
     def _maybe_send_reports(self) -> None:
         """Send any due daemon-wide reports (multi-UPS). Failure-isolated.
 
         The digest aggregates EVERY monitor (one per-UPS section each), not just
         the first. Dedup meta lives in the first monitor's store (a single
-        deterministic place) and delivery goes through that monitor's
-        notification worker once per period.
+        deterministic place) and delivery goes through a coordinator-scoped
+        sender (no per-UPS prefix) once per period.
         """
         try:
             if not self.config.reports.enabled or not self._monitors:
@@ -811,8 +830,7 @@ class MultiUPSCoordinator:
                 self.config,
                 units,
                 getattr(primary, "_stats_store", None),
-                lambda body, ntype, cat: primary._send_notification(
-                    body, ntype, category=cat),
+                self._send_report_notification,
             )
         except Exception as exc:
             self._log(f"⚠️  reports task failed: {exc}")

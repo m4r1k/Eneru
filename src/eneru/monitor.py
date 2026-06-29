@@ -2151,15 +2151,7 @@ class UPSGroupMonitor(
         + api.auth are enabled whenever self_test is.
         """
         cfg = self._resolve_self_test_config()
-        if not cfg.enabled:
-            return
         store = getattr(self, "_stats_store", None)
-        nc = self._resolve_nut_control_config()
-        # Defense-in-depth: never issue a control command unless nut_control is
-        # enabled (validation requires this for the global case; this also
-        # covers a per-UPS self_test override paired with control disabled).
-        if not nc.enabled:
-            return
         # The scheduler needs the stats store to dedup runs (last-run meta) and
         # record the result row. Without it we can neither track state nor avoid
         # re-issuing every tick, so skip rather than fire blindly.
@@ -2171,7 +2163,7 @@ class UPSGroupMonitor(
         # crash between "issued" and "result polled" would otherwise orphan the
         # ``running`` row forever. Adopt it and poll on this tick — the test was
         # issued before the restart, so its result is almost certainly ready.
-        if self._self_test_pending_id is None and store is not None:
+        if self._self_test_pending_id is None:
             pend = store.get_meta("self_test_pending_id")
             if pend:
                 try:
@@ -2180,7 +2172,10 @@ class UPSGroupMonitor(
                 except (TypeError, ValueError):
                     store.set_meta("self_test_pending_id", "")
 
-        # 1) Finalise a pending test once its poll window has elapsed.
+        # 1) Finalise a pending test once its poll window has elapsed. This runs
+        # BEFORE the cfg.enabled / nut_control gates below: a config change that
+        # disables or retargets self_test must NOT orphan a test that was already
+        # issued — its result (a read, not a control command) is finalised first.
         if (self._self_test_pending_id is not None
                 and self._self_test_poll_due_mono is not None):
             if time.monotonic() >= self._self_test_poll_due_mono:
@@ -2191,9 +2186,19 @@ class UPSGroupMonitor(
                 self._log_message(f"🔋 Self-test result: {enum} ({raw!r})")
                 self._self_test_pending_id = None
                 self._self_test_poll_due_mono = None
-                if store is not None:
-                    store.set_meta("self_test_pending_id", "")  # cleared
+                store.set_meta("self_test_pending_id", "")  # cleared
             return  # never issue while one is in flight
+
+        # Now honor the current config: a disabled self_test issues nothing
+        # (the pending test, if any, was already finalised above).
+        if not cfg.enabled:
+            return
+        nc = self._resolve_nut_control_config()
+        # Defense-in-depth: never issue a control command unless nut_control is
+        # enabled (validation requires this for the global case; this also
+        # covers a per-UPS self_test override paired with control disabled).
+        if not nc.enabled:
+            return
 
         # 2) Due? (calendar/interval via the shared scheduler helpers)
         try:

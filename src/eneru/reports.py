@@ -156,11 +156,26 @@ def build_aggregate_report(period: str, per_ups_sources: List[Dict], *,
             "body": body, "csv": csv_text}
 
 
+def _period_start(period: str, now: float) -> int:
+    """Calendar-aware start for a report period (local time).
+
+    ``daily`` = since local midnight, ``monthly`` = since the 1st — so the
+    report's own period matches the calendar boundary a reader expects (and the
+    energy windows / status.py) rather than a rolling 24h/30d. ``weekly`` has no
+    clean calendar anchor, so it stays a 7-day rolling window.
+    """
+    now_dt = datetime.fromtimestamp(now)
+    if period == "daily":
+        return int(datetime(now_dt.year, now_dt.month, now_dt.day).timestamp())
+    if period == "monthly":
+        return int(datetime(now_dt.year, now_dt.month, 1).timestamp())
+    return int(now - PERIOD_WINDOW_SECONDS.get(period, 24 * 3600))
+
+
 def gather_report_sources(store, ups_name: str, energy_config, *,
                           period: str, now: float) -> Dict:
     """Fetch the report sources for one UPS/store over the period window."""
-    window = PERIOD_WINDOW_SECONDS.get(period, 24 * 3600)
-    start = int(now - window)
+    start = _period_start(period, now)
     sources: Dict = {"ups_name": ups_name}
 
     events = store.query_events(start, int(now)) if store else []
@@ -181,10 +196,14 @@ def gather_report_sources(store, ups_name: str, energy_config, *,
     bh_rows = store.query_battery_health(start, int(now)) if store else []
     sources["battery_health"] = bh_rows[-1] if bh_rows else None
 
-    # energy: today + month windows.
+    # energy: today + month windows. CALENDAR boundaries (local time) — "today"
+    # = since local midnight, "month" = since the 1st — mirroring status.py.
+    # Cost is only meaningful against a fixed boundary; a rolling 24h/30d isn't
+    # what an electricity bill measures.
     if store and getattr(energy_config, "enabled", True):
-        today_start = int(now - 24 * 3600)
-        month_start = int(now - 30 * 86400)
+        now_dt = datetime.fromtimestamp(now)
+        today_start = int(datetime(now_dt.year, now_dt.month, now_dt.day).timestamp())
+        month_start = int(datetime(now_dt.year, now_dt.month, 1).timestamp())
         today = store.power_samples(today_start, int(now))
         month = store.power_samples(month_start, int(now))
         sources["energy"] = energy_mod.summarize(

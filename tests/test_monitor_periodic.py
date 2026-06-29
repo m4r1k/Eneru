@@ -290,6 +290,25 @@ class TestRunSelfTestTask:
         assert any("Self-test result: passed" in m for m in mon.logs)
 
     @pytest.mark.unit
+    def test_pending_finalized_even_when_config_now_disabled(self, store, monkeypatch):
+        # A config reload that DISABLES self_test must not orphan an already
+        # issued/pending test: its result is finalised before the disabled
+        # config is honored (otherwise the `running` row lives forever).
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)  # self_test OFF
+        mon._self_test_pending_id = 9
+        mon._self_test_poll_due_mono = time.monotonic() - 1   # poll window elapsed
+        store.set_meta("self_test_pending_id", "9")
+        mon._get_ups_var = lambda var: {"ups.test.result": "Done and passed",
+                                        "ups.test.date": "2026-06-28"}.get(var)
+        monkeypatch.setattr(selftest, "record_self_test_result",
+                            lambda s, tid, raw, date: "passed")
+        mon._run_self_test_task()
+        assert mon._self_test_pending_id is None
+        assert mon._self_test_poll_due_mono is None
+        assert store.get_meta("self_test_pending_id") == ""
+        assert any("Self-test result: passed" in m for m in mon.logs)
+
+    @pytest.mark.unit
     def test_store_none_skips_entirely(self):
         # No store -> can't dedup/record -> skip rather than fire every tick.
         mon = _make_monitor(_cfg(_ENABLED), None)

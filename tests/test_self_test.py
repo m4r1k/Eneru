@@ -37,8 +37,11 @@ class TestNormalize:
         ("Battery test failed", "failed"),
         ("In progress", "running"),
         ("test pending", "running"),
-        ("No test initiated", "unsupported"),
+        # "no test initiated" = nothing has run yet -> unknown (NOT unsupported).
+        ("No test initiated", "unknown"),
+        ("Done: No test initiated", "unknown"),
         ("not supported", "unsupported"),
+        ("Self-test unsupported", "unsupported"),
         ("", "unknown"),
         (None, "unknown"),
         ("weird vendor string", "unknown"),

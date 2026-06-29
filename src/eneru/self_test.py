@@ -45,7 +45,11 @@ def normalize_result(raw: Optional[str]) -> str:
     t = str(raw).strip().lower()
     if not t or t in ("n/a", "na", "-"):
         return "unknown"
-    if "no test initiated" in t or "not supported" in t or "unsupported" in t:
+    # "no test initiated" means no test has RUN yet (unknown), NOT that self-test
+    # is unsupported — keep the two distinct.
+    if "no test initiated" in t:
+        return "unknown"
+    if "not supported" in t or "unsupported" in t:
         return "unsupported"
     if "in progress" in t or "inprogress" in t or "progress" in t \
             or "running" in t or "pending" in t:

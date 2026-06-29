@@ -246,3 +246,22 @@ class TestResolve:
                       "ups:\n  - name: U1@h\n")
         mon = _Mon(cfg, store)
         assert mon._resolve_battery_health_config().update_interval == 1234
+
+    @pytest.mark.unit
+    def test_malformed_config_logs_and_falls_back(self, store):
+        # A malformed config shape (a group whose .ups access raises) must NOT
+        # be swallowed silently: it falls back to the global config AND logs.
+        cfg = _config("battery_health:\n  update_interval: 1234\n"
+                      "ups:\n  - name: U1@h\n")
+
+        class _BadGroup:
+            @property
+            def ups(self):
+                raise AttributeError("ups missing")
+
+        cfg.ups_groups = [_BadGroup()]
+        mon = _Mon(cfg, store)
+        resolved = mon._resolve_battery_health_config()
+        assert resolved.update_interval == 1234           # global fallback
+        assert any("battery-health config resolution failed" in m
+                   for m in mon.logs)

@@ -222,11 +222,50 @@ class TestCrossFieldValidation:
                    for e in errs)
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("cmd_line", [
+        "  command: ''\n",     # empty string
+        "  command:\n",        # null
+    ])
+    def test_self_test_enabled_with_empty_command_is_error(self, cmd_line):
+        # An ENABLED self_test with a missing/empty command must be a CONFIG
+        # error (it would otherwise bypass the allowlist check and only fail at
+        # runtime).
+        _, errs = _validate(
+            "ups:\n  name: U@h\napi:\n  auth:\n    enabled: true\n"
+            "nut_control:\n  enabled: true\n  allowed_commands: [test.battery.start]\n"
+            "self_test:\n  enabled: true\n" + cmd_line)
+        assert any("is enabled but has no command" in e for e in errs)
+
+    @pytest.mark.unit
     def test_self_test_valid_setup_no_errors(self):
         _, errs = _validate(
             "ups:\n  name: U@h\napi:\n  auth:\n    enabled: true\n"
             "nut_control:\n  enabled: true\n  allowed_commands: [test.battery.start]\n"
             "self_test:\n  enabled: true\n")
+        assert errs == []
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("field,val,needle", [
+        ("threshold_score", "abc", "must be a number"),
+        ("threshold_score", "150", "must be <= 100"),
+        ("threshold_score", "-1", "must be >= 0"),
+        ("horizon_days", "soon", "must be a number"),
+        ("horizon_days", "0", "must be >= 1"),
+        ("min_history_days", "true", "must be a number"),
+        ("min_history_days", "0", "must be >= 1"),
+    ])
+    def test_replacement_fields_validated(self, field, val, needle):
+        _, errs = _validate(
+            "ups:\n  name: U@h\nbattery_health:\n  replacement:\n"
+            f"    {field}: {val}\n")
+        assert any(f"replacement.{field}" in e and needle in e for e in errs), errs
+
+    @pytest.mark.unit
+    def test_replacement_fields_valid_no_errors(self):
+        _, errs = _validate(
+            "ups:\n  name: U@h\nbattery_health:\n  replacement:\n"
+            "    threshold_score: 40\n    horizon_days: 60\n"
+            "    min_history_days: 7\n")
         assert errs == []
 
     @pytest.mark.unit

@@ -37,6 +37,15 @@ def _args(**kw):
     return argparse.Namespace(**base)
 
 
+class _FakeStore:
+    """Minimal stand-in for an OPEN StatsStore (just needs ``close()``)."""
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
@@ -175,7 +184,7 @@ class TestRunDirect:
     @pytest.mark.unit
     def test_success(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_load_config", lambda a: _config(SINGLE))
-        monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: None)
+        monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: _FakeStore())
         from eneru import self_test as st
         monkeypatch.setattr(st, "discover_self_test_command",
                             lambda *a, **k: "test.battery.start")
@@ -183,6 +192,26 @@ class TestRunDirect:
                             lambda *a, **k: {"ok": True, "test_id": 1, "error": ""})
         cli._cmd_self_test_run(_args(direct=True))
         assert "issued on UPS@host (command test.battery.start)" in capsys.readouterr().out
+
+    @pytest.mark.unit
+    def test_no_stats_db_refuses(self, monkeypatch, capsys):
+        # --direct must NOT issue a test when the stats DB is unavailable: the
+        # result could never be recorded/finalised, so it exits non-zero and
+        # does not call issue_self_test.
+        monkeypatch.setattr(cli, "_load_config", lambda a: _config(SINGLE))
+        monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: None)
+        from eneru import self_test as st
+        monkeypatch.setattr(st, "discover_self_test_command",
+                            lambda *a, **k: "test.battery.start")
+        called = {"issued": False}
+        monkeypatch.setattr(
+            st, "issue_self_test",
+            lambda *a, **k: called.__setitem__("issued", True))
+        with pytest.raises(SystemExit) as e:
+            cli._cmd_self_test_run(_args(direct=True))
+        assert e.value.code == 1
+        assert called["issued"] is False
+        assert "stats DB is unavailable" in capsys.readouterr().out
 
     @pytest.mark.unit
     def test_nut_control_disabled_exits(self, monkeypatch):
@@ -220,7 +249,7 @@ class TestRunDirect:
             "self_test:\n  command: test.battery.start\n"
             "ups:\n  - name: U1@h\n    self_test:\n      command: test.battery.start.quick\n")
         monkeypatch.setattr(cli, "_load_config", lambda a: cfg)
-        monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: None)
+        monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: _FakeStore())
         from eneru import self_test as st
         seen = {}
 
@@ -236,7 +265,7 @@ class TestRunDirect:
     @pytest.mark.unit
     def test_issue_failure_exits(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_load_config", lambda a: _config(SINGLE))
-        monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: None)
+        monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: _FakeStore())
         from eneru import self_test as st
         monkeypatch.setattr(st, "discover_self_test_command",
                             lambda *a, **k: "test.battery.start")

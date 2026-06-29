@@ -31,84 +31,12 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
-# Shared E2E helpers (apply_scenario: poll-until-applied scenario swaps).
+# Shared E2E helpers: apply_scenario (poll-until-applied scenario swaps) plus
+# the redundancy group helpers (dbg / dump_redundancy_nut_state /
+# wait_for_redundancy_nut / restart_redundancy_nut_server /
+# stop_redundancy_nut_drivers). DBG_TAG labels this script's dbg() lines.
+DBG_TAG="redundancy-quorum.sh"
 . "$E2E_DIR/groups/lib.sh"
-
-# Timestamped step markers. The redundancy regressions chain many
-# fixed-duration sleeps with docker-compose calls; when CI runners are slow
-# the script can be SIGTERMed mid-flight with no idea where it hung. dbg()
-# makes the boundary between phases self-diagnosing in the runner log.
-dbg() {
-  printf '+++ %s [redundancy-quorum.sh] %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" "$*"
-}
-
-dump_redundancy_nut_state() {
-  local label="$1"
-  dbg "[$label] docker compose ps nut-server:"
-  ( cd "$E2E_DIR" && docker compose ps nut-server 2>&1 ) \
-      | sed 's/^/    /' || true
-  dbg "[$label] processes inside nut-server:"
-  ( cd "$E2E_DIR" \
-      && timeout 10s docker compose exec -T nut-server sh -c \
-           'ps -ef 2>&1 | grep -E "dummy-ups|upsd" | grep -v grep || true' ) \
-      2>&1 | sed 's/^/    /' || true
-  dbg "[$label] host upsc probes:"
-  for ups in TestUPS UPS1 UPS2; do
-    printf '    upsc %s ups.status: ' "$ups"
-    timeout 5s upsc "${ups}@localhost:3493" ups.status 2>&1 || echo '<failed/timeout>'
-  done
-}
-
-wait_for_redundancy_nut() {
-  for i in {1..30}; do
-    # Bound each upsc call so a wedged libupsclient read cannot eat the
-    # entire polling budget on a single iteration.
-    if timeout 5s upsc UPS1@localhost:3493 ups.status >/dev/null 2>&1 \
-       && timeout 5s upsc UPS2@localhost:3493 ups.status >/dev/null 2>&1; then
-      dbg "wait_for_redundancy_nut: ready after $i iteration(s)"
-      return 0
-    fi
-    dbg "wait_for_redundancy_nut: attempt $i/30 still failing"
-    sleep 1
-  done
-  dbg "wait_for_redundancy_nut: gave up after 30 attempts"
-  echo "FAIL: redundancy NUT sources did not recover"
-  return 1
-}
-
-restart_redundancy_nut_server() {
-  dbg "restart_redundancy_nut_server: docker compose restart nut-server"
-  (
-    cd "$E2E_DIR"
-    docker compose restart -t 2 nut-server >/dev/null
-  )
-  dbg "restart_redundancy_nut_server: docker compose restart returned"
-  wait_for_redundancy_nut
-  apply_scenario online-charging UPS1
-  apply_scenario online-charging UPS2
-  dbg "restart_redundancy_nut_server: UPS1+UPS2 reset to online (scenarios confirmed live)"
-}
-
-stop_redundancy_nut_drivers() {
-  dbg "stop_redundancy_nut_drivers: pkill UPS1+UPS2 dummy-ups in container"
-  (
-    cd "$E2E_DIR"
-    # The ``[d]`` bracket trick is load-bearing: it makes the regex match the
-    # literal string "dummy-ups" inside a real driver cmdline, but NOT the
-    # pkill wrapper's own cmdline (which contains the literal characters
-    # ``[d]ummy-ups``). Without the trick, pkill kills its own ``sh -c``
-    # wrapper before it can run the second pkill, and ``docker compose exec``
-    # is left holding a half-dead exec stream that hangs until the runner
-    # SIGTERMs the whole step.
-    timeout --kill-after=5s 10s docker compose exec -T nut-server sh -c \
-      "pkill -f '[d]ummy-ups.*-a UPS1' || true; pkill -f '[d]ummy-ups.*-a UPS2' || true"
-  )
-  dbg "stop_redundancy_nut_drivers: pkill returned, verifying drivers are gone"
-  ( cd "$E2E_DIR" \
-      && timeout --kill-after=5s 10s docker compose exec -T nut-server sh -c \
-           'ps -ef | grep -E "[d]ummy-ups.*-a UPS[12]" || echo "    (no UPS1/UPS2 driver processes)"' ) \
-      2>&1 | sed 's/^/    /' || true
-}
 
 # ======================================================================
 # Test 21: Redundancy quorum holds when 1 of 2 healthy

@@ -90,6 +90,36 @@ class TestBuildReport:
 # gather_report_sources
 # --------------------------------------------------------------------------
 
+class TestPeriodStart:
+    @pytest.mark.unit
+    def test_daily_is_local_midnight(self):
+        # daily report window starts at local midnight, NOT now-24h.
+        from datetime import datetime
+        now_dt = datetime(2026, 6, 29, 14, 30, 0)
+        now = now_dt.timestamp()
+        start = reports._period_start("daily", now)
+        assert start == int(datetime(2026, 6, 29).timestamp())
+        # rolling 24h would have been ~14.5h earlier than midnight
+        assert start != int(now - 24 * 3600)
+
+    @pytest.mark.unit
+    def test_monthly_is_first_of_month(self):
+        # monthly report window starts on the 1st, NOT now-30d.
+        from datetime import datetime
+        now_dt = datetime(2026, 6, 29, 14, 30, 0)
+        now = now_dt.timestamp()
+        start = reports._period_start("monthly", now)
+        assert start == int(datetime(2026, 6, 1).timestamp())
+        assert start != int(now - 30 * 86400)
+
+    @pytest.mark.unit
+    def test_weekly_stays_rolling(self):
+        # weekly has no calendar anchor -> 7-day rolling window.
+        now = time.time()
+        start = reports._period_start("weekly", now)
+        assert start == int(now - 7 * 86400)
+
+
 class TestGather:
     @pytest.mark.unit
     def test_gathers_from_store(self, store):
@@ -235,8 +265,10 @@ class TestAggregate:
     def test_multi_covers_every_unit_once(self, tmp_path):
         cfg = _config("ups:\n  - name: A@h\n  - name: B@h\n"
                       "reports:\n  enabled: true\n  daily: true\n  time: '08:00'\n")
-        s1 = StatsStore(tmp_path / "a.db"); s1.open()
-        s2 = StatsStore(tmp_path / "b.db"); s2.open()
+        s1 = StatsStore(tmp_path / "a.db")
+        s1.open()
+        s2 = StatsStore(tmp_path / "b.db")
+        s2.open()
         try:
             now = time.time()
             s1.set_meta("last_report_sent_daily", str(int(now - 2 * DAY)))  # due
@@ -250,12 +282,14 @@ class TestAggregate:
             # dedup stamp lands in the designated meta store
             assert s1.get_meta("last_report_sent_daily") == str(int(now))
         finally:
-            s1.close(); s2.close()
+            s1.close()
+            s2.close()
 
     @pytest.mark.unit
     def test_multi_disabled_or_empty(self, tmp_path):
         off = _config("ups:\n  - name: A@h\nreports:\n  enabled: false\n  daily: true\n")
-        s = StatsStore(tmp_path / "m.db"); s.open()
+        s = StatsStore(tmp_path / "m.db")
+        s.open()
         try:
             assert reports.maybe_send_due_reports_multi(
                 off, [("A@h", s, off.energy)], s, lambda *a: None) == []
@@ -271,7 +305,8 @@ class TestAggregate:
     def test_multi_first_sight_seeds_and_corrupt_meta(self, tmp_path):
         cfg = _config("ups:\n  - name: A@h\nreports:\n  enabled: true\n"
                       "  daily: true\n  time: '08:00'\n")
-        s = StatsStore(tmp_path / "m.db"); s.open()
+        s = StatsStore(tmp_path / "m.db")
+        s.open()
         try:
             # First sight: no explicit now -> seeds baseline, sends nothing.
             assert reports.maybe_send_due_reports_multi(
@@ -288,7 +323,8 @@ class TestAggregate:
     @pytest.mark.unit
     def test_multi_schedule_error_is_skipped(self, tmp_path, monkeypatch):
         cfg = _config("ups:\n  - name: A@h\nreports:\n  enabled: true\n  daily: true\n")
-        s = StatsStore(tmp_path / "m.db"); s.open()
+        s = StatsStore(tmp_path / "m.db")
+        s.open()
         monkeypatch.setattr(reports, "schedule_for_period",
                             lambda *a, **k: (_ for _ in ()).throw(ValueError("bad")))
         try:

@@ -1263,20 +1263,25 @@ class StatsStore:
         except (TypeError, ValueError):
             payload = None
         try:
-            with self._db_lock, self._conn:
-                self._conn.execute(
-                    """
-                    INSERT OR REPLACE INTO battery_health
-                        (ts, score, capacity, runtime, self_test, anomaly, age, detail)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        row_ts, score,
-                        terms.get("capacity"), terms.get("runtime"),
-                        terms.get("self_test"), terms.get("anomaly"),
-                        terms.get("age"), payload,
-                    ),
-                )
+            with self._db_lock:
+                # Re-check under the lock: close() nulls _conn while holding the
+                # lock, so the pre-lock check above can race a concurrent close.
+                if self._conn is None:
+                    return
+                with self._conn:
+                    self._conn.execute(
+                        """
+                        INSERT OR REPLACE INTO battery_health
+                            (ts, score, capacity, runtime, self_test, anomaly, age, detail)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            row_ts, score,
+                            terms.get("capacity"), terms.get("runtime"),
+                            terms.get("self_test"), terms.get("anomaly"),
+                            terms.get("age"), payload,
+                        ),
+                    )
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: record_battery_health failed: {e}")
 
@@ -1293,6 +1298,8 @@ class StatsStore:
             return []
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return []
                 cur = self._conn.execute(
                     """
                     SELECT ts, score, capacity, runtime, self_test, anomaly, age, detail
@@ -1340,18 +1347,21 @@ class StatsStore:
             return None
         row_ts = int(started_ts if started_ts is not None else time.time())
         try:
-            with self._db_lock, self._conn:
-                cur = self._conn.execute(
-                    """
-                    INSERT INTO self_tests
-                        (started_ts, command, result_raw, result_enum,
-                         result_date, source)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (row_ts, str(command), result_raw, result_enum,
-                     result_date, str(source)),
-                )
-                return int(cur.lastrowid)
+            with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return None
+                with self._conn:
+                    cur = self._conn.execute(
+                        """
+                        INSERT INTO self_tests
+                            (started_ts, command, result_raw, result_enum,
+                             result_date, source)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (row_ts, str(command), result_raw, result_enum,
+                         result_date, str(source)),
+                    )
+                    return int(cur.lastrowid)
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: record_self_test failed: {e}")
             return None
@@ -1368,15 +1378,18 @@ class StatsStore:
         if self._conn is None:
             return
         try:
-            with self._db_lock, self._conn:
-                self._conn.execute(
-                    """
-                    UPDATE self_tests
-                    SET result_raw = ?, result_enum = ?, result_date = ?
-                    WHERE id = ?
-                    """,
-                    (result_raw, result_enum, result_date, int(test_id)),
-                )
+            with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return
+                with self._conn:
+                    self._conn.execute(
+                        """
+                        UPDATE self_tests
+                        SET result_raw = ?, result_enum = ?, result_date = ?
+                        WHERE id = ?
+                        """,
+                        (result_raw, result_enum, result_date, int(test_id)),
+                    )
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: update_self_test_result failed: {e}")
 
@@ -1386,6 +1399,8 @@ class StatsStore:
             return None
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return None
                 cur = self._conn.execute(
                     """
                     SELECT id, started_ts, command, result_raw, result_enum,
@@ -1433,6 +1448,8 @@ class StatsStore:
             table = "agg_5min" if tier == "agg_5min" else "agg_hourly"
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return []
                 cur = self._conn.execute(
                     f"SELECT {cols} FROM {table} "
                     "WHERE ts BETWEEN ? AND ? ORDER BY ts ASC",
@@ -1482,6 +1499,8 @@ class StatsStore:
         tier = prefer_tier or self._pick_tier(start_ts, end_ts)
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return []
                 if tier == "samples":
                     column = metric
                     cur = self._conn.execute(

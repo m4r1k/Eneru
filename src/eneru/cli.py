@@ -1973,11 +1973,17 @@ def _self_test_run_direct(config, group, name):
         print(f"UPS {name} does not expose {command!r} (upscmd -l); nothing to do.")
         sys.exit(1)
     store = _open_stats_store(config, group)
+    if store is None:
+        # Without the stats DB the issued test records no `running` row, so its
+        # result can never be polled/finalised (`self-test status` would be
+        # blind) — refuse rather than silently orphan the test.
+        print("Cannot record the self-test: the stats DB is unavailable. "
+              "Refusing to issue a test whose result could not be tracked.")
+        sys.exit(1)
     try:
         result = selftest.issue_self_test(name, cmd, nc, store, source="cli")
     finally:
-        if store is not None:
-            store.close()
+        store.close()
     if result.get("ok"):
         print(f"✅  Self-test issued on {name} (command {cmd}).")
         print("   Re-run `eneru self-test status` once the test completes.")

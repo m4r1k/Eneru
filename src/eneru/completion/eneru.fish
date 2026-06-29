@@ -114,6 +114,9 @@ complete -c eneru -n '__eneru_using self-test' -f -a 'status' -d 'Show the lates
 complete -c eneru -n '__eneru_using self-test' -l ups -r -d 'UPS name'
 complete -c eneru -n '__eneru_using self-test' -s c -l config -r -d 'Path to configuration file'
 complete -c eneru -n '__eneru_using self-test' -l direct -d 'Issue directly via NUT (no daemon)'
+complete -c eneru -n '__eneru_using self-test' -l url -r -d 'Daemon API base URL'
+complete -c eneru -n '__eneru_using self-test' -l token -r -d 'Bearer session token for the daemon API'
+complete -c eneru -n '__eneru_using self-test' -l api-key -r -d 'API key for the daemon API'
 
 # Global options.
 complete -c eneru -s h -l help -d 'Show help and exit'

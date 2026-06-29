@@ -2503,6 +2503,51 @@ class TestClosedConnectionGuards:
         s.set_meta("k", "v")
 
 
+class TestV7ConnRaceUnderLock:
+    """The v7 store APIs must re-check ``_conn`` AFTER acquiring ``_db_lock``.
+
+    ``close()`` nulls ``_conn`` while holding the lock, so a pre-lock-only check
+    races a concurrent close. We simulate the race by nulling ``_conn`` from
+    inside the lock (so the pre-lock check passed but the in-lock body sees
+    None) and asserting every v7 method returns safely instead of crashing on
+    ``None.execute``.
+    """
+
+    def _store_that_nulls_conn_under_lock(self, tmp_path):
+        s = StatsStore(tmp_path / "race.db")
+        s.open()
+        real_conn = s._conn
+
+        class _RaceLock:
+            def __enter__(self_lock):
+                # Pre-lock check already saw a live _conn; the acquirer now
+                # races a close() that nulls it under the lock.
+                s._conn = None
+                return True
+
+            def __exit__(self_lock, *exc):
+                return False
+
+        s._db_lock = _RaceLock()
+        return s, real_conn
+
+    @pytest.mark.unit
+    def test_all_v7_methods_survive_conn_race(self, tmp_path):
+        s, real_conn = self._store_that_nulls_conn_under_lock(tmp_path)
+        try:
+            # None of these may raise; they return the safe empty/None sentinel.
+            assert s.record_battery_health(50.0, {"capacity": 50.0}) is None
+            assert s.query_battery_health(0, 9999) == []
+            assert s.record_self_test("test.battery.start", "scheduler") is None
+            assert s.update_self_test_result(
+                1, result_raw="x", result_enum="passed") is None
+            assert s.latest_self_test() is None
+            assert s.power_samples(0, 9999) == []
+            assert s.query_range("battery_charge", 0, 9999) == []
+        finally:
+            real_conn.close()
+
+
 class TestStatsOpenErrors:
     """``open()`` must surface a clear log when the parent mkdir fails
     (stats.py lines 184-186)."""
