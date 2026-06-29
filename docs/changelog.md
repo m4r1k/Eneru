@@ -46,9 +46,11 @@ of real-world dashboard feedback.
 - **Energy tab** is now a dual-line **load% + power (W)** chart via the new
   `GET /api/v1/ups/{name}/power`; cost rows render even when configured-but-unknown
   (the misleading "set cost_per_kwh" hint no longer shows once it's set).
-- Range is shared across the Power / Battery / Energy tabs; chart loads guard
-  against stale async races; the Energy/Battery/Power charts keep working through
-  overlapping refreshes.
+- Range **and the selected UPS** are shared across the Power / Battery / Energy
+  tabs; chart loads guard against stale async races; the charts keep working
+  through overlapping refreshes.
+- Chart event markers are hoverable along the whole vertical guide (not just the
+  3px dot), and the tooltip carries the full event description (type, time, detail).
 - Monochrome (grayscale) emoji on the tab labels; chart event markers **and** the
   default Events view are restricted to tier-1 power events (no daemon-start /
   upgrade noise) with descriptive tooltips; the event-type dropdown closes on an

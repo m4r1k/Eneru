@@ -150,17 +150,26 @@ function formatRuntimeSeconds(value) {
   return seconds + "s";
 }
 
-// Populate every per-chart UPS <select> with the current UPS list, preserving
-// the operator's existing selection where it still exists.
+const CHART_UPS_SELECTS = ["power-ups", "battery-ups", "energy-ups"];
+
+// Populate every per-chart UPS <select> with the current UPS list, keeping the
+// selection SHARED across the Power/Battery/Energy tabs (like the Range control)
+// so switching tabs doesn't snap back to a different UPS.
 function populateChartUpsSelects(rows) {
-  ["power-ups", "battery-ups", "energy-ups"].forEach((id) => {
+  // Prefer an existing selection that is still valid; else the first UPS.
+  let chosen = "";
+  for (const id of CHART_UPS_SELECTS) {
+    const s = document.getElementById(id);
+    if (s && s.value) { chosen = s.value; break; }
+  }
+  if (!rows.some((u) => u.name === chosen)) chosen = rows.length ? rows[0].name : "";
+  CHART_UPS_SELECTS.forEach((id) => {
     const sel = document.getElementById(id);
     if (!sel) return;
-    const prev = sel.value;
     sel.replaceChildren();
     rows.forEach((u) =>
       sel.appendChild(el("option", { value: u.name, text: u.label || u.name })));
-    if (rows.some((u) => u.name === prev)) sel.value = prev;
+    if (chosen) sel.value = chosen;
   });
 }
 
@@ -743,12 +752,40 @@ function isTier1Event(type) {
   return TIER1_EVENT_PATTERNS.some((p) => u.includes(p));
 }
 
-// Human-readable one-liner for a chart event marker's tooltip.
+// Human-readable tooltip for a chart event marker.
 function eventDescription(e) {
   const type = e.eventType || e.event || "event";
   const when = e.ts ? new Date(e.ts * 1000).toLocaleString() : "";
   const detail = e.detail || e.details || "";
   return type + (when ? (" @ " + when) : "") + (detail ? ("\n" + detail) : "");
+}
+
+// Append one event marker (vertical guide + dot) wrapped in a <g> whose <title>
+// covers the whole group, plus a wide transparent hit line, so hovering anywhere
+// along the guide shows the tooltip (the bare 3px dot was nearly impossible to
+// hit). `e` carries the event; cls is the color class.
+function appendEventMarker(svg, e, ex, top, bottom) {
+  const cls = eventMarkerClass(e.eventType || e.event);
+  const g = document.createElementNS(SVG_NS, "g");
+  const title = document.createElementNS(SVG_NS, "title");
+  title.textContent = eventDescription(e);
+  g.appendChild(title);
+  const mkline = (cssClass) => {
+    const l = document.createElementNS(SVG_NS, "line");
+    l.setAttribute("x1", ex); l.setAttribute("y1", top);
+    l.setAttribute("x2", ex); l.setAttribute("y2", bottom);
+    l.setAttribute("class", cssClass);
+    l.setAttribute("vector-effect", "non-scaling-stroke");
+    g.appendChild(l);
+  };
+  mkline("ev-hit");                 // wide transparent hover target
+  mkline("ev-line " + cls);         // the visible guide
+  const dot = document.createElementNS(SVG_NS, "circle");
+  dot.setAttribute("cx", ex); dot.setAttribute("cy", String(top + 3));
+  dot.setAttribute("r", "4");
+  dot.setAttribute("class", "ev-dot " + cls);
+  g.appendChild(dot);
+  svg.appendChild(g);
 }
 
 function isVoltageMetric(metric) {
@@ -836,17 +873,7 @@ function drawChart(hostId, series, options) {
       ? inRange.filter((_e, i) => i % Math.ceil(inRange.length / MAX) === 0)
       : inRange;
     shown.forEach((e) => {
-      const ex = x(e.ts);
-      line(ex.toFixed(1), 5, ex.toFixed(1), (H - pad).toFixed(1),
-        "ev-line " + eventMarkerClass(e.eventType || e.event));
-      const dot = document.createElementNS(SVG_NS, "circle");
-      dot.setAttribute("cx", ex.toFixed(1)); dot.setAttribute("cy", "8");
-      dot.setAttribute("r", "3");
-      dot.setAttribute("class", "ev-dot " + eventMarkerClass(e.eventType || e.event));
-      const title = document.createElementNS(SVG_NS, "title");
-      title.textContent = eventDescription(e);
-      dot.appendChild(title);
-      svg.appendChild(dot);
+      appendEventMarker(svg, e, x(e.ts).toFixed(1), 5, (H - pad).toFixed(1));
     });
     if (inRange.length > shown.length) {
       const note = document.createElementNS(SVG_NS, "text");
@@ -1038,17 +1065,7 @@ function drawEnergyChart(hostId, rows, options) {
   // tier-1 event markers (already filtered upstream).
   (options.events || []).filter((e) => e.ts >= t0 && e.ts <= t1).slice(0, 100)
     .forEach((e) => {
-      const ex = x(e.ts);
-      mkline(ex.toFixed(1), 5, ex.toFixed(1), (H - pad).toFixed(1),
-        "ev-line " + eventMarkerClass(e.eventType || e.event));
-      const dot = document.createElementNS(SVG_NS, "circle");
-      dot.setAttribute("cx", ex.toFixed(1)); dot.setAttribute("cy", "8");
-      dot.setAttribute("r", "3");
-      dot.setAttribute("class", "ev-dot " + eventMarkerClass(e.eventType || e.event));
-      const ttl = document.createElementNS(SVG_NS, "title");
-      ttl.textContent = eventDescription(e);
-      dot.appendChild(ttl);
-      svg.appendChild(dot);
+      appendEventMarker(svg, e, x(e.ts).toFixed(1), 5, (H - pad).toFixed(1));
     });
 
   function plot(key, sc, cls) {
@@ -1652,10 +1669,21 @@ async function init() {
       onTabActivated(activeTab);  // redraw whichever chart is showing
     });
   });
-  // Non-range controls reload their own chart on change.
-  [["power-ups", "power"], ["power-metric", "power"],
-   ["battery-ups", "battery"], ["battery-metric", "battery"],
-   ["energy-ups", "energy"]].forEach(([id, chart]) => {
+  // Shared UPS selection across Power/Battery/Energy (mirrors the Range sync) so
+  // switching tabs keeps the same UPS in view.
+  CHART_UPS_SELECTS.forEach((id) => {
+    const node = document.getElementById(id);
+    if (!node) return;
+    node.addEventListener("change", () => {
+      CHART_UPS_SELECTS.forEach((other) => {
+        const s = document.getElementById(other);
+        if (s && s.value !== node.value) s.value = node.value;
+      });
+      onTabActivated(activeTab);   // redraw whichever chart is showing
+    });
+  });
+  // Metric selects reload only their own chart.
+  [["power-metric", "power"], ["battery-metric", "battery"]].forEach(([id, chart]) => {
     const node = document.getElementById(id);
     if (node) node.addEventListener("change", () => charts[chart] && charts[chart].load());
   });

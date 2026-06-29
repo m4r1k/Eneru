@@ -374,9 +374,25 @@ def test_dashboard_shared_range_and_cost_hint(minimal_config):
     js = _handler(minimal_config, path="/app.js")._serve_static(
         "/app.js")[1].decode("utf-8")
     assert "RANGE_SELECTS" in js
+    # UPS selection is shared across the chart tabs too (like Range).
+    assert "CHART_UPS_SELECTS" in js
     # Cost hint keys off whether cost is CONFIGURED, not whether a value exists.
     assert "energyCostConfigured" in js
     assert '"todayCost" in en' in js
+
+
+@pytest.mark.unit
+def test_dashboard_event_markers_are_hoverable(minimal_config):
+    # The whole vertical guide (not just the 3px dot) must be hoverable and the
+    # tooltip must carry the event description (type + time + detail).
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    assert "function appendEventMarker" in js
+    assert "function eventDescription" in js
+    assert "ev-hit" in js
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    assert ".ev-hit" in css and "stroke: transparent" in css
 
 
 @pytest.mark.unit
