@@ -469,6 +469,32 @@ def test_dashboard_line_quality_card(minimal_config):
 
 
 @pytest.mark.unit
+def test_dashboard_rc11_surfaces(minimal_config):
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    # Shutdown tab: nav button + panel + DAG renderer.
+    assert 'data-tab="shutdown"' in html and 'id="panel-shutdown"' in html
+    assert 'id="shutdown-plan"' in html
+    assert "function renderShutdownPlan" in js and "shutdown-plan" in js
+    assert ".sd-flow" in css and ".sd-node" in css
+    # Battery: per-term breakdown + score trend graph (new history endpoint).
+    assert "BH_TERM_LABELS" in js and "function renderBatteryHealthGraph" in js
+    assert "battery-health-history" in js
+    assert 'id="bh-graph"' in html
+    # Temperature is graphable on the Battery tab.
+    assert '<option value="temperature"' in html
+    # Events table: colored, icon-led type badges.
+    assert "function eventTypeBadge" in js and ".ev-badge" in css
+    # Energy: this-year window.
+    assert "yearKwh" in js and "This year" in js
+    # Event-marker hover works over the whole column (decoration non-interactive).
+    assert "pointer-events: none" in css
+
+
+@pytest.mark.unit
 def test_dashboard_json_tree_preserves_state_and_drops_counts(minimal_config):
     # The config JSON tree must not collapse on every 10s poll (rebuild only when
     # the config changed) and must not show the ugly per-section item count.

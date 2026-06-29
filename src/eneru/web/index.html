@@ -44,6 +44,8 @@
             aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
     <button class="tab" role="tab" id="tab-control" data-tab="control"
             aria-controls="panel-control" aria-selected="false" tabindex="-1" hidden>Control</button>
+    <button class="tab" role="tab" id="tab-shutdown" data-tab="shutdown"
+            aria-controls="panel-shutdown" aria-selected="false" tabindex="-1">Shutdown</button>
     <button class="tab" role="tab" id="tab-config" data-tab="config"
             aria-controls="panel-config" aria-selected="false" tabindex="-1">Config</button>
   </nav>
@@ -105,6 +107,8 @@
              aria-labelledby="tab-battery" tabindex="0" hidden>
       <h2>Battery health</h2>
       <div id="battery-health" class="cards"></div>
+      <div id="bh-graph" class="graph"></div>
+      <p class="chart-note" id="bh-graph-note" hidden></p>
       <h2>History</h2>
       <div class="graph-controls">
         <label>UPS <select id="battery-ups"></select></label>
@@ -113,6 +117,7 @@
             <option value="charge">Battery charge (%)</option>
             <option value="runtime">Runtime</option>
             <option value="load">Load (%)</option>
+            <option value="temperature">Temperature (°C)</option>
           </select>
         </label>
         <label>Range
@@ -198,6 +203,13 @@
       <p id="control-empty" class="chart-note">
         Control is available when you are signed in and UPS control is enabled.
       </p>
+    </section>
+
+    <!-- Shutdown ------------------------------------------------------------ -->
+    <section id="panel-shutdown" class="panel" role="tabpanel"
+             aria-labelledby="tab-shutdown" tabindex="0" hidden>
+      <h2>Shutdown plan</h2>
+      <div id="shutdown-plan"></div>
     </section>
 
     <!-- Config -------------------------------------------------------------- -->

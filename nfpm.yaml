@@ -292,6 +292,13 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/shutdown/plan.py
+    dst: /opt/ups-monitor/eneru/shutdown/plan.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   - src: src/eneru/shutdown/vms.py
     dst: /opt/ups-monitor/eneru/shutdown/vms.py
     file_info:

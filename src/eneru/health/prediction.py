@@ -62,17 +62,28 @@ def runtime_score(current_runtime_s: Optional[float],
 
 
 def capacity_score(runtime_history: List[Tuple[float, float]],
-                   nominal_runtime_s: Optional[float]) -> Optional[float]:
+                   nominal_runtime_s: Optional[float],
+                   *, min_history_days: float = 14.0) -> Optional[float]:
     """Capacity degradation inferred from the runtime TREND, not instantaneous
     charge (which is state-of-charge, not capacity).
 
     ``runtime_history`` is ``[(ts, runtime_s)]``. A flat or rising trend scores
     100; a decline scores lower in proportion to how fast runtime is dropping
-    relative to the nominal runtime. Unavailable with fewer than two points or
-    no nominal to normalise against.
+    relative to the nominal runtime. Unavailable with fewer than two points, no
+    nominal to normalise against, or a history span shorter than
+    ``min_history_days``.
+
+    The span guard matters: the term projects the observed slope across 30 days,
+    so estimating that slope from only a few hours of data turns ordinary
+    sample-to-sample jitter into a phantom "total capacity loss" and clamps the
+    term to 0 (the v6.1 bug where a brand-new battery scored ~60). Until there is
+    enough span to trust the trend, capacity is *unknown* — not a confident zero.
     """
     if (nominal_runtime_s is None or nominal_runtime_s <= 0
             or len(runtime_history) < 2):
+        return None
+    span_days = (runtime_history[-1][0] - runtime_history[0][0]) / 86400.0
+    if span_days < min_history_days:
         return None
     slope = least_squares_slope(runtime_history)  # runtime_s per second
     if slope is None or slope >= 0:
@@ -120,10 +131,12 @@ def compute_terms(*, current_runtime_s: Optional[float],
                   anomaly_count: int,
                   battery_install_date: Optional[str],
                   expected_life_years: float,
-                  now: float) -> Dict[str, Optional[float]]:
+                  now: float,
+                  min_history_days: float = 14.0) -> Dict[str, Optional[float]]:
     """Compute all five term sub-scores (each 0-100 or None=unavailable)."""
     return {
-        "capacity": capacity_score(runtime_history, nominal_runtime_s),
+        "capacity": capacity_score(runtime_history, nominal_runtime_s,
+                                   min_history_days=min_history_days),
         "runtime": runtime_score(current_runtime_s, nominal_runtime_s),
         "self_test": self_test_score(self_test_result),
         "anomaly": anomaly_score(anomaly_count),

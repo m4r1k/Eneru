@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.0-rc11] - 2026-06-29
+
+Another round of real-hardware dashboard feedback, a battery-score fix, a new
+shutdown-plan view, and the last unanswered AI-review cycle.
+
+### Fixed
+
+- **Battery-health score was too aggressive on new batteries.** The capacity
+  term extrapolated a runtime trend over 30 days with no minimum-history guard,
+  so a few days of jitter clamped it to 0 and dragged an otherwise-healthy
+  battery to ~60. It now reports *unavailable* until there is at least
+  `replacement.min_history_days` of history (the score then reflects the terms
+  that actually have data — e.g. ~97 at lower confidence for a new battery).
+- **Chart event markers are hoverable along their whole column.** The area fill
+  and plot line no longer swallow pointer events, so the tooltip appears wherever
+  you hover the guide, not only above the plotted data.
+- The Battery-tab health card no longer duplicates the score or cramps the term
+  list — it shows a per-term breakdown (each sub-score or n/a) with `?` hints.
+
+### Added
+
+- **Shutdown plan** tab — a read-only, ordered view of exactly what runs on a
+  power-loss shutdown (VMs → containers → filesystem sync/unmount → remote
+  servers → final sync → host poweroff), with parallel groups, per-phase
+  estimates, and skipped phases shown with their reason. Backed by a new
+  `GET /api/v1/ups/{name}/shutdown-plan` derived from config (the execution path
+  is untouched).
+- **Battery-health score trend** graph on the Battery tab, backed by a new
+  `GET /api/v1/ups/{name}/battery-health-history` time series.
+- **Temperature** is graphable on the Battery tab (it was already sampled).
+- **This year** energy + cost window alongside today/month.
+- Events-table type column now shows colored, icon-led severity badges (matching
+  the chart marker colors), and the tier-1 default filter applies reliably.
+- More `?` hints where context helps (battery terms, line-quality states).
+
+### Changed
+
+- The Overview "Last self-test" card is hidden until a self-test has actually
+  run (a "never run" box was noise).
+
 ## [6.1.0-rc10] - 2026-06-29
 
 A second round of dashboard polish from running rc9 on production hardware. No

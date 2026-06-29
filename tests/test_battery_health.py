@@ -112,10 +112,12 @@ class TestCompute:
         cfg = _config("ups:\n  name: U@h\n"
                       "battery_health:\n  nominal_runtime_seconds: 1800\n")
         now = time.time()
+        # Span the two points >= min_history_days (14) apart so the capacity
+        # trend term is trusted (a shorter window is reported as unavailable).
         store.record_battery_health(80.0, {}, detail={"runtime_s": 1800},
-                                    ts=int(now - 10 * DAY))
+                                    ts=int(now - 30 * DAY))
         store.record_battery_health(75.0, {}, detail={"runtime_s": 1600},
-                                    ts=int(now - 5 * DAY))
+                                    ts=int(now - 2 * DAY))
         mon = _Mon(cfg, store)
         mon.state.latest_battery_charge = "100"
         mon.state.latest_runtime = "1700"

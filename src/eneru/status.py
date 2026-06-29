@@ -123,20 +123,24 @@ def _energy_for_monitor(monitor: Any):
         now_dt = datetime.now()
         today_start = int(datetime(now_dt.year, now_dt.month, now_dt.day).timestamp())
         month_start = int(datetime(now_dt.year, now_dt.month, 1).timestamp())
+        year_start = int(datetime(now_dt.year, 1, 1).timestamp())
         today = store.power_samples(today_start, int(now))
         month = store.power_samples(month_start, int(now))
+        year = store.power_samples(year_start, int(now))
         # expected_interval is inferred per window (raw ~check_interval vs
         # aggregated 300s/3600s tiers), so we don't force one here.
         block = energy_mod.summarize(
-            today, month, cost_per_kwh=cfg.cost_per_kwh,
+            today, month, year_samples=year, cost_per_kwh=cfg.cost_per_kwh,
             currency=cfg.currency, cost_format=cfg.cost_format,
             nominal_fallback=getattr(cfg, "nominal_power", None))
         # Tell the UI exactly what each window covers (no "is today 24h or
         # midnight?" guessing) and when each started.
         block["todayLabel"] = "since midnight"
         block["monthLabel"] = now_dt.strftime("since %b 1")
+        block["yearLabel"] = "since Jan 1"
         block["todayStart"] = today_start
         block["monthStart"] = month_start
+        block["yearStart"] = year_start
         return block
     except Exception:
         return None

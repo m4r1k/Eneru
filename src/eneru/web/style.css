@@ -184,6 +184,16 @@ select:focus-visible, input:not([type="checkbox"]):focus-visible {
 .badge.ok { background: rgba(91,214,114,0.15); color: var(--ok); }
 .badge.warn { background: rgba(245,166,35,0.15); color: var(--warn); }
 .badge.crit { background: rgba(255,92,92,0.15); color: var(--crit); }
+.badge.info { background: rgba(167,139,250,0.16); color: #a78bfa; }
+/* Events-table Type cell: icon-led severity badge (matches chart marker color) */
+.ev-badge { display: inline-flex; align-items: center; gap: 0.35rem;
+  padding: 0.12rem 0.55rem; border-radius: 999px; font-size: 0.8rem;
+  font-weight: 600; white-space: nowrap; }
+.ev-badge .ic { width: 13px; height: 13px; }
+.ev-badge.ok { background: var(--ok-weak); color: var(--ok); }
+.ev-badge.warn { background: var(--warn-weak); color: var(--warn); }
+.ev-badge.crit { background: var(--crit-weak); color: var(--crit); }
+.ev-badge.info { background: rgba(167,139,250,0.16); color: #a78bfa; }
 meter.bar { -webkit-appearance: none; appearance: none;
   display: block; width: 100%; height: 8px; margin-top: 0.35rem;
   border: 0; border-radius: 4px; background: var(--panel-2); }
@@ -264,6 +274,9 @@ footer { padding: 0.6rem 1.25rem; color: var(--muted); font-size: 0.85rem;
 .card .row b.ok, .detail-section .row b.ok { color: var(--ok); }
 .card .row b.warn, .detail-section .row b.warn { color: var(--warn); }
 .card .row b.crit, .detail-section .row b.crit { color: var(--crit); }
+.card .row b.na, .detail-section .row b.na { color: var(--muted); font-style: italic;
+  font-weight: 500; }
+.graph .area.bh { fill: var(--accent-weak); }
 meter.bar.ok::-webkit-meter-optimum-value { background: var(--ok); }
 meter.bar.warn::-webkit-meter-optimum-value { background: var(--warn); }
 meter.bar.crit::-webkit-meter-optimum-value { background: var(--crit); }
@@ -383,6 +396,13 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
    FAINT vertical guide that only brightens on hover (a bold full-height line per
    event looked like noise). A wide transparent hit line makes the whole column
    hoverable so the tooltip is easy to summon. */
+/* Chart decoration is non-interactive so an event marker's full-height hit
+   target receives the hover ANYWHERE along its column. The area fill + plot line
+   used to swallow pointer events over the lower part of the guide, so the
+   tooltip only appeared when hovering above the plotted data. */
+.graph .grid, .graph .axis, .graph .area, .graph .plot, .graph .plot-load,
+.graph .plot-watts, .graph .now-dot, .graph .band, .graph .band-edge,
+.graph .band-nominal, .graph .chart-title { pointer-events: none; }
 .graph .ev-line { stroke-width: 1; opacity: 0.12; }
 .graph .ev-hit { stroke: transparent; stroke-width: 11; }
 .graph g:hover .ev-line { opacity: 0.7; }
@@ -392,6 +412,34 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .graph .ev-warn { stroke: var(--warn); fill: var(--warn); }   /* over-voltage / overload */
 .graph .ev-ok   { stroke: var(--ok);   fill: var(--ok); }     /* power restored / recovered */
 .graph .ev-info { stroke: #a78bfa; fill: #a78bfa; }           /* other — violet, not the plot blue */
+
+/* Shutdown plan: an ordered top-to-bottom flow with a connector between phases.
+   Parallel phases lay their steps out side by side; skipped phases are muted. */
+.sd-flow { display: flex; flex-direction: column; margin-top: 0.5rem; }
+.sd-node { position: relative; border: 1px solid var(--line-strong);
+  border-radius: var(--r-md); background: var(--panel); padding: 0.85rem 1rem;
+  box-shadow: var(--shadow-sm); }
+.sd-node + .sd-node { margin-top: 1.4rem; }
+.sd-node + .sd-node::before { content: ""; position: absolute; top: -1.4rem;
+  left: 27px; width: 2px; height: 1.4rem; background: var(--line-strong); }
+.sd-skip { opacity: 0.55; }
+.sd-head { display: flex; align-items: center; gap: 0.6rem; }
+.sd-num { display: inline-grid; place-items: center; width: 26px; height: 26px;
+  border-radius: 999px; background: var(--accent-weak); color: var(--accent);
+  font-size: 0.82rem; font-weight: 700; flex: none; }
+.sd-skip .sd-num { background: var(--panel-2); color: var(--muted); }
+.sd-title { font-weight: 600; }
+.sd-mode { font-size: 0.75rem; font-weight: 600; color: #a78bfa;
+  background: rgba(167,139,250,0.16); padding: 0.08rem 0.45rem; border-radius: 999px; }
+.sd-est { color: var(--muted); font-size: 0.8rem; }
+.sd-head .badge { margin-left: auto; }
+.sd-steps { margin: 0.6rem 0 0 calc(26px + 0.6rem); display: flex;
+  flex-direction: column; gap: 0.4rem; }
+.sd-steps.sd-parallel { flex-direction: row; flex-wrap: wrap; }
+.sd-step { background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--r-sm); padding: 0.4rem 0.65rem; font-size: 0.85rem; }
+.sd-parallel .sd-step { flex: 1 1 200px; }
+.sd-step-detail { color: var(--muted); font-size: 0.78rem; margin-top: 0.15rem; }
 
 /* Energy dual-line chart: load% (kindred accent, translucent) + power (W). */
 .graph .plot-load { stroke: var(--accent); opacity: 0.45; fill: none; }

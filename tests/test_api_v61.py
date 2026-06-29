@@ -265,3 +265,52 @@ class TestPrometheus:
         store.close()
         assert "eneru_ups_energy_kwh{" in text          # kWh present
         assert "eneru_ups_energy_cost{" not in text      # cost omitted
+
+
+class TestShutdownPlanEndpoint:
+    @pytest.mark.unit
+    def test_shutdown_plan_route(self):
+        from types import SimpleNamespace
+        from eneru.api import EneruAPIHandler
+        cfg = _parse_cfg("ups:\n  name: U@h\n")
+        mon = SimpleNamespace(config=cfg)
+        h = object.__new__(EneruAPIHandler)
+        h.api_config = cfg
+        h.api_source = SimpleNamespace(_monitors=[mon])
+        h.api_auth = None
+        h.api_sessions = None
+        h.headers = {}
+        h.path = "/api/v1/ups/U@h/shutdown-plan"
+        status, _, payload = h._route()
+        assert status == 200
+        ids = [p["id"] for p in payload["plan"]["phases"]]
+        assert ids[0] == "vms" and ids[-1] == "local-poweroff"
+        # Unknown UPS -> 404.
+        h.path = "/api/v1/ups/nope/shutdown-plan"
+        assert h._route()[0] == 404
+
+
+class TestBatteryHealthHistoryEndpoint:
+    @pytest.mark.unit
+    def test_history_route(self):
+        from types import SimpleNamespace
+        from eneru.api import EneruAPIHandler
+
+        class _S:
+            def query_battery_health(self, a, b):
+                return [{"ts": 100, "score": 90.0}]
+        cfg = _parse_cfg("ups:\n  name: U@h\n")
+        mon = SimpleNamespace(config=cfg, _stats_store=_S())
+        h = object.__new__(EneruAPIHandler)
+        h.api_config = cfg
+        h.api_source = SimpleNamespace(_monitors=[mon])
+        h.api_auth = None
+        h.api_sessions = None
+        h.headers = {}
+        h.path = "/api/v1/ups/U@h/battery-health-history?from=0&to=200"
+        status, _, payload = h._route()
+        assert status == 200
+        assert payload["data"][0]["score"] == 90.0
+        # Unknown UPS -> 404.
+        h.path = "/api/v1/ups/nope/battery-health-history"
+        assert h._route()[0] == 404

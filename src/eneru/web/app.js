@@ -103,6 +103,7 @@ const ICONS = {
   check:   "M5 12.5 9.5 17 19 7",
   alert:   "M12 4 21 19H3z M12 10v4 M12 16.6v.4",
   close:   "M6 6l12 12 M18 6 6 18",
+  power:   "M12 3v9 M7.8 6.4a7 7 0 1 0 8.4 0",
 };
 function icon(name, cls) {
   const s = document.createElementNS(SVG_NS, "svg");
@@ -115,7 +116,8 @@ function icon(name, cls) {
   return s;
 }
 const TAB_ICONS = { overview: "home", power: "bolt", battery: "battery",
-  energy: "chart", events: "bell", control: "sliders", config: "gear" };
+  energy: "chart", events: "bell", control: "sliders", shutdown: "power",
+  config: "gear" };
 
 // ----- floating tooltip + help hints ---------------------------------------
 // One reused element. Native SVG <title> / title="" only surface after a ~1s
@@ -392,13 +394,16 @@ function renderOverviewSummary(rows) {
       : (en && en.monthKwh != null ? en.monthKwh.toFixed(1) + " kWh this month" : "—"),
     tab: "energy" }));
 
+  // Self-test KPI only when a test has actually run — a "never run" box is noise
+  // (and most UPSes never get one). The Battery tab still explains the term.
   const st = primary.selfTest;
-  const stStatus = st ? ({ passed: "ok", failed: "crit", running: "warn" }[st.result] || null) : null;
-  summary.appendChild(kpiCard({
-    iconName: "check", label: "Last self-test",
-    value: st && st.result ? st.result.charAt(0).toUpperCase() + st.result.slice(1) : "—",
-    cap: st && st.date ? st.date : "never run",
-    valueStatus: stStatus, tab: "battery" }));
+  if (st && st.result) {
+    const stStatus = { passed: "ok", failed: "crit", running: "warn" }[st.result] || null;
+    summary.appendChild(kpiCard({
+      iconName: "check", label: "Last self-test",
+      value: titleCase(st.result),
+      cap: st.date ? st.date : "", valueStatus: stStatus, tab: "battery" }));
+  }
 }
 
 function renderUps(payload) {
@@ -559,20 +564,57 @@ function closeDetail() {
   detailReturnFocus = null;
 }
 
+const BH_TERM_LABELS = {
+  capacity: "Capacity trend", runtime: "Runtime vs nominal",
+  self_test: "Last self-test", anomaly: "Anomalies", age: "Battery age",
+};
+const BH_TERM_HELP = {
+  capacity: "Runtime trend over time vs the nominal full runtime. Needs about "
+    + "two weeks of history before it's trusted — until then it reads n/a rather "
+    + "than guessing (a few days of jitter would otherwise look like total loss).",
+  runtime: "Current runtime under load vs the expected full runtime. n/a until "
+    + "the nominal runtime is configured or learned at a full charge.",
+  self_test: "Result of the latest battery self-test — only a pass or fail counts.",
+  anomaly: "Confirmed battery anomalies; each one lowers the score.",
+  age: "Battery age vs its expected service life (set battery_install_date and "
+    + "expected_life_years).",
+};
+
 // Build the v6.1 battery-health rows shared by the detail modal and the Battery
-// tab. "unknown" is shown honestly rather than a fake high score.
-function batteryHealthRows(bh) {
-  const rows = [
-    detailRow("Score", bh.score != null ? Math.round(bh.score) + "/100" : "unknown"),
-    detailRow("Confidence",
-      bh.confidence != null ? Math.round(bh.confidence * 100) + "%" : null),
-  ];
+// tab. "unknown" is shown honestly rather than a fake high score, and the
+// per-term breakdown explains WHY the score is what it is. ``includeScore`` is
+// false on the Battery tab, where the card's header badge already shows it.
+function batteryHealthRows(bh, opts) {
+  const includeScore = !(opts && opts.includeScore === false);
+  const rows = [];
+  if (includeScore) {
+    rows.push(hintedRow("Score",
+      bh.score != null ? Math.round(bh.score) + "/100" : "unknown",
+      "A weighted average of the available terms below. Terms without enough "
+      + "data are left out (never counted as full marks)."));
+  }
+  if (bh.confidence != null) {
+    rows.push(hintedRow("Confidence", Math.round(bh.confidence * 100) + "%",
+      "How much of the scoring weight had data behind it. Lower means the score "
+      + "rests on fewer terms."));
+  }
   if (bh.replacementDaysRemaining != null) {
     rows.push(detailRow("Replace in", "~" + Math.round(bh.replacementDaysRemaining) + " days"));
   }
-  if ((bh.availableTerms || []).length) {
-    rows.push(detailRow("Terms", bh.availableTerms.join(", ")));
-  }
+  // Per-term breakdown: each sub-score (0-100) or n/a when that term has no data.
+  const terms = bh.terms || {};
+  ["capacity", "runtime", "self_test", "anomaly", "age"].forEach((k) => {
+    if (!(k in terms)) return;
+    const v = terms[k];
+    const val = v == null
+      ? el("b", { class: "na", text: "n/a" })
+      : el("b", { class: scoreClass(v), text: String(Math.round(v)) });
+    rows.push(el("div", { class: "row" }, [
+      el("span", { class: "label-tip" },
+        [el("span", { text: BH_TERM_LABELS[k] }), helpHint(BH_TERM_HELP[k])]),
+      val,
+    ]));
+  });
   return rows;
 }
 
@@ -614,11 +656,18 @@ function energyRows(en) {
     rows.push(hintedRow("This month", en.monthKwh.toFixed(3) + " kWh",
       "Window: " + (en.monthLabel || "since the 1st") + "."));
   }
+  if (en.yearKwh != null) {
+    rows.push(hintedRow("This year", en.yearKwh.toFixed(3) + " kWh",
+      "Window: " + (en.yearLabel || "since Jan 1") + "."));
+  }
   if (energyCostConfigured(en)) {
     // Configured but no kWh yet -> "calculating…", not a blunt "unknown".
     rows.push(detailRow("Today cost", en.todayCostFormatted || "calculating…"));
     if (en.monthKwh != null) {
       rows.push(detailRow("Month cost", en.monthCostFormatted || "calculating…"));
+    }
+    if (en.yearKwh != null) {
+      rows.push(detailRow("Year cost", en.yearCostFormatted || "calculating…"));
     }
   }
   return rows;
@@ -838,13 +887,16 @@ function updateEventTypeFilter(rows) {
   const types = Array.from(new Set((rows || [])
     .map((e) => e.eventType || e.event || "")
     .filter((v) => v))).sort();
-  // First time we actually have event types, default to selecting only the
-  // tier-1 events so the table isn't drowned in routine daemon-start / upgrade
-  // rows. The operator can tick the rest on from there.
-  if (!_eventTypeDefaultApplied && types.length) {
+  // Default to selecting only the tier-1 events so the table isn't drowned in
+  // routine daemon-start / upgrade rows. Apply this only once we actually SEE
+  // tier-1 events AND the operator hasn't picked any types yet — burning the
+  // flag on an early all-routine batch was why the default sometimes never took.
+  if (!_eventTypeDefaultApplied) {
     const tier1 = types.filter(isTier1Event);
-    if (tier1.length) selected = new Set(tier1);
-    _eventTypeDefaultApplied = true;
+    if (tier1.length && selected.size === 0) {
+      selected = new Set(tier1);
+      _eventTypeDefaultApplied = true;
+    }
   }
   box.replaceChildren();
   const kept = new Set();
@@ -981,7 +1033,7 @@ function applyEventFilters() {
     }
     cells.push(
       el("td", { text: ts }),
-      el("td", { text: e.eventType || e.event || "" }),
+      el("td", null, [eventTypeBadge(e)]),
       el("td", { text: e.detail || e.details || "" }),
     );
     body.appendChild(el("tr", null, cells));
@@ -1046,6 +1098,16 @@ function eventMarkerClass(type) {
       || t.includes("AVR") || t.includes("WARNING") || t.includes("ANOMALY")
       || t.includes("REPLACE")) return "ev-warn";
   return "ev-info";
+}
+
+// Events-table Type cell: a colored, icon-led badge whose severity matches the
+// chart marker color, so a marker and its row read the same at a glance.
+function eventTypeBadge(e) {
+  const type = e.eventType || e.event || "";
+  const cls = eventMarkerClass(type);
+  const tone = { "ev-ok": "ok", "ev-warn": "warn", "ev-crit": "crit" }[cls] || "info";
+  const ico = { "ev-ok": "check", "ev-warn": "alert", "ev-crit": "alert" }[cls] || "bell";
+  return el("span", { class: "ev-badge " + tone }, [icon(ico), el("span", { text: type })]);
 }
 
 // "Tier-1" = the power events an operator actually cares about on a chart or in
@@ -1515,6 +1577,60 @@ function drawEnergyChart(hostId, rows, options) {
   host.appendChild(svg);
 }
 
+// A compact single-series line plot (`[{ts, value}]`) with fixed y-bounds.
+// Lighter than drawChart (no metric dropdown / events / threshold bands) — used
+// for the battery-health score trend. Host must carry class "graph" so the
+// shared chart chrome (grid / plot / area / now-dot / labels) applies.
+function drawSimpleSeries(host, pts, opts) {
+  opts = opts || {};
+  host.replaceChildren();
+  const W = host.clientWidth || 600, H = 220, pad = 30, padR = 12, padT = 18;
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts;
+  const span = Math.max(1, t1 - t0);
+  const lo = opts.min != null ? opts.min : Math.min(...pts.map((p) => p.value));
+  const hi = opts.max != null ? opts.max : Math.max(...pts.map((p) => p.value));
+  const rng = Math.max(1e-9, hi - lo);
+  const x = (ts) => pad + (ts - t0) / span * (W - pad - padR);
+  const y = (v) => padT + (1 - (v - lo) / rng) * (H - padT - pad);
+  for (let i = 0; i <= 4; i++) {
+    const yy = (padT + i / 4 * (H - padT - pad)).toFixed(1);
+    const ln = document.createElementNS(SVG_NS, "line");
+    ln.setAttribute("x1", pad); ln.setAttribute("x2", W - padR);
+    ln.setAttribute("y1", yy); ln.setAttribute("y2", yy);
+    ln.setAttribute("class", "grid"); svg.appendChild(ln);
+  }
+  const txt = (s, xx, yy, cls, anchor) => {
+    const t = document.createElementNS(SVG_NS, "text");
+    t.setAttribute("x", xx); t.setAttribute("y", yy); t.setAttribute("class", cls);
+    if (anchor) t.setAttribute("text-anchor", anchor);
+    t.textContent = s; svg.appendChild(t);
+  };
+  if (opts.title) txt(opts.title, (W / 2).toFixed(0), 11, "chart-title", "middle");
+  txt(Math.round(hi) + (opts.unit || ""), 2, padT + 4, "lbl");
+  txt(Math.round(lo) + (opts.unit || ""), 2, H - pad, "lbl");
+  let d = "";
+  pts.forEach((p, i) => {
+    d += (i ? " L" : "M") + x(p.ts).toFixed(1) + " " + y(p.value).toFixed(1);
+  });
+  const area = document.createElementNS(SVG_NS, "path");
+  area.setAttribute("d", d + " L" + x(t1).toFixed(1) + " " + (H - pad).toFixed(1)
+    + " L" + x(t0).toFixed(1) + " " + (H - pad).toFixed(1) + " Z");
+  area.setAttribute("class", "area bh"); svg.appendChild(area);
+  const line = document.createElementNS(SVG_NS, "path");
+  line.setAttribute("d", d); line.setAttribute("class", "plot");
+  line.setAttribute("vector-effect", "non-scaling-stroke"); svg.appendChild(line);
+  const last = pts[pts.length - 1];
+  const dot = document.createElementNS(SVG_NS, "circle");
+  dot.setAttribute("cx", x(last.ts).toFixed(1));
+  dot.setAttribute("cy", y(last.value).toFixed(1));
+  dot.setAttribute("r", "3"); dot.setAttribute("class", "now-dot");
+  svg.appendChild(dot);
+  host.appendChild(svg);
+}
+
 function makeEnergyChart(opts) {
   const state = { rows: [], events: [] };
   let gen = 0;
@@ -1608,24 +1724,53 @@ function renderBatteryHealthTab() {
   rows.forEach((u) => {
     const bh = u.batteryHealth;
     const st = u.selfTest;
-    const cardRows = [];
     if (bh) {
       const scoreTxt = bh.score != null ? Math.round(bh.score) + "/100" : "unknown";
-      cardRows.push(...batteryHealthRows(bh));
-      const card = widgetCard(u.label || u.name, cardRows,
-        { badge: scoreTxt, badgeClass: scoreClass(bh.score) });
-      if (st) {
-        card.appendChild(el("div", { class: "row" }, [
+      // Header badge carries the score, so the rows omit it (no duplicate).
+      const cardRows = batteryHealthRows(bh, { includeScore: false });
+      // Only show a self-test row once a test has actually run.
+      if (st && st.result) {
+        cardRows.push(el("div", { class: "row" }, [
           el("span", { text: "Last self-test" }),
-          el("b", { text: (st.result || "unknown") + (st.date ? (" · " + st.date) : "") }),
+          el("b", { class: { passed: "ok", failed: "crit", running: "warn" }[st.result] || "",
+            text: titleCase(st.result) + (st.date ? (" · " + st.date) : "") }),
         ]));
       }
-      wrap.appendChild(card);
+      wrap.appendChild(widgetCard(u.label || u.name, cardRows,
+        { badge: scoreTxt, badgeClass: scoreClass(bh.score) }));
     } else {
       wrap.appendChild(widgetCard(u.label || u.name,
         [el("p", { class: "chart-note", text: "Battery health not available." })]));
     }
   });
+  renderBatteryHealthGraph();
+}
+
+// Battery-health score trend (v6.1). Sparse rows from the dedicated
+// battery_health table (one per update_interval), so a wide default window.
+async function renderBatteryHealthGraph() {
+  const host = document.getElementById("bh-graph");
+  if (!host) return;
+  const sel = document.getElementById("battery-ups");
+  const name = (sel && sel.value) || (lastUpsRows[0] && lastUpsRows[0].name);
+  if (!name) { host.replaceChildren(); return; }
+  const res = await api("/api/v1/ups/" + encodeURIComponent(name)
+    + "/battery-health-history");
+  const data = (res.ok && res.data && res.data.data) || [];
+  const pts = data.filter((r) => r.score != null)
+    .map((r) => ({ ts: r.ts, value: r.score }));
+  const note = document.getElementById("bh-graph-note");
+  if (pts.length < 2) {
+    host.replaceChildren();
+    if (note) {
+      note.hidden = false;
+      note.textContent = "Health-score trend appears once a couple of readings "
+        + "have been recorded (one per battery_health.update_interval).";
+    }
+    return;
+  }
+  if (note) note.hidden = true;
+  drawSimpleSeries(host, pts, { title: "Health score", unit: "", min: 0, max: 100 });
 }
 
 function renderEnergyTab() {
@@ -2048,7 +2193,7 @@ async function doLogout() {
 // Real ARIA tabs: roving tabindex, arrow-key nav, and URL-hash routing so views
 // are linkable. The 10s refresh redraws only the active tab's chart/widgets.
 
-const TAB_IDS = ["overview", "power", "battery", "energy", "events", "control", "config"];
+const TAB_IDS = ["overview", "power", "battery", "energy", "events", "control", "shutdown", "config"];
 let activeTab = "overview";
 
 function tabButtons() {
@@ -2093,10 +2238,74 @@ function selectTab(name, opts) {
 }
 
 // Draw/refresh whatever the freshly-activated tab needs from the latest data.
+// ----- shutdown plan (DAG view) --------------------------------------------
+// Render the read-only structured shutdown plan as an ordered flow. Enabled
+// phases are prominent; skipped phases are muted with their reason. Parallel
+// phases lay their steps out side by side.
+async function renderShutdownPlan() {
+  const host = document.getElementById("shutdown-plan");
+  if (!host) return;
+  const name = lastUpsRows[0] && lastUpsRows[0].name;
+  if (!name) {
+    host.replaceChildren(el("p", { class: "chart-note", text: "No UPS data yet." }));
+    return;
+  }
+  const res = await api("/api/v1/ups/" + encodeURIComponent(name) + "/shutdown-plan");
+  const plan = res.ok && res.data && res.data.plan;
+  if (!plan) {
+    host.replaceChildren(el("p", { class: "chart-note",
+      text: "Shutdown plan unavailable." }));
+    return;
+  }
+  host.replaceChildren();
+  const intro = el("p", { class: "chart-note" },
+    [el("span", { text: "What runs when a power-loss shutdown is triggered, top "
+      + "to bottom. " })]);
+  if (plan.dryRun) intro.appendChild(el("span", { class: "badge warn", text: "dry-run" }));
+  if (plan.delegated) intro.appendChild(el("span", { class: "badge info", text: "delegated" }));
+  if (plan.coordinatorMode) intro.appendChild(el("span", { class: "badge info", text: "coordinator" }));
+  host.appendChild(intro);
+  if (plan.note) host.appendChild(el("p", { class: "chart-note", text: plan.note }));
+
+  const flow = el("div", { class: "sd-flow" });
+  let n = 0;
+  (plan.phases || []).forEach((p) => {
+    n += 1;
+    const node = el("div", { class: "sd-node" + (p.enabled ? "" : " sd-skip") });
+    const head = el("div", { class: "sd-head" }, [
+      el("span", { class: "sd-num", text: String(n) }),
+      el("span", { class: "sd-title", text: p.title }),
+    ]);
+    if (p.enabled && p.mode === "parallel") {
+      head.appendChild(el("span", { class: "sd-mode", text: "⇉ parallel" }));
+    }
+    if (p.enabled && p.estimateS != null) {
+      head.appendChild(el("span", { class: "sd-est", text: "~" + Math.round(p.estimateS) + "s" }));
+    }
+    if (!p.enabled) {
+      head.appendChild(el("span", { class: "badge", text: p.skipped || "skipped" }));
+    }
+    node.appendChild(head);
+    if (p.enabled && (p.steps || []).length) {
+      const steps = el("div", { class: "sd-steps" + (p.mode === "parallel" ? " sd-parallel" : "") });
+      p.steps.forEach((s) => {
+        const st = el("div", { class: "sd-step" },
+          [el("div", { class: "sd-step-label", text: s.label })]);
+        if (s.detail) st.appendChild(el("div", { class: "sd-step-detail", text: s.detail }));
+        steps.appendChild(st);
+      });
+      node.appendChild(steps);
+    }
+    flow.appendChild(node);
+  });
+  host.appendChild(flow);
+}
+
 function onTabActivated(name) {
   if (name === "power") { renderLineQuality(); if (charts.power) charts.power.load(); }
   else if (name === "battery") { renderBatteryHealthTab(); if (charts.battery) charts.battery.load(); }
   else if (name === "energy") { renderEnergyTab(); if (charts.energy) charts.energy.load(); }
+  else if (name === "shutdown") renderShutdownPlan();
   else if (name === "config") renderConfigTab();
 }
 

@@ -181,8 +181,10 @@ API_ENDPOINTS = (
     {"path": "/api/v1/ups/{name}/variables/{var}", "description": "PUT {value} to set an allowlisted upsrw variable"},
     {"path": "/api/v1/ups/{name}/events", "description": "DELETE selected events {items:[{id,ts,eventType}]} (auth required)"},
     {"path": "/api/v1/ups/{name}/battery-health", "description": "Battery-health score, terms, and replacement projection (v6.1)"},
+    {"path": "/api/v1/ups/{name}/battery-health-history", "description": "Battery-health score trend (time series) for the Battery-tab graph (v6.1)"},
     {"path": "/api/v1/ups/{name}/energy", "description": "Energy (kWh) and optional cost, today/month (v6.1)"},
     {"path": "/api/v1/ups/{name}/power", "description": "Per-sample load% + watts series for the Energy chart (v6.1)"},
+    {"path": "/api/v1/ups/{name}/shutdown-plan", "description": "Structured controlled-shutdown plan (phases, parallel groups, steps) (v6.1)"},
     {"path": "/api/v1/ups/{name}/self-test", "description": "POST to issue a UPS self-test (auth required, allowlisted) (v6.1)"},
     {"path": "/api/v1/config/reload", "description": "POST to re-read config and apply the safe subset live"},
 )
@@ -718,6 +720,45 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 return self._list_commands(ups_name)
             if len(parts) == 6 and parts[5] == "variables":
                 return self._list_variables(ups_name)
+            if len(parts) == 6 and parts[5] == "shutdown-plan":
+                # v6.1: read-only structured shutdown plan (phases, parallel
+                # groups, steps) for the dashboard DAG view. Mirrors the
+                # executor's order without touching the execution path. Built
+                # from the monitor's actual runtime flags so it matches reality.
+                mon = self._monitor_for(ups_name)
+                if mon is None:
+                    return 404, "application/json", self._not_found("UPS not found")
+                from eneru.shutdown.plan import build_shutdown_plan
+                group = (mon.config.ups_groups[0]
+                         if getattr(mon.config, "ups_groups", None) else None)
+                is_local = group.is_local if group is not None else True
+                plan = build_shutdown_plan(
+                    mon.config, is_local=is_local,
+                    delegated=bool(getattr(mon, "_uses_loopback_delegate", False)),
+                    coordinator_mode=bool(getattr(mon, "_coordinator_mode", False)))
+                return 200, "application/json", {"ups": ups_name, "plan": plan}
+            if len(parts) == 6 and parts[5] == "battery-health-history":
+                # v6.1 battery-health score TREND for the Battery-tab graph. The
+                # rows are sparse (one per update_interval), so default to a wide
+                # 90-day window rather than the sample-retention horizon /history
+                # uses, and don't clamp.
+                mon = self._monitor_for(ups_name)
+                if mon is None:
+                    return 404, "application/json", self._not_found("UPS not found")
+                store = getattr(mon, "_stats_store", None)
+                end = _parse_int_param(qs, "to", int(time.time()))
+                start = _parse_int_param(qs, "from", end - 90 * 86400)
+                if start > end:
+                    return 400, "application/json", self._error(
+                        "INVALID_REQUEST", "'from' must be <= 'to'")
+                rows = []
+                if store is not None:
+                    try:
+                        rows = store.query_battery_health(start, end)
+                    except Exception:
+                        rows = []
+                return 200, "application/json", {
+                    "ups": ups_name, "from": start, "to": end, "data": rows}
             if len(parts) == 6 and parts[5] in ("battery-health", "energy"):
                 # v6.1 read endpoints (same data the /status row carries). Build
                 # only the matched monitor's status — not the whole fleet — so a

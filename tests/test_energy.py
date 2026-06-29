@@ -232,3 +232,24 @@ class TestSummarize:
         assert block["monthCost"] is None
         assert block["monthCostFormatted"] is None
         assert block["todayCostFormatted"] is not None
+
+    @pytest.mark.unit
+    def test_year_window_optional_and_backward_compatible(self):
+        s = [(0, 3600.0, None, None), (1, 3600.0, None, None)]
+        # Omitting year_samples keeps the old shape (no year keys).
+        block = summarize(s, s, cost_per_kwh=0.20, expected_interval_s=1)
+        assert "yearKwh" not in block and "yearCost" not in block
+        # Providing it adds yearKwh + (cost configured) yearCost/formatted.
+        block = summarize(s, s, year_samples=s, cost_per_kwh=0.20,
+                          currency="EUR", expected_interval_s=1)
+        assert block["yearKwh"] is not None
+        assert block["yearCost"] is not None
+        assert block["yearCostFormatted"] is not None
+
+    @pytest.mark.unit
+    def test_year_kwh_without_cost(self):
+        s = [(0, 3600.0, None, None), (1, 3600.0, None, None)]
+        block = summarize(s, s, year_samples=s, cost_per_kwh=None,
+                          expected_interval_s=1)
+        assert block["yearKwh"] is not None
+        assert "yearCost" not in block  # cost tracking off

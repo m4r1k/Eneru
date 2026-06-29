@@ -306,6 +306,10 @@ class BatteryMonitorMixin:
             battery_install_date=cfg.battery_install_date,
             expected_life_years=cfg.expected_life_years,
             now=now,
+            # Don't infer a capacity trend from too short a window — the same
+            # min span the replacement projection requires (avoids a confident
+            # zero from a few hours of jitter on a new battery).
+            min_history_days=cfg.replacement.min_history_days,
         )
         score, confidence, available = prediction.composite_score(terms)
         return {

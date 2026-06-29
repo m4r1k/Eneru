@@ -27,25 +27,40 @@ class TestTermScores:
 
     @pytest.mark.unit
     def test_capacity_score_flat_is_full(self):
-        hist = [(0.0, 1800.0), (DAY, 1800.0), (2 * DAY, 1800.0)]
+        # Span must clear min_history_days (default 14) before the trend counts.
+        hist = [(0.0, 1800.0), (15 * DAY, 1800.0), (30 * DAY, 1800.0)]
         assert P.capacity_score(hist, 1800) == 100.0
 
     @pytest.mark.unit
     def test_capacity_score_declining_is_lower(self):
-        # runtime dropping 1800 -> 1700 -> 1600 over 2 days
-        hist = [(0.0, 1800.0), (DAY, 1700.0), (2 * DAY, 1600.0)]
+        # runtime dropping 1800 -> 1700 -> 1600 over a 30-day span
+        hist = [(0.0, 1800.0), (15 * DAY, 1700.0), (30 * DAY, 1600.0)]
         s = P.capacity_score(hist, 1800)
         assert s is not None and 0.0 <= s < 100.0
 
     @pytest.mark.unit
+    def test_capacity_score_short_span_unavailable(self):
+        # A steep decline measured over only a couple of days must NOT
+        # extrapolate to a confident 0 -- too short a window is "unknown"
+        # (this is the v6.1 bug where a brand-new battery scored ~60).
+        short = [(0.0, 1800.0), (DAY, 1500.0), (2 * DAY, 1200.0)]
+        assert P.capacity_score(short, 1800) is None
+        # ...but the same shape over enough span yields a real (low) score.
+        long = [(0.0, 1800.0), (15 * DAY, 1500.0), (30 * DAY, 1200.0)]
+        s = P.capacity_score(long, 1800)
+        assert s is not None and s < 100.0
+
+    @pytest.mark.unit
     def test_capacity_score_unavailable(self):
         assert P.capacity_score([(0.0, 1800.0)], 1800) is None  # <2 points
-        assert P.capacity_score([(0.0, 1800.0), (DAY, 1700.0)], None) is None
+        assert P.capacity_score([(0.0, 1800.0), (30 * DAY, 1700.0)], None) is None
 
     @pytest.mark.unit
     def test_capacity_score_zero_x_variance_is_full(self):
-        # two points at the same ts -> slope undefined -> treated as flat (100)
-        assert P.capacity_score([(5.0, 1800.0), (5.0, 1700.0)], 1800) == 100.0
+        # two points at the same ts -> slope undefined -> treated as flat (100).
+        # Disable the span guard to isolate the slope branch.
+        assert P.capacity_score([(5.0, 1800.0), (5.0, 1700.0)], 1800,
+                                min_history_days=0.0) == 100.0
 
     @pytest.mark.unit
     def test_self_test_score(self):

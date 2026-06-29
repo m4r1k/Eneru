@@ -172,41 +172,48 @@ def format_cost(value: float, currency: str,
 def summarize(today_samples: List[PowerSample],
               month_samples: List[PowerSample], *,
               cost_per_kwh: Optional[float],
+              year_samples: Optional[List[PowerSample]] = None,
               currency: str = "USD",
               cost_format: Optional[str] = None,
               expected_interval_s: Optional[float] = None,
               nominal_fallback: Optional[float] = None) -> Dict:
-    """Build the live ``energy`` status block from two windows' samples.
+    """Build the live ``energy`` status block from the window samples.
 
-    Shape: ``{todayKwh, monthKwh, currency, estimated, partial}`` plus, only
-    when cost tracking is enabled (``cost_per_kwh`` is set),
-    ``todayCost/todayCostFormatted/monthCost/monthCostFormatted``. kWh values
-    are ``None`` when unknown. ``estimated``/``partial`` are the OR across both
-    windows.
+    Shape: ``{todayKwh, monthKwh, currency, estimated, partial}`` (and
+    ``yearKwh`` when ``year_samples`` is given) plus, only when cost tracking is
+    enabled (``cost_per_kwh`` is set), the matching
+    ``*Cost``/``*CostFormatted`` fields. kWh values are ``None`` when unknown.
+    ``estimated``/``partial`` are the OR across all provided windows.
     """
     today = integrate_kwh(today_samples, expected_interval_s=expected_interval_s,
                           nominal_fallback=nominal_fallback)
     month = integrate_kwh(month_samples, expected_interval_s=expected_interval_s,
                           nominal_fallback=nominal_fallback)
+    year = (integrate_kwh(year_samples, expected_interval_s=expected_interval_s,
+                          nominal_fallback=nominal_fallback)
+            if year_samples is not None else None)
 
     block: Dict = {
         "todayKwh": today.kwh,
         "monthKwh": month.kwh,
         "currency": (currency or "USD").upper(),
-        "estimated": today.estimated or month.estimated,
-        "partial": today.partial or month.partial,
+        "estimated": today.estimated or month.estimated
+        or (year.estimated if year else False),
+        "partial": today.partial or month.partial
+        or (year.partial if year else False),
     }
+    if year is not None:
+        block["yearKwh"] = year.kwh
 
     if cost_per_kwh is not None:
-        today_cost = compute_cost(today.kwh, cost_per_kwh)
-        month_cost = compute_cost(month.kwh, cost_per_kwh)
-        block["todayCost"] = today_cost
-        block["monthCost"] = month_cost
-        block["todayCostFormatted"] = (
-            format_cost(today_cost, block["currency"], cost_format)
-            if today_cost is not None else None)
-        block["monthCostFormatted"] = (
-            format_cost(month_cost, block["currency"], cost_format)
-            if month_cost is not None else None)
+        def _cost(kwh):
+            c = compute_cost(kwh, cost_per_kwh)
+            fmt = (format_cost(c, block["currency"], cost_format)
+                   if c is not None else None)
+            return c, fmt
+        block["todayCost"], block["todayCostFormatted"] = _cost(today.kwh)
+        block["monthCost"], block["monthCostFormatted"] = _cost(month.kwh)
+        if year is not None:
+            block["yearCost"], block["yearCostFormatted"] = _cost(year.kwh)
 
     return block
