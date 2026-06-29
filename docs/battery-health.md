@@ -12,7 +12,7 @@ The score is a weighted blend of up to five terms. Each term carries an
 
 | Term | Source | Unavailable when |
 |------|--------|------------------|
-| Capacity degradation | runtime-under-load trend (and self-test) | too little history |
+| Capacity degradation | runtime-under-load trend over the score history | too little history |
 | Runtime vs expected | runtime-under-load vs `nominal_runtime_seconds` | nominal runtime not yet learned |
 | Last self-test | latest normalized self-test result | never self-tested |
 | Confirmed anomalies | `_check_battery_anomaly` counters | (always available) |

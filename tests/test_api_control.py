@@ -307,6 +307,76 @@ def test_set_variable_unknown_ups_404_and_nut_error_502(minimal_config, monkeypa
     assert h._route_put()[0] == 502
 
 
+# ----- self-test endpoint (v6.1) -----
+
+def _src_with_store(name="UPS@h", store=None):
+    from types import SimpleNamespace
+    mon = SimpleNamespace(
+        config=SimpleNamespace(ups=SimpleNamespace(name=name)),
+        _stats_store=store)
+    return SimpleNamespace(_monitors=[mon])
+
+
+@pytest.mark.unit
+def test_store_for_ups_resolves_monitor(minimal_config):
+    # Regression: _run_self_test referenced a nonexistent _store_for_ups -> 500.
+    h = _control_handler(minimal_config, path="/x")
+    h.api_source = _src_with_store("UPS@h", store="STORE")
+    assert h._store_for_ups("UPS@h") == "STORE"
+    assert h._store_for_ups("nope") is None
+
+
+@pytest.mark.unit
+def test_run_self_test_issues(minimal_config, monkeypatch):
+    _enable(minimal_config)
+    minimal_config.nut_control.allowed_commands = ["test.battery.start"]
+    monkeypatch.setattr(apimod.selftest, "discover_self_test_command",
+                        lambda *a, **k: "test.battery.start")
+    monkeypatch.setattr(apimod.selftest, "issue_self_test",
+                        lambda *a, **k: {"ok": True, "test_id": 5, "error": ""})
+    logs = []
+    h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/self-test",
+                         method_body=b"{}", logs=logs)
+    h.api_source = _src_with_store("UPS@h", store=None)
+    h.headers["Authorization"] = f"Bearer {_token(h)}"
+    status, _, payload = h._route_post()
+    assert status == 200 and payload["status"] == "issued" and payload["testId"] == 5
+    assert any("-> ok" in line for line in logs)         # audited
+
+
+@pytest.mark.unit
+def test_run_self_test_unsupported_422(minimal_config, monkeypatch):
+    _enable(minimal_config)
+    minimal_config.nut_control.allowed_commands = ["test.battery.start"]
+    monkeypatch.setattr(apimod.selftest, "discover_self_test_command",
+                        lambda *a, **k: None)   # not exposed by the UPS
+    monkeypatch.setattr(apimod.selftest, "issue_self_test",
+                        lambda *a, **k: pytest.fail("must not issue an unsupported cmd"))
+    h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/self-test",
+                         method_body=b"{}")
+    h.api_source = _src_with_store("UPS@h")
+    h.headers["Authorization"] = f"Bearer {_token(h)}"
+    status, _, payload = h._route_post()
+    assert status == 422 and payload["error"]["code"] == "UNSUPPORTED"
+
+
+@pytest.mark.unit
+def test_run_self_test_denied_not_allowlisted(minimal_config, monkeypatch):
+    _enable(minimal_config)
+    minimal_config.nut_control.allowed_commands = ["beeper.toggle"]
+    minimal_config.self_test.command = "test.battery.start"   # not allowlisted
+    monkeypatch.setattr(apimod.selftest, "issue_self_test",
+                        lambda *a, **k: pytest.fail("must not issue denied cmd"))
+    logs = []
+    h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/self-test",
+                         method_body=b"{}", logs=logs)
+    h.api_source = _src_with_store("UPS@h")
+    h.headers["Authorization"] = f"Bearer {_token(h)}"
+    with pytest.raises(APIForbidden):
+        h._route_post()
+    assert any("denied" in line for line in logs)
+
+
 # ----- audit helper -----
 
 @pytest.mark.unit

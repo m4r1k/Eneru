@@ -2160,6 +2160,11 @@ class UPSGroupMonitor(
         # covers a per-UPS self_test override paired with control disabled).
         if not nc.enabled:
             return
+        # The scheduler needs the stats store to dedup runs (last-run meta) and
+        # record the result row. Without it we can neither track state nor avoid
+        # re-issuing every tick, so skip rather than fire blindly.
+        if store is None:
+            return
 
         # 0) Recover an in-flight test persisted before a restart. The pending id
         # lives in meta (the monotonic poll timer resets across restarts), so a
@@ -2203,20 +2208,27 @@ class UPSGroupMonitor(
         except (TypeError, ValueError):
             last = None
         if not schedule.due(now, last):
-            if last is None and store is not None:
+            if last is None:
                 store.set_meta("self_test_last_run", str(int(now)))  # seed baseline
             return
 
-        # 3) Issue (self-disable if the UPS doesn't expose the command).
-        if store is not None:
-            store.set_meta("self_test_last_run", str(int(now)))
-        cmd = selftest.discover_self_test_command(
-            self._poll_target, cfg.command, timeout=nc.timeout)
+        # 3) Issue. Discover BEFORE stamping last_run so a transient ``upscmd -l``
+        # failure retries next cycle instead of silently burning a (possibly
+        # 30-day) cadence; a genuine "not exposed" still consumes the cycle.
+        try:
+            cmd = selftest.discover_self_test_command(
+                self._poll_target, cfg.command, timeout=nc.timeout)
+        except selftest.SelfTestUnavailable as exc:
+            self._log_message(
+                f"⚠️  self-test discovery failed ({exc}); retrying next cycle")
+            return
         if cmd is None:
+            store.set_meta("self_test_last_run", str(int(now)))  # genuinely unsupported
             self._log_message(
                 f"⚠️  self_test command '{cfg.command}' not exposed by "
                 f"{self._poll_target}; skipping this cycle")
             return
+        store.set_meta("self_test_last_run", str(int(now)))
         result = selftest.issue_self_test(
             self._poll_target, cmd, nc, store, source="scheduler")
         if result["ok"]:

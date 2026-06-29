@@ -790,16 +790,27 @@ class MultiUPSCoordinator:
             self._handle_signal(signal.SIGINT, None)
 
     def _maybe_send_reports(self) -> None:
-        """Send any due daemon-wide reports (multi-UPS). Failure-isolated."""
+        """Send any due daemon-wide reports (multi-UPS). Failure-isolated.
+
+        The digest aggregates EVERY monitor (one per-UPS section each), not just
+        the first. Dedup meta lives in the first monitor's store (a single
+        deterministic place) and delivery goes through that monitor's
+        notification worker once per period.
+        """
         try:
             if not self.config.reports.enabled or not self._monitors:
                 return
             primary = self._monitors[0]
             from eneru import reports as reports_mod
-            reports_mod.maybe_send_due_reports(
+            units = [
+                (m.config.ups.name, getattr(m, "_stats_store", None),
+                 m.config.energy)
+                for m in self._monitors
+            ]
+            reports_mod.maybe_send_due_reports_multi(
                 self.config,
+                units,
                 getattr(primary, "_stats_store", None),
-                primary.config.ups.name,
                 lambda body, ntype, cat: primary._send_notification(
                     body, ntype, category=cat),
             )

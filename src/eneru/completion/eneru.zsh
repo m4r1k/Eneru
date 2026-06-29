@@ -84,6 +84,27 @@ _eneru() {
                         _values 'remote command' list
                     fi
                     ;;
+                self-test)
+                    case "$line[2]" in
+                        run)
+                            _arguments \
+                                '--ups[UPS name]:ups:' \
+                                '(-c --config)'{-c,--config}'[path to configuration file]:config file:_files' \
+                                '--direct[issue directly via NUT, no daemon]' \
+                                '--url[daemon API base URL]:url:' \
+                                '--token[bearer session token]:token:' \
+                                '--api-key[API key]:apikey:'
+                            ;;
+                        status)
+                            _arguments \
+                                '--ups[UPS name]:ups:' \
+                                '(-c --config)'{-c,--config}'[path to configuration file]:config file:_files'
+                            ;;
+                        *)
+                            _values 'self-test command' run status
+                            ;;
+                    esac
+                    ;;
                 validate|test-notifications)
                     _arguments \
                         '(-c --config)'{-c,--config}'[path to configuration file]:config file:_files'

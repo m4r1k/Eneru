@@ -70,6 +70,13 @@ class TestScheduleConstructors:
             Schedule.interval(bad)
 
     @pytest.mark.unit
+    def test_interval_preserves_fractional_seconds(self):
+        # int() truncation used to make interval(0.5) -> 0 (permanently due) and
+        # interval(1.9) -> 1.
+        assert Schedule.interval(0.5).interval_seconds == 0.5
+        assert Schedule.interval(1.9).interval_seconds == 1.9
+
+    @pytest.mark.unit
     def test_calendar_constructors_default_no_fire_on_first(self):
         assert Schedule.daily("08:00").fire_on_first is False
         assert Schedule.weekly("monday", "08:00").fire_on_first is False

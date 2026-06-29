@@ -174,8 +174,14 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .tab:hover { color: var(--text); }
 .tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
 .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.panel { outline: none; }
-.panel:focus-visible { outline: none; }
+/* Monochrome tab icons: desaturate the color emoji so they read as a subtle
+   gray glyph, not a full-color sticker. */
+.tab-emoji { filter: grayscale(1); opacity: 0.75; margin-right: 0.4rem;
+             font-size: 0.95em; }
+.tab[aria-selected="true"] .tab-emoji { opacity: 1; }
+/* Keep a visible focus indicator on a focused panel for keyboard users. */
+.panel:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px;
+                       border-radius: 6px; }
 .panel > h2:first-child { margin-top: 0; }
 
 /* Widget cards with a title + status badge (Battery / Energy tabs) */
@@ -194,6 +200,12 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .graph .ev-crit { stroke: var(--crit); fill: var(--crit); }
 .graph .ev-warn { stroke: var(--warn); fill: var(--warn); }
 .graph .ev-info { stroke: var(--accent); fill: var(--accent); }
+
+/* Energy dual-line chart: load% (kindred accent, translucent) + power (W). */
+.graph .plot-load { stroke: var(--accent); opacity: 0.45; fill: none; }
+.graph .plot-watts { stroke: var(--ok); fill: none; }
+.graph rect.plot-load { stroke: none; fill: var(--accent); opacity: 0.55; }
+.graph rect.plot-watts { stroke: none; fill: var(--ok); }
 
 @media (max-width: 640px) {
   .var-form { grid-template-columns: 1fr; }

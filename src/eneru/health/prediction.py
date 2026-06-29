@@ -17,17 +17,17 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 __all__ = [
-    "TERM_WEIGHTS",
     "MIN_CONFIDENCE",
-    "runtime_score",
-    "capacity_score",
-    "self_test_score",
-    "anomaly_score",
+    "TERM_WEIGHTS",
     "age_score",
-    "compute_terms",
+    "anomaly_score",
+    "capacity_score",
     "composite_score",
+    "compute_terms",
     "least_squares_slope",
     "predict_replacement",
+    "runtime_score",
+    "self_test_score",
 ]
 
 # Default per-term weights. Tunable later; the composite renormalizes over
@@ -183,19 +183,25 @@ def predict_replacement(history: List[Tuple[float, float]], *,
     """
     result = {"due": False, "days_remaining": None, "eta_ts": None,
               "reason": ""}
+    if not history:
+        result["reason"] = "insufficient history"
+        return result
+
+    # Already at/below threshold -> due now, regardless of how much history we
+    # have. A failed battery shouldn't wait for `min_history_days` of trend.
+    last_ts, last_score = history[-1]
+    if last_score <= threshold_score:
+        result.update(due=True, days_remaining=0.0, eta_ts=last_ts,
+                      reason="already below threshold")
+        return result
+
+    # Projecting a future crossing needs a real trend.
     if len(history) < 2:
         result["reason"] = "insufficient history"
         return result
     span_days = (history[-1][0] - history[0][0]) / 86400.0
     if span_days < min_history_days:
         result["reason"] = "insufficient history span"
-        return result
-
-    last_ts, last_score = history[-1]
-    # Already at/below threshold -> due now.
-    if last_score <= threshold_score:
-        result.update(due=True, days_remaining=0.0, eta_ts=last_ts,
-                      reason="already below threshold")
         return result
 
     slope = least_squares_slope(history)  # score per second

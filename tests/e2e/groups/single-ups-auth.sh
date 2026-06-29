@@ -364,7 +364,7 @@ echo ""
 echo ">>> Running: Test 55: Browser dashboard served by embedded API"
 
 apply_scenario online-charging
-timeout 12s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml \
+timeout 12s eneru run --config "$E2E_DIR/config-e2e-dry-run.yaml" \
   > /tmp/test55-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT

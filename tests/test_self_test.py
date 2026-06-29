@@ -68,11 +68,14 @@ class TestDiscover:
             "U@h", "test.battery.start") is None
 
     @pytest.mark.unit
-    def test_none_when_list_fails(self, monkeypatch):
+    def test_list_failure_raises_unavailable(self, monkeypatch):
+        # A transient upscmd -l failure must be distinguishable from "command
+        # genuinely not exposed" (None), so callers can retry instead of skipping
+        # a whole 30-day cadence.
         monkeypatch.setattr(self_test.nutctl, "list_commands",
                             lambda ups, timeout=10: (False, [], "upscmd error"))
-        assert self_test.discover_self_test_command(
-            "U@h", "test.battery.start") is None
+        with pytest.raises(self_test.SelfTestUnavailable):
+            self_test.discover_self_test_command("U@h", "test.battery.start")
 
 
 # --------------------------------------------------------------------------

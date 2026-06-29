@@ -148,6 +148,33 @@ def _self_test_for_monitor(monitor: Any):
     }
 
 
+def power_series(store: Any, start: int, end: int) -> List[Dict[str, Any]]:
+    """Per-sample power for the Energy chart: ``[{ts, loadPct, watts, estimated}]``.
+
+    ``watts`` is ``ups.realpower`` when reported, else the ``load% * nominal``
+    fallback (``estimated=True``), else ``None`` — the same rule energy.py uses
+    for kWh, so the chart and the kWh figure agree.
+    """
+    if store is None:
+        return []
+    from eneru import energy as energy_mod
+    out: List[Dict[str, Any]] = []
+    try:
+        rows = store.power_samples(int(start), int(end))
+    except Exception:
+        return []
+    for ts, real_power, ups_load, power_nominal in rows:
+        watts, estimated = energy_mod.power_sample_w(
+            real_power, ups_load, power_nominal)
+        out.append({
+            "ts": int(ts),
+            "loadPct": ups_load,
+            "watts": watts,
+            "estimated": estimated,
+        })
+    return out
+
+
 def monitor_status(monitor: Any) -> Dict[str, Any]:
     """Return one monitor's live status as a JSON-serializable dict."""
     config = monitor.config

@@ -106,8 +106,12 @@ class TestRunPeriodicTasks:
         mon = _make_monitor(cfg, store)
         mon._update_battery_health_periodic = lambda *a: None
         seen = {}
+
+        def _fake_reports(c, s, name, enq, **k):
+            seen["name"] = name
+            return ["daily"]
         monkeypatch.setattr(monitor_mod.reports_mod, "maybe_send_due_reports",
-                            lambda c, s, name, enq, **k: seen.setdefault("name", name) or ["daily"])
+                            _fake_reports)
         mon._run_periodic_tasks()
         assert seen["name"] == "U@h"
 
@@ -286,6 +290,28 @@ class TestRunSelfTestTask:
         assert any("Self-test result: passed" in m for m in mon.logs)
 
     @pytest.mark.unit
+    def test_store_none_skips_entirely(self):
+        # No store -> can't dedup/record -> skip rather than fire every tick.
+        mon = _make_monitor(_cfg(_ENABLED), None)
+        mon._run_self_test_task()
+        assert mon._self_test_pending_id is None
+
+    @pytest.mark.unit
+    def test_discovery_unavailable_retries_without_consuming_cycle(self, store, monkeypatch):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        store.set_meta("self_test_last_run", "0")     # due now
+
+        def _raise(*a, **k):
+            raise selftest.SelfTestUnavailable("nut down")
+        monkeypatch.setattr(selftest, "discover_self_test_command", _raise)
+        mon._run_self_test_task()
+        assert mon._self_test_pending_id is None
+        assert any("discovery failed" in m for m in mon.logs)
+        # last_run must NOT advance, so the next tick retries instead of waiting
+        # a full (possibly 30-day) cadence.
+        assert store.get_meta("self_test_last_run") == "0"
+
+    @pytest.mark.unit
     def test_pending_poll_not_yet_due(self, store):
         mon = _make_monitor(_cfg(_ENABLED), store)
         mon._self_test_pending_id = 3
@@ -313,8 +339,11 @@ class TestRunSelfTestTask:
         mon._get_ups_var = lambda var: {"ups.test.result": "Done and passed",
                                         "ups.test.date": "2026-06-28"}.get(var)
         recorded = {}
-        monkeypatch.setattr(selftest, "record_self_test_result",
-                            lambda s, tid, raw, date: recorded.setdefault("id", tid) or "passed")
+
+        def _rec(s, tid, raw, date):
+            recorded["id"] = tid
+            return "passed"
+        monkeypatch.setattr(selftest, "record_self_test_result", _rec)
         mon._run_self_test_task()
         assert recorded["id"] == 11                # adopted the persisted id
         assert mon._self_test_pending_id is None   # finalized

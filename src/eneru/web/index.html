@@ -27,19 +27,19 @@
        in app.js. The Control tab is hidden until authenticated + nut_control. -->
   <nav id="tabs" class="tabs" role="tablist" aria-label="Dashboard sections">
     <button class="tab" role="tab" id="tab-overview" data-tab="overview"
-            aria-controls="panel-overview" aria-selected="true">Overview</button>
+            aria-controls="panel-overview" aria-selected="true"><span class="tab-emoji" aria-hidden="true">🏠</span>Overview</button>
     <button class="tab" role="tab" id="tab-power" data-tab="power"
-            aria-controls="panel-power" aria-selected="false" tabindex="-1">Power</button>
+            aria-controls="panel-power" aria-selected="false" tabindex="-1"><span class="tab-emoji" aria-hidden="true">⚡</span>Power</button>
     <button class="tab" role="tab" id="tab-battery" data-tab="battery"
-            aria-controls="panel-battery" aria-selected="false" tabindex="-1">Battery</button>
+            aria-controls="panel-battery" aria-selected="false" tabindex="-1"><span class="tab-emoji" aria-hidden="true">🔋</span>Battery</button>
     <button class="tab" role="tab" id="tab-energy" data-tab="energy"
-            aria-controls="panel-energy" aria-selected="false" tabindex="-1">Energy</button>
+            aria-controls="panel-energy" aria-selected="false" tabindex="-1"><span class="tab-emoji" aria-hidden="true">📈</span>Energy</button>
     <button class="tab" role="tab" id="tab-events" data-tab="events"
-            aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
+            aria-controls="panel-events" aria-selected="false" tabindex="-1"><span class="tab-emoji" aria-hidden="true">🔔</span>Events</button>
     <button class="tab" role="tab" id="tab-control" data-tab="control"
-            aria-controls="panel-control" aria-selected="false" tabindex="-1" hidden>Control</button>
+            aria-controls="panel-control" aria-selected="false" tabindex="-1" hidden><span class="tab-emoji" aria-hidden="true">🎛️</span>Control</button>
     <button class="tab" role="tab" id="tab-config" data-tab="config"
-            aria-controls="panel-config" aria-selected="false" tabindex="-1">Config</button>
+            aria-controls="panel-config" aria-selected="false" tabindex="-1"><span class="tab-emoji" aria-hidden="true">⚙️</span>Config</button>
   </nav>
 
   <div id="banner" class="banner" role="status" hidden></div>
@@ -119,11 +119,13 @@
              aria-labelledby="tab-energy" tabindex="0" hidden>
       <h2>Energy</h2>
       <div id="energy-cards" class="cards"></div>
-      <h2>Load history</h2>
+      <h2>Load &amp; power</h2>
       <div class="graph-controls">
         <label>UPS <select id="energy-ups"></select></label>
         <label>Range
           <select id="energy-range">
+            <option value="3600">Last hour</option>
+            <option value="21600">Last 6 hours</option>
             <option value="86400" selected>Last 24 hours</option>
             <option value="604800">Last 7 days</option>
             <option value="2592000">Last 30 days</option>

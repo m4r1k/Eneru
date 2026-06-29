@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.0-rc7] - 2026-06-29
+
+Addresses an external review plus three more AI-review passes on rc6, and a round
+of real-world dashboard feedback.
+
+### Fixed
+
+- **Critical:** the self-test write path (`POST /api/v1/ups/{name}/self-test`,
+  the dashboard "Run self-test" button, and `eneru self-test run`) called an
+  undefined `_store_for_ups` and returned 500. It now resolves the per-UPS stats
+  store from the live monitor set.
+- The `eneru self-test` CLI opened its `StatsStore` without `open()`, so
+  `--direct` recorded nothing and `status` always read empty; it now opens (and
+  closes) the connection. `--direct` also honors per-UPS `self_test.command`.
+- Config validation checks `self_test.command` against each UPS's **resolved**
+  `nut_control.allowed_commands` (catching a per-UPS-narrowed allowlist) and
+  rejects non-numeric `battery_health` values.
+- `Schedule.interval` keeps fractional seconds (`0.5` no longer truncates to a
+  permanently-due `0`).
+- Replacement prediction fires for an already-below-threshold battery regardless
+  of history depth (the history guard ran first before).
+- `discover_self_test_command` raises on a transient `upscmd -l` failure
+  (distinct from "not exposed"); the scheduler discovers before stamping last-run
+  (so a blip retries instead of burning a cadence) and skips when the stats store
+  is unavailable.
+- Multi-UPS reports are a true daemon-wide digest with a per-UPS section each
+  (not just the first monitor); "Running since" survives long uptimes; the send
+  timestamp is stamped **after** enqueue.
+- API self-test preflights `upscmd -l`; audit writes a typed `CONTROL_SELF_TEST`
+  event; single-UPS battery-health / energy reads no longer compute the whole
+  fleet's status.
+- `self_test` / `reports` are reclassified **SAFE** for hot-reload (their due
+  checks read config live each tick — no registered scheduler to re-init).
+
+### Changed (dashboard)
+
+- **Energy tab** is now a dual-line **load% + power (W)** chart via the new
+  `GET /api/v1/ups/{name}/power`; cost rows render even when configured-but-unknown
+  (the misleading "set cost_per_kwh" hint no longer shows once it's set).
+- Range is shared across the Power / Battery / Energy tabs; chart loads guard
+  against stale async races; the Energy/Battery/Power charts keep working through
+  overlapping refreshes.
+- Monochrome (grayscale) emoji on the tab labels; chart event markers **and** the
+  default Events view are restricted to tier-1 power events (no daemon-start /
+  upgrade noise) with descriptive tooltips; the event-type dropdown closes on an
+  outside click; switching tabs scrolls to the top of the panel; a hidden-tab
+  fallback re-syncs the URL hash; the keyboard focus cue on panels is restored.
+
+### Other
+
+- bash/zsh `self-test` completion branches; `pytest-xdist` added to the declared
+  dev dependencies; the AGENTS Actions pin table refreshed to the current SHAs;
+  the Ubiquiti/TLS-only `upsc` limitation documented (troubleshooting + roadmap
+  backlog).
+
 ## [6.1.0-rc6] - 2026-06-28
 
 ### Added

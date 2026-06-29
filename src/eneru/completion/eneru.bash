@@ -117,6 +117,26 @@ _eneru() {
                 mapfile -t COMPREPLY < <(compgen -W "list $global_opts" -- "$cur")
             fi
             ;;
+        self-test)
+            local st_leaf=""
+            for ((i=2; i < COMP_CWORD; i++)); do
+                case "${COMP_WORDS[i]}" in
+                    -*) continue ;;
+                    run|status) st_leaf="${COMP_WORDS[i]}"; break ;;
+                esac
+            done
+            case "$st_leaf" in
+                run)
+                    mapfile -t COMPREPLY < <(compgen -W "--ups --direct --url --token --api-key $config_opts $global_opts" -- "$cur")
+                    ;;
+                status)
+                    mapfile -t COMPREPLY < <(compgen -W "--ups $config_opts $global_opts" -- "$cur")
+                    ;;
+                *)
+                    mapfile -t COMPREPLY < <(compgen -W "run status $global_opts" -- "$cur")
+                    ;;
+            esac
+            ;;
         validate|test-notifications)
             COMPREPLY=( $(compgen -W "$config_opts $global_opts" -- "$cur") )
             ;;

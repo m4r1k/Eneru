@@ -18,12 +18,19 @@ from eneru.scheduler import Schedule
 
 __all__ = [
     "RESULT_ENUMS",
-    "normalize_result",
+    "SelfTestUnavailable",
     "discover_self_test_command",
     "issue_self_test",
-    "record_self_test_result",
+    "normalize_result",
     "parse_schedule",
+    "record_self_test_result",
 ]
+
+
+class SelfTestUnavailable(Exception):
+    """``upscmd -l`` could not be queried (transient NUT error), as distinct
+    from the command being genuinely unsupported. Callers should retry rather
+    than treating it as 'not exposed'."""
 
 # The normalized result vocabulary the API / Prometheus / UI consume. The raw
 # ``ups.test.result`` string is unbounded and vendor-specific, so it is stored
@@ -54,12 +61,14 @@ def discover_self_test_command(ups_name: str, command: str, *,
                                timeout: int = 10) -> Optional[str]:
     """Return ``command`` if ``upscmd -l`` actually exposes it, else ``None``.
 
-    A ``None`` means the feature self-disables for this UPS (the caller logs
-    it) rather than issuing a command the UPS will reject.
+    ``None`` means the command is genuinely not offered (self-disable for this
+    UPS). A *transient* ``upscmd -l`` failure raises ``SelfTestUnavailable`` so
+    the caller can retry instead of mistaking a dropped connection for an
+    unsupported command (which on a 30-day cadence would skip a whole cycle).
     """
-    ok, commands, _err = nutctl.list_commands(ups_name, timeout=timeout)
+    ok, commands, err = nutctl.list_commands(ups_name, timeout=timeout)
     if not ok:
-        return None
+        raise SelfTestUnavailable(err or "upscmd -l failed")
     return command if command in commands else None
 
 

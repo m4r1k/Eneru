@@ -155,6 +155,14 @@ class TestPredictReplacement:
         assert r["due"] is True and r["days_remaining"] == 0.0
 
     @pytest.mark.unit
+    def test_already_below_with_thin_history_still_due(self):
+        # A failed battery must fire even with a single sub-threshold point: the
+        # already-below check now runs BEFORE the history-length/span guards.
+        r = P.predict_replacement([(0.0, 30.0)], threshold_score=50,
+                                  horizon_days=90, min_history_days=14, now=DAY)
+        assert r["due"] is True and "already below" in r["reason"]
+
+    @pytest.mark.unit
     def test_flat_or_improving_not_due(self):
         hist = [(0.0, 80.0), (30 * DAY, 82.0)]
         r = P.predict_replacement(hist, threshold_score=50, horizon_days=90,

@@ -22,6 +22,8 @@ from eneru.status import (
     config_summary,
     find_status,
     live_remote_health,
+    monitor_status,
+    power_series,
     query_events,
     query_history,
     readiness,
@@ -180,6 +182,7 @@ API_ENDPOINTS = (
     {"path": "/api/v1/ups/{name}/events", "description": "DELETE selected events {items:[{id,ts,eventType}]} (auth required)"},
     {"path": "/api/v1/ups/{name}/battery-health", "description": "Battery-health score, terms, and replacement projection (v6.1)"},
     {"path": "/api/v1/ups/{name}/energy", "description": "Energy (kWh) and optional cost, today/month (v6.1)"},
+    {"path": "/api/v1/ups/{name}/power", "description": "Per-sample load% + watts series for the Energy chart (v6.1)"},
     {"path": "/api/v1/ups/{name}/self-test", "description": "POST to issue a UPS self-test (auth required, allowlisted) (v6.1)"},
     {"path": "/api/v1/config/reload", "description": "POST to re-read config and apply the safe subset live"},
 )
@@ -716,14 +719,40 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             if len(parts) == 6 and parts[5] == "variables":
                 return self._list_variables(ups_name)
             if len(parts) == 6 and parts[5] in ("battery-health", "energy"):
-                # v6.1 read endpoints (same data the /status row carries).
-                payload = collect_status(self.api_source)
-                row = find_status(payload, ups_name)
-                if row is None:
+                # v6.1 read endpoints (same data the /status row carries). Build
+                # only the matched monitor's status — not the whole fleet — so a
+                # single-UPS read doesn't run every other UPS's (DB-heavy) energy
+                # query.
+                mon = self._monitor_for(ups_name)
+                if mon is None:
                     return 404, "application/json", self._not_found("UPS not found")
+                row = monitor_status(mon)
                 key = "batteryHealth" if parts[5] == "battery-health" else "energy"
-                return 200, "application/json", {"ups": row["name"],
-                                                 key: row.get(key)}
+                return 200, "application/json", {
+                    "ups": row.get("name", ups_name), key: row.get(key)}
+            if len(parts) == 6 and parts[5] == "power":
+                # v6.1 Energy-tab series: per-sample load% + watts (realpower or
+                # the load*nominal fallback, flagged estimated). Same retention
+                # window handling as /history.
+                mon = self._monitor_for(ups_name)
+                if mon is None:
+                    return 404, "application/json", self._not_found("UPS not found")
+                end = _parse_int_param(qs, "to", int(time.time()))
+                horizon = end - int(
+                    self.api_config.statistics.retention.agg_hourly_days) * 86400
+                if "from" in qs:
+                    start = _parse_int_param(qs, "from", end - 3600)
+                    if start > end:
+                        return 400, "application/json", self._error(
+                            "INVALID_REQUEST", "'from' must be <= 'to'")
+                    start = max(start, horizon)
+                else:
+                    start = horizon
+                store = getattr(mon, "_stats_store", None)
+                return 200, "application/json", {
+                    "ups": ups_name, "from": start, "to": end,
+                    "data": power_series(store, start, end),
+                }
 
         if path == "/api/v1/events":
             # Cap ``limit`` so a hostile or accidental ``?limit=10000000``
@@ -814,6 +843,20 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             self._audit(principal, "self-test", f"{real}:{command}", "denied")
             raise APIForbidden(
                 f"self_test.command {command!r} is not in allowed_commands")
+        # Preflight against `upscmd -l` like the scheduled/direct paths, so the
+        # API honors the same "self-disable if unsupported" contract the docs
+        # promise rather than letting NUT reject it after the fact.
+        try:
+            exposed = selftest.discover_self_test_command(
+                real, command, timeout=nc.timeout)
+        except selftest.SelfTestUnavailable as exc:
+            self._audit(principal, "self-test", f"{real}:{command}", "failed")
+            return 502, "application/json", self._error("NUT_ERROR", str(exc))
+        if exposed is None:
+            self._audit(principal, "self-test", f"{real}:{command}", "failed")
+            return 422, "application/json", self._error(
+                "UNSUPPORTED",
+                f"UPS {real} does not expose {command!r} (upscmd -l)")
         store = self._store_for_ups(real)
         with _ups_lock(real):
             result = selftest.issue_self_test(
@@ -986,6 +1029,26 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 return group.self_test
         return glob
 
+    def _monitor_for(self, ups_name: str):
+        """Return the live monitor object owning ``ups_name`` (raw or sanitized
+        match), or None. Used to reach a single UPS's stats store / status
+        without walking the whole fleet."""
+        from eneru.status import iter_monitors, sanitize_name
+        target = sanitize_name(ups_name)
+        for mon in iter_monitors(self.api_source):
+            name = getattr(getattr(mon, "config", None), "ups", None)
+            name = getattr(name, "name", None)
+            if name and (name == ups_name or sanitize_name(name) == target):
+                return mon
+        return None
+
+    def _store_for_ups(self, ups_name: str):
+        """The per-UPS stats store for ``ups_name``, or None when unavailable
+        (the store methods no-op on None, matching the daemon's failure
+        isolation)."""
+        mon = self._monitor_for(ups_name)
+        return getattr(mon, "_stats_store", None) if mon is not None else None
+
     def _list_commands(self, ups_name: str) -> Tuple[int, str, Any]:
         self._authorize(write=True)
         self._require_nut_control()
@@ -1086,6 +1149,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         "variable": "CONTROL_VARIABLE",
         "config": "CONFIG_RELOAD",
         "events": "EVENTS_DELETED",
+        "self-test": "CONTROL_SELF_TEST",
     }
 
     @staticmethod

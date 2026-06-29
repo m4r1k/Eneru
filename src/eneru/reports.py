@@ -24,10 +24,12 @@ from eneru.scheduler import Schedule
 
 __all__ = [
     "PERIOD_WINDOW_SECONDS",
+    "build_aggregate_report",
     "build_report",
     "gather_report_sources",
-    "schedule_for_period",
     "maybe_send_due_reports",
+    "maybe_send_due_reports_multi",
+    "schedule_for_period",
 ]
 
 PERIOD_WINDOW_SECONDS = {
@@ -53,38 +55,30 @@ def _fmt_kwh(value: Optional[float]) -> str:
     return f"{value:.3f} kWh" if value is not None else "unknown"
 
 
-def build_report(period: str, sources: Dict, *, include: List[str],
-                 fmt: str = "text") -> Dict:
-    """Assemble a report from pre-fetched ``sources``.
-
-    Returns ``{"subject", "body", "csv"}`` (``csv`` is ``None`` unless
-    ``fmt == "csv"``). ``include`` selects sections (events / battery_health /
-    energy / uptime).
-    """
-    ups = sources.get("ups_name", "UPS")
-    lines = [f"📊 Eneru {period} report — {ups}", ""]
-
+def _section_lines(sources: Dict, include: List[str], *, indent: str = "  ") -> List[str]:
+    """Render the per-UPS report sections (no title) for one sources dict."""
+    lines: List[str] = []
     if "energy" in include:
         e = sources.get("energy") or {}
         lines.append("Energy:")
-        lines.append(f"  Today: {_fmt_kwh(e.get('todayKwh'))}"
+        lines.append(f"{indent}Today: {_fmt_kwh(e.get('todayKwh'))}"
                      + (f"  ({e['todayCostFormatted']})"
                         if e.get("todayCostFormatted") else ""))
-        lines.append(f"  Month: {_fmt_kwh(e.get('monthKwh'))}"
+        lines.append(f"{indent}Month: {_fmt_kwh(e.get('monthKwh'))}"
                      + (f"  ({e['monthCostFormatted']})"
                         if e.get("monthCostFormatted") else ""))
         if e.get("estimated"):
-            lines.append("  (estimated — UPS does not report real power)")
+            lines.append(f"{indent}(estimated — UPS does not report real power)")
         lines.append("")
 
     if "battery_health" in include:
         bh = sources.get("battery_health")
         lines.append("Battery health:")
         if bh and bh.get("score") is not None:
-            lines.append(f"  Score: {bh['score']:.0f}/100"
+            lines.append(f"{indent}Score: {bh['score']:.0f}/100"
                          f" (confidence {bh.get('confidence', 0):.0%})")
         else:
-            lines.append("  Score: unknown (insufficient telemetry)")
+            lines.append(f"{indent}Score: unknown (insufficient telemetry)")
         lines.append("")
 
     if "events" in include:
@@ -95,9 +89,9 @@ def build_report(period: str, sources: Dict, *, include: List[str],
         lines.append(f"Power events ({len(events)} total):")
         if counts:
             for etype in sorted(counts):
-                lines.append(f"  {etype}: {counts[etype]}")
+                lines.append(f"{indent}{etype}: {counts[etype]}")
         else:
-            lines.append("  none")
+            lines.append(f"{indent}none")
         lines.append("")
 
     if "uptime" in include:
@@ -107,23 +101,58 @@ def build_report(period: str, sources: Dict, *, include: List[str],
         since_txt = (datetime.fromtimestamp(since).isoformat(timespec="minutes")
                      if since else "unknown")
         lines.append("Uptime:")
-        lines.append(f"  Daemon starts in window: {starts}")
-        lines.append(f"  Running since: {since_txt}")
+        lines.append(f"{indent}Daemon starts in window: {starts}")
+        lines.append(f"{indent}Running since: {since_txt}")
         lines.append("")
+    return lines
 
-    body = "\n".join(lines).rstrip() + "\n"
 
-    csv_text = None
-    if fmt == "csv":
-        buf = io.StringIO()
-        writer = _csv.writer(buf)
-        writer.writerow(["timestamp", "event_type", "detail"])
+def _events_csv(*source_dicts: Dict) -> str:
+    buf = io.StringIO()
+    writer = _csv.writer(buf)
+    writer.writerow(["ups", "timestamp", "event_type", "detail"])
+    for sources in source_dicts:
+        ups = sources.get("ups_name", "UPS")
         for ts, etype, detail in (sources.get("events") or []):
-            writer.writerow([datetime.fromtimestamp(ts).isoformat(),
+            writer.writerow([ups, datetime.fromtimestamp(ts).isoformat(),
                              etype, detail or ""])
-        csv_text = buf.getvalue()
+    return buf.getvalue()
 
+
+def build_report(period: str, sources: Dict, *, include: List[str],
+                 fmt: str = "text") -> Dict:
+    """Assemble a single-UPS report from pre-fetched ``sources``.
+
+    Returns ``{"subject", "body", "csv"}`` (``csv`` is ``None`` unless
+    ``fmt == "csv"``). ``include`` selects sections (events / battery_health /
+    energy / uptime).
+    """
+    ups = sources.get("ups_name", "UPS")
+    lines = [f"📊 Eneru {period} report — {ups}", ""]
+    lines += _section_lines(sources, include)
+    body = "\n".join(lines).rstrip() + "\n"
+    csv_text = _events_csv(sources) if fmt == "csv" else None
     return {"subject": f"Eneru {period} report — {ups}",
+            "body": body, "csv": csv_text}
+
+
+def build_aggregate_report(period: str, per_ups_sources: List[Dict], *,
+                           include: List[str], fmt: str = "text") -> Dict:
+    """Assemble ONE daemon-wide report with a section per UPS (multi-UPS mode).
+
+    ``per_ups_sources`` is a list of ``gather_report_sources`` dicts, one per
+    UPS. The body carries a per-UPS block so the digest truly covers the whole
+    fleet rather than just the first monitor.
+    """
+    n = len(per_ups_sources)
+    lines = [f"📊 Eneru {period} report — {n} UPS", ""]
+    for sources in per_ups_sources:
+        ups = sources.get("ups_name", "UPS")
+        lines.append(f"━━ {ups} ━━")
+        lines += _section_lines(sources, include)
+    body = "\n".join(lines).rstrip() + "\n"
+    csv_text = _events_csv(*per_ups_sources) if fmt == "csv" else None
+    return {"subject": f"Eneru {period} report — {n} UPS",
             "body": body, "csv": csv_text}
 
 
@@ -137,11 +166,15 @@ def gather_report_sources(store, ups_name: str, energy_config, *,
     events = store.query_events(start, int(now)) if store else []
     sources["events"] = events
 
-    # uptime: count DAEMON_START events in the window; "since" = the most recent.
-    daemon_starts = [ts for ts, etype, _ in events if etype == "DAEMON_START"]
+    # uptime: count DAEMON_START events in the window, but resolve "since" from a
+    # WIDE lookback so a long-lived daemon (no restart in the report window) still
+    # reports its real start time instead of "unknown".
+    in_window_starts = [ts for ts, etype, _ in events if etype == "DAEMON_START"]
+    wide = (store.query_events(int(now - 365 * 86400), int(now)) if store else [])
+    all_starts = [ts for ts, etype, _ in wide if etype == "DAEMON_START"]
     sources["uptime"] = {
-        "daemon_starts": len(daemon_starts),
-        "since": max(daemon_starts) if daemon_starts else None,
+        "daemon_starts": len(in_window_starts),
+        "since": max(all_starts) if all_starts else None,
     }
 
     # battery health: the most recent stored row.
@@ -199,17 +232,73 @@ def maybe_send_due_reports(config, store, ups_name: str,
             if last is None:
                 store.set_meta(key, str(int(now)))  # seed baseline, don't send
             continue
-        store.set_meta(key, str(int(now)))  # stamp before send (no retry storm)
         sources = gather_report_sources(
             store, ups_name, config.energy, period=period, now=now)
         content = build_report(period, sources, include=reports.include,
                                fmt=reports.format)
-        # Honor `reports.format: csv` on delivery: the notification channel is
-        # text-only (no attachments), so append the machine-readable CSV block
-        # under the human summary rather than silently dropping it.
-        message = content["body"]
-        if content.get("csv"):
-            message = message + "\n\n--- CSV ---\n" + content["csv"]
-        enqueue(message, "info", "report")
+        enqueue(_compose_message(content), "info", "report")
+        # Stamp AFTER handing the message to the (persistent) notification queue,
+        # so a transient enqueue failure (which raises) is retried next tick
+        # instead of permanently dropping the period's report.
+        store.set_meta(key, str(int(now)))
+        sent.append(period)
+    return sent
+
+
+def _compose_message(content: Dict) -> str:
+    """Body for delivery. Honors `format: csv` by appending the machine-readable
+    CSV block under the human summary (the notification channel is text-only)."""
+    message = content["body"]
+    if content.get("csv"):
+        message = message + "\n\n--- CSV ---\n" + content["csv"]
+    return message
+
+
+def maybe_send_due_reports_multi(config, units, meta_store,
+                                 enqueue: Callable[[str, str, str], object], *,
+                                 now: Optional[float] = None,
+                                 tz=None) -> List[str]:
+    """Daemon-wide multi-UPS reports: ONE digest per period covering every UPS.
+
+    ``units`` is ``[(ups_name, store, energy_config), ...]``; ``meta_store`` is
+    where the ``last_report_sent_<period>`` dedup keys live (a single deterministic
+    place so the daemon never double-sends). Mirrors ``maybe_send_due_reports``
+    but aggregates per-UPS sections into one body.
+    """
+    reports = config.reports
+    if not reports.enabled or meta_store is None or not units:
+        return []
+    if now is None:
+        now = time.time()
+    sent: List[str] = []
+    for period, enabled in (("daily", reports.daily),
+                            ("weekly", reports.weekly),
+                            ("monthly", reports.monthly)):
+        if not enabled:
+            continue
+        try:
+            sched = schedule_for_period(period, reports)
+        except ValueError:
+            continue
+        key = f"last_report_sent_{period}"
+        raw = meta_store.get_meta(key)
+        try:
+            last = float(raw) if raw else None
+        except (TypeError, ValueError):
+            last = None
+        if not sched.due(now, last, tz):
+            if last is None:
+                meta_store.set_meta(key, str(int(now)))  # seed baseline
+            continue
+        per_ups = [
+            gather_report_sources(store, ups_name, energy_cfg,
+                                  period=period, now=now)
+            for ups_name, store, energy_cfg in units
+        ]
+        content = build_aggregate_report(period, per_ups,
+                                         include=reports.include,
+                                         fmt=reports.format)
+        enqueue(_compose_message(content), "info", "report")
+        meta_store.set_meta(key, str(int(now)))  # stamp after enqueue
         sent.append(period)
     return sent

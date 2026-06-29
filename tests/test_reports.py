@@ -172,6 +172,34 @@ class TestMaybeSend:
         assert reports.maybe_send_due_reports(cfg, None, "U@h", lambda *a: None) == []
 
     @pytest.mark.unit
+    def test_defaults_now_when_omitted(self, store):
+        # First sight with no explicit `now` -> seeds the baseline (exercises the
+        # default-now branch), does not send.
+        cfg = self._cfg()
+        assert reports.maybe_send_due_reports(cfg, store, "U@h", lambda *a: None) == []
+        assert store.get_meta("last_report_sent_daily") is not None
+
+    @pytest.mark.unit
+    def test_schedule_error_is_skipped(self, store, monkeypatch):
+        cfg = self._cfg()
+        monkeypatch.setattr(reports, "schedule_for_period",
+                            lambda *a, **k: (_ for _ in ()).throw(ValueError("bad")))
+        assert reports.maybe_send_due_reports(
+            cfg, store, "U@h", lambda *a: None, now=time.time()) == []
+
+    @pytest.mark.unit
+    def test_running_since_uses_wide_lookback(self, store):
+        # A daemon that started 40 days ago (outside a DAILY window) must still
+        # report its real start time, not "unknown".
+        now = time.time()
+        store.log_event("DAEMON_START", ts=int(now - 40 * DAY))
+        sources = reports.gather_report_sources(
+            store, "U@h", _config("ups:\n  name: U@h\n").energy,
+            period="daily", now=now)
+        assert sources["uptime"]["since"] is not None
+        assert sources["uptime"]["daemon_starts"] == 0   # none inside the daily window
+
+    @pytest.mark.unit
     def test_weekly_and_monthly_due(self, store):
         cfg = _config("ups:\n  name: U@h\nreports:\n  enabled: true\n"
                       "  weekly: true\n  monthly: true\n  time: '08:00'\n"
@@ -192,6 +220,83 @@ class TestMaybeSend:
         # corrupt last -> treated as None -> seed, not send
         assert reports.maybe_send_due_reports(
             cfg, store, "U@h", lambda *a: None, now=time.time()) == []
+
+
+class TestAggregate:
+    @pytest.mark.unit
+    def test_build_aggregate_report_has_per_ups_sections(self):
+        s1 = {"ups_name": "A@h", "events": [], "uptime": {"daemon_starts": 0, "since": None}}
+        s2 = {"ups_name": "B@h", "events": [], "uptime": {"daemon_starts": 0, "since": None}}
+        content = reports.build_aggregate_report("daily", [s1, s2], include=["uptime"])
+        assert "A@h" in content["body"] and "B@h" in content["body"]
+        assert "2 UPS" in content["subject"]
+
+    @pytest.mark.unit
+    def test_multi_covers_every_unit_once(self, tmp_path):
+        cfg = _config("ups:\n  - name: A@h\n  - name: B@h\n"
+                      "reports:\n  enabled: true\n  daily: true\n  time: '08:00'\n")
+        s1 = StatsStore(tmp_path / "a.db"); s1.open()
+        s2 = StatsStore(tmp_path / "b.db"); s2.open()
+        try:
+            now = time.time()
+            s1.set_meta("last_report_sent_daily", str(int(now - 2 * DAY)))  # due
+            bodies = []
+            units = [("A@h", s1, cfg.energy), ("B@h", s2, cfg.energy)]
+            sent = reports.maybe_send_due_reports_multi(
+                cfg, units, s1, lambda b, t, c: bodies.append(b), now=now)
+            assert sent == ["daily"]
+            assert len(bodies) == 1
+            assert bodies[0].count("A@h") == 1 and bodies[0].count("B@h") == 1
+            # dedup stamp lands in the designated meta store
+            assert s1.get_meta("last_report_sent_daily") == str(int(now))
+        finally:
+            s1.close(); s2.close()
+
+    @pytest.mark.unit
+    def test_multi_disabled_or_empty(self, tmp_path):
+        off = _config("ups:\n  - name: A@h\nreports:\n  enabled: false\n  daily: true\n")
+        s = StatsStore(tmp_path / "m.db"); s.open()
+        try:
+            assert reports.maybe_send_due_reports_multi(
+                off, [("A@h", s, off.energy)], s, lambda *a: None) == []
+            on = _config("ups:\n  - name: A@h\nreports:\n  enabled: true\n  daily: true\n")
+            assert reports.maybe_send_due_reports_multi(
+                on, [], s, lambda *a: None) == []          # no units
+            assert reports.maybe_send_due_reports_multi(
+                on, [("A@h", s, on.energy)], None, lambda *a: None) == []  # no meta store
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_multi_first_sight_seeds_and_corrupt_meta(self, tmp_path):
+        cfg = _config("ups:\n  - name: A@h\nreports:\n  enabled: true\n"
+                      "  daily: true\n  time: '08:00'\n")
+        s = StatsStore(tmp_path / "m.db"); s.open()
+        try:
+            # First sight: no explicit now -> seeds baseline, sends nothing.
+            assert reports.maybe_send_due_reports_multi(
+                cfg, [("A@h", s, cfg.energy)], s, lambda *a: None) == []
+            assert s.get_meta("last_report_sent_daily") is not None
+            # Corrupt meta -> treated as unrun -> reseeds, still no send.
+            s.set_meta("last_report_sent_daily", "garbage")
+            assert reports.maybe_send_due_reports_multi(
+                cfg, [("A@h", s, cfg.energy)], s, lambda *a: None,
+                now=time.time()) == []
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_multi_schedule_error_is_skipped(self, tmp_path, monkeypatch):
+        cfg = _config("ups:\n  - name: A@h\nreports:\n  enabled: true\n  daily: true\n")
+        s = StatsStore(tmp_path / "m.db"); s.open()
+        monkeypatch.setattr(reports, "schedule_for_period",
+                            lambda *a, **k: (_ for _ in ()).throw(ValueError("bad")))
+        try:
+            assert reports.maybe_send_due_reports_multi(
+                cfg, [("A@h", s, cfg.energy)], s, lambda *a: None,
+                now=time.time()) == []
+        finally:
+            s.close()
 
 
 class TestScheduleForPeriod:

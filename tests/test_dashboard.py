@@ -330,6 +330,56 @@ def test_dashboard_charts_have_bands_and_event_overlays(minimal_config):
 
 
 @pytest.mark.unit
+def test_dashboard_energy_dual_line_and_power_endpoint(minimal_config):
+    # v6.1 UX: the Energy chart is a dual-line load% + watts plot fed by the new
+    # /power endpoint (not the old load-only history metric).
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    assert "function makeEnergyChart" in js
+    assert "function drawEnergyChart" in js
+    assert "/power" in js
+    assert "plot-load" in js and "plot-watts" in js
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    assert ".plot-watts" in css
+
+
+@pytest.mark.unit
+def test_dashboard_tier1_events_and_dropdown_and_emoji(minimal_config):
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    # Chart markers + default events selection are restricted to tier-1 events.
+    assert "isTier1Event" in js
+    assert "TIER1_EVENT_PATTERNS" in js
+    assert "_eventTypeDefaultApplied" in js
+    # Dropdown closes on outside click; chart load() has a generation race guard.
+    assert "details.event-type-picker[open]" in js
+    assert "myGen !== gen" in js
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    # Monochrome emoji on tab labels (decorative -> aria-hidden).
+    assert 'class="tab-emoji" aria-hidden="true"' in html
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    assert ".tab-emoji" in css and "grayscale(1)" in css
+    # Keyboard focus cue on panels is preserved (not removed).
+    assert ".panel:focus-visible" in css and "outline: 2px solid var(--accent)" in css
+
+
+@pytest.mark.unit
+def test_dashboard_shared_range_and_cost_hint(minimal_config):
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    # All three chart ranges carry identical options so the shared-range sync works.
+    for rid in ('id="power-range"', 'id="battery-range"', 'id="energy-range"'):
+        assert rid in html
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    assert "RANGE_SELECTS" in js
+    # Cost hint keys off whether cost is CONFIGURED, not whether a value exists.
+    assert "energyCostConfigured" in js
+    assert '"todayCost" in en' in js
+
+
+@pytest.mark.unit
 def test_stylesheet_makes_hidden_attribute_win(minimal_config):
     # The dashboard shows/hides everything via the `hidden` attribute. A class
     # that sets `display` (e.g. `.modal { display: flex }`) would otherwise win

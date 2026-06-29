@@ -61,6 +61,50 @@ from eneru.status import (
 )
 
 
+class TestPowerSeries:
+    @pytest.mark.unit
+    def test_power_series_real_and_fallback(self):
+        from eneru.status import power_series
+
+        class _S:
+            def power_samples(self, a, b):
+                return [(100, 120.0, 50.0, 1000.0),   # realpower -> watts 120
+                        (200, None, 25.0, 1000.0)]    # fallback  -> 25% * 1000
+        out = power_series(_S(), 0, 300)
+        assert out[0]["watts"] == 120.0 and out[0]["loadPct"] == 50.0
+        assert out[0]["estimated"] is False
+        assert out[1]["watts"] == 250.0 and out[1]["estimated"] is True
+
+    @pytest.mark.unit
+    def test_power_series_no_store(self):
+        from eneru.status import power_series
+        assert power_series(None, 0, 1) == []
+
+    @pytest.mark.unit
+    def test_power_endpoint_route(self):
+        from types import SimpleNamespace
+        from eneru.api import EneruAPIHandler
+
+        class _S:
+            def power_samples(self, a, b):
+                return [(100, 120.0, 50.0, 1000.0)]
+        mon = SimpleNamespace(
+            config=SimpleNamespace(ups=SimpleNamespace(name="U@h")), _stats_store=_S())
+        h = object.__new__(EneruAPIHandler)
+        h.api_config = _parse_cfg("ups:\n  name: U@h\n")
+        h.api_source = SimpleNamespace(_monitors=[mon])
+        h.api_auth = None
+        h.api_sessions = None
+        h.headers = {}
+        h.path = "/api/v1/ups/U@h/power?from=0&to=300"
+        status, _, payload = h._route()
+        assert status == 200
+        assert payload["data"][0]["watts"] == 120.0
+        # Unknown UPS -> 404.
+        h.path = "/api/v1/ups/nope/power"
+        assert h._route()[0] == 404
+
+
 class TestStatusHelperGuards:
     """The v6.1 status helpers fail soft (return None) so a stats/store hiccup
     never breaks the status payload."""

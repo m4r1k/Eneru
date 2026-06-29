@@ -331,18 +331,18 @@ gh api repos/<owner>/<repo>/branches/<branch> --jq '.commit.sha'
 
 Update both the SHA and the `# vX.Y` trailing comment in lockstep. After bumping, run the full CI matrix on a throwaway branch before merging — silent breakage is the failure mode the pins exist to prevent in the first place.
 
-The current pinned set (as of 2026-04-22):
+The current pinned set (as of 2026-06-29):
 
 | Action | Tag | SHA prefix |
 |---|---|---|
-| `actions/checkout` | `v6` | `de0fac2e…` |
+| `actions/checkout` | `v7.0.0` | `9c091bb2…` |
 | `actions/setup-python` | `v6` | `a309ff8b…` |
-| `actions/upload-artifact` | `v4` / `v7` | `ea165f8d…` / `043fb46d…` |
-| `actions/download-artifact` | `v4` / `v8` | `d3f86a10…` / `3e5f45b2…` |
-| `codecov/codecov-action` | `v6` | `57e3a136…` |
-| `github/codeql-action` | `v4` | `b25d0ebf…` |
+| `actions/upload-artifact` | `v7` | `043fb46d…` |
+| `actions/download-artifact` | `v8` | `3e5f45b2…` |
+| `codecov/codecov-action` | `v6` | `fb8b3582…` |
+| `github/codeql-action` | `v4` | `8aad20d1…` |
 | `pypa/gh-action-pypi-publish` | `release/v1` | `cef22109…` |
-| `softprops/action-gh-release` | `v3` | `b4309332…` |
+| `softprops/action-gh-release` | `v3` | `718ea10b…` |
 | `docker/setup-buildx-action` | `v3` | `8d2750c6…` |
 | `docker/build-push-action` | `v6` | `10e90e36…` |
 

@@ -2556,46 +2556,59 @@ class ConfigLoader:
         """Cross-field validation for the v6.1 sections."""
         messages: List[str] = []
 
-        # Self-test is a scheduled write surface. It must go through the same
-        # gates as manual control AND its command must be allowlisted, so a
-        # scheduled test can never be a back door around the v6.0 allowlist.
-        if config.self_test.enabled:
-            if not config.nut_control.enabled:
-                messages.append(
-                    "ERROR: self_test.enabled requires nut_control.enabled — "
-                    "self-tests issue a UPS command via NUT control.")
-            if not config.api.auth.enabled:
-                messages.append(
-                    "ERROR: self_test.enabled requires api.auth.enabled — a "
-                    "scheduled self-test is a privileged operation.")
-            cmd = config.self_test.command
-            if cmd and cmd not in config.nut_control.allowed_commands:
-                messages.append(
-                    f"ERROR: self_test.command '{cmd}' is not in "
-                    "nut_control.allowed_commands — a scheduled test must not "
-                    "bypass the control allowlist. Add it to "
-                    "nut_control.allowed_commands.")
-
-        # Per-UPS self_test overrides get the SAME gates, so a per-UPS enable
-        # can't slip past the global check above.
+        # Self-test is a scheduled write surface. Validate the EFFECTIVE config
+        # per UPS (per-UPS override else global) against the EFFECTIVE
+        # nut_control, so a per-UPS-narrowed allowlist or a global command that
+        # isn't in a group's own allowlist is caught — a scheduled test can never
+        # be a back door around the v6.0 control allowlist.
         for group in config.ups_groups:
-            st = getattr(group, "self_test", None)
-            if st is None or not st.enabled:
+            st = getattr(group, "self_test", None) or config.self_test
+            if not st.enabled:
                 continue
             name = group.ups.name
             nc = group.nut_control or config.nut_control
             if not nc.enabled:
                 messages.append(
                     f"ERROR: self_test for UPS '{name}' requires "
-                    "nut_control.enabled (per-UPS or global).")
+                    "nut_control.enabled (per-UPS or global) — self-tests issue "
+                    "a UPS command via NUT control.")
             if not config.api.auth.enabled:
                 messages.append(
                     f"ERROR: self_test for UPS '{name}' requires "
-                    "api.auth.enabled.")
+                    "api.auth.enabled — a scheduled self-test is privileged.")
             if st.command and st.command not in nc.allowed_commands:
                 messages.append(
-                    f"ERROR: self_test.command '{st.command}' for UPS "
-                    f"'{name}' is not in its nut_control.allowed_commands.")
+                    f"ERROR: self_test.command '{st.command}' for UPS '{name}' "
+                    "is not in nut_control.allowed_commands — a scheduled test "
+                    "must not bypass the control allowlist. Add it to "
+                    "nut_control.allowed_commands.")
+
+        # Battery-health numeric fields must be numbers (a quoted/typo'd YAML
+        # value would otherwise blow up the runtime int()/float() coercions).
+        def _check_num(label, val, *, allow_none=True, minimum=None):
+            if val is None:
+                if not allow_none:
+                    messages.append(f"ERROR: {label} must be set to a number")
+                return
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                messages.append(f"ERROR: {label} must be a number, got {val!r}")
+            elif minimum is not None and val < minimum:
+                messages.append(f"ERROR: {label} must be >= {minimum}, got {val!r}")
+
+        for label_prefix, bh in (
+            ("battery_health", config.battery_health),
+            *(((f"battery_health (UPS '{g.ups.name}')"),
+               getattr(g, "battery_health", None))
+              for g in config.ups_groups),
+        ):
+            if bh is None:
+                continue
+            _check_num(f"{label_prefix}.nominal_runtime_seconds",
+                       bh.nominal_runtime_seconds, minimum=0)
+            _check_num(f"{label_prefix}.expected_life_years",
+                       bh.expected_life_years, minimum=0)
+            _check_num(f"{label_prefix}.update_interval",
+                       bh.update_interval, minimum=1)
 
         # Energy cost: cost_per_kwh, when set, must be a non-negative number.
         # None/unset is valid and disables cost tracking entirely (B3).

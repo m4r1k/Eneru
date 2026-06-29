@@ -265,19 +265,18 @@ uses this and not `time.monotonic`.
   loop (multi-UPS) or the single monitor's loop (single-UPS). It persists
   to one stats store (the coordinator uses the first monitor's).
 
-**Reload:** `scheduler` schedules come from config (`self_test`, `reports`,
-`battery_health`); on a hot-reload the owner calls
-`PeriodicScheduler.clear()` then re-registers jobs from the new config so
-next-run times recompute. Classify those sections per `reload.py` (see the
-v6.1 additions there) — `self_test`/`reports` are SUBSYSTEM (need the
-re-register hook); `energy`/`battery_health` are SAFE (read live).
+**Reload:** the self-test / report due-checks recompute their `Schedule` from
+config on every loop (there is no long-lived registered schedule holding a
+stale value), so `energy`, `battery_health`, `self_test`, and `reports` are all
+**SAFE** in `reload.py` — an in-place config swap is enough, no re-register hook.
 
-**Last-run semantics:** the owner stamps last-run *before* invoking the job
-body, so a job that raises is logged and not re-attempted until its next
-occurrence (no retry storm, no re-issuing a self-test every second).
-Interval jobs fire on first sight (`fire_on_first=True`); calendar jobs
-seed a baseline on first sight and fire at the *next* occurrence, so a
-restart never blasts a report or kicks off a self-test.
+**Last-run semantics:** last-run is stamped in `meta` once a due job has a real
+decision (issued, or genuinely skipped), so a job that raises mid-run is retried
+next tick rather than burning a whole (possibly 30-day) cadence. The self-test
+and report schedules use `fire_on_first=False`: they seed a baseline on first
+sight and fire at the *next* occurrence, so a restart never blasts a report or
+kicks off a self-test. (`Schedule.interval(..., fire_on_first=True)` is
+available for jobs that *should* run immediately, but the v6.1 jobs don't use it.)
 
 ## Conventions specific to this package
 

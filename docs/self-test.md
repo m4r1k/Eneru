@@ -78,8 +78,10 @@ it when no daemon is running. `--ups` defaults to the only configured UPS.
 ## API and dashboard
 
 - `POST /api/v1/ups/{name}/self-test` — auth-gated, audited, allowlist-checked.
-- The latest result appears in the `selfTest` block of `GET /api/v1/ups` and in
-  `GET /api/v1/ups/{name}/battery-health`.
+- The latest result appears in the `selfTest` block of `GET /api/v1/ups`. (The
+  `GET /api/v1/ups/{name}/battery-health` endpoint returns the health score and
+  replacement projection; the self-test result lives in the status `selfTest`
+  block.)
 - The dashboard **Control** tab has a per-UPS *Run self-test* button; the
   **Battery** tab shows the latest result.
 - **Prometheus** → `eneru_ups_self_test_result{result="passed|failed|..."}`

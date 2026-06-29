@@ -50,6 +50,20 @@ v5.3 (2026-05-10), v5.4 (2026-05-15), v5.5.1 (2026-05-19), v6.0.0 (2026-06-04). 
 
 ---
 
+## Backlog
+
+Items captured from real-world use that are not yet scheduled into a release:
+
+- **TLS-only / non-standard NUT appliances.** Some integrated UPS appliances run
+  an `upsd` whose TLS handshake the stock `upsc` client cannot complete (it fails
+  with an `SSL_connect` / `SSL routines::shutdown while in init` error). Eneru
+  shells out to the standard NUT clients, so it inherits the failure. Investigate
+  a more tolerant connection path (e.g. an `upsmon`-style integration or a TLS
+  option) for these appliances. Workarounds today are in
+  [Troubleshooting](troubleshooting.md#upsc-fails-with-an-ssltls-error).
+
+---
+
 ## Version philosophy
 
 | Range | Theme |

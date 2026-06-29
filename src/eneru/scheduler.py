@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, tzinfo
 from typing import Callable, Dict, List, Optional, Tuple
 
-__all__ = ["Schedule", "PeriodicScheduler", "parse_hhmm", "parse_weekday"]
+__all__ = ["PeriodicScheduler", "Schedule", "parse_hhmm", "parse_weekday"]
 
 _WEEKDAYS = {
     "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
@@ -98,7 +98,9 @@ class Schedule:
     def interval(cls, seconds: float, *, fire_on_first: bool = True) -> "Schedule":
         if seconds is None or seconds <= 0:
             raise ValueError("interval seconds must be > 0")
-        return cls("interval", interval_seconds=int(seconds),
+        # Keep sub-second / fractional intervals intact — int() truncation turned
+        # interval(0.5) into 0 (permanently "due") and interval(1.9) into 1.
+        return cls("interval", interval_seconds=float(seconds),
                    fire_on_first=fire_on_first)
 
     @classmethod

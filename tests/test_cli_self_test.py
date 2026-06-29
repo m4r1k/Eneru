@@ -77,6 +77,11 @@ class TestApiBaseAndToken:
         assert cli._self_test_api_base(cfg, _args()) == "http://127.0.0.1:9191"
 
     @pytest.mark.unit
+    def test_ipv6_bind_is_bracketed(self):
+        cfg = _config("ups:\n  name: U@h\napi:\n  bind: '::1'\n  port: 9191\n")
+        assert cli._self_test_api_base(cfg, _args()) == "http://[::1]:9191"
+
+    @pytest.mark.unit
     def test_token_precedence(self, monkeypatch):
         monkeypatch.delenv("ENERU_API_TOKEN", raising=False)
         monkeypatch.delenv("ENERU_API_KEY", raising=False)
@@ -208,6 +213,27 @@ class TestRunDirect:
         assert e.value.code == 1
 
     @pytest.mark.unit
+    def test_direct_uses_per_ups_command(self, monkeypatch):
+        cfg = _config(
+            "api:\n  auth:\n    enabled: true\n"
+            "nut_control:\n  enabled: true\n  allowed_commands: [test.battery.start.quick]\n"
+            "self_test:\n  command: test.battery.start\n"
+            "ups:\n  - name: U1@h\n    self_test:\n      command: test.battery.start.quick\n")
+        monkeypatch.setattr(cli, "_load_config", lambda a: cfg)
+        monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: None)
+        from eneru import self_test as st
+        seen = {}
+
+        def _disc(name, cmd, **k):
+            seen["cmd"] = cmd
+            return cmd
+        monkeypatch.setattr(st, "discover_self_test_command", _disc)
+        monkeypatch.setattr(st, "issue_self_test",
+                            lambda *a, **k: {"ok": True, "test_id": 1, "error": ""})
+        cli._cmd_self_test_run(_args(ups="U1@h", direct=True))
+        assert seen["cmd"] == "test.battery.start.quick"   # per-UPS override, not global
+
+    @pytest.mark.unit
     def test_issue_failure_exits(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_load_config", lambda a: _config(SINGLE))
         monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: None)
@@ -234,7 +260,8 @@ class TestStatus:
                "result_raw": "Done and passed", "result_enum": "passed",
                "result_date": "2026-06-28", "source": "cli"}
         monkeypatch.setattr(cli, "_open_stats_store",
-                            lambda c, g: SimpleNamespace(latest_self_test=lambda: row))
+                            lambda c, g: SimpleNamespace(latest_self_test=lambda: row,
+                                                         close=lambda: None))
         cli._cmd_self_test_status(_args())
         out = capsys.readouterr().out
         assert "Latest self-test for UPS@host" in out
@@ -245,7 +272,8 @@ class TestStatus:
     def test_no_row(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_load_config", lambda a: _config(SINGLE))
         monkeypatch.setattr(cli, "_open_stats_store",
-                            lambda c, g: SimpleNamespace(latest_self_test=lambda: None))
+                            lambda c, g: SimpleNamespace(latest_self_test=lambda: None,
+                                                         close=lambda: None))
         cli._cmd_self_test_status(_args())
         assert "No self-test on record" in capsys.readouterr().out
 
@@ -258,6 +286,25 @@ class TestStatus:
         monkeypatch.setattr(cli, "_load_config", lambda a: cfg)
         cli._cmd_self_test_status(_args())
         assert "No self-test on record" in capsys.readouterr().out
+
+    @pytest.mark.unit
+    def test_status_reads_seeded_row(self, tmp_path, monkeypatch, capsys):
+        # Proves _open_stats_store actually open()s the DB: a pre-seeded row in
+        # the same default.db must be read back (an unopened store no-ops -> None).
+        from eneru.stats import StatsStore
+        from eneru.status import stats_db_path_for_group
+        cfg = _config(f"ups:\n  name: 'U@h'\n"
+                      f"statistics:\n  db_directory: '{tmp_path}'\n")
+        monkeypatch.setattr(cli, "_load_config", lambda a: cfg)
+        db = stats_db_path_for_group(cfg, cfg.ups_groups[0])
+        seed = StatsStore(db)
+        seed.open()
+        tid = seed.record_self_test("test.battery.start", "cli", result_enum="running")
+        seed.update_self_test_result(tid, result_raw="Done and passed", result_enum="passed")
+        seed.close()
+        cli._cmd_self_test_status(_args())
+        out = capsys.readouterr().out
+        assert "Latest self-test for U@h" in out and "passed" in out
 
     @pytest.mark.unit
     def test_bad_ups(self, monkeypatch):

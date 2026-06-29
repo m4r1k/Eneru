@@ -194,6 +194,34 @@ class TestCrossFieldValidation:
         assert errs == []
 
     @pytest.mark.unit
+    def test_global_self_test_vs_per_ups_narrowed_allowlist(self):
+        # Global self_test enabled with the default command, but one UPS narrows
+        # its OWN nut_control allowlist to exclude it -> caught for that UPS
+        # (validated against the resolved per-UPS config, not just the global).
+        _, errs = _validate(
+            "api:\n  auth:\n    enabled: true\n"
+            "nut_control:\n  enabled: true\n  allowed_commands: [test.battery.start]\n"
+            "self_test:\n  enabled: true\n  command: test.battery.start\n"
+            "ups:\n  - name: U1@h\n"
+            "  - name: U2@h\n    nut_control:\n      enabled: true\n"
+            "      allowed_commands: [beeper.toggle]\n")
+        assert any("U2@h" in e and "not in nut_control.allowed_commands" in e
+                   for e in errs)
+        assert not any("U1@h" in e for e in errs)   # U1 inherits the global allowlist
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("field,val", [
+        ("nominal_runtime_seconds", "abc"),
+        ("expected_life_years", "ten"),
+        ("update_interval", "soon"),
+    ])
+    def test_battery_health_rejects_non_numeric(self, field, val):
+        _, errs = _validate(
+            f"ups:\n  name: U@h\nbattery_health:\n  {field}: {val}\n")
+        assert any(f"battery_health.{field}" in e and "must be a number" in e
+                   for e in errs)
+
+    @pytest.mark.unit
     def test_self_test_valid_setup_no_errors(self):
         _, errs = _validate(
             "ups:\n  name: U@h\napi:\n  auth:\n    enabled: true\n"
@@ -228,7 +256,8 @@ class TestReloadClassification:
 
     @pytest.mark.unit
     def test_safe_vs_subsystem_split(self):
-        assert "energy" in reload_mod.SAFE_TOP_SECTIONS
-        assert "battery_health" in reload_mod.SAFE_TOP_SECTIONS
-        assert "self_test" in reload_mod.SUBSYSTEM_SECTIONS
-        assert "reports" in reload_mod.SUBSYSTEM_SECTIONS
+        # All four v6.1 sections are read live each tick (the self-test/report
+        # due-checks recompute their schedule from config every loop), so they
+        # are SAFE in-place swaps -- no registered scheduler to re-init.
+        for section in ("energy", "battery_health", "self_test", "reports"):
+            assert section in reload_mod.SAFE_TOP_SECTIONS

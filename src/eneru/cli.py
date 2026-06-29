@@ -1826,6 +1826,9 @@ def _self_test_api_base(config, args):
     bind = config.api.bind or "127.0.0.1"
     if bind in ("0.0.0.0", "::", ""):
         bind = "127.0.0.1"
+    # Bracket IPv6 literals so the URL is well-formed (http://[::1]:9191).
+    if ":" in bind and not bind.startswith("["):
+        bind = f"[{bind}]"
     return f"http://{bind}:{config.api.port}"
 
 
@@ -1878,18 +1881,35 @@ def _error_message(data):
     return None
 
 
+def _resolve_self_test_command(config, group):
+    """Per-UPS self_test.command override if set, else the global command —
+    matching EneruAPIHandler._effective_self_test / the monitor resolver so the
+    --direct path issues the right command for the selected UPS."""
+    st = getattr(group, "self_test", None)
+    if st is not None:
+        return st.command
+    return config.self_test.command
+
+
 def _open_stats_store(config, group):
-    """Open the per-UPS stats store for CLI read/write, or ``None`` on failure."""
+    """Open the per-UPS stats store for CLI read/write, or ``None`` on failure.
+
+    The caller owns closing it. The StatsStore methods no-op on an unopened
+    connection, so ``open()`` here is what makes direct-mode recording and
+    status read-out actually work.
+    """
     from eneru.stats import StatsStore
     from eneru.status import stats_db_path_for_group
     db_path = stats_db_path_for_group(config, group)
     try:
-        return StatsStore(
+        store = StatsStore(
             db_path,
             retention_raw_hours=config.statistics.retention.raw_hours,
             retention_5min_days=config.statistics.retention.agg_5min_days,
             retention_hourly_days=config.statistics.retention.agg_hourly_days,
         )
+        store.open()
+        return store
     except Exception as exc:  # pragma: no cover - defensive
         print(f"  (could not open stats DB {db_path}: {exc})")
         return None
@@ -1938,18 +1958,26 @@ def _self_test_run_direct(config, group, name):
         print("nut_control is not enabled. --direct issues a real command via "
               "NUT and needs nut_control credentials + allowlist in the config.")
         sys.exit(2)
-    command = config.self_test.command
+    command = _resolve_self_test_command(config, group)
     if not command_allowed(command, nc.allowed_commands):
         print(f"self_test.command {command!r} is not in "
               "nut_control.allowed_commands; refusing (the direct path is not "
               "exempt from the control allowlist).")
         sys.exit(2)
-    cmd = selftest.discover_self_test_command(name, command, timeout=nc.timeout)
+    try:
+        cmd = selftest.discover_self_test_command(name, command, timeout=nc.timeout)
+    except selftest.SelfTestUnavailable as exc:
+        print(f"Could not query the UPS ({exc}); try again.")
+        sys.exit(1)
     if cmd is None:
         print(f"UPS {name} does not expose {command!r} (upscmd -l); nothing to do.")
         sys.exit(1)
     store = _open_stats_store(config, group)
-    result = selftest.issue_self_test(name, cmd, nc, store, source="cli")
+    try:
+        result = selftest.issue_self_test(name, cmd, nc, store, source="cli")
+    finally:
+        if store is not None:
+            store.close()
     if result.get("ok"):
         print(f"✅  Self-test issued on {name} (command {cmd}).")
         print("   Re-run `eneru self-test status` once the test completes.")
@@ -1966,7 +1994,11 @@ def _cmd_self_test_status(args):
         _self_test_no_ups(getattr(args, "ups", None))   # exits
     name = group.ups.name
     store = _open_stats_store(config, group)
-    row = store.latest_self_test() if store is not None else None
+    try:
+        row = store.latest_self_test() if store is not None else None
+    finally:
+        if store is not None:
+            store.close()
     if not row:
         print(f"No self-test on record for {name}.")
         return
