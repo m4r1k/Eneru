@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.0-rc10] - 2026-06-29
+
+A second round of dashboard polish from running rc9 on production hardware. No
+API or behavior changes; static assets only.
+
+### Added
+
+- **Remote servers** widget on the Overview tab — one card per SSH/remote NUT
+  target (from `/api/v1/remote-health`) showing reachability, host, latency, and
+  last-checked time, with the failure count + last error when unreachable. Hidden
+  when no remote servers are configured.
+- **Line quality** card on the Power tab — a derived **Good / Fair / Poor** read
+  on the incoming mains, summarizing voltage-in-band, frequency, and the UPS
+  regulation states (voltage / AVR / bypass / overload) from the live
+  power-quality block, each color-coded.
+
+### Changed
+
+- **Chart event tooltips are instant and themed.** Hovering (or keyboard-focusing)
+  an event marker now shows a styled card — bold type, timestamp, detail, and a
+  left border color-coded by event type — immediately, instead of the native SVG
+  `<title>` that only appeared after a ~1 s delay and rendered as a plain OS
+  tooltip.
+- **Energy notes became "?" hints.** The verbose window/estimated footnotes were
+  replaced by a small `?` next to the affected value that reveals the same
+  explanation on hover/focus, keeping the block compact.
+- **Config JSON tree no longer collapses on refresh** — it rebuilds only when the
+  configuration actually changes, so expanded sections stay expanded across the
+  10 s poll. The per-section item counts (`api { 4 }`) were dropped for a cleaner
+  `api {…}` / `api {` look.
+
 ## [6.1.0-rc9] - 2026-06-29
 
 A focused visual redesign of the dashboard — minimal, cohesive, and verified

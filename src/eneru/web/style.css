@@ -320,6 +320,31 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .chart-note { color: var(--muted); font-size: 0.85rem; margin: 0.5rem 0 0; }
 .energy-note { color: var(--muted); font-size: 0.78rem; font-style: italic; }
 
+/* Floating tooltip — instant + themed. Native SVG <title> / title="" only appear
+   after a ~1s delay and render as a plain OS tooltip; this shows immediately.
+   Shared by chart event markers and the "?" help hints. */
+.tip { position: fixed; z-index: 60; max-width: 18rem; pointer-events: none;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--line-strong); border-left: 3px solid var(--accent);
+  border-radius: var(--r-sm); padding: 0.5rem 0.65rem; box-shadow: var(--shadow-lg);
+  font-size: 0.82rem; line-height: 1.45; }
+.tip .tip-head { font-weight: 700; }
+.tip .tip-sub { color: var(--muted); font-size: 0.76rem; margin-top: 0.05rem; }
+.tip .tip-body { margin-top: 0.3rem; color: var(--text-2); }
+.tip.ev-ok   { border-left-color: var(--ok); }
+.tip.ev-warn { border-left-color: var(--warn); }
+.tip.ev-crit { border-left-color: var(--crit); }
+.tip.ev-info { border-left-color: #a78bfa; }
+
+/* "?" help hint — reveals a tooltip on hover/focus (replaces verbose footnotes). */
+.label-tip { display: inline-flex; align-items: center; }
+.help { display: inline-flex; align-items: center; justify-content: center;
+  width: 15px; height: 15px; margin-left: 0.35rem; border-radius: 999px;
+  background: var(--panel-2); color: var(--muted); font-size: 0.7rem;
+  font-weight: 700; line-height: 1; cursor: help; user-select: none; }
+.help:hover, .help:focus-visible { background: var(--accent-weak);
+  color: var(--accent); outline: none; }
+
 /* Config tab: colored, collapsible JSON tree (each section folds on its own) */
 .json-tree { background: var(--panel); border: 1px solid var(--line);
   border-radius: 8px; padding: 0.8rem 1rem; margin-top: 0.4rem; overflow: auto;
@@ -338,6 +363,13 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .j-bool { color: #c084fc; }
 .j-null { color: var(--muted); font-style: italic; }
 .j-punct { color: var(--muted); }
+.j-open { margin-left: 0.3rem; }
+.j-ellipsis { color: var(--muted); margin: 0 0.15rem; }
+/* Open nodes show just `key {` (the indented border conveys the grouping); the
+   ellipsis + closing brace only appear when collapsed → `key {…}`. Cleaner than
+   a running item count on every section. */
+.json-node[open] > summary .j-ellipsis,
+.json-node[open] > summary .j-close { display: none; }
 
 /* Chart overlays: voltage threshold band + nominal line + event markers.
    The band is a faint bounded ZONE (subtle fill + dashed edges), not a slab of

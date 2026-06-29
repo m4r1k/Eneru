@@ -398,8 +398,10 @@ def test_dashboard_round3_ux(minimal_config):
     # Event markers: triangle pin + color-by-type incl. green recovery + non-blue.
     assert "ev-pin" in js and "ev-ok" in js
     assert ".ev-ok" in css and ".ev-pin" in css
-    # Energy: "calculating…" not "unknown"; month hidden until data; window notes.
-    assert "calculating" in js and "energyNotes" in js
+    # Energy: "calculating…" not "unknown"; month hidden until data; the
+    # window/estimated context moved from footnotes to "?" hints (ENERGY_HELP).
+    assert "calculating" in js
+    assert "ENERGY_HELP" in js and "function helpHint" in js
     assert "This month" in js
     # Config tab: colored, collapsible JSON tree (<details> per section) + only
     # enabled features.
@@ -423,6 +425,61 @@ def test_dashboard_event_markers_are_hoverable(minimal_config):
     css = _handler(minimal_config, path="/style.css")._serve_static(
         "/style.css")[1].decode("utf-8")
     assert ".ev-hit" in css and "stroke: transparent" in css
+
+
+@pytest.mark.unit
+def test_dashboard_instant_tooltip_replaces_native_title(minimal_config):
+    # Event markers use the instant, themed floating tip (bindTip/eventTipNode),
+    # NOT the native SVG <title> that only appeared after a ~1s browser delay.
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    assert "function bindTip" in js and "function showTip" in js
+    assert "function eventTipNode" in js
+    # The native-title element must be gone from the marker builder.
+    assert 'createElementNS(SVG_NS, "title")' not in js
+    assert ".tip {" in css and ".help {" in css
+
+
+@pytest.mark.unit
+def test_dashboard_remote_server_health_widget(minimal_config):
+    # Overview surfaces remote-server reachability from /api/v1/remote-health.
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    assert "function renderRemoteHealth" in js and "remoteStatusClass" in js
+    assert 'id="remote-section"' in html and 'id="remote-cards"' in html
+    assert "reachable" in js and "unreachable" in js
+
+
+@pytest.mark.unit
+def test_dashboard_line_quality_card(minimal_config):
+    # Power tab carries a derived Good/Fair/Poor line-quality summary built from
+    # the live power-quality block (voltage band, frequency, regulation states).
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    assert "function renderLineQuality" in js and "function lineQuality" in js
+    assert 'id="line-quality"' in html
+    assert "Line quality" in js
+    # Reads the UPS regulation states the daemon exposes.
+    for state in ("voltageState", "avrState", "bypassState", "overloadState"):
+        assert state in js
+
+
+@pytest.mark.unit
+def test_dashboard_json_tree_preserves_state_and_drops_counts(minimal_config):
+    # The config JSON tree must not collapse on every 10s poll (rebuild only when
+    # the config changed) and must not show the ugly per-section item count.
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    assert "_lastConfigJson" in js
+    assert "j-ellipsis" in js and ".j-ellipsis" in css
+    # The old "{ <count> }" annotation (template literal over entries.length) is gone.
+    assert "entries.length" not in js
 
 
 @pytest.mark.unit

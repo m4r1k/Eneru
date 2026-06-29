@@ -66,12 +66,17 @@
         <h2>Redundancy groups</h2>
         <div id="group-cards" class="cards"></div>
       </div>
+      <div id="remote-section" hidden>
+        <h2>Remote servers</h2>
+        <div id="remote-cards" class="cards"></div>
+      </div>
     </section>
 
     <!-- Power --------------------------------------------------------------- -->
     <section id="panel-power" class="panel" role="tabpanel"
              aria-labelledby="tab-power" tabindex="0" hidden>
       <h2>Power quality</h2>
+      <div id="line-quality" class="cards"></div>
       <div class="graph-controls">
         <label>UPS <select id="power-ups"></select></label>
         <label>Metric

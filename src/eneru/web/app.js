@@ -117,6 +117,76 @@ function icon(name, cls) {
 const TAB_ICONS = { overview: "home", power: "bolt", battery: "battery",
   energy: "chart", events: "bell", control: "sliders", config: "gear" };
 
+// ----- floating tooltip + help hints ---------------------------------------
+// One reused element. Native SVG <title> / title="" only surface after a ~1s
+// browser delay and render as a plain OS tooltip; this appears immediately and
+// is themed. Shared by chart event markers and the "?" help hints.
+let _tip = null;
+function tipEl() {
+  if (!_tip) {
+    _tip = el("div", { class: "tip" });
+    _tip.hidden = true;
+    document.body.appendChild(_tip);
+  }
+  return _tip;
+}
+function moveTip(x, y) {
+  const t = tipEl();
+  const r = t.getBoundingClientRect();
+  let left = x + 14, top = y + 16;
+  if (left + r.width > window.innerWidth - 8) left = x - r.width - 14;
+  if (top + r.height > window.innerHeight - 8) top = y - r.height - 16;
+  t.style.left = Math.max(8, left) + "px";
+  t.style.top = Math.max(8, top) + "px";
+}
+function showTip(content, x, y, accent) {
+  const t = tipEl();
+  t.className = "tip" + (accent ? " " + accent : "");
+  if (typeof content === "string") t.replaceChildren(document.createTextNode(content));
+  else t.replaceChildren(...(Array.isArray(content) ? content : [content]));
+  t.hidden = false;
+  moveTip(x, y);
+}
+function hideTip() { if (_tip) _tip.hidden = true; }
+
+// Wire instant hover/focus tooltips onto `node`. `build` returns string|DOM|DOM[];
+// `accent` (optional) is a CSS class that colors the tip's accent border.
+function bindTip(node, build, accent) {
+  node.addEventListener("mouseenter", (ev) => showTip(build(), ev.clientX, ev.clientY, accent));
+  node.addEventListener("mousemove", (ev) => moveTip(ev.clientX, ev.clientY));
+  node.addEventListener("mouseleave", hideTip);
+  node.addEventListener("focus", () => {
+    const r = node.getBoundingClientRect();
+    showTip(build(), r.left, r.bottom, accent);
+  });
+  node.addEventListener("blur", hideTip);
+}
+
+// A small focusable "?" that reveals `text` on hover/focus (replaces verbose
+// inline footnotes; keyboard-accessible).
+function helpHint(text) {
+  const h = el("span", { class: "help", tabindex: "0", role: "button",
+    "aria-label": text, text: "?" });
+  bindTip(h, () => text);
+  return h;
+}
+
+// Title-case a NUT state token ("INACTIVE" -> "Inactive") for display.
+function titleCase(s) {
+  s = String(s == null ? "" : s).toLowerCase();
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : "—";
+}
+
+// "x ago" for remote-health epoch-second timestamps.
+function relTime(epoch) {
+  if (!epoch) return "never";
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - epoch));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+
 function showError(msg) {
   const box = document.getElementById("error");
   if (!msg) { box.hidden = true; return; }
@@ -391,6 +461,7 @@ function renderUps(payload) {
         el("b", { text: String(sources.length) })]),
     ]));
   });
+  renderRemoteHealth();
   updateEventSourceFilter(rows, groups);
 }
 
@@ -420,6 +491,53 @@ function remoteHealthReachable(row) {
     row.healthy === true || row.reachable === true ||
     status === "HEALTHY" || status === "OK"
   );
+}
+
+function remoteStatusClass(row) {
+  if (remoteHealthReachable(row)) return "ok";
+  const s = String((row && row.status) || "").toUpperCase();
+  if (s.includes("DEGRADED") || s.includes("WARN")) return "warn";
+  return "crit";
+}
+
+// Overview widget: SSH shutdown targets / remote NUT servers and whether the
+// daemon can currently reach them (from /api/v1/remote-health). Hidden when none
+// are configured.
+function renderRemoteHealth() {
+  const sec = document.getElementById("remote-section");
+  const wrap = document.getElementById("remote-cards");
+  if (!sec || !wrap) return;
+  const servers = remoteHealthSnapshot || [];
+  sec.hidden = servers.length === 0;
+  if (!servers.length) { wrap.replaceChildren(); return; }
+  wrap.replaceChildren(...servers.map((r) => {
+    const cls = remoteStatusClass(r);
+    const reachable = remoteHealthReachable(r);
+    const name = r.server || r.host || "server";
+    // Health is carried by the colored status strip + icon + the Status row; the
+    // badge stays out of the head so a long server name isn't clipped.
+    const rows = [el("div", { class: "card-head" }, [
+      el("span", { class: "card-ico s-" + cls }, [icon("shield")]),
+      el("h3", { text: name }),
+    ])];
+    rows.push(el("div", { class: "row" }, [el("span", { text: "Status" }),
+      el("span", { class: "badge " + cls,
+        text: reachable ? "reachable" : "unreachable" })]));
+    if (r.host && r.host !== name) rows.push(configKv("Host", r.host));
+    if (r.latency_ms != null && reachable) {
+      rows.push(configKv("Latency", Math.round(r.latency_ms) + " ms"));
+    }
+    rows.push(configKv("Checked", relTime(r.last_checked_at)));
+    if (r.consecutive_failures) {
+      rows.push(el("div", { class: "row" }, [el("span", { text: "Failures" }),
+        el("b", { class: "crit", text: String(r.consecutive_failures) })]));
+    }
+    if (!reachable && r.last_error) {
+      rows.push(el("div", { class: "row" },
+        [el("span", { class: "energy-note", text: r.last_error })]));
+    }
+    return el("div", { class: "card s-" + cls }, rows);
+  }));
 }
 
 function openDetail(name) {
@@ -466,30 +584,35 @@ function energyCostConfigured(en) {
   return en && ("todayCost" in en || "monthCost" in en);
 }
 
-// Gentle footnotes for the energy block (window clarity + estimated/partial),
-// rendered as muted lines rather than blunt key/value rows.
-function energyNotes(en) {
-  const notes = [];
-  if (en.todayLabel || en.monthLabel) {
-    notes.push("Windows — today: " + (en.todayLabel || "since midnight")
-               + " · month: " + (en.monthLabel || "since the 1st"));
-  }
-  if (en.estimated) {
-    notes.push("Power is estimated from load × rated power "
-               + "(set energy.nominal_power for your UPS).");
-  }
-  if (en.partial) notes.push("Based on the samples available so far.");
-  return notes;
+// The window/estimated/partial context that used to be verbose footnotes is now
+// carried by a "?" hint on the relevant value, so the block stays compact.
+const ENERGY_HELP = {
+  estimated: "Estimated from load × rated power — the UPS doesn't report real "
+    + "watts. Set energy.nominal_power for a closer figure.",
+  partial: "Some intervals had data gaps, so this is based on the samples "
+    + "available so far.",
+};
+
+// A key/value row whose label carries a "?" hint (replaces the old footnotes).
+function hintedRow(label, value, tipText) {
+  const labelNode = tipText
+    ? el("span", { class: "label-tip" }, [el("span", { text: label }), helpHint(tipText)])
+    : el("span", { text: label });
+  return el("div", { class: "row" }, [labelNode, el("b", { text: value })]);
 }
 
 function energyRows(en) {
-  const rows = [
-    detailRow("Today", en.todayKwh != null ? en.todayKwh.toFixed(3) + " kWh" : "—"),
-  ];
+  const rows = [];
+  let todayTip = "Window: " + (en.todayLabel || "since midnight") + ".";
+  if (en.estimated) todayTip += " " + ENERGY_HELP.estimated;
+  if (en.partial) todayTip += " " + ENERGY_HELP.partial;
+  rows.push(hintedRow("Today",
+    en.todayKwh != null ? en.todayKwh.toFixed(3) + " kWh" : "—", todayTip));
   // Only show the month line once it has data (no value early in the month or on
   // a fresh UPS reads cleaner than a row full of "unknown").
   if (en.monthKwh != null) {
-    rows.push(detailRow("This month", en.monthKwh.toFixed(3) + " kWh"));
+    rows.push(hintedRow("This month", en.monthKwh.toFixed(3) + " kWh",
+      "Window: " + (en.monthLabel || "since the 1st") + "."));
   }
   if (energyCostConfigured(en)) {
     // Configured but no kWh yet -> "calculating…", not a blunt "unknown".
@@ -498,8 +621,6 @@ function energyRows(en) {
       rows.push(detailRow("Month cost", en.monthCostFormatted || "calculating…"));
     }
   }
-  energyNotes(en).forEach((n) =>
-    rows.push(el("div", { class: "row" }, [el("span", { class: "energy-note", text: n })])));
   return rows;
 }
 
@@ -950,17 +1071,32 @@ function eventDescription(e) {
   return type + (when ? (" @ " + when) : "") + (detail ? ("\n" + detail) : "");
 }
 
-// Append one event marker (vertical guide + dot) wrapped in a <g> whose <title>
-// covers the whole group, plus a wide transparent hit line, so hovering anywhere
-// along the guide shows the tooltip (the bare 3px dot was nearly impossible to
-// hit). `e` carries the event; cls is the color class.
+// The same event as a structured tooltip body (type / time / detail) for the
+// instant floating tip.
+function eventTipNode(e) {
+  const kids = [el("div", { class: "tip-head",
+    text: e.eventType || e.event || "event" })];
+  if (e.ts) kids.push(el("div", { class: "tip-sub",
+    text: new Date(e.ts * 1000).toLocaleString() }));
+  const detail = e.detail || e.details || "";
+  if (detail) kids.push(el("div", { class: "tip-body", text: detail }));
+  return kids;
+}
+
+// Append one event marker (vertical guide + dot) wrapped in a focusable <g>,
+// plus a wide transparent hit line, so hovering/focusing anywhere along the
+// guide shows the tooltip (the bare 3px dot was nearly impossible to hit). The
+// tooltip is the instant themed tip (the old native <title> only appeared after
+// a ~1s delay and looked like a plain OS tooltip). `e` carries the event; cls is
+// the color class.
 function appendEventMarker(svg, e, ex, top, bottom) {
   const cls = eventMarkerClass(e.eventType || e.event);
   const x = parseFloat(ex), yTop = parseFloat(top), yBot = parseFloat(bottom);
   const g = document.createElementNS(SVG_NS, "g");
-  const title = document.createElementNS(SVG_NS, "title");
-  title.textContent = eventDescription(e);
-  g.appendChild(title);
+  g.setAttribute("class", "ev-marker");
+  g.setAttribute("tabindex", "0");
+  g.setAttribute("role", "img");
+  g.setAttribute("aria-label", eventDescription(e));
   const mkline = (cssClass) => {
     const l = document.createElementNS(SVG_NS, "line");
     l.setAttribute("x1", x); l.setAttribute("y1", yTop);
@@ -978,6 +1114,7 @@ function appendEventMarker(svg, e, ex, top, bottom) {
     `${(x - 4).toFixed(1)},${yBot} ${(x + 4).toFixed(1)},${yBot} ${x.toFixed(1)},${(yBot - 7).toFixed(1)}`);
   tri.setAttribute("class", "ev-pin " + cls);
   g.appendChild(tri);
+  bindTip(g, () => eventTipNode(e), cls);
   svg.appendChild(g);
 }
 
@@ -1521,6 +1658,82 @@ function renderEnergyTab() {
   }
 }
 
+// ----- line quality (Power tab) --------------------------------------------
+// A glanceable read on incoming mains quality from the live power-quality block:
+// is the voltage in tolerance, the frequency near nominal, and are the UPS
+// regulation states (AVR / bypass / overload) quiet. Summarized as Good/Fair/Poor.
+
+function nearNominalFreq(hz) {
+  if (hz == null) return true;
+  return Math.abs(hz - 50) <= 1.5 || Math.abs(hz - 60) <= 1.5;
+}
+
+function lineQuality(pq) {
+  const inV = numOrNull(pq.inputVoltage);
+  const lo = numOrNull(pq.warningLow), hi = numOrNull(pq.warningHigh);
+  const banded = inV != null && lo != null && hi != null;
+  const active = (v) => String(v || "").toUpperCase() === "ACTIVE";
+  const vState = String(pq.voltageState || "").toUpperCase();
+  if ((banded && (inV < lo || inV > hi)) || active(pq.overloadState)
+      || active(pq.bypassState) || (vState && vState !== "NORMAL")) {
+    return { cls: "crit", label: "Poor" };
+  }
+  const nearEdge = banded && (inV < lo + (hi - lo) * 0.1 || inV > hi - (hi - lo) * 0.1);
+  if (active(pq.avrState) || nearEdge || !nearNominalFreq(numOrNull(pq.inputFrequency))) {
+    return { cls: "warn", label: "Fair" };
+  }
+  return { cls: "ok", label: "Good" };
+}
+
+// A regulation-state row whose badge is green when quiet (Normal/Inactive) and
+// amber when Active.
+function stateRow(label, value) {
+  const v = String(value || "").toUpperCase();
+  const cls = v === "ACTIVE" ? "warn" : (v === "NORMAL" || v === "INACTIVE" ? "ok" : "");
+  return el("div", { class: "row" }, [el("span", { text: label }),
+    el("span", { class: "badge " + cls, text: titleCase(value) })]);
+}
+
+function renderLineQuality() {
+  const wrap = document.getElementById("line-quality");
+  if (!wrap) return;
+  wrap.replaceChildren();
+  const sel = document.getElementById("power-ups");
+  const name = sel && sel.value;
+  const u = lastUpsRows.find((r) => r.name === name) || lastUpsRows[0];
+  const pq = u && u.powerQuality;
+  if (!pq) return;   // nothing to summarize; the chart below still renders
+  const q = lineQuality(pq);
+  const inV = numOrNull(pq.inputVoltage);
+  const lo = numOrNull(pq.warningLow), hi = numOrNull(pq.warningHigh);
+  const banded = inV != null && lo != null && hi != null;
+  const rows = [el("div", { class: "card-head" }, [
+    el("span", { class: "card-ico s-" + q.cls }, [icon("gauge")]),
+    el("h3", { text: "Line quality" }),
+    el("span", { class: "badge " + q.cls, text: q.label }),
+  ])];
+  rows.push(el("div", { class: "row" }, [
+    el("span", { class: "label-tip" }, [el("span", { text: "Input" }),
+      helpHint(banded ? "Acceptable band " + lo + "–" + hi + " V (nominal "
+        + (pq.nominalVoltage != null ? pq.nominalVoltage : "—") + " V)."
+        : "Incoming mains voltage.")]),
+    el("b", { class: banded && (inV < lo || inV > hi) ? "crit" : "ok",
+      text: inV != null ? inV + " V" : "—" }),
+  ]));
+  if (pq.outputVoltage != null) rows.push(configKv("Output", pq.outputVoltage + " V"));
+  if (pq.inputFrequency != null) {
+    rows.push(el("div", { class: "row" }, [el("span", { text: "Frequency" }),
+      el("b", { class: nearNominalFreq(numOrNull(pq.inputFrequency)) ? "ok" : "warn",
+        text: pq.inputFrequency + " Hz" })]));
+  }
+  [["Voltage", pq.voltageState], ["AVR", pq.avrState], ["Bypass", pq.bypassState],
+   ["Overload", pq.overloadState]].forEach(([lab, val]) => {
+    if (val != null && val !== "") rows.push(stateRow(lab, val));
+  });
+  if (pq.temperature != null) rows.push(configKv("Temperature", pq.temperature + " °C"));
+  wrap.appendChild(el("div", { class: "card s-" + q.cls }, rows));
+}
+
 // ----- config tab ----------------------------------------------------------
 
 function configKv(label, value) {
@@ -1554,8 +1767,11 @@ function jsonNode(key, value, topLevel) {
       const k = el("span", { class: "j-key" }); k.textContent = String(key);
       sum.appendChild(k); sum.appendChild(document.createTextNode(" "));
     }
-    sum.appendChild(el("span", { class: "j-punct",
-      text: isArr ? `[ ${entries.length} ]` : `{ ${entries.length} }` }));
+    // Collapsed reads `key {…}`; expanded reads `key {` (the indented left
+    // border conveys the grouping) — cleaner than a running item count.
+    sum.appendChild(el("span", { class: "j-punct j-open", text: isArr ? "[" : "{" }));
+    sum.appendChild(el("span", { class: "j-ellipsis", text: "…" }));
+    sum.appendChild(el("span", { class: "j-punct j-close", text: isArr ? "]" : "}" }));
     det.appendChild(sum);
     const kids = el("div", { class: "json-kids" });
     entries.forEach(([k, v]) => kids.appendChild(jsonNode(k, v, false)));
@@ -1571,12 +1787,23 @@ function jsonNode(key, value, topLevel) {
   return row;
 }
 
+let _lastConfigJson = null;
 function renderConfigTab() {
   const body = document.getElementById("config-body");
   if (!body) return;
-  body.replaceChildren();
   const cfg = cfgSnapshot;
-  if (!cfg) { body.appendChild(el("p", { class: "chart-note", text: "Loading…" })); return; }
+  if (!cfg) {
+    _lastConfigJson = null;
+    body.replaceChildren(el("p", { class: "chart-note", text: "Loading…" }));
+    return;
+  }
+  // The 10s poll re-activates this tab; rebuilding the tree every time would
+  // collapse every <details> the operator expanded. Rebuild only when the config
+  // actually changed (rare — hot reload / sign-in), so expand state is preserved.
+  const json = JSON.stringify(cfg);
+  if (json === _lastConfigJson && body.childElementCount) return;
+  _lastConfigJson = json;
+  body.replaceChildren();
   const cards = [];
   (cfg.ups || []).forEach((c) => {
     cards.push(widgetCard(c.label || c.name, [
@@ -1867,7 +2094,7 @@ function selectTab(name, opts) {
 
 // Draw/refresh whatever the freshly-activated tab needs from the latest data.
 function onTabActivated(name) {
-  if (name === "power" && charts.power) charts.power.load();
+  if (name === "power") { renderLineQuality(); if (charts.power) charts.power.load(); }
   else if (name === "battery") { renderBatteryHealthTab(); if (charts.battery) charts.battery.load(); }
   else if (name === "energy") { renderEnergyTab(); if (charts.energy) charts.energy.load(); }
   else if (name === "config") renderConfigTab();
