@@ -345,7 +345,7 @@ def test_dashboard_energy_dual_line_and_power_endpoint(minimal_config):
 
 
 @pytest.mark.unit
-def test_dashboard_tier1_events_and_dropdown_and_emoji(minimal_config):
+def test_dashboard_tier1_events_and_dropdown_and_icons(minimal_config):
     js = _handler(minimal_config, path="/app.js")._serve_static(
         "/app.js")[1].decode("utf-8")
     # Chart markers + default events selection are restricted to tier-1 events.
@@ -355,12 +355,16 @@ def test_dashboard_tier1_events_and_dropdown_and_emoji(minimal_config):
     # Dropdown closes on outside click; chart load() has a generation race guard.
     assert "details.event-type-picker[open]" in js
     assert "myGen !== gen" in js
+    # Tabs carry inline-SVG icons injected by initTabs (no emoji font / tofu).
+    assert "TAB_ICONS" in js and "function initTabs" in js
     html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
-    # Monochrome emoji on tab labels (decorative -> aria-hidden).
-    assert 'class="tab-emoji" aria-hidden="true"' in html
+    # Brand lightning bolt in the header + inline ⚡ SVG favicon (no packaged
+    # asset, no emoji font dependency).
+    assert 'class="ic brand-bolt"' in html
+    assert "image/svg+xml" in html
     css = _handler(minimal_config, path="/style.css")._serve_static(
         "/style.css")[1].decode("utf-8")
-    assert ".tab-emoji" in css and "grayscale(1)" in css
+    assert ".tab .ic" in css and ".brand-bolt" in css
     # Keyboard focus cue on panels is preserved (not removed).
     assert ".panel:focus-visible" in css and "outline: 2px solid var(--accent)" in css
 
@@ -397,9 +401,11 @@ def test_dashboard_round3_ux(minimal_config):
     # Energy: "calculating…" not "unknown"; month hidden until data; window notes.
     assert "calculating" in js and "energyNotes" in js
     assert "This month" in js
-    # Config tab: collapsible pretty JSON + only enabled features.
-    assert "config-json" in js and "Enabled features" in js
-    assert ".config-json" in css
+    # Config tab: colored, collapsible JSON tree (<details> per section) + only
+    # enabled features.
+    assert "json-tree" in js and "Enabled features" in js
+    assert "function jsonNode" in js and "json-node" in js
+    assert ".json-tree" in css and ".j-key" in css and ".j-str" in css
     # Detail modal closes on backdrop click; events filters scroll to top.
     assert 'ev.target.id === "detail-modal"' in js
     assert "window.scrollTo(0, 0)" in js

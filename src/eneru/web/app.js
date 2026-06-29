@@ -85,6 +85,38 @@ function el(tag, attrs, children) {
   return node;
 }
 
+// ----- inline SVG icons -----------------------------------------------------
+// A tiny stroke-icon set drawn with currentColor, so icons inherit text/status
+// color and theme automatically — no color-emoji font dependency (the host has
+// none, which is why the old emoji rendered as tofu). Each value is one path `d`
+// (multiple M-segments allowed).
+const ICONS = {
+  home:    "M3 11.5 12 4l9 7.5 M5.5 10.5V20h13v-9.5",
+  bolt:    "M13 3 6 13h5l-1 8 8-11h-5z",
+  battery: "M3 8.5h13v7H3z M18.5 11v3 M5.5 10.5v3",
+  chart:   "M4 5v14h16 M8 14l3-3 2.4 2L19 8",
+  bell:    "M6 9a6 6 0 0 1 12 0c0 5 2.2 7 2.2 7H3.8S6 14 6 9 M10 21h4",
+  sliders: "M5 8h14 M5 16h14 M9 6v4 M15 14v4",
+  gear:    "M12 9.4a2.6 2.6 0 1 0 0 5.2 2.6 2.6 0 0 0 0-5.2z M19.3 12a7 7 0 0 0-.1-1.2l1.9-1.5-1.9-3.3-2.3 1a7 7 0 0 0-1.7-1l-.4-2.5h-3.7l-.4 2.5a7 7 0 0 0-1.7 1l-2.3-1L4.8 8.3l1.9 1.5a7 7 0 0 0 0 2.4l-1.9 1.5 1.9 3.3 2.3-1a7 7 0 0 0 1.7 1l.4 2.5h3.7l.4-2.5a7 7 0 0 0 1.7-1l2.3 1 1.9-3.3-1.9-1.5a7 7 0 0 0 .1-1.2z",
+  shield:  "M12 3 19 6v5c0 4.5-3 7.6-7 8.6-4-1-7-4.1-7-8.6V6z",
+  gauge:   "M4.5 16.5a8 8 0 1 1 15 0 M12 13l3-3",
+  check:   "M5 12.5 9.5 17 19 7",
+  alert:   "M12 4 21 19H3z M12 10v4 M12 16.6v.4",
+  close:   "M6 6l12 12 M18 6 6 18",
+};
+function icon(name, cls) {
+  const s = document.createElementNS(SVG_NS, "svg");
+  s.setAttribute("viewBox", "0 0 24 24");
+  s.setAttribute("class", "ic" + (cls ? " " + cls : ""));
+  s.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(SVG_NS, "path");
+  p.setAttribute("d", ICONS[name] || "");
+  s.appendChild(p);
+  return s;
+}
+const TAB_ICONS = { overview: "home", power: "bolt", battery: "battery",
+  energy: "chart", events: "bell", control: "sliders", config: "gear" };
+
 function showError(msg) {
   const box = document.getElementById("error");
   if (!msg) { box.hidden = true; return; }
@@ -173,6 +205,132 @@ function populateChartUpsSelects(rows) {
   });
 }
 
+// ----- Overview hero + KPI summary (rc9) -----------------------------------
+
+// SVG battery ring gauge: a track circle + a value arc (dasharray), centered
+// label. Colored by status class. The signature visual of the Overview.
+function batteryRing(pct, statusCls) {
+  const R = 52, C = 2 * Math.PI * R;
+  const p = Math.max(0, Math.min(100, isNaN(pct) ? 0 : pct));
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 120 120");
+  svg.setAttribute("class", "ring s-" + (statusCls || "ok"));
+  const circle = (cls, extra) => {
+    const c = document.createElementNS(SVG_NS, "circle");
+    c.setAttribute("cx", "60"); c.setAttribute("cy", "60"); c.setAttribute("r", String(R));
+    c.setAttribute("class", cls);
+    if (extra) for (const k in extra) c.setAttribute(k, extra[k]);
+    svg.appendChild(c);
+  };
+  circle("ring-track");
+  circle("ring-arc", {
+    transform: "rotate(-90 60 60)", "stroke-linecap": "round",
+    "stroke-dasharray": `${(p / 100 * C).toFixed(1)} ${C.toFixed(1)}`,
+  });
+  const txt = (cls, y, s) => {
+    const t = document.createElementNS(SVG_NS, "text");
+    t.setAttribute("x", "60"); t.setAttribute("y", String(y));
+    t.setAttribute("text-anchor", "middle"); t.setAttribute("class", cls);
+    t.textContent = s; svg.appendChild(t);
+  };
+  txt("ring-big", 60, isNaN(pct) ? "—" : Math.round(p) + "%");
+  txt("ring-cap", 78, p >= 95 ? "CHARGED" : p >= 20 ? "ON LINE" : "LOW");
+  return svg;
+}
+
+function heroCard(u) {
+  const charge = parseFloat(u.batteryCharge);
+  const sCls = statusClass(u.status);
+  const pq = u.powerQuality || {};
+  const wrap = el("div", { class: "hero card-click s-" + sCls, tabindex: "0",
+    role: "button", title: "View details" });
+  wrap.appendChild(batteryRing(charge, batteryClass(charge) || sCls));
+  const vital = (label, value) => el("div", null, [
+    el("div", { class: "v-label", text: label }),
+    el("div", { class: "v-value", text: value }),
+  ]);
+  wrap.appendChild(el("div", { class: "hero-main" }, [
+    el("div", { class: "hero-title" }, [
+      icon("battery"), el("h3", { text: u.label || u.name }),
+      el("span", { class: "badge " + sCls, text: u.status || "—" }),
+    ]),
+    el("div", { class: "hero-vitals" }, [
+      vital("Runtime", formatRuntimeSeconds(u.runtime)),
+      vital("Load", u.load != null ? u.load + "%" : "—"),
+      vital("Input", pq.inputVoltage != null ? pq.inputVoltage + " V" : "—"),
+      vital("On battery", u.timeOnBattery != null ? u.timeOnBattery + "s" : "—"),
+    ]),
+  ]));
+  const open = () => openDetail(u.name);
+  wrap.addEventListener("click", open);
+  wrap.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(); }
+  });
+  return wrap;
+}
+
+// A compact KPI summary card that drills through to its tab on click.
+function kpiCard({ iconName, label, value, unit, cap, valueStatus, tab }) {
+  const card = el("div", { class: "card kpi card-click", tabindex: "0", role: "button" });
+  card.appendChild(el("div", { class: "k-label" }, [icon(iconName), el("span", { text: label })]));
+  const val = el("div", { class: "k-value" + (valueStatus ? " s-" + valueStatus : "") });
+  val.appendChild(document.createTextNode(value));
+  if (unit) val.appendChild(el("span", { class: "unit", text: unit }));
+  card.appendChild(val);
+  card.appendChild(el("div", { class: "k-cap", text: cap || "" }));
+  const go = () => selectTab(tab, { updateHash: true });
+  card.addEventListener("click", go);
+  card.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); }
+  });
+  return card;
+}
+
+function renderOverviewSummary(rows) {
+  const hero = document.getElementById("overview-hero");
+  const summary = document.getElementById("overview-summary");
+  if (!hero || !summary) return;
+  hero.replaceChildren();
+  summary.replaceChildren();
+  if (!rows.length) {
+    hero.appendChild(el("p", { class: "chart-note", text: "No UPS data yet." }));
+    return;
+  }
+  // Hero shows the worst-status UPS so a problem surfaces immediately.
+  const rank = { crit: 0, warn: 1, ok: 2 };
+  const primary = rows.slice().sort(
+    (a, b) => rank[statusClass(a.status)] - rank[statusClass(b.status)])[0];
+  hero.appendChild(heroCard(primary));
+
+  // Three drill-through KPI cards surfacing the v6.1 data otherwise buried on
+  // other tabs: battery health, energy today, last self-test.
+  const bh = primary.batteryHealth;
+  summary.appendChild(kpiCard({
+    iconName: "shield", label: "Battery health",
+    value: bh && bh.score != null ? Math.round(bh.score) : "—",
+    unit: bh && bh.score != null ? "/100" : "",
+    cap: bh && bh.confidence != null ? "confidence " + Math.round(bh.confidence * 100) + "%"
+      : "no data yet",
+    valueStatus: bh ? scoreClass(bh.score) : null, tab: "battery" }));
+
+  const en = primary.energy;
+  summary.appendChild(kpiCard({
+    iconName: "chart", label: "Energy today",
+    value: en && en.todayKwh != null ? en.todayKwh.toFixed(2) : "—",
+    unit: en && en.todayKwh != null ? " kWh" : "",
+    cap: en && en.todayCostFormatted ? en.todayCostFormatted + " today"
+      : (en && en.monthKwh != null ? en.monthKwh.toFixed(1) + " kWh this month" : "—"),
+    tab: "energy" }));
+
+  const st = primary.selfTest;
+  const stStatus = st ? ({ passed: "ok", failed: "crit", running: "warn" }[st.result] || null) : null;
+  summary.appendChild(kpiCard({
+    iconName: "check", label: "Last self-test",
+    value: st && st.result ? st.result.charAt(0).toUpperCase() + st.result.slice(1) : "—",
+    cap: st && st.date ? st.date : "never run",
+    valueStatus: stStatus, tab: "battery" }));
+}
+
 function renderUps(payload) {
   const wrap = document.getElementById("ups-cards");
   wrap.replaceChildren();
@@ -200,6 +358,7 @@ function renderUps(payload) {
       el("div", { class: "row" }, [el("span", { text: "Load" }),
         el("b", { text: u.load != null ? u.load + "%" : "—" })]),
     ]);
+    card.classList.add("s-" + statusClass(u.status));   // status accent rail
     card.addEventListener("click", () => openDetail(u.name));
     card.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDetail(u.name); }
@@ -207,6 +366,10 @@ function renderUps(payload) {
     wrap.appendChild(card);
   });
   populateChartUpsSelects(rows);
+  // Single UPS → the Overview is the hero + KPI summary; the raw per-UPS card
+  // grid only appears for a fleet (multi-UPS).
+  document.getElementById("ups-section").hidden = rows.length <= 1;
+  renderOverviewSummary(rows);
 
   const groups = (payload && payload.redundancyGroups) || [];
   lastGroups = groups;
@@ -443,17 +606,18 @@ function renderBanner() {
     }
     if (s.includes("OB") && !warn) warn = u;
   }
+  const setBanner = (cls, iconName, text) => {
+    banner.className = "banner " + cls;
+    banner.replaceChildren(icon(iconName), el("span", { text: text }));
+    banner.hidden = false;
+  };
   if (crit) {
-    banner.className = "banner crit";
     const why = crit.triggerReason ? (": " + crit.triggerReason) : "";
-    banner.textContent = "⚠️  Shutdown imminent — " +
-      (crit.label || crit.name) + " is on low battery" + why;
-    banner.hidden = false;
+    setBanner("crit", "alert", "Shutdown imminent — " +
+      (crit.label || crit.name) + " is on low battery" + why);
   } else if (warn) {
-    banner.className = "banner warn";
-    banner.textContent = "🔋  On battery — " + (warn.label || warn.name) +
-      " is running on battery power";
-    banner.hidden = false;
+    setBanner("warn", "battery", "On battery — " + (warn.label || warn.name) +
+      " is running on battery power");
   } else {
     banner.hidden = true;
   }
@@ -902,8 +1066,15 @@ function drawChart(hostId, series, options) {
   const x = (t) => pad + ((t - t0) / tspan) * (W - pad - 5);
   const y = (v) => (H - pad) - ((v - min) / span) * (H - pad - 5);
 
-  // Voltage threshold band (reference overlay of the CURRENT config, not
-  // historical truth — labelled as such by the caller's note line).
+  // Horizontal gridlines (quarter divisions) — the single biggest "this is a
+  // real chart" cue. Drawn first, behind everything.
+  for (let i = 1; i <= 3; i++) {
+    const gy = (5 + i * (H - pad - 5) / 4).toFixed(1);
+    line(pad, gy, W - 5, gy, "grid");
+  }
+
+  // Voltage threshold band: a faint zone bounded by dashed edge lines (reads as
+  // thresholds, not a slab of page-tint), plus the nominal center line.
   if (wantBand && bands.low != null && bands.high != null) {
     const yHigh = y(bands.high), yLow = y(bands.low);
     const rect = document.createElementNS(SVG_NS, "rect");
@@ -912,6 +1083,8 @@ function drawChart(hostId, series, options) {
     rect.setAttribute("height", Math.max(0, yLow - yHigh).toFixed(1));
     rect.setAttribute("class", "band");
     svg.appendChild(rect);
+    line(pad, yHigh.toFixed(1), W - 5, yHigh.toFixed(1), "band-edge");
+    line(pad, yLow.toFixed(1), W - 5, yLow.toFixed(1), "band-edge");
   }
   if (wantBand && bands.nominal != null) {
     line(pad, y(bands.nominal).toFixed(1), W - 5, y(bands.nominal).toFixed(1), "band-nominal");
@@ -944,13 +1117,43 @@ function drawChart(hostId, series, options) {
     if (typeof p.value !== "number" || isNaN(p.value)) return;
     d += (d ? " L" : "M") + x(p.ts).toFixed(1) + " " + y(p.value).toFixed(1);
   });
+  // Subtle gradient area fill under the line (single-series charts without a
+  // threshold band) — premium depth, not a flat slab.
+  if (!wantBand && d) {
+    const gid = hostId + "-areagrad";
+    const defs = document.createElementNS(SVG_NS, "defs");
+    const grad = document.createElementNS(SVG_NS, "linearGradient");
+    grad.setAttribute("id", gid);
+    grad.setAttribute("x1", "0"); grad.setAttribute("y1", "0");
+    grad.setAttribute("x2", "0"); grad.setAttribute("y2", "1");
+    [["0", "0.22"], ["1", "0"]].forEach(([off, op]) => {
+      const s = document.createElementNS(SVG_NS, "stop");
+      s.setAttribute("offset", off); s.setAttribute("stop-color", "var(--accent)");
+      s.setAttribute("stop-opacity", op); grad.appendChild(s);
+    });
+    defs.appendChild(grad); svg.appendChild(defs);
+    const area = document.createElementNS(SVG_NS, "path");
+    const xL = x(pts[pts.length - 1].ts).toFixed(1), xF = x(pts[0].ts).toFixed(1);
+    area.setAttribute("d", `${d} L${xL} ${(H - pad).toFixed(1)} L${xF} ${(H - pad).toFixed(1)} Z`);
+    area.setAttribute("class", "area"); area.setAttribute("fill", `url(#${gid})`);
+    svg.appendChild(area);
+  }
   const path = document.createElementNS(SVG_NS, "path");
   path.setAttribute("d", d); path.setAttribute("class", "plot");
   path.setAttribute("vector-effect", "non-scaling-stroke");
   svg.appendChild(path);
 
-  // Min/max axis labels.
+  // "Now" marker at the latest reading + min/max axis labels.
   const fmt = (metric === "runtime") ? formatRuntimeSeconds : (v) => v.toFixed(0);
+  const lastPt = [...pts].reverse().find(
+    (p) => typeof p.value === "number" && !isNaN(p.value));
+  if (lastPt) {
+    const dot = document.createElementNS(SVG_NS, "circle");
+    dot.setAttribute("cx", x(lastPt.ts).toFixed(1));
+    dot.setAttribute("cy", y(lastPt.value).toFixed(1));
+    dot.setAttribute("r", "3.5"); dot.setAttribute("class", "now-dot");
+    svg.appendChild(dot);
+  }
   const lab = (txt, yy) => {
     const t = document.createElementNS(SVG_NS, "text");
     t.setAttribute("x", 2); t.setAttribute("y", yy);
@@ -1136,8 +1339,14 @@ function drawEnergyChart(hostId, rows, options) {
     path.setAttribute("vector-effect", "non-scaling-stroke");
     svg.appendChild(path);
   }
-  plot("loadPct", loadS, "plot plot-load");
-  plot("watts", wattS, "plot plot-watts");
+  // When watts is ESTIMATED from load (no real-power sensor) the two lines have
+  // an identical shape — plotting both is redundant noise, so show only Power (W),
+  // the figure operators actually want. Show Load% alongside ONLY when watts is a
+  // real measurement (then they genuinely differ and the comparison is useful).
+  const realWatts = pts.some((p) => typeof p.watts === "number" && p.estimated === false);
+  const showLoad = !wattS || realWatts;
+  if (wattS) plot("watts", wattS, "plot plot-watts");
+  if (showLoad) plot("loadPct", loadS, "plot plot-load");
 
   // Legend + per-line max labels (each line has its own unit/scale).
   let lx = pad + 4;
@@ -1153,8 +1362,19 @@ function drawEnergyChart(hostId, rows, options) {
     svg.appendChild(t);
     lx += 150;
   };
-  if (loadS) legend("Load", "plot-load", loadS.mx, "%");
   if (wattS) legend("Power", "plot-watts", wattS.mx, "W");
+  if (showLoad && loadS) legend("Load", "plot-load", loadS.mx, "%");
+  // Min/max axis numbers for the primary series (watts if present, else load).
+  const prim = wattS || loadS;
+  if (prim) {
+    const unit = wattS ? " W" : " %";
+    const lab = (txt, yy) => {
+      const t = document.createElementNS(SVG_NS, "text");
+      t.setAttribute("x", "2"); t.setAttribute("y", yy);
+      t.setAttribute("class", "lbl"); t.textContent = txt; svg.appendChild(t);
+    };
+    lab(prim.mx.toFixed(0) + unit, 12); lab(prim.mn.toFixed(0) + unit, H - pad);
+  }
   host.appendChild(svg);
 }
 
@@ -1311,6 +1531,46 @@ function configKv(label, value) {
   ]);
 }
 
+// Colored, collapsible JSON tree. Objects/arrays render as <details> so each
+// section expands/collapses on its own; leaves are syntax-colored by type.
+function jsonValueSpan(v) {
+  let cls = "j-num", txt = String(v);
+  if (typeof v === "string") { cls = "j-str"; txt = JSON.stringify(v); }
+  else if (typeof v === "boolean") cls = "j-bool";
+  else if (v === null) { cls = "j-null"; txt = "null"; }
+  const s = el("span", { class: cls });
+  s.textContent = txt;
+  return s;
+}
+
+function jsonNode(key, value, topLevel) {
+  if (value !== null && typeof value === "object") {
+    const isArr = Array.isArray(value);
+    const entries = isArr ? value.map((v, i) => [i, v]) : Object.entries(value);
+    const det = el("details", { class: "json-node" });
+    if (topLevel) det.setAttribute("open", "");   // top level open; sections start collapsed
+    const sum = el("summary");
+    if (key !== undefined) {
+      const k = el("span", { class: "j-key" }); k.textContent = String(key);
+      sum.appendChild(k); sum.appendChild(document.createTextNode(" "));
+    }
+    sum.appendChild(el("span", { class: "j-punct",
+      text: isArr ? `[ ${entries.length} ]` : `{ ${entries.length} }` }));
+    det.appendChild(sum);
+    const kids = el("div", { class: "json-kids" });
+    entries.forEach(([k, v]) => kids.appendChild(jsonNode(k, v, false)));
+    det.appendChild(kids);
+    return det;
+  }
+  const row = el("div", { class: "json-leaf" });
+  if (key !== undefined) {
+    const k = el("span", { class: "j-key" }); k.textContent = String(key);
+    row.appendChild(k); row.appendChild(document.createTextNode(": "));
+  }
+  row.appendChild(jsonValueSpan(value));
+  return row;
+}
+
 function renderConfigTab() {
   const body = document.getElementById("config-body");
   if (!body) return;
@@ -1339,13 +1599,10 @@ function renderConfigTab() {
     body.appendChild(el("p", { class: "chart-note",
       text: "Sign in to see the full configuration (secrets are never shown)." }));
   }
-  // The full (sanitized) config, pretty-printed and collapsible — click to read.
-  const pre = el("pre", { class: "config-json" });
-  pre.textContent = JSON.stringify(cfg, null, 2);
-  body.appendChild(el("details", { class: "config-raw" }, [
-    el("summary", { text: "Configuration (JSON)" }),
-    pre,
-  ]));
+  // The (sanitized) config as a colored, collapsible tree — each section
+  // expands/collapses on its own.
+  body.appendChild(el("h2", { text: "Configuration (JSON)" }));
+  body.appendChild(el("div", { class: "json-tree" }, [jsonNode(undefined, cfg, true)]));
 }
 
 // ----- control panel (5c) -----
@@ -1620,6 +1877,9 @@ function initTabs() {
   const list = document.getElementById("tabs");
   if (!list) return;
   tabButtons().forEach((btn) => {
+    // Prepend each tab's inline-SVG icon (single source of truth in TAB_ICONS).
+    const name = TAB_ICONS[btn.dataset.tab];
+    if (name) btn.insertBefore(icon(name), btn.firstChild);
     btn.addEventListener("click", () =>
       selectTab(btn.dataset.tab, { updateHash: true }));
   });

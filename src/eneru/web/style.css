@@ -2,29 +2,54 @@
    (System default, flash-free) and via an explicit [data-theme] override set by
    the theme switcher. Explicit data-theme always wins over the OS preference. */
 :root {
-  --bg: #0f1115;
-  --panel: #171a21;
-  --panel-2: #20242d;
-  --text: #e6e9ef;
-  --muted: #9aa3b2;
-  --accent: #4f8cf7;
+  --bg: #0d0f13;
+  --panel: #161922;
+  --panel-2: #1e222c;
+  --text: #e7eaf0;
+  --text-2: #c2c8d4;
+  --muted: #99a2b2;
+  --accent: #5b93f7;
+  --accent-rgb: 91,147,247;
   --on-accent: #0b0e13;
-  --ok: #4ccb6e;
-  --warn: #e7a13a;
-  --crit: #ef5b5b;
-  --line: #2b303b;
+  --ok: #4ccb6e;   --ok-rgb: 76,203,110;
+  --warn: #e7a13a; --warn-rgb: 231,161,58;
+  --crit: #ef5b5b; --crit-rgb: 239,91,91;
+  --line: #262b36;
+  --line-strong: #313845;
+  --grid: rgba(255,255,255,0.05);
+  /* tinted status/accent surfaces */
+  --accent-weak: rgba(var(--accent-rgb), 0.14);
+  --ok-weak:   rgba(var(--ok-rgb), 0.13);
+  --warn-weak: rgba(var(--warn-rgb), 0.13);
+  --crit-weak: rgba(var(--crit-rgb), 0.13);
+  --hero-grad: linear-gradient(135deg, rgba(var(--accent-rgb),0.14), rgba(var(--accent-rgb),0.02));
+  /* radius + elevation */
+  --r-sm: 8px; --r-md: 14px; --r-lg: 18px; --r-pill: 999px;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.20);
+  --shadow-md: 0 6px 20px -6px rgba(0,0,0,0.38);
+  --shadow-lg: 0 18px 44px -14px rgba(0,0,0,0.50);
 }
 :root[data-theme="light"], :root[data-theme="light"] * { color-scheme: light; }
 :root[data-theme="dark"], :root[data-theme="dark"] * { color-scheme: dark; }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
-    --bg: #f7f8fa; --panel: #ffffff; --panel-2: #eef1f5; --text: #1b1f27;
-    --muted: #5b6473; --accent: #2563eb; --on-accent: #ffffff; --line: #dfe3ea;
+    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f6; --text: #161a22;
+    --text-2: #2f3744; --muted: #5b6473; --accent: #2563eb; --accent-rgb: 37,99,235;
+    --on-accent: #ffffff; --line: #e6e9ef; --line-strong: #dde1e9;
+    --grid: rgba(15,20,30,0.06);
+    --shadow-sm: 0 1px 2px rgba(15,20,30,0.05);
+    --shadow-md: 0 4px 16px -6px rgba(15,20,30,0.14);
+    --shadow-lg: 0 16px 40px -14px rgba(15,20,30,0.22);
   }
 }
 :root[data-theme="light"] {
-  --bg: #f7f8fa; --panel: #ffffff; --panel-2: #eef1f5; --text: #1b1f27;
-  --muted: #5b6473; --accent: #2563eb; --on-accent: #ffffff; --line: #dfe3ea;
+  --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f6; --text: #161a22;
+  --text-2: #2f3744; --muted: #5b6473; --accent: #2563eb; --accent-rgb: 37,99,235;
+  --on-accent: #ffffff; --line: #e6e9ef; --line-strong: #dde1e9;
+  --grid: rgba(15,20,30,0.06);
+  --shadow-sm: 0 1px 2px rgba(15,20,30,0.05);
+  --shadow-md: 0 4px 16px -6px rgba(15,20,30,0.14);
+  --shadow-lg: 0 16px 40px -14px rgba(15,20,30,0.22);
 }
 * { box-sizing: border-box; }
 /* The dashboard shows/hides every element via the `hidden` attribute. Class
@@ -40,16 +65,120 @@ header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 0.75rem 1.25rem; background: var(--panel); border-bottom: 1px solid var(--line);
 }
-header h1 { font-size: 1.25rem; margin: 0; }
-main { padding: 1.25rem; max-width: 1100px; margin: 0 auto; }
+header h1 { font-size: 1.25rem; margin: 0; display: flex; align-items: center; gap: 0.45rem; }
+header h1 .brand-bolt { width: 22px; height: 22px; color: var(--accent); }
+main { padding: 1.75rem 1.5rem; max-width: 1240px; margin: 0 auto; }
 section { margin-bottom: 1.75rem; }
-h2 { font-size: 1rem; color: var(--muted); text-transform: uppercase;
-     letter-spacing: 0.05em; border-bottom: 1px solid var(--line); padding-bottom: 0.35rem; }
-.cards { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 1rem; }
-.card h3 { margin: 0 0 0.5rem; font-size: 1.05rem; }
-.card .row { display: flex; justify-content: space-between; padding: 0.15rem 0; color: var(--muted); }
-.card .row b { color: var(--text); font-weight: 600; }
+h2 { font-size: 0.8125rem; color: var(--muted); text-transform: uppercase;
+     letter-spacing: 0.06em; font-weight: 600; border-bottom: none;
+     margin: 0 0 1rem; }
+.cards { display: grid; gap: 1.25rem; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.card { background: var(--panel); border: 1px solid var(--line-strong);
+  border-radius: var(--r-md); padding: 1.5rem; box-shadow: var(--shadow-sm);
+  position: relative; overflow: hidden;
+  transition: transform .14s ease, box-shadow .14s ease, border-color .14s ease; }
+.card h3 { margin: 0 0 0.6rem; font-size: 1rem; font-weight: 600; }
+.card .row { display: flex; justify-content: space-between; padding: 0.18rem 0;
+  color: var(--muted); font-size: 0.9375rem; }
+.card .row b { color: var(--text-2); font-weight: 600;
+  font-variant-numeric: tabular-nums; }
+/* Status shown ONCE per card: a 2px accent strip on top (not green-on-everything). */
+.card.s-ok::before, .card.s-warn::before, .card.s-crit::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 2px; }
+.card.s-ok::before   { background: var(--ok); }
+.card.s-warn::before { background: var(--warn); }
+.card.s-crit::before { background: var(--crit); }
+
+/* ===== rc9 redesign components =================================== */
+
+/* Inline-SVG icons (currentColor → theme + status aware, no emoji font). */
+.ic { width: 1em; height: 1em; flex: none; vertical-align: -0.14em;
+  fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round; }
+
+/* Card header: small tinted icon chip + title + right-aligned badge. */
+.card-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.75rem; }
+.card-head h3 { margin: 0; font-size: 1rem; font-weight: 600;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-head .badge { margin-left: auto; flex: none; }
+.card-ico { display: inline-grid; place-items: center; width: 30px; height: 30px;
+  border-radius: 9px; background: var(--accent-weak); color: var(--accent); flex: none; }
+.card-ico .ic { width: 17px; height: 17px; }
+.card-ico.s-ok { background: var(--ok-weak); color: var(--ok); }
+.card-ico.s-warn { background: var(--warn-weak); color: var(--warn); }
+.card-ico.s-crit { background: var(--crit-weak); color: var(--crit); }
+
+/* Clickable cards (overview summary / UPS cards): lift on hover. */
+.card-click { cursor: pointer; }
+.card-click:hover { transform: translateY(-2px); box-shadow: var(--shadow-md);
+  border-color: rgba(var(--accent-rgb), 0.45); }
+
+/* Overview hero card: ring gauge + key vitals, restrained accent wash. */
+.hero { background: var(--hero-grad); border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg); padding: 1.5rem 1.75rem; box-shadow: var(--shadow-sm);
+  display: grid; grid-template-columns: auto 1fr; gap: 1.75rem; align-items: center;
+  position: relative; overflow: hidden; margin-bottom: 1.25rem; }
+.hero.s-ok::before, .hero.s-warn::before, .hero.s-crit::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 3px; }
+.hero.s-ok::before { background: var(--ok); }
+.hero.s-warn::before { background: var(--warn); }
+.hero.s-crit::before { background: var(--crit); }
+.hero-main { display: flex; flex-direction: column; gap: 0.4rem; min-width: 0; }
+.hero-title { display: flex; align-items: center; gap: 0.6rem; }
+.hero-title h3 { margin: 0; font-size: 1.1rem; font-weight: 600; }
+.hero-vitals { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr));
+  gap: 0.5rem 1.5rem; margin-top: 0.4rem; }
+.hero-vitals .v-label { color: var(--muted); font-size: 0.8125rem; }
+.hero-vitals .v-value { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums; }
+@media (max-width: 560px) { .hero { grid-template-columns: 1fr; text-align: center; } }
+
+/* Battery ring gauge (SVG). */
+.ring { width: 132px; height: 132px; }
+.ring-track { fill: none; stroke: var(--panel-2); stroke-width: 11; }
+.ring-arc { fill: none; stroke: var(--accent); stroke-width: 11;
+  transition: stroke-dasharray .6s ease; }
+.ring.s-ok .ring-arc { stroke: var(--ok); }
+.ring.s-warn .ring-arc { stroke: var(--warn); }
+.ring.s-crit .ring-arc { stroke: var(--crit); }
+.ring-big { fill: var(--text); font-size: 27px; font-weight: 700;
+  font-variant-numeric: tabular-nums; }
+.ring-cap { fill: var(--muted); font-size: 9px; font-weight: 600; letter-spacing: 0.14em; }
+
+/* KPI summary tiles (Overview secondary row). */
+.kpi { padding: 1.1rem 1.25rem; display: flex; flex-direction: column; gap: 0.35rem; }
+.kpi .k-label { display: flex; align-items: center; gap: 0.45rem;
+  font-size: 0.8125rem; color: var(--muted); }
+.kpi .k-label .ic { width: 15px; height: 15px; }
+.kpi .k-value { font-size: 1.65rem; font-weight: 700; letter-spacing: -0.02em;
+  line-height: 1.1; font-variant-numeric: tabular-nums; }
+.kpi .k-value .unit { font-size: 0.9rem; font-weight: 600; color: var(--muted);
+  margin-left: 0.15rem; letter-spacing: 0; }
+.kpi .k-value.s-ok { color: var(--ok); }
+.kpi .k-value.s-warn { color: var(--warn); }
+.kpi .k-value.s-crit { color: var(--crit); }
+.kpi .k-cap { font-size: 0.8125rem; color: var(--muted); }
+
+/* Toolbars (graph controls / event filters) get a surface instead of floating. */
+.graph-controls, .event-filters { background: var(--panel);
+  border: 1px solid var(--line-strong); border-radius: var(--r-md);
+  padding: 0.75rem 1rem; gap: 1rem; align-items: center; }
+select:focus-visible, input:not([type="checkbox"]):focus-visible {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-weak); }
+
+/* Chart container + designed chrome. */
+.graph { background: var(--panel); border: 1px solid var(--line-strong);
+  border-radius: var(--r-md); padding: 0.85rem 1rem; box-shadow: var(--shadow-sm); }
+.graph svg { height: 260px; }
+.graph .grid { stroke: var(--grid); stroke-width: 1; shape-rendering: crispEdges; }
+.graph .axis { stroke: var(--line-strong); }
+.graph .plot { fill: none; stroke: var(--accent); stroke-width: 2;
+  stroke-linejoin: round; stroke-linecap: round; }
+.graph .area { stroke: none; }
+.graph .now-dot { fill: var(--accent); stroke: var(--panel); stroke-width: 2; }
+.graph .now-dot.s-warn { fill: var(--warn); }
+.graph .now-dot.s-crit { fill: var(--crit); }
 .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
          font-size: 0.8rem; font-weight: 600; }
 .badge.ok { background: rgba(91,214,114,0.15); color: var(--ok); }
@@ -80,10 +209,7 @@ select, input:not([type="checkbox"]) { background: var(--panel-2); color: var(--
 .event-type-option { display: flex; align-items: center; gap: 0.45rem;
   padding: 0.25rem 0.35rem; color: var(--text); white-space: nowrap; }
 .event-type-option input { margin: 0; accent-color: var(--accent); }
-.graph { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem; }
-.graph svg { width: 100%; height: 220px; display: block; }
-.graph .axis { stroke: var(--line); stroke-width: 1; }
-.graph .plot { fill: none; stroke: var(--accent); stroke-width: 2; }
+.graph svg { width: 100%; display: block; }
 .graph .lbl { fill: var(--muted); font-size: 11px; }
 .graph .chart-title { fill: var(--muted); font-size: 11px; font-weight: 600;
                       letter-spacing: 0.03em; }
@@ -176,11 +302,11 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .tab:hover { color: var(--text); }
 .tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
 .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-/* Monochrome tab icons: desaturate the color emoji so they read as a subtle
-   gray glyph, not a full-color sticker. */
-.tab-emoji { filter: grayscale(1); opacity: 0.75; margin-right: 0.4rem;
-             font-size: 0.95em; }
-.tab[aria-selected="true"] .tab-emoji { opacity: 1; }
+/* Inline-SVG tab icons inherit currentColor → muted, brightening to accent when
+   the tab is selected (no emoji font dependency). */
+.tab { display: inline-flex; align-items: center; gap: 0.4rem; }
+.tab .ic { width: 16px; height: 16px; opacity: 0.85; }
+.tab[aria-selected="true"] .ic { opacity: 1; }
 /* Keep a visible focus indicator on a focused panel for keyboard users. */
 .panel:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px;
                        border-radius: 6px; }
@@ -194,20 +320,33 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .chart-note { color: var(--muted); font-size: 0.85rem; margin: 0.5rem 0 0; }
 .energy-note { color: var(--muted); font-size: 0.78rem; font-style: italic; }
 
-/* Config tab: collapsible pretty-printed JSON view */
-.config-raw { margin-top: 1rem; }
-.config-raw > summary { cursor: pointer; color: var(--muted); font-weight: 600;
-  padding: 0.4rem 0.6rem; background: var(--panel-2); border: 1px solid var(--line);
-  border-radius: 6px; user-select: none; }
-.config-json { background: var(--panel); border: 1px solid var(--line);
-  border-radius: 8px; padding: 0.9rem 1rem; margin: 0.6rem 0 0; overflow: auto;
-  max-height: 60vh; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.82rem; line-height: 1.5; color: var(--text); }
+/* Config tab: colored, collapsible JSON tree (each section folds on its own) */
+.json-tree { background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 0.8rem 1rem; margin-top: 0.4rem; overflow: auto;
+  max-height: 65vh; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem; line-height: 1.6; }
+.json-node > summary { cursor: pointer; user-select: none; list-style: none; }
+.json-node > summary::-webkit-details-marker { display: none; }
+.json-node > summary::before { content: "▸ "; color: var(--muted); }
+.json-node[open] > summary::before { content: "▾ "; }
+.json-kids { padding-left: 1.1rem; border-left: 1px solid var(--line);
+  margin-left: 0.25rem; }
+.json-leaf { padding-left: 1.1rem; }
+.j-key { color: var(--accent); }
+.j-str { color: var(--ok); }
+.j-num { color: var(--warn); }
+.j-bool { color: #c084fc; }
+.j-null { color: var(--muted); font-style: italic; }
+.j-punct { color: var(--muted); }
 
-/* Chart overlays: voltage threshold band + nominal line + event markers */
-.graph .band { fill: var(--ok); opacity: 0.10; }
-.graph .band-nominal { stroke: var(--ok); stroke-width: 1; stroke-dasharray: 4 3;
-                       opacity: 0.7; }
+/* Chart overlays: voltage threshold band + nominal line + event markers.
+   The band is a faint bounded ZONE (subtle fill + dashed edges), not a slab of
+   color that reads as a page tint. */
+.graph .band { fill: rgba(var(--ok-rgb), 0.07); }
+.graph .band-edge { stroke: rgba(var(--warn-rgb), 0.5); stroke-width: 1;
+                    stroke-dasharray: 3 4; }
+.graph .band-nominal { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 3;
+                       opacity: 0.6; }
 /* Event markers: a small color-coded triangle pinned to the time axis, with a
    FAINT vertical guide that only brightens on hover (a bold full-height line per
    event looked like noise). A wide transparent hit line makes the whole column

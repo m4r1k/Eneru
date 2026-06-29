@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.0-rc9] - 2026-06-29
+
+A focused visual redesign of the dashboard — minimal, cohesive, and verified
+against production telemetry. No API or behavior changes; static assets only.
+
+### Changed
+
+- **Inline-SVG icon set** replaces the emoji used on tabs, cards, and the header.
+  Icons render from a single `TAB_ICONS` map (injected by `initTabs`) and inherit
+  `currentColor`, so there is no emoji-font dependency or "tofu" fallback. The
+  header carries a brand lightning bolt and the page now ships an inline ⚡ SVG
+  favicon (no extra packaged asset).
+- **Overview is now a glanceable summary:** a hero card leads with a battery
+  ring gauge plus the worst-status UPS and its key readings, backed by three
+  drill-through KPI cards (battery health, energy today, last self-test) that
+  jump to their tab. The full per-UPS card grid only appears for multi-UPS setups.
+- **Card facelift** — softer radius, layered shadow, hover lift, and a 2 px
+  status strip (ok/warn/crit) so a degraded UPS reads at a glance.
+- **Charts** gained quarter-division gridlines, a gradient area fill under the
+  line, a "now" dot at the latest reading, and a redrawn threshold band (shaded
+  acceptable range + dashed nominal line) for the voltage view.
+- **Config tab** renders the sanitized configuration as a colored, collapsible
+  JSON tree — each section expands/collapses independently, with syntax coloring
+  for keys, strings, numbers, booleans, and nulls.
+- Retuned the dark and light palettes (new surface, line, and accent tokens) for
+  a calmer, more consistent look across both themes.
+
 ## [6.1.0-rc8] - 2026-06-29
 
 A round of real-world dashboard polish from running rc7 on production hardware.

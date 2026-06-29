@@ -4,11 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Eneru</title>
+  <!-- Inline ⚡ favicon (a lightning-bolt path, so it renders without an emoji
+       font and needs no extra packaged asset). -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M13 2 L4 14 h6 l-1 8 9-12 h-6 z' fill='%234f8cf7'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header>
-    <h1>⚡  Eneru</h1>
+    <h1><svg class="ic brand-bolt" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3 6 13h5l-1 8 8-11h-5z"/></svg>Eneru</h1>
     <div id="authbox" class="authbox">
       <label class="theme-pick">Theme
         <select id="theme-select" aria-label="Color theme">
@@ -25,21 +28,24 @@
 
   <!-- Tab bar (Nutify-style). Real ARIA tabs: arrow-key nav + hash sync wired
        in app.js. The Control tab is hidden until authenticated + nut_control. -->
+  <!-- Tab bar (Nutify-style). Real ARIA tabs: arrow-key nav + hash sync wired in
+       app.js, which also prepends each tab's inline-SVG icon (see TAB_ICONS).
+       The Control tab is hidden until authenticated + nut_control. -->
   <nav id="tabs" class="tabs" role="tablist" aria-label="Dashboard sections">
     <button class="tab" role="tab" id="tab-overview" data-tab="overview"
-            aria-controls="panel-overview" aria-selected="true"><span class="tab-emoji" aria-hidden="true">🏠</span>Overview</button>
+            aria-controls="panel-overview" aria-selected="true">Overview</button>
     <button class="tab" role="tab" id="tab-power" data-tab="power"
-            aria-controls="panel-power" aria-selected="false" tabindex="-1"><span class="tab-emoji" aria-hidden="true">⚡</span>Power</button>
+            aria-controls="panel-power" aria-selected="false" tabindex="-1">Power</button>
     <button class="tab" role="tab" id="tab-battery" data-tab="battery"
-            aria-controls="panel-battery" aria-selected="false" tabindex="-1"><span class="tab-emoji" aria-hidden="true">🔋</span>Battery</button>
+            aria-controls="panel-battery" aria-selected="false" tabindex="-1">Battery</button>
     <button class="tab" role="tab" id="tab-energy" data-tab="energy"
-            aria-controls="panel-energy" aria-selected="false" tabindex="-1"><span class="tab-emoji" aria-hidden="true">📈</span>Energy</button>
+            aria-controls="panel-energy" aria-selected="false" tabindex="-1">Energy</button>
     <button class="tab" role="tab" id="tab-events" data-tab="events"
-            aria-controls="panel-events" aria-selected="false" tabindex="-1"><span class="tab-emoji" aria-hidden="true">🔔</span>Events</button>
+            aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
     <button class="tab" role="tab" id="tab-control" data-tab="control"
-            aria-controls="panel-control" aria-selected="false" tabindex="-1" hidden><span class="tab-emoji" aria-hidden="true">🎛️</span>Control</button>
+            aria-controls="panel-control" aria-selected="false" tabindex="-1" hidden>Control</button>
     <button class="tab" role="tab" id="tab-config" data-tab="config"
-            aria-controls="panel-config" aria-selected="false" tabindex="-1"><span class="tab-emoji" aria-hidden="true">⚙️</span>Config</button>
+            aria-controls="panel-config" aria-selected="false" tabindex="-1">Config</button>
   </nav>
 
   <div id="banner" class="banner" role="status" hidden></div>
@@ -49,7 +55,10 @@
     <!-- Overview ------------------------------------------------------------ -->
     <section id="panel-overview" class="panel" role="tabpanel"
              aria-labelledby="tab-overview" tabindex="0">
-      <div id="ups-section">
+      <h2>System</h2>
+      <div id="overview-hero"></div>
+      <div id="overview-summary" class="cards"></div>
+      <div id="ups-section" hidden>
         <h2>UPS status</h2>
         <div id="ups-cards" class="cards"></div>
       </div>
