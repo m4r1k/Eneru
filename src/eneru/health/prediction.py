@@ -63,7 +63,7 @@ def runtime_score(current_runtime_s: Optional[float],
 
 def capacity_score(runtime_history: List[Tuple[float, float]],
                    nominal_runtime_s: Optional[float],
-                   *, min_history_days: float = 14.0) -> Optional[float]:
+                   *, min_history_days: int = 14) -> Optional[float]:
     """Capacity degradation inferred from the runtime TREND, not instantaneous
     charge (which is state-of-charge, not capacity).
 
@@ -132,7 +132,7 @@ def compute_terms(*, current_runtime_s: Optional[float],
                   battery_install_date: Optional[str],
                   expected_life_years: float,
                   now: float,
-                  min_history_days: float = 14.0) -> Dict[str, Optional[float]]:
+                  min_history_days: int = 14) -> Dict[str, Optional[float]]:
     """Compute all five term sub-scores (each 0-100 or None=unavailable)."""
     return {
         "capacity": capacity_score(runtime_history, nominal_runtime_s,

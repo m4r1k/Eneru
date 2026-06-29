@@ -290,6 +290,103 @@ class TestCrossFieldValidation:
         _, errs = _validate(f"ups:\n  name: U@h\nenergy:\n  nominal_power: {val}\n")
         assert any("nominal_power must be a positive number" in e for e in errs)
 
+    # ---- v6.1 string/enum schedule field validation (finding 9) ----
+
+    @pytest.mark.unit
+    def test_self_test_schedule_invalid_is_error(self):
+        _, errs = _validate(
+            "ups:\n  name: U@h\nself_test:\n  schedule: 'every 5x'\n")
+        assert any("self_test.schedule" in e and "invalid" in e for e in errs), errs
+
+    @pytest.mark.unit
+    def test_self_test_time_invalid_is_error(self):
+        _, errs = _validate(
+            "ups:\n  name: U@h\nself_test:\n  schedule: daily\n  time: '25:99'\n")
+        # daily schedule round-trips time through parse_hhmm -> ValueError.
+        assert any("self_test.schedule/time" in e or "self_test.time" in e
+                   for e in errs), errs
+
+    @pytest.mark.unit
+    def test_self_test_time_invalid_on_interval_schedule_is_error(self):
+        # An interval schedule skips parse_hhmm inside parse_schedule, so the
+        # direct parse_hhmm round-trip is what catches a bad time here.
+        _, errs = _validate(
+            "ups:\n  name: U@h\nself_test:\n  schedule: 'every 5d'\n"
+            "  time: 'noon'\n")
+        assert any("self_test.time" in e for e in errs), errs
+
+    @pytest.mark.unit
+    def test_per_ups_self_test_schedule_invalid_is_error(self):
+        _, errs = _validate(
+            "self_test:\n  schedule: daily\n"
+            "ups:\n  - name: U1@h\n    self_test:\n      schedule: 'weekley'\n")
+        assert any("self_test (UPS 'U1@h')" in e and "schedule" in e
+                   for e in errs), errs
+
+    @pytest.mark.unit
+    def test_reports_time_invalid_is_error(self):
+        _, errs = _validate("ups:\n  name: U@h\nreports:\n  time: '99:99'\n")
+        assert any("reports.time" in e and "invalid" in e for e in errs), errs
+
+    @pytest.mark.unit
+    def test_reports_weekly_day_invalid_is_error(self):
+        _, errs = _validate(
+            "ups:\n  name: U@h\nreports:\n  weekly_day: 'funday'\n")
+        assert any("reports.weekly_day" in e and "invalid" in e for e in errs), errs
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("val", ["0", "32", "abc"])
+    def test_reports_monthly_day_out_of_range_is_error(self, val):
+        _, errs = _validate(
+            f"ups:\n  name: U@h\nreports:\n  monthly_day: {val}\n")
+        assert any("reports.monthly_day" in e for e in errs), errs
+
+    @pytest.mark.unit
+    def test_reports_format_invalid_is_error(self):
+        _, errs = _validate("ups:\n  name: U@h\nreports:\n  format: pdf\n")
+        assert any("reports.format" in e and "must be one of" in e
+                   for e in errs), errs
+
+    @pytest.mark.unit
+    def test_reports_valid_schedule_fields_no_errors(self):
+        _, errs = _validate(
+            "ups:\n  name: U@h\nreports:\n  time: '08:30'\n"
+            "  weekly_day: friday\n  monthly_day: 15\n  format: csv\n")
+        assert errs == []
+
+    # ---- battery_health numeric edge cases (finding 10) ----
+
+    @pytest.mark.unit
+    def test_critical_score_equal_to_warn_is_rejected(self):
+        # critical_score >= warn_score must be rejected (the comparison uses >=).
+        _, errs = _validate(
+            "ups:\n  name: U@h\nbattery_health:\n"
+            "  warn_score: 40\n  critical_score: 40\n")
+        assert any("critical_score" in e and "must be < warn_score" in e
+                   for e in errs), errs
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("field,val,needle", [
+        ("warn_score", "150", "must be <= 100"),
+        ("warn_score", "-5", "must be >= 0"),
+        ("critical_score", "200", "must be <= 100"),
+        ("critical_score", "-1", "must be >= 0"),
+    ])
+    def test_warn_critical_out_of_range_is_rejected(self, field, val, needle):
+        _, errs = _validate(
+            f"ups:\n  name: U@h\nbattery_health:\n  {field}: {val}\n")
+        assert any(f"battery_health.{field}" in e and needle in e
+                   for e in errs), errs
+
+    @pytest.mark.unit
+    def test_explicit_null_update_interval_is_error(self):
+        # update_interval is non-Optional; an explicit YAML null must be a config
+        # ERROR (else int() blows up at runtime and the feature dies).
+        _, errs = _validate(
+            "ups:\n  name: U@h\nbattery_health:\n  update_interval:\n")
+        assert any("battery_health.update_interval" in e
+                   and "must be set to a number" in e for e in errs), errs
+
 
 # --------------------------------------------------------------------------
 # reload classification

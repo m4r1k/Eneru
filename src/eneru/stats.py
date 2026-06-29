@@ -778,7 +778,14 @@ class StatsStore:
             return (0, 0)
 
     def purge(self) -> Tuple[int, int, int]:
-        """Apply retention. Returns ``(samples, agg_5min, agg_hourly)`` deleted."""
+        """Apply retention. Returns ``(samples, agg_5min, agg_hourly)`` deleted.
+
+        ``events``, ``battery_health`` and ``self_tests`` are also trimmed to the
+        hourly cutoff (not reflected in the returned tuple, which stays the
+        three metric tiers for back-compat). battery_health/self_tests are
+        otherwise unbounded — one row per update_interval / per issued test —
+        so a small update_interval would grow them without limit.
+        """
         if self._conn is None:
             return (0, 0, 0)
         now = int(time.time())
@@ -807,6 +814,17 @@ class StatsStore:
                 ).rowcount
                 self._conn.execute(
                     "DELETE FROM events WHERE ts < ?", (cutoff_hourly,),
+                )
+                # v7 history tables: one row per periodic computation / issued
+                # test, so they grow unbounded at a small update_interval. Trim
+                # them on the same hourly cutoff as events. self_tests keys on
+                # its own timestamp column (started_ts).
+                self._conn.execute(
+                    "DELETE FROM battery_health WHERE ts < ?", (cutoff_hourly,),
+                )
+                self._conn.execute(
+                    "DELETE FROM self_tests WHERE started_ts < ?",
+                    (cutoff_hourly,),
                 )
             return (
                 max(0, deleted_raw),
@@ -853,6 +871,8 @@ class StatsStore:
             return []
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return []
                 cur = self._conn.execute(
                     "SELECT ts, event_type, detail FROM events "
                     "WHERE ts BETWEEN ? AND ? ORDER BY ts ASC",
@@ -921,6 +941,8 @@ class StatsStore:
         )
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return []
                 cur = self._conn.execute(query, params)
                 return list(reversed(cur.fetchall()))
         except (sqlite3.Error, OSError) as e:
@@ -1005,6 +1027,8 @@ class StatsStore:
             return []
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return []
                 cur = self._conn.execute(
                     "SELECT ts, id, body, notify_type, attempts, category "
                     "FROM notifications WHERE status='pending' "
@@ -1029,6 +1053,8 @@ class StatsStore:
             return []
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return []
                 if since_ts is None:
                     cur = self._conn.execute(
                         "SELECT id, ts, body, notify_type FROM notifications "
@@ -1112,6 +1138,8 @@ class StatsStore:
             return 0
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return 0
                 cur = self._conn.execute(
                     "SELECT COUNT(*) FROM notifications WHERE status='pending'"
                 )
@@ -1213,6 +1241,8 @@ class StatsStore:
             return None
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return None
                 cur = self._conn.execute(
                     "SELECT value FROM meta WHERE key=?", (str(key),),
                 )

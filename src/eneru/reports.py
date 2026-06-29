@@ -75,8 +75,14 @@ def _section_lines(sources: Dict, include: List[str], *, indent: str = "  ") -> 
         bh = sources.get("battery_health")
         lines.append("Battery health:")
         if bh and bh.get("score") is not None:
+            # query_battery_health rows carry confidence inside the decoded
+            # `detail` JSON, not as a top-level key (status.py's live block does
+            # carry it top-level). Read either so the report shows the real value.
+            conf = (bh.get("detail") or {}).get("confidence")
+            if conf is None:
+                conf = bh.get("confidence", 0) or 0
             lines.append(f"{indent}Score: {bh['score']:.0f}/100"
-                         f" (confidence {bh.get('confidence', 0):.0%})")
+                         f" (confidence {conf:.0%})")
         else:
             lines.append(f"{indent}Score: unknown (insufficient telemetry)")
         lines.append("")
@@ -257,9 +263,13 @@ def maybe_send_due_reports(config, store, ups_name: str,
         content = build_report(period, sources, include=reports.include,
                                fmt=reports.format)
         enqueue(_compose_message(content), "info", "report")
-        # Stamp AFTER handing the message to the (persistent) notification queue,
-        # so a transient enqueue failure (which raises) is retried next tick
-        # instead of permanently dropping the period's report.
+        # Stamp AFTER enqueue returns. The wired enqueue (the monitor's
+        # _send_notification) hands the message to the PERSISTENT notification
+        # queue and returns without waiting on delivery — it does not raise on a
+        # transient delivery failure, so durability past this point is the
+        # notification worker's job (it retries from the queued row). If enqueue
+        # itself raises (e.g. the queue insert fails), the period is left
+        # unstamped so the next tick retries the whole report.
         store.set_meta(key, str(int(now)))
         sent.append(period)
     return sent
@@ -319,6 +329,9 @@ def maybe_send_due_reports_multi(config, units, meta_store,
                                          include=reports.include,
                                          fmt=reports.format)
         enqueue(_compose_message(content), "info", "report")
-        meta_store.set_meta(key, str(int(now)))  # stamp after enqueue
+        # Stamp after enqueue RETURNS (see maybe_send_due_reports): the enqueue
+        # only persists to the notification queue, it does not block on or raise
+        # for delivery failure — the worker owns delivery durability from here.
+        meta_store.set_meta(key, str(int(now)))
         sent.append(period)
     return sent

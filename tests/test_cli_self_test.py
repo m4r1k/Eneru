@@ -263,6 +263,60 @@ class TestRunDirect:
         assert seen["cmd"] == "test.battery.start.quick"   # per-UPS override, not global
 
     @pytest.mark.unit
+    def test_direct_per_ups_cannot_enable_when_global_off(self, monkeypatch):
+        # A per-UPS nut_control block can NEVER enable control when the global
+        # gate is off — --direct must force `enabled` from the GLOBAL config,
+        # mirroring the API's _effective_nut_control. So this exits (code 2)
+        # even though the per-UPS block says enabled: true.
+        cfg = _config(
+            "api:\n  auth:\n    enabled: true\n"
+            "nut_control:\n  enabled: false\n"
+            "  allowed_commands: [test.battery.start]\n"
+            "self_test:\n  command: test.battery.start\n"
+            "ups:\n  - name: U1@h\n"
+            "    nut_control:\n      enabled: true\n"
+            "      allowed_commands: [test.battery.start]\n")
+        monkeypatch.setattr(cli, "_load_config", lambda a: cfg)
+        called = {"discover": False}
+        from eneru import self_test as st
+        monkeypatch.setattr(
+            st, "discover_self_test_command",
+            lambda *a, **k: called.__setitem__("discover", True) or "x")
+        with pytest.raises(SystemExit) as e:
+            cli._cmd_self_test_run(_args(ups="U1@h", direct=True))
+        assert e.value.code == 2
+        assert called["discover"] is False   # never got past the enabled gate
+
+    @pytest.mark.unit
+    def test_direct_per_ups_override_inherits_global_enabled(self, monkeypatch):
+        # The mirror case: global ON + a per-UPS override that does NOT set
+        # enabled still issues (enabled forced from the global ON gate), and the
+        # per-UPS allowlist/creds are used as-is.
+        cfg = _config(
+            "api:\n  auth:\n    enabled: true\n"
+            "nut_control:\n  enabled: true\n  username: g\n  password: g\n"
+            "  allowed_commands: [test.battery.start]\n"
+            "self_test:\n  command: test.battery.start\n"
+            "ups:\n  - name: U1@h\n"
+            "    nut_control:\n      username: u1\n      password: p1\n"
+            "      allowed_commands: [test.battery.start]\n")
+        monkeypatch.setattr(cli, "_load_config", lambda a: cfg)
+        monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: _FakeStore())
+        from eneru import self_test as st
+        seen = {}
+        monkeypatch.setattr(st, "discover_self_test_command",
+                            lambda *a, **k: "test.battery.start")
+
+        def _issue(name, cmd, nc, store, **k):
+            seen["enabled"] = nc.enabled
+            seen["username"] = nc.username
+            return {"ok": True, "test_id": 1, "error": ""}
+        monkeypatch.setattr(st, "issue_self_test", _issue)
+        cli._cmd_self_test_run(_args(ups="U1@h", direct=True))
+        assert seen["enabled"] is True          # forced from global ON
+        assert seen["username"] == "u1"         # per-UPS creds used as-is
+
+    @pytest.mark.unit
     def test_issue_failure_exits(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_load_config", lambda a: _config(SINGLE))
         monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: _FakeStore())

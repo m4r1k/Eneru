@@ -62,18 +62,10 @@ _CONTENT_TYPE_HEADERS = {
 }
 
 # Serialize control writes per UPS so two concurrent requests can't race an
-# INSTCMD/SET against the same device. Keyed by the real NUT name.
-_ups_command_locks: Dict[str, threading.Lock] = {}
-_ups_locks_guard = threading.Lock()
-
-
-def _ups_lock(name: str) -> threading.Lock:
-    with _ups_locks_guard:
-        lock = _ups_command_locks.get(name)
-        if lock is None:
-            lock = threading.Lock()
-            _ups_command_locks[name] = lock
-        return lock
+# INSTCMD/SET against the same device. The lock lives in nut_control so the
+# scheduled self-test path (monitor) shares the SAME lock identity as the API
+# control routes — keyed by the real NUT name.
+from eneru.nut_control import command_lock as _ups_lock  # noqa: E402
 
 
 class APIBadRequest(ValueError):
@@ -735,7 +727,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 plan = build_shutdown_plan(
                     mon.config, is_local=is_local,
                     delegated=bool(getattr(mon, "_uses_loopback_delegate", False)),
-                    coordinator_mode=bool(getattr(mon, "_coordinator_mode", False)))
+                    coordinator_mode=bool(getattr(mon, "_coordinator_mode", False)),
+                    # Raw shutdown commands can embed sensitive flags/creds —
+                    # redact for anonymous readers (mirrors config_summary).
+                    reveal_commands=principal is not None)
                 return 200, "application/json", {"ups": ups_name, "plan": plan}
             if len(parts) == 6 and parts[5] == "battery-health-history":
                 # v6.1 battery-health score TREND for the Battery-tab graph. The
@@ -1034,7 +1029,15 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         return nc
 
     def _resolve_ups_name(self, ups_name: str) -> Optional[str]:
-        """Return the real NUT name for a UPS id/name, or None if unknown."""
+        """Return the real NUT name for a UPS id/name, or None if unknown.
+
+        Resolves through ``_monitor_for`` first so both resolvers share one
+        matching path (no drift) and a control lookup skips the DB-heavy
+        ``collect_status``; falls back to status matching for rows without a
+        local monitor (e.g. remote-only UPSes)."""
+        mon = self._monitor_for(ups_name)
+        if mon is not None:
+            return mon.config.ups.name
         row = find_status(collect_status(self.api_source), ups_name)
         return row["name"] if row is not None else None
 

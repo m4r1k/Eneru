@@ -348,10 +348,10 @@ def test_dashboard_energy_dual_line_and_power_endpoint(minimal_config):
 def test_dashboard_tier1_events_and_dropdown_and_icons(minimal_config):
     js = _handler(minimal_config, path="/app.js")._serve_static(
         "/app.js")[1].decode("utf-8")
-    # Chart markers + default events selection are restricted to tier-1 events.
+    # Chart markers + default events view key off the window-independent tier.
     assert "isTier1Event" in js
     assert "TIER1_EVENT_PATTERNS" in js
-    assert "_eventTypeDefaultApplied" in js
+    assert "function eventPassesTier" in js
     # Dropdown closes on outside click; chart load() has a generation race guard.
     assert "details.event-type-picker[open]" in js
     assert "myGen !== gen" in js
@@ -466,6 +466,24 @@ def test_dashboard_line_quality_card(minimal_config):
     # Reads the UPS regulation states the daemon exposes.
     for state in ("voltageState", "avrState", "bypassState", "overloadState"):
         assert state in js
+
+
+@pytest.mark.unit
+def test_dashboard_event_tier_dropdown(minimal_config):
+    # The Events tab gains a window-INDEPENDENT tier selector (power/diag/all)
+    # so widening the time range still surfaces power events.
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    assert 'id="event-tier"' in html
+    assert "function eventTierMode" in js and "function eventPassesTier" in js
+    assert "function eventTierOf" in js and "function isLifecycleEvent" in js
+    # Emitted names are matched correctly (BATTERY_LOW, not LOW_BATTERY) and the
+    # v6.1 battery-health alerts are tier-1.
+    assert '"BATTERY_LOW"' in js and '"BATTERY_HEALTH"' in js
+    assert '"LOW_BATTERY"' not in js
+    # The old window-derived default was removed.
+    assert "_eventTypeDefaultApplied" not in js
 
 
 @pytest.mark.unit

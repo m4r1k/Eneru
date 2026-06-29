@@ -1891,6 +1891,27 @@ def _resolve_self_test_command(config, group):
     return config.self_test.command
 
 
+def _effective_nut_control(config, group):
+    """Resolve nut_control for one UPS, mirroring
+    EneruAPIHandler._effective_nut_control: a per-group override is used as-is
+    for everything EXCEPT ``enabled``, which is always forced from the GLOBAL
+    nut_control. A per-UPS block can never enable control when the global gate
+    is off, so --direct matches the API's privilege model exactly."""
+    glob = config.nut_control
+    override = getattr(group, "nut_control", None)
+    if not override:
+        return glob
+    from eneru.config import NutControlConfig
+    return NutControlConfig(
+        enabled=glob.enabled,
+        username=override.username,
+        password=override.password,
+        allowed_commands=override.allowed_commands,
+        allowed_variables=override.allowed_variables,
+        timeout=override.timeout,
+    )
+
+
 def _open_stats_store(config, group):
     """Open the per-UPS stats store for CLI read/write, or ``None`` on failure.
 
@@ -1953,7 +1974,7 @@ def _self_test_run_api(config, name, args):
 def _self_test_run_direct(config, group, name):
     from eneru import self_test as selftest
     from eneru.nut_control import command_allowed
-    nc = group.nut_control or config.nut_control
+    nc = _effective_nut_control(config, group)
     if not nc.enabled:
         print("nut_control is not enabled. --direct issues a real command via "
               "NUT and needs nut_control credentials + allowlist in the config.")

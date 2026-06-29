@@ -26,6 +26,7 @@ from eneru.mqtt import MQTTPublisher
 from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
 from eneru import self_test as selftest
 from eneru import reports as reports_mod
+from eneru import nut_control as nutctl
 from eneru.config import NutControlConfig
 from eneru.lifecycle import (
     EVENT_TYPE_DAEMON_START,
@@ -2234,8 +2235,12 @@ class UPSGroupMonitor(
                 f"{self._poll_target}; skipping this cycle")
             return
         store.set_meta("self_test_last_run", str(int(now)))
-        result = selftest.issue_self_test(
-            self._poll_target, cmd, nc, store, source="scheduler")
+        # Serialize against the API control path (same per-UPS lock identity) so
+        # a scheduled self-test can't race an operator-issued command/self-test
+        # on the same device.
+        with nutctl.command_lock(self._poll_target):
+            result = selftest.issue_self_test(
+                self._poll_target, cmd, nc, store, source="scheduler")
         if result["ok"]:
             self._self_test_pending_id = result["test_id"]
             self._self_test_poll_due_mono = (

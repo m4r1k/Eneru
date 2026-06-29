@@ -102,6 +102,20 @@ def test_remote_steps_sorted_by_order(cfg):
 
 
 @pytest.mark.unit
+def test_commands_redacted_for_anonymous(cfg):
+    cfg.local_shutdown.enabled = True
+    # Default reveals the real commands...
+    shown = _by_id(build_shutdown_plan(cfg, is_local=True))
+    assert cfg.local_shutdown.command in shown["local-poweroff"]["steps"][0]["detail"]
+    # ...redacted when reveal_commands=False (anonymous reader).
+    hidden = _by_id(build_shutdown_plan(cfg, is_local=True, reveal_commands=False))
+    po = hidden["local-poweroff"]["steps"][0]["detail"]
+    assert "hidden" in po and cfg.local_shutdown.command not in po
+    for s in hidden["remote"]["steps"]:
+        assert "hidden" in s["detail"]
+
+
+@pytest.mark.unit
 def test_remote_order_loopback_detail_and_object_mount(cfg):
     from types import SimpleNamespace
     # A server with an explicit order + host-loopback flag annotates its detail.

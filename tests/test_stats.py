@@ -1750,6 +1750,36 @@ class TestPurge:
             s.close()
 
     @pytest.mark.unit
+    def test_purge_trims_old_battery_health_and_self_tests(self, tmp_path):
+        # battery_health/self_tests grow unbounded at a small update_interval;
+        # purge() must trim rows older than the hourly cutoff (mirroring events).
+        s = StatsStore(tmp_path / "purge_v7.db",
+                       retention_hourly_days=1)
+        s.open()
+        try:
+            now = int(time.time())
+            old = now - 2 * 86400      # 2 days old -> beyond 1-day hourly window
+            recent = now - 60
+            # battery_health is keyed on ts.
+            s.record_battery_health(50.0, {"capacity": 50.0}, ts=old)
+            s.record_battery_health(60.0, {"capacity": 60.0}, ts=recent)
+            # self_tests is keyed on started_ts.
+            s.record_self_test("test.battery.start", "cli", started_ts=old)
+            s.record_self_test("test.battery.start", "cli", started_ts=recent)
+
+            s.purge()
+
+            bh = s._conn.execute("SELECT COUNT(*) FROM battery_health").fetchone()[0]
+            stc = s._conn.execute("SELECT COUNT(*) FROM self_tests").fetchone()[0]
+            assert bh == 1     # only the recent battery_health row survives
+            assert stc == 1    # only the recent self_test row survives
+            # And the survivor is the recent one in each table.
+            assert s.query_battery_health(0, now * 2)[0]["ts"] == recent
+            assert s.latest_self_test()["started_ts"] == recent
+        finally:
+            s.close()
+
+    @pytest.mark.unit
     def test_purge_swallows_sqlite_error(self, store):
         class _BoomConn:
             def __enter__(self): return self
@@ -2526,6 +2556,9 @@ class TestV7ConnRaceUnderLock:
                 return True
 
             def __exit__(self_lock, *exc):
+                # Restore so the NEXT method's pre-lock check passes and we
+                # exercise ITS post-lock re-check too (not just the first call's).
+                s._conn = real_conn
                 return False
 
         s._db_lock = _RaceLock()
@@ -2544,6 +2577,51 @@ class TestV7ConnRaceUnderLock:
             assert s.latest_self_test() is None
             assert s.power_samples(0, 9999) == []
             assert s.query_range("battery_charge", 0, 9999) == []
+        finally:
+            real_conn.close()
+
+
+class TestPreExistingConnRaceUnderLock:
+    """The pre-existing read methods must ALSO re-check ``_conn`` AFTER acquiring
+    ``_db_lock`` (the same TOCTOU window the v7 methods already guarded).
+
+    ``close()`` nulls ``_conn`` under the lock, so a pre-lock-only check races a
+    concurrent close. We simulate it by nulling ``_conn`` from inside the lock
+    and asserting each method returns its safe empty default instead of crashing
+    on ``None.execute``.
+    """
+
+    def _store_that_nulls_conn_under_lock(self, tmp_path):
+        s = StatsStore(tmp_path / "race_pre.db")
+        s.open()
+        real_conn = s._conn
+
+        class _RaceLock:
+            def __enter__(self_lock):
+                s._conn = None
+                return True
+
+            def __exit__(self_lock, *exc):
+                # Restore so the NEXT method's pre-lock check passes and we
+                # exercise ITS post-lock re-check too (not just the first call's).
+                s._conn = real_conn
+                return False
+
+        s._db_lock = _RaceLock()
+        return s, real_conn
+
+    @pytest.mark.unit
+    def test_pre_existing_read_methods_survive_conn_race(self, tmp_path):
+        s, real_conn = self._store_that_nulls_conn_under_lock(tmp_path)
+        try:
+            # Each must return its method-specific safe empty value, not raise.
+            assert s.query_events(0, 9999) == []
+            assert s.query_recent_events(end_ts=9999, limit=10) == []
+            assert s.next_pending_notifications() == []
+            assert s.find_pending_by_category("health") == []
+            assert s.find_pending_by_category("health", since_ts=0) == []
+            assert s.pending_notification_count() == 0
+            assert s.get_meta("schema_version") is None
         finally:
             real_conn.close()
 

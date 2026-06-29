@@ -136,6 +136,20 @@ class TestGather:
         assert any(e[1] == "ON_BATTERY" for e in sources["events"])
         assert "todayKwh" in sources["energy"]
 
+    def test_report_confidence_from_store_detail(self, store):
+        # The store row carries confidence in `detail`, not top-level — the
+        # report must render the real value, not "(confidence 0%)".
+        now = time.time()
+        store.record_battery_health(82.0, {"runtime": 100.0},
+                                    detail={"confidence": 0.7}, ts=int(now))
+        cfg = _config("ups:\n  name: U@h\n")
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="daily", now=now)
+        body = reports.build_report(
+            "daily", sources, include=["battery_health"])["body"]
+        assert "confidence 70%" in body
+        assert "confidence 0%" not in body
+
 
 # --------------------------------------------------------------------------
 # maybe_send_due_reports

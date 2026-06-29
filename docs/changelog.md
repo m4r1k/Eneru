@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.0-rc13] - 2026-06-29
+
+Title-style consistency, a window-independent Events tier, and a full local
+code-review pass over the whole v6.1 branch.
+
+### Added
+
+- **Events tier selector** (Power / + Diagnostics / All) — a window-INDEPENDENT
+  filter so widening the time range always surfaces power events. Fixes the case
+  where a default that was materialized from the loaded window meant switching
+  from 7 to 30 days wouldn't show an earlier outage. The per-type checkboxes
+  remain as optional advanced narrowing within the tier.
+
+### Fixed
+
+- **Battery-health report confidence** rendered as `0%` — the store row carries
+  confidence inside `detail`, not top-level; the report now reads it correctly.
+- **Shutdown-plan command disclosure** — raw shutdown commands (per-remote and
+  the local poweroff) are now redacted for anonymous readers and only shown to
+  authenticated callers, matching the config-summary / remote-health policy.
+- **Battery-health alerts hidden in the TUI** — `BATTERY_HEALTH_WARNING/CRITICAL`
+  and `BATTERY_REPLACEMENT_PREDICTED` are now Power-tier events (shown at the
+  default verbosity), not buried in Diagnostics. The dashboard tier-1 patterns
+  matched `LOW_BATTERY` but the emitted name is `BATTERY_LOW`; fixed, and the
+  battery-health events are now treated as tier-1.
+- **Scheduled self-test** now holds the same per-UPS control lock as the API so a
+  scheduled and an operator-issued command can't race the device.
+- Config validation: `critical_score` must be **strictly** below `warn_score`
+  (equal silently disabled the warn tier); an explicit YAML-null for a
+  non-Optional `battery_health` numeric is now a config error; and the v6.1
+  schedule/time/day/format strings are validated up front instead of silently
+  no-op'ing at runtime.
+- `battery_health` / `self_tests` tables are now purged on the retention cadence;
+  the replacement re-warning re-fires weekly (not once per 90-day horizon);
+  `energy.cost_format` honors a numeric spec (`"{value:.2f} EUR"`); and the
+  Battery card / Energy / Config widget titles share the icon-chip style used by
+  Power's Line-quality and the Remote-servers cards.
+
+### Changed
+
+- Chart tooltips clear on the 10s refresh (no orphaned tip); recovery-state
+  events (`*_INACTIVE`) read green; a `DEGRADED` remote server shows a
+  "degraded" badge rather than a contradictory "unreachable"; and the Overview
+  self-test card only appears once a test has actually passed/failed/run.
+
 ## [6.1.0-rc12] - 2026-06-29
 
 Shutdown-plan now covers remote-only UPSes + redundancy groups, a polished

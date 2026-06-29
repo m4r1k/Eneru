@@ -300,10 +300,16 @@ class BatteryMonitorMixin:
             latest = store.latest_self_test()
             st = latest.get("result_enum") if latest else None
 
+        # Fetch enough runtime history to cover the capacity term's span guard:
+        # capacity_score needs span >= min_history_days, which has no upper bound
+        # in validation, so a min_history_days > 60 would permanently starve the
+        # capacity term if we hard-capped the fetch at 60 days.
+        min_history_days = cfg.replacement.min_history_days
         terms = prediction.compute_terms(
             current_runtime_s=runtime_s,
             nominal_runtime_s=nominal,
-            runtime_history=self._battery_runtime_history(now),
+            runtime_history=self._battery_runtime_history(
+                now, days=max(60, int(min_history_days) + 7)),
             self_test_result=st,
             anomaly_count=anomaly_count,
             battery_install_date=cfg.battery_install_date,
@@ -312,7 +318,7 @@ class BatteryMonitorMixin:
             # Don't infer a capacity trend from too short a window — the same
             # min span the replacement projection requires (avoids a confident
             # zero from a few hours of jitter on a new battery).
-            min_history_days=cfg.replacement.min_history_days,
+            min_history_days=min_history_days,
         )
         score, confidence, available = prediction.composite_score(terms)
         return {
@@ -377,17 +383,25 @@ class BatteryMonitorMixin:
         )
         if not result["due"]:
             return result
-        # Dedup: at most one prediction notification per horizon window.
+        # Dedup: re-nag at most weekly while the battery stays due. Silencing the
+        # warning for the full horizon_days (default 90d) means a battery that is
+        # already overdue goes quiet for a quarter — re-warn weekly instead, but
+        # never more often than the horizon if that is shorter than a week.
         last_raw = store.get_meta(_META_REPLACEMENT_PREDICTED)
         try:
             last = float(last_raw) if last_raw else 0.0
         except (TypeError, ValueError):
             last = 0.0
-        if now - last < rep.horizon_days * 86400:
+        if now - last < min(rep.horizon_days, 7) * 86400:
             return result
         store.set_meta(_META_REPLACEMENT_PREDICTED, str(int(now)))
         days = result.get("days_remaining")
-        days_txt = f"~{days:.0f} days" if days else "imminently"
+        if not days:
+            days_txt = "imminently"
+        elif days < 1:
+            days_txt = "<1 day"
+        else:
+            days_txt = f"~{days:.0f} days"
         self._log_message(
             f"🔋 Battery replacement predicted: health trending below "
             f"{rep.threshold_score:.0f} in {days_txt}.")

@@ -179,13 +179,30 @@ class TestCost:
         assert format_cost(0.2, currency) == expected
 
     @pytest.mark.unit
-    def test_format_cost_override(self):
-        assert format_cost(0.2, "EUR", "{value} EUR") == "0.20 EUR"
+    def test_format_cost_numeric_spec_template(self):
+        # A numeric format spec applies to the NUMERIC value (the v6.1 fix —
+        # previously {value} got a pre-stringified amount and a numeric spec
+        # raised, silently falling back to the symbol table).
+        assert format_cost(0.2, "EUR", "{value:.2f} EUR") == "0.20 EUR"
+        assert format_cost(0.2, "USD", "{value:.3f} USD") == "0.200 USD"
+
+    @pytest.mark.unit
+    def test_format_cost_plain_text_template(self):
+        # A plain {value} template still renders (unrounded numeric repr).
+        assert format_cost(0.2, "EUR", "{value} EUR") == "0.2 EUR"
+        assert format_cost(0.25, "GBP", "GBP {value}") == "GBP 0.25"
 
     @pytest.mark.unit
     def test_format_cost_malformed_override_falls_back(self):
         # bad placeholder -> fall through to the currency table
         assert format_cost(0.2, "USD", "{nope}") == "$0.20"
+
+    @pytest.mark.unit
+    def test_format_cost_bad_format_spec_falls_back(self):
+        # A template whose format spec is invalid for a number raises ValueError
+        # internally -> safe fall-through to the currency table, never an
+        # exception out of format_cost.
+        assert format_cost(0.2, "EUR", "{value:Z}") == "0.20 €"
 
 
 # --------------------------------------------------------------------------

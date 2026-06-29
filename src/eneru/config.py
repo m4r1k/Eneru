@@ -2567,6 +2567,64 @@ class ConfigLoader:
         """Cross-field validation for the v6.1 sections."""
         messages: List[str] = []
 
+        # String/enum schedule fields. These fail SAFE at runtime (a bad value
+        # raises ValueError inside the scheduler and the feature silently
+        # no-ops), so round-trip them through the same parse helpers the runtime
+        # uses and surface a clear ERROR rather than a silently-dead feature.
+        # Imported lazily to avoid any import-cycle risk at config import time.
+        from eneru.self_test import parse_schedule as _parse_schedule
+        from eneru.scheduler import parse_hhmm as _parse_hhmm
+        from eneru.scheduler import parse_weekday as _parse_weekday
+
+        st_glob = config.self_test
+        for label_prefix, st in (
+            ("self_test", st_glob),
+            *((f"self_test (UPS '{g.ups.name}')",
+               getattr(g, "self_test", None))
+              for g in config.ups_groups),
+        ):
+            if st is None:
+                continue
+            # parse_schedule also consumes self_test.time (for calendar
+            # schedules) and weekday/monthly_day defaults; round-tripping it
+            # validates both schedule and time together as the runtime does.
+            try:
+                _parse_schedule(st.schedule, st.time)
+            except (ValueError, TypeError) as exc:
+                messages.append(
+                    f"ERROR: {label_prefix}.schedule/time invalid: {exc}")
+            else:
+                # parse_schedule only reaches parse_hhmm for calendar kinds; an
+                # 'every <N>d' interval skips time. Validate time directly too so
+                # a bad time on an interval schedule is still caught.
+                try:
+                    _parse_hhmm(st.time)
+                except (ValueError, TypeError) as exc:
+                    messages.append(
+                        f"ERROR: {label_prefix}.time invalid: {exc}")
+
+        # Reports schedule/enum fields (daemon-wide; no per-UPS override).
+        reports = config.reports
+        try:
+            _parse_hhmm(reports.time)
+        except (ValueError, TypeError) as exc:
+            messages.append(f"ERROR: reports.time invalid: {exc}")
+        try:
+            _parse_weekday(reports.weekly_day)
+        except (ValueError, TypeError) as exc:
+            messages.append(f"ERROR: reports.weekly_day invalid: {exc}")
+        md = reports.monthly_day
+        if (isinstance(md, bool) or not isinstance(md, int)
+                or not (1 <= md <= 31)):
+            messages.append(
+                f"ERROR: reports.monthly_day must be an integer 1..31, "
+                f"got {md!r}")
+        _REPORT_FORMATS = ("text", "csv")
+        if reports.format not in _REPORT_FORMATS:
+            messages.append(
+                f"ERROR: reports.format must be one of "
+                f"{', '.join(_REPORT_FORMATS)}, got {reports.format!r}")
+
         # Self-test is a scheduled write surface. Validate the EFFECTIVE config
         # per UPS (per-UPS override else global) against the EFFECTIVE
         # nut_control, so a per-UPS-narrowed allowlist or a global command that
@@ -2624,12 +2682,16 @@ class ConfigLoader:
         ):
             if bh is None:
                 continue
+            # nominal_runtime_seconds + warn/critical are genuinely Optional
+            # (None = unset/disabled); the rest are non-Optional, so an explicit
+            # YAML null must be a config error (else int()/float() blows up at
+            # runtime and the feature silently dies).
             _check_num(f"{label_prefix}.nominal_runtime_seconds",
                        bh.nominal_runtime_seconds, minimum=0)
             _check_num(f"{label_prefix}.expected_life_years",
-                       bh.expected_life_years, minimum=0)
+                       bh.expected_life_years, allow_none=False, minimum=0)
             _check_num(f"{label_prefix}.update_interval",
-                       bh.update_interval, minimum=1)
+                       bh.update_interval, allow_none=False, minimum=1)
             _check_num(f"{label_prefix}.warn_score", bh.warn_score,
                        minimum=0, maximum=100)
             _check_num(f"{label_prefix}.critical_score", bh.critical_score,
@@ -2638,21 +2700,23 @@ class ConfigLoader:
                     and not isinstance(bh.warn_score, bool)
                     and isinstance(bh.critical_score, (int, float))
                     and not isinstance(bh.critical_score, bool)
-                    and bh.critical_score > bh.warn_score):
+                    and bh.critical_score >= bh.warn_score):
                 messages.append(
                     f"ERROR: {label_prefix}.critical_score "
-                    f"({bh.critical_score}) must be <= warn_score "
+                    f"({bh.critical_score}) must be < warn_score "
                     f"({bh.warn_score})")
             # Nested replacement-prediction fields share the runtime int()/float()
-            # coercion risk as the parent — validate them the same way.
+            # coercion risk as the parent — validate them the same way (all
+            # non-Optional, so reject explicit null too).
             rep = getattr(bh, "replacement", None)
             if rep is not None:
                 _check_num(f"{label_prefix}.replacement.threshold_score",
-                           rep.threshold_score, minimum=0, maximum=100)
+                           rep.threshold_score, allow_none=False,
+                           minimum=0, maximum=100)
                 _check_num(f"{label_prefix}.replacement.horizon_days",
-                           rep.horizon_days, minimum=1)
+                           rep.horizon_days, allow_none=False, minimum=1)
                 _check_num(f"{label_prefix}.replacement.min_history_days",
-                           rep.min_history_days, minimum=1)
+                           rep.min_history_days, allow_none=False, minimum=1)
 
         # Energy cost: cost_per_kwh, when set, must be a non-negative number.
         # None/unset is valid and disables cost tracking entirely (B3).

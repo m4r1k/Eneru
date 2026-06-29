@@ -60,13 +60,21 @@ def _local_skip(is_local: bool, delegated: bool, enabled: bool) -> Optional[str]
 
 def build_shutdown_plan(config: Any, *, is_local: bool = True,
                         delegated: bool = False,
-                        coordinator_mode: bool = False) -> Dict[str, Any]:
+                        coordinator_mode: bool = False,
+                        reveal_commands: bool = True) -> Dict[str, Any]:
     """Build the structured shutdown plan from a (group-scoped) config.
 
     ``is_local`` / ``delegated`` / ``coordinator_mode`` are the runtime flags the
     monitor uses to gate phases; pass the monitor's actual values so the plan
     matches what that daemon would really do.
+
+    ``reveal_commands`` controls whether raw shutdown commands (per-remote
+    ``shutdown_command`` and the local poweroff command) appear in the output.
+    Pass ``False`` for unauthenticated callers — those commands can embed
+    sensitive flags/credentials, so they're redacted exactly like the config
+    summary and the remote-health view do for anonymous reads.
     """
+    hidden = "command hidden — sign in to view"
     local_active = is_local and not delegated
     phases: List[Dict[str, Any]] = []
 
@@ -120,7 +128,7 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
     rsteps = []
     for s in ordered:
         bits = [f"{(s.user + '@') if s.user else ''}{s.host}",
-                s.shutdown_command or "shutdown"]
+                (s.shutdown_command or "shutdown") if reveal_commands else hidden]
         if getattr(s, "command_timeout", None):
             bits.append(f"timeout {s.command_timeout}s")
         if s.shutdown_order is not None:
@@ -160,7 +168,9 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
             "local-poweroff", "Local host poweroff", enabled=po_on,
             skipped=(None if po_on
                      else ("delegated to host" if delegated else "disabled")),
-            steps=[{"label": "Power off this host", "detail": ls.command}] if po_on else []))
+            steps=[{"label": "Power off this host",
+                    "detail": ls.command if reveal_commands else hidden}]
+            if po_on else []))
 
     note = None
     if delegated:

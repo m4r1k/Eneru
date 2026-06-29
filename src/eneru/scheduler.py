@@ -85,7 +85,7 @@ class Schedule:
     """
 
     kind: str  # "interval" | "daily" | "weekly" | "monthly"
-    interval_seconds: Optional[int] = None
+    interval_seconds: Optional[float] = None
     hour: int = 0
     minute: int = 0
     weekday: Optional[int] = None  # 0=Mon .. 6=Sun

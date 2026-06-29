@@ -404,7 +404,7 @@ function renderOverviewSummary(rows) {
   // Self-test KPI only when a test has actually run — a "never run" box is noise
   // (and most UPSes never get one). The Battery tab still explains the term.
   const st = primary.selfTest;
-  if (st && st.result) {
+  if (st && ["passed", "failed", "running"].includes(st.result)) {
     const stStatus = { passed: "ok", failed: "crit", running: "warn" }[st.result] || null;
     summary.appendChild(kpiCard({
       iconName: "check", label: "Last self-test",
@@ -532,9 +532,12 @@ function renderRemoteHealth() {
       el("span", { class: "card-ico s-" + cls }, [icon("shield")]),
       el("h3", { text: name }),
     ])];
+    // Label matches the color: ok→reachable, warn→degraded, crit→unreachable
+    // (a DEGRADED server is amber, not a contradictory "unreachable").
+    const statusText = cls === "ok" ? "reachable"
+      : cls === "warn" ? "degraded" : "unreachable";
     rows.push(el("div", { class: "row" }, [el("span", { text: "Status" }),
-      el("span", { class: "badge " + cls,
-        text: reachable ? "reachable" : "unreachable" })]));
+      el("span", { class: "badge " + cls, text: statusText })]));
     if (r.host && r.host !== name) rows.push(configKv("Host", r.host));
     if (r.latency_ms != null && reachable) {
       rows.push(configKv("Latency", Math.round(r.latency_ms) + " ms"));
@@ -884,27 +887,17 @@ function updateEventSourceFilter(upsRows, groups) {
   if (knownEventSources.some((s) => s.value === prev)) sel.value = prev;
 }
 
-// Set once we've applied the tier-1 default selection, so later polls preserve
-// whatever the operator has since chosen.
-let _eventTypeDefaultApplied = false;
-
+// Rebuild the per-type checkbox list from the loaded events (the Tier dropdown
+// is the primary filter; these only narrow within the tier).
 function updateEventTypeFilter(rows) {
   const box = document.getElementById("event-type-filter");
-  let selected = selectedEventTypes();
+  // The Tier dropdown is the primary, window-independent filter; the per-type
+  // checkboxes are an OPTIONAL narrowing within the tier and default to none
+  // selected (= all types in the tier). Preserve whatever the operator ticked.
+  const selected = selectedEventTypes();
   const types = Array.from(new Set((rows || [])
     .map((e) => e.eventType || e.event || "")
     .filter((v) => v))).sort();
-  // Default to selecting only the tier-1 events so the table isn't drowned in
-  // routine daemon-start / upgrade rows. Apply this only once we actually SEE
-  // tier-1 events AND the operator hasn't picked any types yet — burning the
-  // flag on an early all-routine batch was why the default sometimes never took.
-  if (!_eventTypeDefaultApplied) {
-    const tier1 = types.filter(isTier1Event);
-    if (tier1.length && selected.size === 0) {
-      selected = new Set(tier1);
-      _eventTypeDefaultApplied = true;
-    }
-  }
   box.replaceChildren();
   const kept = new Set();
   types.forEach((type) => {
@@ -959,7 +952,8 @@ function visibleEvents() {
     const detail = (e.detail || e.details || "").toLowerCase();
     return (from === null || e.ts >= from)
       && eventMatchesSource(e, source)
-      && (types.size === 0 || types.has(eventType))
+      && eventPassesTier(eventType)              // window-independent tier gate
+      && (types.size === 0 || types.has(eventType))  // optional advanced narrowing
       && (!text || detail.includes(text));
   });
   if (eventSortDirection === "desc") rows.reverse();
@@ -1097,9 +1091,10 @@ async function deleteSelected() {
 function eventMarkerClass(type) {
   const t = (type || "").toUpperCase();
   if (t.includes("RESTORED") || t.includes("NORMALIZED")
-      || t.includes("RESOLVED") || t.includes("RECOVER")) return "ev-ok";
+      || t.includes("RESOLVED") || t.includes("RECOVER")
+      || t.includes("INACTIVE")) return "ev-ok";  // bypass/AVR left = good news
   if (t.includes("SHUTDOWN") || t.includes("FSD") || t.includes("ON_BATTERY")
-      || t.includes("BROWNOUT") || t.includes("LOW_BATTERY")
+      || t.includes("BROWNOUT") || t.includes("BATTERY_LOW")
       || t.includes("CONNECTION_LOST") || t.includes("CRITICAL")) return "ev-crit";
   if (t.includes("OVER_VOLTAGE") || t.includes("OVERLOAD") || t.includes("BYPASS")
       || t.includes("AVR") || t.includes("WARNING") || t.includes("ANOMALY")
@@ -1117,19 +1112,50 @@ function eventTypeBadge(e) {
   return el("span", { class: "ev-badge " + tone }, [icon(ico), el("span", { text: type })]);
 }
 
-// "Tier-1" = the power events an operator actually cares about on a chart or in
-// the default events view. Routine lifecycle rows (daemon start/stop, upgrades,
-// config reloads, AVR cycling, suppressed flaps) are excluded so the markers and
-// the default table aren't drowned in noise.
+// Event tiers (mirror the TUI's Power / Diagnostics / Lifecycle split):
+//   power  = the events an operator actually cares about on a chart or in the
+//            default events view (outages, voltage excursions, battery alerts).
+//   lifecycle = routine daemon start/stop/upgrade/recover rows.
+//   diag   = everything else (AVR cycling, suppressed flaps, slow-NUT, etc.).
+// Substring patterns match the emitted event-type names. NOTE: the emitted name
+// is BATTERY_LOW (not LOW_BATTERY) and battery-health alerts are BATTERY_HEALTH_*
+// — both are power-tier and were previously missed.
 const TIER1_EVENT_PATTERNS = [
-  "ON_BATTERY", "POWER_RESTORED", "LOW_BATTERY", "SHUTDOWN", "FSD",
-  "OVER_VOLTAGE", "BROWNOUT", "OVERLOAD_ACTIVE", "BYPASS_MODE_ACTIVE",
+  "ON_BATTERY", "POWER_RESTORED", "BATTERY_LOW", "SHUTDOWN", "FSD",
+  "OVER_VOLTAGE", "VOLTAGE_HIGH", "VOLTAGE_LOW", "BROWNOUT",
+  "OVERLOAD_ACTIVE", "OVERLOAD_DETECTED", "BYPASS_MODE_ACTIVE",
   "CONNECTION_LOST", "CONNECTION_RESTORED", "REPLACE_BATTERY",
-  "BATTERY_REPLACEMENT", "SELF_TEST", "ANOMALY",
+  "BATTERY_REPLACEMENT", "BATTERY_HEALTH", "SELF_TEST", "ANOMALY",
 ];
+const LIFECYCLE_EVENT_PATTERNS = ["DAEMON_"];
 function isTier1Event(type) {
   const u = (type || "").toUpperCase();
   return TIER1_EVENT_PATTERNS.some((p) => u.includes(p));
+}
+function isLifecycleEvent(type) {
+  const u = (type || "").toUpperCase();
+  return LIFECYCLE_EVENT_PATTERNS.some((p) => u.includes(p));
+}
+// Which display tier an event belongs to.
+function eventTierOf(type) {
+  if (isTier1Event(type)) return "power";
+  if (isLifecycleEvent(type)) return "lifecycle";
+  return "diag";
+}
+// Current Events-tab tier mode (window-INDEPENDENT): power | diag | all.
+function eventTierMode() {
+  const sel = document.getElementById("event-tier");
+  return (sel && sel.value) || "power";
+}
+// Does an event pass the selected tier? power -> power only; diag -> power+diag
+// (not lifecycle); all -> everything. This is the fix for "widen the window and
+// the outage still shows" — it keys off the type, not what's in the window.
+function eventPassesTier(type) {
+  const mode = eventTierMode();
+  if (mode === "all") return true;
+  const tier = eventTierOf(type);
+  if (mode === "diag") return tier !== "lifecycle";
+  return tier === "power";
 }
 
 // Human-readable tooltip for a chart event marker.
@@ -1214,6 +1240,7 @@ function drawChart(hostId, series, options) {
   options = options || {};
   const host = document.getElementById(hostId);
   if (!host) return;
+  hideTip();  // a redraw detaches any hovered marker without firing mouseleave
   // Size the viewBox to the host's real pixel width so the coordinate system
   // maps 1:1 to screen pixels. When hidden/zero-width the ResizeObserver redraws
   // once it has width.
@@ -1484,6 +1511,7 @@ function drawEnergyChart(hostId, rows, options) {
   options = options || {};
   const host = document.getElementById(hostId);
   if (!host) return;
+  hideTip();  // a redraw detaches any hovered marker without firing mouseleave
   const W = host.clientWidth;
   if (!W) return;
   host.replaceChildren();
@@ -1590,11 +1618,11 @@ function drawEnergyChart(hostId, rows, options) {
 // shared chart chrome (grid / plot / area / now-dot / labels) applies.
 function drawSimpleSeries(host, pts, opts) {
   opts = opts || {};
+  hideTip();
   host.replaceChildren();
   const W = host.clientWidth || 600, H = 220, pad = 30, padR = 12, padT = 18;
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  svg.setAttribute("preserveAspectRatio", "none");
   const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts;
   const span = Math.max(1, t1 - t0);
   const lo = opts.min != null ? opts.min : Math.min(...pts.map((p) => p.value));
@@ -1703,7 +1731,14 @@ const charts = {};
 
 function widgetCard(title, rows, opts) {
   opts = opts || {};
-  const head = [el("h3", { text: title })];
+  const head = [];
+  // Optional icon chip (same treatment as the Line-quality / Remote-server
+  // cards), so every widget card shares one title style.
+  if (opts.icon) {
+    head.push(el("span", { class: "card-ico" + (opts.iconClass ? " s-" + opts.iconClass : "") },
+      [icon(opts.icon)]));
+  }
+  head.push(el("h3", { text: title }));
   if (opts.badge) head.push(el("span", { class: "badge " + (opts.badgeClass || "ok"),
     text: opts.badge }));
   return el("div", { class: "card" }, [
@@ -1744,10 +1779,12 @@ function renderBatteryHealthTab() {
         ]));
       }
       wrap.appendChild(widgetCard(u.label || u.name, cardRows,
-        { badge: scoreTxt, badgeClass: scoreClass(bh.score) }));
+        { badge: scoreTxt, badgeClass: scoreClass(bh.score),
+          icon: "shield", iconClass: scoreClass(bh.score) }));
     } else {
       wrap.appendChild(widgetCard(u.label || u.name,
-        [el("p", { class: "chart-note", text: "Battery health not available." })]));
+        [el("p", { class: "chart-note", text: "Battery health not available." })],
+        { icon: "shield", iconClass: "warn" }));
     }
   });
   renderBatteryHealthGraph();
@@ -1794,11 +1831,12 @@ function renderEnergyTab() {
     const en = u.energy;
     if (en) {
       if (energyCostConfigured(en)) costConfigured = true;
-      wrap.appendChild(widgetCard(u.label || u.name, energyRows(en)));
+      wrap.appendChild(widgetCard(u.label || u.name, energyRows(en), { icon: "chart" }));
     } else {
       wrap.appendChild(widgetCard(u.label || u.name,
         [el("p", { class: "chart-note",
-          text: "Energy tracking not available (no samples yet)." })]));
+          text: "Energy tracking not available (no samples yet)." })],
+        { icon: "chart" }));
     }
   });
   // Only nudge about cost when it isn't already configured — once cost_per_kwh
@@ -1962,7 +2000,7 @@ function renderConfigTab() {
       configKv("Name", c.name),
       configKv("Local host", c.isLocal ? "yes" : "no"),
       configKv("Remote servers", (c.remoteServers || []).length),
-    ]));
+    ], { icon: "battery" }));
   });
   // Only surface what's ON — a list of "disabled" rows is just noise.
   const enabled = [];
@@ -1970,7 +2008,8 @@ function renderConfigTab() {
   if (enabled.length) {
     cards.push(widgetCard("Enabled features",
       enabled.map((f) => el("div", { class: "row" },
-        [el("span", { text: f }), el("b", { class: "ok", text: "on" })]))));
+        [el("span", { text: f }), el("b", { class: "ok", text: "on" })])),
+      { icon: "check" }));
   }
   body.appendChild(el("div", { class: "cards" }, cards));
 
@@ -2515,6 +2554,10 @@ async function init() {
   // poll deliberately do NOT scroll.)
   const scrollTop = () => window.scrollTo(0, 0);
   document.getElementById("event-source-filter").addEventListener("change", () => {
+    applyEventFilters(); scrollTop();
+  });
+  // Tier is the primary, window-independent event filter.
+  document.getElementById("event-tier").addEventListener("change", () => {
     applyEventFilters(); scrollTop();
   });
   document.getElementById("event-type-filter").addEventListener("change", () => {

@@ -3315,3 +3315,16 @@ class TestRunOnceDisplayName:
         # Header line: "Rack A  (ups-a@host)  [is_local]  --  daemon not running"
         assert "Rack A" in out
         assert "(ups-a@host)" in out
+
+
+@pytest.mark.unit
+def test_battery_health_alerts_are_power_tier():
+    """v6.1 battery-health alerts must be Power-tier (visible at the default
+    verbosity), not hidden in Diagnostics."""
+    from eneru.tui import (POWER_EVENTS, _event_tier, _event_enabled,
+                           EVENT_SECTION_POWER, EVENTS_VERBOSITY_POWER)
+    for ev in ("BATTERY_HEALTH_CRITICAL", "BATTERY_HEALTH_WARNING",
+               "BATTERY_REPLACEMENT_PREDICTED"):
+        assert ev in POWER_EVENTS
+        assert _event_tier(ev) == EVENT_SECTION_POWER
+        assert _event_enabled(ev, EVENTS_VERBOSITY_POWER)

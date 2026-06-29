@@ -325,10 +325,10 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
                        border-radius: 6px; }
 .panel > h2:first-child { margin-top: 0; }
 
-/* Widget cards with a title + status badge (Battery / Energy tabs) */
-.card-head { display: flex; align-items: center; justify-content: space-between;
-             gap: 0.5rem; margin-bottom: 0.5rem; }
-.card-head h3 { margin: 0; font-size: 1.05rem; }
+/* Widget cards with a title + status badge (Battery / Energy tabs). The base
+   .card-head / .card-head h3 rules are defined once above (icon chip + title +
+   right-aligned badge via margin-left:auto); only the title size differs here. */
+.card-head h3 { font-size: 1.05rem; }
 .card .card-head + .row { margin-top: 0.1rem; }
 .chart-note { color: var(--muted); font-size: 0.85rem; margin: 0.5rem 0 0; }
 .energy-note { color: var(--muted); font-size: 0.78rem; font-style: italic; }

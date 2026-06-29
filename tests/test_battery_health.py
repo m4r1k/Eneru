@@ -125,6 +125,55 @@ class TestCompute:
         assert "capacity" in health["availableTerms"]
 
     @pytest.mark.unit
+    def test_runtime_history_window_follows_min_history_days(self, store):
+        # The capacity term needs span >= min_history_days, which has no upper
+        # bound, so the runtime-history fetch window must widen past the old
+        # hard-coded 60 days when min_history_days > 60. Otherwise the capacity
+        # term is permanently starved.
+        cfg = _config(
+            "ups:\n  name: U@h\n"
+            "battery_health:\n  nominal_runtime_seconds: 1800\n"
+            "  replacement:\n    min_history_days: 120\n")
+        now = float(int(time.time()))
+        captured = {}
+        orig = store.query_battery_health
+
+        def _spy(start_ts, end_ts):
+            captured["span_days"] = (end_ts - start_ts) / 86400.0
+            return orig(start_ts, end_ts)
+
+        store.query_battery_health = _spy
+        mon = _Mon(cfg, store)
+        mon.state.latest_battery_charge = "100"
+        mon.state.latest_runtime = "1700"
+        mon._compute_battery_health(cfg.battery_health, now)
+        # max(60, 120 + 7) == 127 days fetched.
+        assert captured["span_days"] == pytest.approx(127.0, abs=1.0)
+
+    @pytest.mark.unit
+    def test_runtime_history_window_floor_is_60(self, store):
+        # With a small min_history_days the fetch window stays at the 60-day
+        # floor (max(60, min_history_days + 7)).
+        cfg = _config(
+            "ups:\n  name: U@h\n"
+            "battery_health:\n  nominal_runtime_seconds: 1800\n"
+            "  replacement:\n    min_history_days: 14\n")
+        now = float(int(time.time()))
+        captured = {}
+        orig = store.query_battery_health
+
+        def _spy(start_ts, end_ts):
+            captured["span_days"] = (end_ts - start_ts) / 86400.0
+            return orig(start_ts, end_ts)
+
+        store.query_battery_health = _spy
+        mon = _Mon(cfg, store)
+        mon.state.latest_battery_charge = "100"
+        mon.state.latest_runtime = "1700"
+        mon._compute_battery_health(cfg.battery_health, now)
+        assert captured["span_days"] == pytest.approx(60.0, abs=1.0)
+
+    @pytest.mark.unit
     def test_compute_safe_without_store(self):
         mon = _Mon(_config(), None)
         mon.state.latest_battery_charge = "50"
@@ -211,10 +260,80 @@ class TestPrediction:
         # event logged
         events = store.query_battery_health(0, int(now + 1))  # sanity store works
         assert events is not None
-        # Dedup: a second call within the horizon does not re-notify.
+        # Dedup: a second call within the WEEKLY re-nag window does not re-notify
+        # (even though the battery is still due, and well within horizon_days).
         mon.notifications.clear()
         mon._maybe_predict_replacement(cfg.battery_health, now + DAY)
         assert mon.notifications == []
+        # ...but it RE-fires after ~7 days while still due (was previously
+        # silenced for the full 90-day horizon).
+        mon.notifications.clear()
+        mon._maybe_predict_replacement(cfg.battery_health, now + 7 * DAY + 60)
+        assert any("Replacement Predicted" in body
+                   for body, _ in mon.notifications)
+
+    @pytest.mark.unit
+    def test_renag_window_caps_at_horizon_when_horizon_short(self, store):
+        # horizon_days < 7 -> the weekly cap collapses to the horizon, so a tiny
+        # horizon still re-nags on its own (shorter) cadence.
+        cfg = _config(
+            "ups:\n  name: U@h\n"
+            "battery_health:\n  replacement:\n    threshold_score: 50\n"
+            "    horizon_days: 3\n    min_history_days: 14\n")
+        mon = _Mon(cfg, store)
+        now = time.time()
+        # Last score already at/below threshold -> due now regardless of trend.
+        store.record_battery_health(60.0, {}, ts=int(now - 30 * DAY))
+        store.record_battery_health(50.0, {}, ts=int(now))
+        mon._maybe_predict_replacement(cfg.battery_health, now)
+        assert mon.notifications
+        # Within 3 days -> still deduped.
+        mon.notifications.clear()
+        mon._maybe_predict_replacement(cfg.battery_health, now + 2 * DAY)
+        assert mon.notifications == []
+        # Past the 3-day horizon -> re-fires.
+        mon.notifications.clear()
+        mon._maybe_predict_replacement(cfg.battery_health, now + 3 * DAY + 60)
+        assert mon.notifications
+
+    @pytest.mark.unit
+    def test_sub_day_estimate_renders_lt_one_day(self, store, monkeypatch):
+        # A positive estimate under one day must render "<1 day", not "~0 days".
+        cfg = _config(
+            "ups:\n  name: U@h\n"
+            "battery_health:\n  replacement:\n    threshold_score: 50\n"
+            "    horizon_days: 90\n    min_history_days: 14\n")
+        mon = _Mon(cfg, store)
+        now = time.time()
+        store.record_battery_health(60.0, {}, ts=int(now - 30 * DAY))
+        store.record_battery_health(55.0, {}, ts=int(now))
+        # Force a fractional days_remaining < 1.
+        import eneru.health.battery as bat
+        monkeypatch.setattr(
+            bat.prediction, "predict_replacement",
+            lambda *a, **k: {"due": True, "days_remaining": 0.4,
+                             "eta_ts": now, "reason": "within horizon"})
+        mon._maybe_predict_replacement(cfg.battery_health, now)
+        assert any("<1 day" in body for body, _ in mon.notifications)
+        assert not any("~0 days" in body for body, _ in mon.notifications)
+
+    @pytest.mark.unit
+    def test_zero_estimate_renders_imminently(self, store, monkeypatch):
+        # days_remaining 0/None keeps the "imminently" wording.
+        cfg = _config(
+            "ups:\n  name: U@h\n"
+            "battery_health:\n  replacement:\n    threshold_score: 50\n"
+            "    horizon_days: 90\n    min_history_days: 14\n")
+        mon = _Mon(cfg, store)
+        now = time.time()
+        store.record_battery_health(40.0, {}, ts=int(now))
+        import eneru.health.battery as bat
+        monkeypatch.setattr(
+            bat.prediction, "predict_replacement",
+            lambda *a, **k: {"due": True, "days_remaining": 0.0,
+                             "eta_ts": now, "reason": "already below threshold"})
+        mon._maybe_predict_replacement(cfg.battery_health, now)
+        assert any("imminently" in body for body, _ in mon.notifications)
 
     @pytest.mark.unit
     def test_flat_trend_does_not_fire(self, store):

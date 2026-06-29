@@ -152,11 +152,16 @@ def compute_cost(kwh: Optional[float],
 def format_cost(value: float, currency: str,
                 cost_format: Optional[str] = None) -> str:
     """Format a cost value. ``cost_format`` (e.g. ``"{value} €"``) wins; else a
-    per-currency symbol/placement table; else ``"<amount> <CODE>"``."""
+    per-currency symbol/placement table; else ``"<amount> <CODE>"``.
+
+    ``cost_format`` receives the NUMERIC value as ``{value}`` so a numeric
+    format spec works (``"{value:.2f} EUR"`` -> ``"0.20 EUR"``). A plain
+    ``"{value}"`` template still renders, just unrounded; a malformed template
+    (or one missing the ``{value}`` field) falls back to the currency table."""
     amount = f"{value:.2f}"
     if cost_format:
         try:
-            return cost_format.format(value=amount)
+            return cost_format.format(value=value)
         except (KeyError, IndexError, ValueError):
             pass  # malformed override -> fall through to the table
     code = (currency or "USD").upper()

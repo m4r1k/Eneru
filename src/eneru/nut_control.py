@@ -19,10 +19,29 @@ import pty
 import re
 import select
 import subprocess
+import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
 from eneru.utils import run_command
+
+# Per-UPS lock serializing CONTROL commands (INSTCMD/SET/self-test) against one
+# device. Lives here so every issuer shares one lock identity — the API control
+# routes AND the scheduled self-test path in the monitor — so two of them can't
+# race a command against the same UPS. Keyed by the real NUT name.
+_ups_command_locks: Dict[str, "threading.Lock"] = {}
+_ups_locks_guard = threading.Lock()
+
+
+def command_lock(name: str) -> "threading.Lock":
+    """Return the shared per-UPS control-command lock for ``name``."""
+    with _ups_locks_guard:
+        lock = _ups_command_locks.get(name)
+        if lock is None:
+            lock = threading.Lock()
+            _ups_command_locks[name] = lock
+        return lock
+
 
 _AUTH_COMMAND_BINARIES = {"upscmd", "upsrw"}
 _SAFE_AUTH_ARG = re.compile(r"\A[A-Za-z0-9 ._:@+%/,\-=\[\]]{1,256}\Z")
