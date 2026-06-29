@@ -16,6 +16,9 @@ from eneru.utils import is_numeric
 # meta keys for cross-restart battery-health bookkeeping.
 _META_NOMINAL_RUNTIME = "battery_nominal_runtime"
 _META_REPLACEMENT_PREDICTED = "battery_replacement_predicted_ts"
+_META_HEALTH_ALERT_TIER = "battery_health_alert_tier"  # none|warn|critical
+
+_HEALTH_TIER_RANK = {"none": 0, "warn": 1, "critical": 2}
 
 
 class BatteryMonitorMixin:
@@ -348,6 +351,8 @@ class BatteryMonitorMixin:
         pred = self._maybe_predict_replacement(cfg, now)
         health["replacementDaysRemaining"] = pred.get("days_remaining")
         health["replacementDue"] = bool(pred.get("due"))
+        # Escalating absolute-score alerts (separate from the trend prediction).
+        self._maybe_alert_health(cfg, health.get("score"))
         with self.state._lock:
             self.state.latest_battery_health = health
 
@@ -398,3 +403,48 @@ class BatteryMonitorMixin:
             "BATTERY_REPLACEMENT_PREDICTED",
             f"health trend crosses {rep.threshold_score:.0f} in {days_txt}")
         return result
+
+    def _maybe_alert_health(self, cfg, score) -> None:
+        """Escalating, deduped absolute-score alerts (separate from the
+        trend-based prediction). Fires once when the score first drops below a
+        configured tier and re-arms when it recovers above it; a drop straight
+        to / further into 'critical' escalates. A de-escalation only re-arms."""
+        if score is None:
+            return
+        store = getattr(self, "_stats_store", None)
+        if store is None:
+            return
+        warn, crit = cfg.warn_score, cfg.critical_score
+        if crit is not None and score < crit:
+            tier = "critical"
+        elif warn is not None and score < warn:
+            tier = "warn"
+        else:
+            tier = "none"
+        prev = store.get_meta(_META_HEALTH_ALERT_TIER) or "none"
+        if tier == prev:
+            return                                   # unchanged -> dedup
+        store.set_meta(_META_HEALTH_ALERT_TIER, tier)
+        # Only ANNOUNCE on escalation; recovery / de-escalation just re-arms.
+        if _HEALTH_TIER_RANK[tier] <= _HEALTH_TIER_RANK.get(prev, 0):
+            return
+        if tier == "critical":
+            self._log_message(
+                f"🔋 Battery health CRITICAL: score {score:.0f} (< {crit:.0f}).")
+            self._send_notification(
+                f"🔋 **Battery Health CRITICAL**\n"
+                f"The battery-health score is {score:.0f} (below {crit:.0f}). "
+                f"Replace the battery now.",
+                self.config.NOTIFY_FAILURE, category="health")
+            store.log_event("BATTERY_HEALTH_CRITICAL",
+                            f"score {score:.0f} < {crit:.0f}")
+        else:
+            self._log_message(
+                f"🔋 Battery health low: score {score:.0f} (< {warn:.0f}).")
+            self._send_notification(
+                f"🔋 **Battery Health Warning**\n"
+                f"The battery-health score is {score:.0f} (below {warn:.0f}). "
+                f"Plan to replace the battery.",
+                self.config.NOTIFY_WARNING, category="health")
+            store.log_event("BATTERY_HEALTH_WARNING",
+                            f"score {score:.0f} < {warn:.0f}")

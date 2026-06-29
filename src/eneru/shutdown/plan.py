@@ -73,10 +73,14 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
     # 1) Virtual machines (libvirt).
     vm = config.virtual_machines
     vm_on = local_active and vm.enabled
+    vm_wait = getattr(vm, "max_wait", None)
     phases.append(_phase(
         "vms", "Virtual machines", enabled=vm_on,
         skipped=_local_skip(is_local, delegated, vm.enabled),
-        steps=[{"label": "Gracefully shut down running VMs (libvirt)"}] if vm_on else []))
+        estimate_s=float(vm_wait) if (vm_on and vm_wait) else None,
+        steps=[{"label": "Gracefully shut down running VMs (libvirt)",
+                "detail": (f"up to {vm_wait}s each" if vm_wait else None)}]
+        if vm_on else []))
 
     # 2) Containers.
     c = config.containers
@@ -117,6 +121,8 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
     for s in ordered:
         bits = [f"{(s.user + '@') if s.user else ''}{s.host}",
                 s.shutdown_command or "shutdown"]
+        if getattr(s, "command_timeout", None):
+            bits.append(f"timeout {s.command_timeout}s")
         if s.shutdown_order is not None:
             bits.append(f"order {s.shutdown_order}")
         if s.is_host_loopback:
@@ -169,11 +175,16 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
         note = ("Multi-UPS coordinator mode: this group reports completion to the "
                 "coordinator, which performs the single host poweroff.")
 
+    # Rough total: sum the per-phase estimates we have (sequential phases). Phases
+    # without a known timeout (sync, poweroff) aren't counted, so it's a floor.
+    total = sum(p["estimateS"] for p in phases
+                if p["enabled"] and p["estimateS"] is not None)
     return {
         "dryRun": bool(getattr(config.behavior, "dry_run", False)),
         "delegated": bool(delegated),
         "isLocal": bool(is_local),
         "coordinatorMode": bool(coordinator_mode),
         "note": note,
+        "totalEstimateS": total or None,
         "phases": phases,
     }

@@ -36,11 +36,24 @@ battery_health:
   nominal_runtime_seconds: null  # null = autodetect at first 100% charge
   battery_install_date: null     # "YYYY-MM-DD" — unlocks the age term
   expected_life_years: 5.0
+  warn_score: 30.0               # escalating absolute-score alerts (null = off)
+  critical_score: 15.0           # must be <= warn_score
   replacement:
     threshold_score: 50.0        # warn when the projected score will cross this
     horizon_days: 90             # ...within this many days
     min_history_days: 14         # don't trend on less history than this
 ```
+
+Two **independent** alerting mechanisms cover different failure shapes:
+
+- **Replacement prediction** (`replacement.*`) trends the score series and warns
+  once when the score is *projected* to cross `threshold_score` within
+  `horizon_days` — "plan ahead."
+- **Tiered health alerts** (`warn_score` / `critical_score`) fire on the
+  *current* score: a WARNING notification the first time it drops below
+  `warn_score`, escalating to a CRITICAL notification below `critical_score`.
+  Each tier fires once (deduped) and re-arms when the score recovers above it, so
+  an already-degraded battery is surfaced immediately, not only as a trend.
 
 Battery characteristics are **per-UPS**, so `battery_install_date`,
 `nominal_runtime_seconds`, and `expected_life_years` can be overridden per UPS in

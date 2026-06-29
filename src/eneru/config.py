@@ -204,6 +204,11 @@ class BatteryHealthConfig:
     nominal_runtime_seconds: Optional[int] = None    # None => autodetect at 100%
     battery_install_date: Optional[str] = None       # "YYYY-MM-DD"; None => age term unavailable
     expected_life_years: float = 5.0
+    # Escalating absolute health-score alerts, complementing the trend-based
+    # replacement prediction. Each fires once when the score first drops below
+    # it and re-arms when the score recovers above it. None disables that tier.
+    warn_score: Optional[float] = 30.0
+    critical_score: Optional[float] = 15.0
     replacement: BatteryReplacementConfig = field(
         default_factory=BatteryReplacementConfig)
 
@@ -1312,6 +1317,8 @@ class ConfigLoader:
                 'battery_install_date', base.battery_install_date),
             expected_life_years=bh_data.get(
                 'expected_life_years', base.expected_life_years),
+            warn_score=bh_data.get('warn_score', base.warn_score),
+            critical_score=bh_data.get('critical_score', base.critical_score),
             replacement=BatteryReplacementConfig(
                 threshold_score=rep.get(
                     'threshold_score', base.replacement.threshold_score),
@@ -1535,7 +1542,7 @@ class ConfigLoader:
             # v6.1 sections
             _bh_keys = {"enabled", "update_interval", "nominal_runtime_seconds",
                         "battery_install_date", "expected_life_years",
-                        "replacement"}
+                        "warn_score", "critical_score", "replacement"}
             _rep_keys = {"threshold_score", "horizon_days", "min_history_days"}
             _st_keys = {"enabled", "schedule", "time", "command",
                         "result_poll_after"}
@@ -2623,6 +2630,19 @@ class ConfigLoader:
                        bh.expected_life_years, minimum=0)
             _check_num(f"{label_prefix}.update_interval",
                        bh.update_interval, minimum=1)
+            _check_num(f"{label_prefix}.warn_score", bh.warn_score,
+                       minimum=0, maximum=100)
+            _check_num(f"{label_prefix}.critical_score", bh.critical_score,
+                       minimum=0, maximum=100)
+            if (isinstance(bh.warn_score, (int, float))
+                    and not isinstance(bh.warn_score, bool)
+                    and isinstance(bh.critical_score, (int, float))
+                    and not isinstance(bh.critical_score, bool)
+                    and bh.critical_score > bh.warn_score):
+                messages.append(
+                    f"ERROR: {label_prefix}.critical_score "
+                    f"({bh.critical_score}) must be <= warn_score "
+                    f"({bh.warn_score})")
             # Nested replacement-prediction fields share the runtime int()/float()
             # coercion risk as the parent — validate them the same way.
             rep = getattr(bh, "replacement", None)

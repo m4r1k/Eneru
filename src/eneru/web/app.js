@@ -104,7 +104,14 @@ const ICONS = {
   alert:   "M12 4 21 19H3z M12 10v4 M12 16.6v.4",
   close:   "M6 6l12 12 M18 6 6 18",
   power:   "M12 3v9 M7.8 6.4a7 7 0 1 0 8.4 0",
+  vm:      "M3 5h18v11H3z M8 20h8 M11 16v4",
+  box:     "M12 3 21 7.5v9L12 21 3 16.5v-9z M3 7.5 12 12l9-4.5 M12 12v9",
+  disk:    "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3z M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6 M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
+  globe:   "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M3 12h18 M12 3c2.6 2.7 2.6 15.3 0 18 M12 3c-2.6 2.7-2.6 15.3 0 18",
 };
+const SD_PHASE_ICONS = { vms: "vm", containers: "box", "filesystem-sync": "disk",
+  "filesystem-unmount": "disk", remote: "globe", "final-sync": "disk",
+  "local-poweroff": "power" };
 function icon(name, cls) {
   const s = document.createElementNS(SVG_NS, "svg");
   s.setAttribute("viewBox", "0 0 24 24");
@@ -2242,15 +2249,56 @@ function selectTab(name, opts) {
 // Render the read-only structured shutdown plan as an ordered flow. Enabled
 // phases are prominent; skipped phases are muted with their reason. Parallel
 // phases lay their steps out side by side.
+// Populate the Shutdown-tab UPS selector from the live UPS list (remote UPSes
+// flagged), keeping the current pick. Hidden for a single-UPS deployment. Each
+// UPS/group has its own plan, so this is how remote-only + multi-UPS plans
+// become reachable. Returns the selected UPS name.
+function populateShutdownUpsSelect() {
+  const sel = document.getElementById("shutdown-ups");
+  const ctl = document.getElementById("shutdown-controls");
+  const rows = lastUpsRows;
+  if (!sel) return rows[0] && rows[0].name;
+  const prev = sel.value;
+  const isLocal = {};
+  ((cfgSnapshot && cfgSnapshot.ups) || []).forEach((c) => { isLocal[c.name] = c.isLocal; });
+  sel.replaceChildren();
+  rows.forEach((u) => sel.appendChild(el("option", { value: u.name,
+    text: (u.label || u.name) + (isLocal[u.name] === false ? " (remote)" : "") })));
+  if (prev && rows.some((u) => u.name === prev)) sel.value = prev;
+  if (ctl) ctl.hidden = rows.length <= 1;
+  return sel.value || (rows[0] && rows[0].name);
+}
+
+// "What triggers this sequence" — a redundancy-group quorum loss (coordinated),
+// or a standalone UPS's own low-battery / forced shutdown. Built from the
+// redundancy-group data the dashboard already holds (lastGroups).
+function shutdownTriggerNodes(name, plan) {
+  const groups = lastGroups.filter((g) => (g.upsSources || []).includes(name));
+  const coord = plan && plan.coordinatorMode ? " — coordinator-run" : "";
+  if (groups.length) {
+    return groups.map((g) => el("div", { class: "sd-trigger" }, [
+      icon("alert"),
+      el("span", { text: "Triggers when group “" + g.name + "” drops below "
+        + g.minHealthy + " of " + (g.upsSources || []).length + " healthy" + coord }),
+    ]));
+  }
+  return [el("div", { class: "sd-trigger" }, [icon("alert"),
+    el("span", { text: "Triggers when this UPS reaches low battery or a forced "
+      + "shutdown (FSD)" + coord })])];
+}
+
+let _sdGen = 0;
 async function renderShutdownPlan() {
   const host = document.getElementById("shutdown-plan");
   if (!host) return;
-  const name = lastUpsRows[0] && lastUpsRows[0].name;
+  const name = populateShutdownUpsSelect();
   if (!name) {
     host.replaceChildren(el("p", { class: "chart-note", text: "No UPS data yet." }));
     return;
   }
+  const myGen = ++_sdGen;
   const res = await api("/api/v1/ups/" + encodeURIComponent(name) + "/shutdown-plan");
+  if (myGen !== _sdGen) return;
   const plan = res.ok && res.data && res.data.plan;
   if (!plan) {
     host.replaceChildren(el("p", { class: "chart-note",
@@ -2258,9 +2306,12 @@ async function renderShutdownPlan() {
     return;
   }
   host.replaceChildren();
+  shutdownTriggerNodes(name, plan).forEach((nd) => host.appendChild(nd));
   const intro = el("p", { class: "chart-note" },
     [el("span", { text: "What runs when a power-loss shutdown is triggered, top "
       + "to bottom. " })]);
+  if (plan.totalEstimateS) intro.appendChild(
+    el("span", { class: "badge", text: "~" + Math.round(plan.totalEstimateS) + "s est." }));
   if (plan.dryRun) intro.appendChild(el("span", { class: "badge warn", text: "dry-run" }));
   if (plan.delegated) intro.appendChild(el("span", { class: "badge info", text: "delegated" }));
   if (plan.coordinatorMode) intro.appendChild(el("span", { class: "badge info", text: "coordinator" }));
@@ -2274,6 +2325,8 @@ async function renderShutdownPlan() {
     const node = el("div", { class: "sd-node" + (p.enabled ? "" : " sd-skip") });
     const head = el("div", { class: "sd-head" }, [
       el("span", { class: "sd-num", text: String(n) }),
+      el("span", { class: "sd-ico" + (p.enabled ? "" : " off") },
+        [icon(SD_PHASE_ICONS[p.id] || "power")]),
       el("span", { class: "sd-title", text: p.title }),
     ]);
     if (p.enabled && p.mode === "parallel") {
@@ -2283,7 +2336,11 @@ async function renderShutdownPlan() {
       head.appendChild(el("span", { class: "sd-est", text: "~" + Math.round(p.estimateS) + "s" }));
     }
     if (!p.enabled) {
-      head.appendChild(el("span", { class: "badge", text: p.skipped || "skipped" }));
+      // "delegated to host" / "non-local group" read as an accent tag, not flat
+      // gray — they're meaningful routing, not just "off".
+      const routed = p.skipped === "delegated to host" || p.skipped === "non-local group";
+      head.appendChild(el("span", { class: "badge" + (routed ? " info" : ""),
+        text: p.skipped || "skipped" }));
     }
     node.appendChild(head);
     if (p.enabled && (p.steps || []).length) {
@@ -2414,6 +2471,10 @@ async function init() {
   charts.energy = makeEnergyChart({ hostId: "energy-graph", upsSelId: "energy-ups",
     rangeSelId: "energy-range" });
   Object.values(charts).forEach((c) => c.observe());
+
+  // Shutdown-tab UPS selector: re-render the plan for the chosen UPS/group.
+  const sdSel = document.getElementById("shutdown-ups");
+  if (sdSel) sdSel.addEventListener("change", renderShutdownPlan);
 
   // Shared Range across Power/Battery/Energy: changing one applies to all three
   // (they carry identical options) and reloads the active chart, so switching

@@ -480,6 +480,12 @@ def test_dashboard_rc11_surfaces(minimal_config):
     assert 'id="shutdown-plan"' in html
     assert "function renderShutdownPlan" in js and "shutdown-plan" in js
     assert ".sd-flow" in css and ".sd-node" in css
+    # Shutdown plan is reachable per-UPS (remote-only/multi-UPS) + shows the
+    # redundancy-group quorum trigger.
+    assert 'id="shutdown-ups"' in html
+    assert "function populateShutdownUpsSelect" in js
+    assert "function shutdownTriggerNodes" in js and ".sd-trigger" in css
+    assert "drops below" in js
     # Battery: per-term breakdown + score trend graph (new history endpoint).
     assert "BH_TERM_LABELS" in js and "function renderBatteryHealthGraph" in js
     assert "battery-health-history" in js

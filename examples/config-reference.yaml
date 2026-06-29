@@ -202,6 +202,12 @@ battery_health:
   # (the score is reported with lower confidence, never a fake high mark).
   battery_install_date: null
   expected_life_years: 5.0
+  # Escalating absolute-score alerts (separate from the trend-based prediction
+  # below). Each fires ONCE when the score first drops below it and re-arms when
+  # the score recovers above it; a drop into "critical" escalates. null disables
+  # a tier. critical_score must be <= warn_score.
+  warn_score: 30.0
+  critical_score: 15.0
   replacement:
     # Warn when the projected score will cross this within horizon_days.
     threshold_score: 50.0

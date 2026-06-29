@@ -267,3 +267,38 @@ class TestResolve:
         assert resolved.update_interval == 1234           # global fallback
         assert any("battery-health config resolution failed" in m
                    for m in mon.logs)
+
+
+class TestHealthAlerts:
+    @pytest.mark.unit
+    def test_tiered_alerts_escalate_dedup_and_rearm(self, store):
+        bh = _config("ups:\n  name: U@h\n"
+                     "battery_health:\n  warn_score: 30\n"
+                     "  critical_score: 15\n").battery_health
+        mon = _Mon(_config(), store)
+        mon._maybe_alert_health(bh, 80)                  # healthy -> nothing
+        assert mon.notifications == []
+        mon._maybe_alert_health(bh, 25)                  # < warn -> WARNING
+        assert len(mon.notifications) == 1
+        assert "Warning" in mon.notifications[-1][0]
+        mon._maybe_alert_health(bh, 22)                  # still warn -> deduped
+        assert len(mon.notifications) == 1
+        mon._maybe_alert_health(bh, 10)                  # < critical -> escalate
+        assert len(mon.notifications) == 2
+        assert "CRITICAL" in mon.notifications[-1][0]
+        mon._maybe_alert_health(bh, 8)                   # still critical -> deduped
+        assert len(mon.notifications) == 2
+        mon._maybe_alert_health(bh, 90)                  # recover -> re-arm, quiet
+        assert len(mon.notifications) == 2
+        mon._maybe_alert_health(bh, 20)                  # drops again -> fires
+        assert len(mon.notifications) == 3
+
+    @pytest.mark.unit
+    def test_no_alert_when_unknown_or_disabled(self, store):
+        bh = _config("ups:\n  name: U@h\n"
+                     "battery_health:\n  warn_score: null\n"
+                     "  critical_score: null\n").battery_health
+        mon = _Mon(_config(), store)
+        mon._maybe_alert_health(bh, None)                # unknown score
+        mon._maybe_alert_health(bh, 5)                   # tiers disabled
+        assert mon.notifications == []

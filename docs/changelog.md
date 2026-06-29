@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.0-rc12] - 2026-06-29
+
+Shutdown-plan now covers remote-only UPSes + redundancy groups, a polished
+shutdown view, and escalating battery-health alerts.
+
+### Added
+
+- **Shutdown plan is reachable per UPS** — a UPS selector on the Shutdown tab
+  (remote UPSes flagged), so multi-UPS and remote-only deployments can view each
+  group's plan, not just the first UPS.
+- **Shutdown trigger context** — the plan now states *what triggers* it: for a
+  redundancy-group member, "triggers when group X drops below N of M healthy"
+  (coordinator-run); for a standalone UPS, its low-battery / FSD trigger.
+- **Tiered battery-health alerts** — `battery_health.warn_score` (default 30) and
+  `critical_score` (default 15) raise escalating, deduped notifications on the
+  *current* score, complementing the trend-based replacement prediction. Each
+  tier fires once and re-arms on recovery. `null` disables a tier.
+
+### Changed
+
+- **Shutdown view polish** — per-phase icons + color (much less gray), surfaced
+  timeouts (VM `max_wait`, container `stop_timeout`, per-remote `command_timeout`)
+  and a total-duration estimate, and "delegated to host" / "non-local group" now
+  read as accent tags rather than flat gray.
+
 ## [6.1.0-rc11] - 2026-06-29
 
 Another round of real-hardware dashboard feedback, a battery-score fix, a new
