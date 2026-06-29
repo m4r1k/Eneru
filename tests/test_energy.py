@@ -13,6 +13,25 @@ from eneru.energy import (
 )
 
 
+class TestNominalFallback:
+    @pytest.mark.unit
+    def test_fallback_estimates_when_no_realpower_or_nominal(self):
+        # samples report neither realpower nor power.nominal -> needs the config
+        # fallback to turn load% into watts.
+        samples = [(0, None, 50.0, None), (3600, None, 50.0, None)]
+        r = integrate_kwh(samples, nominal_fallback=1000.0)
+        assert r.kwh is not None and r.estimated is True
+        assert abs(r.kwh - 0.5) < 1e-6          # 50% of 1000W over 1h
+        # Without the fallback the window is unknown (not zero).
+        assert integrate_kwh(samples).kwh is None
+
+    @pytest.mark.unit
+    def test_summarize_threads_fallback(self):
+        s = [(0, None, 25.0, None), (3600, None, 25.0, None)]
+        block = summarize(s, s, cost_per_kwh=None, nominal_fallback=2000.0)
+        assert block["todayKwh"] is not None and block["estimated"] is True
+
+
 class TestMedian:
     @pytest.mark.unit
     def test_odd_length(self):

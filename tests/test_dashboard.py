@@ -382,6 +382,30 @@ def test_dashboard_shared_range_and_cost_hint(minimal_config):
 
 
 @pytest.mark.unit
+def test_dashboard_round3_ux(minimal_config):
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    # Metric name + unit label on charts.
+    assert "function metricLabel" in js and "Input voltage (V)" in js
+    assert ".chart-title" in css
+    # Event markers: triangle pin + color-by-type incl. green recovery + non-blue.
+    assert "ev-pin" in js and "ev-ok" in js
+    assert ".ev-ok" in css and ".ev-pin" in css
+    # Energy: "calculating…" not "unknown"; month hidden until data; window notes.
+    assert "calculating" in js and "energyNotes" in js
+    assert "This month" in js
+    # Config tab: collapsible pretty JSON + only enabled features.
+    assert "config-json" in js and "Enabled features" in js
+    assert ".config-json" in css
+    # Detail modal closes on backdrop click; events filters scroll to top.
+    assert 'ev.target.id === "detail-modal"' in js
+    assert "window.scrollTo(0, 0)" in js
+
+
+@pytest.mark.unit
 def test_dashboard_event_markers_are_hoverable(minimal_config):
     # The whole vertical guide (not just the 3px dot) must be hoverable and the
     # tooltip must carry the event description (type + time + detail).

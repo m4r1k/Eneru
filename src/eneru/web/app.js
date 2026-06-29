@@ -303,20 +303,40 @@ function energyCostConfigured(en) {
   return en && ("todayCost" in en || "monthCost" in en);
 }
 
+// Gentle footnotes for the energy block (window clarity + estimated/partial),
+// rendered as muted lines rather than blunt key/value rows.
+function energyNotes(en) {
+  const notes = [];
+  if (en.todayLabel || en.monthLabel) {
+    notes.push("Windows — today: " + (en.todayLabel || "since midnight")
+               + " · month: " + (en.monthLabel || "since the 1st"));
+  }
+  if (en.estimated) {
+    notes.push("Power is estimated from load × rated power "
+               + "(set energy.nominal_power for your UPS).");
+  }
+  if (en.partial) notes.push("Based on the samples available so far.");
+  return notes;
+}
+
 function energyRows(en) {
   const rows = [
-    detailRow("Today", en.todayKwh != null ? en.todayKwh.toFixed(3) + " kWh" : "unknown"),
-    detailRow("Month", en.monthKwh != null ? en.monthKwh.toFixed(3) + " kWh" : "unknown"),
+    detailRow("Today", en.todayKwh != null ? en.todayKwh.toFixed(3) + " kWh" : "—"),
   ];
-  // When cost is configured, always show the cost rows (so "unknown" reads as
-  // "tracked, but no power data" rather than silently hiding cost + nagging to
-  // set a price that is already set).
-  if (energyCostConfigured(en)) {
-    rows.push(detailRow("Today cost", en.todayCostFormatted || "unknown"));
-    rows.push(detailRow("Month cost", en.monthCostFormatted || "unknown"));
+  // Only show the month line once it has data (no value early in the month or on
+  // a fresh UPS reads cleaner than a row full of "unknown").
+  if (en.monthKwh != null) {
+    rows.push(detailRow("This month", en.monthKwh.toFixed(3) + " kWh"));
   }
-  if (en.estimated) rows.push(detailRow("Note", "estimated (no real-power reading)"));
-  if (en.partial) rows.push(detailRow("Coverage", "partial (data gaps in window)"));
+  if (energyCostConfigured(en)) {
+    // Configured but no kWh yet -> "calculating…", not a blunt "unknown".
+    rows.push(detailRow("Today cost", en.todayCostFormatted || "calculating…"));
+    if (en.monthKwh != null) {
+      rows.push(detailRow("Month cost", en.monthCostFormatted || "calculating…"));
+    }
+  }
+  energyNotes(en).forEach((n) =>
+    rows.push(el("div", { class: "row" }, [el("span", { class: "energy-note", text: n })])));
   return rows;
 }
 
@@ -727,13 +747,19 @@ async function deleteSelected() {
 // series, so the Power / Battery / Energy tabs draw independently. Optional
 // voltage threshold bands and power-event overlays layer on top of the line.
 
-// Marker color class by event type, for the chart overlays.
+// Marker color class by event type, for the chart overlays. Recovery events are
+// green, outage/danger red, warnings amber, everything else a distinct violet
+// (NOT the blue of the plot line, so a marker never blends into the curve).
 function eventMarkerClass(type) {
   const t = (type || "").toUpperCase();
-  if (t.includes("SHUTDOWN") || t.includes("FSD") || t === "ON_BATTERY"
-      || t.includes("BROWNOUT") || t.includes("CRITICAL")) return "ev-crit";
+  if (t.includes("RESTORED") || t.includes("NORMALIZED")
+      || t.includes("RESOLVED") || t.includes("RECOVER")) return "ev-ok";
+  if (t.includes("SHUTDOWN") || t.includes("FSD") || t.includes("ON_BATTERY")
+      || t.includes("BROWNOUT") || t.includes("LOW_BATTERY")
+      || t.includes("CONNECTION_LOST") || t.includes("CRITICAL")) return "ev-crit";
   if (t.includes("OVER_VOLTAGE") || t.includes("OVERLOAD") || t.includes("BYPASS")
-      || t.includes("AVR") || t.includes("WARNING") || t.includes("ANOMALY")) return "ev-warn";
+      || t.includes("AVR") || t.includes("WARNING") || t.includes("ANOMALY")
+      || t.includes("REPLACE")) return "ev-warn";
   return "ev-info";
 }
 
@@ -766,25 +792,28 @@ function eventDescription(e) {
 // hit). `e` carries the event; cls is the color class.
 function appendEventMarker(svg, e, ex, top, bottom) {
   const cls = eventMarkerClass(e.eventType || e.event);
+  const x = parseFloat(ex), yTop = parseFloat(top), yBot = parseFloat(bottom);
   const g = document.createElementNS(SVG_NS, "g");
   const title = document.createElementNS(SVG_NS, "title");
   title.textContent = eventDescription(e);
   g.appendChild(title);
   const mkline = (cssClass) => {
     const l = document.createElementNS(SVG_NS, "line");
-    l.setAttribute("x1", ex); l.setAttribute("y1", top);
-    l.setAttribute("x2", ex); l.setAttribute("y2", bottom);
+    l.setAttribute("x1", x); l.setAttribute("y1", yTop);
+    l.setAttribute("x2", x); l.setAttribute("y2", yBot);
     l.setAttribute("class", cssClass);
     l.setAttribute("vector-effect", "non-scaling-stroke");
     g.appendChild(l);
   };
-  mkline("ev-hit");                 // wide transparent hover target
-  mkline("ev-line " + cls);         // the visible guide
-  const dot = document.createElementNS(SVG_NS, "circle");
-  dot.setAttribute("cx", ex); dot.setAttribute("cy", String(top + 3));
-  dot.setAttribute("r", "4");
-  dot.setAttribute("class", "ev-dot " + cls);
-  g.appendChild(dot);
+  mkline("ev-hit");                 // wide transparent full-height hover target
+  mkline("ev-line " + cls);         // faint guide (CSS brightens on hover)
+  // The at-a-glance marker is a small colored triangle sitting ON the time axis,
+  // not a bold full-height line — reads as an annotation pin, color-coded by type.
+  const tri = document.createElementNS(SVG_NS, "polygon");
+  tri.setAttribute("points",
+    `${(x - 4).toFixed(1)},${yBot} ${(x + 4).toFixed(1)},${yBot} ${x.toFixed(1)},${(yBot - 7).toFixed(1)}`);
+  tri.setAttribute("class", "ev-pin " + cls);
+  g.appendChild(tri);
   svg.appendChild(g);
 }
 
@@ -792,6 +821,22 @@ function isVoltageMetric(metric) {
   return metric === "voltage" || metric === "output_voltage"
       || metric === "battery_voltage";
 }
+
+// Human metric name + unit so a bare number axis is identifiable (esp. when the
+// metric dropdown changes input vs output voltage, frequency, etc.).
+const METRIC_LABELS = {
+  charge: "Battery charge (%)",
+  runtime: "Runtime",
+  load: "Load (%)",
+  voltage: "Input voltage (V)",
+  output_voltage: "Output voltage (V)",
+  frequency: "Input frequency (Hz)",
+  output_frequency: "Output frequency (Hz)",
+  battery_voltage: "Battery voltage (V)",
+  temperature: "Temperature (°C)",
+  real_power: "Power (W)",
+};
+function metricLabel(metric) { return METRIC_LABELS[metric] || metric || ""; }
 
 // Draw `series` (a /history payload) into the host element, with optional
 // `bands` (voltage thresholds) and `events` (overlay markers).
@@ -819,6 +864,15 @@ function drawChart(hostId, series, options) {
   };
   line(pad, H - pad, W - 5, H - pad, "axis");
   line(pad, 5, pad, H - pad, "axis");
+
+  // Metric name + unit, top-centered, so the numbers on the axis are identifiable.
+  if (options.metric) {
+    const t = document.createElementNS(SVG_NS, "text");
+    t.setAttribute("x", (W / 2).toFixed(0)); t.setAttribute("y", "12");
+    t.setAttribute("text-anchor", "middle"); t.setAttribute("class", "chart-title");
+    t.textContent = metricLabel(options.metric);
+    svg.appendChild(t);
+  }
 
   const vals = pts.map((p) => p.value).filter((v) => typeof v === "number" && !isNaN(v));
   const bands = options.bands || null;
@@ -1271,16 +1325,27 @@ function renderConfigTab() {
       configKv("Remote servers", (c.remoteServers || []).length),
     ]));
   });
-  const features = [];
-  if (cfg.nutControl) features.push(configKv("UPS control",
-    cfg.nutControl.enabled ? "enabled" : "disabled"));
-  if (cfg.detail === "sanitized") {
-    features.push(el("p", { class: "chart-note",
-      text: "Sign in to see the full configuration." }));
+  // Only surface what's ON — a list of "disabled" rows is just noise.
+  const enabled = [];
+  if (cfg.nutControl && cfg.nutControl.enabled) enabled.push("UPS control");
+  if (enabled.length) {
+    cards.push(widgetCard("Enabled features",
+      enabled.map((f) => el("div", { class: "row" },
+        [el("span", { text: f }), el("b", { class: "ok", text: "on" })]))));
   }
-  if (features.length) cards.push(widgetCard("Features", features));
-  const grid = el("div", { class: "cards" }, cards);
-  body.replaceChildren(grid);
+  body.appendChild(el("div", { class: "cards" }, cards));
+
+  if (cfg.detail === "sanitized") {
+    body.appendChild(el("p", { class: "chart-note",
+      text: "Sign in to see the full configuration (secrets are never shown)." }));
+  }
+  // The full (sanitized) config, pretty-printed and collapsible — click to read.
+  const pre = el("pre", { class: "config-json" });
+  pre.textContent = JSON.stringify(cfg, null, 2);
+  body.appendChild(el("details", { class: "config-raw" }, [
+    el("summary", { text: "Configuration (JSON)" }),
+    pre,
+  ]));
 }
 
 // ----- control panel (5c) -----
@@ -1688,17 +1753,31 @@ async function init() {
     if (node) node.addEventListener("change", () => charts[chart] && charts[chart].load());
   });
 
-  document.getElementById("event-source-filter").addEventListener("change", applyEventFilters);
+  // Discrete filter changes can resize the table a lot; reset to the top of the
+  // page so the operator isn't left stranded mid-table. (Text input + the 10s
+  // poll deliberately do NOT scroll.)
+  const scrollTop = () => window.scrollTo(0, 0);
+  document.getElementById("event-source-filter").addEventListener("change", () => {
+    applyEventFilters(); scrollTop();
+  });
   document.getElementById("event-type-filter").addEventListener("change", () => {
     updateEventTypeSummary();
     applyEventFilters();
+    scrollTop();
   });
   document.getElementById("event-text-filter").addEventListener("input", applyEventFilters);
-  document.getElementById("event-range").addEventListener("change", resetEvents);
+  document.getElementById("event-range").addEventListener("change", () => {
+    resetEvents(); scrollTop();
+  });
   document.getElementById("event-load-older").addEventListener("click", loadOlderEvents);
   document.getElementById("event-delete").addEventListener("click", deleteSelected);
   document.getElementById("event-sort-time").addEventListener("click", toggleEventSort);
   document.getElementById("detail-close").addEventListener("click", closeDetail);
+  // Click anywhere on the backdrop (outside the card) closes the detail modal,
+  // not just the ✕.
+  document.getElementById("detail-modal").addEventListener("click", (ev) => {
+    if (ev.target.id === "detail-modal") closeDetail();
+  });
   // Esc closes whichever modal is open.
   document.addEventListener("keydown", (ev) => {
     if (ev.key !== "Escape") return;

@@ -85,6 +85,8 @@ select, input:not([type="checkbox"]) { background: var(--panel-2); color: var(--
 .graph .axis { stroke: var(--line); stroke-width: 1; }
 .graph .plot { fill: none; stroke: var(--accent); stroke-width: 2; }
 .graph .lbl { fill: var(--muted); font-size: 11px; }
+.graph .chart-title { fill: var(--muted); font-size: 11px; font-weight: 600;
+                      letter-spacing: 0.03em; }
 .events { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 .events th, .events td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--line); }
 .events th { color: var(--muted); font-weight: 600; }
@@ -190,20 +192,35 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .card-head h3 { margin: 0; font-size: 1.05rem; }
 .card .card-head + .row { margin-top: 0.1rem; }
 .chart-note { color: var(--muted); font-size: 0.85rem; margin: 0.5rem 0 0; }
+.energy-note { color: var(--muted); font-size: 0.78rem; font-style: italic; }
+
+/* Config tab: collapsible pretty-printed JSON view */
+.config-raw { margin-top: 1rem; }
+.config-raw > summary { cursor: pointer; color: var(--muted); font-weight: 600;
+  padding: 0.4rem 0.6rem; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 6px; user-select: none; }
+.config-json { background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 0.9rem 1rem; margin: 0.6rem 0 0; overflow: auto;
+  max-height: 60vh; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem; line-height: 1.5; color: var(--text); }
 
 /* Chart overlays: voltage threshold band + nominal line + event markers */
 .graph .band { fill: var(--ok); opacity: 0.10; }
 .graph .band-nominal { stroke: var(--ok); stroke-width: 1; stroke-dasharray: 4 3;
                        opacity: 0.7; }
-.graph .ev-line { stroke-width: 1; opacity: 0.45; }
-/* Wide transparent hover target so the whole vertical guide shows the marker's
-   tooltip, not just the tiny dot. */
-.graph .ev-hit { stroke: transparent; stroke-width: 9; }
-.graph g:hover .ev-line { opacity: 0.9; }
-.graph .ev-dot { stroke: var(--bg); stroke-width: 0.5; }
-.graph .ev-crit { stroke: var(--crit); fill: var(--crit); }
-.graph .ev-warn { stroke: var(--warn); fill: var(--warn); }
-.graph .ev-info { stroke: var(--accent); fill: var(--accent); }
+/* Event markers: a small color-coded triangle pinned to the time axis, with a
+   FAINT vertical guide that only brightens on hover (a bold full-height line per
+   event looked like noise). A wide transparent hit line makes the whole column
+   hoverable so the tooltip is easy to summon. */
+.graph .ev-line { stroke-width: 1; opacity: 0.12; }
+.graph .ev-hit { stroke: transparent; stroke-width: 11; }
+.graph g:hover .ev-line { opacity: 0.7; }
+.graph .ev-pin { stroke: var(--bg); stroke-width: 0.5; }
+.graph g:hover .ev-pin { stroke-width: 1; }
+.graph .ev-crit { stroke: var(--crit); fill: var(--crit); }   /* outage / danger */
+.graph .ev-warn { stroke: var(--warn); fill: var(--warn); }   /* over-voltage / overload */
+.graph .ev-ok   { stroke: var(--ok);   fill: var(--ok); }     /* power restored / recovered */
+.graph .ev-info { stroke: #a78bfa; fill: #a78bfa; }           /* other — violet, not the plot blue */
 
 /* Energy dual-line chart: load% (kindred accent, translucent) + power (W). */
 .graph .plot-load { stroke: var(--accent); opacity: 0.45; fill: none; }

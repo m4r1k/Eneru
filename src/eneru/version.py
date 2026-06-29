@@ -2,4 +2,4 @@
 
 # Version is set at build time via git describe --tags
 # Format: "5.2.1" for tagged releases, "5.2.1-5-gabcdef1" for dev builds
-__version__ = "6.1.0-rc7"
+__version__ = "6.1.0-rc8"

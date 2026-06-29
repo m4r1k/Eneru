@@ -749,9 +749,11 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 else:
                     start = horizon
                 store = getattr(mon, "_stats_store", None)
+                nominal = getattr(getattr(mon.config, "energy", None),
+                                  "nominal_power", None)
                 return 200, "application/json", {
                     "ups": ups_name, "from": start, "to": end,
-                    "data": power_series(store, start, end),
+                    "data": power_series(store, start, end, nominal_fallback=nominal),
                 }
 
         if path == "/api/v1/events":

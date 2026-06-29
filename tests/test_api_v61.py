@@ -81,6 +81,18 @@ class TestPowerSeries:
         assert power_series(None, 0, 1) == []
 
     @pytest.mark.unit
+    def test_power_series_uses_nominal_fallback(self):
+        from eneru.status import power_series
+
+        class _S:
+            def power_samples(self, a, b):
+                return [(100, None, 40.0, None)]   # no realpower, no nominal
+        # Without a fallback -> watts unknown; with one -> estimated 40% * 500.
+        assert power_series(_S(), 0, 200)[0]["watts"] is None
+        out = power_series(_S(), 0, 200, nominal_fallback=500.0)
+        assert out[0]["watts"] == 200.0 and out[0]["estimated"] is True
+
+    @pytest.mark.unit
     def test_power_endpoint_route(self):
         from types import SimpleNamespace
         from eneru.api import EneruAPIHandler

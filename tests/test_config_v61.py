@@ -240,6 +240,17 @@ class TestCrossFieldValidation:
         _, errs = _validate("ups:\n  name: U@h\nenergy:\n  currency: EUR\n")
         assert errs == []
 
+    @pytest.mark.unit
+    def test_energy_nominal_power_parsed(self):
+        cfg = _parse("ups:\n  name: U@h\nenergy:\n  nominal_power: 1000\n")
+        assert cfg.energy.nominal_power == 1000
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("val", ["-1", "0", "abc"])
+    def test_energy_nominal_power_must_be_positive_number(self, val):
+        _, errs = _validate(f"ups:\n  name: U@h\nenergy:\n  nominal_power: {val}\n")
+        assert any("nominal_power must be a positive number" in e for e in errs)
+
 
 # --------------------------------------------------------------------------
 # reload classification

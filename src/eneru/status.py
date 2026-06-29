@@ -2,6 +2,7 @@
 
 import time
 import shlex
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -116,13 +117,27 @@ def _energy_for_monitor(monitor: Any):
     try:
         from eneru import energy as energy_mod
         now = time.time()
-        today = store.power_samples(int(now - 86400), int(now))
-        month = store.power_samples(int(now - 30 * 86400), int(now))
+        # Calendar windows (local time): "today" = since midnight, "month" =
+        # since the 1st. Cost is only meaningful against a fixed boundary — a
+        # rolling 24h/30d isn't what an electricity bill measures.
+        now_dt = datetime.now()
+        today_start = int(datetime(now_dt.year, now_dt.month, now_dt.day).timestamp())
+        month_start = int(datetime(now_dt.year, now_dt.month, 1).timestamp())
+        today = store.power_samples(today_start, int(now))
+        month = store.power_samples(month_start, int(now))
         # expected_interval is inferred per window (raw ~check_interval vs
         # aggregated 300s/3600s tiers), so we don't force one here.
-        return energy_mod.summarize(
+        block = energy_mod.summarize(
             today, month, cost_per_kwh=cfg.cost_per_kwh,
-            currency=cfg.currency, cost_format=cfg.cost_format)
+            currency=cfg.currency, cost_format=cfg.cost_format,
+            nominal_fallback=getattr(cfg, "nominal_power", None))
+        # Tell the UI exactly what each window covers (no "is today 24h or
+        # midnight?" guessing) and when each started.
+        block["todayLabel"] = "since midnight"
+        block["monthLabel"] = now_dt.strftime("since %b 1")
+        block["todayStart"] = today_start
+        block["monthStart"] = month_start
+        return block
     except Exception:
         return None
 
@@ -148,12 +163,14 @@ def _self_test_for_monitor(monitor: Any):
     }
 
 
-def power_series(store: Any, start: int, end: int) -> List[Dict[str, Any]]:
+def power_series(store: Any, start: int, end: int,
+                 *, nominal_fallback: Optional[float] = None) -> List[Dict[str, Any]]:
     """Per-sample power for the Energy chart: ``[{ts, loadPct, watts, estimated}]``.
 
     ``watts`` is ``ups.realpower`` when reported, else the ``load% * nominal``
-    fallback (``estimated=True``), else ``None`` — the same rule energy.py uses
-    for kWh, so the chart and the kWh figure agree.
+    fallback (``estimated=True``) using the sample's ``ups.power.nominal`` or the
+    configured ``nominal_fallback`` (``energy.nominal_power``), else ``None`` —
+    the same rule energy.py uses for kWh, so the chart and the kWh figure agree.
     """
     if store is None:
         return []
@@ -164,8 +181,9 @@ def power_series(store: Any, start: int, end: int) -> List[Dict[str, Any]]:
     except Exception:
         return []
     for ts, real_power, ups_load, power_nominal in rows:
+        nominal = power_nominal if power_nominal is not None else nominal_fallback
         watts, estimated = energy_mod.power_sample_w(
-            real_power, ups_load, power_nominal)
+            real_power, ups_load, nominal)
         out.append({
             "ts": int(ts),
             "loadPct": ups_load,

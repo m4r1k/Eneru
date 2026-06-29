@@ -29,7 +29,24 @@ energy:
   cost_per_kwh: null            # null/unset => cost tracking is OFF entirely
   currency: USD                 # ISO 4217 code (USD, EUR, GBP, ...)
   cost_format: null             # optional override, e.g. "{value} €"
+  nominal_power: null           # rated W/VA; estimates watts when the UPS reports
+                                # neither ups.realpower nor ups.power.nominal
 ```
+
+### When the UPS reports no power
+
+Some integrated UPSes expose neither `ups.realpower` nor `ups.power.nominal`, so
+Eneru has nothing to turn `load%` into watts and energy stays *unknown*. Set
+`energy.nominal_power` to the unit's rated power (e.g. `1000` for a 1000 VA
+tower) and Eneru estimates `watts = load% × nominal_power` (flagged
+`estimated`). The Energy tab's **Power (W)** line then plots, and kWh/cost
+populate.
+
+### Windows
+
+`today` is the **calendar day** (since local midnight) and `month` is the
+**calendar month** (since the 1st) — fixed boundaries that match how an
+electricity bill is measured, not a rolling 24 h / 30 d.
 
 **Cost is gated on `cost_per_kwh`.** While it is unset (`null`), cost tracking is
 disabled *entirely* — no `cost` field in the status payload, no

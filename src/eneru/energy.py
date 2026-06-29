@@ -96,7 +96,8 @@ def _median(values: List[float]) -> Optional[float]:
 
 def integrate_kwh(samples: List[PowerSample], *,
                   expected_interval_s: Optional[float] = None,
-                  gap_factor: float = 2.0) -> EnergyResult:
+                  gap_factor: float = 2.0,
+                  nominal_fallback: Optional[float] = None) -> EnergyResult:
     """Integrate a single-tier power series into kWh (see module contract).
 
     ``expected_interval_s`` sets the gap cap (a dt above ``gap_factor`` x it is
@@ -104,6 +105,10 @@ def integrate_kwh(samples: List[PowerSample], *,
     from the data as the median consecutive dt -- so the same code handles the
     raw tier (~1s) and the aggregate tiers (300s / 3600s) without the caller
     having to know which tier it fetched.
+
+    ``nominal_fallback`` (from ``energy.nominal_power``) supplies a rated power
+    when a sample reports neither ``ups.realpower`` nor ``ups.power.nominal``, so
+    watts can still be estimated from load% on UPSes that expose neither.
     """
     if expected_interval_s is None or expected_interval_s <= 0:
         dts = [nxt[0] - cur[0] for cur, nxt in zip(samples, samples[1:])
@@ -122,7 +127,8 @@ def integrate_kwh(samples: List[PowerSample], *,
         if dt > cap:
             partial = True
             continue
-        power, was_fallback = power_sample_w(rp0, load0, nom0)
+        nominal = nom0 if nom0 is not None else nominal_fallback
+        power, was_fallback = power_sample_w(rp0, load0, nominal)
         if power is None:
             partial = True
             continue
@@ -168,7 +174,8 @@ def summarize(today_samples: List[PowerSample],
               cost_per_kwh: Optional[float],
               currency: str = "USD",
               cost_format: Optional[str] = None,
-              expected_interval_s: Optional[float] = None) -> Dict:
+              expected_interval_s: Optional[float] = None,
+              nominal_fallback: Optional[float] = None) -> Dict:
     """Build the live ``energy`` status block from two windows' samples.
 
     Shape: ``{todayKwh, monthKwh, currency, estimated, partial}`` plus, only
@@ -177,8 +184,10 @@ def summarize(today_samples: List[PowerSample],
     are ``None`` when unknown. ``estimated``/``partial`` are the OR across both
     windows.
     """
-    today = integrate_kwh(today_samples, expected_interval_s=expected_interval_s)
-    month = integrate_kwh(month_samples, expected_interval_s=expected_interval_s)
+    today = integrate_kwh(today_samples, expected_interval_s=expected_interval_s,
+                          nominal_fallback=nominal_fallback)
+    month = integrate_kwh(month_samples, expected_interval_s=expected_interval_s,
+                          nominal_fallback=nominal_fallback)
 
     block: Dict = {
         "todayKwh": today.kwh,

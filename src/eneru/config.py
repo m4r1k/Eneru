@@ -250,6 +250,8 @@ class EnergyConfig:
     cost_per_kwh: Optional[float] = None
     currency: str = "USD"                # ISO 4217 code
     cost_format: Optional[str] = None    # e.g. "{value} €"; overrides the currency table
+    nominal_power: Optional[float] = None  # rated W/VA; estimates watts when the
+    # UPS reports neither ups.realpower nor ups.power.nominal
 
 
 @dataclass
@@ -1209,6 +1211,7 @@ class ConfigLoader:
                 cost_per_kwh=e.get('cost_per_kwh', config.energy.cost_per_kwh),
                 currency=e.get('currency', config.energy.currency),
                 cost_format=e.get('cost_format', config.energy.cost_format),
+                nominal_power=e.get('nominal_power', config.energy.nominal_power),
             )
 
         # Detect legacy vs multi-UPS format
@@ -1557,7 +1560,8 @@ class ConfigLoader:
             ))
             messages.extend(cls._unknown_key_errors(
                 "energy", raw_data.get("energy", {}),
-                {"enabled", "cost_per_kwh", "currency", "cost_format"},
+                {"enabled", "cost_per_kwh", "currency", "cost_format",
+                 "nominal_power"},
             ))
             _nc_keys = {"enabled", "username", "password", "allowed_commands",
                         "allowed_variables", "timeout"}
@@ -2618,5 +2622,11 @@ class ConfigLoader:
                 messages.append(
                     f"ERROR: energy.cost_per_kwh must be a non-negative number "
                     f"or unset, got {cpk!r}")
+        npw = config.energy.nominal_power
+        if npw is not None:
+            if isinstance(npw, bool) or not isinstance(npw, (int, float)) or npw <= 0:
+                messages.append(
+                    f"ERROR: energy.nominal_power must be a positive number "
+                    f"or unset, got {npw!r}")
 
         return messages

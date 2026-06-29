@@ -253,6 +253,11 @@ energy:
   # Optional format override, e.g. "{value} €". When unset, a small built-in
   # symbol/placement table is used per currency code.
   cost_format: null
+  # Rated power (W/VA) used to estimate watts/kWh from load% when the UPS
+  # reports NEITHER ups.realpower NOR ups.power.nominal (some integrated UPSes
+  # expose neither). null = no estimate; energy stays "unknown" for such UPSes.
+  # e.g. a 1000 VA tower: nominal_power: 1000
+  nominal_power: null
 
 # ==============================================================================
 # NOTIFICATIONS (via Apprise)

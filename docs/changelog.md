@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.0-rc8] - 2026-06-29
+
+A round of real-world dashboard polish from running rc7 on production hardware.
+
+### Added
+
+- `energy.nominal_power` — a rated W/VA used to estimate watts (and kWh/cost)
+  from load% when the UPS reports **neither** `ups.realpower` nor
+  `ups.power.nominal` (common on integrated appliances). Threaded through the
+  status block, the `/power` series, reports, and kWh integration.
+
+### Changed
+
+- **Energy windows are now calendar-based:** "today" is since local midnight and
+  "month" is since the 1st — fixed boundaries that match an electricity bill,
+  not a rolling 24 h / 30 d. The status block carries `todayLabel` / `monthLabel`
+  so the UI states the window explicitly.
+- **Charts** label the metric + unit (e.g. "Input voltage (V)") so the axis
+  numbers are identifiable when switching input/output voltage, frequency, etc.
+- **Event markers** are now a small color-coded triangle pinned to the time axis
+  with a faint hover-only guide (was a bold full-height line in the plot color):
+  outage/danger red, recovery green, warnings amber, everything else violet — no
+  longer the same blue as the data line. The whole column is hoverable.
+- **Energy tab** reads cleaner: the month line is hidden until it has data; a
+  configured-but-not-yet-computed cost shows "calculating…" instead of
+  "unknown"; the blunt "partial (data gaps)" row became a gentle footnote; and
+  the window is stated inline.
+- **Config tab** shows only enabled features (no "disabled" noise) plus a
+  collapsible, pretty-printed JSON view of the (sanitized) configuration.
+- The UPS detail modal closes on a backdrop click (not only the ✕), and the
+  Events tab scrolls back to the top when you change the range/source/type
+  filters so a big table doesn't strand you mid-page.
+
 ## [6.1.0-rc7] - 2026-06-29
 
 Addresses an external review plus three more AI-review passes on rc6, and a round
