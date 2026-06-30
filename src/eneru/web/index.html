@@ -4,11 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Eneru</title>
+  <!-- Inline ⚡ favicon (a lightning-bolt path, so it renders without an emoji
+       font and needs no extra packaged asset). -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M13 2 L4 14 h6 l-1 8 9-12 h-6 z' fill='%234f8cf7'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header>
-    <h1>⚡  Eneru</h1>
+    <h1><svg class="ic brand-bolt" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3 6 13h5l-1 8 8-11h-5z"/></svg>Eneru</h1>
     <div id="authbox" class="authbox">
       <label class="theme-pick">Theme
         <select id="theme-select" aria-label="Color theme">
@@ -23,53 +26,149 @@
     </div>
   </header>
 
+  <!-- Tab bar (Nutify-style). Real ARIA tabs: arrow-key nav + hash sync wired
+       in app.js. The Control tab is hidden until authenticated + nut_control. -->
+  <!-- Tab bar (Nutify-style). Real ARIA tabs: arrow-key nav + hash sync wired in
+       app.js, which also prepends each tab's inline-SVG icon (see TAB_ICONS).
+       The Control tab is hidden until authenticated + nut_control. -->
+  <nav id="tabs" class="tabs" role="tablist" aria-label="Dashboard sections">
+    <button class="tab" role="tab" id="tab-overview" data-tab="overview"
+            aria-controls="panel-overview" aria-selected="true">Overview</button>
+    <button class="tab" role="tab" id="tab-power" data-tab="power"
+            aria-controls="panel-power" aria-selected="false" tabindex="-1">Power</button>
+    <button class="tab" role="tab" id="tab-battery" data-tab="battery"
+            aria-controls="panel-battery" aria-selected="false" tabindex="-1">Battery</button>
+    <button class="tab" role="tab" id="tab-energy" data-tab="energy"
+            aria-controls="panel-energy" aria-selected="false" tabindex="-1">Energy</button>
+    <button class="tab" role="tab" id="tab-events" data-tab="events"
+            aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
+    <button class="tab" role="tab" id="tab-control" data-tab="control"
+            aria-controls="panel-control" aria-selected="false" tabindex="-1" hidden>Control</button>
+    <button class="tab" role="tab" id="tab-shutdown" data-tab="shutdown"
+            aria-controls="panel-shutdown" aria-selected="false" tabindex="-1">Shutdown</button>
+    <button class="tab" role="tab" id="tab-config" data-tab="config"
+            aria-controls="panel-config" aria-selected="false" tabindex="-1">Config</button>
+  </nav>
+
   <div id="banner" class="banner" role="status" hidden></div>
   <div id="error" class="error" hidden></div>
 
   <main>
-    <section id="ups-section">
-      <h2>UPS status</h2>
-      <div id="ups-cards" class="cards"></div>
+    <!-- Overview ------------------------------------------------------------ -->
+    <section id="panel-overview" class="panel" role="tabpanel"
+             aria-labelledby="tab-overview" tabindex="0">
+      <h2>System</h2>
+      <div id="overview-hero"></div>
+      <div id="overview-summary" class="cards"></div>
+      <div id="ups-section" hidden>
+        <h2>UPS status</h2>
+        <div id="ups-cards" class="cards"></div>
+      </div>
+      <div id="groups-section" hidden>
+        <h2>Redundancy groups</h2>
+        <div id="group-cards" class="cards"></div>
+      </div>
+      <div id="remote-section" hidden>
+        <h2>Remote servers</h2>
+        <div id="remote-cards" class="cards"></div>
+      </div>
     </section>
 
-    <section id="groups-section" hidden>
-      <h2>Redundancy groups</h2>
-      <div id="group-cards" class="cards"></div>
-    </section>
-
-    <section id="graph-section">
-      <h2>History</h2>
+    <!-- Power --------------------------------------------------------------- -->
+    <section id="panel-power" class="panel" role="tabpanel"
+             aria-labelledby="tab-power" tabindex="0" hidden>
+      <h2>Power quality</h2>
+      <div id="line-quality" class="cards"></div>
       <div class="graph-controls">
-        <label>UPS <select id="graph-ups"></select></label>
+        <label>UPS <select id="power-ups"></select></label>
         <label>Metric
-          <select id="graph-metric">
-            <option value="charge">Battery charge (%)</option>
-            <option value="load">Load (%)</option>
-            <option value="runtime">Runtime</option>
+          <select id="power-metric">
             <option value="voltage">Input voltage (V)</option>
+            <option value="output_voltage">Output voltage (V)</option>
+            <option value="frequency">Input frequency (Hz)</option>
           </select>
         </label>
         <label>Range
-          <select id="graph-range">
+          <select id="power-range">
             <option value="3600">Last hour</option>
             <option value="21600">Last 6 hours</option>
             <option value="86400" selected>Last 24 hours</option>
             <option value="604800">Last 7 days</option>
             <option value="2592000">Last 30 days</option>
-            <option value="31536000">Last year</option>
-            <option value="all">All</option>
           </select>
         </label>
       </div>
-      <div id="graph" class="graph"></div>
+      <div id="power-graph" class="graph"></div>
+      <p class="chart-note" id="power-note" hidden></p>
     </section>
 
-    <section id="events-section">
+    <!-- Battery ------------------------------------------------------------- -->
+    <section id="panel-battery" class="panel" role="tabpanel"
+             aria-labelledby="tab-battery" tabindex="0" hidden>
+      <h2>Battery health</h2>
+      <div id="battery-health" class="cards"></div>
+      <div id="bh-graph" class="graph"></div>
+      <p class="chart-note" id="bh-graph-note" hidden></p>
+      <h2>History</h2>
+      <div class="graph-controls">
+        <label>UPS <select id="battery-ups"></select></label>
+        <label>Metric
+          <select id="battery-metric">
+            <option value="charge">Battery charge (%)</option>
+            <option value="runtime">Runtime</option>
+            <option value="load">Load (%)</option>
+            <option value="temperature">Temperature (°C)</option>
+          </select>
+        </label>
+        <label>Range
+          <select id="battery-range">
+            <option value="3600">Last hour</option>
+            <option value="21600">Last 6 hours</option>
+            <option value="86400" selected>Last 24 hours</option>
+            <option value="604800">Last 7 days</option>
+            <option value="2592000">Last 30 days</option>
+          </select>
+        </label>
+      </div>
+      <div id="battery-graph" class="graph"></div>
+    </section>
+
+    <!-- Energy -------------------------------------------------------------- -->
+    <section id="panel-energy" class="panel" role="tabpanel"
+             aria-labelledby="tab-energy" tabindex="0" hidden>
+      <h2>Energy</h2>
+      <div id="energy-cards" class="cards"></div>
+      <h2>Load &amp; power</h2>
+      <div class="graph-controls">
+        <label>UPS <select id="energy-ups"></select></label>
+        <label>Range
+          <select id="energy-range">
+            <option value="3600">Last hour</option>
+            <option value="21600">Last 6 hours</option>
+            <option value="86400" selected>Last 24 hours</option>
+            <option value="604800">Last 7 days</option>
+            <option value="2592000">Last 30 days</option>
+          </select>
+        </label>
+      </div>
+      <div id="energy-graph" class="graph"></div>
+    </section>
+
+    <!-- Events -------------------------------------------------------------- -->
+    <section id="panel-events" class="panel" role="tabpanel"
+             aria-labelledby="tab-events" tabindex="0" hidden>
       <h2>Events</h2>
       <div class="event-filters">
         <label>Source
           <select id="event-source-filter">
             <option value="">All sources</option>
+          </select>
+        </label>
+        <label>Tier
+          <select id="event-tier">
+            <option value="power" selected>Power events</option>
+            <option value="diag">+ Diagnostics</option>
+            <option value="all">All</option>
           </select>
         </label>
         <div class="filter-field">
@@ -101,9 +200,33 @@
       </table>
     </section>
 
-    <section id="control-section" hidden>
-      <h2>UPS control</h2>
-      <div id="control-panel"></div>
+    <!-- Control ------------------------------------------------------------- -->
+    <section id="panel-control" class="panel" role="tabpanel"
+             aria-labelledby="tab-control" tabindex="0" hidden>
+      <div id="control-section" hidden>
+        <h2>UPS control</h2>
+        <div id="control-panel"></div>
+      </div>
+      <p id="control-empty" class="chart-note">
+        Control is available when you are signed in and UPS control is enabled.
+      </p>
+    </section>
+
+    <!-- Shutdown ------------------------------------------------------------ -->
+    <section id="panel-shutdown" class="panel" role="tabpanel"
+             aria-labelledby="tab-shutdown" tabindex="0" hidden>
+      <h2>Shutdown plan</h2>
+      <div class="graph-controls" id="shutdown-controls" hidden>
+        <label>UPS <select id="shutdown-ups"></select></label>
+      </div>
+      <div id="shutdown-plan"></div>
+    </section>
+
+    <!-- Config -------------------------------------------------------------- -->
+    <section id="panel-config" class="panel" role="tabpanel"
+             aria-labelledby="tab-config" tabindex="0" hidden>
+      <h2>Configuration</h2>
+      <div id="config-body"></div>
     </section>
   </main>
 

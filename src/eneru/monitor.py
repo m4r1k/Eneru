@@ -24,6 +24,10 @@ from eneru.remote_health import RemoteHealthManager, remote_health_sidecar_path
 from eneru.api import EneruAPIServer
 from eneru.mqtt import MQTTPublisher
 from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
+from eneru import self_test as selftest
+from eneru import reports as reports_mod
+from eneru import nut_control as nutctl
+from eneru.config import NutControlConfig
 from eneru.lifecycle import (
     EVENT_TYPE_DAEMON_START,
     REASON_FATAL,
@@ -50,6 +54,10 @@ SLOW_NUT_LOG_THRESHOLD_SECONDS = 2.0
 SLOW_NUT_LOG_RATE_LIMIT_SECONDS = 300.0
 SLOW_NUT_NOTIFY_THRESHOLD_SECONDS = 10.0
 SLOW_NUT_NOTIFY_CONSECUTIVE_POLLS = 3
+# Backoff between scheduled self-test ISSUE retries after a failure, so a
+# persistently-broken config doesn't re-attempt (and spawn an upscmd subprocess)
+# on every poll tick.
+SELF_TEST_ISSUE_RETRY_SECONDS = 300.0
 
 # Re-export for backwards compatibility (tests may mock these)
 try:
@@ -174,6 +182,17 @@ class UPSGroupMonitor(
         self._last_slow_nut_log_time = 0.0
         self._slow_nut_poll_streak = 0
         self._slow_nut_poll_notified = False
+        # v6.1: monotonic gate for the per-UPS battery-health update (interval
+        # read live from config.battery_health -> SAFE reload). None = run on
+        # the first loop iteration.
+        self._last_health_update_mono: Optional[float] = None
+        # v6.1: per-UPS self-test issue/poll timing (set up in B6).
+        self._self_test_pending_id: Optional[int] = None
+        self._self_test_poll_due_mono: Optional[float] = None
+        # Backoff after a failed ISSUE so a persistently-broken self-test (bad
+        # creds, command pulled from the allowlist) retries periodically instead
+        # of re-attempting on every poll tick.
+        self._self_test_retry_after_mono: Optional[float] = None
 
         # Effective target passed to ``upsc`` (``upsname@host:port``). Normally
         # identical to ``config.ups.name``, but the autodiscovery diagnostic may
@@ -2068,6 +2087,215 @@ class UPSGroupMonitor(
 
         # If connection_state == "FAILED": already notified, nothing to do
 
+    def _run_periodic_tasks(self) -> None:
+        """End-of-iteration per-UPS periodic tasks (v6.1).
+
+        Time-gated and fully failure-isolated: any exception here is logged
+        and swallowed so a scheduler/health hiccup can never interrupt the
+        poll loop or the shutdown path. The battery-health interval is read
+        live from config (SAFE hot-reload). Self-test is wired in B6.
+        """
+        try:
+            bh = self._resolve_battery_health_config()
+            if bh.enabled:
+                interval = max(1, int(bh.update_interval))
+                now_mono = time.monotonic()
+                if (self._last_health_update_mono is None
+                        or now_mono - self._last_health_update_mono >= interval):
+                    self._last_health_update_mono = now_mono
+                    self._update_battery_health_periodic()
+        except Exception as exc:
+            self._log_message(f"⚠️  battery-health task failed: {exc}")
+        try:
+            self._run_self_test_task()
+        except Exception as exc:
+            self._log_message(f"⚠️  self-test task failed: {exc}")
+        # Reports are daemon-wide (one digest). In multi-UPS mode the
+        # coordinator owns them; a per-group monitor must not send N copies.
+        try:
+            if not self._coordinator_mode and self.config.reports.enabled:
+                reports_mod.maybe_send_due_reports(
+                    self.config, getattr(self, "_stats_store", None),
+                    self.config.ups.name, self._enqueue_report)
+        except Exception as exc:
+            self._log_message(f"⚠️  reports task failed: {exc}")
+
+    def _enqueue_report(self, body: str, notify_type: str, category: str) -> None:
+        """Adapter so reports.py can deliver via the notification queue."""
+        self._send_notification(body, notify_type, category=category)
+
+    def _resolve_self_test_config(self):
+        """Per-UPS self_test override if present, else the global config."""
+        glob = self.config.self_test
+        # Resolve defensively with getattr() rather than a broad try/except: a
+        # bare `except Exception: pass` here would hide a genuinely broken
+        # per-UPS override and silently run the global config instead.
+        name = getattr(getattr(self.config, "ups", None), "name", None)
+        for group in getattr(self.config, "ups_groups", None) or []:
+            group_ups = getattr(group, "ups", None)
+            if (name is not None
+                    and getattr(group_ups, "name", None) == name
+                    and getattr(group, "self_test", None)):
+                return group.self_test
+        return glob
+
+    def _resolve_nut_control_config(self) -> NutControlConfig:
+        """Per-UPS nut_control override if present, else the global config."""
+        glob = self.config.nut_control
+        name = getattr(getattr(self.config, "ups", None), "name", None)
+        for group in getattr(self.config, "ups_groups", None) or []:
+            group_ups = getattr(group, "ups", None)
+            if (name is not None
+                    and getattr(group_ups, "name", None) == name
+                    and getattr(group, "nut_control", None)):
+                return group.nut_control
+        return glob
+
+    def _run_self_test_task(self) -> None:
+        """Issue / poll the scheduled UPS self-test (v6.1).
+
+        Wall-clock + meta-persisted due check (survives restarts, unlike a
+        monotonic timer that would reset and never reach a 30-day cadence);
+        the short result poll uses monotonic time. Self-disables if the UPS
+        doesn't expose the command. Validation already guarantees nut_control
+        + api.auth are enabled whenever self_test is.
+        """
+        cfg = self._resolve_self_test_config()
+        store = getattr(self, "_stats_store", None)
+        # The scheduler needs the stats store to dedup runs (last-run meta) and
+        # record the result row. Without it we can neither track state nor avoid
+        # re-issuing every tick, so skip rather than fire blindly. A store
+        # created in __init__ but never opened (or already closed) silently
+        # no-ops get_meta()/set_meta(), so treat a closed store as unavailable
+        # too — otherwise scheduled tests would fire without state tracking.
+        if store is None or not getattr(store, "is_open", False):
+            return
+
+        # 0) Recover an in-flight test persisted before a restart. The pending id
+        # lives in meta (the monotonic poll timer resets across restarts), so a
+        # crash between "issued" and "result polled" would otherwise orphan the
+        # ``running`` row forever. Adopt it and poll on this tick — the test was
+        # issued before the restart, so its result is almost certainly ready.
+        if self._self_test_pending_id is None:
+            pend = store.get_meta("self_test_pending_id")
+            if pend:
+                try:
+                    self._self_test_pending_id = int(pend)
+                    self._self_test_poll_due_mono = time.monotonic()
+                except (TypeError, ValueError):
+                    store.set_meta("self_test_pending_id", "")
+
+        # 1) Finalise a pending test once its poll window has elapsed. This runs
+        # BEFORE the cfg.enabled / nut_control gates below: a config change that
+        # disables or retargets self_test must NOT orphan a test that was already
+        # issued — its result (a read, not a control command) is finalised first.
+        if (self._self_test_pending_id is not None
+                and self._self_test_poll_due_mono is not None):
+            if time.monotonic() >= self._self_test_poll_due_mono:
+                raw = self._get_ups_var("ups.test.result")
+                date = self._get_ups_var("ups.test.date")
+                enum = selftest.record_self_test_result(
+                    store, self._self_test_pending_id, raw, date)
+                self._log_message(f"🔋 Self-test result: {enum} ({raw!r})")
+                self._self_test_pending_id = None
+                self._self_test_poll_due_mono = None
+                store.set_meta("self_test_pending_id", "")  # cleared
+            return  # never issue while one is in flight
+
+        # Now honor the current config: a disabled self_test issues nothing
+        # (the pending test, if any, was already finalised above).
+        if not cfg.enabled:
+            return
+        nc = self._resolve_nut_control_config()
+        # Defense-in-depth: never issue a control command unless nut_control is
+        # enabled (validation requires this for the global case; this also
+        # covers a per-UPS self_test override paired with control disabled).
+        if not nc.enabled:
+            return
+
+        # 2) Due? (calendar/interval via the shared scheduler helpers)
+        try:
+            schedule = selftest.parse_schedule(cfg.schedule, cfg.time)
+        except ValueError as exc:
+            self._log_message(f"⚠️  invalid self_test.schedule: {exc}")
+            return
+        now = time.time()
+        last_raw = store.get_meta("self_test_last_run") if store else None
+        try:
+            last = float(last_raw) if last_raw else None
+        except (TypeError, ValueError):
+            last = None
+        if not schedule.due(now, last):
+            if last is None:
+                store.set_meta("self_test_last_run", str(int(now)))  # seed baseline
+            return
+
+        # A recent issue attempt failed: back off before retrying so a
+        # persistently-broken self-test doesn't re-attempt every poll tick (the
+        # cadence isn't stamped on failure, so `due` stays true).
+        if (self._self_test_retry_after_mono is not None
+                and time.monotonic() < self._self_test_retry_after_mono):
+            return
+
+        # Never issue a real control command against an AUTO-CORRECTED poll
+        # target: _run_ups_name_diagnostic() keeps the rest of the control
+        # surface on the configured ups.name until the operator fixes the
+        # config, so a scheduled self-test must not be the one path that fires
+        # an INSTCMD at the discovered UPS. Back off and wait for the fix.
+        if getattr(self, "_ups_name_autocorrected", False):
+            self._self_test_retry_after_mono = (
+                time.monotonic() + SELF_TEST_ISSUE_RETRY_SECONDS)
+            self._log_message(
+                "⚠️  self-test skipped: polling target was auto-corrected; "
+                "fix ups.name before scheduled control commands resume.")
+            return
+
+        # 3) Issue. Discover BEFORE stamping last_run so a transient ``upscmd -l``
+        # failure retries next cycle instead of silently burning a (possibly
+        # 30-day) cadence; a genuine "not exposed" still consumes the cycle.
+        try:
+            cmd = selftest.discover_self_test_command(
+                self._poll_target, cfg.command, timeout=nc.timeout)
+        except selftest.SelfTestUnavailable as exc:
+            self._log_message(
+                f"⚠️  self-test discovery failed ({exc}); retrying next cycle")
+            return
+        if cmd is None:
+            store.set_meta("self_test_last_run", str(int(now)))  # genuinely unsupported
+            self._self_test_retry_after_mono = None
+            self._log_message(
+                f"⚠️  self_test command '{cfg.command}' not exposed by "
+                f"{self._poll_target}; skipping this cycle")
+            return
+        # Serialize against the API control path (same per-UPS lock identity) so
+        # a scheduled self-test can't race an operator-issued command/self-test
+        # on the same device.
+        with nutctl.command_lock(self._poll_target):
+            result = selftest.issue_self_test(
+                self._poll_target, cmd, nc, store, source="scheduler")
+        if result["ok"]:
+            # Stamp the cadence ONLY once the issue succeeds: a failed issue
+            # (NUT error, transient lock contention) must retry next cycle, not
+            # silently burn a (possibly 30-day) interval. The genuinely-
+            # unsupported path above still consumes the cycle.
+            store.set_meta("self_test_last_run", str(int(now)))
+            self._self_test_retry_after_mono = None
+            self._self_test_pending_id = result["test_id"]
+            self._self_test_poll_due_mono = (
+                time.monotonic() + max(1, int(cfg.result_poll_after)))
+            if store is not None and result["test_id"] is not None:
+                # Persist so a restart before the poll can recover + finalise it.
+                store.set_meta("self_test_pending_id", str(result["test_id"]))
+            self._log_message(
+                f"🔋 Self-test issued ({cmd}); polling result in "
+                f"{cfg.result_poll_after}s")
+        else:
+            # Don't stamp the cadence (so it retries), but back off so a
+            # persistent failure doesn't re-attempt every poll tick.
+            self._self_test_retry_after_mono = (
+                time.monotonic() + SELF_TEST_ISSUE_RETRY_SECONDS)
+            self._log_message(f"⚠️  self-test issue failed: {result['error']}")
+
     def _main_loop(self):
         """Main monitoring loop."""
         while not self._stop_event.is_set():
@@ -2349,5 +2577,10 @@ class UPSGroupMonitor(
                 )
                 self.state.latest_update_time = time.time()
                 self.state.previous_status = ups_status
+
+            # v6.1: time-gated per-UPS periodic tasks (battery-health update,
+            # self-test). Failure-isolated so a scheduler hiccup can never
+            # touch the poll/shutdown path.
+            self._run_periodic_tasks()
 
             self._stop_event.wait(self.config.ups.check_interval)

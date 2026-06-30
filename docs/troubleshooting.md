@@ -75,6 +75,30 @@ systemctl status nut-driver
 journalctl -u nut-driver -e
 ```
 
+### `upsc` fails with an SSL/TLS error
+
+Some integrated UPS appliances run an `upsd` that negotiates TLS in a
+non-standard way. `upsc` then fails before it can read any variable, e.g.:
+
+```text
+Unknown return value from SSL_connect -1: Success
+Error: SSL error: error:0A000197:SSL routines::shutdown while in init
+```
+
+This is a NUT client/server TLS handshake mismatch, not an Eneru bug — Eneru
+shells out to the stock `upsc`/`upscmd` clients, so whatever those report is
+what Eneru sees. Workarounds:
+
+- Point Eneru at an `upsd` listener that does not force TLS (a plain `LISTEN`
+  without `CERTFILE`), or proxy through a standard NUT server that polls the
+  appliance.
+- Confirm the same `upsc UPS@host` command works from a shell before expecting
+  Eneru to monitor it.
+
+Broader native handling of TLS-only / non-standard appliances (e.g. an
+`upsmon`-style path) is tracked as a backlog item — see
+[Roadmap](roadmap.md#backlog).
+
 ## Intermittent NUT drops
 
 Some networked UPSes and embedded NUT servers flap briefly. Use the connection-loss grace period to avoid alerts for short drops while the UPS is on line power:

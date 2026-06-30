@@ -10,18 +10,21 @@ catches ``sqlite3.Error`` and ``OSError`` and logs once with rate-limit.
 A SQLite outage never raises into the daemon loop.
 """
 
+import json
 import sqlite3
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote as urlquote
 
 
-# Sample columns: 10 raw NUT metrics from spec 2.12 (battery.charge,
+# Sample columns: 12 raw NUT metrics from spec 2.12 (battery.charge,
 # battery.runtime, ups.load, input.voltage, output.voltage, battery.voltage,
-# ups.temperature, input.frequency, output.frequency, ups.status) plus 3
+# ups.temperature, input.frequency, output.frequency, ups.status, plus
+# ups.realpower / ups.power.nominal for energy tracking) plus 3
 # Eneru-derived state fields (depletion_rate, time_on_battery,
 # connection_state) that are the foundation for the future API.
 # Order is locked: appending only keeps INSERT tuples stable for migrations.
@@ -40,12 +43,14 @@ SAMPLE_FIELDS: Tuple[str, ...] = (
     "ups_temperature",   # °C                (added v2)
     "input_frequency",   # Hz                (added v2)
     "output_frequency",  # Hz                (added v2)
+    "real_power",        # W   ups.realpower      (added v7, energy)
+    "power_nominal",     # VA  ups.power.nominal  (added v7, energy)
 )
 
 # Bump and add a migration block in StatsStore._init_schema whenever the
 # samples / agg_5min / agg_hourly / events / meta / notifications schema
 # gains a column or table. See src/eneru/AGENTS.md "Stats schema evolution".
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # If the daemon or one-shot deferred-delivery helper dies after claiming a
 # notification but before marking it sent/pending, the next daemon open moves
@@ -135,6 +140,8 @@ def _sample_from_ups_data(
         _to_float(ups_data.get("ups.temperature")),
         _to_float(ups_data.get("input.frequency")),
         _to_float(ups_data.get("output.frequency")),
+        _to_float(ups_data.get("ups.realpower")),
+        _to_float(ups_data.get("ups.power.nominal")),
     )
 
 
@@ -252,6 +259,25 @@ class StatsStore:
         """True when the store has a live DB connection (open, not yet closed)."""
         return self._conn is not None
 
+    @contextmanager
+    def _write(self):
+        """Run a write transaction under the DB lock, re-checking the
+        connection AFTER acquiring it.
+
+        A caller's pre-lock ``if self._conn is None`` guard is stale once the
+        lock is released: a concurrent ``close()`` (which nulls ``_conn`` while
+        holding ``_db_lock``) can win the race, after which ``with self._conn:``
+        would raise ``AttributeError`` on ``None``. Yields the live connection,
+        or ``None`` when the store closed concurrently — callers must treat
+        ``None`` as a no-op and return their empty result."""
+        with self._db_lock:
+            conn = self._conn
+            if conn is None:
+                yield None
+                return
+            with conn:
+                yield conn
+
     def close(self) -> None:
         try:
             self.flush()
@@ -287,6 +313,9 @@ class StatsStore:
                 ("ups_temperature", "REAL"),
                 ("input_frequency", "REAL"),
                 ("output_frequency", "REAL"),
+                # v7 additions (energy tracking):
+                ("real_power", "REAL"),
+                ("power_nominal", "REAL"),
             )
         )
         agg_cols = """
@@ -308,7 +337,9 @@ class StatsStore:
             ups_temperature_min REAL,
             ups_temperature_max REAL,
             input_frequency_avg REAL,
-            output_frequency_avg REAL
+            output_frequency_avg REAL,
+            real_power_avg REAL,
+            power_nominal_avg REAL
         """
         with self._conn:
             self._conn.executescript(f"""
@@ -357,6 +388,41 @@ class StatsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_notifications_status_ts
                     ON notifications(status, ts);
+
+                -- v7: battery-health history (one row per periodic
+                -- computation; feeds replacement-prediction trending). A
+                -- NULL term column means "unavailable" -- deliberately
+                -- distinct from a 0 sub-score, so an unknown score is never
+                -- confused with a failing one. detail carries the JSON
+                -- breakdown (weights, confidence, raw inputs).
+                CREATE TABLE IF NOT EXISTS battery_health (
+                    ts INTEGER PRIMARY KEY,
+                    score REAL,
+                    capacity REAL,
+                    runtime REAL,
+                    self_test REAL,
+                    anomaly REAL,
+                    age REAL,
+                    detail TEXT
+                );
+
+                -- v7: self-test results. One row per issued test; the row
+                -- starts 'running' and is updated once upsd reports a
+                -- result. result_enum is the normalized form
+                -- (passed|failed|running|unknown|unsupported) the
+                -- API/Prometheus/UI consume; result_raw keeps the original
+                -- ups.test.result string.
+                CREATE TABLE IF NOT EXISTS self_tests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_ts INTEGER NOT NULL,
+                    command TEXT NOT NULL,
+                    result_raw TEXT,
+                    result_enum TEXT,
+                    result_date TEXT,
+                    source TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_self_tests_started
+                    ON self_tests(started_ts);
             """)
             self._migrate_schema()
             self._conn.execute(
@@ -460,6 +526,41 @@ class StatsStore:
             # recovery only steals stale claims, so a live one-shot helper that
             # is actively sending a stop notification is not duplicated.
             self._safe_alter("notifications", "delivering_at INTEGER")
+
+        if current < 7:
+            # v6 -> v7: energy tracking + battery-health/self-test history.
+            # Two raw NUT power columns on samples and their *_avg on the agg
+            # tables (kWh is integrated on read in energy.py, so no stored
+            # cumulative column). Plus two new tables, created idempotently
+            # via CREATE IF NOT EXISTS so a partially-migrated DB heals.
+            for col in ("real_power REAL", "power_nominal REAL"):
+                self._safe_alter("samples", col)
+            for table in ("agg_5min", "agg_hourly"):
+                for col in ("real_power_avg REAL", "power_nominal_avg REAL"):
+                    self._safe_alter(table, col)
+            self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS battery_health (
+                    ts INTEGER PRIMARY KEY,
+                    score REAL,
+                    capacity REAL,
+                    runtime REAL,
+                    self_test REAL,
+                    anomaly REAL,
+                    age REAL,
+                    detail TEXT
+                );
+                CREATE TABLE IF NOT EXISTS self_tests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_ts INTEGER NOT NULL,
+                    command TEXT NOT NULL,
+                    result_raw TEXT,
+                    result_enum TEXT,
+                    result_date TEXT,
+                    source TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_self_tests_started
+                    ON self_tests(started_ts);
+            """)
 
     def _migrate_events_to_v5(self) -> None:
         """Rebuild ``events`` with a stable id column.
@@ -633,8 +734,10 @@ class StatsStore:
         if self._conn is None:
             return (0, 0)
         try:
-            with self._db_lock, self._conn:
-                inserted_5 = self._conn.execute(f"""
+            with self._write() as conn:
+                if conn is None:
+                    return (0, 0)
+                inserted_5 = conn.execute(f"""
                     INSERT OR REPLACE INTO agg_5min (
                         ts,
                         battery_charge_avg, battery_charge_min, battery_charge_max,
@@ -644,7 +747,8 @@ class StatsStore:
                         samples_count,
                         output_voltage_avg, battery_voltage_avg,
                         ups_temperature_avg, ups_temperature_min, ups_temperature_max,
-                        input_frequency_avg, output_frequency_avg
+                        input_frequency_avg, output_frequency_avg,
+                        real_power_avg, power_nominal_avg
                     )
                     SELECT
                         (ts / {BUCKET_5MIN}) * {BUCKET_5MIN} AS bucket,
@@ -655,11 +759,12 @@ class StatsStore:
                         COUNT(*),
                         AVG(output_voltage), AVG(battery_voltage),
                         AVG(ups_temperature), MIN(ups_temperature), MAX(ups_temperature),
-                        AVG(input_frequency), AVG(output_frequency)
+                        AVG(input_frequency), AVG(output_frequency),
+                        AVG(real_power), AVG(power_nominal)
                     FROM samples
                     GROUP BY bucket
                 """).rowcount
-                inserted_h = self._conn.execute(f"""
+                inserted_h = conn.execute(f"""
                     INSERT OR REPLACE INTO agg_hourly (
                         ts,
                         battery_charge_avg, battery_charge_min, battery_charge_max,
@@ -669,7 +774,8 @@ class StatsStore:
                         samples_count,
                         output_voltage_avg, battery_voltage_avg,
                         ups_temperature_avg, ups_temperature_min, ups_temperature_max,
-                        input_frequency_avg, output_frequency_avg
+                        input_frequency_avg, output_frequency_avg,
+                        real_power_avg, power_nominal_avg
                     )
                     SELECT
                         (ts / {BUCKET_HOURLY}) * {BUCKET_HOURLY} AS bucket,
@@ -683,7 +789,8 @@ class StatsStore:
                         AVG(output_voltage_avg), AVG(battery_voltage_avg),
                         AVG(ups_temperature_avg),
                         MIN(ups_temperature_min), MAX(ups_temperature_max),
-                        AVG(input_frequency_avg), AVG(output_frequency_avg)
+                        AVG(input_frequency_avg), AVG(output_frequency_avg),
+                        AVG(real_power_avg), AVG(power_nominal_avg)
                     FROM agg_5min
                     GROUP BY bucket
                 """).rowcount
@@ -693,7 +800,14 @@ class StatsStore:
             return (0, 0)
 
     def purge(self) -> Tuple[int, int, int]:
-        """Apply retention. Returns ``(samples, agg_5min, agg_hourly)`` deleted."""
+        """Apply retention. Returns ``(samples, agg_5min, agg_hourly)`` deleted.
+
+        ``events``, ``battery_health`` and ``self_tests`` are also trimmed to the
+        hourly cutoff (not reflected in the returned tuple, which stays the
+        three metric tiers for back-compat). battery_health/self_tests are
+        otherwise unbounded — one row per update_interval / per issued test —
+        so a small update_interval would grow them without limit.
+        """
         if self._conn is None:
             return (0, 0, 0)
         now = int(time.time())
@@ -710,18 +824,31 @@ class StatsStore:
         cutoff_raw = (cutoff_raw // BUCKET_5MIN) * BUCKET_5MIN
         cutoff_5min = (cutoff_5min // BUCKET_HOURLY) * BUCKET_HOURLY
         try:
-            with self._db_lock, self._conn:
-                deleted_raw = self._conn.execute(
+            with self._write() as conn:
+                if conn is None:
+                    return (0, 0, 0)
+                deleted_raw = conn.execute(
                     "DELETE FROM samples WHERE ts < ?", (cutoff_raw,),
                 ).rowcount
-                deleted_5min = self._conn.execute(
+                deleted_5min = conn.execute(
                     "DELETE FROM agg_5min WHERE ts < ?", (cutoff_5min,),
                 ).rowcount
-                deleted_hourly = self._conn.execute(
+                deleted_hourly = conn.execute(
                     "DELETE FROM agg_hourly WHERE ts < ?", (cutoff_hourly,),
                 ).rowcount
-                self._conn.execute(
+                conn.execute(
                     "DELETE FROM events WHERE ts < ?", (cutoff_hourly,),
+                )
+                # v7 history tables: one row per periodic computation / issued
+                # test, so they grow unbounded at a small update_interval. Trim
+                # them on the same hourly cutoff as events. self_tests keys on
+                # its own timestamp column (started_ts).
+                conn.execute(
+                    "DELETE FROM battery_health WHERE ts < ?", (cutoff_hourly,),
+                )
+                conn.execute(
+                    "DELETE FROM self_tests WHERE started_ts < ?",
+                    (cutoff_hourly,),
                 )
             return (
                 max(0, deleted_raw),
@@ -752,8 +879,10 @@ class StatsStore:
             return
         ts = int(ts if ts is not None else time.time())
         try:
-            with self._db_lock, self._conn:
-                self._conn.execute(
+            with self._write() as conn:
+                if conn is None:
+                    return
+                conn.execute(
                     "INSERT INTO events (ts, event_type, detail, "
                     "notification_sent) VALUES (?, ?, ?, ?)",
                     (ts, str(event_type), str(detail),
@@ -768,6 +897,8 @@ class StatsStore:
             return []
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return []
                 cur = self._conn.execute(
                     "SELECT ts, event_type, detail FROM events "
                     "WHERE ts BETWEEN ? AND ? ORDER BY ts ASC",
@@ -836,6 +967,8 @@ class StatsStore:
         )
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return []
                 cur = self._conn.execute(query, params)
                 return list(reversed(cur.fetchall()))
         except (sqlite3.Error, OSError) as e:
@@ -865,9 +998,11 @@ class StatsStore:
             return 0
         try:
             count = 0
-            with self._db_lock, self._conn:
+            with self._write() as conn:
+                if conn is None:
+                    return 0
                 for event_id, ts, event_type in rows:
-                    cur = self._conn.execute(
+                    cur = conn.execute(
                         "DELETE FROM events WHERE id = ? AND ts = ? "
                         "AND event_type = ?",
                         (event_id, ts, event_type),
@@ -892,8 +1027,10 @@ class StatsStore:
             return None
         ts = int(ts if ts is not None else time.time())
         try:
-            with self._db_lock, self._conn:
-                cur = self._conn.execute(
+            with self._write() as conn:
+                if conn is None:
+                    return None
+                cur = conn.execute(
                     "INSERT INTO notifications "
                     "(ts, body, notify_type, category) "
                     "VALUES (?, ?, ?, ?)",
@@ -920,6 +1057,8 @@ class StatsStore:
             return []
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return []
                 cur = self._conn.execute(
                     "SELECT ts, id, body, notify_type, attempts, category "
                     "FROM notifications WHERE status='pending' "
@@ -944,6 +1083,8 @@ class StatsStore:
             return []
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return []
                 if since_ts is None:
                     cur = self._conn.execute(
                         "SELECT id, ts, body, notify_type FROM notifications "
@@ -972,8 +1113,10 @@ class StatsStore:
             return
         sent_at = int(sent_at if sent_at is not None else time.time())
         try:
-            with self._db_lock, self._conn:
-                self._conn.execute(
+            with self._write() as conn:
+                if conn is None:
+                    return
+                conn.execute(
                     "UPDATE notifications SET status='sent', sent_at=?, "
                     "delivering_at=NULL "
                     "WHERE id=?",
@@ -990,8 +1133,10 @@ class StatsStore:
         if self._conn is None:
             return
         try:
-            with self._db_lock, self._conn:
-                self._conn.execute(
+            with self._write() as conn:
+                if conn is None:
+                    return
+                conn.execute(
                     "UPDATE notifications SET attempts=attempts+1 "
                     "WHERE id=?",
                     (int(notification_id),),
@@ -1009,8 +1154,10 @@ class StatsStore:
         if self._conn is None:
             return
         try:
-            with self._db_lock, self._conn:
-                self._conn.execute(
+            with self._write() as conn:
+                if conn is None:
+                    return
+                conn.execute(
                     "UPDATE notifications SET status='cancelled', "
                     "sent_at=NULL, delivering_at=NULL, cancel_reason=? WHERE id=?",
                     (str(reason), int(notification_id)),
@@ -1027,6 +1174,8 @@ class StatsStore:
             return 0
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return 0
                 cur = self._conn.execute(
                     "SELECT COUNT(*) FROM notifications WHERE status='pending'"
                 )
@@ -1047,8 +1196,10 @@ class StatsStore:
         if self._conn is None or max_pending <= 0:
             return 0
         try:
-            with self._db_lock, self._conn:
-                cur = self._conn.execute(
+            with self._write() as conn:
+                if conn is None:
+                    return 0
+                cur = conn.execute(
                     "SELECT COUNT(*) FROM notifications "
                     "WHERE status='pending'"
                 )
@@ -1058,7 +1209,7 @@ class StatsStore:
                 if excess <= 0:
                     return 0
                 # Cancel the `excess` oldest pending rows.
-                self._conn.execute(
+                conn.execute(
                     "UPDATE notifications SET status='cancelled', "
                     "cancel_reason='backlog_overflow' "
                     "WHERE id IN ("
@@ -1095,8 +1246,10 @@ class StatsStore:
         deleted = 0
         expired = 0
         try:
-            with self._db_lock, self._conn:
-                cur = self._conn.execute(
+            with self._write() as conn:
+                if conn is None:
+                    return (0, 0)
+                cur = conn.execute(
                     "DELETE FROM notifications "
                     "WHERE status IN ('sent','cancelled') AND ts < ?",
                     (cutoff_sent,),
@@ -1106,7 +1259,7 @@ class StatsStore:
                     cutoff_pending = (
                         int(time.time()) - int(max_age_days) * 86400
                     )
-                    cur = self._conn.execute(
+                    cur = conn.execute(
                         "UPDATE notifications SET status='cancelled', "
                         "cancel_reason='too_old' "
                         "WHERE status='pending' AND ts < ?",
@@ -1128,6 +1281,8 @@ class StatsStore:
             return None
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return None
                 cur = self._conn.execute(
                     "SELECT value FROM meta WHERE key=?", (str(key),),
                 )
@@ -1142,13 +1297,248 @@ class StatsStore:
         if self._conn is None:
             return
         try:
-            with self._db_lock, self._conn:
-                self._conn.execute(
+            with self._write() as conn:
+                if conn is None:
+                    return
+                conn.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
                     (str(key), str(value)),
                 )
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: set_meta failed: {e}")
+
+    # ----- v7: battery-health, self-test, energy data -----
+
+    def record_battery_health(
+        self,
+        score: Optional[float],
+        terms: Optional[Dict[str, Optional[float]]] = None,
+        *,
+        detail: Optional[Dict[str, Any]] = None,
+        ts: Optional[int] = None,
+    ) -> None:
+        """Persist one battery-health computation.
+
+        ``score`` is the composite 0-100 (``None`` = unknown). ``terms`` maps
+        the five sub-scores (capacity/runtime/self_test/anomaly/age) to a
+        0-100 value or ``None`` when that term is unavailable -- the NULL is
+        what keeps "unknown" distinct from "0" in the stored trend. ``detail``
+        is any extra JSON-serialisable context (weights, confidence, inputs).
+        """
+        if self._conn is None:
+            return
+        terms = terms or {}
+        row_ts = int(ts if ts is not None else time.time())
+        payload: Optional[str]
+        try:
+            payload = json.dumps(detail, sort_keys=True) if detail else None
+        except (TypeError, ValueError):
+            payload = None
+        try:
+            with self._db_lock:
+                # Re-check under the lock: close() nulls _conn while holding the
+                # lock, so the pre-lock check above can race a concurrent close.
+                if self._conn is None:
+                    return
+                with self._conn:
+                    self._conn.execute(
+                        """
+                        INSERT OR REPLACE INTO battery_health
+                            (ts, score, capacity, runtime, self_test, anomaly, age, detail)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            row_ts, score,
+                            terms.get("capacity"), terms.get("runtime"),
+                            terms.get("self_test"), terms.get("anomaly"),
+                            terms.get("age"), payload,
+                        ),
+                    )
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: record_battery_health failed: {e}")
+
+    def query_battery_health(
+        self, start_ts: int, end_ts: int,
+    ) -> List[Dict[str, Any]]:
+        """Return battery-health rows in ``[start_ts, end_ts]`` ascending.
+
+        Each row is a dict with ts, score, the five term columns, and the
+        decoded ``detail``. Feeds replacement-prediction trending over the
+        ``score`` series.
+        """
+        if self._conn is None:
+            return []
+        try:
+            with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return []
+                cur = self._conn.execute(
+                    """
+                    SELECT ts, score, capacity, runtime, self_test, anomaly, age, detail
+                    FROM battery_health
+                    WHERE ts BETWEEN ? AND ?
+                    ORDER BY ts ASC
+                    """,
+                    (int(start_ts), int(end_ts)),
+                )
+                rows = cur.fetchall()
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: query_battery_health failed: {e}")
+            return []
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            detail = None
+            if r[7]:
+                try:
+                    detail = json.loads(r[7])
+                except (TypeError, ValueError):
+                    detail = None
+            out.append({
+                "ts": int(r[0]), "score": r[1],
+                "capacity": r[2], "runtime": r[3], "self_test": r[4],
+                "anomaly": r[5], "age": r[6], "detail": detail,
+            })
+        return out
+
+    def record_self_test(
+        self,
+        command: str,
+        source: str,
+        *,
+        started_ts: Optional[int] = None,
+        result_raw: Optional[str] = None,
+        result_enum: str = "running",
+        result_date: Optional[str] = None,
+    ) -> Optional[int]:
+        """Insert a self-test row and return its id (``None`` on failure).
+
+        An issued test starts as ``running``; poll upsd later and finalise it
+        with :meth:`update_self_test_result`.
+        """
+        if self._conn is None:
+            return None
+        row_ts = int(started_ts if started_ts is not None else time.time())
+        try:
+            with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return None
+                with self._conn:
+                    cur = self._conn.execute(
+                        """
+                        INSERT INTO self_tests
+                            (started_ts, command, result_raw, result_enum,
+                             result_date, source)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (row_ts, str(command), result_raw, result_enum,
+                         result_date, str(source)),
+                    )
+                    return int(cur.lastrowid)
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: record_self_test failed: {e}")
+            return None
+
+    def update_self_test_result(
+        self,
+        test_id: int,
+        *,
+        result_raw: Optional[str],
+        result_enum: str,
+        result_date: Optional[str] = None,
+    ) -> None:
+        """Finalise a self-test row once upsd reports a result."""
+        if self._conn is None:
+            return
+        try:
+            with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return
+                with self._conn:
+                    self._conn.execute(
+                        """
+                        UPDATE self_tests
+                        SET result_raw = ?, result_enum = ?, result_date = ?
+                        WHERE id = ?
+                        """,
+                        (result_raw, result_enum, result_date, int(test_id)),
+                    )
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: update_self_test_result failed: {e}")
+
+    def latest_self_test(self) -> Optional[Dict[str, Any]]:
+        """Return the most-recently-started self-test row, or ``None``."""
+        if self._conn is None:
+            return None
+        try:
+            with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return None
+                cur = self._conn.execute(
+                    """
+                    SELECT id, started_ts, command, result_raw, result_enum,
+                           result_date, source
+                    FROM self_tests
+                    ORDER BY started_ts DESC, id DESC
+                    LIMIT 1
+                    """
+                )
+                r = cur.fetchone()
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: latest_self_test failed: {e}")
+            return None
+        if r is None:
+            return None
+        return {
+            "id": int(r[0]), "started_ts": int(r[1]), "command": r[2],
+            "result_raw": r[3], "result_enum": r[4], "result_date": r[5],
+            "source": r[6],
+        }
+
+    def power_samples(
+        self,
+        start_ts: int,
+        end_ts: int,
+        *,
+        prefer_tier: Optional[str] = None,
+    ) -> List[Tuple[int, Optional[float], Optional[float], Optional[float]]]:
+        """Return ``[(ts, real_power, ups_load, power_nominal)]`` for energy.
+
+        Picks the same retention tier as :meth:`query_range` so an energy
+        integral never mixes raw and aggregated rows. energy.py turns this
+        into kWh (real_power when present, else ups_load/100 * power_nominal).
+        Unlike query_range this keeps NULL cells (returned as ``None``) so the
+        integrator can mark gaps rather than silently dropping them.
+        """
+        if self._conn is None:
+            return []
+        tier = prefer_tier or self._pick_tier(start_ts, end_ts)
+        if tier == "samples":
+            cols = "ts, real_power, ups_load, power_nominal"
+            table = "samples"
+        else:
+            cols = "ts, real_power_avg, ups_load_avg, power_nominal_avg"
+            table = "agg_5min" if tier == "agg_5min" else "agg_hourly"
+        try:
+            with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return []
+                cur = self._conn.execute(
+                    f"SELECT {cols} FROM {table} "
+                    "WHERE ts BETWEEN ? AND ? ORDER BY ts ASC",
+                    (int(start_ts), int(end_ts)),
+                )
+                return [
+                    (
+                        int(r[0]),
+                        float(r[1]) if r[1] is not None else None,
+                        float(r[2]) if r[2] is not None else None,
+                        float(r[3]) if r[3] is not None else None,
+                    )
+                    for r in cur.fetchall()
+                ]
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: power_samples failed: {e}")
+            return []
 
     # ----- metric query API -----
 
@@ -1181,6 +1571,8 @@ class StatsStore:
         tier = prefer_tier or self._pick_tier(start_ts, end_ts)
         try:
             with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return []
                 if tier == "samples":
                     column = metric
                     cur = self._conn.execute(
@@ -1231,6 +1623,8 @@ class StatsStore:
             "ups_temperature": "ups_temperature_avg",
             "input_frequency": "input_frequency_avg",
             "output_frequency": "output_frequency_avg",
+            "real_power": "real_power_avg",
+            "power_nominal": "power_nominal_avg",
         }
         return avg_map.get(metric, metric)
 

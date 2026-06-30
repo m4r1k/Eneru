@@ -187,6 +187,85 @@ nut_control:
   # (the global `enabled` above still gates the feature). See docs/nut-control.md.
 
 # ==============================================================================
+# BATTERY HEALTH (v6.1)
+# ==============================================================================
+# A composite 0-100 health score (capacity, runtime-vs-expected, last self-test,
+# confirmed anomalies, age) plus replacement prediction. See docs/battery-health.md.
+battery_health:
+  enabled: true
+  # How often (seconds) the score is recomputed and stored.
+  update_interval: 3600
+  # Expected full-charge runtime under load, in seconds. null = autodetect at
+  # the first 100%-charge reading. Per-UPS overridable (see below).
+  nominal_runtime_seconds: null
+  # Battery install date "YYYY-MM-DD". null => the age term is "unavailable"
+  # (the score is reported with lower confidence, never a fake high mark).
+  battery_install_date: null
+  expected_life_years: 5.0
+  # Escalating absolute-score alerts (separate from the trend-based prediction
+  # below). Each fires ONCE when the score first drops below it and re-arms when
+  # the score recovers above it; a drop into "critical" escalates. null disables
+  # a tier. critical_score must be < warn_score.
+  warn_score: 30.0
+  critical_score: 15.0
+  replacement:
+    # Warn when the projected score will cross this within horizon_days.
+    threshold_score: 50.0
+    horizon_days: 90
+    # Don't trend on less than this much history.
+    min_history_days: 14
+
+# ==============================================================================
+# SELF-TEST (v6.1) — scheduled UPS battery self-test
+# ==============================================================================
+# A WRITE surface like nut_control: enabling it requires nut_control.enabled AND
+# api.auth.enabled AND that `command` is in nut_control.allowed_commands, so a
+# scheduled test can never bypass the control allowlist. See docs/self-test.md.
+self_test:
+  enabled: false
+  # daily | weekly | monthly, or "every <N>d/h/m" (e.g. "every 30d").
+  schedule: monthly
+  # Wall-clock time for calendar schedules (HH:MM, daemon local time).
+  time: "03:00"
+  # The instant command to issue. Adapts to whatever `upscmd -l` exposes; many
+  # UPSes only support `test.battery.start`. Must be on the control allowlist.
+  command: test.battery.start
+  # Seconds to wait after issuing before polling ups.test.result.
+  result_poll_after: 60
+
+# ==============================================================================
+# REPORTS (v6.1) — periodic summaries via the notification channel
+# ==============================================================================
+reports:
+  enabled: false
+  daily: false
+  weekly: false
+  monthly: false
+  time: "08:00"        # send time (daemon local)
+  weekly_day: monday
+  monthly_day: 1
+  include: [events, battery_health, energy, uptime]
+  format: text         # text | csv
+
+# ==============================================================================
+# ENERGY (v6.1) — kWh and optional cost tracking
+# ==============================================================================
+energy:
+  enabled: true
+  # Price per kWh. null/unset => cost tracking is DISABLED entirely (no cost in
+  # status, metrics, or the UI) rather than a meaningless zero-currency graph.
+  cost_per_kwh: null
+  currency: USD        # ISO 4217 code (USD, EUR, GBP, ...)
+  # Optional format override, e.g. "{value} €". When unset, a small built-in
+  # symbol/placement table is used per currency code.
+  cost_format: null
+  # Rated power (W/VA) used to estimate watts/kWh from load% when the UPS
+  # reports NEITHER ups.realpower NOR ups.power.nominal (some integrated UPSes
+  # expose neither). null = no estimate; energy stays "unknown" for such UPSes.
+  # e.g. a 1000 VA tower: nominal_power: 1000
+  nominal_power: null
+
+# ==============================================================================
 # NOTIFICATIONS (via Apprise)
 # ==============================================================================
 # Apprise supports 100+ notification services

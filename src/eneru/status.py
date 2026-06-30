@@ -2,6 +2,7 @@
 
 import time
 import shlex
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -24,6 +25,15 @@ HISTORY_METRICS = {
     "runtime": "battery_runtime",
     "load": "ups_load",
     "voltage": "input_voltage",
+    # v6.1: the dashboard's Power/Energy tabs chart these. Every column below is
+    # both a raw `samples` column and an aggregated `*_avg` on agg_5min/agg_hourly
+    # (see _init_schema), so query_range resolves them across all retention tiers.
+    "output_voltage": "output_voltage",
+    "frequency": "input_frequency",
+    "output_frequency": "output_frequency",
+    "battery_voltage": "battery_voltage",
+    "temperature": "ups_temperature",
+    "real_power": "real_power",
     "depletion": "depletion_rate",
 }
 POWER_EVENT_TYPES = {
@@ -89,6 +99,107 @@ def iter_monitors(source: Any) -> List[Any]:
     return [source]
 
 
+def _battery_health_for_monitor(monitor: Any):
+    """Latest computed battery-health block (v6.1), or None."""
+    try:
+        with monitor.state._lock:
+            return monitor.state.latest_battery_health
+    except Exception:
+        return None
+
+
+def _energy_for_monitor(monitor: Any):
+    """Live energy block (v6.1) for one monitor, or None when disabled."""
+    store = getattr(monitor, "_stats_store", None)
+    cfg = getattr(monitor.config, "energy", None)
+    if store is None or cfg is None or not getattr(cfg, "enabled", False):
+        return None
+    try:
+        from eneru import energy as energy_mod
+        # One clock sample for BOTH the epoch end and the calendar boundaries, so
+        # a tick across midnight/month/year can't put the window start ahead of
+        # the end (boundary race).
+        now = time.time()
+        now_dt = datetime.fromtimestamp(now)
+        # Calendar windows (local time): "today" = since midnight, "month" =
+        # since the 1st. Cost is only meaningful against a fixed boundary — a
+        # rolling 24h/30d isn't what an electricity bill measures.
+        today_start = int(datetime(now_dt.year, now_dt.month, now_dt.day).timestamp())
+        month_start = int(datetime(now_dt.year, now_dt.month, 1).timestamp())
+        year_start = int(datetime(now_dt.year, 1, 1).timestamp())
+        today = store.power_samples(today_start, int(now))
+        month = store.power_samples(month_start, int(now))
+        year = store.power_samples(year_start, int(now))
+        # expected_interval is inferred per window (raw ~check_interval vs
+        # aggregated 300s/3600s tiers), so we don't force one here.
+        block = energy_mod.summarize(
+            today, month, year_samples=year, cost_per_kwh=cfg.cost_per_kwh,
+            currency=cfg.currency, cost_format=cfg.cost_format,
+            nominal_fallback=getattr(cfg, "nominal_power", None))
+        # Tell the UI exactly what each window covers (no "is today 24h or
+        # midnight?" guessing) and when each started.
+        block["todayLabel"] = "since midnight"
+        block["monthLabel"] = now_dt.strftime("since %b 1")
+        block["yearLabel"] = "since Jan 1"
+        block["todayStart"] = today_start
+        block["monthStart"] = month_start
+        block["yearStart"] = year_start
+        return block
+    except Exception:
+        return None
+
+
+def _self_test_for_monitor(monitor: Any):
+    """Latest self-test row (v6.1) as a status block, or None."""
+    store = getattr(monitor, "_stats_store", None)
+    if store is None:
+        return None
+    try:
+        latest = store.latest_self_test()
+    except Exception:
+        return None
+    if not latest:
+        return None
+    return {
+        "result": latest["result_enum"],
+        "raw": latest["result_raw"],
+        "date": latest["result_date"],
+        "startedTs": latest["started_ts"],
+        "command": latest["command"],
+        "source": latest["source"],
+    }
+
+
+def power_series(store: Any, start: int, end: int,
+                 *, nominal_fallback: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Per-sample power for the Energy chart: ``[{ts, loadPct, watts, estimated}]``.
+
+    ``watts`` is ``ups.realpower`` when reported, else the ``load% * nominal``
+    fallback (``estimated=True``) using the sample's ``ups.power.nominal`` or the
+    configured ``nominal_fallback`` (``energy.nominal_power``), else ``None`` —
+    the same rule energy.py uses for kWh, so the chart and the kWh figure agree.
+    """
+    if store is None:
+        return []
+    from eneru import energy as energy_mod
+    out: List[Dict[str, Any]] = []
+    try:
+        rows = store.power_samples(int(start), int(end))
+    except Exception:
+        return []
+    for ts, real_power, ups_load, power_nominal in rows:
+        nominal = power_nominal if power_nominal is not None else nominal_fallback
+        watts, estimated = energy_mod.power_sample_w(
+            real_power, ups_load, nominal)
+        out.append({
+            "ts": int(ts),
+            "loadPct": ups_load,
+            "watts": watts,
+            "estimated": estimated,
+        })
+    return out
+
+
 def monitor_status(monitor: Any) -> Dict[str, Any]:
     """Return one monitor's live status as a JSON-serializable dict."""
     config = monitor.config
@@ -138,6 +249,9 @@ def monitor_status(monitor: Any) -> Dict[str, Any]:
         "triggerReason": snap.trigger_reason,
         "staleDataCount": snap.stale_data_count,
         "remoteHealth": remote_health_for_monitor(monitor),
+        "batteryHealth": _battery_health_for_monitor(monitor),
+        "energy": _energy_for_monitor(monitor),
+        "selfTest": _self_test_for_monitor(monitor),
     }
 
 

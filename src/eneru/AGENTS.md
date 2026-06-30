@@ -236,6 +236,60 @@ def _safe_alter(self, table: str, column_def: str) -> None:
    idempotent on repeated open, one that proves existing rows are
    preserved.
 
+## Periodic scheduling (v6.1)
+
+`scheduler.py`'s `Schedule` is the one place that answers "is this job due
+yet?". It is **pure + threadless**: `Schedule.due(now, last_run, tz)` does
+interval / daily / weekly / monthly due-time math (calendar kinds take an
+injectable `tz` so tests pin UTC). Each owner reads/writes that job's last-run
+in the stats `meta` table itself — there is no long-lived registry object;
+`Schedule` is rebuilt from config on every check. (`scheduler.py` also ships a
+`PeriodicScheduler` register/tick helper, but the daemon does NOT use it today;
+the per-UPS and daemon-wide loops below call `Schedule.due` directly.)
+
+ELI5: it's a fridge whiteboard of chores. Each chore has a rule ("every
+hour", "the 1st at 08:00") and a last-done date written on the board (the
+`meta` table, *not* a kitchen timer). Because the date is on the board and
+not a timer, a chore due "every 30 days" still happens on day 30 even if
+the power blipped and the timer would have reset — that's why self-test
+uses this and not `time.monotonic`.
+
+**Where jobs are ticked (do NOT add a new thread):**
+
+- **Per-UPS jobs** (battery-health update, self-test issue/poll): each
+  `UPSGroupMonitor` runs `_run_periodic_tasks()` at the END of `_main_loop`
+  (just before `self._stop_event.wait(check_interval)`), wrapped in try/except
+  so a scheduler hiccup can never touch the shutdown path. Battery-health is
+  gated by a monotonic interval (`_last_health_update_mono` vs
+  `battery_health.update_interval`); self-test (`_run_self_test_task`) rebuilds
+  its `Schedule` from config each tick and checks `Schedule.due` against the
+  `self_test_last_run` meta. last-run persists via that monitor's
+  `self._stats_store`. The self-test hook also finalises an already-issued
+  (pending) test BEFORE honoring the current config, so a reload that disables
+  self_test can't orphan an in-flight test.
+- **Daemon-wide jobs** (periodic reports — one digest, not N copies): in
+  multi-UPS mode the `MultiUPSCoordinator` ticks `_maybe_send_reports()` from
+  `_wait_for_completion`, which calls `reports.maybe_send_due_reports_multi`
+  and delivers via the coordinator-scoped `_send_report_notification` (no
+  per-UPS log prefix). In single-UPS mode the lone monitor ticks
+  `reports.maybe_send_due_reports` from `_run_periodic_tasks` (skipped when
+  `_coordinator_mode` is set, so the daemon never sends N copies). Dedup meta
+  (`last_report_sent_<period>`) lives in one store — the coordinator uses the
+  first monitor's.
+
+**Reload:** the self-test / report due-checks recompute their `Schedule` from
+config on every loop (there is no long-lived registered schedule holding a
+stale value), so `energy`, `battery_health`, `self_test`, and `reports` are all
+**SAFE** in `reload.py` — an in-place config swap is enough, no re-register hook.
+
+**Last-run semantics:** last-run is stamped in `meta` once a due job has a real
+decision (issued, or genuinely skipped), so a job that raises mid-run is retried
+next tick rather than burning a whole (possibly 30-day) cadence. The self-test
+and report schedules use `fire_on_first=False`: they seed a baseline on first
+sight and fire at the *next* occurrence, so a restart never blasts a report or
+kicks off a self-test. (`Schedule.interval(..., fire_on_first=True)` is
+available for jobs that *should* run immediately, but the v6.1 jobs don't use it.)
+
 ## Conventions specific to this package
 
 - Emoji semantics in log messages are documented in the root `AGENTS.md`

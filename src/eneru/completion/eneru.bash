@@ -14,7 +14,7 @@ _eneru() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local subcommands="run shutdown remote validate monitor tui test-notifications completion version"
+    local subcommands="run shutdown remote validate monitor tui test-notifications self-test completion version"
     local global_opts="-h --help"
     local config_opts="-c --config"
     local monitor_opts="--once --interval --graph --time --events-only -v --verbose --length"
@@ -62,7 +62,9 @@ _eneru() {
             COMPREPLY=( $(compgen -W "127.0.0.1 0.0.0.0" -- "$cur") )
             return 0
             ;;
-        --server|--group)
+        --server|--group|--ups|--url|--token|--api-key)
+            # Value-taking flags (incl. the self-test run flags): no static
+            # completion, so don't fall through to offering option names.
             COMPREPLY=()
             return 0
             ;;
@@ -116,6 +118,26 @@ _eneru() {
             else
                 mapfile -t COMPREPLY < <(compgen -W "list $global_opts" -- "$cur")
             fi
+            ;;
+        self-test)
+            local st_leaf=""
+            for ((i=2; i < COMP_CWORD; i++)); do
+                case "${COMP_WORDS[i]}" in
+                    -*) continue ;;
+                    run|status) st_leaf="${COMP_WORDS[i]}"; break ;;
+                esac
+            done
+            case "$st_leaf" in
+                run)
+                    mapfile -t COMPREPLY < <(compgen -W "--ups --direct --url --token --api-key $config_opts $global_opts" -- "$cur")
+                    ;;
+                status)
+                    mapfile -t COMPREPLY < <(compgen -W "--ups $config_opts $global_opts" -- "$cur")
+                    ;;
+                *)
+                    mapfile -t COMPREPLY < <(compgen -W "run status $global_opts" -- "$cur")
+                    ;;
+            esac
             ;;
         validate|test-notifications)
             COMPREPLY=( $(compgen -W "$config_opts $global_opts" -- "$cur") )

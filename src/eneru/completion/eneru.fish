@@ -96,6 +96,34 @@ function __eneru_using_remote_list
     return 1
 end
 
+function __eneru_using_self_test_run
+    set -l cmd (commandline -opc)
+    set -l saw_self_test 0
+    set -l skip_value 0
+    for word in $cmd[2..-1]
+        # Skip the value that follows a value-taking flag (space form), so e.g.
+        # `self-test --ups NAME run` doesn't mistake NAME for the subcommand.
+        if test $skip_value -eq 1
+            set skip_value 0
+            continue
+        end
+        switch $word
+            case --ups --url --token --api-key -c --config
+                set skip_value 1
+            case '-*'
+                continue
+            case self-test
+                set saw_self_test 1
+            case run
+                test $saw_self_test -eq 1; and return 0
+                return 1
+            case '*'
+                test $saw_self_test -eq 1; and return 1
+        end
+    end
+    return 1
+end
+
 # Subcommands.
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'run' -d 'Start the monitoring daemon'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'shutdown' -d 'Manual shutdown drills'
@@ -104,8 +132,21 @@ complete -c eneru -n '__eneru_no_subcommand' -f -a 'validate' -d 'Validate confi
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'monitor' -d 'Launch real-time TUI dashboard'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'tui' -d 'Alias for monitor'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'test-notifications' -d 'Send a test notification'
+complete -c eneru -n '__eneru_no_subcommand' -f -a 'self-test' -d 'Issue or inspect a UPS battery self-test'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'completion' -d 'Print shell completion script'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'version' -d 'Show version information'
+
+# `self-test` subcommands.
+complete -c eneru -n '__eneru_using self-test' -f -a 'run' -d 'Issue a self-test'
+complete -c eneru -n '__eneru_using self-test' -f -a 'status' -d 'Show the latest self-test result'
+complete -c eneru -n '__eneru_using self-test' -l ups -r -d 'UPS name'
+complete -c eneru -n '__eneru_using self-test' -s c -l config -r -d 'Path to configuration file'
+# --direct/--url/--token/--api-key only apply to `self-test run` (not `status`),
+# matching the bash + zsh completions.
+complete -c eneru -n '__eneru_using_self_test_run' -l direct -d 'Issue directly via NUT (no daemon)'
+complete -c eneru -n '__eneru_using_self_test_run' -l url -r -d 'Daemon API base URL'
+complete -c eneru -n '__eneru_using_self_test_run' -l token -r -d 'Bearer session token for the daemon API'
+complete -c eneru -n '__eneru_using_self_test_run' -l api-key -r -d 'API key for the daemon API'
 
 # Global options.
 complete -c eneru -s h -l help -d 'Show help and exit'

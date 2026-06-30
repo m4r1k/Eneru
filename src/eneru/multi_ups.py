@@ -322,6 +322,14 @@ class MultiUPSCoordinator:
                 prometheus=self.config.prometheus,
                 remote_health=self.config.remote_health,
                 mqtt=self.config.mqtt,
+                nut_control=self.config.nut_control,
+                # v6.1: per-monitor battery-health / self-test / energy read
+                # these. The per-UPS override (if any) rides on `group` in
+                # ups_groups above; these globals are the inheritance base.
+                battery_health=self.config.battery_health,
+                self_test=self.config.self_test,
+                reports=self.config.reports,
+                energy=self.config.energy,
             )
 
             # Sanitize UPS name for file paths
@@ -773,9 +781,66 @@ class MultiUPSCoordinator:
                 alive += [t for t in self._evaluator_threads if t.is_alive()]
                 if not alive:
                     break
+                # Daemon-wide periodic reports: ONE digest for the whole daemon
+                # (per-group monitors skip reports in coordinator mode). Cheap +
+                # meta-gated, so ticking each ~1s loop is fine.
+                self._maybe_send_reports()
                 self._stop_event.wait(1)
         except KeyboardInterrupt:
             self._handle_signal(signal.SIGINT, None)
+
+    def _send_report_notification(self, body: str, notify_type: str,
+                                  category: str) -> None:
+        """Deliver a daemon-wide (fleet) report via the shared worker.
+
+        Unlike ``UPSGroupMonitor._send_notification`` this prepends NO per-UPS
+        log prefix: a fleet-wide digest already carries its own per-UPS sections,
+        so stamping it with just the FIRST group's prefix would be misleading.
+        The store is the primary monitor's (a single deterministic place that
+        also owns the dedup meta). ``@`` is still escaped to avoid Discord
+        mentions in UPS names like ``ups@host``.
+        """
+        if not self._notification_worker or not self._monitors:
+            return
+        escaped = body.replace("@", "@\u200B")   # zero-width space after @
+        self._notification_worker.send(
+            body=escaped, notify_type=notify_type, category=category,
+            store=getattr(self._monitors[0], "_stats_store", None),
+        )
+
+    def _maybe_send_reports(self) -> None:
+        """Send any due daemon-wide reports (multi-UPS). Failure-isolated.
+
+        The digest aggregates EVERY monitor (one per-UPS section each), not just
+        the first. Dedup meta lives in the first monitor's store (a single
+        deterministic place) and delivery goes through a coordinator-scoped
+        sender (no per-UPS prefix) once per period.
+        """
+        try:
+            # _send_report_notification silently no-ops when the notification
+            # worker is unavailable (startup init failure, or a disable→enable
+            # reload). Bail before maybe_send_due_reports_multi() stamps the
+            # last-run meta, otherwise the period is burned and the next report
+            # is skipped even though nothing was ever enqueued.
+            if (not self.config.reports.enabled
+                    or not self._monitors
+                    or self._notification_worker is None):
+                return
+            primary = self._monitors[0]
+            from eneru import reports as reports_mod
+            units = [
+                (m.config.ups.name, getattr(m, "_stats_store", None),
+                 m.config.energy)
+                for m in self._monitors
+            ]
+            reports_mod.maybe_send_due_reports_multi(
+                self.config,
+                units,
+                getattr(primary, "_stats_store", None),
+                self._send_report_notification,
+            )
+        except Exception as exc:
+            self._log(f"⚠️  reports task failed: {exc}")
 
     def reload_config(self) -> dict:
         """Re-read config and apply the safe subset live to every group.

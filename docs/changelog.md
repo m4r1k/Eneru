@@ -7,84 +7,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [6.1.0-rc3] - 2026-06-10
+## [6.1.0] - 2026-06-30
 
-### Changed
-
-- **Remote SSH host-key checking now defaults to `accept-new` (issue #73).**
-  Previously a `remote_servers` entry with no `ssh_options` inherited OpenSSH's
-  `StrictHostKeyChecking=ask`, which fails closed under `BatchMode` when a host
-  key is unknown — so a fresh remote could never connect on first contact, and
-  the rc2 workaround (hand-run `ssh-keyscan` + `StrictHostKeyChecking=yes`) was
-  easy to get wrong (a missing/empty/mismatched `known_hosts` failed closed
-  silently until a power event). Eneru now injects
-  `StrictHostKeyChecking=accept-new` into any remote that does not set a
-  `StrictHostKeyChecking` directive of its own. Bare-metal installs use the
-  running user's normal `~/.ssh/known_hosts`; Docker/Podman containers use the
-  documented `/var/lib/eneru/ssh/known_hosts` path; Kubernetes samples set
-  `ENERU_SSH_KNOWN_HOSTS_FILE=/var/lib/eneru/known_hosts` because SSH keys live
-  in a read-only Secret and learned trust belongs on the writable PVC. Any
-  explicit `StrictHostKeyChecking` or `UserKnownHostsFile` you set is preserved
-  verbatim, including the loopback delegate's `no`. No `ssh_options` are needed
-  for the common case.
-- **Containers keep the existing SSH mount contract.** Docker/Podman still use
-  `/srv/eneru/ssh:/var/lib/eneru/ssh`; the directory is writable so
-  `accept-new` can write `known_hosts`, while the private key files remain mode
-  `0400`. The shipped Kubernetes Deployment
-  (`deploy/kubernetes/remote-deployment.yaml`) backs `state` with a
-  `PersistentVolumeClaim` (instead of `emptyDir`) so learned keys — and the
-  stats/auth databases — survive pod restarts; it uses the `Recreate` strategy
-  to avoid two pods contending for the ReadWriteOnce volume. The container docs
-  drop the manual `ssh-keyscan` setup accordingly, and E2E Test 57 proves the
-  no-`ssh_options` default learns and preserves trust across a container
-  recreate.
-
-## [6.1.0-rc2] - 2026-06-10
-
-### Changed
-
-- **Container SSH host-key setup (issue #73).** A container is a hotel room:
-  anything learned interactively inside it disappears when the room is rebuilt.
-  The container docs now tell operators to mount both the private key and a
-  pre-seeded `known_hosts` file from `/srv/eneru/ssh`, then configure
-  `UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts` with
-  `StrictHostKeyChecking=yes` so remote-server trust survives
-  Docker/Podman/Kubernetes recreation without disabling host-key checks. The same
-  pass makes the uid `10001` private-key ownership and mode guidance consistent
-  across the container walkthroughs.
-- **E2E coverage for issue #71 and issue #73.** The CI matrix now includes a
-  real NUT autodiscovery regression that proves a wrong single-UPS name
-  self-heals for the running session, plus a container SSH regression that uses
-  a mounted private key and mounted `known_hosts` with strict host-key checking
-  across container recreation.
-
-## [6.1.0-rc1] - 2026-06-09
+Battery intelligence, energy tracking, scheduled self-tests, periodic reports,
+and a rebuilt browser dashboard, on top of the v6.0 monitoring and control
+surface.
 
 ### Added
 
+- **Battery health score.** A composite 0-100 score per UPS, built from five
+  terms: capacity (runtime trend), runtime against nominal, last self-test
+  result, confirmed anomaly history, and battery age. Each term carries an
+  availability flag, so missing telemetry reports as *unknown* instead of
+  inflating the score, and a new battery reports *unavailable* until it has at
+  least `replacement.min_history_days` of history rather than being dragged down
+  by early jitter. Least-squares replacement prediction warns when the score
+  trends toward a configured threshold, and tiered `warn_score` / `critical_score`
+  alerts fire on the current score (once each, re-arming on recovery). New
+  `battery_health` config section, per-UPS overridable, plus
+  `BATTERY_REPLACEMENT_PREDICTED` and `BATTERY_HEALTH_WARNING` / `_CRITICAL`
+  events.
+- **Energy tracking.** kWh integrated from `ups.realpower`, falling back to
+  `load% × power.nominal` (flagged *estimated*) or a configured
+  `energy.nominal_power` rating when the UPS reports neither. Daemon-down gaps
+  are capped so an outage doesn't invent consumption. Windows are calendar-based
+  (today since local midnight, month since the 1st, plus a year-to-date) to match
+  an electricity bill rather than a rolling average. Optional cost with
+  per-currency and custom formatting; leaving `cost_per_kwh` unset disables cost
+  entirely. New `energy` config section.
+- **Scheduled self-tests.** Issues a NUT battery self-test on a
+  daily/weekly/monthly/interval schedule and records the normalized result, gated
+  behind the same `nut_control` allowlist and API auth as manual control. It
+  adapts to whatever `upscmd -l` exposes and self-disables otherwise, and an
+  in-flight test is persisted and recovered after a restart so a `running` row is
+  never orphaned. New `self_test` section (per-UPS overridable), an auth-gated
+  `POST /api/v1/ups/{name}/self-test`, and a CLI: `eneru self-test run` (via the
+  daemon API by default, `--direct` over NUT) and `eneru self-test status`.
+- **Periodic reports.** Daily, weekly, and monthly digests covering power events,
+  battery health, energy, and uptime, delivered through the notification channel
+  with optional CSV. Multi-UPS deployments get one daemon-wide digest with a
+  section per UPS. New `reports` section, backed by a shared periodic scheduler
+  whose last-run state lives in the stats `meta` table so infrequent jobs fire
+  correctly across restarts.
+- **Rebuilt dashboard.** The web UI is now a tabbed single-page app (Overview,
+  Power, Battery, Energy, Events, Shutdown, Config) built as real ARIA tabs with
+  arrow-key navigation and URL-hash routing, still vanilla JS and SVG with no
+  build step. Overview leads with a battery ring gauge and drill-through KPI
+  cards; an inline-SVG icon set replaces emoji; charts gain threshold bands,
+  gradient fills, a "now" marker, and color-coded power-event overlays with
+  instant themed tooltips. New widgets cover remote-server health, a derived
+  line-quality (Good/Fair/Poor) read, a multi-year battery-health trend graph
+  that marks the replacement threshold and the projected replacement date, a
+  load%-and-power energy chart, a collapsible config JSON tree, and a
+  window-independent Events tier filter.
+- **Shutdown plan view.** A read-only, ordered view of exactly what runs on a
+  power-loss shutdown (VMs, containers, filesystem sync and unmount, remote
+  servers by phase, final sync, host poweroff) with parallel groups, per-phase
+  timeouts and a total estimate, and skipped phases shown with their reason. A
+  UPS selector covers multi-UPS and remote-only deployments, and each plan states
+  its trigger (a redundancy group's quorum loss or a standalone UPS's low-battery
+  / FSD trigger). Backed by `GET /api/v1/ups/{name}/shutdown-plan`, derived from
+  config; the execution path is untouched, and raw shutdown commands are redacted
+  on API reads.
+- **More telemetry surfaces.** New `batteryHealth`, `energy`, and `selfTest`
+  status blocks on the API and MQTT; Prometheus gauges for health score, energy
+  kWh/cost (with a `period` label), self-test result, and replacement days
+  remaining (unknown series omitted); `battery-health-history` and `power`
+  time-series endpoints; and output voltage, input/output frequency, battery
+  voltage, temperature, and real power added to `/history`.
 - **NUT name autodiscovery (issue #71).** When a poll can't reach the configured
-  UPS, Eneru now runs `upsc -l <host>` to list the UPS names the server actually
-  exposes and logs them. If exactly one UPS exists and the configured name is not
-  it (the classic case of a NUT *login username* placed where the UPS *device
-  name* belongs), Eneru self-heals for the session and tells you to fix
-  `ups.name`. With multiple UPSes it lists the choices instead of guessing. The
-  operator-configured name, display, and on-disk state are never mutated.
+  UPS, Eneru lists what `upsc -l` actually exposes; if exactly one UPS exists and
+  the configured name isn't it (the classic login-username-where-the-device-name
+  -belongs mistake), it self-heals for the session and tells you to fix
+  `ups.name`. The configured name and on-disk state are never mutated.
 
 ### Changed
 
-- **`expected_host_identity` auto-populates from any `cat /absolute/path`
-  (issue #70).** Previously the container-side identity read was hardcoded to
-  `/etc/machine-id`, so marker-file setups had to duplicate the value or mount
-  over `/etc/machine-id`. Now a simple `host_identity_command: "cat /path"` reads
-  the same path locally and fills in the expected value automatically. Non-`cat`
-  commands still require an explicit `expected_host_identity`.
-- **Quieter NUT polling.** `upsc` runs with `NUT_QUIET_INIT_SSL=true` and the
-  benign `Init SSL without certificate database` line is filtered from failure
-  output, so real errors stay visible.
-- **Docs for non-systemd / no-`machine-id` hosts.** New end-to-end marker-file
-  recipe for Alpine and other consumer/non-systemd setups, linked from the
-  install, migration, and troubleshooting pages. deb and rpm remain the published
-  packages; the OCI image stays a first-class citizen.
+- **Stats schema v7** (additive, idempotent): `real_power` / `power_nominal`
+  sample columns and aggregates, plus `battery_health` and `self_tests` tables,
+  trimmed on the existing retention cadence.
+- **Remote SSH host-key checking defaults to `accept-new` (issue #73).** A
+  `remote_servers` entry with no `ssh_options` no longer inherits OpenSSH's
+  interactive `ask` (which fails closed under `BatchMode`), so a fresh remote
+  connects on first contact and learns the key. Bare-metal uses the running
+  user's `known_hosts`; containers use the writable
+  `/var/lib/eneru/ssh/known_hosts`; the Kubernetes sample backs state with a PVC
+  so learned trust survives pod restarts. Any explicit `StrictHostKeyChecking` or
+  `UserKnownHostsFile` you set is preserved.
+- **`expected_host_identity` auto-populates from any `cat /path` (issue #70)**, so
+  marker-file setups no longer duplicate the value or mount over
+  `/etc/machine-id`.
+- **`energy`, `battery_health`, `self_test`, and `reports` are SAFE hot-reloads:**
+  their schedules are recomputed from config on each loop, so a SIGHUP applies on
+  the next due-check with no scheduler re-register step.
+- **Quieter NUT polling** (`NUT_QUIET_INIT_SSL=true`, benign SSL-init line
+  filtered) and a faster CI/E2E pipeline (eight parallel E2E matrix jobs, buildx
+  layer caching, `pytest-xdist`, a reduced PR Python matrix).
+
+### Fixed
+
+- Replacement prediction fires for an already-below-threshold battery regardless
+  of history depth, and the re-warning re-fires weekly rather than once per
+  horizon.
+- `Schedule.interval` keeps fractional seconds; the scheduler discovers the
+  self-test command before stamping last-run and stamps only on a successful
+  issue, so a transient failure retries instead of burning a cadence.
+- Multi-UPS reports are a true daemon-wide digest, "Running since" survives long
+  uptimes, and `format: csv` delivery is honored.
+- Median sample-spacing averages the two middle values, and an auto-learned
+  nominal runtime is not persisted when the config already pins one.
+- Config validation rejects non-numeric and non-mapping v6.1 sections, requires
+  `critical_score` strictly below `warn_score`, and validates schedule/time
+  strings up front instead of failing at runtime.
+- Stats write transactions re-check the connection under the DB lock, closing a
+  shutdown-time race that could crash a transaction.
 
 ## [6.0.0] - 2026-06-04
 

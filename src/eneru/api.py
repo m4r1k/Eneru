@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 from eneru import nut_control as nutctl
+from eneru import self_test as selftest
 from eneru.auth import AuthStore
 from eneru.status import (
     HISTORY_METRICS,
@@ -21,6 +22,8 @@ from eneru.status import (
     config_summary,
     find_status,
     live_remote_health,
+    monitor_status,
+    power_series,
     query_events,
     query_history,
     readiness,
@@ -59,18 +62,10 @@ _CONTENT_TYPE_HEADERS = {
 }
 
 # Serialize control writes per UPS so two concurrent requests can't race an
-# INSTCMD/SET against the same device. Keyed by the real NUT name.
-_ups_command_locks: Dict[str, threading.Lock] = {}
-_ups_locks_guard = threading.Lock()
-
-
-def _ups_lock(name: str) -> threading.Lock:
-    with _ups_locks_guard:
-        lock = _ups_command_locks.get(name)
-        if lock is None:
-            lock = threading.Lock()
-            _ups_command_locks[name] = lock
-        return lock
+# INSTCMD/SET against the same device. The lock lives in nut_control so the
+# scheduled self-test path (monitor) shares the SAME lock identity as the API
+# control routes — keyed by the real NUT name.
+from eneru.nut_control import command_lock as _ups_lock  # noqa: E402
 
 
 class APIBadRequest(ValueError):
@@ -149,7 +144,9 @@ API_ENDPOINTS = (
         "path": "/api/v1/ups/{name}/history",
         "description": "SQLite metric history for one UPS",
         "query": {
-            "metric": "charge|runtime|load|voltage|depletion",
+            # Derived from HISTORY_METRICS so discovery never drifts from the
+            # set /history actually accepts.
+            "metric": "|".join(HISTORY_METRICS),
             "from": "unix timestamp",
             "to": "unix timestamp",
         },
@@ -177,6 +174,12 @@ API_ENDPOINTS = (
     {"path": "/api/v1/ups/{name}/variables", "description": "Allowlisted writable UPS variables (upsrw)"},
     {"path": "/api/v1/ups/{name}/variables/{var}", "description": "PUT {value} to set an allowlisted upsrw variable"},
     {"path": "/api/v1/ups/{name}/events", "description": "DELETE selected events {items:[{id,ts,eventType}]} (auth required)"},
+    {"path": "/api/v1/ups/{name}/battery-health", "description": "Battery-health score, terms, and replacement projection (v6.1)"},
+    {"path": "/api/v1/ups/{name}/battery-health-history", "description": "Battery-health score trend (time series) for the Battery-tab graph (v6.1)"},
+    {"path": "/api/v1/ups/{name}/energy", "description": "Energy (kWh) and optional cost, today/month (v6.1)"},
+    {"path": "/api/v1/ups/{name}/power", "description": "Per-sample load% + watts series for the Energy chart (v6.1)"},
+    {"path": "/api/v1/ups/{name}/shutdown-plan", "description": "Structured controlled-shutdown plan (phases, parallel groups, steps) (v6.1)"},
+    {"path": "/api/v1/ups/{name}/self-test", "description": "POST to issue a UPS self-test (auth required, allowlisted) (v6.1)"},
     {"path": "/api/v1/config/reload", "description": "POST to re-read config and apply the safe subset live"},
 )
 
@@ -711,6 +714,130 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 return self._list_commands(ups_name)
             if len(parts) == 6 and parts[5] == "variables":
                 return self._list_variables(ups_name)
+            if len(parts) == 6 and parts[5] == "shutdown-plan":
+                # v6.1: read-only structured shutdown plan (phases, parallel
+                # groups, steps) for the dashboard DAG view. Mirrors the
+                # executor's order without touching the execution path. Built
+                # from the monitor's actual runtime flags so it matches reality.
+                mon = self._monitor_for(ups_name)
+                if mon is None:
+                    return 404, "application/json", self._not_found("UPS not found")
+                from eneru.shutdown.plan import build_shutdown_plan
+                group = (mon.config.ups_groups[0]
+                         if getattr(mon.config, "ups_groups", None) else None)
+                is_local = group.is_local if group is not None else True
+                plan = build_shutdown_plan(
+                    mon.config, is_local=is_local,
+                    delegated=bool(getattr(mon, "_uses_loopback_delegate", False)),
+                    coordinator_mode=bool(getattr(mon, "_coordinator_mode", False)),
+                    # Raw shutdown commands can embed sensitive flags/creds, so
+                    # they stay redacted for ALL readers — matching the
+                    # config_summary(extended=True) / remote-health contract,
+                    # which never reveals raw commands even to authenticated users.
+                    reveal_commands=False)
+                return 200, "application/json", {"ups": ups_name, "plan": plan}
+            if len(parts) == 6 and parts[5] == "battery-health-history":
+                # v6.1 battery-health score TREND for the Battery-tab graph.
+                # Battery aging plays out over YEARS, so default to the full
+                # retained history (battery_health rows survive the hourly
+                # retention horizon, up to ~5y) instead of a short window, and
+                # downsample to one point per day so a multi-year span still
+                # renders. Also project the replacement date so the UI can mark
+                # it (data-driven trend ETA, else the age-based estimate).
+                from eneru.health import prediction
+                mon = self._monitor_for(ups_name)
+                if mon is None:
+                    return 404, "application/json", self._not_found("UPS not found")
+                store = getattr(mon, "_stats_store", None)
+                now_ts = int(time.time())
+                end = _parse_int_param(qs, "to", now_ts)
+                # `from` unset -> the full retained horizon (5y), so the graph
+                # spans the battery's whole recorded life.
+                start = _parse_int_param(qs, "from", end - 1825 * 86400)
+                if start > end:
+                    return 400, "application/json", self._error(
+                        "INVALID_REQUEST", "'from' must be <= 'to'")
+                rows = []
+                if store is not None:
+                    try:
+                        rows = store.query_battery_health(start, end)
+                    except Exception:
+                        rows = []
+                # Downsample to one point per UTC day (mean score). Hourly rows
+                # over years would be tens of thousands of points; a daily trend
+                # is what the multi-year view needs.
+                buckets: Dict[int, List[float]] = {}
+                for r in rows:
+                    s = r.get("score")
+                    if s is None:
+                        continue
+                    day = (int(r["ts"]) // 86400) * 86400
+                    acc = buckets.setdefault(day, [0.0, 0.0])
+                    acc[0] += float(s)
+                    acc[1] += 1
+                data = [{"ts": d, "score": round(a[0] / a[1], 2)}
+                        for d, a in sorted(buckets.items())]
+                # Replacement-date projection for the red marker + threshold line.
+                replacement: Dict[str, Any] = {
+                    "etaTs": None, "etaSource": None, "thresholdScore": None}
+                try:
+                    cfg = mon._resolve_battery_health_config()
+                except Exception:
+                    cfg = getattr(mon.config, "battery_health", None)
+                if cfg is not None:
+                    rep = cfg.replacement
+                    history = [(float(r["ts"]), float(r["score"]))
+                               for r in rows if r.get("score") is not None]
+                    eta, src = prediction.replacement_eta(
+                        history,
+                        threshold_score=rep.threshold_score,
+                        horizon_days=rep.horizon_days,
+                        min_history_days=rep.min_history_days,
+                        battery_install_date=cfg.battery_install_date,
+                        expected_life_years=cfg.expected_life_years,
+                        now=now_ts)
+                    replacement = {"etaTs": eta, "etaSource": src,
+                                   "thresholdScore": rep.threshold_score}
+                return 200, "application/json", {
+                    "ups": ups_name, "from": start, "to": end,
+                    "data": data, "replacement": replacement}
+            if len(parts) == 6 and parts[5] in ("battery-health", "energy"):
+                # v6.1 read endpoints (same data the /status row carries). Build
+                # only the matched monitor's status — not the whole fleet — so a
+                # single-UPS read doesn't run every other UPS's (DB-heavy) energy
+                # query.
+                mon = self._monitor_for(ups_name)
+                if mon is None:
+                    return 404, "application/json", self._not_found("UPS not found")
+                row = monitor_status(mon)
+                key = "batteryHealth" if parts[5] == "battery-health" else "energy"
+                return 200, "application/json", {
+                    "ups": row.get("name", ups_name), key: row.get(key)}
+            if len(parts) == 6 and parts[5] == "power":
+                # v6.1 Energy-tab series: per-sample load% + watts (realpower or
+                # the load*nominal fallback, flagged estimated). Same retention
+                # window handling as /history.
+                mon = self._monitor_for(ups_name)
+                if mon is None:
+                    return 404, "application/json", self._not_found("UPS not found")
+                end = _parse_int_param(qs, "to", int(time.time()))
+                horizon = end - int(
+                    self.api_config.statistics.retention.agg_hourly_days) * 86400
+                if "from" in qs:
+                    start = _parse_int_param(qs, "from", end - 3600)
+                    if start > end:
+                        return 400, "application/json", self._error(
+                            "INVALID_REQUEST", "'from' must be <= 'to'")
+                    start = max(start, horizon)
+                else:
+                    start = horizon
+                store = getattr(mon, "_stats_store", None)
+                nominal = getattr(getattr(mon.config, "energy", None),
+                                  "nominal_power", None)
+                return 200, "application/json", {
+                    "ups": ups_name, "from": start, "to": end,
+                    "data": power_series(store, start, end, nominal_fallback=nominal),
+                }
 
         if path == "/api/v1/events":
             # Cap ``limit`` so a hostile or accidental ``?limit=10000000``
@@ -779,8 +906,62 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if len(parts) == 6 and parts[1:4] == ["api", "v1", "ups"] \
                 and parts[5] == "command":
             return self._run_instant_command(unquote(parts[4]))
+        # POST /api/v1/ups/{name}/self-test (v6.1)
+        if len(parts) == 6 and parts[1:4] == ["api", "v1", "ups"] \
+                and parts[5] == "self-test":
+            return self._run_self_test(unquote(parts[4]))
 
         return 404, "application/json", self._not_found("Endpoint not found")
+
+    def _run_self_test(self, ups_name: str) -> Tuple[int, str, Any]:
+        """Issue a UPS self-test (auth-gated, audited). Goes through the same
+        nut_control allowlist as the manual command path -- the self-test
+        command must be allowlisted."""
+        principal = self._authorize(write=True)
+        self._require_nut_control()
+        real = self._resolve_ups_name(ups_name)
+        if real is None:
+            return 404, "application/json", self._not_found("UPS not found")
+        nc = self._effective_nut_control(real)
+        command = self._effective_self_test(real).command
+        if not nutctl.command_allowed(command, nc.allowed_commands):
+            self._audit(principal, "self-test", f"{real}:{command}", "denied")
+            raise APIForbidden(
+                f"self_test.command {command!r} is not in allowed_commands")
+        # Preflight against `upscmd -l` like the scheduled/direct paths, so the
+        # API honors the same "self-disable if unsupported" contract the docs
+        # promise rather than letting NUT reject it after the fact.
+        try:
+            exposed = selftest.discover_self_test_command(
+                real, command, timeout=nc.timeout)
+        except selftest.SelfTestUnavailable as exc:
+            self._audit(principal, "self-test", f"{real}:{command}", "failed")
+            return 502, "application/json", self._error("NUT_ERROR", str(exc))
+        if exposed is None:
+            self._audit(principal, "self-test", f"{real}:{command}", "failed")
+            return 422, "application/json", self._error(
+                "UNSUPPORTED",
+                f"UPS {real} does not expose {command!r} (upscmd -l)")
+        # A self-test must record a `running` row so its result can be finalised
+        # later; without an open stats store it would orphan that state, so
+        # refuse (mirrors the CLI --direct and scheduler guards). A store that
+        # exists but is closed counts as unavailable too (public is_open mirrors
+        # the monitor / battery-health guards).
+        store = self._store_for_ups(real)
+        if store is None or not getattr(store, "is_open", False):
+            self._audit(principal, "self-test", f"{real}:{command}", "failed")
+            return 503, "application/json", self._error(
+                "STATS_UNAVAILABLE", "the statistics store is unavailable")
+        with _ups_lock(real):
+            result = selftest.issue_self_test(
+                real, command, nc, store, source="api")
+        self._audit(principal, "self-test", f"{real}:{command}",
+                    "ok" if result["ok"] else "failed")
+        if not result["ok"]:
+            return 502, "application/json", self._error("NUT_ERROR", result["error"])
+        return 200, "application/json", {"ups": real, "command": command,
+                                         "status": "issued",
+                                         "testId": result["test_id"]}
 
     def _route_delete(self) -> Tuple[int, str, Any]:
         parsed = urlparse(self.path)
@@ -904,7 +1085,15 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         return nc
 
     def _resolve_ups_name(self, ups_name: str) -> Optional[str]:
-        """Return the real NUT name for a UPS id/name, or None if unknown."""
+        """Return the real NUT name for a UPS id/name, or None if unknown.
+
+        Resolves through ``_monitor_for`` first so both resolvers share one
+        matching path (no drift) and a control lookup skips the DB-heavy
+        ``collect_status``; falls back to status matching for rows without a
+        local monitor (e.g. remote-only UPSes)."""
+        mon = self._monitor_for(ups_name)
+        if mon is not None:
+            return mon.config.ups.name
         row = find_status(collect_status(self.api_source), ups_name)
         return row["name"] if row is not None else None
 
@@ -931,6 +1120,36 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     timeout=override.timeout,
                 )
         return glob
+
+    def _effective_self_test(self, ups_name: str):
+        """Resolve the self_test config for one UPS (per-group override if set),
+        mirroring _effective_nut_control so a per-UPS `self_test.command` is
+        honored instead of always using the global command."""
+        glob = self.api_config.self_test
+        for group in getattr(self.api_config, "ups_groups", []):
+            if group.ups.name == ups_name and getattr(group, "self_test", None):
+                return group.self_test
+        return glob
+
+    def _monitor_for(self, ups_name: str):
+        """Return the live monitor object owning ``ups_name`` (raw or sanitized
+        match), or None. Used to reach a single UPS's stats store / status
+        without walking the whole fleet."""
+        from eneru.status import iter_monitors, sanitize_name
+        target = sanitize_name(ups_name)
+        for mon in iter_monitors(self.api_source):
+            name = getattr(getattr(mon, "config", None), "ups", None)
+            name = getattr(name, "name", None)
+            if name and (name == ups_name or sanitize_name(name) == target):
+                return mon
+        return None
+
+    def _store_for_ups(self, ups_name: str):
+        """The per-UPS stats store for ``ups_name``, or None when unavailable
+        (the store methods no-op on None, matching the daemon's failure
+        isolation)."""
+        mon = self._monitor_for(ups_name)
+        return getattr(mon, "_stats_store", None) if mon is not None else None
 
     def _list_commands(self, ups_name: str) -> Tuple[int, str, Any]:
         self._authorize(write=True)
@@ -976,7 +1195,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if real is None:
             return 404, "application/json", self._not_found("UPS not found")
         nc = self._effective_nut_control(real)
-        if command not in set(nc.allowed_commands):
+        if not nutctl.command_allowed(command, nc.allowed_commands):
             self._audit(principal, "command", f"{real}:{command}", "denied")
             raise APIForbidden(f"command {command!r} is not in allowed_commands")
         with _ups_lock(real):
@@ -1032,6 +1251,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         "variable": "CONTROL_VARIABLE",
         "config": "CONFIG_RELOAD",
         "events": "EVENTS_DELETED",
+        "self-test": "CONTROL_SELF_TEST",
     }
 
     @staticmethod
@@ -1104,6 +1324,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/v1/ups/{name}/command") or \
                     path.startswith("/api/v1/ups/{name}/variables"):
                 return nut_enabled
+            if path == "/api/v1/ups/{name}/self-test":
+                # POST self-test needs auth (write) AND nut_control, exactly like
+                # the manual control path.
+                return auth_enabled and nut_enabled
             return True
 
         return [dict(e) for e in API_ENDPOINTS if _visible(e["path"])]
@@ -1249,6 +1473,21 @@ _METRIC_CATALOGUE = (
      "Remote SSH target status indicator (1 per status label combination)."),
     ("eneru_remote_health_consecutive_failures", "gauge",
      "Consecutive failed remote-health probes for this SSH target."),
+    # v6.1
+    ("eneru_ups_battery_health_score", "gauge",
+     "Composite battery-health score 0-100 (omitted when unknown)."),
+    ("eneru_ups_replacement_days_remaining", "gauge",
+     "Projected days until the battery-health score crosses the replacement "
+     "threshold (omitted when not projectable)."),
+    ("eneru_ups_energy_kwh", "gauge",
+     "Energy consumed in kWh, by period label (today|month). A gauge, NOT a "
+     "_total: it is recomputed per window and is not monotonic."),
+    ("eneru_ups_energy_cost", "gauge",
+     "Energy cost by period label (today|month); omitted entirely when "
+     "energy.cost_per_kwh is unset."),
+    ("eneru_ups_self_test_result", "gauge",
+     "Latest self-test result, one series per normalized result label "
+     "(passed|failed|running|unknown|unsupported)."),
 )
 
 
@@ -1303,6 +1542,33 @@ def render_prometheus_metrics(source: Any) -> str:
             labels,
             1 if row["triggerActive"] else 0,
         ))
+        # v6.1: battery health, replacement, energy, self-test. Omit a series
+        # when its value is unknown rather than emitting a misleading 0.
+        bh = row.get("batteryHealth") or {}
+        if bh.get("score") is not None:
+            lines.append(_metric_line(
+                "eneru_ups_battery_health_score", labels, bh["score"]))
+        if bh.get("replacementDaysRemaining") is not None:
+            lines.append(_metric_line(
+                "eneru_ups_replacement_days_remaining", labels,
+                bh["replacementDaysRemaining"]))
+        energy = row.get("energy") or {}
+        for period, kwh_key, cost_key in (("today", "todayKwh", "todayCost"),
+                                          ("month", "monthKwh", "monthCost"),
+                                          ("year", "yearKwh", "yearCost")):
+            if energy.get(kwh_key) is not None:
+                lines.append(_metric_line(
+                    "eneru_ups_energy_kwh", {**labels, "period": period},
+                    energy[kwh_key]))
+            if energy.get(cost_key) is not None:
+                lines.append(_metric_line(
+                    "eneru_ups_energy_cost", {**labels, "period": period},
+                    energy[cost_key]))
+        st = row.get("selfTest") or {}
+        if st.get("result"):
+            lines.append(_metric_line(
+                "eneru_ups_self_test_result",
+                {**labels, "result": st["result"]}, 1))
         for server in row.get("remoteHealth", []):
             s_labels = {
                 "ups": row["name"],

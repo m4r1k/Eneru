@@ -20,7 +20,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14', '3.15-dev']
+        # Reduced matrix on PRs for fast/cheap feedback; full matrix on
+        # push to main so a version-specific break is still caught before
+        # release. The span ends (3.9, 3.12) plus the prerelease (3.15-dev,
+        # allowed to fail) cover the common cases on PRs.
+        #
+        # OPERATOR ACTION when v6.1 merges: make ONLY the `3.9` and `3.12`
+        # validate checks required in branch protection. The other versions
+        # run on push-to-main (and as non-required PR jobs) but must not be
+        # listed as required checks, or PRs wedge on "expected, never
+        # reported" for the versions a PR doesn't run. Tradeoff: a
+        # 3.10/3.11/3.13/3.14-only break is caught at merge-to-main, not on
+        # the PR.
+        python-version: ${{ (github.event_name == 'pull_request' && fromJSON('["3.9","3.12","3.15-dev"]')) || fromJSON('["3.9","3.10","3.11","3.12","3.13","3.14","3.15-dev"]') }}
     continue-on-error: ${{ matrix.python-version == '3.15-dev' }}
 
     steps:
@@ -36,14 +48,16 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -e ".[notifications,auth]"
-        pip install pytest pytest-cov pytest-mock
+        pip install pytest pytest-cov pytest-mock pytest-xdist
 
     - name: Run tests
       run: |
-        pytest --cov=src/eneru --cov-report=xml --cov-report=term -v
+        pytest -n auto --cov=src/eneru --cov-report=xml --cov-report=term
 
     - name: Upload coverage to Codecov
-      if: matrix.python-version == '3.11'
+      # 3.12 is in both the reduced PR matrix and the full push matrix, so
+      # coverage uploads on PRs as well as on main.
+      if: matrix.python-version == '3.12'
       uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v6
       with:
         files: ./coverage.xml

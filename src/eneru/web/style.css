@@ -2,29 +2,54 @@
    (System default, flash-free) and via an explicit [data-theme] override set by
    the theme switcher. Explicit data-theme always wins over the OS preference. */
 :root {
-  --bg: #0f1115;
-  --panel: #171a21;
-  --panel-2: #20242d;
-  --text: #e6e9ef;
-  --muted: #9aa3b2;
-  --accent: #4f8cf7;
+  --bg: #0d0f13;
+  --panel: #161922;
+  --panel-2: #1e222c;
+  --text: #e7eaf0;
+  --text-2: #c2c8d4;
+  --muted: #99a2b2;
+  --accent: #5b93f7;
+  --accent-rgb: 91,147,247;
   --on-accent: #0b0e13;
-  --ok: #4ccb6e;
-  --warn: #e7a13a;
-  --crit: #ef5b5b;
-  --line: #2b303b;
+  --ok: #4ccb6e;   --ok-rgb: 76,203,110;
+  --warn: #e7a13a; --warn-rgb: 231,161,58;
+  --crit: #ef5b5b; --crit-rgb: 239,91,91;
+  --line: #262b36;
+  --line-strong: #313845;
+  --grid: rgba(255,255,255,0.05);
+  /* tinted status/accent surfaces */
+  --accent-weak: rgba(var(--accent-rgb), 0.14);
+  --ok-weak:   rgba(var(--ok-rgb), 0.13);
+  --warn-weak: rgba(var(--warn-rgb), 0.13);
+  --crit-weak: rgba(var(--crit-rgb), 0.13);
+  --hero-grad: linear-gradient(135deg, rgba(var(--accent-rgb),0.14), rgba(var(--accent-rgb),0.02));
+  /* radius + elevation */
+  --r-sm: 8px; --r-md: 14px; --r-lg: 18px; --r-pill: 999px;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.20);
+  --shadow-md: 0 6px 20px -6px rgba(0,0,0,0.38);
+  --shadow-lg: 0 18px 44px -14px rgba(0,0,0,0.50);
 }
 :root[data-theme="light"], :root[data-theme="light"] * { color-scheme: light; }
 :root[data-theme="dark"], :root[data-theme="dark"] * { color-scheme: dark; }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
-    --bg: #f7f8fa; --panel: #ffffff; --panel-2: #eef1f5; --text: #1b1f27;
-    --muted: #5b6473; --accent: #2563eb; --on-accent: #ffffff; --line: #dfe3ea;
+    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f6; --text: #161a22;
+    --text-2: #2f3744; --muted: #5b6473; --accent: #2563eb; --accent-rgb: 37,99,235;
+    --on-accent: #ffffff; --line: #e6e9ef; --line-strong: #dde1e9;
+    --grid: rgba(15,20,30,0.06);
+    --shadow-sm: 0 1px 2px rgba(15,20,30,0.05);
+    --shadow-md: 0 4px 16px -6px rgba(15,20,30,0.14);
+    --shadow-lg: 0 16px 40px -14px rgba(15,20,30,0.22);
   }
 }
 :root[data-theme="light"] {
-  --bg: #f7f8fa; --panel: #ffffff; --panel-2: #eef1f5; --text: #1b1f27;
-  --muted: #5b6473; --accent: #2563eb; --on-accent: #ffffff; --line: #dfe3ea;
+  --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f6; --text: #161a22;
+  --text-2: #2f3744; --muted: #5b6473; --accent: #2563eb; --accent-rgb: 37,99,235;
+  --on-accent: #ffffff; --line: #e6e9ef; --line-strong: #dde1e9;
+  --grid: rgba(15,20,30,0.06);
+  --shadow-sm: 0 1px 2px rgba(15,20,30,0.05);
+  --shadow-md: 0 4px 16px -6px rgba(15,20,30,0.14);
+  --shadow-lg: 0 16px 40px -14px rgba(15,20,30,0.22);
 }
 * { box-sizing: border-box; }
 /* The dashboard shows/hides every element via the `hidden` attribute. Class
@@ -40,21 +65,143 @@ header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 0.75rem 1.25rem; background: var(--panel); border-bottom: 1px solid var(--line);
 }
-header h1 { font-size: 1.25rem; margin: 0; }
-main { padding: 1.25rem; max-width: 1100px; margin: 0 auto; }
+header h1 { font-size: 1.25rem; margin: 0; display: flex; align-items: center; gap: 0.45rem; }
+header h1 .brand-bolt { width: 22px; height: 22px; color: var(--accent); }
+main { padding: 1.75rem 1.5rem; max-width: 1240px; margin: 0 auto; }
 section { margin-bottom: 1.75rem; }
-h2 { font-size: 1rem; color: var(--muted); text-transform: uppercase;
-     letter-spacing: 0.05em; border-bottom: 1px solid var(--line); padding-bottom: 0.35rem; }
-.cards { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 1rem; }
-.card h3 { margin: 0 0 0.5rem; font-size: 1.05rem; }
-.card .row { display: flex; justify-content: space-between; padding: 0.15rem 0; color: var(--muted); }
-.card .row b { color: var(--text); font-weight: 600; }
+h2 { font-size: 0.8125rem; color: var(--muted); text-transform: uppercase;
+     letter-spacing: 0.06em; font-weight: 600; border-bottom: none;
+     margin: 0 0 1rem; }
+.cards { display: grid; gap: 1.25rem; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.card { background: var(--panel); border: 1px solid var(--line-strong);
+  border-radius: var(--r-md); padding: 1.5rem; box-shadow: var(--shadow-sm);
+  position: relative; overflow: hidden;
+  transition: transform .14s ease, box-shadow .14s ease, border-color .14s ease; }
+.card h3 { margin: 0 0 0.6rem; font-size: 1rem; font-weight: 600; }
+.card .row { display: flex; justify-content: space-between; padding: 0.18rem 0;
+  color: var(--muted); font-size: 0.9375rem; }
+.card .row b { color: var(--text-2); font-weight: 600;
+  font-variant-numeric: tabular-nums; }
+/* Status shown ONCE per card: a 2px accent strip on top (not green-on-everything). */
+.card.s-ok::before, .card.s-warn::before, .card.s-crit::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 2px; }
+.card.s-ok::before   { background: var(--ok); }
+.card.s-warn::before { background: var(--warn); }
+.card.s-crit::before { background: var(--crit); }
+
+/* ===== rc9 redesign components =================================== */
+
+/* Inline-SVG icons (currentColor → theme + status aware, no emoji font). */
+.ic { width: 1em; height: 1em; flex: none; vertical-align: -0.14em;
+  fill: none; stroke: currentcolor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round; }
+
+/* Card header: small tinted icon chip + title + right-aligned badge. */
+.card-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.75rem; }
+.card-head h3 { margin: 0; font-size: 1rem; font-weight: 600;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-head .badge { margin-left: auto; flex: none; }
+.card-ico { display: inline-grid; place-items: center; width: 30px; height: 30px;
+  border-radius: 9px; background: var(--accent-weak); color: var(--accent); flex: none; }
+.card-ico .ic { width: 17px; height: 17px; }
+.card-ico.s-ok { background: var(--ok-weak); color: var(--ok); }
+.card-ico.s-warn { background: var(--warn-weak); color: var(--warn); }
+.card-ico.s-crit { background: var(--crit-weak); color: var(--crit); }
+
+/* Clickable cards (overview summary / UPS cards): lift on hover. */
+.card-click { cursor: pointer; }
+.card-click:hover { transform: translateY(-2px); box-shadow: var(--shadow-md);
+  border-color: rgba(var(--accent-rgb), 0.45); }
+
+/* Overview hero card: ring gauge + key vitals, restrained accent wash. */
+.hero { background: var(--hero-grad); border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg); padding: 1.5rem 1.75rem; box-shadow: var(--shadow-sm);
+  display: grid; grid-template-columns: auto 1fr; gap: 1.75rem; align-items: center;
+  position: relative; overflow: hidden; margin-bottom: 1.25rem; }
+.hero.s-ok::before, .hero.s-warn::before, .hero.s-crit::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 3px; }
+.hero.s-ok::before { background: var(--ok); }
+.hero.s-warn::before { background: var(--warn); }
+.hero.s-crit::before { background: var(--crit); }
+.hero-main { display: flex; flex-direction: column; gap: 0.4rem; min-width: 0; }
+.hero-title { display: flex; align-items: center; gap: 0.6rem; }
+.hero-title h3 { margin: 0; font-size: 1.1rem; font-weight: 600; }
+.hero-vitals { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr));
+  gap: 0.5rem 1.5rem; margin-top: 0.4rem; }
+.hero-vitals .v-label { color: var(--muted); font-size: 0.8125rem; }
+.hero-vitals .v-value { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums; }
+@media (max-width: 560px) { .hero { grid-template-columns: 1fr; text-align: center; } }
+
+/* Battery ring gauge (SVG). */
+.ring { width: 132px; height: 132px; }
+.ring-track { fill: none; stroke: var(--panel-2); stroke-width: 11; }
+.ring-arc { fill: none; stroke: var(--accent); stroke-width: 11;
+  transition: stroke-dasharray .6s ease; }
+.ring.s-ok .ring-arc { stroke: var(--ok); }
+.ring.s-warn .ring-arc { stroke: var(--warn); }
+.ring.s-crit .ring-arc { stroke: var(--crit); }
+.ring-big { fill: var(--text); font-size: 27px; font-weight: 700;
+  font-variant-numeric: tabular-nums; }
+.ring-cap { fill: var(--muted); font-size: 9px; font-weight: 600; letter-spacing: 0.14em; }
+
+/* KPI summary tiles (Overview secondary row). */
+.kpi { padding: 1.1rem 1.25rem; display: flex; flex-direction: column; gap: 0.35rem; }
+.kpi .k-label { display: flex; align-items: center; gap: 0.45rem;
+  font-size: 0.8125rem; color: var(--muted); }
+.kpi .k-label .ic { width: 15px; height: 15px; }
+.kpi .k-value { font-size: 1.65rem; font-weight: 700; letter-spacing: -0.02em;
+  line-height: 1.1; font-variant-numeric: tabular-nums; }
+.kpi .k-value .unit { font-size: 0.9rem; font-weight: 600; color: var(--muted);
+  margin-left: 0.15rem; letter-spacing: 0; }
+.kpi .k-value.s-ok { color: var(--ok); }
+.kpi .k-value.s-warn { color: var(--warn); }
+.kpi .k-value.s-crit { color: var(--crit); }
+.kpi .k-cap { font-size: 0.8125rem; color: var(--muted); }
+
+/* Toolbars (graph controls / event filters) get a surface instead of floating. */
+.graph-controls, .event-filters { background: var(--panel);
+  border: 1px solid var(--line-strong); border-radius: var(--r-md);
+  padding: 0.75rem 1rem; gap: 1rem; align-items: center; }
+select:focus-visible, input:not([type="checkbox"]):focus-visible {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-weak); }
+
+/* Chart container + designed chrome. */
+.graph { background: var(--panel); border: 1px solid var(--line-strong);
+  border-radius: var(--r-md); padding: 0.85rem 1rem; box-shadow: var(--shadow-sm); }
+.graph svg { height: 260px; }
+.graph .grid { stroke: var(--grid); stroke-width: 1; shape-rendering: crispedges; }
+.graph .axis { stroke: var(--line-strong); }
+.graph .plot { fill: none; stroke: var(--accent); stroke-width: 2;
+  stroke-linejoin: round; stroke-linecap: round; }
+.graph .area { stroke: none; }
+.graph .now-dot { fill: var(--accent); stroke: var(--panel); stroke-width: 2; }
+.graph .now-dot.s-warn { fill: var(--warn); }
+.graph .now-dot.s-crit { fill: var(--crit); }
+/* Battery-health replacement markers: threshold line + projected-date line. */
+.graph .bh-thresh { stroke: var(--crit); stroke-width: 1.5;
+  stroke-dasharray: 5 4; opacity: 0.75; }
+.graph .bh-eta { stroke: var(--crit); stroke-width: 1.5; stroke-dasharray: 2 3; }
+.graph .bh-eta-lbl { fill: var(--crit); font-size: 0.7rem; font-weight: 600; }
+/* Dotted projection from the latest reading to the replacement point. */
+.graph .bh-proj { stroke: var(--accent); stroke-width: 1.5;
+  stroke-dasharray: 1 4; stroke-linecap: round; opacity: 0.7; }
 .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
          font-size: 0.8rem; font-weight: 600; }
 .badge.ok { background: rgba(91,214,114,0.15); color: var(--ok); }
 .badge.warn { background: rgba(245,166,35,0.15); color: var(--warn); }
 .badge.crit { background: rgba(255,92,92,0.15); color: var(--crit); }
+.badge.info { background: rgba(167,139,250,0.16); color: #a78bfa; }
+/* Events-table Type cell: icon-led severity badge (matches chart marker color) */
+.ev-badge { display: inline-flex; align-items: center; gap: 0.35rem;
+  padding: 0.12rem 0.55rem; border-radius: 999px; font-size: 0.8rem;
+  font-weight: 600; white-space: nowrap; }
+.ev-badge .ic { width: 13px; height: 13px; }
+.ev-badge.ok { background: var(--ok-weak); color: var(--ok); }
+.ev-badge.warn { background: var(--warn-weak); color: var(--warn); }
+.ev-badge.crit { background: var(--crit-weak); color: var(--crit); }
+.ev-badge.info { background: rgba(167,139,250,0.16); color: #a78bfa; }
 meter.bar { -webkit-appearance: none; appearance: none;
   display: block; width: 100%; height: 8px; margin-top: 0.35rem;
   border: 0; border-radius: 4px; background: var(--panel-2); }
@@ -80,11 +227,10 @@ select, input:not([type="checkbox"]) { background: var(--panel-2); color: var(--
 .event-type-option { display: flex; align-items: center; gap: 0.45rem;
   padding: 0.25rem 0.35rem; color: var(--text); white-space: nowrap; }
 .event-type-option input { margin: 0; accent-color: var(--accent); }
-.graph { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem; }
-.graph svg { width: 100%; height: 220px; display: block; }
-.graph .axis { stroke: var(--line); stroke-width: 1; }
-.graph .plot { fill: none; stroke: var(--accent); stroke-width: 2; }
+.graph svg { width: 100%; display: block; }
 .graph .lbl { fill: var(--muted); font-size: 11px; }
+.graph .chart-title { fill: var(--muted); font-size: 11px; font-weight: 600;
+                      letter-spacing: 0.03em; }
 .events { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 .events th, .events td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--line); }
 .events th { color: var(--muted); font-weight: 600; }
@@ -136,6 +282,9 @@ footer { padding: 0.6rem 1.25rem; color: var(--muted); font-size: 0.85rem;
 .card .row b.ok, .detail-section .row b.ok { color: var(--ok); }
 .card .row b.warn, .detail-section .row b.warn { color: var(--warn); }
 .card .row b.crit, .detail-section .row b.crit { color: var(--crit); }
+.card .row b.na, .detail-section .row b.na { color: var(--muted); font-style: italic;
+  font-weight: 500; }
+.graph .area.bh { fill: var(--accent-weak); }
 meter.bar.ok::-webkit-meter-optimum-value { background: var(--ok); }
 meter.bar.warn::-webkit-meter-optimum-value { background: var(--warn); }
 meter.bar.crit::-webkit-meter-optimum-value { background: var(--crit); }
@@ -159,8 +308,166 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
                        padding: 0.15rem 0; color: var(--muted); }
 .detail-section .row b { color: var(--text); font-weight: 600; }
 
+/* ----- Tabbed SPA (v6.1) ------------------------------------------------- */
+.tabs {
+  display: flex; gap: 0.25rem; flex-wrap: wrap;
+  padding: 0 1.25rem; background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  max-width: 1100px; margin: 0 auto; box-sizing: content-box;
+}
+.tab {
+  background: transparent; color: var(--muted); border: 0;
+  border-bottom: 2px solid transparent; border-radius: 0;
+  padding: 0.6rem 0.9rem; font-weight: 600; cursor: pointer;
+}
+.tab:hover { color: var(--text); }
+.tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Inline-SVG tab icons inherit currentColor → muted, brightening to accent when
+   the tab is selected (no emoji font dependency). */
+.tab { display: inline-flex; align-items: center; gap: 0.4rem; }
+.tab .ic { width: 16px; height: 16px; opacity: 0.85; }
+.tab[aria-selected="true"] .ic { opacity: 1; }
+/* Keep a visible focus indicator on a focused panel for keyboard users. */
+.panel:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px;
+                       border-radius: 6px; }
+.panel > h2:first-child { margin-top: 0; }
+
+/* Widget cards with a title + status badge (Battery / Energy tabs). The base
+   .card-head / .card-head h3 rules are defined once above (icon chip + title +
+   right-aligned badge via margin-left:auto); only the title size differs here. */
+.card-head h3 { font-size: 1.05rem; }
+.card .card-head + .row { margin-top: 0.1rem; }
+.chart-note { color: var(--muted); font-size: 0.85rem; margin: 0.5rem 0 0; }
+.energy-note { color: var(--muted); font-size: 0.78rem; font-style: italic; }
+
+/* Floating tooltip — instant + themed. Native SVG <title> / title="" only appear
+   after a ~1s delay and render as a plain OS tooltip; this shows immediately.
+   Shared by chart event markers and the "?" help hints. */
+.tip { position: fixed; z-index: 60; max-width: 18rem; pointer-events: none;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--line-strong); border-left: 3px solid var(--accent);
+  border-radius: var(--r-sm); padding: 0.5rem 0.65rem; box-shadow: var(--shadow-lg);
+  font-size: 0.82rem; line-height: 1.45; }
+.tip .tip-head { font-weight: 700; }
+.tip .tip-sub { color: var(--muted); font-size: 0.76rem; margin-top: 0.05rem; }
+.tip .tip-body { margin-top: 0.3rem; color: var(--text-2); }
+.tip.ev-ok   { border-left-color: var(--ok); }
+.tip.ev-warn { border-left-color: var(--warn); }
+.tip.ev-crit { border-left-color: var(--crit); }
+.tip.ev-info { border-left-color: #a78bfa; }
+
+/* "?" help hint — reveals a tooltip on hover/focus (replaces verbose footnotes). */
+.label-tip { display: inline-flex; align-items: center; }
+.help { display: inline-flex; align-items: center; justify-content: center;
+  width: 15px; height: 15px; margin-left: 0.35rem; border-radius: 999px;
+  background: var(--panel-2); color: var(--muted); font-size: 0.7rem;
+  font-weight: 700; line-height: 1; cursor: help; user-select: none; }
+.help:hover, .help:focus-visible { background: var(--accent-weak);
+  color: var(--accent); outline: none; }
+
+/* Config tab: colored, collapsible JSON tree (each section folds on its own) */
+.json-tree { background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 0.8rem 1rem; margin-top: 0.4rem; overflow: auto;
+  max-height: 65vh; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem; line-height: 1.6; }
+.json-node > summary { cursor: pointer; user-select: none; list-style: none; }
+.json-node > summary::-webkit-details-marker { display: none; }
+.json-node > summary::before { content: "▸ "; color: var(--muted); }
+.json-node[open] > summary::before { content: "▾ "; }
+.json-kids { padding-left: 1.1rem; border-left: 1px solid var(--line);
+  margin-left: 0.25rem; }
+.json-leaf { padding-left: 1.1rem; }
+.j-key { color: var(--accent); }
+.j-str { color: var(--ok); }
+.j-num { color: var(--warn); }
+.j-bool { color: #c084fc; }
+.j-null { color: var(--muted); font-style: italic; }
+.j-punct { color: var(--muted); }
+.j-open { margin-left: 0.3rem; }
+.j-ellipsis { color: var(--muted); margin: 0 0.15rem; }
+/* Open nodes show just `key {` (the indented border conveys the grouping); the
+   ellipsis + closing brace only appear when collapsed → `key {…}`. Cleaner than
+   a running item count on every section. */
+.json-node[open] > summary .j-ellipsis,
+.json-node[open] > summary .j-close { display: none; }
+
+/* Chart overlays: voltage threshold band + nominal line + event markers.
+   The band is a faint bounded ZONE (subtle fill + dashed edges), not a slab of
+   color that reads as a page tint. */
+.graph .band { fill: rgba(var(--ok-rgb), 0.07); }
+.graph .band-edge { stroke: rgba(var(--warn-rgb), 0.5); stroke-width: 1;
+                    stroke-dasharray: 3 4; }
+.graph .band-nominal { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 3;
+                       opacity: 0.6; }
+/* Event markers: a small color-coded triangle pinned to the time axis, with a
+   FAINT vertical guide that only brightens on hover (a bold full-height line per
+   event looked like noise). A wide transparent hit line makes the whole column
+   hoverable so the tooltip is easy to summon. */
+/* Chart decoration is non-interactive so an event marker's full-height hit
+   target receives the hover ANYWHERE along its column. The area fill + plot line
+   used to swallow pointer events over the lower part of the guide, so the
+   tooltip only appeared when hovering above the plotted data. */
+.graph .grid, .graph .axis, .graph .area, .graph .plot, .graph .plot-load,
+.graph .plot-watts, .graph .now-dot, .graph .band, .graph .band-edge,
+.graph .band-nominal, .graph .chart-title { pointer-events: none; }
+.graph .ev-line { stroke-width: 1; opacity: 0.12; }
+.graph .ev-hit { stroke: transparent; stroke-width: 11; }
+.graph g:hover .ev-line { opacity: 0.7; }
+.graph .ev-pin { stroke: var(--bg); stroke-width: 0.5; }
+.graph g:hover .ev-pin { stroke-width: 1; }
+.graph .ev-crit { stroke: var(--crit); fill: var(--crit); }   /* outage / danger */
+.graph .ev-warn { stroke: var(--warn); fill: var(--warn); }   /* over-voltage / overload */
+.graph .ev-ok   { stroke: var(--ok);   fill: var(--ok); }     /* power restored / recovered */
+.graph .ev-info { stroke: #a78bfa; fill: #a78bfa; }           /* other — violet, not the plot blue */
+
+/* Shutdown plan: an ordered top-to-bottom flow with a connector between phases.
+   Parallel phases lay their steps out side by side; skipped phases are muted. */
+.sd-trigger { display: flex; align-items: center; gap: 0.5rem;
+  margin: 0.3rem 0 0.9rem; padding: 0.6rem 0.85rem; border-radius: var(--r-md);
+  background: var(--warn-weak); border: 1px solid rgba(var(--warn-rgb), 0.4);
+  font-size: 0.9rem; }
+.sd-trigger .ic { width: 16px; height: 16px; color: var(--warn); flex: none; }
+.sd-flow { display: flex; flex-direction: column; margin-top: 0.5rem; }
+.sd-node { position: relative; border: 1px solid var(--line-strong);
+  border-radius: var(--r-md); background: var(--panel); padding: 0.85rem 1rem;
+  box-shadow: var(--shadow-sm); }
+.sd-node + .sd-node { margin-top: 1.4rem; }
+.sd-node + .sd-node::before { content: ""; position: absolute; top: -1.4rem;
+  left: 27px; width: 2px; height: 1.4rem; background: var(--line-strong); }
+.sd-skip { opacity: 0.78; }
+.sd-head { display: flex; align-items: center; gap: 0.6rem; }
+.sd-num { display: inline-grid; place-items: center; width: 24px; height: 24px;
+  border-radius: 999px; background: var(--accent-weak); color: var(--accent);
+  font-size: 0.8rem; font-weight: 700; flex: none; }
+.sd-skip .sd-num { background: var(--panel-2); color: var(--muted); }
+.sd-ico { display: inline-grid; place-items: center; width: 28px; height: 28px;
+  border-radius: 8px; background: var(--accent-weak); color: var(--accent); flex: none; }
+.sd-ico .ic { width: 16px; height: 16px; }
+.sd-ico.off { background: var(--panel-2); color: var(--muted); }
+.sd-title { font-weight: 600; }
+.sd-mode { font-size: 0.75rem; font-weight: 600; color: #a78bfa;
+  background: rgba(167,139,250,0.16); padding: 0.08rem 0.45rem; border-radius: 999px; }
+.sd-est { color: var(--muted); font-size: 0.8rem; }
+.sd-head .badge { margin-left: auto; }
+.sd-steps { margin: 0.6rem 0 0 calc(26px + 0.6rem); display: flex;
+  flex-direction: column; gap: 0.4rem; }
+.sd-steps.sd-parallel { flex-direction: row; flex-wrap: wrap; }
+.sd-step { background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--r-sm); padding: 0.4rem 0.65rem; font-size: 0.85rem; }
+.sd-parallel .sd-step { flex: 1 1 200px; }
+.sd-step-detail { color: var(--muted); font-size: 0.78rem; margin-top: 0.15rem; }
+
+/* Energy dual-line chart: load% (kindred accent, translucent) + power (W). */
+.graph .plot-load { stroke: var(--accent); opacity: 0.45; fill: none; }
+.graph .plot-watts { stroke: var(--ok); fill: none; }
+.graph rect.plot-load { stroke: none; fill: var(--accent); opacity: 0.55; }
+.graph rect.plot-watts { stroke: none; fill: var(--ok); }
+
 @media (max-width: 640px) {
   .var-form { grid-template-columns: 1fr; }
   header { flex-wrap: wrap; gap: 0.5rem; }
   .authbox { flex-wrap: wrap; }
+  .tabs { padding: 0 0.5rem; }
+  .tab { padding: 0.5rem 0.6rem; }
 }

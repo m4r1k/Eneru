@@ -46,11 +46,44 @@ runs:
         mkdir -p ${{ inputs.e2e-dir }}/ssh-target
         cp /tmp/e2e-ssh-key.pub ${{ inputs.e2e-dir }}/ssh-target/authorized_keys
 
-    - name: Build and start E2E environment
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+    # Pre-build the two E2E image contexts once, with the GitHub Actions
+    # cache backend, then bring the stack up with --no-build. Before
+    # this, every parallel E2E matrix group re-ran `compose up --build`
+    # on a fresh runner with no image cache, so the duplicated build
+    # dominated wall-clock and splitting groups just re-paid that cost.
+    # buildx + type=gha caches the layers across groups and across runs;
+    # the explicit `--load`ed tags match the `image:` names in
+    # docker-compose.yml so `up --no-build` resolves them. Separate cache
+    # scopes keep the two contexts from clobbering each other's cache.
+    # docker/build-push-action (official) injects the Actions runtime
+    # token the gha cache backend needs — a raw `docker buildx build`
+    # would additionally require crazy-max/ghaction-github-runtime.
+    - name: Build nut-dummy image (cached)
+      uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+      with:
+        context: ${{ inputs.e2e-dir }}/nut-dummy
+        load: true
+        tags: eneru-e2e-nut-dummy:ci
+        cache-from: type=gha,scope=e2e-nut-dummy
+        cache-to: type=gha,mode=max,scope=e2e-nut-dummy
+
+    - name: Build ssh-target image (cached)
+      uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+      with:
+        context: ${{ inputs.e2e-dir }}/ssh-target
+        load: true
+        tags: eneru-e2e-ssh-target:ci
+        cache-from: type=gha,scope=e2e-ssh-target
+        cache-to: type=gha,mode=max,scope=e2e-ssh-target
+
+    - name: Start E2E environment
       shell: bash
       run: |
         cd ${{ inputs.e2e-dir }}
-        docker compose up -d --build
+        docker compose up -d --no-build
         docker compose ps
 
     - name: Wait for services to be ready

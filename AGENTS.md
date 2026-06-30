@@ -125,6 +125,12 @@ examples/                       # Example configs
   config-enterprise.yaml        # Multi-server enterprise setup
   config-dual-ups.yaml          # Multi-UPS setup
 
+tools/
+  dashboard-preview.py          # Serve working-tree web/ + proxy /api to a live
+                                # daemon, screenshot every tab (Playwright). The
+                                # standard way to visually verify dashboard
+                                # changes; see the dashboard-preview skill.
+
 packaging/
   eneru-wrapper.py              # Package entry point wrapper
   eneru.service                 # Systemd service file
@@ -225,7 +231,7 @@ This repo deliberately keeps individual files small (`monitor.py` is now ~830 li
 `main` is protected. All changes go through feature branches and pull requests.
 
 **Branch protection on `main`:**
-- Required CI checks before merge: `validate` (Python 3.9-3.14, 6 jobs) + 6 parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy`, `E2E Stats`, `E2E Loopback`) — **12 checks total**
+- Required CI checks before merge: `validate` (v6.1 reduced PR matrix — runs `3.9`, `3.12`, `3.15-dev` on PRs, full set on push-to-`main`; only `3.9` + `3.12` are required checks) + **8** parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single Core`, `E2E UPS Single Auth`, `E2E UPS Multi`, `E2E Redundancy Quorum`, `E2E Redundancy Regression`, `E2E Stats`, `E2E Loopback`).
 - Strict mode: branch must be up-to-date with main before merge
 - Enforce admins: maintainers follow the same rules
 - No force pushes, no branch deletion
@@ -245,7 +251,7 @@ This repo deliberately keeps individual files small (`monitor.py` is now ~830 li
    slice / logical unit of work) — NOT one commit per push (CI flood,
    AI-reviewer quota burn) and NOT "20 commits → finally open PR" (single
    huge CI run, hard to bisect when something breaks)
-6. CI checks must pass (all 12) before merge
+6. CI checks must pass (all required: 8 E2E + validate 3.9/3.12) before merge
 7. Merge via GitHub (branch auto-deletes)
 ```
 
@@ -270,7 +276,7 @@ This repo uses **three layers of AI review**: a pre-push review via the `agent-s
 **Why manual:**
 - **CodeRabbit** free tier allows one review per 45 minutes. Per-commit auto-review burns the quota fast and produces noisy partial reviews against intermediate diffs.
 - **cubic.dev** free tier allows 40 reviews per month. Same problem.
-- We deliberately push commits early so the GitHub Actions E2E suite (`E2E CLI`, `E2E UPS Single`, `E2E UPS Multi`, `E2E Redundancy`, `E2E Stats`, `E2E Loopback`) gates work-in-progress and gives feedback fast on real-world scenarios. That CI feedback loop must stay cheap; AI review should not bottleneck it.
+- We deliberately push commits early so the GitHub Actions E2E suite (`E2E CLI`, `E2E UPS Single Core`, `E2E UPS Single Auth`, `E2E UPS Multi`, `E2E Redundancy Quorum`, `E2E Redundancy Regression`, `E2E Stats`, `E2E Loopback`) gates work-in-progress and gives feedback fast on real-world scenarios. That CI feedback loop must stay cheap; AI review should not bottleneck it.
 
 **Pre-push: spawn `agent-skills:code-reviewer` as a SUBAGENT**
 
@@ -305,7 +311,7 @@ Two reasons:
 - Single-line typo fixes
 - Pure dependency upgrades with no code changes
 
-For trivial PRs the CI gates (validate × 6 + E2E × 6) are sufficient. Saves quota for substantive changes.
+For trivial PRs the CI gates (validate 3.9/3.12 + E2E × 8) are sufficient. Saves quota for substantive changes.
 
 **Configuration:**
 - **CodeRabbit:** `.coderabbit.yaml` at repo root sets `reviews.auto_review.enabled: false`. The file also documents the manual-trigger phrase.
@@ -331,18 +337,20 @@ gh api repos/<owner>/<repo>/branches/<branch> --jq '.commit.sha'
 
 Update both the SHA and the `# vX.Y` trailing comment in lockstep. After bumping, run the full CI matrix on a throwaway branch before merging — silent breakage is the failure mode the pins exist to prevent in the first place.
 
-The current pinned set (as of 2026-04-22):
+The current pinned set (as of 2026-06-29):
 
 | Action | Tag | SHA prefix |
 |---|---|---|
-| `actions/checkout` | `v6` | `de0fac2e…` |
-| `actions/setup-python` | `v6` | `a309ff8b…` |
-| `actions/upload-artifact` | `v4` / `v7` | `ea165f8d…` / `043fb46d…` |
-| `actions/download-artifact` | `v4` / `v8` | `d3f86a10…` / `3e5f45b2…` |
-| `codecov/codecov-action` | `v6` | `57e3a136…` |
-| `github/codeql-action` | `v4` | `b25d0ebf…` |
+| `actions/checkout` | `v7.0.0` | `9c091bb2…` |
+| `actions/setup-python` | `v6` | `ece7cb06…` |
+| `actions/upload-artifact` | `v7` | `043fb46d…` |
+| `actions/download-artifact` | `v8` | `3e5f45b2…` |
+| `codecov/codecov-action` | `v6` | `fb8b3582…` |
+| `github/codeql-action` | `v4` | `8aad20d1…` |
 | `pypa/gh-action-pypi-publish` | `release/v1` | `cef22109…` |
-| `softprops/action-gh-release` | `v3` | `b4309332…` |
+| `softprops/action-gh-release` | `v3` | `718ea10b…` |
+| `docker/setup-buildx-action` | `v3` | `8d2750c6…` |
+| `docker/build-push-action` | `v6` | `10e90e36…` |
 
 `nFPM` is similarly pinned (`NFPM_VERSION` env var in `release.yml` and `integration.yml`) and verified against the goreleaser-published `checksums.txt` before extraction. Bump the version constant and the checksum check still verifies the new download.
 

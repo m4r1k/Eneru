@@ -19,6 +19,7 @@ _eneru() {
         'monitor:Launch real-time TUI dashboard'
         'tui:Alias for monitor -- launch real-time TUI dashboard'
         'test-notifications:Send a test notification and exit'
+        'self-test:Issue or inspect a UPS battery self-test'
         'completion:Print shell completion script (bash/zsh/fish)'
         'version:Show version information'
     )
@@ -82,6 +83,27 @@ _eneru() {
                     else
                         _values 'remote command' list
                     fi
+                    ;;
+                self-test)
+                    case "$line[2]" in
+                        run)
+                            _arguments \
+                                '--ups[UPS name]:ups:' \
+                                '(-c --config)'{-c,--config}'[path to configuration file]:config file:_files' \
+                                '--direct[issue directly via NUT, no daemon]' \
+                                '--url[daemon API base URL]:url:' \
+                                '--token[bearer session token]:token:' \
+                                '--api-key[API key]:apikey:'
+                            ;;
+                        status)
+                            _arguments \
+                                '--ups[UPS name]:ups:' \
+                                '(-c --config)'{-c,--config}'[path to configuration file]:config file:_files'
+                            ;;
+                        *)
+                            _values 'self-test command' run status
+                            ;;
+                    esac
                     ;;
                 validate|test-notifications)
                     _arguments \

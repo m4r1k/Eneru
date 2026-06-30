@@ -50,6 +50,10 @@ nav:
       - Observability and API: observability-api.md
       - Authentication: authentication.md
       - UPS control: nut-control.md
+      - Self-test: self-test.md
+      - Battery health: battery-health.md
+      - Energy tracking: energy-tracking.md
+      - Reports: reports.md
       - Statistics: statistics.md
       - Troubleshooting: troubleshooting.md
   - Project:

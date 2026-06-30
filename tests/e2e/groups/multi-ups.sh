@@ -18,6 +18,9 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
+# Shared E2E helpers (apply_scenario: poll-until-applied scenario swaps).
+. "$E2E_DIR/groups/lib.sh"
+
 # ======================================================================
 # Test 9: Multi-UPS isolation (UPS1 fails, UPS2 normal)
 # ======================================================================
@@ -31,13 +34,11 @@ echo "=== Test 9: Multi-UPS Isolation ==="
 rm -f /tmp/eneru-e2e-shutdown-flag*
 
 # Ensure both UPSes start online
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 
 # Now fail UPS1 (low battery) while UPS2 stays online
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-sleep 3
+apply_scenario low-battery UPS1
 
 # Verify UPS1 is on battery / low
 UPS1_STATUS=$(upsc UPS1@localhost:3493 ups.status 2>/dev/null)
@@ -95,9 +96,8 @@ echo "=== Test 10: Multi-UPS Normal Operation ==="
 rm -f /tmp/eneru-e2e-shutdown-flag*
 
 # Both UPSes online
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 
 # Run briefly -- should NOT trigger any shutdown
 timeout 5 eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml 2>&1 | tee /tmp/test10.log || true
@@ -123,9 +123,8 @@ echo "=== Test 14: Concurrent UPS Failure ==="
 rm -f /tmp/eneru-e2e-shutdown-flag*
 
 # Both UPSes go low-battery simultaneously
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario low-battery UPS1
+apply_scenario low-battery UPS2
 
 # Run multi-UPS Eneru -- both groups should trigger shutdown
 eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test14.log || true
@@ -166,9 +165,8 @@ echo "=== Test 15: Non-Local UPS Failure ==="
 rm -f /tmp/eneru-e2e-shutdown-flag*
 
 # UPS1 stays online, UPS2 goes low-battery
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario online-charging UPS1
+apply_scenario low-battery UPS2
 
 # Verify UPS states
 UPS1_STATUS=$(upsc UPS1@localhost:3493 ups.status 2>/dev/null)
@@ -209,9 +207,8 @@ echo "=== Test 16: Local Drain ==="
 rm -f /tmp/eneru-e2e-shutdown-flag*
 
 # UPS1 (is_local) goes low-battery, UPS2 stays online
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario low-battery UPS1
+apply_scenario online-charging UPS2
 
 # Run with drain config
 eneru run --config $E2E_DIR/config-e2e-multi-ups-drain.yaml --exit-after-shutdown 2>&1 | tee /tmp/test16.log || true
@@ -248,9 +245,8 @@ echo "=== Test 17: Local No-Drain ==="
 rm -f /tmp/eneru-e2e-shutdown-flag*
 
 # UPS1 (is_local) goes low-battery, UPS2 stays online
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario low-battery UPS1
+apply_scenario online-charging UPS2
 
 # Run with default multi-UPS config (drain=false)
 eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test17.log || true
@@ -284,8 +280,7 @@ echo "=== Test 18: Power Recovery ==="
 rm -f /tmp/eneru-e2e-shutdown-flag*
 
 # Start with on-battery (above thresholds -- no shutdown trigger)
-cp $E2E_DIR/scenarios/on-battery.dev $E2E_DIR/scenarios/apply.dev
-sleep 3
+apply_scenario on-battery
 
 # Run Eneru in background
 timeout 12 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test18.log &
@@ -295,8 +290,7 @@ ENERU_PID=$!
 sleep 4
 
 # Restore power
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-sleep 3
+apply_scenario online-charging
 
 # Wait for Eneru to detect recovery
 wait $ENERU_PID 2>/dev/null || true
@@ -340,8 +334,7 @@ done
 rm -f /tmp/eneru-e2e-shutdown-order-flag
 
 # Trigger shutdown via low battery
-cp scenarios/low-battery.dev scenarios/apply.dev
-sleep 3
+apply_scenario low-battery
 
 eneru run --config config-e2e-shutdown-order.yaml --exit-after-shutdown 2>&1 \
   | tee /tmp/test19.log || true
@@ -444,10 +437,9 @@ rm -f /tmp/eneru-e2e-restart-multi-shutdown-flag
 # the multi-UPS scenarios use); without resetting them here Test 36
 # inherits whatever state the previous test left, becoming order-
 # dependent. (CodeRabbit P1 from PR #35 review.)
-cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply.dev"
-cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply-UPS1.dev"
-cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply-UPS2.dev"
-sleep 3
+apply_scenario online-charging
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 
 # --- First run: coordinator startup, then SIGTERM. ---
 eneru run --config "$E2E_DIR/config-e2e-restart-multi.yaml" > /tmp/test36-run1.log 2>&1 &

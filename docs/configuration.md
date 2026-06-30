@@ -188,6 +188,11 @@ Validation catches YAML errors, invalid enum values, local-resource ownership mi
 | `prometheus` | Global | `/metrics` endpoint toggle |
 | `remote_health` | Global | Harmless SSH connectivity checks for remote servers |
 | `mqtt` | Global | Optional outbound MQTT status publishing |
+| `nut_control` | Global, overridable per group | UPS control via NUT (write surface; requires API auth) |
+| `battery_health` | Global, overridable per UPS | Battery health score + replacement prediction (v6.1) |
+| `self_test` | Global, overridable per UPS | Scheduled UPS battery self-test (v6.1; write surface) |
+| `reports` | Global | Periodic summary reports via the notification channel (v6.1) |
+| `energy` | Global | kWh and optional cost tracking (v6.1) |
 | `notifications` | Global | Apprise URLs, retry, coalescing, and event suppression |
 | `statistics` | Global | SQLite history location and retention |
 | `virtual_machines` | Single UPS or local group only | Libvirt VM shutdown |
@@ -357,7 +362,11 @@ so a typo never takes monitoring down. Valid changes are split in two:
 - **Applied live:** trigger thresholds (per UPS group), `behavior.dry_run`,
   `nut_control` allowlists/credentials, `prometheus.enabled`, `notifications`
   (URLs/targets, via an Apprise rebuild), MQTT broker/topic/interval,
-  `remote_health` interval/probe/thresholds, and `statistics.retention`.
+  `remote_health` interval/probe/thresholds, `statistics.retention`, and the
+  v6.1 sections `energy`, `battery_health`, `self_test`, and `reports`. These
+  are SAFE reloads because their `Schedule` objects are recomputed from config
+  on every loop, so the next due-check picks up the new schedule with no
+  scheduler re-register step.
 - **Restart-required (reported, not applied):** `api.bind`/`port` and auth,
   UPS/redundancy topology, `logging`, `local_shutdown`, and
   `statistics.db_directory`. These are captured at startup by sockets, file

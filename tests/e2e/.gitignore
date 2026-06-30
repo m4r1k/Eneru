@@ -1,5 +1,9 @@
-# E2E test artifacts
+# E2E test artifacts — runtime scenario triggers, atomic-publish temps,
+# and the "applied" confirmation markers the dummy watcher touches.
 scenarios/apply.dev
+scenarios/apply-*.dev
+scenarios/apply*.tmp
+scenarios/applied-*
 *.log
 
 # SSH keys (generated during tests)

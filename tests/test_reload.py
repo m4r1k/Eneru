@@ -147,6 +147,46 @@ def test_apply_reload_group_non_trigger_change_restart(tmp_path):
 
 
 @pytest.mark.unit
+def test_apply_reload_per_ups_v61_overrides_live(tmp_path):
+    # Per-UPS battery_health / self_test overrides are read live by the v6.1
+    # resolvers each tick, so a reload must apply them IN PLACE — not punt the
+    # whole group to restart-required (the original B1a gap CodeRabbit flagged).
+    base = (
+        "api:\n  auth:\n    enabled: true\n"
+        "nut_control:\n  enabled: true\n  allowed_commands: [test.battery.start]\n"
+        "ups:\n"
+        "  - name: U1@h\n"
+        "    battery_health:\n      expected_life_years: {y}\n"
+        "    self_test:\n      schedule: {sch}\n      command: test.battery.start\n"
+        "  - name: U2@h\n"
+    )
+    live = _load(_write(tmp_path / "a.yaml", base.format(y=5, sch="monthly")))
+    new = _load(_write(tmp_path / "b.yaml", base.format(y=3, sch="weekly")))
+    report = reloadmod.apply_reload(live, [live], new)
+    assert "battery_health:U1@h" in report["applied"]
+    assert "self_test:U1@h" in report["applied"]
+    # The whole group must NOT be punted to restart-required for a live field.
+    assert "ups_groups:U1@h" not in report["restartRequired"]
+    g1 = next(g for g in live.ups_groups if g.ups.name == "U1@h")
+    assert g1.battery_health.expected_life_years == 3
+    assert g1.self_test.schedule == "weekly"
+
+
+@pytest.mark.unit
+def test_apply_reload_per_ups_other_field_still_restart(tmp_path):
+    # A per-UPS change OUTSIDE the live set (e.g. virtual_machines) is still
+    # restart-required even alongside a live battery_health change.
+    base = ("ups:\n  - name: U@h\n"
+            "    battery_health:\n      expected_life_years: {y}\n"
+            "    virtual_machines:\n      enabled: {vm}\n")
+    live = _load(_write(tmp_path / "a.yaml", base.format(y=5, vm="false")))
+    new = _load(_write(tmp_path / "b.yaml", base.format(y=3, vm="true")))
+    report = reloadmod.apply_reload(live, [live], new)
+    assert "battery_health:U@h" in report["applied"]
+    assert "ups_groups:U@h" in report["restartRequired"]
+
+
+@pytest.mark.unit
 def test_apply_reload_dedups_trigger_tag_across_configs(tmp_path):
     primary = _load(_write(tmp_path / "a.yaml",
                            "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 20\n"))
@@ -484,3 +524,66 @@ def test_coordinator_reload_remote_health_and_mqtt_bounce_workers():
     assert coord._redundancy_remote_health_managers == []
     old_mqtt.stop.assert_called_once()
     coord._start_mqtt_publisher.assert_called_once()
+
+
+# ----- reload bucket completeness (regression meta-test) -----
+
+@pytest.mark.unit
+def test_every_config_section_has_a_reload_bucket():
+    """Regression guard: every top-level Config dataclass section must be
+    classified into exactly one reload bucket (SAFE / SUBSYSTEM / RESTART) OR be
+    one of the explicitly-handled topology sections. A future field added without
+    a reload bucket would silently never apply (or never be restart-flagged), so
+    this fails the moment that happens — forcing the author to pick a bucket.
+    """
+    import dataclasses
+
+    # Non-config Config fields: the source path + the NOTIFY_* severity
+    # constants are not user-tunable sections and have no reload semantics.
+    non_config_fields = {
+        "config_path",
+        "NOTIFY_FAILURE", "NOTIFY_WARNING", "NOTIFY_SUCCESS", "NOTIFY_INFO",
+    }
+    # Topology sections are handled explicitly in apply_reload (diffed by name /
+    # by value), not via the section-name bucket tuples.
+    topology_sections = {"ups_groups", "redundancy_groups"}
+
+    buckets = {
+        "SAFE": set(reloadmod.SAFE_TOP_SECTIONS),
+        "SUBSYSTEM": set(reloadmod.SUBSYSTEM_SECTIONS),
+        "RESTART": set(reloadmod.RESTART_TOP_SECTIONS),
+    }
+
+    section_fields = [
+        f.name for f in dataclasses.fields(Config)
+        if f.name not in non_config_fields and f.name not in topology_sections
+    ]
+    assert section_fields, "expected some classifiable Config sections"
+
+    for name in section_fields:
+        memberships = [b for b, names in buckets.items() if name in names]
+        assert len(memberships) == 1, (
+            f"Config section {name!r} must belong to exactly ONE reload bucket "
+            f"(SAFE/SUBSYSTEM/RESTART) or be an explicit topology section; "
+            f"found in: {memberships or 'NONE'}. Add it to a bucket in "
+            f"reload.py (or to topology_sections here if it is handled "
+            f"specially).")
+
+
+@pytest.mark.unit
+def test_reload_buckets_are_mutually_exclusive_and_no_unknown_names():
+    """The three bucket tuples must not overlap, and must not reference a name
+    that is not an actual Config field (a typo'd bucket entry would silently do
+    nothing)."""
+    import dataclasses
+
+    safe = set(reloadmod.SAFE_TOP_SECTIONS)
+    sub = set(reloadmod.SUBSYSTEM_SECTIONS)
+    restart = set(reloadmod.RESTART_TOP_SECTIONS)
+    assert safe.isdisjoint(sub)
+    assert safe.isdisjoint(restart)
+    assert sub.isdisjoint(restart)
+
+    real_fields = {f.name for f in dataclasses.fields(Config)}
+    for name in safe | sub | restart:
+        assert name in real_fields, f"reload bucket references unknown field {name!r}"

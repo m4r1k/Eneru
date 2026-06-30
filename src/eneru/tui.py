@@ -87,6 +87,11 @@ POWER_EVENTS = frozenset({
     "FSD_DETECTED",
     "CONNECTION_LOST",
     "CONNECTION_RESTORED",
+    # v6.1 battery-health alerts — critical/actionable, must show by default
+    # (they were landing in Diagnostics, hidden at the default verbosity).
+    "BATTERY_HEALTH_CRITICAL",
+    "BATTERY_HEALTH_WARNING",
+    "BATTERY_REPLACEMENT_PREDICTED",
 })
 
 LIFECYCLE_EVENTS = frozenset({

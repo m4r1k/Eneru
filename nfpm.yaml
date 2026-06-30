@@ -207,6 +207,34 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/scheduler.py
+    dst: /opt/ups-monitor/eneru/scheduler.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/energy.py
+    dst: /opt/ups-monitor/eneru/energy.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/self_test.py
+    dst: /opt/ups-monitor/eneru/self_test.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/reports.py
+    dst: /opt/ups-monitor/eneru/reports.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   - src: src/eneru/api.py
     dst: /opt/ups-monitor/eneru/api.py
     file_info:
@@ -264,6 +292,13 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/shutdown/plan.py
+    dst: /opt/ups-monitor/eneru/shutdown/plan.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   - src: src/eneru/shutdown/vms.py
     dst: /opt/ups-monitor/eneru/shutdown/vms.py
     file_info:
@@ -309,6 +344,13 @@ contents:
 
   - src: src/eneru/health/battery.py
     dst: /opt/ups-monitor/eneru/health/battery.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/health/prediction.py
+    dst: /opt/ups-monitor/eneru/health/prediction.py
     file_info:
       mode: 0644
       owner: root

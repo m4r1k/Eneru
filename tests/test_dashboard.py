@@ -113,23 +113,43 @@ def test_dashboard_js_contains_plan_control_surfaces(minimal_config):
 
 
 @pytest.mark.unit
+def test_dashboard_js_contains_v61_surfaces(minimal_config):
+    # The v6.1 battery-health / energy / self-test wiring must stay present in
+    # the served dashboard so the new sensors remain visible + actionable.
+    body = _handler(minimal_config, path="/app.js")._serve_static("/app.js")[1]
+    text = body.decode("utf-8")
+    assert "batteryHealth" in text
+    assert "u.energy" in text
+    assert "runSelfTest(" in text
+    assert "/self-test" in text
+    # The self-test button must debounce: a non-idempotent hardware POST can't be
+    # double-clicked into multiple tests.
+    assert "if (btn) btn.disabled = true" in text
+
+
+@pytest.mark.unit
 def test_dashboard_js_graph_is_resize_safe(minimal_config):
     # Guard the graph-scaling fix (no browser in CI): the renderer must size the
-    # viewBox to the host width, use non-scaling strokes, and register a single
-    # resize observer rather than stretching a fixed viewBox.
+    # viewBox to the host width, use non-scaling strokes, and register a resize
+    # observer per chart rather than stretching a fixed viewBox. v6.1: the single
+    # global graph became the reusable makeChart factory (one instance per tab).
     text = _handler(minimal_config, path="/app.js")._serve_static(
         "/app.js")[1].decode("utf-8")
-    assert "observeGraphResize" in text
+    assert "function makeChart" in text
+    assert "function drawChart" in text
+    assert "new ResizeObserver(redraw)" in text
     assert "non-scaling-stroke" in text
     assert "host.clientWidth" in text
 
 
 @pytest.mark.unit
 def test_dashboard_has_wide_history_surfaces(minimal_config):
-    # Guard the Slice B surfaces: graph + event range selectors and the
-    # "load older" paging that drives wide-history viewing.
+    # Guard the Slice B surfaces: per-tab chart + event range selectors and the
+    # "load older" paging that drives wide-history viewing. v6.1 split the single
+    # History graph into per-tab charts (power/battery/energy ranges).
     html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
-    assert 'id="graph-range"' in html
+    assert 'id="battery-range"' in html
+    assert 'id="power-range"' in html
     assert 'id="event-range"' in html
     assert 'id="event-load-older"' in html
     js = _handler(minimal_config, path="/app.js")._serve_static(
@@ -261,6 +281,255 @@ def test_dashboard_theme_palette_supports_light_dark_system(minimal_config):
     assert 'data-theme="light"' in css
     assert 'data-theme="dark"' in css
     assert "prefers-color-scheme: light" in css
+
+
+@pytest.mark.unit
+def test_dashboard_serves_tabbed_shell(minimal_config):
+    # v6.1: the dashboard is a tabbed SPA. The tab nav + every panel must be in
+    # the served markup with real ARIA roles, and the JS must own the tab logic
+    # (arrow-key nav + hash routing). No browser in CI, so assert the surfaces.
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    assert 'role="tablist"' in html
+    for tab in ("overview", "power", "battery", "energy", "events", "control", "config"):
+        assert f'id="tab-{tab}"' in html
+        assert f'id="panel-{tab}"' in html
+    assert 'role="tab"' in html
+    assert 'role="tabpanel"' in html
+    assert 'aria-controls="panel-overview"' in html
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    assert "function selectTab" in js
+    assert "function initTabs" in js
+    assert "aria-selected" in js
+    assert "ArrowRight" in js and "ArrowLeft" in js
+    assert "hashchange" in js
+    # The Control tab is hidden until authenticated + nut_control enabled.
+    assert 'id="tab-control"' in html and "tab.hidden = !available" in js
+
+
+@pytest.mark.unit
+def test_dashboard_charts_have_bands_and_event_overlays(minimal_config):
+    # v6.1 B9b: the Power chart carries voltage threshold bands (reference
+    # overlay of the live config) and charts carry power-event overlay markers.
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    assert "isVoltageMetric" in js
+    assert "eventMarkerClass" in js
+    assert "nominalVoltage" in js and "warningLow" in js and "warningHigh" in js
+    # Band is presented as a reference overlay, not historical truth.
+    assert "reference overlay" in js
+    # Marker count is bounded so a dense window doesn't drown the SVG.
+    assert "const MAX = 100" in js
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    assert ".band" in css and ".ev-line" in css
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    assert 'id="power-graph"' in html
+    assert 'id="battery-health"' in html
+    assert 'id="energy-cards"' in html
+
+
+@pytest.mark.unit
+def test_dashboard_energy_dual_line_and_power_endpoint(minimal_config):
+    # v6.1 UX: the Energy chart is a dual-line load% + watts plot fed by the new
+    # /power endpoint (not the old load-only history metric).
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    assert "function makeEnergyChart" in js
+    assert "function drawEnergyChart" in js
+    assert "/power" in js
+    assert "plot-load" in js and "plot-watts" in js
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    assert ".plot-watts" in css
+
+
+@pytest.mark.unit
+def test_dashboard_tier1_events_and_dropdown_and_icons(minimal_config):
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    # Chart markers + default events view key off the window-independent tier.
+    assert "isTier1Event" in js
+    assert "TIER1_EVENT_PATTERNS" in js
+    assert "function eventPassesTier" in js
+    # Dropdown closes on outside click; chart load() has a generation race guard.
+    assert "details.event-type-picker[open]" in js
+    assert "myGen !== gen" in js
+    # Tabs carry inline-SVG icons injected by initTabs (no emoji font / tofu).
+    assert "TAB_ICONS" in js and "function initTabs" in js
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    # Brand lightning bolt in the header + inline ⚡ SVG favicon (no packaged
+    # asset, no emoji font dependency).
+    assert 'class="ic brand-bolt"' in html
+    assert "image/svg+xml" in html
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    assert ".tab .ic" in css and ".brand-bolt" in css
+    # Keyboard focus cue on panels is preserved (not removed).
+    assert ".panel:focus-visible" in css and "outline: 2px solid var(--accent)" in css
+
+
+@pytest.mark.unit
+def test_dashboard_shared_range_and_cost_hint(minimal_config):
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    # All three chart ranges carry identical options so the shared-range sync works.
+    for rid in ('id="power-range"', 'id="battery-range"', 'id="energy-range"'):
+        assert rid in html
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    assert "RANGE_SELECTS" in js
+    # UPS selection is shared across the chart tabs too (like Range).
+    assert "CHART_UPS_SELECTS" in js
+    # Cost hint keys off whether cost is CONFIGURED, not whether a value exists.
+    assert "energyCostConfigured" in js
+    assert '"todayCost" in en' in js
+
+
+@pytest.mark.unit
+def test_dashboard_round3_ux(minimal_config):
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    # Metric name + unit label on charts.
+    assert "function metricLabel" in js and "Input voltage (V)" in js
+    assert ".chart-title" in css
+    # Event markers: triangle pin + color-by-type incl. green recovery + non-blue.
+    assert "ev-pin" in js and "ev-ok" in js
+    assert ".ev-ok" in css and ".ev-pin" in css
+    # Energy: "calculating…" not "unknown"; month hidden until data; the
+    # window/estimated context moved from footnotes to "?" hints (ENERGY_HELP).
+    assert "calculating" in js
+    assert "ENERGY_HELP" in js and "function helpHint" in js
+    assert "This month" in js
+    # Config tab: colored, collapsible JSON tree (<details> per section) + only
+    # enabled features.
+    assert "json-tree" in js and "Enabled features" in js
+    assert "function jsonNode" in js and "json-node" in js
+    assert ".json-tree" in css and ".j-key" in css and ".j-str" in css
+    # Detail modal closes on backdrop click; events filters scroll to top.
+    assert 'ev.target.id === "detail-modal"' in js
+    assert "window.scrollTo(0, 0)" in js
+
+
+@pytest.mark.unit
+def test_dashboard_event_markers_are_hoverable(minimal_config):
+    # The whole vertical guide (not just the 3px dot) must be hoverable and the
+    # tooltip must carry the event description (type + time + detail).
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    assert "function appendEventMarker" in js
+    assert "function eventDescription" in js
+    assert "ev-hit" in js
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    assert ".ev-hit" in css and "stroke: transparent" in css
+
+
+@pytest.mark.unit
+def test_dashboard_instant_tooltip_replaces_native_title(minimal_config):
+    # Event markers use the instant, themed floating tip (bindTip/eventTipNode),
+    # NOT the native SVG <title> that only appeared after a ~1s browser delay.
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    assert "function bindTip" in js and "function showTip" in js
+    assert "function eventTipNode" in js
+    # The native-title element must be gone from the marker builder.
+    assert 'createElementNS(SVG_NS, "title")' not in js
+    assert ".tip {" in css and ".help {" in css
+
+
+@pytest.mark.unit
+def test_dashboard_remote_server_health_widget(minimal_config):
+    # Overview surfaces remote-server reachability from /api/v1/remote-health.
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    assert "function renderRemoteHealth" in js and "remoteStatusClass" in js
+    assert 'id="remote-section"' in html and 'id="remote-cards"' in html
+    assert "reachable" in js and "unreachable" in js
+
+
+@pytest.mark.unit
+def test_dashboard_line_quality_card(minimal_config):
+    # Power tab carries a derived Good/Fair/Poor line-quality summary built from
+    # the live power-quality block (voltage band, frequency, regulation states).
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    assert "function renderLineQuality" in js and "function lineQuality" in js
+    assert 'id="line-quality"' in html
+    assert "Line quality" in js
+    # Reads the UPS regulation states the daemon exposes.
+    for state in ("voltageState", "avrState", "bypassState", "overloadState"):
+        assert state in js
+
+
+@pytest.mark.unit
+def test_dashboard_event_tier_dropdown(minimal_config):
+    # The Events tab gains a window-INDEPENDENT tier selector (power/diag/all)
+    # so widening the time range still surfaces power events.
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    assert 'id="event-tier"' in html
+    assert "function eventTierMode" in js and "function eventPassesTier" in js
+    assert "function eventTierOf" in js and "function isLifecycleEvent" in js
+    # Emitted names are matched correctly (BATTERY_LOW, not LOW_BATTERY) and the
+    # v6.1 battery-health alerts are tier-1.
+    assert '"BATTERY_LOW"' in js and '"BATTERY_HEALTH"' in js
+    assert '"LOW_BATTERY"' not in js
+    # The old window-derived default was removed.
+    assert "_eventTypeDefaultApplied" not in js
+
+
+@pytest.mark.unit
+def test_dashboard_rc11_surfaces(minimal_config):
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    # Shutdown tab: nav button + panel + DAG renderer.
+    assert 'data-tab="shutdown"' in html and 'id="panel-shutdown"' in html
+    assert 'id="shutdown-plan"' in html
+    assert "function renderShutdownPlan" in js and "shutdown-plan" in js
+    assert ".sd-flow" in css and ".sd-node" in css
+    # Shutdown plan is reachable per-UPS (remote-only/multi-UPS) + shows the
+    # redundancy-group quorum trigger.
+    assert 'id="shutdown-ups"' in html
+    assert "function populateShutdownUpsSelect" in js
+    assert "function shutdownTriggerNodes" in js and ".sd-trigger" in css
+    assert "drops below" in js
+    # Battery: per-term breakdown + score trend graph (new history endpoint).
+    assert "BH_TERM_LABELS" in js and "function renderBatteryHealthGraph" in js
+    assert "battery-health-history" in js
+    assert 'id="bh-graph"' in html
+    # Temperature is graphable on the Battery tab.
+    assert '<option value="temperature"' in html
+    # Events table: colored, icon-led type badges.
+    assert "function eventTypeBadge" in js and ".ev-badge" in css
+    # Energy: this-year window.
+    assert "yearKwh" in js and "This year" in js
+    # Event-marker hover works over the whole column (decoration non-interactive).
+    assert "pointer-events: none" in css
+
+
+@pytest.mark.unit
+def test_dashboard_json_tree_preserves_state_and_drops_counts(minimal_config):
+    # The config JSON tree must not collapse on every 10s poll (rebuild only when
+    # the config changed) and must not show the ugly per-section item count.
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+    assert "_lastConfigJson" in js
+    assert "j-ellipsis" in js and ".j-ellipsis" in css
+    # The old "{ <count> }" annotation (template literal over entries.length) is gone.
+    assert "entries.length" not in js
 
 
 @pytest.mark.unit

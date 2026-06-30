@@ -183,6 +183,83 @@ class NutControlConfig:
 
 
 @dataclass
+class BatteryReplacementConfig:
+    """When to predict battery replacement (nested under battery_health)."""
+    threshold_score: float = 50.0   # health score the battery is "due" at
+    horizon_days: int = 90          # only warn if the crossing is within this
+    min_history_days: int = 14      # don't trend on less history than this
+
+
+@dataclass
+class BatteryHealthConfig:
+    """Battery-health scoring + replacement prediction (v6.1).
+
+    Per-UPS overridable (different UPSes have different batteries): the
+    install date, learned/declared nominal runtime, and expected life are
+    UPS-specific. A per-UPS block overrides these for that UPS; unset fields
+    inherit this global default.
+    """
+    enabled: bool = True
+    update_interval: int = 3600                      # seconds between computations
+    nominal_runtime_seconds: Optional[int] = None    # None => autodetect at 100%
+    battery_install_date: Optional[str] = None       # "YYYY-MM-DD"; None => age term unavailable
+    expected_life_years: float = 5.0
+    # Escalating absolute health-score alerts, complementing the trend-based
+    # replacement prediction. Each fires once when the score first drops below
+    # it and re-arms when the score recovers above it. None disables that tier.
+    warn_score: Optional[float] = 30.0
+    critical_score: Optional[float] = 15.0
+    replacement: BatteryReplacementConfig = field(
+        default_factory=BatteryReplacementConfig)
+
+
+@dataclass
+class SelfTestConfig:
+    """Scheduled UPS self-test (v6.1). Off by default.
+
+    A write surface like nut_control: enabling it requires nut_control +
+    api.auth and that the command is on the nut_control allowlist (enforced
+    in validation), so a scheduled test is never a back door around the v6.0
+    control allowlist. Per-UPS overridable.
+    """
+    enabled: bool = False
+    schedule: str = "monthly"            # daily|weekly|monthly or "every <N>d/h/m"
+    time: str = "03:00"                  # wall-clock for calendar schedules
+    command: str = "test.battery.start"  # adapts to whatever upscmd -l exposes
+    result_poll_after: int = 60          # seconds after issue before polling result
+
+
+@dataclass
+class ReportsConfig:
+    """Periodic summary reports delivered via the notification channel (v6.1)."""
+    enabled: bool = False
+    daily: bool = False
+    weekly: bool = False
+    monthly: bool = False
+    time: str = "08:00"                  # wall-clock send time
+    weekly_day: str = "monday"
+    monthly_day: int = 1
+    include: List[str] = field(default_factory=lambda: [
+        "events", "battery_health", "energy", "uptime"])
+    format: str = "text"                 # text | csv
+
+
+@dataclass
+class EnergyConfig:
+    """Energy (kWh) + optional cost tracking (v6.1).
+
+    cost_per_kwh None/unset => cost tracking disabled entirely (no cost in
+    status/metrics/UI), rather than a meaningless zero-currency graph.
+    """
+    enabled: bool = True
+    cost_per_kwh: Optional[float] = None
+    currency: str = "USD"                # ISO 4217 code
+    cost_format: Optional[str] = None    # e.g. "{value} €"; overrides the currency table
+    nominal_power: Optional[float] = None  # rated W/VA; estimates watts when the
+    # UPS reports neither ups.realpower nor ups.power.nominal
+
+
+@dataclass
 class NotificationsConfig:
     """Notifications configuration using Apprise."""
     enabled: bool = False
@@ -429,6 +506,11 @@ class UPSGroupConfig:
     # v6.0: optional per-group UPS-control override (creds/allowlists) for
     # deployments where this UPS lives on a different upsd. None => use global.
     nut_control: Optional[NutControlConfig] = None
+    # v6.1: optional per-UPS overrides. Battery health (install date, nominal
+    # runtime, expected life) and self-test support are UPS-specific, so a
+    # multi-UPS user can give each UPS its own values. None => use global.
+    battery_health: Optional[BatteryHealthConfig] = None
+    self_test: Optional[SelfTestConfig] = None
 
     @property
     def is_multi_ups(self) -> bool:
@@ -485,6 +567,11 @@ class Config:
     remote_health: RemoteHealthConfig = field(default_factory=RemoteHealthConfig)
     mqtt: MQTTConfig = field(default_factory=MQTTConfig)
     nut_control: NutControlConfig = field(default_factory=NutControlConfig)
+    # v6.1: battery intelligence, scheduled self-test, periodic reports, energy.
+    battery_health: BatteryHealthConfig = field(default_factory=BatteryHealthConfig)
+    self_test: SelfTestConfig = field(default_factory=SelfTestConfig)
+    reports: ReportsConfig = field(default_factory=ReportsConfig)
+    energy: EnergyConfig = field(default_factory=EnergyConfig)
     # v5.2.1: source path of the YAML this Config was loaded from.
     # Used by deferred_delivery to spawn a systemd-run timer that
     # re-loads the same config out-of-process. None when the Config
@@ -1092,13 +1179,54 @@ class ConfigLoader:
             nc_data = raw_nc if isinstance(raw_nc, dict) else {}
             config.nut_control = cls._parse_nut_control(nc_data, config.nut_control)
 
+        # v6.1 sections. battery_health / self_test are parsed before the UPS
+        # list so per-UPS overrides can inherit from these globals.
+        if 'battery_health' in data:
+            raw_bh = data.get('battery_health')
+            bh_data = raw_bh if isinstance(raw_bh, dict) else {}
+            config.battery_health = cls._parse_battery_health(
+                bh_data, config.battery_health)
+
+        if 'self_test' in data:
+            raw_st = data.get('self_test')
+            st_data = raw_st if isinstance(raw_st, dict) else {}
+            config.self_test = cls._parse_self_test(st_data, config.self_test)
+
+        if 'reports' in data:
+            raw_r = data.get('reports')
+            r = raw_r if isinstance(raw_r, dict) else {}
+            inc = r.get('include', config.reports.include)
+            config.reports = ReportsConfig(
+                enabled=r.get('enabled', config.reports.enabled),
+                daily=r.get('daily', config.reports.daily),
+                weekly=r.get('weekly', config.reports.weekly),
+                monthly=r.get('monthly', config.reports.monthly),
+                time=r.get('time', config.reports.time),
+                weekly_day=r.get('weekly_day', config.reports.weekly_day),
+                monthly_day=r.get('monthly_day', config.reports.monthly_day),
+                include=list(inc) if isinstance(inc, list) else config.reports.include,
+                format=r.get('format', config.reports.format),
+            )
+
+        if 'energy' in data:
+            raw_e = data.get('energy')
+            e = raw_e if isinstance(raw_e, dict) else {}
+            config.energy = EnergyConfig(
+                enabled=e.get('enabled', config.energy.enabled),
+                cost_per_kwh=e.get('cost_per_kwh', config.energy.cost_per_kwh),
+                currency=e.get('currency', config.energy.currency),
+                cost_format=e.get('cost_format', config.energy.cost_format),
+                nominal_power=e.get('nominal_power', config.energy.nominal_power),
+            )
+
         # Detect legacy vs multi-UPS format
         ups_raw = data.get('ups', {})
 
         if isinstance(ups_raw, list):
             # --- Multi-UPS mode ---
             config.ups_groups = cls._parse_multi_ups(
-                ups_raw, global_triggers, config.nut_control)
+                ups_raw, global_triggers, config.nut_control,
+                config.battery_health, config.self_test)
         else:
             # --- Legacy single-UPS mode ---
             config.ups_groups = [cls._parse_legacy_ups(data, ups_raw, global_triggers)]
@@ -1173,10 +1301,53 @@ class ConfigLoader:
             timeout=nc_data.get('timeout', base.timeout),
         )
 
+    @staticmethod
+    def _parse_battery_health(bh_data: Dict[str, Any],
+                              base: "BatteryHealthConfig") -> "BatteryHealthConfig":
+        """Parse a battery_health mapping, inheriting unset fields from ``base``."""
+        base = base or BatteryHealthConfig()
+        raw_rep = bh_data.get('replacement')
+        rep = raw_rep if isinstance(raw_rep, dict) else {}
+        return BatteryHealthConfig(
+            enabled=bh_data.get('enabled', base.enabled),
+            update_interval=bh_data.get('update_interval', base.update_interval),
+            nominal_runtime_seconds=bh_data.get(
+                'nominal_runtime_seconds', base.nominal_runtime_seconds),
+            battery_install_date=bh_data.get(
+                'battery_install_date', base.battery_install_date),
+            expected_life_years=bh_data.get(
+                'expected_life_years', base.expected_life_years),
+            warn_score=bh_data.get('warn_score', base.warn_score),
+            critical_score=bh_data.get('critical_score', base.critical_score),
+            replacement=BatteryReplacementConfig(
+                threshold_score=rep.get(
+                    'threshold_score', base.replacement.threshold_score),
+                horizon_days=rep.get('horizon_days', base.replacement.horizon_days),
+                min_history_days=rep.get(
+                    'min_history_days', base.replacement.min_history_days),
+            ),
+        )
+
+    @staticmethod
+    def _parse_self_test(st_data: Dict[str, Any],
+                         base: "SelfTestConfig") -> "SelfTestConfig":
+        """Parse a self_test mapping, inheriting unset fields from ``base``."""
+        base = base or SelfTestConfig()
+        return SelfTestConfig(
+            enabled=st_data.get('enabled', base.enabled),
+            schedule=st_data.get('schedule', base.schedule),
+            time=st_data.get('time', base.time),
+            command=st_data.get('command', base.command),
+            result_poll_after=st_data.get(
+                'result_poll_after', base.result_poll_after),
+        )
+
     @classmethod
     def _parse_multi_ups(cls, ups_list: list,
                           global_triggers: TriggersConfig,
-                          global_nut_control: "NutControlConfig" = None
+                          global_nut_control: "NutControlConfig" = None,
+                          global_battery_health: "BatteryHealthConfig" = None,
+                          global_self_test: "SelfTestConfig" = None
                           ) -> List[UPSGroupConfig]:
         """Parse multi-UPS list format into UPSGroupConfig list."""
         groups = []
@@ -1221,6 +1392,18 @@ class ConfigLoader:
                 base = global_nut_control or NutControlConfig()
                 nut_control = cls._parse_nut_control(entry['nut_control'], base)
 
+            # v6.1 per-UPS overrides: same base-inheritance contract as
+            # nut_control — unset fields inherit the global default for that UPS.
+            battery_health = None
+            if isinstance(entry.get('battery_health'), dict):
+                base = global_battery_health or BatteryHealthConfig()
+                battery_health = cls._parse_battery_health(
+                    entry['battery_health'], base)
+            self_test = None
+            if isinstance(entry.get('self_test'), dict):
+                base = global_self_test or SelfTestConfig()
+                self_test = cls._parse_self_test(entry['self_test'], base)
+
             group = UPSGroupConfig(
                 ups=ups_config,
                 triggers=triggers,
@@ -1230,6 +1413,8 @@ class ConfigLoader:
                 filesystems=fs_config,
                 is_local=is_local,
                 nut_control=nut_control,
+                battery_health=battery_health,
+                self_test=self_test,
             )
             group._multi_ups = True
             groups.append(group)
@@ -1354,6 +1539,62 @@ class ConfigLoader:
                 raw_data.get("mqtt", {}),
                 {"enabled", "broker", "topic_prefix", "publish_interval"},
             ))
+            # v6.1 sections. A scalar/array for any of these (e.g.
+            # `self_test: true`, `battery_health: []`) is parsed as {} at load
+            # and would silently revert to defaults — making the section look
+            # configured while it is actually disabled. Reject it up front.
+            for _sec in ("battery_health", "self_test", "reports", "energy"):
+                if _sec in raw_data and not isinstance(raw_data[_sec], dict):
+                    messages.append(f"ERROR: {_sec} must be a mapping")
+            _bh_keys = {"enabled", "update_interval", "nominal_runtime_seconds",
+                        "battery_install_date", "expected_life_years",
+                        "warn_score", "critical_score", "replacement"}
+            _rep_keys = {"threshold_score", "horizon_days", "min_history_days"}
+            _st_keys = {"enabled", "schedule", "time", "command",
+                        "result_poll_after"}
+
+            def _check_battery_health(block, label):
+                if not isinstance(block, dict):
+                    return
+                messages.extend(cls._unknown_key_errors(label, block, _bh_keys))
+                if "replacement" in block and not isinstance(
+                        block.get("replacement"), dict):
+                    messages.append(
+                        f"ERROR: {label}.replacement must be a mapping")
+                elif isinstance(block.get("replacement"), dict):
+                    messages.extend(cls._unknown_key_errors(
+                        f"{label}.replacement", block["replacement"], _rep_keys))
+
+            _check_battery_health(raw_data.get("battery_health", {}),
+                                  "battery_health")
+            messages.extend(cls._unknown_key_errors(
+                "self_test", raw_data.get("self_test", {}), _st_keys,
+            ))
+            messages.extend(cls._unknown_key_errors(
+                "reports", raw_data.get("reports", {}),
+                {"enabled", "daily", "weekly", "monthly", "time",
+                 "weekly_day", "monthly_day", "include", "format"},
+            ))
+            # reports.include: a scalar is silently coerced to the default list
+            # at parse time, and unknown section names quietly change what gets
+            # sent — validate it on the raw data before that coercion.
+            _raw_reports = raw_data.get("reports")
+            if isinstance(_raw_reports, dict) and "include" in _raw_reports:
+                _inc = _raw_reports["include"]
+                _valid_inc = {"events", "battery_health", "energy", "uptime"}
+                if not isinstance(_inc, list):
+                    messages.append("ERROR: reports.include must be a list")
+                else:
+                    for _sec in _inc:
+                        if _sec not in _valid_inc:
+                            messages.append(
+                                f"ERROR: reports.include entry {_sec!r} is not "
+                                f"one of {sorted(_valid_inc)}")
+            messages.extend(cls._unknown_key_errors(
+                "energy", raw_data.get("energy", {}),
+                {"enabled", "cost_per_kwh", "currency", "cost_format",
+                 "nominal_power"},
+            ))
             _nc_keys = {"enabled", "username", "password", "allowed_commands",
                         "allowed_variables", "timeout"}
 
@@ -1413,6 +1654,26 @@ class ConfigLoader:
                             f"ERROR: nut_control for UPS '{name}' must not set "
                             "'enabled' (UPS control is enabled globally)")
                     _check_nut_control(block, f"ups '{name}' nut_control")
+            # v6.1 per-UPS battery_health / self_test override key checks.
+            if isinstance(raw_ups, list):
+                for idx, entry in enumerate(raw_ups):
+                    if not isinstance(entry, dict):
+                        continue
+                    name = entry.get("name") or f"ups[{idx}]"
+                    # Same non-mapping guard as the top-level sections: a scalar
+                    # per-UPS override silently reverts to the global config.
+                    for _sec in ("battery_health", "self_test"):
+                        if _sec in entry and not isinstance(entry[_sec], dict):
+                            messages.append(
+                                f"ERROR: ups '{name}' {_sec} must be a mapping")
+                    if isinstance(entry.get("battery_health"), dict):
+                        _check_battery_health(
+                            entry["battery_health"],
+                            f"ups '{name}' battery_health")
+                    if isinstance(entry.get("self_test"), dict):
+                        messages.extend(cls._unknown_key_errors(
+                            f"ups '{name}' self_test",
+                            entry["self_test"], _st_keys))
             logging_raw = raw_data.get("logging", {})
             messages.extend(cls._unknown_key_errors(
                 "logging",
@@ -1493,6 +1754,8 @@ class ConfigLoader:
                 "max_stale_data_tolerance", "connection_loss_grace_period",
                 "is_local", "triggers", "remote_servers", "virtual_machines",
                 "containers", "filesystems", "nut_control",
+                # v6.1 per-UPS overrides
+                "battery_health", "self_test",
             }
             redundancy_entry_keys = {
                 "name", "ups_sources", "min_healthy", "degraded_counts_as",
@@ -2326,5 +2589,190 @@ class ConfigLoader:
                 "authenticated. Enable api.auth and create a user with "
                 "'eneru user create' first."
             )
+
+        messages.extend(cls._validate_v61(config))
+        return messages
+
+    @staticmethod
+    def _validate_v61(config: Config) -> List[str]:
+        """Cross-field validation for the v6.1 sections."""
+        messages: List[str] = []
+
+        # String/enum schedule fields. These fail SAFE at runtime (a bad value
+        # raises ValueError inside the scheduler and the feature silently
+        # no-ops), so round-trip them through the same parse helpers the runtime
+        # uses and surface a clear ERROR rather than a silently-dead feature.
+        # Imported lazily to avoid any import-cycle risk at config import time.
+        from eneru.self_test import parse_schedule as _parse_schedule
+        from eneru.scheduler import parse_hhmm as _parse_hhmm
+        from eneru import nut_control as _nutctl
+        from eneru.scheduler import parse_weekday as _parse_weekday
+
+        st_glob = config.self_test
+        for label_prefix, st in (
+            ("self_test", st_glob),
+            *((f"self_test (UPS '{g.ups.name}')",
+               getattr(g, "self_test", None))
+              for g in config.ups_groups),
+        ):
+            if st is None:
+                continue
+            # parse_schedule also consumes self_test.time (for calendar
+            # schedules) and weekday/monthly_day defaults; round-tripping it
+            # validates both schedule and time together as the runtime does.
+            try:
+                _parse_schedule(st.schedule, st.time)
+            except (ValueError, TypeError) as exc:
+                messages.append(
+                    f"ERROR: {label_prefix}.schedule/time invalid: {exc}")
+            else:
+                # parse_schedule only reaches parse_hhmm for calendar kinds; an
+                # 'every <N>d' interval skips time. Validate time directly too so
+                # a bad time on an interval schedule is still caught.
+                try:
+                    _parse_hhmm(st.time)
+                except (ValueError, TypeError) as exc:
+                    messages.append(
+                        f"ERROR: {label_prefix}.time invalid: {exc}")
+            # result_poll_after is cast with int() at runtime after a test is
+            # issued; a bad value leaves the in-flight state half-updated and
+            # the result unpolled, so validate it up front like the others.
+            rpa = getattr(st, "result_poll_after", None)
+            if isinstance(rpa, bool) or not isinstance(rpa, int) or rpa < 1:
+                messages.append(
+                    f"ERROR: {label_prefix}.result_poll_after must be an "
+                    f"integer >= 1, got {rpa!r}")
+
+        # Reports schedule/enum fields (daemon-wide; no per-UPS override).
+        reports = config.reports
+        try:
+            _parse_hhmm(reports.time)
+        except (ValueError, TypeError) as exc:
+            messages.append(f"ERROR: reports.time invalid: {exc}")
+        try:
+            _parse_weekday(reports.weekly_day)
+        except (ValueError, TypeError) as exc:
+            messages.append(f"ERROR: reports.weekly_day invalid: {exc}")
+        md = reports.monthly_day
+        if (isinstance(md, bool) or not isinstance(md, int)
+                or not (1 <= md <= 31)):
+            messages.append(
+                f"ERROR: reports.monthly_day must be an integer 1..31, "
+                f"got {md!r}")
+        _REPORT_FORMATS = ("text", "csv")
+        if reports.format not in _REPORT_FORMATS:
+            messages.append(
+                f"ERROR: reports.format must be one of "
+                f"{', '.join(_REPORT_FORMATS)}, got {reports.format!r}")
+
+        # Self-test is a scheduled write surface. Validate the EFFECTIVE config
+        # per UPS (per-UPS override else global) against the EFFECTIVE
+        # nut_control, so a per-UPS-narrowed allowlist or a global command that
+        # isn't in a group's own allowlist is caught — a scheduled test can never
+        # be a back door around the v6.0 control allowlist.
+        for group in config.ups_groups:
+            st = getattr(group, "self_test", None) or config.self_test
+            if not st.enabled:
+                continue
+            name = group.ups.name
+            nc = group.nut_control or config.nut_control
+            if not nc.enabled:
+                messages.append(
+                    f"ERROR: self_test for UPS '{name}' requires "
+                    "nut_control.enabled (per-UPS or global) — self-tests issue "
+                    "a UPS command via NUT control.")
+            if not config.api.auth.enabled:
+                messages.append(
+                    f"ERROR: self_test for UPS '{name}' requires "
+                    "api.auth.enabled — a scheduled self-test is privileged.")
+            cmd = (st.command or "").strip() if st.command else ""
+            if not cmd:
+                messages.append(
+                    f"ERROR: self_test for UPS '{name}' is enabled but has no "
+                    "command — set self_test.command (per-UPS or global) to a "
+                    "command on nut_control.allowed_commands "
+                    "(e.g. 'test.battery.start').")
+            elif not _nutctl.command_allowed(cmd, nc.allowed_commands):
+                messages.append(
+                    f"ERROR: self_test.command '{st.command}' for UPS '{name}' "
+                    "is not in nut_control.allowed_commands — a scheduled test "
+                    "must not bypass the control allowlist. Add it to "
+                    "nut_control.allowed_commands.")
+
+        # Battery-health numeric fields must be numbers (a quoted/typo'd YAML
+        # value would otherwise blow up the runtime int()/float() coercions).
+        def _check_num(label, val, *, allow_none=True, minimum=None,
+                       maximum=None):
+            if val is None:
+                if not allow_none:
+                    messages.append(f"ERROR: {label} must be set to a number")
+                return
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                messages.append(f"ERROR: {label} must be a number, got {val!r}")
+            elif minimum is not None and val < minimum:
+                messages.append(f"ERROR: {label} must be >= {minimum}, got {val!r}")
+            elif maximum is not None and val > maximum:
+                messages.append(f"ERROR: {label} must be <= {maximum}, got {val!r}")
+
+        for label_prefix, bh in (
+            ("battery_health", config.battery_health),
+            *(((f"battery_health (UPS '{g.ups.name}')"),
+               getattr(g, "battery_health", None))
+              for g in config.ups_groups),
+        ):
+            if bh is None:
+                continue
+            # nominal_runtime_seconds + warn/critical are genuinely Optional
+            # (None = unset/disabled); the rest are non-Optional, so an explicit
+            # YAML null must be a config error (else int()/float() blows up at
+            # runtime and the feature silently dies). minimum=1 (not 0):
+            # health/prediction.py treats <= 0 as "unavailable", so a 0 here
+            # would silently disable the score term instead of erroring.
+            _check_num(f"{label_prefix}.nominal_runtime_seconds",
+                       bh.nominal_runtime_seconds, minimum=1)
+            _check_num(f"{label_prefix}.expected_life_years",
+                       bh.expected_life_years, allow_none=False, minimum=1)
+            _check_num(f"{label_prefix}.update_interval",
+                       bh.update_interval, allow_none=False, minimum=1)
+            _check_num(f"{label_prefix}.warn_score", bh.warn_score,
+                       minimum=0, maximum=100)
+            _check_num(f"{label_prefix}.critical_score", bh.critical_score,
+                       minimum=0, maximum=100)
+            if (isinstance(bh.warn_score, (int, float))
+                    and not isinstance(bh.warn_score, bool)
+                    and isinstance(bh.critical_score, (int, float))
+                    and not isinstance(bh.critical_score, bool)
+                    and bh.critical_score >= bh.warn_score):
+                messages.append(
+                    f"ERROR: {label_prefix}.critical_score "
+                    f"({bh.critical_score}) must be < warn_score "
+                    f"({bh.warn_score})")
+            # Nested replacement-prediction fields share the runtime int()/float()
+            # coercion risk as the parent — validate them the same way (all
+            # non-Optional, so reject explicit null too).
+            rep = getattr(bh, "replacement", None)
+            if rep is not None:
+                _check_num(f"{label_prefix}.replacement.threshold_score",
+                           rep.threshold_score, allow_none=False,
+                           minimum=0, maximum=100)
+                _check_num(f"{label_prefix}.replacement.horizon_days",
+                           rep.horizon_days, allow_none=False, minimum=1)
+                _check_num(f"{label_prefix}.replacement.min_history_days",
+                           rep.min_history_days, allow_none=False, minimum=1)
+
+        # Energy cost: cost_per_kwh, when set, must be a non-negative number.
+        # None/unset is valid and disables cost tracking entirely (B3).
+        cpk = config.energy.cost_per_kwh
+        if cpk is not None:
+            if isinstance(cpk, bool) or not isinstance(cpk, (int, float)) or cpk < 0:
+                messages.append(
+                    f"ERROR: energy.cost_per_kwh must be a non-negative number "
+                    f"or unset, got {cpk!r}")
+        npw = config.energy.nominal_power
+        if npw is not None:
+            if isinstance(npw, bool) or not isinstance(npw, (int, float)) or npw <= 0:
+                messages.append(
+                    f"ERROR: energy.nominal_power must be a positive number "
+                    f"or unset, got {npw!r}")
 
         return messages

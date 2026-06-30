@@ -693,6 +693,294 @@ class TestSchemaMigration:
             s.close()
 
 
+class TestSchemaMigrationV7:
+    """v6 -> v7: energy columns + battery_health / self_tests tables."""
+
+    @staticmethod
+    def _build_v6_db(path: Path) -> None:
+        """Synthesize a v6-shaped DB by hand (no v7 energy cols/tables)."""
+        c = sqlite3.connect(str(path), isolation_level=None)
+        c.execute("PRAGMA journal_mode = WAL")
+        # samples: v1 base + v2 additions == the full v6 column set.
+        c.execute(
+            "CREATE TABLE samples ("
+            "ts INTEGER NOT NULL, status TEXT, battery_charge REAL, "
+            "battery_runtime REAL, ups_load REAL, input_voltage REAL, "
+            "output_voltage REAL, depletion_rate REAL, time_on_battery INTEGER, "
+            "connection_state TEXT, battery_voltage REAL, ups_temperature REAL, "
+            "input_frequency REAL, output_frequency REAL)"
+        )
+        c.execute("CREATE INDEX idx_samples_ts ON samples(ts)")
+        for table in ("agg_5min", "agg_hourly"):
+            c.execute(
+                f"CREATE TABLE {table} ("
+                "ts INTEGER PRIMARY KEY, battery_charge_avg REAL, "
+                "battery_charge_min REAL, battery_charge_max REAL, "
+                "battery_runtime_avg REAL, ups_load_avg REAL, ups_load_max REAL, "
+                "input_voltage_avg REAL, input_voltage_min REAL, "
+                "input_voltage_max REAL, samples_count INTEGER, "
+                "output_voltage_avg REAL, battery_voltage_avg REAL, "
+                "ups_temperature_avg REAL, ups_temperature_min REAL, "
+                "ups_temperature_max REAL, input_frequency_avg REAL, "
+                "output_frequency_avg REAL)"
+            )
+        c.execute(
+            "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "ts INTEGER NOT NULL, event_type TEXT NOT NULL, detail TEXT, "
+            "notification_sent INTEGER DEFAULT 1)"
+        )
+        c.execute(
+            "CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "ts INTEGER NOT NULL, body TEXT NOT NULL, notify_type TEXT NOT NULL, "
+            "category TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', "
+            "attempts INTEGER NOT NULL DEFAULT 0, sent_at INTEGER, "
+            "delivering_at INTEGER, cancel_reason TEXT)"
+        )
+        c.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        c.execute("INSERT INTO meta(key,value) VALUES ('schema_version','6')")
+        # Seed a v6 sample so we can prove preservation across the v7 migration.
+        c.execute(
+            "INSERT INTO samples (ts, status, battery_charge, battery_runtime, "
+            "ups_load, input_voltage, output_voltage, depletion_rate, "
+            "time_on_battery, connection_state, battery_voltage, ups_temperature, "
+            "input_frequency, output_frequency) VALUES "
+            "(1000,'OL',95.0,1800.0,15.0,230.0,231.0,0.0,0,'OK',54.0,35.0,50.0,50.0)"
+        )
+        c.close()
+
+    @pytest.mark.unit
+    def test_v6_db_adds_energy_columns_to_samples(self, tmp_path):
+        path = tmp_path / "v6.db"
+        self._build_v6_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            cols = {r[1] for r in s._conn.execute("PRAGMA table_info(samples)")}
+            assert {"real_power", "power_nominal"} <= cols
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v6_db_adds_energy_avg_to_agg_tables(self, tmp_path):
+        path = tmp_path / "v6.db"
+        self._build_v6_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            for table in ("agg_5min", "agg_hourly"):
+                cols = {r[1] for r in s._conn.execute(
+                    f"PRAGMA table_info({table})")}
+                assert {"real_power_avg", "power_nominal_avg"} <= cols
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v6_db_creates_v7_tables(self, tmp_path):
+        path = tmp_path / "v6.db"
+        self._build_v6_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            tables = {r[0] for r in s._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            assert {"battery_health", "self_tests"} <= tables
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v6_data_preserved_after_v7_migration(self, tmp_path):
+        path = tmp_path / "v6.db"
+        self._build_v6_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            row = s._conn.execute(
+                "SELECT ts, status, battery_charge, real_power, power_nominal "
+                "FROM samples"
+            ).fetchone()
+            # Pre-existing row preserved; new energy columns NULL until next sample.
+            assert row == (1000, "OL", 95.0, None, None)
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v6_to_v7_bumps_meta(self, tmp_path):
+        path = tmp_path / "v6.db"
+        self._build_v6_db(path)
+        s = StatsStore(path)
+        s.open()
+        try:
+            sv = s._conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            assert int(sv[0]) == SCHEMA_VERSION == 7
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v7_migration_idempotent_on_reopen(self, tmp_path):
+        path = tmp_path / "v6.db"
+        self._build_v6_db(path)
+        open_and_close_store(path)
+        # Second open must not raise (ALTERs wrapped, tables IF NOT EXISTS).
+        s = StatsStore(path)
+        s.open()
+        try:
+            cols = {r[1] for r in s._conn.execute("PRAGMA table_info(samples)")}
+            assert {"real_power", "power_nominal"} <= cols
+            assert s._conn.execute("SELECT ts FROM samples").fetchone() == (1000,)
+        finally:
+            s.close()
+
+
+class TestV7StoreMethods:
+    """v7: battery_health / self_tests / power_samples store API."""
+
+    @staticmethod
+    def _open(tmp_path):
+        s = StatsStore(tmp_path / "v7.db")
+        s.open()
+        return s
+
+    @pytest.mark.unit
+    def test_record_and_query_battery_health(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            s.record_battery_health(
+                82.5,
+                {"capacity": 80.0, "runtime": 90.0, "self_test": None,
+                 "anomaly": 100.0, "age": 70.0},
+                detail={"confidence": 0.8, "weights": {"age": 0.2}},
+                ts=1000,
+            )
+            s.record_battery_health(None, {"capacity": None}, ts=2000)
+            rows = s.query_battery_health(0, 9999)
+            assert [r["ts"] for r in rows] == [1000, 2000]
+            assert rows[0]["score"] == 82.5
+            assert rows[0]["self_test"] is None      # unavailable kept as NULL
+            assert rows[0]["anomaly"] == 100.0
+            assert rows[0]["detail"]["confidence"] == 0.8
+            assert rows[1]["score"] is None          # unknown score kept as NULL
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_query_battery_health_empty_range(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            assert s.query_battery_health(0, 100) == []
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_record_battery_health_unserializable_detail(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            s.record_battery_health(50.0, {"capacity": 50.0},
+                                    detail={"bad": object()}, ts=1000)
+            assert s.query_battery_health(0, 9999)[0]["detail"] is None
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_query_battery_health_tolerates_corrupt_detail(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            with s._conn:
+                s._conn.execute(
+                    "INSERT INTO battery_health (ts, score, detail) VALUES (?,?,?)",
+                    (1000, 50.0, "{not valid json"),
+                )
+            assert s.query_battery_health(0, 9999)[0]["detail"] is None
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_record_self_test_and_latest(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            tid = s.record_self_test("test.battery.start", "scheduler",
+                                     started_ts=1000)
+            assert isinstance(tid, int)
+            latest = s.latest_self_test()
+            assert latest["id"] == tid
+            assert latest["command"] == "test.battery.start"
+            assert latest["result_enum"] == "running"
+            assert latest["source"] == "scheduler"
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_update_self_test_result(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            tid = s.record_self_test("test.battery.start", "api", started_ts=1000)
+            s.update_self_test_result(
+                tid, result_raw="Done and passed",
+                result_enum="passed", result_date="2026-06-28",
+            )
+            latest = s.latest_self_test()
+            assert latest["result_enum"] == "passed"
+            assert latest["result_raw"] == "Done and passed"
+            assert latest["result_date"] == "2026-06-28"
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_latest_self_test_none_when_empty(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            assert s.latest_self_test() is None
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_power_samples_reads_energy_columns(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            s.buffer_sample(
+                {"ups.status": "OL", "ups.load": "40",
+                 "ups.realpower": "120", "ups.power.nominal": "300"},
+                ts=1000,
+            )
+            s.buffer_sample(
+                {"ups.status": "OL", "ups.load": "50"},  # no realpower/nominal
+                ts=1001,
+            )
+            s.flush()
+            rows = s.power_samples(0, 9999, prefer_tier="samples")
+            assert rows[0] == (1000, 120.0, 40.0, 300.0)
+            assert rows[1] == (1001, None, 50.0, None)  # NULL cells preserved
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_v7_methods_safe_on_closed_store(self, tmp_path):
+        # Never opened -> _conn is None. Every v7 method must no-op / return a
+        # safe default, never raise (failure-isolation contract).
+        s = StatsStore(tmp_path / "closed.db")
+        s.record_battery_health(50.0, {"capacity": 50.0})
+        assert s.query_battery_health(0, 100) == []
+        assert s.record_self_test("test.battery.start", "cli") is None
+        s.update_self_test_result(1, result_raw="x", result_enum="passed")
+        assert s.latest_self_test() is None
+        assert s.power_samples(0, 100) == []
+
+    @pytest.mark.unit
+    def test_v7_methods_swallow_db_errors(self, tmp_path):
+        # _conn is set but the underlying connection is closed, so execute
+        # raises sqlite3.ProgrammingError. The failure-isolation contract says
+        # swallow + log + return the safe default, never raise into the daemon.
+        s = self._open(tmp_path)
+        s._conn.close()
+        s.record_battery_health(50.0, {"capacity": 50.0}, ts=1000)
+        assert s.query_battery_health(0, 9999) == []
+        assert s.record_self_test("test.battery.start", "cli") is None
+        s.update_self_test_result(1, result_raw="x", result_enum="passed")
+        assert s.latest_self_test() is None
+        assert s.power_samples(0, 9999) == []
+
+
 class TestNotificationQueue:
     """v4: persistent notification queue CRUD + TTL/cap/age rules."""
 
@@ -1462,6 +1750,36 @@ class TestPurge:
             s.close()
 
     @pytest.mark.unit
+    def test_purge_trims_old_battery_health_and_self_tests(self, tmp_path):
+        # battery_health/self_tests grow unbounded at a small update_interval;
+        # purge() must trim rows older than the hourly cutoff (mirroring events).
+        s = StatsStore(tmp_path / "purge_v7.db",
+                       retention_hourly_days=1)
+        s.open()
+        try:
+            now = int(time.time())
+            old = now - 2 * 86400      # 2 days old -> beyond 1-day hourly window
+            recent = now - 60
+            # battery_health is keyed on ts.
+            s.record_battery_health(50.0, {"capacity": 50.0}, ts=old)
+            s.record_battery_health(60.0, {"capacity": 60.0}, ts=recent)
+            # self_tests is keyed on started_ts.
+            s.record_self_test("test.battery.start", "cli", started_ts=old)
+            s.record_self_test("test.battery.start", "cli", started_ts=recent)
+
+            s.purge()
+
+            bh = s._conn.execute("SELECT COUNT(*) FROM battery_health").fetchone()[0]
+            stc = s._conn.execute("SELECT COUNT(*) FROM self_tests").fetchone()[0]
+            assert bh == 1     # only the recent battery_health row survives
+            assert stc == 1    # only the recent self_test row survives
+            # And the survivor is the recent one in each table.
+            assert s.query_battery_health(0, now * 2)[0]["ts"] == recent
+            assert s.latest_self_test()["started_ts"] == recent
+        finally:
+            s.close()
+
+    @pytest.mark.unit
     def test_purge_swallows_sqlite_error(self, store):
         class _BoomConn:
             def __enter__(self): return self
@@ -2213,6 +2531,150 @@ class TestClosedConnectionGuards:
     def test_set_meta_no_ops_when_closed(self, tmp_path):
         s = self._closed(tmp_path)
         s.set_meta("k", "v")
+
+
+class TestV7ConnRaceUnderLock:
+    """The v7 store APIs must re-check ``_conn`` AFTER acquiring ``_db_lock``.
+
+    ``close()`` nulls ``_conn`` while holding the lock, so a pre-lock-only check
+    races a concurrent close. We simulate the race by nulling ``_conn`` from
+    inside the lock (so the pre-lock check passed but the in-lock body sees
+    None) and asserting every v7 method returns safely instead of crashing on
+    ``None.execute``.
+    """
+
+    def _store_that_nulls_conn_under_lock(self, tmp_path):
+        s = StatsStore(tmp_path / "race.db")
+        s.open()
+        real_conn = s._conn
+
+        class _RaceLock:
+            def __enter__(self_lock):
+                # Pre-lock check already saw a live _conn; the acquirer now
+                # races a close() that nulls it under the lock.
+                s._conn = None
+                return True
+
+            def __exit__(self_lock, *exc):
+                # Restore so the NEXT method's pre-lock check passes and we
+                # exercise ITS post-lock re-check too (not just the first call's).
+                s._conn = real_conn
+                return False
+
+        s._db_lock = _RaceLock()
+        return s, real_conn
+
+    @pytest.mark.unit
+    def test_all_v7_methods_survive_conn_race(self, tmp_path):
+        s, real_conn = self._store_that_nulls_conn_under_lock(tmp_path)
+        try:
+            # None of these may raise; they return the safe empty/None sentinel.
+            assert s.record_battery_health(50.0, {"capacity": 50.0}) is None
+            assert s.query_battery_health(0, 9999) == []
+            assert s.record_self_test("test.battery.start", "scheduler") is None
+            assert s.update_self_test_result(
+                1, result_raw="x", result_enum="passed") is None
+            assert s.latest_self_test() is None
+            assert s.power_samples(0, 9999) == []
+            assert s.query_range("battery_charge", 0, 9999) == []
+        finally:
+            real_conn.close()
+
+
+class TestPreExistingConnRaceUnderLock:
+    """The pre-existing read methods must ALSO re-check ``_conn`` AFTER acquiring
+    ``_db_lock`` (the same TOCTOU window the v7 methods already guarded).
+
+    ``close()`` nulls ``_conn`` under the lock, so a pre-lock-only check races a
+    concurrent close. We simulate it by nulling ``_conn`` from inside the lock
+    and asserting each method returns its safe empty default instead of crashing
+    on ``None.execute``.
+    """
+
+    def _store_that_nulls_conn_under_lock(self, tmp_path):
+        s = StatsStore(tmp_path / "race_pre.db")
+        s.open()
+        real_conn = s._conn
+
+        class _RaceLock:
+            def __enter__(self_lock):
+                s._conn = None
+                return True
+
+            def __exit__(self_lock, *exc):
+                # Restore so the NEXT method's pre-lock check passes and we
+                # exercise ITS post-lock re-check too (not just the first call's).
+                s._conn = real_conn
+                return False
+
+        s._db_lock = _RaceLock()
+        return s, real_conn
+
+    @pytest.mark.unit
+    def test_pre_existing_read_methods_survive_conn_race(self, tmp_path):
+        s, real_conn = self._store_that_nulls_conn_under_lock(tmp_path)
+        try:
+            # Each must return its method-specific safe empty value, not raise.
+            assert s.query_events(0, 9999) == []
+            assert s.query_recent_events(end_ts=9999, limit=10) == []
+            assert s.next_pending_notifications() == []
+            assert s.find_pending_by_category("health") == []
+            assert s.find_pending_by_category("health", since_ts=0) == []
+            assert s.pending_notification_count() == 0
+            assert s.get_meta("schema_version") is None
+        finally:
+            real_conn.close()
+
+
+class TestWriteHelperConnRaceUnderLock:
+    """The write methods routed through ``_write()`` must re-check ``_conn``
+    AFTER acquiring ``_db_lock``.
+
+    ``_write()`` is the single place that takes the lock, re-binds the
+    connection, and opens the transaction. ``close()`` nulls ``_conn`` under the
+    lock, so a caller's pre-lock check races a concurrent close. We simulate it
+    by nulling ``_conn`` from inside the lock (pre-lock check passed; the helper
+    then sees None and yields None) and assert every write returns its safe
+    sentinel instead of crashing on ``None.execute``.
+    """
+
+    def _store_that_nulls_conn_under_lock(self, tmp_path):
+        s = StatsStore(tmp_path / "race_write.db")
+        s.open()
+        real_conn = s._conn
+
+        class _RaceLock:
+            def __enter__(self_lock):
+                s._conn = None
+                return True
+
+            def __exit__(self_lock, *exc):
+                # Restore so the NEXT method's pre-lock check passes and we
+                # exercise ITS post-lock re-check too (not just the first call's).
+                s._conn = real_conn
+                return False
+
+        s._db_lock = _RaceLock()
+        return s, real_conn
+
+    @pytest.mark.unit
+    def test_write_methods_survive_conn_race(self, tmp_path):
+        s, real_conn = self._store_that_nulls_conn_under_lock(tmp_path)
+        try:
+            # Each must return its method-specific safe value, not raise.
+            assert s.aggregate() == (0, 0)
+            assert s.purge() == (0, 0, 0)
+            s.log_event("DAEMON_START")                     # no return
+            assert s.delete_events([(1, 1, "DAEMON_START")]) == 0
+            assert s.enqueue_notification("b", "info", "cat") is None
+            s.mark_notification_sent(1)                      # no return
+            s.mark_notification_attempt(1)                   # no return
+            s.cancel_notification(1, "too_old")              # no return
+            assert s.cap_pending_notifications(5) == 0
+            assert s.prune_old_notifications(7, 30) == (0, 0)
+            s.set_meta("k", "v")                             # no return
+        finally:
+            real_conn.close()
 
 
 class TestStatsOpenErrors:

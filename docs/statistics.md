@@ -61,9 +61,11 @@ These intervals come from `StatsWriter` defaults in `src/eneru/stats.py`: `flush
 | `agg_hourly` | Hourly aggregate buckets |
 | `events` | Power, health, lifecycle, slow-response diagnostics, remote-health transition, and shutdown events. Each row has an `id` (`INTEGER PRIMARY KEY AUTOINCREMENT`, schema v5) that the API uses to target individual events for deletion; the id is never reused, so deletion is always safe |
 | `notifications` | Persistent notification queue and delivery history |
+| `battery_health` | One row per periodic battery-health computation (schema v7): composite score plus per-term sub-scores, feeding replacement-prediction trending |
+| `self_tests` | UPS self-test results (schema v7): one row per issued test with the normalized result enum and the raw `ups.test.result` |
 | `meta` | Schema version and lifecycle metadata |
 
-The main sample metrics include status, battery charge, runtime, load, input/output voltage, battery voltage, temperature, frequency, depletion rate, time on battery, and connection state.
+The main sample metrics include status, battery charge, runtime, load, input/output voltage, battery voltage, temperature, frequency, real power and nominal power (schema v7, for energy tracking), depletion rate, time on battery, and connection state.
 
 ## Retention
 
@@ -169,7 +171,7 @@ sqlite3 /var/lib/eneru/UPS-192-168-1-100.db \
 
 ## Schema migrations
 
-Eneru stores the schema version in `meta.schema_version`. New releases migrate existing databases with additive `ALTER TABLE` statements and preserve old rows. When a column cannot be added in place, the table is rebuilt inside the same transaction. Schema **v5** does this for `events.id INTEGER PRIMARY KEY AUTOINCREMENT`, which SQLite cannot `ALTER ADD`; existing rows keep their identity as `id = old rowid`, so the migration is still atomic and replay-safe.
+Eneru stores the schema version in `meta.schema_version`. New releases migrate existing databases with additive `ALTER TABLE` statements and preserve old rows. When a column cannot be added in place, the table is rebuilt inside the same transaction. Schema **v5** does this for `events.id INTEGER PRIMARY KEY AUTOINCREMENT`, which SQLite cannot `ALTER ADD`; existing rows keep their identity as `id = old rowid`, so the migration is still atomic and replay-safe. Schema **v7** adds the `real_power` / `power_nominal` sample columns (with matching `*_avg` on the aggregate tables) plus the `battery_health` and `self_tests` tables; all additive, so existing rows are untouched.
 
 Check the version:
 

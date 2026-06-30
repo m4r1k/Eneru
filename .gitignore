@@ -37,6 +37,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*uv.lock
 
 # Virtual environments
 venv/
@@ -51,6 +52,9 @@ dist/
 *.egg-info/
 *.egg
 .eggs/
+
+# MkDocs build output
+site/
 
 # PyInstaller
 *.manifest
@@ -157,3 +161,9 @@ id_ups_shutdown
 # Webhook URLs or tokens
 secrets.yaml
 secrets.json
+
+# Claude local permission settings — ignore everything under .claude EXCEPT
+# shareable repo skills (.claude/skills/), which are versioned so any
+# contributor/agent gets them. Local-only settings stay ignored.
+.claude/*
+!.claude/skills/

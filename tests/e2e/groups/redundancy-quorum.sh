@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# E2E group: redundancy
+# E2E group: redundancy-quorum
 #
 # Auto-extracted from .github/workflows/e2e.yml. Tests in this
 # group run sequentially; each test body is wrapped in a subshell
@@ -31,82 +31,12 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
-# Timestamped step markers. The redundancy regressions chain many
-# fixed-duration sleeps with docker-compose calls; when CI runners are slow
-# the script can be SIGTERMed mid-flight with no idea where it hung. dbg()
-# makes the boundary between phases self-diagnosing in the runner log.
-dbg() {
-  printf '+++ %s [redundancy.sh] %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" "$*"
-}
-
-dump_redundancy_nut_state() {
-  local label="$1"
-  dbg "[$label] docker compose ps nut-server:"
-  ( cd "$E2E_DIR" && docker compose ps nut-server 2>&1 ) \
-      | sed 's/^/    /' || true
-  dbg "[$label] processes inside nut-server:"
-  ( cd "$E2E_DIR" \
-      && timeout 10s docker compose exec -T nut-server sh -c \
-           'ps -ef 2>&1 | grep -E "dummy-ups|upsd" | grep -v grep || true' ) \
-      2>&1 | sed 's/^/    /' || true
-  dbg "[$label] host upsc probes:"
-  for ups in TestUPS UPS1 UPS2; do
-    printf '    upsc %s ups.status: ' "$ups"
-    timeout 5s upsc "${ups}@localhost:3493" ups.status 2>&1 || echo '<failed/timeout>'
-  done
-}
-
-wait_for_redundancy_nut() {
-  for i in {1..30}; do
-    # Bound each upsc call so a wedged libupsclient read cannot eat the
-    # entire polling budget on a single iteration.
-    if timeout 5s upsc UPS1@localhost:3493 ups.status >/dev/null 2>&1 \
-       && timeout 5s upsc UPS2@localhost:3493 ups.status >/dev/null 2>&1; then
-      dbg "wait_for_redundancy_nut: ready after $i iteration(s)"
-      return 0
-    fi
-    dbg "wait_for_redundancy_nut: attempt $i/30 still failing"
-    sleep 1
-  done
-  dbg "wait_for_redundancy_nut: gave up after 30 attempts"
-  echo "FAIL: redundancy NUT sources did not recover"
-  return 1
-}
-
-restart_redundancy_nut_server() {
-  dbg "restart_redundancy_nut_server: docker compose restart nut-server"
-  (
-    cd "$E2E_DIR"
-    docker compose restart nut-server >/dev/null
-  )
-  dbg "restart_redundancy_nut_server: docker compose restart returned"
-  wait_for_redundancy_nut
-  cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply-UPS1.dev"
-  cp "$E2E_DIR/scenarios/online-charging.dev" "$E2E_DIR/scenarios/apply-UPS2.dev"
-  sleep 3
-  dbg "restart_redundancy_nut_server: settle sleep done"
-}
-
-stop_redundancy_nut_drivers() {
-  dbg "stop_redundancy_nut_drivers: pkill UPS1+UPS2 dummy-ups in container"
-  (
-    cd "$E2E_DIR"
-    # The ``[d]`` bracket trick is load-bearing: it makes the regex match the
-    # literal string "dummy-ups" inside a real driver cmdline, but NOT the
-    # pkill wrapper's own cmdline (which contains the literal characters
-    # ``[d]ummy-ups``). Without the trick, pkill kills its own ``sh -c``
-    # wrapper before it can run the second pkill, and ``docker compose exec``
-    # is left holding a half-dead exec stream that hangs until the runner
-    # SIGTERMs the whole step.
-    timeout --kill-after=5s 10s docker compose exec -T nut-server sh -c \
-      "pkill -f '[d]ummy-ups.*-a UPS1' || true; pkill -f '[d]ummy-ups.*-a UPS2' || true"
-  )
-  dbg "stop_redundancy_nut_drivers: pkill returned, verifying drivers are gone"
-  ( cd "$E2E_DIR" \
-      && timeout --kill-after=5s 10s docker compose exec -T nut-server sh -c \
-           'ps -ef | grep -E "[d]ummy-ups.*-a UPS[12]" || echo "    (no UPS1/UPS2 driver processes)"' ) \
-      2>&1 | sed 's/^/    /' || true
-}
+# Shared E2E helpers: apply_scenario (poll-until-applied scenario swaps) plus
+# the redundancy group helpers (dbg / dump_redundancy_nut_state /
+# wait_for_redundancy_nut / restart_redundancy_nut_server /
+# stop_redundancy_nut_drivers). DBG_TAG labels this script's dbg() lines.
+DBG_TAG="redundancy-quorum.sh"
+. "$E2E_DIR/groups/lib.sh"
 
 # ======================================================================
 # Test 21: Redundancy quorum holds when 1 of 2 healthy
@@ -117,9 +47,8 @@ echo ">>> Running: Test 21: Redundancy quorum holds when 1 of 2 healthy"
 
 echo "=== Test 21: Quorum holds ==="
 # UPS1 critical (low battery), UPS2 healthy
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario low-battery UPS1
+apply_scenario online-charging UPS2
 
 # 1 healthy member meets min_healthy=1 -- the evaluator must NOT fire.
 # Use a finite timeout since --exit-after-shutdown wouldn't trigger.
@@ -154,9 +83,8 @@ echo ""
 echo ">>> Running: Test 22: Both UPSes critical → redundancy shutdown fires"
 
 echo "=== Test 22: Quorum exhausted ==="
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario low-battery UPS1
+apply_scenario low-battery UPS2
 
 # Grace ~10s, then evaluator ticks each second.
 timeout 30s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test22.log || true
@@ -172,9 +100,8 @@ if ! grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test22.log; then
   exit 1
 fi
 # Restore for downstream tests
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 2
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 echo "PASS: Redundancy shutdown fired on exhausted quorum"
 )
 
@@ -190,9 +117,8 @@ echo "=== Test 23: UNKNOWN handling ==="
 # the goal is to confirm UNKNOWN is *handled*, not to force it).
 # We assert the handling indirectly via Test 22's matching log lines
 # already covering UNKNOWN→CRITICAL via unknown_counts_as.
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 2
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 
 # Long enough to clear the startup grace and confirm steady state.
 timeout 18s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test23.log || true
@@ -224,9 +150,8 @@ echo "=== Test 24: Both UNKNOWN ==="
 # combination "OB + dropped data" is hard to provoke with the
 # dummy. We rely on the same low-battery scenario as Test 22,
 # which the evaluator treats as CRITICAL via trigger_active.
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario low-battery UPS1
+apply_scenario low-battery UPS2
 
 timeout 30s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test24.log || true
 
@@ -236,9 +161,8 @@ if ! grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test24.log; then
   exit 1
 fi
 # Restore
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 2
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 echo "PASS: Fail-safe shutdown fired"
 )
 
@@ -254,9 +178,8 @@ echo "=== Test 25: Cross-group cascade ==="
 # the redundancy group. UPS2 is healthy. The redundancy evaluator
 # must NOT fire (1 of 2 healthy >= min_healthy=1) regardless of
 # the independent group's behavior.
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario low-battery UPS1
+apply_scenario online-charging UPS2
 
 timeout 18s eneru run --config $E2E_DIR/config-e2e-redundancy-cross-group.yaml --exit-after-shutdown 2>&1 | tee /tmp/test25.log || true
 
@@ -267,8 +190,7 @@ if grep -q "rack-1-dual-psu.* quorum LOST" /tmp/test25.log; then
   exit 1
 fi
 # Restore
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-sleep 2
+apply_scenario online-charging UPS1
 echo "PASS: Cross-group cascade behaved correctly"
 )
 
@@ -281,9 +203,8 @@ echo ">>> Running: Test 26: Advisory-mode log signature"
 
 echo "=== Test 26: Advisory-mode log signature ==="
 # UPS1 critical (only it is in the redundancy group); UPS2 healthy.
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario low-battery UPS1
+apply_scenario online-charging UPS2
 
 timeout 18s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test26.log || true
 
@@ -300,8 +221,7 @@ if grep -q "Triggering immediate shutdown" /tmp/test26.log; then
   exit 1
 fi
 # Restore
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-sleep 2
+apply_scenario online-charging UPS1
 echo "PASS: Advisory-mode log signature verified"
 )
 
@@ -317,10 +237,9 @@ echo "=== Test 27: Separate-Eneru-UPS ==="
 # (powers remote rack). The redundancy shutdown must fire for
 # the rack, but TestUPS is unaffected, so the Eneru host stays
 # up (local_shutdown.enabled=false in the config anyway).
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario online-charging
+apply_scenario low-battery UPS1
+apply_scenario low-battery UPS2
 
 timeout 35s eneru run --config $E2E_DIR/config-e2e-redundancy-separate-eneru.yaml --exit-after-shutdown 2>&1 | tee /tmp/test27.log || true
 
@@ -342,9 +261,8 @@ if grep -q "Eneru Host UPS.*Triggering immediate shutdown" /tmp/test27.log; then
   exit 1
 fi
 # Restore
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 2
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 echo "PASS: Separate-Eneru-UPS topology verified"
 )
 
@@ -369,9 +287,8 @@ echo "=== Test 37: re-arm ==="
 
 # Start from a known-healthy quorum so the evaluator's startup grace
 # elapses without firing.
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 2
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 
 # Run eneru in background -- we need to drive scenarios in flight,
 # so --exit-after-shutdown is intentionally omitted. Budget: 13s
@@ -387,19 +304,19 @@ trap 'kill "$ENERU_PID" 2>/dev/null || true' EXIT
 sleep 13
 
 # Phase 1: drop both UPSes critical -> first quorum-loss shutdown.
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
+apply_scenario low-battery UPS1
+apply_scenario low-battery UPS2
 sleep 8
 
 # Phase 2: restore both -> evaluator must log "quorum restored -- re-armed"
 # AND clear the executor's re-entry guard.
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 sleep 8
 
 # Phase 3: drop both critical again -> SECOND quorum-loss shutdown.
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
+apply_scenario low-battery UPS1
+apply_scenario low-battery UPS2
 sleep 8
 
 kill "$ENERU_PID" 2>/dev/null || true
@@ -439,9 +356,8 @@ if grep -q "suppressed: flag .* startup cleanup bypassed" /tmp/test37.log; then
 fi
 
 # Restore for downstream tests
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 2
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 echo "PASS: redundancy re-arm verified across two consecutive quorum-loss events"
 )
 
@@ -459,9 +375,8 @@ echo "=== Test 38: stale flag restart ==="
 # This uses the real redundancy flag path derived from
 # logging.shutdown_flag_file's parent plus the group name.
 printf "stale-pre-rc4-flag\n" > /tmp/ups-shutdown-redundancy-rack-1-dual-psu
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 3
+apply_scenario low-battery UPS1
+apply_scenario low-battery UPS2
 
 timeout 30s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown \
   > /tmp/test38.log 2>&1 || true
@@ -480,136 +395,10 @@ if grep -q "suppressed: flag .* startup cleanup bypassed" /tmp/test38.log; then
 fi
 
 # Restore for downstream tests
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS1.dev
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply-UPS2.dev
-sleep 2
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
 echo "PASS: stale restart flag was cleared before redundancy shutdown"
 )
 
-# ======================================================================
-# Regression R1: Runtime transient NUT loss stays inside redundancy grace
-# ======================================================================
-(
 echo ""
-echo ">>> Running: Regression R1: Runtime transient NUT loss stays inside redundancy grace"
-
-echo "=== Regression R1: transient runtime NUT visibility loss ==="
-dbg "R1 step 1/8: pre-test restart_redundancy_nut_server"
-restart_redundancy_nut_server
-dump_redundancy_nut_state "R1 after first restart"
-
-dbg "R1 step 2/8: launching eneru in background (timeout 90s)"
-timeout 90s eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
-  > /tmp/test-r1.log 2>&1 &
-ENERU_PID=$!
-trap 'kill "$ENERU_PID" 2>/dev/null || true; restart_redundancy_nut_server >/dev/null 2>&1 || true' EXIT
-
-# Let both member monitors publish good snapshots and clear evaluator startup grace.
-dbg "R1 step 3/8: sleep 13 (let monitors publish good snapshots)"
-sleep 13
-dbg "R1 step 4/8: stop_redundancy_nut_drivers (induce visibility loss)"
-stop_redundancy_nut_drivers
-
-# Old behavior could turn the stale snapshots UNKNOWN after ~5s and fire
-# quorum loss before the connection grace expired. Recover inside grace.
-dbg "R1 step 5/8: sleep 7 (stay inside the 40s connection grace)"
-sleep 7
-dbg "R1 step 6/8: restart_redundancy_nut_server (recover NUT inside grace)"
-restart_redundancy_nut_server
-dbg "R1 step 7/8: sleep 10 (let monitor observe recovery)"
-sleep 10
-
-dbg "R1 step 8/8: kill eneru and verify"
-kill "$ENERU_PID" 2>/dev/null || true
-wait "$ENERU_PID" 2>/dev/null || true
-trap - EXIT
-
-r1_fail() {
-  echo "$1"
-  echo "----- /tmp/test-r1.log (full) -----"
-  cat /tmp/test-r1.log
-  echo "----- /tmp/test-r1.log end -----"
-  dump_redundancy_nut_state "R1 failure"
-  exit 1
-}
-
-if grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test-r1.log; then
-  r1_fail "FAIL: transient NUT loss should not fire redundancy shutdown"
-fi
-if ! grep -q "Redundancy group 'rack-1-dual-psu' evaluator started" /tmp/test-r1.log; then
-  r1_fail "FAIL: evaluator did not start during transient NUT-loss regression"
-fi
-if ! grep -q "Grace period started" /tmp/test-r1.log; then
-  r1_fail "FAIL: transient NUT-loss regression did not enter connection grace"
-fi
-if ! grep -q "recovered during grace period" /tmp/test-r1.log; then
-  r1_fail "FAIL: transient NUT-loss regression did not prove recovery inside grace"
-fi
-if grep -q "rack-1-dual-psu.* quorum LOST" /tmp/test-r1.log; then
-  r1_fail "FAIL: transient NUT loss should not lose redundancy quorum"
-fi
-echo "PASS: transient runtime NUT loss recovered inside grace without redundancy shutdown"
-)
-
-# ======================================================================
-# Regression R2: Runtime persistent NUT loss still fails safe after grace
-# ======================================================================
-(
-echo ""
-echo ">>> Running: Regression R2: Runtime persistent NUT loss fails safe after grace"
-
-echo "=== Regression R2: persistent runtime NUT visibility loss ==="
-dbg "R2 step 1/8: pre-test restart_redundancy_nut_server"
-restart_redundancy_nut_server
-dump_redundancy_nut_state "R2 after first restart"
-
-dbg "R2 step 2/8: launching eneru in background (timeout 105s)"
-timeout 105s eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
-  > /tmp/test-r2.log 2>&1 &
-ENERU_PID=$!
-trap 'kill "$ENERU_PID" 2>/dev/null || true; restart_redundancy_nut_server >/dev/null 2>&1 || true' EXIT
-
-dbg "R2 step 3/8: sleep 13 (let monitors publish good snapshots)"
-sleep 13
-dbg "R2 step 4/8: stop_redundancy_nut_drivers (induce visibility loss)"
-stop_redundancy_nut_drivers
-
-# Hold loss longer than connection grace. Fail-safe UNKNOWN handling must
-# still fire once the member monitors mark the connection FAILED.
-dbg "R2 step 5/8: sleep 55 (hold loss past 40s grace + headroom)"
-sleep 55
-dbg "R2 step 6/8: kill eneru"
-kill "$ENERU_PID" 2>/dev/null || true
-wait "$ENERU_PID" 2>/dev/null || true
-trap - EXIT
-dbg "R2 step 7/8: post-test restart_redundancy_nut_server (cleanup)"
-restart_redundancy_nut_server
-dbg "R2 step 8/8: verify assertions"
-
-r2_fail() {
-  echo "$1"
-  echo "----- /tmp/test-r2.log (full) -----"
-  cat /tmp/test-r2.log
-  echo "----- /tmp/test-r2.log end -----"
-  dump_redundancy_nut_state "R2 failure"
-  exit 1
-}
-
-if ! grep -q "Redundancy group 'rack-1-dual-psu' evaluator started" /tmp/test-r2.log; then
-  r2_fail "FAIL: evaluator did not start during persistent NUT-loss regression"
-fi
-if ! grep -q "Grace period started" /tmp/test-r2.log; then
-  r2_fail "FAIL: persistent NUT-loss regression did not enter connection grace"
-fi
-if ! grep -q "rack-1-dual-psu.* quorum LOST" /tmp/test-r2.log; then
-  r2_fail "FAIL: persistent NUT loss should lose redundancy quorum after grace"
-fi
-if ! grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test-r2.log; then
-  r2_fail "FAIL: persistent NUT loss should fire redundancy shutdown after grace"
-fi
-echo "PASS: persistent runtime NUT loss fired redundancy shutdown after grace"
-)
-
-
-echo ""
-echo "=== Group 'redundancy' completed successfully ==="
+echo "=== Group 'redundancy-quorum' completed successfully ==="

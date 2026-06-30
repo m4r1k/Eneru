@@ -9,12 +9,17 @@ ups:
     max_stale_data_tolerance: 2
     connection_loss_grace_period:
       enabled: true
-      # 40s gives the R1 transient-loss regression enough headroom for a
-      # full ``docker compose restart nut-server`` (10s graceful stop +
-      # entrypoint startup + driver settle) to complete inside the grace
-      # window on slow GHA runners. R2 holds the loss past this window to
-      # verify the fail-safe path. Production defaults remain unchanged.
-      duration: 40
+      # 30s (down from 40) gives the R1 transient-loss regression headroom
+      # for a full ``docker compose restart nut-server`` (bounded with
+      # ``-t 2`` in restart_redundancy_nut_server) to complete inside the
+      # grace window on slow GHA runners -- the entrypoint alone burns ~4s
+      # of fixed startup sleeps before upsd is even probed, so we keep a
+      # comfortable cushion here -- while still shaving wall-clock off R2,
+      # which holds the loss past this window to verify the fail-safe path.
+      # Don't drop below ~25s: the restart-inside-grace requirement is the
+      # real floor, not the documented 15s minimum. Production defaults
+      # remain unchanged.
+      duration: 30
       flap_threshold: 5
   - name: "UPS2@localhost:3493"
     display_name: "E2E UPS2"
@@ -22,12 +27,17 @@ ups:
     max_stale_data_tolerance: 2
     connection_loss_grace_period:
       enabled: true
-      # 40s gives the R1 transient-loss regression enough headroom for a
-      # full ``docker compose restart nut-server`` (10s graceful stop +
-      # entrypoint startup + driver settle) to complete inside the grace
-      # window on slow GHA runners. R2 holds the loss past this window to
-      # verify the fail-safe path. Production defaults remain unchanged.
-      duration: 40
+      # 30s (down from 40) gives the R1 transient-loss regression headroom
+      # for a full ``docker compose restart nut-server`` (bounded with
+      # ``-t 2`` in restart_redundancy_nut_server) to complete inside the
+      # grace window on slow GHA runners -- the entrypoint alone burns ~4s
+      # of fixed startup sleeps before upsd is even probed, so we keep a
+      # comfortable cushion here -- while still shaving wall-clock off R2,
+      # which holds the loss past this window to verify the fail-safe path.
+      # Don't drop below ~25s: the restart-inside-grace requirement is the
+      # real floor, not the documented 15s minimum. Production defaults
+      # remain unchanged.
+      duration: 30
       flap_threshold: 5
 
 triggers:
