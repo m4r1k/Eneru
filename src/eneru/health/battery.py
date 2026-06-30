@@ -233,10 +233,19 @@ class BatteryMonitorMixin:
                 f"config: {e}")
         return glob
 
+    def _open_store(self):
+        """Return the per-UPS stats store only when it is actually open. A store
+        created in __init__ but never opened (or already closed) silently no-ops
+        get_meta/set_meta and returns empty reads, so every battery-health
+        caller must treat it as unavailable — otherwise learning/prediction
+        degrades into a silent no-op instead of failing soft on a real store."""
+        store = getattr(self, "_stats_store", None)
+        return store if store is not None and store.is_open else None
+
     def _learned_nominal_runtime(self) -> Optional[float]:
         """Read the nominal full-charge runtime learned at a 100%-charge poll
         (persisted in meta so it survives restarts)."""
-        store = getattr(self, "_stats_store", None)
+        store = self._open_store()
         if store is None:
             return None
         raw = store.get_meta(_META_NOMINAL_RUNTIME)
@@ -249,7 +258,7 @@ class BatteryMonitorMixin:
                                      runtime_s: Optional[float]) -> None:
         """At full charge, record runtime as the nominal once (if not already
         learned and not configured)."""
-        store = getattr(self, "_stats_store", None)
+        store = self._open_store()
         if store is None or charge is None or runtime_s is None:
             return
         # If the config pins a nominal runtime, _compute_battery_health prefers
@@ -264,7 +273,7 @@ class BatteryMonitorMixin:
     def _battery_runtime_history(self, now: float, days: int = 60):
         """[(ts, runtime_s)] from stored battery_health detail, for the
         capacity trend term."""
-        store = getattr(self, "_stats_store", None)
+        store = self._open_store()
         if store is None:
             return []
         out = []
@@ -295,7 +304,7 @@ class BatteryMonitorMixin:
             nominal = self._learned_nominal_runtime()
 
         st = None
-        store = getattr(self, "_stats_store", None)
+        store = self._open_store()
         if store is not None:
             latest = store.latest_self_test()
             st = latest.get("result_enum") if latest else None
@@ -344,7 +353,7 @@ class BatteryMonitorMixin:
                 self.state.latest_battery_health = None
             return
         health = self._compute_battery_health(cfg, now)
-        store = getattr(self, "_stats_store", None)
+        store = self._open_store()
         # Persist FIRST so the prediction trend includes this fresh point.
         if store is not None:
             store.record_battery_health(
@@ -366,7 +375,7 @@ class BatteryMonitorMixin:
         """Trend the stored score series; warn once per period if the battery
         is projected to need replacement within the horizon. Returns the
         prediction result dict (used to enrich the status block)."""
-        store = getattr(self, "_stats_store", None)
+        store = self._open_store()
         if store is None:
             return {"due": False, "days_remaining": None}
         rep = cfg.replacement
@@ -425,7 +434,7 @@ class BatteryMonitorMixin:
         to / further into 'critical' escalates. A de-escalation only re-arms."""
         if score is None:
             return
-        store = getattr(self, "_stats_store", None)
+        store = self._open_store()
         if store is None:
             return
         warn, crit = cfg.warn_score, cfg.critical_score

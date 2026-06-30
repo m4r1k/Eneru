@@ -41,6 +41,7 @@ def _make_monitor(cfg, store=None, *, coordinator_mode=False):
     mon._last_health_update_mono = None
     mon._self_test_pending_id = None
     mon._self_test_poll_due_mono = None
+    mon._self_test_retry_after_mono = None
     mon._poll_target = cfg.ups.name
     mon.logs = []
     mon.notifications = []
@@ -263,6 +264,32 @@ class TestRunSelfTestTask:
         mon._run_self_test_task()
         assert mon._self_test_pending_id is None
         assert any("self-test issue failed" in m for m in mon.logs)
+
+    @pytest.mark.unit
+    def test_failed_issue_backs_off_before_retry(self, store, monkeypatch):
+        # A failed issue doesn't burn the cadence (so it retries), but a backoff
+        # gate stops it from re-attempting on the very next poll tick — otherwise
+        # a persistently-broken config would spawn an upscmd every few seconds.
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        store.set_meta("self_test_last_run", "0")
+        calls = []
+        monkeypatch.setattr(selftest, "discover_self_test_command",
+                            lambda *a, **k: "test.battery.start")
+
+        def _issue(*a, **k):
+            calls.append(1)
+            return {"ok": False, "test_id": None, "error": "nope"}
+        monkeypatch.setattr(selftest, "issue_self_test", _issue)
+
+        mon._run_self_test_task()                      # attempt 1 fails -> backoff
+        assert len(calls) == 1
+        assert mon._self_test_retry_after_mono is not None
+        assert store.get_meta("self_test_last_run") == "0"   # cadence not burned
+        mon._run_self_test_task()                      # within backoff -> gated
+        assert len(calls) == 1
+        mon._self_test_retry_after_mono = time.monotonic() - 1   # backoff elapsed
+        mon._run_self_test_task()                      # retries
+        assert len(calls) == 2
 
     @pytest.mark.unit
     def test_invalid_schedule_logs(self, store):

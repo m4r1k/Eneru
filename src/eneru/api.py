@@ -900,9 +900,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         # A self-test must record a `running` row so its result can be finalised
         # later; without an open stats store it would orphan that state, so
         # refuse (mirrors the CLI --direct and scheduler guards). A store that
-        # exists but is closed (_conn is None) counts as unavailable too.
+        # exists but is closed counts as unavailable too (public is_open mirrors
+        # the monitor / battery-health guards).
         store = self._store_for_ups(real)
-        if store is None or getattr(store, "_conn", None) is None:
+        if store is None or not getattr(store, "is_open", False):
             self._audit(principal, "self-test", f"{real}:{command}", "failed")
             return 503, "application/json", self._error(
                 "STATS_UNAVAILABLE", "the statistics store is unavailable")

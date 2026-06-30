@@ -737,7 +737,7 @@ class StatsStore:
             with self._write() as conn:
                 if conn is None:
                     return (0, 0)
-                inserted_5 = self._conn.execute(f"""
+                inserted_5 = conn.execute(f"""
                     INSERT OR REPLACE INTO agg_5min (
                         ts,
                         battery_charge_avg, battery_charge_min, battery_charge_max,
@@ -764,7 +764,7 @@ class StatsStore:
                     FROM samples
                     GROUP BY bucket
                 """).rowcount
-                inserted_h = self._conn.execute(f"""
+                inserted_h = conn.execute(f"""
                     INSERT OR REPLACE INTO agg_hourly (
                         ts,
                         battery_charge_avg, battery_charge_min, battery_charge_max,
@@ -827,26 +827,26 @@ class StatsStore:
             with self._write() as conn:
                 if conn is None:
                     return (0, 0, 0)
-                deleted_raw = self._conn.execute(
+                deleted_raw = conn.execute(
                     "DELETE FROM samples WHERE ts < ?", (cutoff_raw,),
                 ).rowcount
-                deleted_5min = self._conn.execute(
+                deleted_5min = conn.execute(
                     "DELETE FROM agg_5min WHERE ts < ?", (cutoff_5min,),
                 ).rowcount
-                deleted_hourly = self._conn.execute(
+                deleted_hourly = conn.execute(
                     "DELETE FROM agg_hourly WHERE ts < ?", (cutoff_hourly,),
                 ).rowcount
-                self._conn.execute(
+                conn.execute(
                     "DELETE FROM events WHERE ts < ?", (cutoff_hourly,),
                 )
                 # v7 history tables: one row per periodic computation / issued
                 # test, so they grow unbounded at a small update_interval. Trim
                 # them on the same hourly cutoff as events. self_tests keys on
                 # its own timestamp column (started_ts).
-                self._conn.execute(
+                conn.execute(
                     "DELETE FROM battery_health WHERE ts < ?", (cutoff_hourly,),
                 )
-                self._conn.execute(
+                conn.execute(
                     "DELETE FROM self_tests WHERE started_ts < ?",
                     (cutoff_hourly,),
                 )
@@ -882,7 +882,7 @@ class StatsStore:
             with self._write() as conn:
                 if conn is None:
                     return
-                self._conn.execute(
+                conn.execute(
                     "INSERT INTO events (ts, event_type, detail, "
                     "notification_sent) VALUES (?, ?, ?, ?)",
                     (ts, str(event_type), str(detail),
@@ -1002,7 +1002,7 @@ class StatsStore:
                 if conn is None:
                     return 0
                 for event_id, ts, event_type in rows:
-                    cur = self._conn.execute(
+                    cur = conn.execute(
                         "DELETE FROM events WHERE id = ? AND ts = ? "
                         "AND event_type = ?",
                         (event_id, ts, event_type),
@@ -1030,7 +1030,7 @@ class StatsStore:
             with self._write() as conn:
                 if conn is None:
                     return None
-                cur = self._conn.execute(
+                cur = conn.execute(
                     "INSERT INTO notifications "
                     "(ts, body, notify_type, category) "
                     "VALUES (?, ?, ?, ?)",
@@ -1116,7 +1116,7 @@ class StatsStore:
             with self._write() as conn:
                 if conn is None:
                     return
-                self._conn.execute(
+                conn.execute(
                     "UPDATE notifications SET status='sent', sent_at=?, "
                     "delivering_at=NULL "
                     "WHERE id=?",
@@ -1136,7 +1136,7 @@ class StatsStore:
             with self._write() as conn:
                 if conn is None:
                     return
-                self._conn.execute(
+                conn.execute(
                     "UPDATE notifications SET attempts=attempts+1 "
                     "WHERE id=?",
                     (int(notification_id),),
@@ -1157,7 +1157,7 @@ class StatsStore:
             with self._write() as conn:
                 if conn is None:
                     return
-                self._conn.execute(
+                conn.execute(
                     "UPDATE notifications SET status='cancelled', "
                     "sent_at=NULL, delivering_at=NULL, cancel_reason=? WHERE id=?",
                     (str(reason), int(notification_id)),
@@ -1199,7 +1199,7 @@ class StatsStore:
             with self._write() as conn:
                 if conn is None:
                     return 0
-                cur = self._conn.execute(
+                cur = conn.execute(
                     "SELECT COUNT(*) FROM notifications "
                     "WHERE status='pending'"
                 )
@@ -1209,7 +1209,7 @@ class StatsStore:
                 if excess <= 0:
                     return 0
                 # Cancel the `excess` oldest pending rows.
-                self._conn.execute(
+                conn.execute(
                     "UPDATE notifications SET status='cancelled', "
                     "cancel_reason='backlog_overflow' "
                     "WHERE id IN ("
@@ -1249,7 +1249,7 @@ class StatsStore:
             with self._write() as conn:
                 if conn is None:
                     return (0, 0)
-                cur = self._conn.execute(
+                cur = conn.execute(
                     "DELETE FROM notifications "
                     "WHERE status IN ('sent','cancelled') AND ts < ?",
                     (cutoff_sent,),
@@ -1259,7 +1259,7 @@ class StatsStore:
                     cutoff_pending = (
                         int(time.time()) - int(max_age_days) * 86400
                     )
-                    cur = self._conn.execute(
+                    cur = conn.execute(
                         "UPDATE notifications SET status='cancelled', "
                         "cancel_reason='too_old' "
                         "WHERE status='pending' AND ts < ?",
@@ -1300,7 +1300,7 @@ class StatsStore:
             with self._write() as conn:
                 if conn is None:
                     return
-                self._conn.execute(
+                conn.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
                     (str(key), str(value)),
                 )

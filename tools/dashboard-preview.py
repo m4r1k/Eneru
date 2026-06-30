@@ -70,8 +70,16 @@ def _make_handler(web_dir: Path, daemon: str):
 
         def _proxy(self) -> None:
             url = daemon.rstrip("/") + self.path
+            # Forward the request body + relevant headers so non-GET verbs
+            # (authed POST self-test, control commands) carry their payload.
+            length = int(self.headers.get("Content-Length") or 0)
+            data = self.rfile.read(length) if length else None
+            req = urllib.request.Request(url, data=data, method=self.command)
+            for h in ("Content-Type", "Authorization"):
+                if self.headers.get(h):
+                    req.add_header(h, self.headers[h])
             try:
-                with urllib.request.urlopen(url, timeout=10) as resp:
+                with urllib.request.urlopen(req, timeout=10) as resp:
                     body = resp.read()
                     ctype = resp.headers.get("Content-Type", "application/json")
                     code = resp.status

@@ -54,6 +54,10 @@ SLOW_NUT_LOG_THRESHOLD_SECONDS = 2.0
 SLOW_NUT_LOG_RATE_LIMIT_SECONDS = 300.0
 SLOW_NUT_NOTIFY_THRESHOLD_SECONDS = 10.0
 SLOW_NUT_NOTIFY_CONSECUTIVE_POLLS = 3
+# Backoff between scheduled self-test ISSUE retries after a failure, so a
+# persistently-broken config doesn't re-attempt (and spawn an upscmd subprocess)
+# on every poll tick.
+SELF_TEST_ISSUE_RETRY_SECONDS = 300.0
 
 # Re-export for backwards compatibility (tests may mock these)
 try:
@@ -185,6 +189,10 @@ class UPSGroupMonitor(
         # v6.1: per-UPS self-test issue/poll timing (set up in B6).
         self._self_test_pending_id: Optional[int] = None
         self._self_test_poll_due_mono: Optional[float] = None
+        # Backoff after a failed ISSUE so a persistently-broken self-test (bad
+        # creds, command pulled from the allowlist) retries periodically instead
+        # of re-attempting on every poll tick.
+        self._self_test_retry_after_mono: Optional[float] = None
 
         # Effective target passed to ``upsc`` (``upsname@host:port``). Normally
         # identical to ``config.ups.name``, but the autodiscovery diagnostic may
@@ -2222,6 +2230,13 @@ class UPSGroupMonitor(
                 store.set_meta("self_test_last_run", str(int(now)))  # seed baseline
             return
 
+        # A recent issue attempt failed: back off before retrying so a
+        # persistently-broken self-test doesn't re-attempt every poll tick (the
+        # cadence isn't stamped on failure, so `due` stays true).
+        if (self._self_test_retry_after_mono is not None
+                and time.monotonic() < self._self_test_retry_after_mono):
+            return
+
         # 3) Issue. Discover BEFORE stamping last_run so a transient ``upscmd -l``
         # failure retries next cycle instead of silently burning a (possibly
         # 30-day) cadence; a genuine "not exposed" still consumes the cycle.
@@ -2234,6 +2249,7 @@ class UPSGroupMonitor(
             return
         if cmd is None:
             store.set_meta("self_test_last_run", str(int(now)))  # genuinely unsupported
+            self._self_test_retry_after_mono = None
             self._log_message(
                 f"⚠️  self_test command '{cfg.command}' not exposed by "
                 f"{self._poll_target}; skipping this cycle")
@@ -2250,6 +2266,7 @@ class UPSGroupMonitor(
             # silently burn a (possibly 30-day) interval. The genuinely-
             # unsupported path above still consumes the cycle.
             store.set_meta("self_test_last_run", str(int(now)))
+            self._self_test_retry_after_mono = None
             self._self_test_pending_id = result["test_id"]
             self._self_test_poll_due_mono = (
                 time.monotonic() + max(1, int(cfg.result_poll_after)))
@@ -2260,6 +2277,10 @@ class UPSGroupMonitor(
                 f"🔋 Self-test issued ({cmd}); polling result in "
                 f"{cfg.result_poll_after}s")
         else:
+            # Don't stamp the cadence (so it retries), but back off so a
+            # persistent failure doesn't re-attempt every poll tick.
+            self._self_test_retry_after_mono = (
+                time.monotonic() + SELF_TEST_ISSUE_RETRY_SECONDS)
             self._log_message(f"⚠️  self-test issue failed: {result['error']}")
 
     def _main_loop(self):
