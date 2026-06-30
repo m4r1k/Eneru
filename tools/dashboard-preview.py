@@ -17,7 +17,7 @@ How it works: a tiny HTTP server serves the working-tree ``index.html`` /
 light and dark themes so you can eyeball the result (and console errors are
 printed).
 
-Usage (inside the dev venv, with `pip install -e ".[dev]"` + `playwright
+Usage (inside the uv dev venv, with `uv pip install -e ".[dev]"` + `playwright
 install chromium`):
 
     python tools/dashboard-preview.py                 # all tabs, light+dark
@@ -116,7 +116,7 @@ def _shoot(port: int, out: Path, tabs, themes, settle_ms: int) -> int:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("playwright is not installed. Install the dev extra and the "
-              "browser:\n    pip install -e \".[dev]\"\n    playwright install "
+              "browser:\n    uv pip install -e \".[dev]\"\n    playwright install "
               "chromium", file=sys.stderr)
         return 2
     out.mkdir(parents=True, exist_ok=True)

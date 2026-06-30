@@ -15,7 +15,7 @@ the planner walks exactly this order so the two cannot silently diverge.
 """
 from typing import Any, Dict, List, Optional
 
-__all__ = ["build_shutdown_plan", "PHASE_ORDER"]
+__all__ = ["PHASE_ORDER", "build_shutdown_plan"]
 
 # Canonical phase order — mirrors monitor._execute_shutdown_sequence. Keep in
 # sync (test_shutdown_plan asserts the built plan follows this order).

@@ -139,8 +139,9 @@ def parse_schedule(schedule: str, time_str: str = "03:00",
         unit = spec[-1:] if spec else ""
         try:
             n = int(spec[:-1])
-        except (ValueError, TypeError):
-            raise ValueError(f"invalid self_test.schedule interval {schedule!r}")
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"invalid self_test.schedule interval {schedule!r}") from exc
         mult = {"d": 86400, "h": 3600, "m": 60}.get(unit)
         if mult is None or n <= 0:
             raise ValueError(f"invalid self_test.schedule interval {schedule!r}")

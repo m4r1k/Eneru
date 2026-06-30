@@ -144,7 +144,9 @@ API_ENDPOINTS = (
         "path": "/api/v1/ups/{name}/history",
         "description": "SQLite metric history for one UPS",
         "query": {
-            "metric": "charge|runtime|load|voltage|depletion",
+            # Derived from HISTORY_METRICS so discovery never drifts from the
+            # set /history actually accepts.
+            "metric": "|".join(HISTORY_METRICS),
             "from": "unix timestamp",
             "to": "unix timestamp",
         },

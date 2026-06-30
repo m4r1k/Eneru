@@ -295,12 +295,13 @@ class TestAggregate:
         s2 = StatsStore(tmp_path / "b.db")
         s2.open()
         try:
-            now = time.time()
-            s1.set_meta("last_report_sent_daily", str(int(now - 2 * DAY)))  # due
+            now = DUE_TS   # fixed due timestamp (+ tz=UTC) so the due-path is
+            s1.set_meta("last_report_sent_daily", str(int(now - 2 * DAY)))  # deterministic
             bodies = []
             units = [("A@h", s1, cfg.energy), ("B@h", s2, cfg.energy)]
             sent = reports.maybe_send_due_reports_multi(
-                cfg, units, s1, lambda b, t, c: bodies.append(b), now=now)
+                cfg, units, s1, lambda b, t, c: bodies.append(b),
+                now=now, tz=timezone.utc)
             assert sent == ["daily"]
             assert len(bodies) == 1
             assert bodies[0].count("A@h") == 1 and bodies[0].count("B@h") == 1

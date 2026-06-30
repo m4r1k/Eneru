@@ -130,7 +130,7 @@ pushing** — this is strongly recommended, not optional.
 Playwright. Playwright ships in the `dev` extra; fetch the browser once:
 
 ```bash
-pip install -e ".[dev]"     # inside the uv venv (includes playwright)
+uv pip install -e ".[dev]"   # inside the uv venv (includes playwright)
 playwright install chromium
 
 # With a daemon running on :9191 (curl -s 127.0.0.1:9191/api/v1/ups -> 200):

@@ -166,7 +166,7 @@ def format_cost(value: float, currency: str,
     if cost_format and "{value" in cost_format:
         try:
             return cost_format.format(value=value)
-        except (KeyError, IndexError, ValueError):
+        except (KeyError, IndexError, ValueError, AttributeError, TypeError):
             pass  # malformed override -> fall through to the table
     code = (currency or "USD").upper()
     entry = _CURRENCY.get(code)

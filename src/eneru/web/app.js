@@ -2053,6 +2053,10 @@ async function renderControl(payload) {
   const tab = document.getElementById("tab-control");
   if (tab) tab.hidden = !available;
   if (!available) {
+    // A live reload that disables nut_control (or a token expiry) can leave us
+    // sitting on the now-hidden Control tab. Fall back to Overview, mirroring
+    // clearAuthState(), so we never strand on a hidden panel.
+    if (activeTab === "control") selectTab("overview", { updateHash: true });
     sec.hidden = true;
     if (empty) empty.hidden = false;
     _controlBuiltKey = null;  // rebuild when control becomes available again
