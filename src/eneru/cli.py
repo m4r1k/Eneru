@@ -5,7 +5,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Tuple
 
 from eneru import auth
 from eneru.version import __version__
@@ -1794,7 +1794,8 @@ def _cmd_apikey_revoke(args):
 # latest recorded row from the local stats DB.
 # ---------------------------------------------------------------------------
 
-def _self_test_find_group(config, name):
+def _self_test_find_group(
+        config: Config, name: Optional[str]) -> Optional[UPSGroupConfig]:
     """Resolve a UPS group by exact or sanitized name; default to the sole UPS
     when ``name`` is omitted. Returns the group or ``None``."""
     from eneru.status import sanitize_name
@@ -1811,7 +1812,7 @@ def _self_test_find_group(config, name):
     return None
 
 
-def _self_test_no_ups(name):
+def _self_test_no_ups(name: Optional[str]) -> None:
     if name:
         print(f"No UPS named {name!r} in the configuration.")
     else:
@@ -1819,20 +1820,24 @@ def _self_test_no_ups(name):
     sys.exit(2)
 
 
-def _self_test_api_base(config, args):
+def _self_test_api_base(config: Config, args: argparse.Namespace) -> str:
     """Base URL for the running daemon's API (loopback when bound to a wildcard)."""
     if getattr(args, "url", None):
         return args.url.rstrip("/")
     bind = config.api.bind or "127.0.0.1"
-    if bind in ("0.0.0.0", "::", ""):
+    if bind in ("0.0.0.0", ""):
         bind = "127.0.0.1"
+    elif bind == "::":
+        # Preserve IPv6 loopback so an IPv6-only daemon (IPV6_V6ONLY=1) is
+        # still reachable instead of falling back to an unreachable IPv4 URL.
+        bind = "::1"
     # Bracket IPv6 literals so the URL is well-formed (http://[::1]:9191).
     if ":" in bind and not bind.startswith("["):
         bind = f"[{bind}]"
     return f"http://{bind}:{config.api.port}"
 
 
-def _self_test_token(args):
+def _self_test_token(args: argparse.Namespace) -> str:
     return (getattr(args, "token", None)
             or getattr(args, "api_key", None)
             or os.environ.get("ENERU_API_TOKEN")
@@ -1840,7 +1845,9 @@ def _self_test_token(args):
             or "")
 
 
-def _http_json(method, url, token=None, body=None, timeout=15):
+def _http_json(method: str, url: str, token: Optional[str] = None,
+               body: Optional[Any] = None,
+               timeout: int = 15) -> Tuple[int, Any]:
     """Minimal stdlib JSON HTTP client. Returns ``(status, data)``; status 0
     means the request never reached the server. Factored into one function so
     tests mock a single seam."""
@@ -1871,7 +1878,7 @@ def _http_json(method, url, token=None, body=None, timeout=15):
         return 0, {"error": {"message": str(getattr(exc, "reason", exc))}}
 
 
-def _error_message(data):
+def _error_message(data: Any) -> Optional[str]:
     if isinstance(data, dict):
         err = data.get("error")
         if isinstance(err, dict) and err.get("message"):
@@ -1881,7 +1888,7 @@ def _error_message(data):
     return None
 
 
-def _resolve_self_test_command(config, group):
+def _resolve_self_test_command(config: Config, group: UPSGroupConfig) -> str:
     """Per-UPS self_test.command override if set, else the global command —
     matching EneruAPIHandler._effective_self_test / the monitor resolver so the
     --direct path issues the right command for the selected UPS."""
@@ -1891,7 +1898,8 @@ def _resolve_self_test_command(config, group):
     return config.self_test.command
 
 
-def _effective_nut_control(config, group):
+def _effective_nut_control(
+        config: Config, group: UPSGroupConfig) -> "NutControlConfig":
     """Resolve nut_control for one UPS, mirroring
     EneruAPIHandler._effective_nut_control: a per-group override is used as-is
     for everything EXCEPT ``enabled``, which is always forced from the GLOBAL
@@ -1912,7 +1920,8 @@ def _effective_nut_control(config, group):
     )
 
 
-def _open_stats_store(config, group):
+def _open_stats_store(
+        config: Config, group: UPSGroupConfig) -> Optional["StatsStore"]:
     """Open the per-UPS stats store for CLI read/write, or ``None`` on failure.
 
     The caller owns closing it. The StatsStore methods no-op on an unopened
@@ -1936,7 +1945,7 @@ def _open_stats_store(config, group):
         return None
 
 
-def _cmd_self_test_run(args):
+def _cmd_self_test_run(args: argparse.Namespace) -> None:
     """Issue a UPS battery self-test (daemon API by default; --direct via NUT)."""
     config = _load_config(args)
     group = _self_test_find_group(config, getattr(args, "ups", None))
@@ -1949,7 +1958,8 @@ def _cmd_self_test_run(args):
         _self_test_run_api(config, name, args)
 
 
-def _self_test_run_api(config, name, args):
+def _self_test_run_api(
+        config: Config, name: str, args: argparse.Namespace) -> None:
     from urllib.parse import quote
     token = _self_test_token(args)
     if not token:
@@ -1971,9 +1981,10 @@ def _self_test_run_api(config, name, args):
     sys.exit(1)
 
 
-def _self_test_run_direct(config, group, name):
+def _self_test_run_direct(
+        config: Config, group: UPSGroupConfig, name: str) -> None:
     from eneru import self_test as selftest
-    from eneru.nut_control import command_allowed
+    from eneru.nut_control import command_allowed, command_lock
     nc = _effective_nut_control(config, group)
     if not nc.enabled:
         print("nut_control is not enabled. --direct issues a real command via "
@@ -2002,7 +2013,11 @@ def _self_test_run_direct(config, group, name):
               "Refusing to issue a test whose result could not be tracked.")
         sys.exit(1)
     try:
-        result = selftest.issue_self_test(name, cmd, nc, store, source="cli")
+        # Serialize against the API control path and the scheduled self-test
+        # (same per-UPS lock identity) so this direct write can't race another
+        # control command on the same device.
+        with command_lock(name):
+            result = selftest.issue_self_test(name, cmd, nc, store, source="cli")
     finally:
         store.close()
     if result.get("ok"):
@@ -2013,7 +2028,7 @@ def _self_test_run_direct(config, group, name):
         sys.exit(1)
 
 
-def _cmd_self_test_status(args):
+def _cmd_self_test_status(args: argparse.Namespace) -> None:
     """Show the latest recorded self-test result for a UPS."""
     config = _load_config(args)
     group = _self_test_find_group(config, getattr(args, "ups", None))
@@ -2021,11 +2036,15 @@ def _cmd_self_test_status(args):
         _self_test_no_ups(getattr(args, "ups", None))   # exits
     name = group.ups.name
     store = _open_stats_store(config, group)
+    if store is None:
+        # _open_stats_store already printed the open error; a DB-open failure is
+        # not the same as an empty store, so exit non-zero instead of claiming
+        # there is no self-test on record.
+        sys.exit(1)
     try:
-        row = store.latest_self_test() if store is not None else None
+        row = store.latest_self_test()
     finally:
-        if store is not None:
-            store.close()
+        store.close()
     if not row:
         print(f"No self-test on record for {name}.")
         return

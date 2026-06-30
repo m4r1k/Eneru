@@ -317,6 +317,14 @@ def _src_with_store(name="UPS@h", store=None):
     return SimpleNamespace(_monitors=[mon])
 
 
+def _open_store_stub():
+    """A stats-store stand-in the self-test POST guard treats as available:
+    it exposes a non-None ``_conn`` (the API refuses to issue when the store is
+    None or its ``_conn`` is None — i.e. unopened/closed)."""
+    from types import SimpleNamespace
+    return SimpleNamespace(_conn=object(), is_open=True)
+
+
 @pytest.mark.unit
 def test_store_for_ups_resolves_monitor(minimal_config):
     # Regression: _run_self_test referenced a nonexistent _store_for_ups -> 500.
@@ -337,11 +345,36 @@ def test_run_self_test_issues(minimal_config, monkeypatch):
     logs = []
     h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/self-test",
                          method_body=b"{}", logs=logs)
-    h.api_source = _src_with_store("UPS@h", store=None)
+    h.api_source = _src_with_store("UPS@h", store=_open_store_stub())
     h.headers["Authorization"] = f"Bearer {_token(h)}"
     status, _, payload = h._route_post()
     assert status == 200 and payload["status"] == "issued" and payload["testId"] == 5
     assert any("-> ok" in line for line in logs)         # audited
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("store", [None, "closed"])
+def test_run_self_test_503_without_open_store(minimal_config, monkeypatch, store):
+    # A self-test must record a `running` row; without an open stats store the
+    # API refuses (503) rather than orphaning the test state. Covers both the
+    # missing store (None) and the present-but-closed store (_conn is None).
+    _enable(minimal_config)
+    minimal_config.nut_control.allowed_commands = ["test.battery.start"]
+    monkeypatch.setattr(apimod.selftest, "discover_self_test_command",
+                        lambda *a, **k: "test.battery.start")
+    monkeypatch.setattr(apimod.selftest, "issue_self_test",
+                        lambda *a, **k: pytest.fail("must not issue without a store"))
+    if store == "closed":
+        from types import SimpleNamespace
+        store = SimpleNamespace(_conn=None, is_open=False)   # opened then closed
+    logs = []
+    h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/self-test",
+                         method_body=b"{}", logs=logs)
+    h.api_source = _src_with_store("UPS@h", store=store)
+    h.headers["Authorization"] = f"Bearer {_token(h)}"
+    status, _, payload = h._route_post()
+    assert status == 503 and payload["error"]["code"] == "STATS_UNAVAILABLE"
+    assert any("-> failed" in line for line in logs)        # audited
 
 
 @pytest.mark.unit

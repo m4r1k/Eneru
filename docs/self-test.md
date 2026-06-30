@@ -44,8 +44,10 @@ self_test:
 `schedule` accepts `daily`, `weekly`, `monthly`, or an interval such as
 `every 30d` / `every 12h`. The scheduler persists its last-run time, so a
 30-day cadence survives daemon restarts (it does not reset to "now" on boot),
-and a restart never kicks off an unscheduled test. `self_test` is a hot-reload
-**subsystem** section — the scheduler re-registers its jobs on reload.
+and a restart never kicks off an unscheduled test. `self_test` is a **SAFE**
+hot-reload section: its `Schedule` is recomputed from config on every loop, so a
+SIGHUP schedule change is picked up on the next due-check with no re-register
+step.
 
 ## Result normalization
 

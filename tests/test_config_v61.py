@@ -329,6 +329,30 @@ class TestCrossFieldValidation:
         assert any("reports.time" in e and "invalid" in e for e in errs), errs
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("val", ["0", "-5", "'abc'", "1.5", "true"])
+    def test_self_test_result_poll_after_invalid_is_error(self, val):
+        # result_poll_after is int()-cast at runtime after a test is issued; a
+        # non-positive / non-integer value must be caught at config-validation
+        # time, not silently left to corrupt the in-flight poll state.
+        _, errs = _validate(
+            f"ups:\n  name: U@h\nself_test:\n  result_poll_after: {val}\n")
+        assert any("self_test.result_poll_after" in e for e in errs), errs
+
+    @pytest.mark.unit
+    def test_self_test_result_poll_after_valid_no_error(self):
+        _, errs = _validate(
+            "ups:\n  name: U@h\nself_test:\n  result_poll_after: 120\n")
+        assert not any("result_poll_after" in e for e in errs), errs
+
+    @pytest.mark.unit
+    def test_per_ups_self_test_result_poll_after_invalid_is_error(self):
+        _, errs = _validate(
+            "self_test:\n  schedule: daily\n"
+            "ups:\n  - name: U1@h\n    self_test:\n      result_poll_after: 0\n")
+        assert any("self_test (UPS 'U1@h')" in e and "result_poll_after" in e
+                   for e in errs), errs
+
+    @pytest.mark.unit
     def test_reports_weekly_day_invalid_is_error(self):
         _, errs = _validate(
             "ups:\n  name: U@h\nreports:\n  weekly_day: 'funday'\n")

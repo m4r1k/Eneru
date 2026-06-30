@@ -506,9 +506,11 @@ function remoteHealthReachable(row) {
 }
 
 function remoteStatusClass(row) {
-  if (remoteHealthReachable(row)) return "ok";
+  // Check the explicit status FIRST: a DEGRADED row may also carry
+  // reachable:true, and it should read amber, not green.
   const s = String((row && row.status) || "").toUpperCase();
   if (s.includes("DEGRADED") || s.includes("WARN")) return "warn";
+  if (remoteHealthReachable(row)) return "ok";
   return "crit";
 }
 
@@ -1442,7 +1444,11 @@ function makeChart(opts) {
     const series = res.ok ? res.data : null;
     let events = [];
     if (opts.events) {
-      let eq = "limit=1000";
+      // Fetch up to the server max: markers are filtered to THIS UPS + tier-1
+      // client-side, so a busy multi-UPS fleet can't let other UPSes' events
+      // consume a small cap and drop this UPS's markers. (Per-UPS server-side
+      // filtering is a follow-up; the events endpoint aggregates all DBs.)
+      let eq = "limit=10000";
       if (from !== null) eq += "&from=" + from;
       if (to !== null) eq += "&to=" + to;
       const ev = await api("/api/v1/events?" + eq);
@@ -1792,14 +1798,17 @@ function renderBatteryHealthTab() {
 
 // Battery-health score trend (v6.1). Sparse rows from the dedicated
 // battery_health table (one per update_interval), so a wide default window.
+let _bhGraphGen = 0;
 async function renderBatteryHealthGraph() {
   const host = document.getElementById("bh-graph");
   if (!host) return;
   const sel = document.getElementById("battery-ups");
   const name = (sel && sel.value) || (lastUpsRows[0] && lastUpsRows[0].name);
   if (!name) { host.replaceChildren(); return; }
+  const myGen = ++_bhGraphGen;
   const res = await api("/api/v1/ups/" + encodeURIComponent(name)
     + "/battery-health-history");
+  if (myGen !== _bhGraphGen) return;  // a newer call superseded this one
   const data = (res.ok && res.data && res.data.data) || [];
   const pts = data.filter((r) => r.score != null)
     .map((r) => ({ ts: r.ts, value: r.score }));

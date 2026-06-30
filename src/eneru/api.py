@@ -728,9 +728,11 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     mon.config, is_local=is_local,
                     delegated=bool(getattr(mon, "_uses_loopback_delegate", False)),
                     coordinator_mode=bool(getattr(mon, "_coordinator_mode", False)),
-                    # Raw shutdown commands can embed sensitive flags/creds —
-                    # redact for anonymous readers (mirrors config_summary).
-                    reveal_commands=principal is not None)
+                    # Raw shutdown commands can embed sensitive flags/creds, so
+                    # they stay redacted for ALL readers — matching the
+                    # config_summary(extended=True) / remote-health contract,
+                    # which never reveals raw commands even to authenticated users.
+                    reveal_commands=False)
                 return 200, "application/json", {"ups": ups_name, "plan": plan}
             if len(parts) == 6 and parts[5] == "battery-health-history":
                 # v6.1 battery-health score TREND for the Battery-tab graph. The
@@ -895,7 +897,15 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             return 422, "application/json", self._error(
                 "UNSUPPORTED",
                 f"UPS {real} does not expose {command!r} (upscmd -l)")
+        # A self-test must record a `running` row so its result can be finalised
+        # later; without an open stats store it would orphan that state, so
+        # refuse (mirrors the CLI --direct and scheduler guards). A store that
+        # exists but is closed (_conn is None) counts as unavailable too.
         store = self._store_for_ups(real)
+        if store is None or getattr(store, "_conn", None) is None:
+            self._audit(principal, "self-test", f"{real}:{command}", "failed")
+            return 503, "application/json", self._error(
+                "STATS_UNAVAILABLE", "the statistics store is unavailable")
         with _ups_lock(real):
             result = selftest.issue_self_test(
                 real, command, nc, store, source="api")

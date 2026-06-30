@@ -62,7 +62,9 @@ _eneru() {
             COMPREPLY=( $(compgen -W "127.0.0.1 0.0.0.0" -- "$cur") )
             return 0
             ;;
-        --server|--group)
+        --server|--group|--ups|--url|--token|--api-key)
+            # Value-taking flags (incl. the self-test run flags): no static
+            # completion, so don't fall through to offering option names.
             COMPREPLY=()
             return 0
             ;;

@@ -120,33 +120,65 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
         skipped=_local_skip(is_local, delegated, um.enabled),
         steps=[_unmount_step(m) for m in (um.mounts or [])] if um_on else []))
 
-    # 5) Remote servers — best-effort, runs regardless of local/delegated. Within
-    #    a shutdown-order group they run in PARALLEL; groups run in order.
+    # 5) Remote servers — best-effort, runs regardless of local/delegated. This
+    #    mirrors RemoteShutdownMixin._shutdown_remote_servers exactly: loopback
+    #    pre-actions bracket FIRST, then regular remotes run grouped by EFFECTIVE
+    #    shutdown_order (parallel only WITHIN a same-order group; groups run in
+    #    sequence), then loopback shutdown commands run LAST. Estimate sums the
+    #    sequential groups (max timeout within a parallel group).
     enabled_servers = [s for s in config.remote_servers if s.enabled]
-    ordered = sorted(enabled_servers, key=lambda s: (s.shutdown_order
-                                                     if s.shutdown_order is not None else 0))
-    rsteps = []
-    for s in ordered:
+    loopbacks = [s for s in enabled_servers if s.is_host_loopback is True]
+    regulars = [s for s in enabled_servers if s.is_host_loopback is not True]
+
+    def _remote_step(s, note):
         bits = [f"{(s.user + '@') if s.user else ''}{s.host}",
                 (s.shutdown_command or "shutdown") if reveal_commands else hidden]
         if getattr(s, "command_timeout", None):
             bits.append(f"timeout {s.command_timeout}s")
-        if s.shutdown_order is not None:
-            bits.append(f"order {s.shutdown_order}")
+        if note:
+            bits.append(note)
         if s.is_host_loopback:
             bits.append("host-loopback")
-        rsteps.append({"label": s.name or s.host, "detail": " · ".join(bits),
-                       "host": s.host, "order": s.shutdown_order,
-                       "loopback": bool(s.is_host_loopback)})
-    parallel = any(s.parallel for s in enabled_servers)
-    timeouts = [float(s.command_timeout) for s in enabled_servers
-                if getattr(s, "command_timeout", None)]
-    remote_est = (max(timeouts) if parallel else sum(timeouts)) if timeouts else None
+        return {"label": s.name or s.host, "detail": " · ".join(bits),
+                "host": s.host, "order": s.shutdown_order,
+                "loopback": bool(s.is_host_loopback)}
+
+    rsteps = []
+    est = 0.0
+    any_parallel = False
+    # Loopback pre-actions run before the regulars.
+    if any(getattr(lb, "pre_shutdown_commands", None) for lb in loopbacks):
+        for lb in loopbacks:
+            if getattr(lb, "pre_shutdown_commands", None):
+                rsteps.append(_remote_step(lb, "pre-shutdown · runs first"))
+    # Regular remotes, grouped by the SAME effective-order logic the executor uses.
+    if regulars:
+        from eneru.monitor import compute_effective_order
+        groups = {}
+        for order, s in compute_effective_order(regulars):
+            groups.setdefault(order, []).append(s)
+        for order in sorted(groups):
+            members = groups[order]
+            parallel_group = len(members) > 1
+            any_parallel = any_parallel or parallel_group
+            note = f"order {order}" + (" · ⇉ parallel" if parallel_group else "")
+            for s in members:
+                rsteps.append(_remote_step(s, note))
+            gto = [float(s.command_timeout) for s in members
+                   if getattr(s, "command_timeout", None)]
+            if gto:
+                est += max(gto) if parallel_group else sum(gto)
+    # Loopback shutdown commands run after all regulars.
+    for lb in loopbacks:
+        rsteps.append(_remote_step(lb, "shutdown · runs last"))
+        if getattr(lb, "command_timeout", None):
+            est += float(lb.command_timeout)
     phases.append(_phase(
-        "remote", "Remote servers", mode="parallel" if parallel else "sequential",
+        "remote", "Remote servers",
+        mode="parallel" if any_parallel else "sequential",
         enabled=bool(enabled_servers),
         skipped=None if enabled_servers else "none configured",
-        estimate_s=remote_est, steps=rsteps))
+        estimate_s=(est or None), steps=rsteps))
 
     # 6) Final filesystem sync (local, sync enabled, not delegated).
     final_on = is_local and fs.sync_enabled and not delegated

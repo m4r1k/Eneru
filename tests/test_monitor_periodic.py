@@ -316,6 +316,19 @@ class TestRunSelfTestTask:
         assert mon._self_test_pending_id is None
 
     @pytest.mark.unit
+    def test_closed_store_skips_entirely(self, tmp_path):
+        # A store that exists but is closed (get_meta/set_meta silently no-op)
+        # must be treated as unavailable too — otherwise scheduled tests fire
+        # without any state tracking. A closed StatsStore reports is_open=False.
+        closed = StatsStore(tmp_path / "closed.db")
+        closed.open()
+        closed.close()
+        assert closed.is_open is False
+        mon = _make_monitor(_cfg(_ENABLED), closed)
+        mon._run_self_test_task()
+        assert mon._self_test_pending_id is None
+
+    @pytest.mark.unit
     def test_discovery_unavailable_retries_without_consuming_cycle(self, store, monkeypatch):
         mon = _make_monitor(_cfg(_ENABLED), store)
         store.set_meta("self_test_last_run", "0")     # due now

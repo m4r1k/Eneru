@@ -2119,27 +2119,28 @@ class UPSGroupMonitor(
     def _resolve_self_test_config(self):
         """Per-UPS self_test override if present, else the global config."""
         glob = self.config.self_test
-        try:
-            name = self.config.ups.name
-            for group in getattr(self.config, "ups_groups", None) or []:
-                if (getattr(group.ups, "name", None) == name
-                        and getattr(group, "self_test", None)):
-                    return group.self_test
-        except Exception:
-            pass
+        # Resolve defensively with getattr() rather than a broad try/except: a
+        # bare `except Exception: pass` here would hide a genuinely broken
+        # per-UPS override and silently run the global config instead.
+        name = getattr(getattr(self.config, "ups", None), "name", None)
+        for group in getattr(self.config, "ups_groups", None) or []:
+            group_ups = getattr(group, "ups", None)
+            if (name is not None
+                    and getattr(group_ups, "name", None) == name
+                    and getattr(group, "self_test", None)):
+                return group.self_test
         return glob
 
     def _resolve_nut_control_config(self) -> NutControlConfig:
         """Per-UPS nut_control override if present, else the global config."""
         glob = self.config.nut_control
-        try:
-            name = self.config.ups.name
-            for group in getattr(self.config, "ups_groups", None) or []:
-                if (getattr(group.ups, "name", None) == name
-                        and getattr(group, "nut_control", None)):
-                    return group.nut_control
-        except Exception:
-            pass
+        name = getattr(getattr(self.config, "ups", None), "name", None)
+        for group in getattr(self.config, "ups_groups", None) or []:
+            group_ups = getattr(group, "ups", None)
+            if (name is not None
+                    and getattr(group_ups, "name", None) == name
+                    and getattr(group, "nut_control", None)):
+                return group.nut_control
         return glob
 
     def _run_self_test_task(self) -> None:
@@ -2155,8 +2156,11 @@ class UPSGroupMonitor(
         store = getattr(self, "_stats_store", None)
         # The scheduler needs the stats store to dedup runs (last-run meta) and
         # record the result row. Without it we can neither track state nor avoid
-        # re-issuing every tick, so skip rather than fire blindly.
-        if store is None:
+        # re-issuing every tick, so skip rather than fire blindly. A store
+        # created in __init__ but never opened (or already closed) silently
+        # no-ops get_meta()/set_meta(), so treat a closed store as unavailable
+        # too — otherwise scheduled tests would fire without state tracking.
+        if store is None or not getattr(store, "is_open", False):
             return
 
         # 0) Recover an in-flight test persisted before a restart. The pending id
@@ -2234,7 +2238,6 @@ class UPSGroupMonitor(
                 f"⚠️  self_test command '{cfg.command}' not exposed by "
                 f"{self._poll_target}; skipping this cycle")
             return
-        store.set_meta("self_test_last_run", str(int(now)))
         # Serialize against the API control path (same per-UPS lock identity) so
         # a scheduled self-test can't race an operator-issued command/self-test
         # on the same device.
@@ -2242,6 +2245,11 @@ class UPSGroupMonitor(
             result = selftest.issue_self_test(
                 self._poll_target, cmd, nc, store, source="scheduler")
         if result["ok"]:
+            # Stamp the cadence ONLY once the issue succeeds: a failed issue
+            # (NUT error, transient lock contention) must retry next cycle, not
+            # silently burn a (possibly 30-day) interval. The genuinely-
+            # unsupported path above still consumes the cycle.
+            store.set_meta("self_test_last_run", str(int(now)))
             self._self_test_pending_id = result["test_id"]
             self._self_test_poll_due_mono = (
                 time.monotonic() + max(1, int(cfg.result_poll_after)))

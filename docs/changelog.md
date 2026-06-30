@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.0-rc14] - 2026-06-30
+
+Addresses the full CodeRabbit + cubic review of rc13 (every actionable finding,
+not just a subset).
+
+### Fixed
+
+- **Self-test cadence no longer burned by a failed issue** — a scheduled
+  self-test that fails to *issue* (NUT error / lock contention) now retries on
+  the next cycle instead of silently consuming a (possibly 30-day) interval; the
+  cadence is stamped only on a successful issue.
+- **Direct CLI self-test now serialized** — `self-test run --direct` acquires the
+  same per-UPS control lock as the API and scheduler, so it can't race another
+  command on the same device.
+- **Report "Power events" section** now counts only real power events; lifecycle
+  rows (`DAEMON_START`, …) no longer skew the digest.
+- **Closed stats store treated as unavailable** in the battery-health learning /
+  prediction paths (not just a `None` store), so a closed DB fails soft instead
+  of silently no-opping.
+- **Config validation** rejects non-mapping v6.1 sections (`battery_health`,
+  `self_test`, `reports`, `energy`, and per-UPS overrides) instead of silently
+  reverting to defaults, and requires `nominal_runtime_seconds` /
+  `expected_life_years` to be ≥ 1 (a 0 silently disabled the score term).
+- **Stats store write transactions** re-check the connection under the DB lock
+  (a concurrent `close()` could otherwise crash a transaction with
+  `AttributeError`).
+- **Per-UPS override resolution** no longer swallows a broken override behind a
+  bare `except` and silently falls back to the global config.
+
+### Changed
+
+- IPv6 loopback (`api.bind: "::"`) preserved as `::1` for the self-test CLI;
+  `self-test status` distinguishes a DB-open failure from "no record"; `__all__`
+  sorted; malformed `cost_format` without `{value}` falls back; scheduler
+  persists the full-precision run timestamp; shell completions scope the
+  self-test value flags to `run`; Stylelint keyword casing; docs/reference
+  wording (`critical_score < warn_score`, SAFE hot-reload) corrected; new
+  self-test CLI helpers fully type-hinted.
+
 ## [6.1.0-rc13] - 2026-06-29
 
 Title-style consistency, a window-independent Events tier, and a full local

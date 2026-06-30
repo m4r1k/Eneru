@@ -1539,7 +1539,13 @@ class ConfigLoader:
                 raw_data.get("mqtt", {}),
                 {"enabled", "broker", "topic_prefix", "publish_interval"},
             ))
-            # v6.1 sections
+            # v6.1 sections. A scalar/array for any of these (e.g.
+            # `self_test: true`, `battery_health: []`) is parsed as {} at load
+            # and would silently revert to defaults — making the section look
+            # configured while it is actually disabled. Reject it up front.
+            for _sec in ("battery_health", "self_test", "reports", "energy"):
+                if _sec in raw_data and not isinstance(raw_data[_sec], dict):
+                    messages.append(f"ERROR: {_sec} must be a mapping")
             _bh_keys = {"enabled", "update_interval", "nominal_runtime_seconds",
                         "battery_install_date", "expected_life_years",
                         "warn_score", "critical_score", "replacement"}
@@ -1635,6 +1641,12 @@ class ConfigLoader:
                     if not isinstance(entry, dict):
                         continue
                     name = entry.get("name") or f"ups[{idx}]"
+                    # Same non-mapping guard as the top-level sections: a scalar
+                    # per-UPS override silently reverts to the global config.
+                    for _sec in ("battery_health", "self_test"):
+                        if _sec in entry and not isinstance(entry[_sec], dict):
+                            messages.append(
+                                f"ERROR: ups '{name}' {_sec} must be a mapping")
                     if isinstance(entry.get("battery_health"), dict):
                         _check_battery_health(
                             entry["battery_health"],
@@ -2602,6 +2614,14 @@ class ConfigLoader:
                 except (ValueError, TypeError) as exc:
                     messages.append(
                         f"ERROR: {label_prefix}.time invalid: {exc}")
+            # result_poll_after is cast with int() at runtime after a test is
+            # issued; a bad value leaves the in-flight state half-updated and
+            # the result unpolled, so validate it up front like the others.
+            rpa = getattr(st, "result_poll_after", None)
+            if isinstance(rpa, bool) or not isinstance(rpa, int) or rpa < 1:
+                messages.append(
+                    f"ERROR: {label_prefix}.result_poll_after must be an "
+                    f"integer >= 1, got {rpa!r}")
 
         # Reports schedule/enum fields (daemon-wide; no per-UPS override).
         reports = config.reports
@@ -2685,11 +2705,13 @@ class ConfigLoader:
             # nominal_runtime_seconds + warn/critical are genuinely Optional
             # (None = unset/disabled); the rest are non-Optional, so an explicit
             # YAML null must be a config error (else int()/float() blows up at
-            # runtime and the feature silently dies).
+            # runtime and the feature silently dies). minimum=1 (not 0):
+            # health/prediction.py treats <= 0 as "unavailable", so a 0 here
+            # would silently disable the score term instead of erroring.
             _check_num(f"{label_prefix}.nominal_runtime_seconds",
-                       bh.nominal_runtime_seconds, minimum=0)
+                       bh.nominal_runtime_seconds, minimum=1)
             _check_num(f"{label_prefix}.expected_life_years",
-                       bh.expected_life_years, allow_none=False, minimum=0)
+                       bh.expected_life_years, allow_none=False, minimum=1)
             _check_num(f"{label_prefix}.update_interval",
                        bh.update_interval, allow_none=False, minimum=1)
             _check_num(f"{label_prefix}.warn_score", bh.warn_score,

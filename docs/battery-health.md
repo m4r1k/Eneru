@@ -37,7 +37,7 @@ battery_health:
   battery_install_date: null     # "YYYY-MM-DD" — unlocks the age term
   expected_life_years: 5.0
   warn_score: 30.0               # escalating absolute-score alerts (null = off)
-  critical_score: 15.0           # must be <= warn_score
+  critical_score: 15.0           # must be < warn_score
   replacement:
     threshold_score: 50.0        # warn when the projected score will cross this
     horizon_days: 90             # ...within this many days

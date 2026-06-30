@@ -49,8 +49,9 @@ table (`last_report_sent_<period>`), so:
 In a multi-UPS deployment the report is **daemon-wide** — the coordinator sends a
 single digest covering every UPS, not one per UPS.
 
-`reports` is a hot-reload **subsystem** section: changing the schedule re-registers
-the scheduler jobs without a restart (see
+`reports` is a hot-reload **safe** section: the monitor/coordinator rereads the
+schedule from config on each loop, so schedule changes apply on SIGHUP without
+a restart (see
 [Configuration reference](configuration.md#hot-reload)).
 
 ## See also

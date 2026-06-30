@@ -125,6 +125,12 @@ examples/                       # Example configs
   config-enterprise.yaml        # Multi-server enterprise setup
   config-dual-ups.yaml          # Multi-UPS setup
 
+tools/
+  dashboard-preview.py          # Serve working-tree web/ + proxy /api to a live
+                                # daemon, screenshot every tab (Playwright). The
+                                # standard way to visually verify dashboard
+                                # changes; see the dashboard-preview skill.
+
 packaging/
   eneru-wrapper.py              # Package entry point wrapper
   eneru.service                 # Systemd service file
@@ -225,7 +231,7 @@ This repo deliberately keeps individual files small (`monitor.py` is now ~830 li
 `main` is protected. All changes go through feature branches and pull requests.
 
 **Branch protection on `main`:**
-- Required CI checks before merge: `validate` (v6.1 reduced PR matrix — runs `3.9`, `3.12`, `3.15-dev` on PRs, full set on push-to-`main`; only `3.9` + `3.12` are required checks) + **8** parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single Core`, `E2E UPS Single Auth`, `E2E UPS Multi`, `E2E Redundancy Quorum`, `E2E Redundancy Regression`, `E2E Stats`, `E2E Loopback`). The branch-protection required-check *names* must be updated by the operator when v6.1 merges — see the `e2e.yml` and `validate.yml` header comments.
+- Required CI checks before merge: `validate` (v6.1 reduced PR matrix — runs `3.9`, `3.12`, `3.15-dev` on PRs, full set on push-to-`main`; only `3.9` + `3.12` are required checks) + **8** parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single Core`, `E2E UPS Single Auth`, `E2E UPS Multi`, `E2E Redundancy Quorum`, `E2E Redundancy Regression`, `E2E Stats`, `E2E Loopback`).
 - Strict mode: branch must be up-to-date with main before merge
 - Enforce admins: maintainers follow the same rules
 - No force pushes, no branch deletion
@@ -336,7 +342,7 @@ The current pinned set (as of 2026-06-29):
 | Action | Tag | SHA prefix |
 |---|---|---|
 | `actions/checkout` | `v7.0.0` | `9c091bb2…` |
-| `actions/setup-python` | `v6` | `a309ff8b…` |
+| `actions/setup-python` | `v6` | `ece7cb06…` |
 | `actions/upload-artifact` | `v7` | `043fb46d…` |
 | `actions/download-artifact` | `v8` | `3e5f45b2…` |
 | `codecov/codecov-action` | `v6` | `fb8b3582…` |

@@ -93,7 +93,7 @@ h2 { font-size: 0.8125rem; color: var(--muted); text-transform: uppercase;
 
 /* Inline-SVG icons (currentColor → theme + status aware, no emoji font). */
 .ic { width: 1em; height: 1em; flex: none; vertical-align: -0.14em;
-  fill: none; stroke: currentColor; stroke-width: 2;
+  fill: none; stroke: currentcolor; stroke-width: 2;
   stroke-linecap: round; stroke-linejoin: round; }
 
 /* Card header: small tinted icon chip + title + right-aligned badge. */
@@ -171,7 +171,7 @@ select:focus-visible, input:not([type="checkbox"]):focus-visible {
 .graph { background: var(--panel); border: 1px solid var(--line-strong);
   border-radius: var(--r-md); padding: 0.85rem 1rem; box-shadow: var(--shadow-sm); }
 .graph svg { height: 260px; }
-.graph .grid { stroke: var(--grid); stroke-width: 1; shape-rendering: crispEdges; }
+.graph .grid { stroke: var(--grid); stroke-width: 1; shape-rendering: crispedges; }
 .graph .axis { stroke: var(--line-strong); }
 .graph .plot { fill: none; stroke: var(--accent); stroke-width: 2;
   stroke-linejoin: round; stroke-linecap: round; }

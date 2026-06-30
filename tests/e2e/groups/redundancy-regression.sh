@@ -50,8 +50,11 @@ dbg "R1 step 1/8: pre-test restart_redundancy_nut_server"
 restart_redundancy_nut_server
 dump_redundancy_nut_state "R1 after first restart"
 
-dbg "R1 step 2/8: launching eneru in background (timeout 90s)"
-timeout 90s eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
+dbg "R1 step 2/8: launching eneru in background (timeout 150s)"
+# 150s (was 90s): restart_redundancy_nut_server can cost ~75s worst-case plus
+# the fixed sleeps below, so a loaded CI runner could blow a 90s budget and fail
+# with a confusing assertion instead of surfacing the real cause (CI slowness).
+timeout 150s eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
   > /tmp/test-r1.log 2>&1 &
 ENERU_PID=$!
 trap 'kill "$ENERU_PID" 2>/dev/null || true; restart_redundancy_nut_server >/dev/null 2>&1 || true' EXIT

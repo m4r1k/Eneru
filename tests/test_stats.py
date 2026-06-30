@@ -2626,6 +2626,57 @@ class TestPreExistingConnRaceUnderLock:
             real_conn.close()
 
 
+class TestWriteHelperConnRaceUnderLock:
+    """The write methods routed through ``_write()`` must re-check ``_conn``
+    AFTER acquiring ``_db_lock``.
+
+    ``_write()`` is the single place that takes the lock, re-binds the
+    connection, and opens the transaction. ``close()`` nulls ``_conn`` under the
+    lock, so a caller's pre-lock check races a concurrent close. We simulate it
+    by nulling ``_conn`` from inside the lock (pre-lock check passed; the helper
+    then sees None and yields None) and assert every write returns its safe
+    sentinel instead of crashing on ``None.execute``.
+    """
+
+    def _store_that_nulls_conn_under_lock(self, tmp_path):
+        s = StatsStore(tmp_path / "race_write.db")
+        s.open()
+        real_conn = s._conn
+
+        class _RaceLock:
+            def __enter__(self_lock):
+                s._conn = None
+                return True
+
+            def __exit__(self_lock, *exc):
+                # Restore so the NEXT method's pre-lock check passes and we
+                # exercise ITS post-lock re-check too (not just the first call's).
+                s._conn = real_conn
+                return False
+
+        s._db_lock = _RaceLock()
+        return s, real_conn
+
+    @pytest.mark.unit
+    def test_write_methods_survive_conn_race(self, tmp_path):
+        s, real_conn = self._store_that_nulls_conn_under_lock(tmp_path)
+        try:
+            # Each must return its method-specific safe value, not raise.
+            assert s.aggregate() == (0, 0)
+            assert s.purge() == (0, 0, 0)
+            s.log_event("DAEMON_START")                     # no return
+            assert s.delete_events([(1, 1, "DAEMON_START")]) == 0
+            assert s.enqueue_notification("b", "info", "cat") is None
+            s.mark_notification_sent(1)                      # no return
+            s.mark_notification_attempt(1)                   # no return
+            s.cancel_notification(1, "too_old")              # no return
+            assert s.cap_pending_notifications(5) == 0
+            assert s.prune_old_notifications(7, 30) == (0, 0)
+            s.set_meta("k", "v")                             # no return
+        finally:
+            real_conn.close()
+
+
 class TestStatsOpenErrors:
     """``open()`` must surface a clear log when the parent mkdir fails
     (stats.py lines 184-186)."""

@@ -263,13 +263,17 @@ class PeriodicScheduler:
                 if job.schedule.due(now, last, self._tz):
                     # Stamp + record as fired first, so a job whose body
                     # raises is logged but not re-attempted every tick.
-                    set_meta(key, str(int(now)))
+                    # Persist the full float (Schedule.interval keeps fractional
+                    # seconds); truncating with int() makes last_run earlier than
+                    # the real fire time, so interval jobs can become due too
+                    # early on the next tick or after a restart.
+                    set_meta(key, repr(now))
                     ran.append(job.name)
                     job.run(now)
                 elif last is None:
                     # Seed the baseline so the first real fire is the next
                     # occurrence, not an immediate one on every restart.
-                    set_meta(key, str(int(now)))
+                    set_meta(key, repr(now))
             except Exception as exc:  # failure isolation
                 self._log(f"⚠️  scheduler job '{job.name}' failed: {exc}")
         return ran

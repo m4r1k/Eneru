@@ -523,7 +523,7 @@ class TestCoordinatorReportSender:
         coord, _ = self._coord_with_monitors()
         coord._send_report_notification("covers UPS-A@h and UPS-B@h", "info", "report")
         body = coord._notification_worker.send.call_args.kwargs["body"]
-        assert "@​" in body and "@h" not in body.replace("@​", "")
+        assert "@\u200B" in body and "@h" not in body.replace("@\u200B", "")
 
     @pytest.mark.unit
     def test_send_report_notification_no_worker_is_safe(self):
@@ -539,6 +539,47 @@ class TestCoordinatorReportSender:
         assert "self._send_report_notification" in src
         # and the old prefixing path is gone
         assert "primary._send_notification" not in src
+
+    def _coord_reports_enabled(self):
+        from eneru.config import ReportsConfig
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS-A@h"),
+                                       is_local=True)],
+            reports=ReportsConfig(enabled=True, daily=True),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        # A real monitor's .config is the full Config (has .ups.name + .energy);
+        # a plain MagicMock satisfies both attribute reads in the unit list comp.
+        mon = MagicMock()
+        mon._stats_store = object()
+        coord._monitors = [mon]
+        return coord
+
+    @pytest.mark.unit
+    def test_maybe_send_reports_skipped_when_no_worker(self, monkeypatch):
+        # If the notification worker is unavailable, nothing can actually be
+        # enqueued — so we must NOT call maybe_send_due_reports_multi (which would
+        # stamp the cadence meta and burn the period). The next tick should retry.
+        from eneru import reports as reports_mod
+        coord = self._coord_reports_enabled()
+        coord._notification_worker = None
+        called = []
+        monkeypatch.setattr(reports_mod, "maybe_send_due_reports_multi",
+                            lambda *a, **k: called.append(True) or [])
+        coord._maybe_send_reports()
+        assert called == []
+
+    @pytest.mark.unit
+    def test_maybe_send_reports_runs_when_worker_present(self, monkeypatch):
+        from eneru import reports as reports_mod
+        coord = self._coord_reports_enabled()
+        coord._notification_worker = MagicMock()
+        called = []
+        monkeypatch.setattr(reports_mod, "maybe_send_due_reports_multi",
+                            lambda *a, **k: called.append(True) or [])
+        coord._maybe_send_reports()
+        assert called == [True]
 
 
 # ==============================================================================

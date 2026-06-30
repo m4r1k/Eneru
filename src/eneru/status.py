@@ -116,11 +116,14 @@ def _energy_for_monitor(monitor: Any):
         return None
     try:
         from eneru import energy as energy_mod
+        # One clock sample for BOTH the epoch end and the calendar boundaries, so
+        # a tick across midnight/month/year can't put the window start ahead of
+        # the end (boundary race).
         now = time.time()
+        now_dt = datetime.fromtimestamp(now)
         # Calendar windows (local time): "today" = since midnight, "month" =
         # since the 1st. Cost is only meaningful against a fixed boundary — a
         # rolling 24h/30d isn't what an electricity bill measures.
-        now_dt = datetime.now()
         today_start = int(datetime(now_dt.year, now_dt.month, now_dt.day).timestamp())
         month_start = int(datetime(now_dt.year, now_dt.month, 1).timestamp())
         year_start = int(datetime(now_dt.year, 1, 1).timestamp())

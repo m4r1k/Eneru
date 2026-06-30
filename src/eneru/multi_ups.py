@@ -802,7 +802,7 @@ class MultiUPSCoordinator:
         """
         if not self._notification_worker or not self._monitors:
             return
-        escaped = body.replace("@", "@​")   # zero-width space after @
+        escaped = body.replace("@", "@\u200B")   # zero-width space after @
         self._notification_worker.send(
             body=escaped, notify_type=notify_type, category=category,
             store=getattr(self._monitors[0], "_stats_store", None),
@@ -817,7 +817,14 @@ class MultiUPSCoordinator:
         sender (no per-UPS prefix) once per period.
         """
         try:
-            if not self.config.reports.enabled or not self._monitors:
+            # _send_report_notification silently no-ops when the notification
+            # worker is unavailable (startup init failure, or a disable→enable
+            # reload). Bail before maybe_send_due_reports_multi() stamps the
+            # last-run meta, otherwise the period is burned and the next report
+            # is skipped even though nothing was ever enqueued.
+            if (not self.config.reports.enabled
+                    or not self._monitors
+                    or self._notification_worker is None):
                 return
             primary = self._monitors[0]
             from eneru import reports as reports_mod

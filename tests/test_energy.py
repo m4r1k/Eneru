@@ -204,6 +204,17 @@ class TestCost:
         # exception out of format_cost.
         assert format_cost(0.2, "EUR", "{value:Z}") == "0.20 €"
 
+    @pytest.mark.unit
+    def test_format_cost_template_without_value_falls_back(self):
+        # A constant template missing the {value} field would otherwise format
+        # "successfully" and silently drop the amount; it must fall back to the
+        # currency table instead (docstring contract).
+        assert format_cost(0.2, "EUR", "flat") == "0.20 €"
+        assert format_cost(0.2, "USD", "EUR") == "$0.20"
+        assert format_cost(0.2, "xyz", "no placeholder") == "0.20 XYZ"
+        # A numeric-spec placeholder is still recognised via the "{value" prefix.
+        assert format_cost(0.2, "EUR", "{value:.2f} EUR") == "0.20 EUR"
+
 
 # --------------------------------------------------------------------------
 # summarize (status block shape)

@@ -185,7 +185,12 @@ def gather_report_sources(store, ups_name: str, energy_config, *,
     sources: Dict = {"ups_name": ups_name}
 
     events = store.query_events(start, int(now)) if store else []
-    sources["events"] = events
+    # The rendered section is labelled "Power events", so keep it to the real
+    # power-event set — lifecycle/diagnostic rows (DAEMON_START, etc.) would
+    # otherwise be miscounted under that heading and skew the digest. The full
+    # `events` list is still used below for the DAEMON_START uptime math.
+    from eneru.status import POWER_EVENT_TYPES
+    sources["events"] = [e for e in events if e[1] in POWER_EVENT_TYPES]
 
     # uptime: count DAEMON_START events in the window, but resolve "since" from a
     # WIDE lookback so a long-lived daemon (no restart in the report window) still

@@ -91,6 +91,14 @@ class TestApiBaseAndToken:
         assert cli._self_test_api_base(cfg, _args()) == "http://[::1]:9191"
 
     @pytest.mark.unit
+    def test_ipv6_wildcard_bind_becomes_ipv6_loopback(self):
+        # `::` (IPv6 wildcard) must map to the bracketed IPv6 loopback, not the
+        # IPv4 127.0.0.1 — an IPv6-only daemon (IPV6_V6ONLY=1) is otherwise
+        # unreachable from the CLI.
+        cfg = _config("ups:\n  name: U@h\napi:\n  bind: '::'\n  port: 9000\n")
+        assert cli._self_test_api_base(cfg, _args()) == "http://[::1]:9000"
+
+    @pytest.mark.unit
     def test_token_precedence(self, monkeypatch):
         monkeypatch.delenv("ENERU_API_TOKEN", raising=False)
         monkeypatch.delenv("ENERU_API_KEY", raising=False)
@@ -359,6 +367,17 @@ class TestStatus:
                                                          close=lambda: None))
         cli._cmd_self_test_status(_args())
         assert "No self-test on record" in capsys.readouterr().out
+
+    @pytest.mark.unit
+    def test_db_open_failure_exits_non_zero(self, monkeypatch, capsys):
+        # A stats-DB open failure (store is None) must NOT be reported as an
+        # empty store ("No self-test on record"); it exits non-zero instead.
+        monkeypatch.setattr(cli, "_load_config", lambda a: _config(SINGLE))
+        monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: None)
+        with pytest.raises(SystemExit) as e:
+            cli._cmd_self_test_status(_args())
+        assert e.value.code == 1
+        assert "No self-test on record" not in capsys.readouterr().out
 
     @pytest.mark.unit
     def test_status_opens_real_store(self, tmp_path, monkeypatch, capsys):

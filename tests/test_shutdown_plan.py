@@ -127,6 +127,11 @@ def test_remote_order_loopback_detail_and_object_mount(cfg):
     plan = build_shutdown_plan(cfg, is_local=True)
     by = _by_id(plan)
     loop = [st for st in by["remote"]["steps"] if "host-loopback" in st["detail"]]
-    assert loop and "order 2" in loop[0]["detail"]
+    # Loopbacks now BRACKET the regular remotes (pre-shutdown first, shutdown
+    # last) to mirror the executor, instead of being grouped by shutdown_order,
+    # so the loopback step is annotated "runs last" — not "order 2".
+    assert loop and "runs last" in loop[0]["detail"]
+    assert loop[0]["loopback"] is True
+    assert "order 2" not in loop[0]["detail"]
     um = by["filesystem-unmount"]["steps"][0]
     assert um["label"] == "Unmount /data" and um["detail"] == "options: -l"

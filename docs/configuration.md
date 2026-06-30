@@ -363,9 +363,10 @@ so a typo never takes monitoring down. Valid changes are split in two:
   `nut_control` allowlists/credentials, `prometheus.enabled`, `notifications`
   (URLs/targets, via an Apprise rebuild), MQTT broker/topic/interval,
   `remote_health` interval/probe/thresholds, `statistics.retention`, and the
-  v6.1 sections `energy` and `battery_health` (read live each computation) plus
-  `self_test` and `reports` (the scheduler re-registers its jobs so next-run
-  times recompute from the new schedule).
+  v6.1 sections `energy`, `battery_health`, `self_test`, and `reports`. These
+  are SAFE reloads because their `Schedule` objects are recomputed from config
+  on every loop, so the next due-check picks up the new schedule with no
+  scheduler re-register step.
 - **Restart-required (reported, not applied):** `api.bind`/`port` and auth,
   UPS/redundancy topology, `logging`, `local_shutdown`, and
   `statistics.db_directory`. These are captured at startup by sockets, file

@@ -15,6 +15,7 @@ import sqlite3
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote as urlquote
@@ -257,6 +258,25 @@ class StatsStore:
     def is_open(self) -> bool:
         """True when the store has a live DB connection (open, not yet closed)."""
         return self._conn is not None
+
+    @contextmanager
+    def _write(self):
+        """Run a write transaction under the DB lock, re-checking the
+        connection AFTER acquiring it.
+
+        A caller's pre-lock ``if self._conn is None`` guard is stale once the
+        lock is released: a concurrent ``close()`` (which nulls ``_conn`` while
+        holding ``_db_lock``) can win the race, after which ``with self._conn:``
+        would raise ``AttributeError`` on ``None``. Yields the live connection,
+        or ``None`` when the store closed concurrently — callers must treat
+        ``None`` as a no-op and return their empty result."""
+        with self._db_lock:
+            conn = self._conn
+            if conn is None:
+                yield None
+                return
+            with conn:
+                yield conn
 
     def close(self) -> None:
         try:
@@ -714,7 +734,9 @@ class StatsStore:
         if self._conn is None:
             return (0, 0)
         try:
-            with self._db_lock, self._conn:
+            with self._write() as conn:
+                if conn is None:
+                    return (0, 0)
                 inserted_5 = self._conn.execute(f"""
                     INSERT OR REPLACE INTO agg_5min (
                         ts,
@@ -802,7 +824,9 @@ class StatsStore:
         cutoff_raw = (cutoff_raw // BUCKET_5MIN) * BUCKET_5MIN
         cutoff_5min = (cutoff_5min // BUCKET_HOURLY) * BUCKET_HOURLY
         try:
-            with self._db_lock, self._conn:
+            with self._write() as conn:
+                if conn is None:
+                    return (0, 0, 0)
                 deleted_raw = self._conn.execute(
                     "DELETE FROM samples WHERE ts < ?", (cutoff_raw,),
                 ).rowcount
@@ -855,7 +879,9 @@ class StatsStore:
             return
         ts = int(ts if ts is not None else time.time())
         try:
-            with self._db_lock, self._conn:
+            with self._write() as conn:
+                if conn is None:
+                    return
                 self._conn.execute(
                     "INSERT INTO events (ts, event_type, detail, "
                     "notification_sent) VALUES (?, ?, ?, ?)",
@@ -972,7 +998,9 @@ class StatsStore:
             return 0
         try:
             count = 0
-            with self._db_lock, self._conn:
+            with self._write() as conn:
+                if conn is None:
+                    return 0
                 for event_id, ts, event_type in rows:
                     cur = self._conn.execute(
                         "DELETE FROM events WHERE id = ? AND ts = ? "
@@ -999,7 +1027,9 @@ class StatsStore:
             return None
         ts = int(ts if ts is not None else time.time())
         try:
-            with self._db_lock, self._conn:
+            with self._write() as conn:
+                if conn is None:
+                    return None
                 cur = self._conn.execute(
                     "INSERT INTO notifications "
                     "(ts, body, notify_type, category) "
@@ -1083,7 +1113,9 @@ class StatsStore:
             return
         sent_at = int(sent_at if sent_at is not None else time.time())
         try:
-            with self._db_lock, self._conn:
+            with self._write() as conn:
+                if conn is None:
+                    return
                 self._conn.execute(
                     "UPDATE notifications SET status='sent', sent_at=?, "
                     "delivering_at=NULL "
@@ -1101,7 +1133,9 @@ class StatsStore:
         if self._conn is None:
             return
         try:
-            with self._db_lock, self._conn:
+            with self._write() as conn:
+                if conn is None:
+                    return
                 self._conn.execute(
                     "UPDATE notifications SET attempts=attempts+1 "
                     "WHERE id=?",
@@ -1120,7 +1154,9 @@ class StatsStore:
         if self._conn is None:
             return
         try:
-            with self._db_lock, self._conn:
+            with self._write() as conn:
+                if conn is None:
+                    return
                 self._conn.execute(
                     "UPDATE notifications SET status='cancelled', "
                     "sent_at=NULL, delivering_at=NULL, cancel_reason=? WHERE id=?",
@@ -1160,7 +1196,9 @@ class StatsStore:
         if self._conn is None or max_pending <= 0:
             return 0
         try:
-            with self._db_lock, self._conn:
+            with self._write() as conn:
+                if conn is None:
+                    return 0
                 cur = self._conn.execute(
                     "SELECT COUNT(*) FROM notifications "
                     "WHERE status='pending'"
@@ -1208,7 +1246,9 @@ class StatsStore:
         deleted = 0
         expired = 0
         try:
-            with self._db_lock, self._conn:
+            with self._write() as conn:
+                if conn is None:
+                    return (0, 0)
                 cur = self._conn.execute(
                     "DELETE FROM notifications "
                     "WHERE status IN ('sent','cancelled') AND ts < ?",
@@ -1257,7 +1297,9 @@ class StatsStore:
         if self._conn is None:
             return
         try:
-            with self._db_lock, self._conn:
+            with self._write() as conn:
+                if conn is None:
+                    return
                 self._conn.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
                     (str(key), str(value)),

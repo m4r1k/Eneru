@@ -1,6 +1,7 @@
 """Unit tests for periodic reports (src/eneru/reports.py)."""
 
 import time
+from datetime import timezone
 
 import pytest
 import yaml
@@ -10,6 +11,11 @@ from eneru.config import ConfigLoader
 from eneru.stats import StatsStore
 
 DAY = 86400.0
+# 2026-06-01 10:00 UTC: a Monday that is also the 1st of the month and well past
+# the 08:00 schedule, so the daily/weekly/monthly due-paths are deterministically
+# due regardless of the wall clock or calendar day the suite runs on. Paired with
+# an explicit tz=UTC so the schedule math never depends on the host timezone.
+DUE_TS = 1780308000.0
 
 
 @pytest.fixture
@@ -164,18 +170,19 @@ class TestMaybeSend:
     def test_sends_when_due_and_dedups(self, store):
         cfg = self._cfg()
         sent = []
-        now = time.time()
+        now = DUE_TS
         # last sent 2 days ago -> definitely before today's occurrence -> due
         store.set_meta("last_report_sent_daily", str(int(now - 2 * DAY)))
         periods = reports.maybe_send_due_reports(
             cfg, store, "U@h",
-            lambda b, t, c: sent.append((t, c)), now=now)
+            lambda b, t, c: sent.append((t, c)), now=now, tz=timezone.utc)
         assert periods == ["daily"]
         assert sent == [("info", "report")]
         # immediate second call: last is now -> not due -> no resend
         sent.clear()
         periods = reports.maybe_send_due_reports(
-            cfg, store, "U@h", lambda b, t, c: sent.append(c), now=now + 60)
+            cfg, store, "U@h", lambda b, t, c: sent.append(c),
+            now=now + 60, tz=timezone.utc)
         assert periods == [] and sent == []
 
     @pytest.mark.unit
@@ -186,10 +193,11 @@ class TestMaybeSend:
                       "reports:\n  enabled: true\n  daily: true\n  time: '08:00'\n"
                       "  format: csv\n")
         bodies = []
-        now = time.time()
+        now = DUE_TS
         store.set_meta("last_report_sent_daily", str(int(now - 2 * DAY)))
         reports.maybe_send_due_reports(
-            cfg, store, "U@h", lambda b, t, c: bodies.append(b), now=now)
+            cfg, store, "U@h", lambda b, t, c: bodies.append(b),
+            now=now, tz=timezone.utc)
         assert bodies and "--- CSV ---" in bodies[0]
         assert "timestamp,event_type,detail" in bodies[0]
 
@@ -249,11 +257,14 @@ class TestMaybeSend:
                       "  weekly: true\n  monthly: true\n  time: '08:00'\n"
                       "  weekly_day: monday\n  monthly_day: 1\n")
         sent = []
-        now = time.time()
+        # DUE_TS is a Monday and the 1st of the month, so both the weekly
+        # (Monday) and monthly (day 1) occurrences are in the past at this now.
+        now = DUE_TS
         store.set_meta("last_report_sent_weekly", str(int(now - 30 * DAY)))
         store.set_meta("last_report_sent_monthly", str(int(now - 90 * DAY)))
         periods = reports.maybe_send_due_reports(
-            cfg, store, "U@h", lambda b, t, c: sent.append(c), now=now)
+            cfg, store, "U@h", lambda b, t, c: sent.append(c),
+            now=now, tz=timezone.utc)
         assert set(periods) == {"weekly", "monthly"}
         assert sent == ["report", "report"]
 

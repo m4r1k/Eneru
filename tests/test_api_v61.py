@@ -150,11 +150,17 @@ class TestStatusHelperGuards:
     @pytest.mark.unit
     def test_battery_health_error_is_none(self):
         from types import SimpleNamespace
-        # A state whose _lock blows up -> guarded -> None.
-        bad_lock = SimpleNamespace(
-            __enter__=lambda *a: (_ for _ in ()).throw(RuntimeError("x")),
-            __exit__=lambda *a: False)
-        mon = SimpleNamespace(state=SimpleNamespace(_lock=bad_lock))
+        # A state whose _lock blows up -> guarded -> None. Use a real
+        # context-manager class: `with` looks up __enter__/__exit__ on the TYPE,
+        # so dunders set as SimpleNamespace instance attrs would never fire and
+        # the test would pass for the wrong reason (TypeError, not RuntimeError).
+        class _BadLock:
+            def __enter__(self):
+                raise RuntimeError("x")
+
+            def __exit__(self, *a):
+                return False
+        mon = SimpleNamespace(state=SimpleNamespace(_lock=_BadLock()))
         assert _battery_health_for_monitor(mon) is None
 
 

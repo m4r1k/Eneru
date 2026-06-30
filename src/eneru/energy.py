@@ -28,10 +28,10 @@ from typing import Dict, List, Optional, Tuple
 
 __all__ = [
     "EnergyResult",
-    "power_sample_w",
-    "integrate_kwh",
     "compute_cost",
     "format_cost",
+    "integrate_kwh",
+    "power_sample_w",
     "summarize",
 ]
 
@@ -159,7 +159,11 @@ def format_cost(value: float, currency: str,
     ``"{value}"`` template still renders, just unrounded; a malformed template
     (or one missing the ``{value}`` field) falls back to the currency table."""
     amount = f"{value:.2f}"
-    if cost_format:
+    # A template without the {value} field (e.g. "flat" or "EUR") would format
+    # "successfully" yet silently drop the amount, so require the placeholder and
+    # otherwise fall back to the currency table. "{value" also matches a format
+    # spec like "{value:.2f} EUR".
+    if cost_format and "{value" in cost_format:
         try:
             return cost_format.format(value=value)
         except (KeyError, IndexError, ValueError):

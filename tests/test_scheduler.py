@@ -248,7 +248,9 @@ class TestPeriodicScheduler:
         ran = sched.tick(1000.0, meta.get, meta.set)
         assert ran == ["health"]
         assert calls == [1000.0]
-        assert meta.data["sched:health"] == "1000"
+        # The full run timestamp is persisted (not truncated to an int), so
+        # compare the parsed float rather than locking to a string form.
+        assert float(meta.data["sched:health"]) == 1000.0
         # not due 30s later
         assert sched.tick(1030.0, meta.get, meta.set) == []
         # due 60s later
@@ -281,7 +283,7 @@ class TestPeriodicScheduler:
         # Job raises but is logged + last-run stamped, so it doesn't retry
         # until the next interval.
         assert sched.tick(1000.0, meta.get, meta.set) == ["flaky"]
-        assert meta.data["sched:flaky"] == "1000"
+        assert float(meta.data["sched:flaky"]) == 1000.0
         assert sched.tick(1030.0, meta.get, meta.set) == []  # not retried
 
     @pytest.mark.unit
