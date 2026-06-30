@@ -53,6 +53,11 @@ dev = [
     "apprise>=1.9.7",
     "paho-mqtt>=2.0.0",
     "bcrypt>=4.0.1",
+    # Browser automation for the dashboard preview harness
+    # (tools/dashboard-preview.py). Strongly recommended: any web/ change
+    # should be screenshot-verified against a live daemon before pushing.
+    # After install, fetch the browser once: `playwright install chromium`.
+    "playwright>=1.40.0",
 ]
 docs = [
     "mkdocs>=1.6.1",

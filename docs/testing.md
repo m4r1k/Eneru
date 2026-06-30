@@ -117,6 +117,32 @@ for config in examples/*.yaml; do
 done
 ```
 
+## Dashboard visual verification
+
+The browser dashboard (`src/eneru/web/`) is static assets talking to the
+daemon's JSON API. Unit tests cover the asset-serving surface, but they cannot
+catch layout, theming, or chart-rendering regressions. **Any change under
+`src/eneru/web/` should be screenshot-verified against a live daemon before
+pushing** — this is strongly recommended, not optional.
+
+`tools/dashboard-preview.py` serves the working-tree assets and proxies every
+`/api/*` call to a running daemon, then screenshots each tab (light + dark) with
+Playwright. Playwright ships in the `dev` extra; fetch the browser once:
+
+```bash
+pip install -e ".[dev]"     # inside the uv venv (includes playwright)
+playwright install chromium
+
+# With a daemon running on :9191 (curl -s 127.0.0.1:9191/api/v1/ups -> 200):
+python tools/dashboard-preview.py                 # all tabs, light + dark
+python tools/dashboard-preview.py --themes light --tabs overview,battery
+```
+
+Read the resulting `dash-*.png` files to confirm the change renders; the script
+also prints any browser console errors and exits non-zero if it saw any. See the
+`dashboard-preview` skill (`.claude/skills/dashboard-preview/`) for the agent
+workflow.
+
 ## Test areas
 
 | Area | Coverage |
