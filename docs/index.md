@@ -4,7 +4,7 @@
   <img src="images/eneru-diagram.svg" alt="Eneru architecture" width="640">
 </p>
 
-Eneru monitors UPSes through [Network UPS Tools](https://networkupstools.org/) and coordinates shutdown before the batteries are exhausted. It is built for hosts that run more than one thing: VMs, containers, NAS mounts, remote servers, and multiple UPS groups. v6.0 adds a browser dashboard, authenticated API write paths, UPS control, and config hot-reload on top of the existing shutdown daemon.
+Eneru monitors UPSes through [Network UPS Tools](https://networkupstools.org/) and coordinates shutdown before the batteries are exhausted. It is built for hosts that run more than one thing: VMs, containers, NAS mounts, remote servers, and multiple UPS groups. v6.0 added a browser dashboard, authenticated API write paths, UPS control, and config hot-reload; v6.1 adds battery-health scoring with replacement prediction, energy and cost tracking, scheduled self-tests, periodic reports, and a read-only shutdown-plan view.
 
 <p align="center">
   <img src="images/eneru-mon.gif" alt="Eneru TUI monitor dashboard" height="260">
@@ -23,7 +23,8 @@ Eneru is the layer above NUT. NUT talks to the UPS hardware. Eneru decides what 
 | Remote systems | SSH shutdown with ordered phases and pre-shutdown actions for Proxmox, ESXi, XCP-ng, Docker, and custom commands |
 | Multiple UPSes | Independent UPS groups, shared configuration defaults, and one local-shutdown owner |
 | Redundant power | Quorum-based redundancy groups for dual-PSU servers and A+B power feeds |
-| Operators | Browser dashboard, TUI dashboard, one-shot status output, SQLite history/events, authenticated API writes, Prometheus, MQTT, Grafana, JSON/syslog logs, and Apprise notifications |
+| Battery and energy | Battery-health score (0-100) with replacement prediction and tiered alerts, scheduled NUT self-tests, kWh and cost tracking, and daily/weekly/monthly reports |
+| Operators | Browser dashboard, TUI dashboard, one-shot status output, SQLite history/events, authenticated API writes, a read-only shutdown-plan view, Prometheus, MQTT, Grafana, JSON/syslog logs, and Apprise notifications |
 | Deployment | Native systemd packages, plus an OCI image that is first-class for both remote-only AND full local-host ownership (v5.5+ SSH loopback delegate) |
 
 !!! note "Eneru does not replace NUT"

@@ -182,6 +182,11 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 - Real-time TUI dashboard (`eneru monitor`) with color-coded status
 - Shutdown triggers: battery %, runtime, depletion rate, time on battery, FSD flag, and the connection-loss failsafe (six in total)
 - Battery anomaly alerts for unexpected charge drops while on line power, with jitter filtering for APC, CyberPower, and Ubiquiti UniFi UPS units
+- Battery-health score (0-100) with replacement prediction and tiered low-score alerts
+- Scheduled NUT self-tests with recorded, normalized results
+- Energy and cost tracking (kWh from real power or load, calendar today/month/year windows)
+- Daily, weekly, and monthly reports (events, battery health, energy, uptime) via the notification channel
+- Read-only shutdown-plan view: exactly what runs, in order, with per-phase timeouts and an estimate
 - Shuts down VMs, containers, remote servers, filesystems, and the local system in order
 - Notifications to 100+ services (Discord, Slack, Telegram, ntfy, email) via [Apprise](https://github.com/caronc/apprise/wiki)
 - Power quality monitoring: voltage, AVR, bypass, overload

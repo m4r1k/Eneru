@@ -7,470 +7,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [6.1.0-rc14] - 2026-06-30
+## [6.1.0] - 2026-06-30
 
-Addresses the full CodeRabbit + cubic review of rc13 (every actionable finding,
-not just a subset).
-
-### Fixed
-
-- **Self-test cadence no longer burned by a failed issue** — a scheduled
-  self-test that fails to *issue* (NUT error / lock contention) now retries on
-  the next cycle instead of silently consuming a (possibly 30-day) interval; the
-  cadence is stamped only on a successful issue.
-- **Direct CLI self-test now serialized** — `self-test run --direct` acquires the
-  same per-UPS control lock as the API and scheduler, so it can't race another
-  command on the same device.
-- **Report "Power events" section** now counts only real power events; lifecycle
-  rows (`DAEMON_START`, …) no longer skew the digest.
-- **Closed stats store treated as unavailable** in the battery-health learning /
-  prediction paths (not just a `None` store), so a closed DB fails soft instead
-  of silently no-opping.
-- **Config validation** rejects non-mapping v6.1 sections (`battery_health`,
-  `self_test`, `reports`, `energy`, and per-UPS overrides) instead of silently
-  reverting to defaults, and requires `nominal_runtime_seconds` /
-  `expected_life_years` to be ≥ 1 (a 0 silently disabled the score term).
-- **Stats store write transactions** re-check the connection under the DB lock
-  (a concurrent `close()` could otherwise crash a transaction with
-  `AttributeError`).
-- **Per-UPS override resolution** no longer swallows a broken override behind a
-  bare `except` and silently falls back to the global config.
-
-### Changed
-
-- IPv6 loopback (`api.bind: "::"`) preserved as `::1` for the self-test CLI;
-  `self-test status` distinguishes a DB-open failure from "no record"; `__all__`
-  sorted; malformed `cost_format` without `{value}` falls back; scheduler
-  persists the full-precision run timestamp; shell completions scope the
-  self-test value flags to `run`; Stylelint keyword casing; docs/reference
-  wording (`critical_score < warn_score`, SAFE hot-reload) corrected; new
-  self-test CLI helpers fully type-hinted.
-
-## [6.1.0-rc13] - 2026-06-29
-
-Title-style consistency, a window-independent Events tier, and a full local
-code-review pass over the whole v6.1 branch.
+Battery intelligence, energy tracking, scheduled self-tests, periodic reports,
+and a rebuilt browser dashboard, on top of the v6.0 monitoring and control
+surface.
 
 ### Added
 
-- **Events tier selector** (Power / + Diagnostics / All) — a window-INDEPENDENT
-  filter so widening the time range always surfaces power events. Fixes the case
-  where a default that was materialized from the loaded window meant switching
-  from 7 to 30 days wouldn't show an earlier outage. The per-type checkboxes
-  remain as optional advanced narrowing within the tier.
-
-### Fixed
-
-- **Battery-health report confidence** rendered as `0%` — the store row carries
-  confidence inside `detail`, not top-level; the report now reads it correctly.
-- **Shutdown-plan command disclosure** — raw shutdown commands (per-remote and
-  the local poweroff) are now redacted for anonymous readers and only shown to
-  authenticated callers, matching the config-summary / remote-health policy.
-- **Battery-health alerts hidden in the TUI** — `BATTERY_HEALTH_WARNING/CRITICAL`
-  and `BATTERY_REPLACEMENT_PREDICTED` are now Power-tier events (shown at the
-  default verbosity), not buried in Diagnostics. The dashboard tier-1 patterns
-  matched `LOW_BATTERY` but the emitted name is `BATTERY_LOW`; fixed, and the
-  battery-health events are now treated as tier-1.
-- **Scheduled self-test** now holds the same per-UPS control lock as the API so a
-  scheduled and an operator-issued command can't race the device.
-- Config validation: `critical_score` must be **strictly** below `warn_score`
-  (equal silently disabled the warn tier); an explicit YAML-null for a
-  non-Optional `battery_health` numeric is now a config error; and the v6.1
-  schedule/time/day/format strings are validated up front instead of silently
-  no-op'ing at runtime.
-- `battery_health` / `self_tests` tables are now purged on the retention cadence;
-  the replacement re-warning re-fires weekly (not once per 90-day horizon);
-  `energy.cost_format` honors a numeric spec (`"{value:.2f} EUR"`); and the
-  Battery card / Energy / Config widget titles share the icon-chip style used by
-  Power's Line-quality and the Remote-servers cards.
-
-### Changed
-
-- Chart tooltips clear on the 10s refresh (no orphaned tip); recovery-state
-  events (`*_INACTIVE`) read green; a `DEGRADED` remote server shows a
-  "degraded" badge rather than a contradictory "unreachable"; and the Overview
-  self-test card only appears once a test has actually passed/failed/run.
-
-## [6.1.0-rc12] - 2026-06-29
-
-Shutdown-plan now covers remote-only UPSes + redundancy groups, a polished
-shutdown view, and escalating battery-health alerts.
-
-### Added
-
-- **Shutdown plan is reachable per UPS** — a UPS selector on the Shutdown tab
-  (remote UPSes flagged), so multi-UPS and remote-only deployments can view each
-  group's plan, not just the first UPS.
-- **Shutdown trigger context** — the plan now states *what triggers* it: for a
-  redundancy-group member, "triggers when group X drops below N of M healthy"
-  (coordinator-run); for a standalone UPS, its low-battery / FSD trigger.
-- **Tiered battery-health alerts** — `battery_health.warn_score` (default 30) and
-  `critical_score` (default 15) raise escalating, deduped notifications on the
-  *current* score, complementing the trend-based replacement prediction. Each
-  tier fires once and re-arms on recovery. `null` disables a tier.
-
-### Changed
-
-- **Shutdown view polish** — per-phase icons + color (much less gray), surfaced
-  timeouts (VM `max_wait`, container `stop_timeout`, per-remote `command_timeout`)
-  and a total-duration estimate, and "delegated to host" / "non-local group" now
-  read as accent tags rather than flat gray.
-
-## [6.1.0-rc11] - 2026-06-29
-
-Another round of real-hardware dashboard feedback, a battery-score fix, a new
-shutdown-plan view, and the last unanswered AI-review cycle.
-
-### Fixed
-
-- **Battery-health score was too aggressive on new batteries.** The capacity
-  term extrapolated a runtime trend over 30 days with no minimum-history guard,
-  so a few days of jitter clamped it to 0 and dragged an otherwise-healthy
-  battery to ~60. It now reports *unavailable* until there is at least
-  `replacement.min_history_days` of history (the score then reflects the terms
-  that actually have data — e.g. ~97 at lower confidence for a new battery).
-- **Chart event markers are hoverable along their whole column.** The area fill
-  and plot line no longer swallow pointer events, so the tooltip appears wherever
-  you hover the guide, not only above the plotted data.
-- The Battery-tab health card no longer duplicates the score or cramps the term
-  list — it shows a per-term breakdown (each sub-score or n/a) with `?` hints.
-
-### Added
-
-- **Shutdown plan** tab — a read-only, ordered view of exactly what runs on a
-  power-loss shutdown (VMs → containers → filesystem sync/unmount → remote
-  servers → final sync → host poweroff), with parallel groups, per-phase
-  estimates, and skipped phases shown with their reason. Backed by a new
-  `GET /api/v1/ups/{name}/shutdown-plan` derived from config (the execution path
-  is untouched).
-- **Battery-health score trend** graph on the Battery tab, backed by a new
-  `GET /api/v1/ups/{name}/battery-health-history` time series.
-- **Temperature** is graphable on the Battery tab (it was already sampled).
-- **This year** energy + cost window alongside today/month.
-- Events-table type column now shows colored, icon-led severity badges (matching
-  the chart marker colors), and the tier-1 default filter applies reliably.
-- More `?` hints where context helps (battery terms, line-quality states).
-
-### Changed
-
-- The Overview "Last self-test" card is hidden until a self-test has actually
-  run (a "never run" box was noise).
-
-## [6.1.0-rc10] - 2026-06-29
-
-A second round of dashboard polish from running rc9 on production hardware. No
-API or behavior changes; static assets only.
-
-### Added
-
-- **Remote servers** widget on the Overview tab — one card per SSH/remote NUT
-  target (from `/api/v1/remote-health`) showing reachability, host, latency, and
-  last-checked time, with the failure count + last error when unreachable. Hidden
-  when no remote servers are configured.
-- **Line quality** card on the Power tab — a derived **Good / Fair / Poor** read
-  on the incoming mains, summarizing voltage-in-band, frequency, and the UPS
-  regulation states (voltage / AVR / bypass / overload) from the live
-  power-quality block, each color-coded.
-
-### Changed
-
-- **Chart event tooltips are instant and themed.** Hovering (or keyboard-focusing)
-  an event marker now shows a styled card — bold type, timestamp, detail, and a
-  left border color-coded by event type — immediately, instead of the native SVG
-  `<title>` that only appeared after a ~1 s delay and rendered as a plain OS
-  tooltip.
-- **Energy notes became "?" hints.** The verbose window/estimated footnotes were
-  replaced by a small `?` next to the affected value that reveals the same
-  explanation on hover/focus, keeping the block compact.
-- **Config JSON tree no longer collapses on refresh** — it rebuilds only when the
-  configuration actually changes, so expanded sections stay expanded across the
-  10 s poll. The per-section item counts (`api { 4 }`) were dropped for a cleaner
-  `api {…}` / `api {` look.
-
-## [6.1.0-rc9] - 2026-06-29
-
-A focused visual redesign of the dashboard — minimal, cohesive, and verified
-against production telemetry. No API or behavior changes; static assets only.
-
-### Changed
-
-- **Inline-SVG icon set** replaces the emoji used on tabs, cards, and the header.
-  Icons render from a single `TAB_ICONS` map (injected by `initTabs`) and inherit
-  `currentColor`, so there is no emoji-font dependency or "tofu" fallback. The
-  header carries a brand lightning bolt and the page now ships an inline ⚡ SVG
-  favicon (no extra packaged asset).
-- **Overview is now a glanceable summary:** a hero card leads with a battery
-  ring gauge plus the worst-status UPS and its key readings, backed by three
-  drill-through KPI cards (battery health, energy today, last self-test) that
-  jump to their tab. The full per-UPS card grid only appears for multi-UPS setups.
-- **Card facelift** — softer radius, layered shadow, hover lift, and a 2 px
-  status strip (ok/warn/crit) so a degraded UPS reads at a glance.
-- **Charts** gained quarter-division gridlines, a gradient area fill under the
-  line, a "now" dot at the latest reading, and a redrawn threshold band (shaded
-  acceptable range + dashed nominal line) for the voltage view.
-- **Config tab** renders the sanitized configuration as a colored, collapsible
-  JSON tree — each section expands/collapses independently, with syntax coloring
-  for keys, strings, numbers, booleans, and nulls.
-- Retuned the dark and light palettes (new surface, line, and accent tokens) for
-  a calmer, more consistent look across both themes.
-
-## [6.1.0-rc8] - 2026-06-29
-
-A round of real-world dashboard polish from running rc7 on production hardware.
-
-### Added
-
-- `energy.nominal_power` — a rated W/VA used to estimate watts (and kWh/cost)
-  from load% when the UPS reports **neither** `ups.realpower` nor
-  `ups.power.nominal` (common on integrated appliances). Threaded through the
-  status block, the `/power` series, reports, and kWh integration.
-
-### Changed
-
-- **Energy windows are now calendar-based:** "today" is since local midnight and
-  "month" is since the 1st — fixed boundaries that match an electricity bill,
-  not a rolling 24 h / 30 d. The status block carries `todayLabel` / `monthLabel`
-  so the UI states the window explicitly.
-- **Charts** label the metric + unit (e.g. "Input voltage (V)") so the axis
-  numbers are identifiable when switching input/output voltage, frequency, etc.
-- **Event markers** are now a small color-coded triangle pinned to the time axis
-  with a faint hover-only guide (was a bold full-height line in the plot color):
-  outage/danger red, recovery green, warnings amber, everything else violet — no
-  longer the same blue as the data line. The whole column is hoverable.
-- **Energy tab** reads cleaner: the month line is hidden until it has data; a
-  configured-but-not-yet-computed cost shows "calculating…" instead of
-  "unknown"; the blunt "partial (data gaps)" row became a gentle footnote; and
-  the window is stated inline.
-- **Config tab** shows only enabled features (no "disabled" noise) plus a
-  collapsible, pretty-printed JSON view of the (sanitized) configuration.
-- The UPS detail modal closes on a backdrop click (not only the ✕), and the
-  Events tab scrolls back to the top when you change the range/source/type
-  filters so a big table doesn't strand you mid-page.
-
-## [6.1.0-rc7] - 2026-06-29
-
-Addresses an external review plus three more AI-review passes on rc6, and a round
-of real-world dashboard feedback.
-
-### Fixed
-
-- **Critical:** the self-test write path (`POST /api/v1/ups/{name}/self-test`,
-  the dashboard "Run self-test" button, and `eneru self-test run`) called an
-  undefined `_store_for_ups` and returned 500. It now resolves the per-UPS stats
-  store from the live monitor set.
-- The `eneru self-test` CLI opened its `StatsStore` without `open()`, so
-  `--direct` recorded nothing and `status` always read empty; it now opens (and
-  closes) the connection. `--direct` also honors per-UPS `self_test.command`.
-- Config validation checks `self_test.command` against each UPS's **resolved**
-  `nut_control.allowed_commands` (catching a per-UPS-narrowed allowlist) and
-  rejects non-numeric `battery_health` values.
-- `Schedule.interval` keeps fractional seconds (`0.5` no longer truncates to a
-  permanently-due `0`).
-- Replacement prediction fires for an already-below-threshold battery regardless
-  of history depth (the history guard ran first before).
-- `discover_self_test_command` raises on a transient `upscmd -l` failure
-  (distinct from "not exposed"); the scheduler discovers before stamping last-run
-  (so a blip retries instead of burning a cadence) and skips when the stats store
-  is unavailable.
-- Multi-UPS reports are a true daemon-wide digest with a per-UPS section each
-  (not just the first monitor); "Running since" survives long uptimes; the send
-  timestamp is stamped **after** enqueue.
-- API self-test preflights `upscmd -l`; audit writes a typed `CONTROL_SELF_TEST`
-  event; single-UPS battery-health / energy reads no longer compute the whole
-  fleet's status.
-- `self_test` / `reports` are reclassified **SAFE** for hot-reload (their due
-  checks read config live each tick — no registered scheduler to re-init).
-
-### Changed (dashboard)
-
-- **Energy tab** is now a dual-line **load% + power (W)** chart via the new
-  `GET /api/v1/ups/{name}/power`; cost rows render even when configured-but-unknown
-  (the misleading "set cost_per_kwh" hint no longer shows once it's set).
-- Range **and the selected UPS** are shared across the Power / Battery / Energy
-  tabs; chart loads guard against stale async races; the charts keep working
-  through overlapping refreshes.
-- Chart event markers are hoverable along the whole vertical guide (not just the
-  3px dot), and the tooltip carries the full event description (type, time, detail).
-- Monochrome (grayscale) emoji on the tab labels; chart event markers **and** the
-  default Events view are restricted to tier-1 power events (no daemon-start /
-  upgrade noise) with descriptive tooltips; the event-type dropdown closes on an
-  outside click; switching tabs scrolls to the top of the panel; a hidden-tab
-  fallback re-syncs the URL hash; the keyboard focus cue on panels is restored.
-
-### Other
-
-- bash/zsh `self-test` completion branches; `pytest-xdist` added to the declared
-  dev dependencies; the AGENTS Actions pin table refreshed to the current SHAs;
-  the Ubiquiti/TLS-only `upsc` limitation documented (troubleshooting + roadmap
-  backlog).
-
-## [6.1.0-rc6] - 2026-06-28
-
-### Added
-
-- **Tabbed dashboard (Nutify-style).** The web UI is now a tabbed SPA —
-  Overview / Power / Battery / Energy / Events / Control / Config — built as
-  real ARIA tabs (roving tabindex, arrow-key nav, URL-hash routing), still
-  vanilla JS + SVG with no build toolchain. Per-tab charts gain **input-voltage
-  threshold bands** (a reference overlay of the live config) and **power-event
-  overlay markers** (color-coded, capped so dense windows stay readable), and
-  the Battery/Energy tabs surface the v6.1 score / replacement / self-test and
-  kWh / cost widgets directly.
-- **Self-test CLI.** `eneru self-test run` (defaults to the daemon API so the
-  daemon owns the audit + record; `--direct` issues via NUT with no daemon) and
-  `eneru self-test status`. Both honor the `nut_control` allowlist. Shell
-  completions updated.
-- **Feature documentation.** New `battery-health`, `self-test`, `reports`, and
-  `energy-tracking` pages (and mkdocs nav).
-- **More history metrics.** `/history` now serves output voltage, input/output
-  frequency, battery voltage, temperature, and real power (already aggregated
-  across all retention tiers) so the new charts plot them at every range.
-
-### Fixed
-
-- Reports honor `format: csv` on delivery — the CSV block now rides under the
-  text summary instead of being silently dropped.
-- Per-UPS `battery_health` / `self_test` / `nut_control` overrides now
-  hot-reload live (they are read each tick by the v6.1 resolvers) instead of
-  being misclassified as restart-required.
-- The dashboard self-test button debounces, so a double-click can't enqueue
-  multiple non-idempotent hardware self-tests.
-- E2E: `apply_scenario` is now a hard synchronization point (fails the test on a
-  >20s unconfirmed apply rather than running against stale dummy state); Test 55
-  asserts the tab nav is served and exercises real path-traversal payloads.
-- Energy `_median` now averages the two middle values for even-length series, so
-  the inferred sample spacing (and thus `integrate_kwh`'s gap cap) isn't inflated.
-- The battery-health status block is cleared on a reload to
-  `battery_health.enabled: false` instead of leaving a stale score on the API.
-- An auto-learned nominal runtime is no longer persisted when the config already
-  pins `nominal_runtime_seconds`.
-- The self-test API and the in-loop self-test task honor per-UPS
-  `self_test.command`; `/self-test` is hidden from `availableEndpoints` unless
-  auth + `nut_control` are both on; and an in-flight self-test is persisted to
-  `meta` and recovered after a restart so a `running` row is never orphaned.
-
-## [6.1.0-rc5] - 2026-06-28
-
-### Added
-
-- **Battery intelligence.** A composite battery-health score (0-100) built
-  from five terms — capacity (runtime trend), runtime-vs-nominal, last
-  self-test, confirmed anomalies, and battery age — each carrying an
-  availability flag so missing telemetry reports as *unknown* rather than a
-  false high score. Least-squares replacement prediction warns (once per
-  horizon) when the score is trending toward the configured threshold. New
-  `battery_health` config section (per-UPS overridable) and a
-  `BATTERY_REPLACEMENT_PREDICTED` event.
-- **Energy tracking.** kWh integration from `ups.realpower` (falling back to
-  `load% × power.nominal`, flagged "estimated") with daemon-down gaps capped,
-  plus optional cost with per-currency formatting. New `energy` config section;
-  `cost_per_kwh` unset disables cost tracking entirely.
-- **Scheduled self-test.** Issues a UPS battery self-test on a schedule and
-  records the normalized result, gated behind the same `nut_control` allowlist
-  + API auth as manual control. New `self_test` section (per-UPS overridable),
-  an auth-gated `POST /api/v1/ups/{name}/self-test`, and a dashboard trigger.
-  Adapts to whatever `upscmd -l` exposes; self-disables otherwise.
-- **Periodic reports.** Daily/weekly/monthly digests (events, battery health,
-  energy, uptime; optional CSV) delivered through the notification channel.
-  New `reports` section.
-- **Shared periodic scheduler** (`scheduler.py`) underpinning the above, with
-  last-run state persisted in the stats `meta` table so infrequent jobs fire
+- **Battery health score.** A composite 0-100 score per UPS, built from five
+  terms: capacity (runtime trend), runtime against nominal, last self-test
+  result, confirmed anomaly history, and battery age. Each term carries an
+  availability flag, so missing telemetry reports as *unknown* instead of
+  inflating the score, and a new battery reports *unavailable* until it has at
+  least `replacement.min_history_days` of history rather than being dragged down
+  by early jitter. Least-squares replacement prediction warns when the score
+  trends toward a configured threshold, and tiered `warn_score` / `critical_score`
+  alerts fire on the current score (once each, re-arming on recovery). New
+  `battery_health` config section, per-UPS overridable, plus
+  `BATTERY_REPLACEMENT_PREDICTED` and `BATTERY_HEALTH_WARNING` / `_CRITICAL`
+  events.
+- **Energy tracking.** kWh integrated from `ups.realpower`, falling back to
+  `load% × power.nominal` (flagged *estimated*) or a configured
+  `energy.nominal_power` rating when the UPS reports neither. Daemon-down gaps
+  are capped so an outage doesn't invent consumption. Windows are calendar-based
+  (today since local midnight, month since the 1st, plus a year-to-date) to match
+  an electricity bill rather than a rolling average. Optional cost with
+  per-currency and custom formatting; leaving `cost_per_kwh` unset disables cost
+  entirely. New `energy` config section.
+- **Scheduled self-tests.** Issues a NUT battery self-test on a
+  daily/weekly/monthly/interval schedule and records the normalized result, gated
+  behind the same `nut_control` allowlist and API auth as manual control. It
+  adapts to whatever `upscmd -l` exposes and self-disables otherwise, and an
+  in-flight test is persisted and recovered after a restart so a `running` row is
+  never orphaned. New `self_test` section (per-UPS overridable), an auth-gated
+  `POST /api/v1/ups/{name}/self-test`, and a CLI: `eneru self-test run` (via the
+  daemon API by default, `--direct` over NUT) and `eneru self-test status`.
+- **Periodic reports.** Daily, weekly, and monthly digests covering power events,
+  battery health, energy, and uptime, delivered through the notification channel
+  with optional CSV. Multi-UPS deployments get one daemon-wide digest with a
+  section per UPS. New `reports` section, backed by a shared periodic scheduler
+  whose last-run state lives in the stats `meta` table so infrequent jobs fire
   correctly across restarts.
-- **Surfacing.** New status blocks (`batteryHealth`, `energy`, `selfTest`) on
-  the API/MQTT status, Prometheus gauges (`eneru_ups_battery_health_score`,
-  `eneru_ups_energy_kwh`/`_cost` with a `period` label, `eneru_ups_self_test_result`,
-  `eneru_ups_replacement_days_remaining`; unknown series omitted), and the web
-  dashboard detail view.
+- **Rebuilt dashboard.** The web UI is now a tabbed single-page app (Overview,
+  Power, Battery, Energy, Events, Shutdown, Config) built as real ARIA tabs with
+  arrow-key navigation and URL-hash routing, still vanilla JS and SVG with no
+  build step. Overview leads with a battery ring gauge and drill-through KPI
+  cards; an inline-SVG icon set replaces emoji; charts gain threshold bands,
+  gradient fills, a "now" marker, and color-coded power-event overlays with
+  instant themed tooltips. New widgets cover remote-server health, a derived
+  line-quality (Good/Fair/Poor) read, a battery-health trend graph, a
+  load%-and-power energy chart, a collapsible config JSON tree, and a
+  window-independent Events tier filter.
+- **Shutdown plan view.** A read-only, ordered view of exactly what runs on a
+  power-loss shutdown (VMs, containers, filesystem sync and unmount, remote
+  servers by phase, final sync, host poweroff) with parallel groups, per-phase
+  timeouts and a total estimate, and skipped phases shown with their reason. A
+  UPS selector covers multi-UPS and remote-only deployments, and each plan states
+  its trigger (a redundancy group's quorum loss or a standalone UPS's low-battery
+  / FSD trigger). Backed by `GET /api/v1/ups/{name}/shutdown-plan`, derived from
+  config; the execution path is untouched, and raw shutdown commands are redacted
+  on API reads.
+- **More telemetry surfaces.** New `batteryHealth`, `energy`, and `selfTest`
+  status blocks on the API and MQTT; Prometheus gauges for health score, energy
+  kWh/cost (with a `period` label), self-test result, and replacement days
+  remaining (unknown series omitted); `battery-health-history` and `power`
+  time-series endpoints; and output voltage, input/output frequency, battery
+  voltage, temperature, and real power added to `/history`.
+- **NUT name autodiscovery (issue #71).** When a poll can't reach the configured
+  UPS, Eneru lists what `upsc -l` actually exposes; if exactly one UPS exists and
+  the configured name isn't it (the classic login-username-where-the-device-name
+  -belongs mistake), it self-heals for the session and tells you to fix
+  `ups.name`. The configured name and on-disk state are never mutated.
 
 ### Changed
 
 - **Stats schema v7** (additive, idempotent): `real_power` / `power_nominal`
-  sample columns (+ aggregates) and `battery_health` / `self_tests` tables.
-- **CI / E2E speedup.** E2E image builds are cached with buildx + the GitHub
-  Actions cache; the two long-pole groups are split into eight parallel matrix
-  jobs; scenario switches poll-until-applied instead of fixed `sleep 3`;
-  grace-tied redundancy waits are trimmed; and `validate` runs `pytest-xdist`
-  with a reduced PR Python matrix. (Operator: branch-protection required-check
-  names updated accordingly.)
+  sample columns and aggregates, plus `battery_health` and `self_tests` tables,
+  trimmed on the existing retention cadence.
+- **Remote SSH host-key checking defaults to `accept-new` (issue #73).** A
+  `remote_servers` entry with no `ssh_options` no longer inherits OpenSSH's
+  interactive `ask` (which fails closed under `BatchMode`), so a fresh remote
+  connects on first contact and learns the key. Bare-metal uses the running
+  user's `known_hosts`; containers use the writable
+  `/var/lib/eneru/ssh/known_hosts`; the Kubernetes sample backs state with a PVC
+  so learned trust survives pod restarts. Any explicit `StrictHostKeyChecking` or
+  `UserKnownHostsFile` you set is preserved.
+- **`expected_host_identity` auto-populates from any `cat /path` (issue #70)**, so
+  marker-file setups no longer duplicate the value or mount over
+  `/etc/machine-id`.
+- **`energy`, `battery_health`, `self_test`, and `reports` are SAFE hot-reloads:**
+  their schedules are recomputed from config on each loop, so a SIGHUP applies on
+  the next due-check with no scheduler re-register step.
+- **Quieter NUT polling** (`NUT_QUIET_INIT_SSL=true`, benign SSL-init line
+  filtered) and a faster CI/E2E pipeline (eight parallel E2E matrix jobs, buildx
+  layer caching, `pytest-xdist`, a reduced PR Python matrix).
 
-## [6.1.0-rc3] - 2026-06-10
+### Fixed
 
-### Changed
-
-- **Remote SSH host-key checking now defaults to `accept-new` (issue #73).**
-  Previously a `remote_servers` entry with no `ssh_options` inherited OpenSSH's
-  `StrictHostKeyChecking=ask`, which fails closed under `BatchMode` when a host
-  key is unknown — so a fresh remote could never connect on first contact, and
-  the rc2 workaround (hand-run `ssh-keyscan` + `StrictHostKeyChecking=yes`) was
-  easy to get wrong (a missing/empty/mismatched `known_hosts` failed closed
-  silently until a power event). Eneru now injects
-  `StrictHostKeyChecking=accept-new` into any remote that does not set a
-  `StrictHostKeyChecking` directive of its own. Bare-metal installs use the
-  running user's normal `~/.ssh/known_hosts`; Docker/Podman containers use the
-  documented `/var/lib/eneru/ssh/known_hosts` path; Kubernetes samples set
-  `ENERU_SSH_KNOWN_HOSTS_FILE=/var/lib/eneru/known_hosts` because SSH keys live
-  in a read-only Secret and learned trust belongs on the writable PVC. Any
-  explicit `StrictHostKeyChecking` or `UserKnownHostsFile` you set is preserved
-  verbatim, including the loopback delegate's `no`. No `ssh_options` are needed
-  for the common case.
-- **Containers keep the existing SSH mount contract.** Docker/Podman still use
-  `/srv/eneru/ssh:/var/lib/eneru/ssh`; the directory is writable so
-  `accept-new` can write `known_hosts`, while the private key files remain mode
-  `0400`. The shipped Kubernetes Deployment
-  (`deploy/kubernetes/remote-deployment.yaml`) backs `state` with a
-  `PersistentVolumeClaim` (instead of `emptyDir`) so learned keys — and the
-  stats/auth databases — survive pod restarts; it uses the `Recreate` strategy
-  to avoid two pods contending for the ReadWriteOnce volume. The container docs
-  drop the manual `ssh-keyscan` setup accordingly, and E2E Test 57 proves the
-  no-`ssh_options` default learns and preserves trust across a container
-  recreate.
-
-## [6.1.0-rc2] - 2026-06-10
-
-### Changed
-
-- **Container SSH host-key setup (issue #73).** A container is a hotel room:
-  anything learned interactively inside it disappears when the room is rebuilt.
-  The container docs now tell operators to mount both the private key and a
-  pre-seeded `known_hosts` file from `/srv/eneru/ssh`, then configure
-  `UserKnownHostsFile=/var/lib/eneru/ssh/known_hosts` with
-  `StrictHostKeyChecking=yes` so remote-server trust survives
-  Docker/Podman/Kubernetes recreation without disabling host-key checks. The same
-  pass makes the uid `10001` private-key ownership and mode guidance consistent
-  across the container walkthroughs.
-- **E2E coverage for issue #71 and issue #73.** The CI matrix now includes a
-  real NUT autodiscovery regression that proves a wrong single-UPS name
-  self-heals for the running session, plus a container SSH regression that uses
-  a mounted private key and mounted `known_hosts` with strict host-key checking
-  across container recreation.
-
-## [6.1.0-rc1] - 2026-06-09
-
-### Added
-
-- **NUT name autodiscovery (issue #71).** When a poll can't reach the configured
-  UPS, Eneru now runs `upsc -l <host>` to list the UPS names the server actually
-  exposes and logs them. If exactly one UPS exists and the configured name is not
-  it (the classic case of a NUT *login username* placed where the UPS *device
-  name* belongs), Eneru self-heals for the session and tells you to fix
-  `ups.name`. With multiple UPSes it lists the choices instead of guessing. The
-  operator-configured name, display, and on-disk state are never mutated.
-
-### Changed
-
-- **`expected_host_identity` auto-populates from any `cat /absolute/path`
-  (issue #70).** Previously the container-side identity read was hardcoded to
-  `/etc/machine-id`, so marker-file setups had to duplicate the value or mount
-  over `/etc/machine-id`. Now a simple `host_identity_command: "cat /path"` reads
-  the same path locally and fills in the expected value automatically. Non-`cat`
-  commands still require an explicit `expected_host_identity`.
-- **Quieter NUT polling.** `upsc` runs with `NUT_QUIET_INIT_SSL=true` and the
-  benign `Init SSL without certificate database` line is filtered from failure
-  output, so real errors stay visible.
-- **Docs for non-systemd / no-`machine-id` hosts.** New end-to-end marker-file
-  recipe for Alpine and other consumer/non-systemd setups, linked from the
-  install, migration, and troubleshooting pages. deb and rpm remain the published
-  packages; the OCI image stays a first-class citizen.
+- Replacement prediction fires for an already-below-threshold battery regardless
+  of history depth, and the re-warning re-fires weekly rather than once per
+  horizon.
+- `Schedule.interval` keeps fractional seconds; the scheduler discovers the
+  self-test command before stamping last-run and stamps only on a successful
+  issue, so a transient failure retries instead of burning a cadence.
+- Multi-UPS reports are a true daemon-wide digest, "Running since" survives long
+  uptimes, and `format: csv` delivery is honored.
+- Median sample-spacing averages the two middle values, and an auto-learned
+  nominal runtime is not persisted when the config already pins one.
+- Config validation rejects non-numeric and non-mapping v6.1 sections, requires
+  `critical_score` strictly below `warn_score`, and validates schedule/time
+  strings up front instead of failing at runtime.
+- Stats write transactions re-check the connection under the DB lock, closing a
+  shutdown-time race that could crash a transaction.
 
 ## [6.0.0] - 2026-06-04
 
