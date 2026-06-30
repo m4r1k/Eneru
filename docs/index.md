@@ -8,7 +8,7 @@ Eneru monitors UPSes through [Network UPS Tools](https://networkupstools.org/) a
 
 <p align="center">
   <img src="images/eneru-mon.gif" alt="Eneru TUI monitor dashboard" height="260">
-  <img src="images/eneru-webui.png" alt="Eneru browser dashboard" height="260">
+  <img src="images/eneru-webui.gif" alt="Eneru browser dashboard" height="260">
   <img src="images/grafana.png" alt="Eneru Grafana dashboard" height="260">
 </p>
 

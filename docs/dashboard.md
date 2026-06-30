@@ -5,9 +5,7 @@ no external service, build toolchain, or third-party JavaScript. It is a thin
 client over the REST API: every value it shows comes from an endpoint, and all
 logic stays server-side.
 
-<p align="center">
-  <img src="images/eneru-webui.png" alt="Eneru browser dashboard" width="900">
-</p>
+![Eneru browser dashboard](images/eneru-webui.gif){ width="900" }
 
 ## Enabling it
 

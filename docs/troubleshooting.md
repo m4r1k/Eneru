@@ -87,7 +87,26 @@ Error: SSL error: error:0A000197:SSL routines::shutdown while in init
 
 This is a NUT client/server TLS handshake mismatch, not an Eneru bug — Eneru
 shells out to the stock `upsc`/`upscmd` clients, so whatever those report is
-what Eneru sees. Workarounds:
+what Eneru sees. `upsc` "tries SSL" by default: when the server *accepts*
+`STARTTLS` and then mishandles the handshake, there is no plaintext fallback and
+the read fails hard. Eneru detects this signature and appends a hint to the
+connection error in its log.
+
+**UniFi UPS (USP) specifically.** This is the most common trigger. The UniFi
+`upsd` works fine for anonymous reads — until you enable **NUT login
+credentials** on the UniFi side, which flips on a TLS/auth path the firmware
+implements incorrectly and breaks the handshake for *every* client on port 3493
+(not just authenticated ones). The fix is to **disable NUT login credentials**:
+
+- Anonymous `upsc UPS@host` reads work, so Eneru can monitor the UPS normally.
+- The trade-off is that authenticated commands (`upscmd`, e.g. battery
+  self-tests via [UPS control](nut-control.md) / [Self-test](self-test.md)) are
+  not reachable on this firmware — the device exposes `test.battery.start`, but
+  you cannot authenticate without breaking the connection. Trigger battery tests
+  from the UniFi app until Ubiquiti fixes NUT auth (some 1.5.0+ firmware reports
+  a `monuser` workaround).
+
+General workarounds for other non-standard appliances:
 
 - Point Eneru at an `upsd` listener that does not force TLS (a plain `LISTEN`
   without `CERTFILE`), or proxy through a standard NUT server that polls the

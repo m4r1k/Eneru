@@ -1002,11 +1002,28 @@ class UPSGroupMonitor(
                     continue
                 if text not in parts:
                     parts.append(text)
-        if parts:
-            return " | ".join(parts)
-        # All output was blank or filtered noise (e.g. only the SSL-init line):
-        # do not resurface what we just stripped.
-        return "upsc exited without output"
+        if not parts:
+            # All output was blank or filtered noise (e.g. only the SSL-init
+            # line): do not resurface what we just stripped.
+            return "upsc exited without output"
+        message = " | ".join(parts)
+        # A NUT server that ACCEPTS STARTTLS and then botches the handshake
+        # makes upsc fail hard with no plaintext fallback, emitting inscrutable
+        # OpenSSL text ("SSL_connect -1", "shutdown while in init"). The most
+        # common cause in the wild is UniFi UPS firmware once NUT login
+        # credentials are enabled — it breaks TLS for every client on the port,
+        # not just authenticated ones. Point the operator at the actual fix.
+        lowered = message.lower()
+        ssl_markers = ("ssl_connect", "ssl error", "ssl_error",
+                       "ssl routines", "handshake", "shutdown while in init")
+        if any(marker in lowered for marker in ssl_markers):
+            message += (
+                " | hint: the NUT server offered TLS but the handshake failed. "
+                "If this is a UniFi UPS, disable NUT login credentials — its "
+                "firmware breaks TLS when auth is enabled (anonymous upsc reads "
+                "still work). See docs/troubleshooting.md."
+            )
+        return message
 
     @staticmethod
     def _parse_nut_host(target: str) -> str:
