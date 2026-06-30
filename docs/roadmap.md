@@ -6,18 +6,8 @@ get cut if they turn out to be impractical or nobody actually wants them.
 Feature requests and feedback: [GitHub Issues](https://github.com/m4r1k/Eneru/issues).
 
 Recently shipped: v5.0 (2026-04-11), v5.1 (2026-04-21), v5.2 (2026-04-24),
-v5.3 (2026-05-10), v5.4 (2026-05-15), v5.5.1 (2026-05-19), v6.0.0 (2026-06-04). See the
-[changelog](changelog.md) for details.
-
----
-
-## v6.1 -- Battery intelligence and reporting (planned)
-
-- Battery health score (0-100) from charge capacity, runtime under load, self-test results, anomaly history, and age
-- Replacement prediction: trend the health score over time, alert when it projects below a threshold (default 90 days out)
-- Built-in self-test scheduling via NUT `upscmd`, with result tracking
-- Periodic reports (daily/weekly/monthly) via notification channels: power events, battery health, uptime
-- Energy tracking: kWh from load data, with cost projection
+v5.3 (2026-05-10), v5.4 (2026-05-15), v5.5.1 (2026-05-19), v6.0.0 (2026-06-04),
+v6.1.0 (2026-06-30). See the [changelog](changelog.md) for details.
 
 ---
 
