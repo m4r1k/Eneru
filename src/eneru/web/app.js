@@ -1327,12 +1327,16 @@ function addChartHover(svg, geom, series) {
   hit.setAttribute("width", Math.max(0, W - pad - 5).toFixed(1));
   hit.setAttribute("height", Math.max(0, H - pad - 5).toFixed(1));
   hit.setAttribute("class", "chart-hit");
+  // Hide the crosshair + floating tip. Used on mouseleave AND on every early
+  // exit from move(): a sample with no plottable value (a gap) must clear any
+  // readout left pinned by a prior move, not leave it stuck until mouseleave.
+  const hideHover = () => { cross.style.display = "none"; hideTip(); };
   const move = (ev) => {
-    if (!base.length) return;
+    if (!base.length) return hideHover();
     const r = svg.getBoundingClientRect();
-    if (!r.width) return;
+    if (!r.width) return hideHover();
     const p = nearest((ev.clientX - r.left) * (W / r.width));
-    if (!p) return;
+    if (!p) return hideHover();
     const cx = x(p.ts);
     vline.setAttribute("x1", cx.toFixed(1)); vline.setAttribute("x2", cx.toFixed(1));
     const valueLines = [];
@@ -1348,14 +1352,14 @@ function addChartHover(svg, geom, series) {
         dots[i].style.display = "none";
       }
     });
-    if (!valueLines.length) return;
+    if (!valueLines.length) return hideHover();
     cross.style.display = "";
     showTip(valueLines.concat([el("div", { class: "tip-sub",
       text: new Date(p.ts * 1000).toLocaleString() })]),
       ev.clientX, ev.clientY, "ev-info");
   };
   hit.addEventListener("mousemove", move);
-  hit.addEventListener("mouseleave", () => { cross.style.display = "none"; hideTip(); });
+  hit.addEventListener("mouseleave", hideHover);
   svg.appendChild(hit);
   return cross;
 }
@@ -1545,30 +1549,37 @@ function drawChart(hostId, series, options) {
   host.appendChild(svg);
 }
 
-// Fetch tier-1 power events for `ups` and split them into the ones inside the
-// selected [from,to] window (drawn as markers + outage bands) and a COUNT of
-// those sitting just outside it — out to the widest selectable range — so a
-// chart can nudge the operator to widen when sparse outages fall outside the
-// 24h default. One request feeds both: events are light, while the history
-// series (the heavy fetch) stays bounded to the selected window. Markers are
-// filtered to THIS UPS + tier-1 client-side, so a busy multi-UPS fleet can't
-// let other UPSes' events consume the cap and drop this UPS's markers.
 const CHART_EVENT_HORIZON = 2592000;   // 30d — widest selectable chart range
-async function loadChartEvents(ups, from, to, range) {
-  const horizonFrom = (to !== null) ? to - CHART_EVENT_HORIZON : null;
+
+// Tier-1 power events for `ups` within [from,to], filtered to this UPS + tier-1
+// client-side. NOTE: /api/v1/events applies `limit` BEFORE we filter by source,
+// so a wide window on a busy multi-UPS fleet can still let other UPSes' events
+// crowd out this one's — full per-UPS server-side filtering is the tracked
+// follow-up. To keep that pressure as low as it was before the out-of-window
+// hint existed, the markers fetch (below) stays scoped to the SELECTED window.
+async function fetchTierEvents(ups, from, to) {
   let eq = "limit=10000";
-  if (horizonFrom !== null) eq += "&from=" + horizonFrom;
+  if (from !== null) eq += "&from=" + from;
   if (to !== null) eq += "&to=" + to;
   const ev = await api("/api/v1/events?" + eq);
   const rows = (ev.ok && ev.data && ev.data.events) || [];
-  const mine = rows.filter(
+  return rows.filter(
     (e) => eventMatchesSource(e, ups) && isTier1Event(e.eventType || e.event));
-  if (from === null) return { events: mine, hidden: 0 };
-  return {
-    events: mine.filter((e) => e.ts >= from),
-    hidden: (range !== null && range < CHART_EVENT_HORIZON)
-      ? mine.filter((e) => e.ts < from).length : 0,
-  };
+}
+
+// Markers + outage bands come from the SELECTED window only (low cap pressure).
+// The "N earlier power events" nudge does a SEPARATE best-effort scan of
+// [horizon, from); a saturated cap there only under-reports the hint count, it
+// can never drop a marker the operator is actually looking at.
+async function loadChartEvents(ups, from, to, range) {
+  const events = await fetchTierEvents(ups, from, to);
+  if (from === null) return { events, hidden: 0 };
+  let hidden = 0;
+  if (range !== null && range < CHART_EVENT_HORIZON) {
+    const older = await fetchTierEvents(ups, to - CHART_EVENT_HORIZON, from - 1);
+    hidden = older.length;
+  }
+  return { events, hidden };
 }
 
 // Show/clear the "earlier power events outside this range" nudge for a chart.
