@@ -179,6 +179,11 @@ select:focus-visible, input:not([type="checkbox"]):focus-visible {
 .graph .now-dot { fill: var(--accent); stroke: var(--panel); stroke-width: 2; }
 .graph .now-dot.s-warn { fill: var(--warn); }
 .graph .now-dot.s-crit { fill: var(--crit); }
+/* Battery-health replacement markers: threshold line + projected-date line. */
+.graph .bh-thresh { stroke: var(--crit); stroke-width: 1.5;
+  stroke-dasharray: 5 4; opacity: 0.75; }
+.graph .bh-eta { stroke: var(--crit); stroke-width: 1.5; stroke-dasharray: 2 3; }
+.graph .bh-eta-lbl { fill: var(--crit); font-size: 0.7rem; font-weight: 600; }
 .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
          font-size: 0.8rem; font-weight: 600; }
 .badge.ok { background: rgba(91,214,114,0.15); color: var(--ok); }

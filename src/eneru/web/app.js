@@ -1629,7 +1629,11 @@ function drawSimpleSeries(host, pts, opts) {
   const W = host.clientWidth || 600, H = 220, pad = 30, padR = 12, padT = 18;
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts;
+  const t0 = pts[0].ts;
+  const tLast = pts[pts.length - 1].ts;
+  // Extend the x-axis to opts.tEnd (e.g. a future replacement date) so a marker
+  // beyond the data is visible; the plotted line still stops at the last reading.
+  const t1 = (opts.tEnd != null && opts.tEnd > tLast) ? opts.tEnd : tLast;
   const span = Math.max(1, t1 - t0);
   const lo = opts.min != null ? opts.min : Math.min(...pts.map((p) => p.value));
   const hi = opts.max != null ? opts.max : Math.max(...pts.map((p) => p.value));
@@ -1657,7 +1661,7 @@ function drawSimpleSeries(host, pts, opts) {
     d += (i ? " L" : "M") + x(p.ts).toFixed(1) + " " + y(p.value).toFixed(1);
   });
   const area = document.createElementNS(SVG_NS, "path");
-  area.setAttribute("d", d + " L" + x(t1).toFixed(1) + " " + (H - pad).toFixed(1)
+  area.setAttribute("d", d + " L" + x(tLast).toFixed(1) + " " + (H - pad).toFixed(1)
     + " L" + x(t0).toFixed(1) + " " + (H - pad).toFixed(1) + " Z");
   area.setAttribute("class", "area bh"); svg.appendChild(area);
   const line = document.createElementNS(SVG_NS, "path");
@@ -1669,6 +1673,30 @@ function drawSimpleSeries(host, pts, opts) {
   dot.setAttribute("cy", y(last.value).toFixed(1));
   dot.setAttribute("r", "3"); dot.setAttribute("class", "now-dot");
   svg.appendChild(dot);
+  // Horizontal reference lines (e.g. the replacement threshold score).
+  (opts.hlines || []).forEach((h) => {
+    if (h.value == null || h.value < lo || h.value > hi) return;
+    const yy = y(h.value).toFixed(1);
+    const ln = document.createElementNS(SVG_NS, "line");
+    ln.setAttribute("x1", pad); ln.setAttribute("x2", W - padR);
+    ln.setAttribute("y1", yy); ln.setAttribute("y2", yy);
+    ln.setAttribute("class", h.cls || "grid"); svg.appendChild(ln);
+  });
+  // Vertical markers (e.g. the projected replacement date), with a label kept
+  // inside the plot.
+  (opts.vmarkers || []).forEach((m) => {
+    if (m.ts == null || m.ts < t0 || m.ts > t1) return;
+    const mx = x(m.ts);
+    const ln = document.createElementNS(SVG_NS, "line");
+    ln.setAttribute("x1", mx.toFixed(1)); ln.setAttribute("x2", mx.toFixed(1));
+    ln.setAttribute("y1", padT); ln.setAttribute("y2", H - pad);
+    ln.setAttribute("class", m.cls || "grid"); svg.appendChild(ln);
+    if (m.label) {
+      const anchor = mx > W * 0.55 ? "end" : "start";
+      txt(m.label, anchor === "end" ? mx - 4 : mx + 4, padT + 4,
+          m.lblCls || "lbl", anchor);
+    }
+  });
   host.appendChild(svg);
 }
 
@@ -1810,6 +1838,7 @@ async function renderBatteryHealthGraph() {
     + "/battery-health-history");
   if (myGen !== _bhGraphGen) return;  // a newer call superseded this one
   const data = (res.ok && res.data && res.data.data) || [];
+  const repl = (res.ok && res.data && res.data.replacement) || {};
   const pts = data.filter((r) => r.score != null)
     .map((r) => ({ ts: r.ts, value: r.score }));
   const note = document.getElementById("bh-graph-note");
@@ -1823,7 +1852,24 @@ async function renderBatteryHealthGraph() {
     return;
   }
   if (note) note.hidden = true;
-  drawSimpleSeries(host, pts, { title: "Health score", unit: "", min: 0, max: 100 });
+  const opts = { title: "Health score", unit: "", min: 0, max: 100 };
+  // Mark the replacement threshold (horizontal) and the projected replacement
+  // date (vertical, red), extending the x-axis into the future so the date is
+  // visible. Battery aging is a years-long trend, hence the full-history window.
+  if (repl.thresholdScore != null) {
+    opts.hlines = [{ value: repl.thresholdScore, cls: "bh-thresh" }];
+  }
+  if (repl.etaTs) {
+    opts.tEnd = repl.etaTs;
+    const d = new Date(repl.etaTs * 1000);
+    const ym = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+    const src = repl.etaSource === "age" ? "est" : "proj";
+    opts.vmarkers = [{
+      ts: repl.etaTs, cls: "bh-eta", lblCls: "bh-eta-lbl",
+      label: "Replace ~" + ym + " (" + src + ")",
+    }];
+  }
+  drawSimpleSeries(host, pts, opts);
 }
 
 function renderEnergyTab() {

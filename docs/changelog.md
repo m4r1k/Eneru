@@ -56,7 +56,8 @@ surface.
   cards; an inline-SVG icon set replaces emoji; charts gain threshold bands,
   gradient fills, a "now" marker, and color-coded power-event overlays with
   instant themed tooltips. New widgets cover remote-server health, a derived
-  line-quality (Good/Fair/Poor) read, a battery-health trend graph, a
+  line-quality (Good/Fair/Poor) read, a multi-year battery-health trend graph
+  that marks the replacement threshold and the projected replacement date, a
   load%-and-power energy chart, a collapsible config JSON tree, and a
   window-independent Events tier filter.
 - **Shutdown plan view.** A read-only, ordered view of exactly what runs on a

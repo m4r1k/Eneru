@@ -26,6 +26,7 @@ __all__ = [
     "compute_terms",
     "least_squares_slope",
     "predict_replacement",
+    "replacement_eta",
     "runtime_score",
     "self_test_score",
 ]
@@ -235,3 +236,34 @@ def predict_replacement(history: List[Tuple[float, float]], *,
                   reason="within horizon" if days_remaining <= horizon_days
                   else "beyond horizon")
     return result
+
+
+def replacement_eta(history: List[Tuple[float, float]], *,
+                    threshold_score: float, horizon_days: int,
+                    min_history_days: int,
+                    battery_install_date: Optional[str],
+                    expected_life_years: Optional[float],
+                    now: float) -> Tuple[Optional[float], Optional[str]]:
+    """Best replacement-date estimate for the dashboard marker, as
+    ``(eta_ts, source)``.
+
+    Prefer the data-driven projection: when the score is trending down with
+    enough history, ``predict_replacement`` gives the timestamp it is expected
+    to cross ``threshold_score`` (even if that is years out and not yet "due").
+    When there is no declining trend, fall back to the age-based estimate
+    (``battery_install_date`` + ``expected_life_years``). ``source`` is
+    ``"trend"``, ``"age"``, or ``None`` when neither is available."""
+    pred = predict_replacement(
+        history, threshold_score=threshold_score, horizon_days=horizon_days,
+        min_history_days=min_history_days, now=now)
+    if pred.get("eta_ts") is not None:
+        return float(pred["eta_ts"]), "trend"
+    if (battery_install_date and expected_life_years
+            and expected_life_years > 0):
+        try:
+            installed = datetime.strptime(
+                str(battery_install_date).strip(), "%Y-%m-%d").timestamp()
+        except (ValueError, TypeError):
+            return None, None
+        return installed + expected_life_years * 365.25 * 86400, "age"
+    return None, None

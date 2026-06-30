@@ -317,6 +317,69 @@ class TestBatteryHealthHistoryEndpoint:
         status, _, payload = h._route()
         assert status == 200
         assert payload["data"][0]["score"] == 90.0
+        # v6.1: the replacement block rides along (threshold for the graph line).
+        assert payload["replacement"]["thresholdScore"] == 50.0
         # Unknown UPS -> 404.
         h.path = "/api/v1/ups/nope/battery-health-history"
         assert h._route()[0] == 404
+
+    def _handler(self, store, cfg_yaml="ups:\n  name: U@h\n"):
+        from types import SimpleNamespace
+        from eneru.api import EneruAPIHandler
+        cfg = _parse_cfg(cfg_yaml)
+        mon = SimpleNamespace(config=cfg, _stats_store=store)
+        h = object.__new__(EneruAPIHandler)
+        h.api_config = cfg
+        h.api_source = SimpleNamespace(_monitors=[mon])
+        h.api_auth = None
+        h.api_sessions = None
+        h.headers = {}
+        return h
+
+    @pytest.mark.unit
+    def test_downsamples_to_daily_mean(self):
+        # Two readings on the SAME UTC day collapse to one averaged point;
+        # different days stay separate (years-long view stays renderable).
+        class _S:
+            def query_battery_health(self, a, b):
+                return [{"ts": 10, "score": 80.0}, {"ts": 20, "score": 90.0},
+                        {"ts": 86400 + 5, "score": 60.0}]
+        h = self._handler(_S())
+        h.path = "/api/v1/ups/U@h/battery-health-history?from=0&to=200000"
+        status, _, payload = h._route()
+        assert status == 200
+        data = payload["data"]
+        assert data == [{"ts": 0, "score": 85.0}, {"ts": 86400, "score": 60.0}]
+
+    @pytest.mark.unit
+    def test_default_window_is_multi_year(self):
+        # `from` unset -> a multi-year span so battery aging is visible.
+        class _S:
+            def query_battery_health(self, a, b):
+                self.span = b - a
+                return []
+        store = _S()
+        h = self._handler(store)
+        h.path = "/api/v1/ups/U@h/battery-health-history"
+        status, _, payload = h._route()
+        assert status == 200
+        assert (payload["to"] - payload["from"]) >= 365 * 5 * 86400
+
+    @pytest.mark.unit
+    def test_replacement_eta_from_trend(self):
+        # A declining multi-point history yields a projected replacement ETA.
+        DAY = 86400
+        rows = [{"ts": i * 30 * DAY, "score": 100.0 - i * 10}
+                for i in range(4)]   # 100 -> 70 over 90 days
+        now = 3 * 30 * DAY
+
+        class _S:
+            def query_battery_health(self, a, b):
+                return rows
+        h = self._handler(_S())
+        h.path = f"/api/v1/ups/U@h/battery-health-history?from=0&to={now}"
+        status, _, payload = h._route()
+        assert status == 200
+        repl = payload["replacement"]
+        assert repl["etaSource"] == "trend"
+        assert repl["etaTs"] > rows[-1]["ts"]   # crossing 50 is in the future

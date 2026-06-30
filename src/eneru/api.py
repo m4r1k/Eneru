@@ -737,16 +737,23 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     reveal_commands=False)
                 return 200, "application/json", {"ups": ups_name, "plan": plan}
             if len(parts) == 6 and parts[5] == "battery-health-history":
-                # v6.1 battery-health score TREND for the Battery-tab graph. The
-                # rows are sparse (one per update_interval), so default to a wide
-                # 90-day window rather than the sample-retention horizon /history
-                # uses, and don't clamp.
+                # v6.1 battery-health score TREND for the Battery-tab graph.
+                # Battery aging plays out over YEARS, so default to the full
+                # retained history (battery_health rows survive the hourly
+                # retention horizon, up to ~5y) instead of a short window, and
+                # downsample to one point per day so a multi-year span still
+                # renders. Also project the replacement date so the UI can mark
+                # it (data-driven trend ETA, else the age-based estimate).
+                from eneru.health import prediction
                 mon = self._monitor_for(ups_name)
                 if mon is None:
                     return 404, "application/json", self._not_found("UPS not found")
                 store = getattr(mon, "_stats_store", None)
-                end = _parse_int_param(qs, "to", int(time.time()))
-                start = _parse_int_param(qs, "from", end - 90 * 86400)
+                now_ts = int(time.time())
+                end = _parse_int_param(qs, "to", now_ts)
+                # `from` unset -> the full retained horizon (5y), so the graph
+                # spans the battery's whole recorded life.
+                start = _parse_int_param(qs, "from", end - 1825 * 86400)
                 if start > end:
                     return 400, "application/json", self._error(
                         "INVALID_REQUEST", "'from' must be <= 'to'")
@@ -756,8 +763,44 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                         rows = store.query_battery_health(start, end)
                     except Exception:
                         rows = []
+                # Downsample to one point per UTC day (mean score). Hourly rows
+                # over years would be tens of thousands of points; a daily trend
+                # is what the multi-year view needs.
+                buckets: Dict[int, List[float]] = {}
+                for r in rows:
+                    s = r.get("score")
+                    if s is None:
+                        continue
+                    day = (int(r["ts"]) // 86400) * 86400
+                    acc = buckets.setdefault(day, [0.0, 0.0])
+                    acc[0] += float(s)
+                    acc[1] += 1
+                data = [{"ts": d, "score": round(a[0] / a[1], 2)}
+                        for d, a in sorted(buckets.items())]
+                # Replacement-date projection for the red marker + threshold line.
+                replacement: Dict[str, Any] = {
+                    "etaTs": None, "etaSource": None, "thresholdScore": None}
+                try:
+                    cfg = mon._resolve_battery_health_config()
+                except Exception:
+                    cfg = getattr(mon.config, "battery_health", None)
+                if cfg is not None:
+                    rep = cfg.replacement
+                    history = [(float(r["ts"]), float(r["score"]))
+                               for r in rows if r.get("score") is not None]
+                    eta, src = prediction.replacement_eta(
+                        history,
+                        threshold_score=rep.threshold_score,
+                        horizon_days=rep.horizon_days,
+                        min_history_days=rep.min_history_days,
+                        battery_install_date=cfg.battery_install_date,
+                        expected_life_years=cfg.expected_life_years,
+                        now=now_ts)
+                    replacement = {"etaTs": eta, "etaSource": src,
+                                   "thresholdScore": rep.threshold_score}
                 return 200, "application/json", {
-                    "ups": ups_name, "from": start, "to": end, "data": rows}
+                    "ups": ups_name, "from": start, "to": end,
+                    "data": data, "replacement": replacement}
             if len(parts) == 6 and parts[5] in ("battery-health", "energy"):
                 # v6.1 read endpoints (same data the /status row carries). Build
                 # only the matched monitor's status — not the whole fleet — so a

@@ -210,3 +210,46 @@ class TestPredictReplacement:
                                   min_history_days=14, now=60 * DAY)
         assert r["due"] is False
         assert r["days_remaining"] > 30
+
+
+class TestReplacementEta:
+    @pytest.mark.unit
+    def test_trend_eta_preferred(self):
+        # Declining trend -> data-driven ETA, even if beyond the warn horizon.
+        now = 100 * DAY
+        hist = [(0.0, 100.0), (50 * DAY, 90.0), (now, 80.0)]
+        eta, src = P.replacement_eta(
+            hist, threshold_score=50, horizon_days=30, min_history_days=14,
+            battery_install_date="2020-01-01", expected_life_years=5.0, now=now)
+        assert src == "trend"
+        assert eta > now            # crossing is in the future
+
+    @pytest.mark.unit
+    def test_age_fallback_when_no_trend(self):
+        # Flat/healthy battery -> no trend ETA -> age-based estimate.
+        now = 60 * DAY
+        flat = [(0.0, 97.0), (now, 97.0)]
+        eta, src = P.replacement_eta(
+            flat, threshold_score=50, horizon_days=90, min_history_days=14,
+            battery_install_date="2024-01-01", expected_life_years=5.0, now=now)
+        assert src == "age"
+        # 2024-01-01 + 5y ~= early 2029
+        from datetime import datetime
+        assert datetime.fromtimestamp(eta).year == 2028 or \
+            datetime.fromtimestamp(eta).year == 2029
+
+    @pytest.mark.unit
+    def test_none_when_no_trend_and_no_install_date(self):
+        eta, src = P.replacement_eta(
+            [(0.0, 97.0), (60 * DAY, 97.0)], threshold_score=50,
+            horizon_days=90, min_history_days=14, battery_install_date=None,
+            expected_life_years=5.0, now=60 * DAY)
+        assert eta is None and src is None
+
+    @pytest.mark.unit
+    def test_unparseable_install_date_yields_none(self):
+        eta, src = P.replacement_eta(
+            [], threshold_score=50, horizon_days=90, min_history_days=14,
+            battery_install_date="not-a-date", expected_life_years=5.0,
+            now=60 * DAY)
+        assert eta is None and src is None
