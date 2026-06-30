@@ -2409,11 +2409,20 @@ def main():
     # --- self-test (v6.1) ---
     st_parser = subparsers.add_parser(
         "self-test", help="Issue or inspect a UPS battery self-test")
+    # Locator flags live on the parent too (default=SUPPRESS so they never
+    # clobber a subparser value), so `eneru self-test --ups NAME` works the way
+    # the "retry with --ups NAME" hint promises, not just `... status --ups`.
+    st_parser.add_argument("--ups", default=argparse.SUPPRESS,
+                           help="UPS name (default: the only configured UPS)")
+    st_parser.add_argument("-c", "--config", default=argparse.SUPPRESS,
+                           help="Path to configuration file")
     st_sub = st_parser.add_subparsers(dest="self_test_command")
     st_run = st_sub.add_parser(
         "run", help="Issue a self-test (via the daemon API by default)")
-    st_run.add_argument("--ups", help="UPS name (default: the only configured UPS)")
-    st_run.add_argument("-c", "--config", default=None, help="Path to configuration file")
+    st_run.add_argument("--ups", default=argparse.SUPPRESS,
+                        help="UPS name (default: the only configured UPS)")
+    st_run.add_argument("-c", "--config", default=argparse.SUPPRESS,
+                        help="Path to configuration file")
     st_run.add_argument("--direct", action="store_true",
                         help="Issue directly via NUT (nut_control creds), no daemon")
     st_run.add_argument("--url", help="Daemon API base URL (default: from api.bind/port)")
@@ -2422,11 +2431,13 @@ def main():
     st_run.set_defaults(func=_cmd_self_test_run)
     st_status = st_sub.add_parser(
         "status", help="Show the latest recorded self-test result")
-    st_status.add_argument("--ups", help="UPS name (default: the only configured UPS)")
-    st_status.add_argument("-c", "--config", default=None,
+    st_status.add_argument("--ups", default=argparse.SUPPRESS,
+                           help="UPS name (default: the only configured UPS)")
+    st_status.add_argument("-c", "--config", default=argparse.SUPPRESS,
                            help="Path to configuration file")
     st_status.set_defaults(func=_cmd_self_test_status)
-    # Bare `eneru self-test` (no subcommand) -> status.
+    # Bare `eneru self-test` (no subcommand) -> status. The SUPPRESS-defaulted
+    # locator flags fall back to these baselines when not supplied.
     st_parser.set_defaults(func=_cmd_self_test_status, ups=None, config=None)
 
     # --- version ---

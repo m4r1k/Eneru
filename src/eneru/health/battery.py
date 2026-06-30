@@ -229,8 +229,8 @@ class BatteryMonitorMixin:
             # something to swallow silently — surface it, then fall back to the
             # global config so health tracking still runs.
             self._log_message(
-                f"battery-health config resolution failed, using global "
-                f"config: {e}")
+                f"⚠️  battery-health config resolution failed "
+                f"({e}); using global config")
         return glob
 
     def _open_store(self):

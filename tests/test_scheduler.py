@@ -257,6 +257,23 @@ class TestPeriodicScheduler:
         assert sched.tick(1060.0, meta.get, meta.set) == ["health"]
 
     @pytest.mark.unit
+    def test_state_read_failure_skips_job_without_reseeding(self):
+        # A get_meta() failure must NOT be read as "first run": that would
+        # reseed a calendar job (skipping a due run) or fire an interval job
+        # early. The job is skipped for this tick and its state left untouched.
+        sets = []
+        calls = []
+        sched = PeriodicScheduler(tz=UTC)
+        sched.register("health", Schedule.interval(60), lambda now: calls.append(now))
+
+        def _boom(_k):
+            raise RuntimeError("stats db gone")
+        ran = sched.tick(1000.0, _boom, lambda k, v: sets.append((k, v)))
+        assert ran == []          # not fired
+        assert calls == []        # body never ran
+        assert sets == []         # state not reseeded
+
+    @pytest.mark.unit
     def test_calendar_job_seeds_then_fires_next_occurrence(self):
         meta = _Meta()
         calls = []

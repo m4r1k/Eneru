@@ -292,6 +292,22 @@ class TestRunSelfTestTask:
         assert len(calls) == 2
 
     @pytest.mark.unit
+    def test_skips_when_poll_target_autocorrected(self, store, monkeypatch):
+        # After NUT name autocorrect, the control surface stays on the
+        # configured ups.name; a scheduled self-test must NOT fire an INSTCMD at
+        # the discovered target. It skips (with backoff) until the config is fixed.
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        mon._ups_name_autocorrected = True
+        store.set_meta("self_test_last_run", "0")        # due
+        monkeypatch.setattr(
+            selftest, "discover_self_test_command",
+            lambda *a, **k: pytest.fail("must not discover when autocorrected"))
+        mon._run_self_test_task()
+        assert mon._self_test_pending_id is None
+        assert mon._self_test_retry_after_mono is not None
+        assert any("auto-corrected" in m for m in mon.logs)
+
+    @pytest.mark.unit
     def test_invalid_schedule_logs(self, store):
         cfg = _cfg("api:\n  auth:\n    enabled: true\n"
                    "nut_control:\n  enabled: true\n  allowed_commands: [test.battery.start]\n"

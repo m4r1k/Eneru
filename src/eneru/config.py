@@ -1557,7 +1557,11 @@ class ConfigLoader:
                 if not isinstance(block, dict):
                     return
                 messages.extend(cls._unknown_key_errors(label, block, _bh_keys))
-                if isinstance(block.get("replacement"), dict):
+                if "replacement" in block and not isinstance(
+                        block.get("replacement"), dict):
+                    messages.append(
+                        f"ERROR: {label}.replacement must be a mapping")
+                elif isinstance(block.get("replacement"), dict):
                     messages.extend(cls._unknown_key_errors(
                         f"{label}.replacement", block["replacement"], _rep_keys))
 
@@ -2586,6 +2590,7 @@ class ConfigLoader:
         # Imported lazily to avoid any import-cycle risk at config import time.
         from eneru.self_test import parse_schedule as _parse_schedule
         from eneru.scheduler import parse_hhmm as _parse_hhmm
+        from eneru import nut_control as _nutctl
         from eneru.scheduler import parse_weekday as _parse_weekday
 
         st_glob = config.self_test
@@ -2672,7 +2677,7 @@ class ConfigLoader:
                     "command — set self_test.command (per-UPS or global) to a "
                     "command on nut_control.allowed_commands "
                     "(e.g. 'test.battery.start').")
-            elif cmd not in nc.allowed_commands:
+            elif not _nutctl.command_allowed(cmd, nc.allowed_commands):
                 messages.append(
                     f"ERROR: self_test.command '{st.command}' for UPS '{name}' "
                     "is not in nut_control.allowed_commands — a scheduled test "

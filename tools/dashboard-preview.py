@@ -29,6 +29,7 @@ Outputs ``<out>/dash-[<theme>-]<tab>.png``. Read them to verify the change;
 this is the loop the project uses instead of trusting string-only UI tests.
 """
 import argparse
+import json
 import sys
 import threading
 import time
@@ -88,8 +89,8 @@ def _make_handler(web_dir: Path, daemon: str):
                 ctype = exc.headers.get("Content-Type", "application/json")
                 code = exc.code
             except Exception as exc:  # daemon down / unreachable
-                body = ('{"error":{"message":"preview proxy: %s"}}'
-                        % exc).encode()
+                body = json.dumps(
+                    {"error": {"message": f"preview proxy: {exc}"}}).encode()
                 ctype, code = "application/json", 502
             self.send_response(code)
             self.send_header("Content-Type", ctype)
@@ -171,6 +172,10 @@ def main(argv=None) -> int:
         return 2
     tabs = [t.strip() for t in args.tabs.split(",") if t.strip()]
     themes = [t.strip() for t in args.themes.split(",") if t.strip()]
+    if not tabs or not themes:
+        print("--tabs and --themes must each name at least one value",
+              file=sys.stderr)
+        return 2
 
     handler = _make_handler(args.web_dir, args.daemon)
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), handler)

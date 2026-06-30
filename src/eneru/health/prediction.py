@@ -172,14 +172,16 @@ def least_squares_slope(points: List[Tuple[float, float]]) -> Optional[float]:
     n = len(points)
     if n < 2:
         return None
-    sx = sum(x for x, _ in points)
-    sy = sum(y for _, y in points)
-    sxx = sum(x * x for x, _ in points)
-    sxy = sum(x * y for x, y in points)
-    denom = n * sxx - sx * sx
+    # Center x before the sums. Raw epoch timestamps (~1.7e9) squared overflow
+    # float64's ~15-digit precision, so the textbook `n*sxx - sx*sx` subtracts
+    # two huge near-equal numbers and a long-running battery's trend goes
+    # unstable / collapses to 0. Centered sums stay small and exact.
+    mean_x = sum(x for x, _ in points) / n
+    mean_y = sum(y for _, y in points) / n
+    denom = sum((x - mean_x) ** 2 for x, _ in points)
     if denom == 0:
         return None
-    return (n * sxy - sx * sy) / denom
+    return sum((x - mean_x) * (y - mean_y) for x, y in points) / denom
 
 
 def predict_replacement(history: List[Tuple[float, float]], *,

@@ -99,8 +99,17 @@ end
 function __eneru_using_self_test_run
     set -l cmd (commandline -opc)
     set -l saw_self_test 0
+    set -l skip_value 0
     for word in $cmd[2..-1]
+        # Skip the value that follows a value-taking flag (space form), so e.g.
+        # `self-test --ups NAME run` doesn't mistake NAME for the subcommand.
+        if test $skip_value -eq 1
+            set skip_value 0
+            continue
+        end
         switch $word
+            case --ups --url --token --api-key -c --config
+                set skip_value 1
             case '-*'
                 continue
             case self-test

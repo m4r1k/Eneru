@@ -1673,6 +1673,19 @@ function drawSimpleSeries(host, pts, opts) {
   dot.setAttribute("cy", y(last.value).toFixed(1));
   dot.setAttribute("r", "3"); dot.setAttribute("class", "now-dot");
   svg.appendChild(dot);
+  // Projected trend (dotted) from the last reading toward a future point, e.g.
+  // the replacement date at the threshold score. Clipped to the domain.
+  if (opts.projection && opts.projection.ts != null) {
+    const px = Math.min(t1, Math.max(t0, opts.projection.ts));
+    const pl = document.createElementNS(SVG_NS, "line");
+    pl.setAttribute("x1", x(last.ts).toFixed(1));
+    pl.setAttribute("y1", y(last.value).toFixed(1));
+    pl.setAttribute("x2", x(px).toFixed(1));
+    pl.setAttribute("y2", y(opts.projection.value).toFixed(1));
+    pl.setAttribute("class", opts.projection.cls || "grid");
+    pl.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.appendChild(pl);
+  }
   // Horizontal reference lines (e.g. the replacement threshold score).
   (opts.hlines || []).forEach((h) => {
     if (h.value == null || h.value < lo || h.value > hi) return;
@@ -1852,7 +1865,17 @@ async function renderBatteryHealthGraph() {
     return;
   }
   if (note) note.hidden = true;
-  const opts = { title: "Health score", unit: "", min: 0, max: 100 };
+  // Adaptive y-floor: a healthy battery's scores cluster near 100, so a fixed
+  // 0-100 axis wastes the bottom half. Anchor the floor just below the lower of
+  // the threshold and the observed scores (rounded down to a tidy step) so the
+  // trend, the threshold, and the projection all use the vertical space.
+  const scores = pts.map((p) => p.value);
+  let floorRef = Math.min.apply(null, scores);
+  if (repl.thresholdScore != null) floorRef = Math.min(floorRef, repl.thresholdScore);
+  const opts = {
+    title: "Health score", unit: "",
+    min: Math.max(0, Math.floor((floorRef - 8) / 5) * 5), max: 100,
+  };
   // Mark the replacement threshold (horizontal) and the projected replacement
   // date (vertical, red), extending the x-axis into the future so the date is
   // visible. Battery aging is a years-long trend, hence the full-history window.
@@ -1861,6 +1884,14 @@ async function renderBatteryHealthGraph() {
   }
   if (repl.etaTs) {
     opts.tEnd = repl.etaTs;
+    // Dotted projection from the latest reading to the replacement point (the
+    // threshold score at the projected date), so even sparse / pre-release
+    // history reads as a trend heading toward replacement.
+    if (repl.thresholdScore != null) {
+      opts.projection = {
+        ts: repl.etaTs, value: repl.thresholdScore, cls: "bh-proj",
+      };
+    }
     const d = new Date(repl.etaTs * 1000);
     const ym = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
     const src = repl.etaSource === "age" ? "est" : "proj";

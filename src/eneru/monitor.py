@@ -2237,6 +2237,19 @@ class UPSGroupMonitor(
                 and time.monotonic() < self._self_test_retry_after_mono):
             return
 
+        # Never issue a real control command against an AUTO-CORRECTED poll
+        # target: _run_ups_name_diagnostic() keeps the rest of the control
+        # surface on the configured ups.name until the operator fixes the
+        # config, so a scheduled self-test must not be the one path that fires
+        # an INSTCMD at the discovered UPS. Back off and wait for the fix.
+        if getattr(self, "_ups_name_autocorrected", False):
+            self._self_test_retry_after_mono = (
+                time.monotonic() + SELF_TEST_ISSUE_RETRY_SECONDS)
+            self._log_message(
+                "⚠️  self-test skipped: polling target was auto-corrected; "
+                "fix ups.name before scheduled control commands resume.")
+            return
+
         # 3) Issue. Discover BEFORE stamping last_run so a transient ``upscmd -l``
         # failure retries next cycle instead of silently burning a (possibly
         # 30-day) cadence; a genuine "not exposed" still consumes the cycle.

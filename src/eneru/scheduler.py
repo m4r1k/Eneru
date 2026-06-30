@@ -29,7 +29,7 @@ directly.
 import calendar as _calendar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, tzinfo
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 __all__ = ["PeriodicScheduler", "Schedule", "parse_hhmm", "parse_weekday"]
 
@@ -53,7 +53,7 @@ def parse_hhmm(value: str) -> Tuple[int, int]:
     return hour, minute
 
 
-def parse_weekday(value) -> int:
+def parse_weekday(value: Union[int, str]) -> int:
     """Parse a weekday name (or 0-6 int, Monday=0) into 0-6."""
     if isinstance(value, bool):  # bool is an int subclass; reject explicitly
         raise ValueError(f"invalid weekday {value!r}")
@@ -109,7 +109,7 @@ class Schedule:
         return cls("daily", hour=hour, minute=minute, fire_on_first=fire_on_first)
 
     @classmethod
-    def weekly(cls, weekday, hhmm: str, *,
+    def weekly(cls, weekday: Union[int, str], hhmm: str, *,
                fire_on_first: bool = False) -> "Schedule":
         hour, minute = parse_hhmm(hhmm)
         return cls("weekly", weekday=parse_weekday(weekday),
@@ -240,10 +240,11 @@ class PeriodicScheduler:
 
     def _read_last(self, get_meta: Callable[[str], Optional[str]],
                    name: str) -> Optional[float]:
-        try:
-            raw = get_meta(self._meta_prefix + name)
-        except Exception:  # pragma: no cover - get_meta is already isolated
-            return None
+        # NOTE: a get_meta() failure deliberately propagates to tick(), which
+        # skips the job for this tick. Swallowing it here and returning None
+        # would make tick() take the no-baseline path: it reseeds a calendar
+        # job (silently skipping a due run) or fires an interval job early.
+        raw = get_meta(self._meta_prefix + name)
         if raw in (None, ""):
             return None
         try:
@@ -258,7 +259,12 @@ class PeriodicScheduler:
         ran: List[str] = []
         for job in self._jobs:
             key = self._meta_prefix + job.name
-            last = self._read_last(get_meta, job.name)
+            try:
+                last = self._read_last(get_meta, job.name)
+            except Exception as exc:  # state read failed -> skip, don't reseed
+                self._log(
+                    f"⚠️  scheduler state read failed for '{job.name}': {exc}")
+                continue
             try:
                 if job.schedule.due(now, last, self._tz):
                     # Stamp + record as fired first, so a job whose body

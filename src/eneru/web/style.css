@@ -184,6 +184,9 @@ select:focus-visible, input:not([type="checkbox"]):focus-visible {
   stroke-dasharray: 5 4; opacity: 0.75; }
 .graph .bh-eta { stroke: var(--crit); stroke-width: 1.5; stroke-dasharray: 2 3; }
 .graph .bh-eta-lbl { fill: var(--crit); font-size: 0.7rem; font-weight: 600; }
+/* Dotted projection from the latest reading to the replacement point. */
+.graph .bh-proj { stroke: var(--accent); stroke-width: 1.5;
+  stroke-dasharray: 1 4; stroke-linecap: round; opacity: 0.7; }
 .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
          font-size: 0.8rem; font-weight: 600; }
 .badge.ok { background: rgba(91,214,114,0.15); color: var(--ok); }
