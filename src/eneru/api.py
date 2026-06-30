@@ -1554,7 +1554,8 @@ def render_prometheus_metrics(source: Any) -> str:
                 bh["replacementDaysRemaining"]))
         energy = row.get("energy") or {}
         for period, kwh_key, cost_key in (("today", "todayKwh", "todayCost"),
-                                          ("month", "monthKwh", "monthCost")):
+                                          ("month", "monthKwh", "monthCost"),
+                                          ("year", "yearKwh", "yearCost")):
             if energy.get(kwh_key) is not None:
                 lines.append(_metric_line(
                     "eneru_ups_energy_kwh", {**labels, "period": period},

@@ -272,6 +272,9 @@ class TestPeriodicScheduler:
         assert ran == []          # not fired
         assert calls == []        # body never ran
         assert sets == []         # state not reseeded
+        # next_runs() isolates the same read failure: the job is omitted, not
+        # guessed from a None baseline.
+        assert sched.next_runs(1000.0, _boom) == {}
 
     @pytest.mark.unit
     def test_calendar_job_seeds_then_fires_next_occurrence(self):

@@ -195,11 +195,13 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
                     "detail": "the coordinator performs the host poweroff"}]))
     else:
         ls = config.local_shutdown
-        po_on = ls.enabled and not delegated
+        # Host poweroff is a LOCAL-ownership action: gate it the same way as the
+        # other local drain phases (a non-local group never powers off this host).
+        po_skip = _local_skip(is_local, delegated, ls.enabled)
+        po_on = po_skip is None
         phases.append(_phase(
             "local-poweroff", "Local host poweroff", enabled=po_on,
-            skipped=(None if po_on
-                     else ("delegated to host" if delegated else "disabled")),
+            skipped=po_skip,
             steps=[{"label": "Power off this host",
                     "detail": ls.command if reveal_commands else hidden}]
             if po_on else []))

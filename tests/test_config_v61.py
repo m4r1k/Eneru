@@ -359,6 +359,20 @@ class TestCrossFieldValidation:
         assert any("reports.weekly_day" in e and "invalid" in e for e in errs), errs
 
     @pytest.mark.unit
+    def test_reports_include_scalar_is_error(self):
+        # A scalar is silently coerced to the default list at parse time, so it
+        # must be rejected on the raw data.
+        _, errs = _validate(
+            "ups:\n  name: U@h\nreports:\n  include: events\n")
+        assert any("reports.include must be a list" in e for e in errs), errs
+
+    @pytest.mark.unit
+    def test_reports_include_unknown_entry_is_error(self):
+        _, errs = _validate(
+            "ups:\n  name: U@h\nreports:\n  include:\n    - events\n    - bogus\n")
+        assert any("reports.include entry 'bogus'" in e for e in errs), errs
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("val", ["0", "32", "abc"])
     def test_reports_monthly_day_out_of_range_is_error(self, val):
         _, errs = _validate(

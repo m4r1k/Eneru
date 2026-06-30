@@ -289,6 +289,11 @@ class PeriodicScheduler:
         """Map each job name to its next-fire epoch (for status/API)."""
         out: Dict[str, float] = {}
         for job in self._jobs:
-            last = self._read_last(get_meta, job.name)
+            try:
+                last = self._read_last(get_meta, job.name)
+            except Exception as exc:  # state read failed -> omit, don't guess
+                self._log(
+                    f"⚠️  scheduler state read failed for '{job.name}': {exc}")
+                continue
             out[job.name] = job.schedule.next_run(now, last, self._tz)
         return out

@@ -65,11 +65,16 @@ def test_delegated_skips_local_but_runs_remote(cfg):
 def test_non_local_group_skips_local_drain(cfg):
     # A non-local group can't manage the host's VMs/containers/filesystems
     # (those belong to the host that owns the UPS); remote shutdown still runs.
+    cfg.local_shutdown.enabled = True   # even with poweroff enabled...
     plan = build_shutdown_plan(cfg, is_local=False)
     by = _by_id(plan)
     for pid in ("vms", "containers", "filesystem-sync", "filesystem-unmount"):
         assert by[pid]["skipped"] == "non-local group"
         assert not by[pid]["enabled"]
+    # ...host poweroff is a local-ownership action too, so a non-local group
+    # never powers off this host.
+    assert not by["local-poweroff"]["enabled"]
+    assert by["local-poweroff"]["skipped"] == "non-local group"
     assert by["remote"]["enabled"]
     assert plan["note"] and "non-local" in plan["note"].lower()
 
@@ -135,3 +140,27 @@ def test_remote_order_loopback_detail_and_object_mount(cfg):
     assert "order 2" not in loop[0]["detail"]
     um = by["filesystem-unmount"]["steps"][0]
     assert um["label"] == "Unmount /data" and um["detail"] == "options: -l"
+
+
+@pytest.mark.unit
+def test_remote_loopback_brackets_and_parallel_group_estimate(cfg):
+    from eneru.config import RemoteServerConfig, RemoteCommandConfig
+    # A loopback with pre-shutdown commands brackets the run (pre-shutdown first,
+    # shutdown last); two regulars sharing one effective order form a parallel
+    # group. Estimate = max(parallel timeouts) + the loopback's own timeout.
+    lb = RemoteServerConfig(
+        name="host", host="127.0.0.1", enabled=True, is_host_loopback=True,
+        command_timeout=20,
+        pre_shutdown_commands=[RemoteCommandConfig(command="systemctl stop x")])
+    a = RemoteServerConfig(name="A", host="10.0.0.1", enabled=True,
+                           shutdown_order=1, command_timeout=10)
+    b = RemoteServerConfig(name="B", host="10.0.0.2", enabled=True,
+                           shutdown_order=1, command_timeout=15)
+    cfg.remote_servers[:] = [lb, a, b]   # remote_servers is a read-only property
+    remote = _by_id(build_shutdown_plan(cfg, is_local=True))["remote"]
+    details = [s["detail"] for s in remote["steps"]]
+    assert any("pre-shutdown · runs first" in d for d in details)   # loopback pre
+    assert any("⇉ parallel" in d for d in details)                  # same-order group
+    assert any("shutdown · runs last" in d for d in details)        # loopback last
+    assert remote["mode"] == "parallel"
+    assert remote["estimateS"] == 35.0                              # max(10,15)+20

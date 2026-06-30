@@ -142,6 +142,7 @@ class TestGather:
         assert any(e[1] == "ON_BATTERY" for e in sources["events"])
         assert "todayKwh" in sources["energy"]
 
+    @pytest.mark.unit
     def test_report_confidence_from_store_detail(self, store):
         # The store row carries confidence in `detail`, not top-level — the
         # report must render the real value, not "(confidence 0%)".

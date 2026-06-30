@@ -38,7 +38,7 @@ energy:
 Some integrated UPSes expose neither `ups.realpower` nor `ups.power.nominal`, so
 Eneru has nothing to turn `load%` into watts and energy stays *unknown*. Set
 `energy.nominal_power` to the unit's rated power (e.g. `1000` for a 1000 VA
-tower) and Eneru estimates `watts = load% × nominal_power` (flagged
+tower) and Eneru estimates `watts = (load% / 100) × nominal_power` (flagged
 `estimated`). The Energy tab's **Power (W)** line then plots, and kWh/cost
 populate.
 

@@ -1575,6 +1575,21 @@ class ConfigLoader:
                 {"enabled", "daily", "weekly", "monthly", "time",
                  "weekly_day", "monthly_day", "include", "format"},
             ))
+            # reports.include: a scalar is silently coerced to the default list
+            # at parse time, and unknown section names quietly change what gets
+            # sent — validate it on the raw data before that coercion.
+            _raw_reports = raw_data.get("reports")
+            if isinstance(_raw_reports, dict) and "include" in _raw_reports:
+                _inc = _raw_reports["include"]
+                _valid_inc = {"events", "battery_health", "energy", "uptime"}
+                if not isinstance(_inc, list):
+                    messages.append("ERROR: reports.include must be a list")
+                else:
+                    for _sec in _inc:
+                        if _sec not in _valid_inc:
+                            messages.append(
+                                f"ERROR: reports.include entry {_sec!r} is not "
+                                f"one of {sorted(_valid_inc)}")
             messages.extend(cls._unknown_key_errors(
                 "energy", raw_data.get("energy", {}),
                 {"enabled", "cost_per_kwh", "currency", "cost_format",
