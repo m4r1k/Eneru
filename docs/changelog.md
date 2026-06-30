@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.1] - 2026-06-30
+
+Dashboard UX polish and bug fixes on top of 6.1.0. No config, API, or shutdown
+behavior changes.
+
+### Fixed
+
+- **Tab scroll jump on refresh.** The 10s auto-refresh no longer yanks a scrolled
+  tab (Battery, Energy, Events, …) back to the top; only explicit tab switches
+  reset scroll.
+- **Sparse power events looked missing.** Power/Battery/Energy charts default to a
+  24h window, so rare outages fell outside it. Charts now show a hint when tier-1
+  power events exist beyond the selected range ("N earlier power events outside
+  this range — widen to view").
+- **Brief outages were invisible on charts.** A short `ON_BATTERY` →
+  `POWER_RESTORED` pair (often ~2s) collapsed onto one pixel and the restore
+  marker hid the cut. Outages now render as a shaded span with a minimum width.
+- **Unreadable frequency chart.** Mains frequency is quantized (e.g. 50.0/50.2 Hz),
+  so auto-scaling amplified it into noise on short ranges. The value axis now has
+  a 2 Hz floor, rendering a calm line near nominal.
+- **Cryptic `upsc` SSL error.** A failed STARTTLS handshake (notably UniFi UPS
+  firmware once NUT login credentials are enabled) now logs an actionable hint
+  pointing at the fix, instead of raw OpenSSL text.
+- **Config-tab gear icon** redrawn (was visibly skewed).
+- **Docs image 404 on Read the Docs.** Dashboard / Grafana screenshots used a
+  relative `<img>` path that broke under directory URLs; switched to Markdown
+  image syntax.
+
+### Added
+
+- **Hover readout on charts.** Mousing over any chart line shows the metric value
+  and timestamp at that point (crosshair + floating tip), so per-point inspection
+  no longer requires the Grafana/Prometheus stack. Coexists with event-marker and
+  outage tooltips.
+- **Battery-health factor meters.** Each scoring term (runtime, anomalies, age, …)
+  now shows a small 0-100 bar beside its number, on the Battery tab and in the
+  detail modal.
+- **Power-quality help hints.** The detail modal's voltage / frequency /
+  temperature rows carry "?" explanations, including how Eneru classifies
+  brownout/surge and a note that some UPSes (incl. UniFi) report a fixed
+  placeholder temperature.
+- **Clearer shutdown routing.** "delegated to host" now reads "delegated to host
+  OS" with a "?" explaining the container loopback delegation.
+
+### Docs
+
+- Troubleshooting: expanded the `upsc` SSL/TLS section with the UniFi NUT-auth
+  limitation and the disable-credentials workaround.
+
+---
+
 ## [6.1.0] - 2026-06-30
 
 Battery intelligence, energy tracking, scheduled self-tests, periodic reports,

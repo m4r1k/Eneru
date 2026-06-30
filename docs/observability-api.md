@@ -167,9 +167,7 @@ brownout is visible directly on the Input/output voltage panel — no extra
 Grafana plugin required. Exact SQLite event rows with their full detail
 text remain available from `/api/v1/events` if you want a tabular feed.
 
-<p align="center">
-  <img src="images/grafana.png" alt="Eneru Grafana dashboard" width="900">
-</p>
+![Eneru Grafana dashboard](images/grafana.png){ width="900" }
 
 ## Remote SSH health
 

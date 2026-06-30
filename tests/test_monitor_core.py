@@ -3199,6 +3199,41 @@ class TestGetAllUpsDataFailurePaths:
         assert err == "Error: Unknown UPS"
 
     @pytest.mark.unit
+    def test_ssl_handshake_failure_appends_unifi_hint(self, tmp_path):
+        """A botched STARTTLS handshake (e.g. UniFi UPS with NUT login
+        credentials enabled) gets an actionable hint, not just raw OpenSSL."""
+        monitor = make_monitor(tmp_path)
+        with patch.object(
+            monitor, "_run_upsc",
+            return_value=(
+                1,
+                "",
+                "Unknown return value from SSL_connect -1: Success\n"
+                "Error: SSL error: error:0A000197:SSL routines::"
+                "shutdown while in init\n",
+            ),
+        ):
+            success, _data, err = monitor._get_all_ups_data()
+        assert success is False
+        # Raw text is preserved AND the hint is appended.
+        assert "SSL routines" in err
+        assert "disable NUT login credentials" in err
+        assert "UniFi" in err
+
+    @pytest.mark.unit
+    def test_non_ssl_error_gets_no_hint(self, tmp_path):
+        """An ordinary connection error must not be decorated with the SSL hint."""
+        monitor = make_monitor(tmp_path)
+        with patch.object(
+            monitor, "_run_upsc",
+            return_value=(1, "", "Error: Connection failure: Connection refused\n"),
+        ):
+            success, _data, err = monitor._get_all_ups_data()
+        assert success is False
+        assert err == "Error: Connection failure: Connection refused"
+        assert "hint:" not in err
+
+    @pytest.mark.unit
     def test_run_upsc_suppresses_nut_ssl_init_noise(self, tmp_path):
         monitor = make_monitor(tmp_path)
         with patch("eneru.monitor.run_command",

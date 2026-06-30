@@ -97,7 +97,7 @@ const ICONS = {
   chart:   "M4 5v14h16 M8 14l3-3 2.4 2L19 8",
   bell:    "M6 9a6 6 0 0 1 12 0c0 5 2.2 7 2.2 7H3.8S6 14 6 9 M10 21h4",
   sliders: "M5 8h14 M5 16h14 M9 6v4 M15 14v4",
-  gear:    "M12 9.4a2.6 2.6 0 1 0 0 5.2 2.6 2.6 0 0 0 0-5.2z M19.3 12a7 7 0 0 0-.1-1.2l1.9-1.5-1.9-3.3-2.3 1a7 7 0 0 0-1.7-1l-.4-2.5h-3.7l-.4 2.5a7 7 0 0 0-1.7 1l-2.3-1L4.8 8.3l1.9 1.5a7 7 0 0 0 0 2.4l-1.9 1.5 1.9 3.3 2.3-1a7 7 0 0 0 1.7 1l.4 2.5h3.7l.4-2.5a7 7 0 0 0 1.7-1l2.3 1 1.9-3.3-1.9-1.5a7 7 0 0 0 .1-1.2z",
+  gear:    "M19.43 12.98c.04-.32.07-.64.07-.98 0-.34-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.3-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.23-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98 0 .33.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.12.22.39.3.61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.23.09.49 0 .61-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z",
   shield:  "M12 3 19 6v5c0 4.5-3 7.6-7 8.6-4-1-7-4.1-7-8.6V6z",
   gauge:   "M4.5 16.5a8 8 0 1 1 15 0 M12 13l3-3",
   check:   "M5 12.5 9.5 17 19 7",
@@ -618,13 +618,22 @@ function batteryHealthRows(bh, opts) {
   ["capacity", "runtime", "self_test", "anomaly", "age"].forEach((k) => {
     if (!(k in terms)) return;
     const v = terms[k];
-    const val = v == null
-      ? el("b", { class: "na", text: "n/a" })
-      : el("b", { class: scoreClass(v), text: String(Math.round(v)) });
-    rows.push(el("div", { class: "row" }, [
+    // Each factor gets a small 0-100 meter next to its number, so "why is the
+    // score what it is" reads at a glance instead of as a column of digits.
+    const value = el("span", { class: "term-value" });
+    if (v == null) {
+      value.appendChild(el("b", { class: "na", text: "n/a" }));
+    } else {
+      const cls = scoreClass(v);
+      const pct = Math.max(0, Math.min(100, v));
+      value.appendChild(el("span", { class: "term-meter" },
+        [el("span", { class: "term-meter-fill " + cls, style: "width:" + pct + "%" })]));
+      value.appendChild(el("b", { class: cls, text: String(Math.round(v)) }));
+    }
+    rows.push(el("div", { class: "row term-row" }, [
       el("span", { class: "label-tip" },
         [el("span", { text: BH_TERM_LABELS[k] }), helpHint(BH_TERM_HELP[k])]),
-      val,
+      value,
     ]));
   });
   return rows;
@@ -652,7 +661,9 @@ function hintedRow(label, value, tipText) {
   const labelNode = tipText
     ? el("span", { class: "label-tip" }, [el("span", { text: label }), helpHint(tipText)])
     : el("span", { text: label });
-  return el("div", { class: "row" }, [labelNode, el("b", { text: value })]);
+  const text = (value === undefined || value === null || value === "")
+    ? "—" : String(value);
+  return el("div", { class: "row" }, [labelNode, el("b", { text })]);
 }
 
 function energyRows(en) {
@@ -705,12 +716,27 @@ function renderDetail(name) {
   ]));
 
   sections.push(detailSection("Power quality", [
-    detailRow("Input voltage", pq.inputVoltage != null ? pq.inputVoltage + " V" : null),
-    detailRow("Output voltage", pq.outputVoltage != null ? pq.outputVoltage + " V" : null),
-    detailRow("Battery voltage", pq.batteryVoltage != null ? pq.batteryVoltage + " V" : null),
-    detailRow("Input frequency", pq.inputFrequency != null ? pq.inputFrequency + " Hz" : null),
-    detailRow("Output frequency", pq.outputFrequency != null ? pq.outputFrequency + " Hz" : null),
-    detailRow("Temperature", pq.temperature != null ? pq.temperature + " °C" : null),
+    hintedRow("Input voltage", pq.inputVoltage != null ? pq.inputVoltage + " V" : null,
+      "Mains voltage entering the UPS. Eneru classifies brownout (sag) and surge "
+      + "against the configured warning band — the shaded thresholds on the Power "
+      + "tab — not arbitrary cutoffs."),
+    hintedRow("Output voltage", pq.outputVoltage != null ? pq.outputVoltage + " V" : null,
+      "Voltage delivered to the load. On line power the UPS regulates / AVR-"
+      + "corrects it toward nominal; during an outage it's inverter output from "
+      + "the battery."),
+    hintedRow("Battery voltage", pq.batteryVoltage != null ? pq.batteryVoltage + " V" : null,
+      "Terminal voltage of the battery string. It sags under load and as charge "
+      + "depletes; on line power it floats near the charger's nominal."),
+    hintedRow("Input frequency", pq.inputFrequency != null ? pq.inputFrequency + " Hz" : null,
+      "Mains frequency. Nominal is 50 Hz (EU) or 60 Hz (US); sustained excursions "
+      + "point to unstable mains or generator power."),
+    hintedRow("Output frequency", pq.outputFrequency != null ? pq.outputFrequency + " Hz" : null,
+      "Frequency the UPS delivers. Line-interactive units track the mains on line "
+      + "power and synthesize nominal on battery."),
+    hintedRow("Temperature", pq.temperature != null ? pq.temperature + " °C" : null,
+      "As reported by the UPS. Many models (including some UniFi UPS firmware) "
+      + "report a fixed placeholder such as a constant 25 °C rather than a live "
+      + "sensor reading."),
   ]));
 
   // v6.1 Battery health (score/terms/replacement).
@@ -830,7 +856,11 @@ function mergeEvents(incoming) {
     });
   if (lastEvents.length > 2000) lastEvents = lastEvents.slice(-2000);
   updateEventTypeFilter(lastEvents);
-  applyEventFilters();
+  // The 10s poll merges fresh rows and rebuilds the table; preserve the
+  // operator's scroll so a passive refresh doesn't yank the Events tab up to
+  // (or past) the filter bar. Intentional filter/range changes call scrollTop()
+  // separately, so this does not fight them.
+  preserveWindowScroll(applyEventFilters);
 }
 
 function eventRangeFrom() {
@@ -1236,6 +1266,100 @@ const METRIC_LABELS = {
 };
 function metricLabel(metric) { return METRIC_LABELS[metric] || metric || ""; }
 
+// Unit suffix for a metric's readout (matches the parenthetical in METRIC_LABELS).
+function metricUnit(metric) {
+  if (metric === "frequency" || metric === "output_frequency") return " Hz";
+  if (/voltage/.test(metric)) return " V";
+  if (metric === "load" || metric === "charge") return " %";
+  if (metric === "temperature") return " °C";
+  if (metric === "real_power") return " W";
+  return "";
+}
+
+// Format a metric value for the hover readout (runtime is a duration; charge/load
+// are whole percents; voltage/frequency keep one decimal).
+function formatMetricValue(metric, v) {
+  if (metric === "runtime") return formatRuntimeSeconds(v);
+  const dp = (metric === "load" || metric === "charge") ? 0 : 1;
+  return v.toFixed(dp) + metricUnit(metric);
+}
+
+// Minimum visible value-span (in metric units) so a near-constant series renders
+// calmly instead of being stretched into noise by auto-scaling. 0 = no floor.
+function metricMinSpan(metric) {
+  if (metric === "frequency" || metric === "output_frequency") return 2.0;  // Hz
+  return 0;
+}
+
+// Add a hover crosshair + value readout to a chart. The capture rect is appended
+// HERE (early), so it sits BELOW the event markers + outage bands that are drawn
+// afterwards — those keep their own tips and the readout only fires over empty
+// plot area. The returned crosshair group is non-interactive and must be appended
+// LAST by the caller so the highlight dot draws on top of the plotted line.
+// `series`: [{ y(v)->py, valueAt(point)->number, fmt(number)->string, label }].
+function addChartHover(svg, geom, series) {
+  const { x, W, H, pad } = geom;
+  const base = (series.find((s) => s.pts && s.pts.length) || {}).pts || [];
+  const cross = document.createElementNS(SVG_NS, "g");
+  cross.setAttribute("class", "crosshair");
+  cross.style.display = "none";
+  const vline = document.createElementNS(SVG_NS, "line");
+  vline.setAttribute("y1", 5); vline.setAttribute("y2", (H - pad).toFixed(1));
+  vline.setAttribute("class", "crosshair-line");
+  vline.setAttribute("vector-effect", "non-scaling-stroke");
+  cross.appendChild(vline);
+  const dots = series.map(() => {
+    const c = document.createElementNS(SVG_NS, "circle");
+    c.setAttribute("r", "3.5"); c.setAttribute("class", "crosshair-dot");
+    cross.appendChild(c);
+    return c;
+  });
+  const nearest = (svgX) => {
+    let best = null, bestD = Infinity;
+    for (const p of base) {
+      const d = Math.abs(x(p.ts) - svgX);
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    return best;
+  };
+  const hit = document.createElementNS(SVG_NS, "rect");
+  hit.setAttribute("x", pad); hit.setAttribute("y", 5);
+  hit.setAttribute("width", Math.max(0, W - pad - 5).toFixed(1));
+  hit.setAttribute("height", Math.max(0, H - pad - 5).toFixed(1));
+  hit.setAttribute("class", "chart-hit");
+  const move = (ev) => {
+    if (!base.length) return;
+    const r = svg.getBoundingClientRect();
+    if (!r.width) return;
+    const p = nearest((ev.clientX - r.left) * (W / r.width));
+    if (!p) return;
+    const cx = x(p.ts);
+    vline.setAttribute("x1", cx.toFixed(1)); vline.setAttribute("x2", cx.toFixed(1));
+    const valueLines = [];
+    series.forEach((s, i) => {
+      const v = s.valueAt(p);
+      if (typeof v === "number" && !isNaN(v)) {
+        dots[i].setAttribute("cx", cx.toFixed(1));
+        dots[i].setAttribute("cy", s.y(v).toFixed(1));
+        dots[i].style.display = "";
+        valueLines.push(el("div", { class: "tip-head",
+          text: (series.length > 1 ? s.label + ": " : "") + s.fmt(v) }));
+      } else {
+        dots[i].style.display = "none";
+      }
+    });
+    if (!valueLines.length) return;
+    cross.style.display = "";
+    showTip(valueLines.concat([el("div", { class: "tip-sub",
+      text: new Date(p.ts * 1000).toLocaleString() })]),
+      ev.clientX, ev.clientY, "ev-info");
+  };
+  hit.addEventListener("mousemove", move);
+  hit.addEventListener("mouseleave", () => { cross.style.display = "none"; hideTip(); });
+  svg.appendChild(hit);
+  return cross;
+}
+
 // Draw `series` (a /history payload) into the host element, with optional
 // `bands` (voltage thresholds) and `events` (overlay markers).
 function drawChart(hostId, series, options) {
@@ -1296,6 +1420,16 @@ function drawChart(hostId, series, options) {
       if (v != null) { min = Math.min(min, v); max = Math.max(max, v); }
     });
   }
+  // Floor the visible value range per metric so a near-constant series isn't
+  // amplified into noise. Mains frequency is quantized (e.g. 50.0/50.2 Hz steps),
+  // so on a short window auto-scaling stretches a 0.2 Hz wobble across the whole
+  // height and reads as junk; a 2 Hz floor renders it as a calm line near center.
+  const floor = metricMinSpan(metric);
+  if (floor && (max - min) < floor) {
+    const mid = (min + max) / 2;
+    min = mid - floor / 2;
+    max = mid + floor / 2;
+  }
   const span = (max - min) || 1;
   const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts, tspan = (t1 - t0) || 1;
   const x = (t) => pad + ((t - t0) / tspan) * (W - pad - 5);
@@ -1324,6 +1458,18 @@ function drawChart(hostId, series, options) {
   if (wantBand && bands.nominal != null) {
     line(pad, y(bands.nominal).toFixed(1), W - 5, y(bands.nominal).toFixed(1), "band-nominal");
   }
+
+  // Hover crosshair + value readout. The capture rect is added now, BELOW the
+  // outage bands + event markers added next, so those keep their own tooltips
+  // and the readout only fires over empty plot area. The crosshair group itself
+  // is appended last (on top of the plotted line).
+  const crosshair = addChartHover(svg, { x, W, H, pad },
+    [{ label: metricLabel(metric), pts,
+       valueAt: (p) => p.value, y, fmt: (v) => formatMetricValue(metric, v) }]);
+
+  // Outage spans: shade ON_BATTERY -> POWER_RESTORED intervals behind the
+  // markers + data line so brief outages stay visible (see appendOutageBands).
+  appendOutageBands(svg, options.events || [], x, t0, t1, 5, H - pad);
 
   // Event overlays: vertical guides at each event timestamp inside the range,
   // colored by type. Cap markers so a dense window doesn't drown the SVG.
@@ -1395,13 +1541,144 @@ function drawChart(hostId, series, options) {
     t.setAttribute("class", "lbl"); t.textContent = txt; svg.appendChild(t);
   };
   lab(fmt(max), 12); lab(fmt(min), H - pad);
+  svg.appendChild(crosshair);   // drawn last so the highlight dot sits on top
   host.appendChild(svg);
+}
+
+// Fetch tier-1 power events for `ups` and split them into the ones inside the
+// selected [from,to] window (drawn as markers + outage bands) and a COUNT of
+// those sitting just outside it — out to the widest selectable range — so a
+// chart can nudge the operator to widen when sparse outages fall outside the
+// 24h default. One request feeds both: events are light, while the history
+// series (the heavy fetch) stays bounded to the selected window. Markers are
+// filtered to THIS UPS + tier-1 client-side, so a busy multi-UPS fleet can't
+// let other UPSes' events consume the cap and drop this UPS's markers.
+const CHART_EVENT_HORIZON = 2592000;   // 30d — widest selectable chart range
+async function loadChartEvents(ups, from, to, range) {
+  const horizonFrom = (to !== null) ? to - CHART_EVENT_HORIZON : null;
+  let eq = "limit=10000";
+  if (horizonFrom !== null) eq += "&from=" + horizonFrom;
+  if (to !== null) eq += "&to=" + to;
+  const ev = await api("/api/v1/events?" + eq);
+  const rows = (ev.ok && ev.data && ev.data.events) || [];
+  const mine = rows.filter(
+    (e) => eventMatchesSource(e, ups) && isTier1Event(e.eventType || e.event));
+  if (from === null) return { events: mine, hidden: 0 };
+  return {
+    events: mine.filter((e) => e.ts >= from),
+    hidden: (range !== null && range < CHART_EVENT_HORIZON)
+      ? mine.filter((e) => e.ts < from).length : 0,
+  };
+}
+
+// Show/clear the "earlier power events outside this range" nudge for a chart.
+// `hidden` is already 0 when the widest range is selected (nothing to widen to).
+function setEventsHint(noteId, hidden) {
+  if (!noteId) return;
+  const note = document.getElementById(noteId);
+  if (!note) return;
+  const n = hidden || 0;
+  note.hidden = !n;
+  note.textContent = n
+    ? ("↞ " + n + " earlier power event" + (n === 1 ? "" : "s")
+       + " outside this range — widen to view.")
+    : "";
+}
+
+function fmtOutageDur(secs) {
+  secs = Math.max(0, Math.round(secs));
+  if (secs < 60) return secs + "s";
+  const m = Math.floor(secs / 60), s = secs % 60;
+  if (m < 60) return s ? (m + "m " + s + "s") : (m + "m");
+  const h = Math.floor(m / 60), mm = m % 60;
+  return mm ? (h + "h " + mm + "m") : (h + "h");
+}
+
+// Flat aria-label for an outage band (screen readers / focus).
+function outageLabel(head, s) {
+  let label = head;
+  if (s.cut) label += " · on battery " + new Date(s.cut.ts * 1000).toLocaleString();
+  label += s.restore
+    ? " · restored " + new Date(s.restore.ts * 1000).toLocaleString()
+    : " · ongoing or restore outside range";
+  return label;
+}
+
+// Structured instant-tip body for an outage band (mirrors eventTipNode; the
+// dashboard deliberately uses the themed floating tip, not native <title>).
+function outageTipNode(head, s) {
+  const kids = [el("div", { class: "tip-head", text: head })];
+  if (s.cut) {
+    kids.push(el("div", { class: "tip-sub",
+      text: "On battery: " + new Date(s.cut.ts * 1000).toLocaleString() }));
+  }
+  kids.push(el("div", { class: s.restore ? "tip-body" : "tip-sub",
+    text: s.restore
+      ? "Restored: " + new Date(s.restore.ts * 1000).toLocaleString()
+      : "Ongoing / restore outside range" }));
+  return kids;
+}
+
+// Shade each ON_BATTERY -> POWER_RESTORED interval as an "outage" band behind
+// the markers + data line. Brief outages are often only a second or two, so the
+// cut and restore markers collapse onto the same x-pixel and the later restore
+// marker paints over the cut — the outage then looks like it never happened. A
+// minimum pixel width keeps instantaneous outages visible. Unpaired ends (a cut
+// still open at the right edge, or a restore whose cut predates the window)
+// extend to the chart edge so partial outages still read correctly.
+const MIN_OUTAGE_PX = 3;
+function appendOutageBands(svg, events, x, t0, t1, yTop, yBot) {
+  const evs = (events || [])
+    .filter((e) => {
+      const t = (e.eventType || e.event || "").toUpperCase();
+      return t.includes("ON_BATTERY") || t.includes("POWER_RESTORED");
+    })
+    .slice()
+    .sort((a, b) => a.ts - b.ts);
+  if (!evs.length) return;
+  const spans = [];
+  let openCut = null;
+  for (const e of evs) {
+    const t = (e.eventType || e.event || "").toUpperCase();
+    if (t.includes("ON_BATTERY")) {
+      if (openCut === null) openCut = e;          // ignore repeats while open
+    } else {                                       // POWER_RESTORED
+      spans.push({ start: openCut ? openCut.ts : t0, end: e.ts,
+                   cut: openCut, restore: e });
+      openCut = null;
+    }
+  }
+  if (openCut !== null) {
+    spans.push({ start: openCut.ts, end: t1, cut: openCut, restore: null });
+  }
+  const top = parseFloat(yTop), bot = parseFloat(yBot);
+  for (const s of spans) {
+    if (s.end < t0 || s.start > t1) continue;     // outage entirely off-chart
+    const sx = x(Math.max(s.start, t0));
+    const ex = x(Math.min(s.end, t1));
+    const left = Math.min(sx, ex);
+    const width = Math.max(Math.abs(ex - sx), MIN_OUTAGE_PX);
+    const rect = document.createElementNS(SVG_NS, "rect");
+    rect.setAttribute("x", left.toFixed(1));
+    rect.setAttribute("y", top.toFixed(1));
+    rect.setAttribute("width", width.toFixed(1));
+    rect.setAttribute("height", Math.max(0, bot - top).toFixed(1));
+    rect.setAttribute("class", "outage-band");
+    rect.setAttribute("tabindex", "0");
+    rect.setAttribute("role", "img");
+    const head = (s.cut && s.restore)
+      ? "Outage · " + fmtOutageDur(s.end - s.start)
+      : "Outage (ongoing or partial)";
+    rect.setAttribute("aria-label", outageLabel(head, s));
+    bindTip(rect, () => outageTipNode(head, s), "ev-crit");
+    svg.appendChild(rect);
+  }
 }
 
 // Per-instance chart over the /history series. Owns its DOM hosts + caches and
 // is driven by the tab controller (load on activate, redraw on resize).
 function makeChart(opts) {
-  const state = { series: null, events: [], thresholds: null };
+  const state = { series: null, events: [], thresholds: null, hiddenEvents: 0 };
   // Generation guard: overlapping load()s (tab switch + 10s poll + control
   // change) must not let a slow earlier response overwrite fresher data — only
   // the most recent load() is allowed to commit its results.
@@ -1429,7 +1706,7 @@ function makeChart(opts) {
     if (!host) return;
     const myGen = ++gen;
     const ups = upsName();
-    if (!ups) { state.series = null; state.events = []; draw(); return; }
+    if (!ups) { state.series = null; state.events = []; state.hiddenEvents = 0; draw(); return; }
     const m = metric();
     let q = "metric=" + encodeURIComponent(m);
     const range = rangeSeconds();
@@ -1442,24 +1719,16 @@ function makeChart(opts) {
     const res = await api("/api/v1/ups/" + encodeURIComponent(ups) + "/history?" + q);
     if (myGen !== gen) return;   // a newer load() superseded this one
     const series = res.ok ? res.data : null;
-    let events = [];
+    let events = [], hidden = 0;
     if (opts.events) {
-      // Fetch up to the server max: markers are filtered to THIS UPS + tier-1
-      // client-side, so a busy multi-UPS fleet can't let other UPSes' events
-      // consume a small cap and drop this UPS's markers. (Per-UPS server-side
-      // filtering is a follow-up; the events endpoint aggregates all DBs.)
-      let eq = "limit=10000";
-      if (from !== null) eq += "&from=" + from;
-      if (to !== null) eq += "&to=" + to;
-      const ev = await api("/api/v1/events?" + eq);
-      if (myGen !== gen) return;
-      const rows = (ev.ok && ev.data && ev.data.events) || [];
-      // Chart markers show only tier-1 power events (no daemon starts / upgrades).
-      events = rows.filter(
-        (e) => eventMatchesSource(e, ups) && isTier1Event(e.eventType || e.event));
+      const r = await loadChartEvents(ups, from, to, range);
+      if (myGen !== gen) return;   // a newer load() superseded this one
+      events = r.events;
+      hidden = r.hidden;
     }
     state.series = series;
     state.events = events;
+    state.hiddenEvents = hidden;
     if (opts.bands) {
       const u = lastUpsRows.find((r) => r.name === ups);
       const pq = (u && u.powerQuality) || {};
@@ -1492,6 +1761,7 @@ function makeChart(opts) {
         }
       }
     }
+    setEventsHint(opts.eventsNoteId, state.hiddenEvents);
   }
 
   function observe() {
@@ -1558,7 +1828,24 @@ function drawEnergyChart(hostId, rows, options) {
   }
   const loadS = scale(loads, true);
   const wattS = scale(watts, true);
+  // When watts is ESTIMATED from load (no real-power sensor) the two lines share
+  // an identical shape, so we plot only Power (W); show Load% alongside ONLY when
+  // watts is a real measurement (then they genuinely differ).
+  const realWatts = pts.some((p) => typeof p.watts === "number" && p.estimated === false);
+  const showLoad = !wattS || realWatts;
 
+  // Hover crosshair + readout for whichever line(s) are shown. The capture rect
+  // is added now, BELOW the outage bands + event markers added next, so those
+  // keep their own tooltips; the crosshair group is appended last (on top).
+  const hoverSeries = [];
+  if (wattS) hoverSeries.push({ label: "Power", pts, y: wattS.y,
+    valueAt: (p) => p.watts, fmt: (v) => v.toFixed(0) + " W" });
+  if (showLoad && loadS) hoverSeries.push({ label: "Load", pts, y: loadS.y,
+    valueAt: (p) => p.loadPct, fmt: (v) => v.toFixed(0) + " %" });
+  const crosshair = addChartHover(svg, { x, W, H, pad }, hoverSeries);
+
+  // Outage spans behind the markers (see appendOutageBands).
+  appendOutageBands(svg, options.events || [], x, t0, t1, 5, H - pad);
   // tier-1 event markers (already filtered upstream).
   (options.events || []).filter((e) => e.ts >= t0 && e.ts <= t1).slice(0, 100)
     .forEach((e) => {
@@ -1579,12 +1866,6 @@ function drawEnergyChart(hostId, rows, options) {
     path.setAttribute("vector-effect", "non-scaling-stroke");
     svg.appendChild(path);
   }
-  // When watts is ESTIMATED from load (no real-power sensor) the two lines have
-  // an identical shape — plotting both is redundant noise, so show only Power (W),
-  // the figure operators actually want. Show Load% alongside ONLY when watts is a
-  // real measurement (then they genuinely differ and the comparison is useful).
-  const realWatts = pts.some((p) => typeof p.watts === "number" && p.estimated === false);
-  const showLoad = !wattS || realWatts;
   if (wattS) plot("watts", wattS, "plot plot-watts");
   if (showLoad) plot("loadPct", loadS, "plot plot-load");
 
@@ -1615,6 +1896,7 @@ function drawEnergyChart(hostId, rows, options) {
     };
     lab(prim.mx.toFixed(0) + unit, 12); lab(prim.mn.toFixed(0) + unit, H - pad);
   }
+  svg.appendChild(crosshair);   // drawn last so the highlight dot sits on top
   host.appendChild(svg);
 }
 
@@ -1714,7 +1996,7 @@ function drawSimpleSeries(host, pts, opts) {
 }
 
 function makeEnergyChart(opts) {
-  const state = { rows: [], events: [] };
+  const state = { rows: [], events: [], hiddenEvents: 0 };
   let gen = 0;
   function upsName() {
     const sel = document.getElementById(opts.upsSelId);
@@ -1730,7 +2012,7 @@ function makeEnergyChart(opts) {
     if (!host) return;
     const myGen = ++gen;
     const ups = upsName();
-    if (!ups) { state.rows = []; state.events = []; draw(); return; }
+    if (!ups) { state.rows = []; state.events = []; state.hiddenEvents = 0; draw(); return; }
     let q = "";
     const range = rangeSeconds();
     let from = null, to = null;
@@ -1742,19 +2024,16 @@ function makeEnergyChart(opts) {
     const res = await api("/api/v1/ups/" + encodeURIComponent(ups) + "/power" + q);
     if (myGen !== gen) return;
     const rows = (res.ok && res.data && res.data.data) || [];
-    let eq = "limit=1000";
-    if (from !== null) eq += "&from=" + from;
-    if (to !== null) eq += "&to=" + to;
-    const ev = await api("/api/v1/events?" + eq);
-    if (myGen !== gen) return;
-    const erows = (ev.ok && ev.data && ev.data.events) || [];
+    const r = await loadChartEvents(ups, from, to, range);
+    if (myGen !== gen) return;   // a newer load() superseded this one
     state.rows = rows;
-    state.events = erows.filter(
-      (e) => eventMatchesSource(e, ups) && isTier1Event(e.eventType || e.event));
+    state.events = r.events;
+    state.hiddenEvents = r.hidden;
     draw();
   }
   function draw() {
     drawEnergyChart(opts.hostId, state.rows, { events: state.events });
+    setEventsHint(opts.eventsNoteId, state.hiddenEvents);
   }
   function observe() {
     const host = document.getElementById(opts.hostId);
@@ -2468,8 +2747,21 @@ async function renderShutdownPlan() {
       // "delegated to host" / "non-local group" read as an accent tag, not flat
       // gray — they're meaningful routing, not just "off".
       const routed = p.skipped === "delegated to host" || p.skipped === "non-local group";
-      head.appendChild(el("span", { class: "badge" + (routed ? " info" : ""),
-        text: p.skipped || "skipped" }));
+      // Spell out the loopback delegation: "delegated to host" alone reads as a
+      // failure, when it actually means the host OS (not the container) powers
+      // off. A "?" hint carries the detail.
+      const label = p.skipped === "delegated to host"
+        ? "delegated to host OS" : (p.skipped || "skipped");
+      const tag = el("span", { class: "label-tip" },
+        [el("span", { class: "badge" + (routed ? " info" : ""), text: label })]);
+      if (p.skipped === "delegated to host") {
+        tag.appendChild(helpHint(
+          "Eneru runs in a container and hands this phase to the host OS over the "
+          + "loopback socket — the host performs the power-off so it doesn't kill "
+          + "the container mid-sequence. See Troubleshooting → container loopback "
+          + "delegation."));
+      }
+      head.appendChild(tag);
     }
     node.appendChild(head);
     if (p.enabled && (p.steps || []).length) {
@@ -2565,7 +2857,14 @@ async function refresh() {
 
   const ups = await api("/api/v1/ups");
   if (ups.ok) {
-    renderUps(ups.data); renderControl(ups.data); renderBanner(); showError("");
+    // Poll-driven redraws must not yank the operator back to the top of a tab
+    // they have scrolled (battery health, energy cards, overview, …). Explicit
+    // tab switches still reset to the top via selectTab(); this only wraps the
+    // passive 10s refresh's in-place rebuilds.
+    preserveWindowScroll(() => {
+      renderUps(ups.data); renderControl(ups.data); renderBanner();
+    });
+    showError("");
   } else if (ups.status === 0) {
     showError("⚠️  Connection lost — retrying…");  // L14: network/daemon down
   } else if (ups.status !== 401) {
@@ -2573,7 +2872,7 @@ async function refresh() {
   }
   await loadEvents();        // merges fresh recent events into the accumulated list
   // Redraw only the active tab's chart/widgets (the others redraw on activate).
-  onTabActivated(activeTab);
+  preserveWindowScroll(() => onTabActivated(activeTab));
   // If a detail modal is open, keep it live with the fresh snapshot.
   if (!document.getElementById("detail-modal").hidden && openDetailName) {
     renderDetail(openDetailName);
@@ -2594,11 +2893,12 @@ async function init() {
   // overlays; Battery + Energy carry event overlays.
   charts.power = makeChart({ hostId: "power-graph", upsSelId: "power-ups",
     metricSelId: "power-metric", rangeSelId: "power-range", bands: true,
-    events: true, noteId: "power-note" });
+    events: true, noteId: "power-note", eventsNoteId: "power-events-note" });
   charts.battery = makeChart({ hostId: "battery-graph", upsSelId: "battery-ups",
-    metricSelId: "battery-metric", rangeSelId: "battery-range", events: true });
+    metricSelId: "battery-metric", rangeSelId: "battery-range", events: true,
+    eventsNoteId: "battery-events-note" });
   charts.energy = makeEnergyChart({ hostId: "energy-graph", upsSelId: "energy-ups",
-    rangeSelId: "energy-range" });
+    rangeSelId: "energy-range", eventsNoteId: "energy-events-note" });
   Object.values(charts).forEach((c) => c.observe());
 
   // Shutdown-tab UPS selector: re-render the plan for the chosen UPS/group.

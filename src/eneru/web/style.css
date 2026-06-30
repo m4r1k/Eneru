@@ -284,6 +284,15 @@ footer { padding: 0.6rem 1.25rem; color: var(--muted); font-size: 0.85rem;
 .card .row b.crit, .detail-section .row b.crit { color: var(--crit); }
 .card .row b.na, .detail-section .row b.na { color: var(--muted); font-style: italic;
   font-weight: 500; }
+/* Battery-health factor meters: a small 0-100 bar beside each term's number so
+   the breakdown (age / runtime / anomalies …) reads at a glance. */
+.term-value { display: inline-flex; align-items: center; gap: 0.5rem; }
+.term-meter { display: inline-block; width: 56px; height: 6px; border-radius: 3px;
+  background: var(--line-strong); overflow: hidden; }
+.term-meter-fill { display: block; height: 100%; background: var(--muted); }
+.term-meter-fill.ok { background: var(--ok); }
+.term-meter-fill.warn { background: var(--warn); }
+.term-meter-fill.crit { background: var(--crit); }
 .graph .area.bh { fill: var(--accent-weak); }
 meter.bar.ok::-webkit-meter-optimum-value { background: var(--ok); }
 meter.bar.warn::-webkit-meter-optimum-value { background: var(--warn); }
@@ -396,6 +405,10 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
    The band is a faint bounded ZONE (subtle fill + dashed edges), not a slab of
    color that reads as a page tint. */
 .graph .band { fill: rgba(var(--ok-rgb), 0.07); }
+/* Outage span: ON_BATTERY -> POWER_RESTORED shaded behind markers + plot. A
+   min-width sliver (see MIN_OUTAGE_PX) keeps even ~2s outages visible where the
+   cut and restore markers would otherwise collapse onto one pixel. */
+.graph .outage-band { fill: rgba(var(--crit-rgb), 0.20); }
 .graph .band-edge { stroke: rgba(var(--warn-rgb), 0.5); stroke-width: 1;
                     stroke-dasharray: 3 4; }
 .graph .band-nominal { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 3;
@@ -413,6 +426,14 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .graph .band-nominal, .graph .chart-title { pointer-events: none; }
 .graph .ev-line { stroke-width: 1; opacity: 0.12; }
 .graph .ev-hit { stroke: transparent; stroke-width: 11; }
+/* Hover crosshair: a transparent capture rect over the plot area drives a
+   vertical guide + per-line highlight dot and the floating value readout. It is
+   added to the SVG BEFORE the event markers + outage bands, so those sit on top
+   and keep their own tips; the readout only fires over empty plot area. */
+.graph .chart-hit { fill: transparent; cursor: crosshair; }
+.graph .crosshair { pointer-events: none; }
+.graph .crosshair-line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+.graph .crosshair-dot { fill: var(--accent); stroke: var(--panel); stroke-width: 1.5; }
 .graph g:hover .ev-line { opacity: 0.7; }
 .graph .ev-pin { stroke: var(--bg); stroke-width: 0.5; }
 .graph g:hover .ev-pin { stroke-width: 1; }
