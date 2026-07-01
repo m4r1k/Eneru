@@ -98,10 +98,10 @@ class TestDiscover:
 
         monkeypatch.setattr(self_test.nutctl, "list_commands", fake_list)
         self_test.discover_self_test_command(
-            "U@h", "test.battery.start", username="mon", password="mon",  # noqa: S106
-            timeout=7)
-        assert captured == {"ups": "U@h", "username": "mon", "password": "mon",
-                            "timeout": 7}
+            "U@h", "test.battery.start",
+            username="mon-user", password="mon-pass", timeout=7)  # noqa: S106
+        assert captured == {"ups": "U@h", "username": "mon-user",
+                            "password": "mon-pass", "timeout": 7}
 
 
 # --------------------------------------------------------------------------

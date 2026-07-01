@@ -242,7 +242,8 @@ class TestRunSelfTestTask:
         # Regression: discovery must forward credentials so `upscmd -l` works on
         # an upsd that only lists commands to a logged-in client.
         cfg = _cfg("api:\n  auth:\n    enabled: true\n"
-                   "nut_control:\n  enabled: true\n  username: mon\n  password: mon\n"
+                   "nut_control:\n  enabled: true\n"
+                   "  username: mon-user\n  password: mon-pass\n"
                    "  allowed_commands: [test.battery.start]\n"
                    "self_test:\n  enabled: true\n  command: test.battery.start\n"
                    "ups:\n  name: U@h\n")
@@ -257,7 +258,7 @@ class TestRunSelfTestTask:
         monkeypatch.setattr(selftest, "issue_self_test",
                             lambda *a, **k: {"ok": True, "test_id": 1, "error": ""})
         mon._run_self_test_task()
-        assert seen == {"username": "mon", "password": "mon"}
+        assert seen == {"username": "mon-user", "password": "mon-pass"}
 
     @pytest.mark.unit
     def test_first_sight_seeds_baseline(self, store):
@@ -544,6 +545,23 @@ class TestObservedSelfTest:
         latest = store.latest_self_test()
         assert latest["result_enum"] == "failed"
         assert latest["result_date"] is None
+
+    @pytest.mark.unit
+    def test_record_failure_does_not_fingerprint(self, store, monkeypatch):
+        # If the row write fails (record_self_test -> None), the observed key
+        # must NOT be stamped, so the next poll retries instead of silently
+        # dropping a device result forever.
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        monkeypatch.setattr(store, "record_self_test", lambda *a, **k: None)
+        mon._check_observed_self_test(
+            {"ups.test.result": "done and passed", "ups.test.date": "2026-06-02"})
+        assert store.get_meta("self_test_observed_key") in (None, "")
+        # Recovery: once the write succeeds, it records + fingerprints.
+        monkeypatch.undo()
+        mon._check_observed_self_test(
+            {"ups.test.result": "done and passed", "ups.test.date": "2026-06-02"})
+        assert store.latest_self_test()["result_enum"] == "passed"
+        assert store.get_meta("self_test_observed_key") == "2026-06-02|done and passed"
 
     @pytest.mark.unit
     def test_no_store_is_safe(self):

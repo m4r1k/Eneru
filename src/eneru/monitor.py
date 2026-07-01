@@ -2207,9 +2207,11 @@ class UPSGroupMonitor(
         if self._self_test_pending_id is not None:
             return
         # command="" — Eneru issued nothing; this is the device's own test.
-        store.record_self_test(
+        test_id = store.record_self_test(
             "", "device", result_raw=raw, result_enum=enum,
             result_date=(date or None))
+        if test_id is None:
+            return  # write failed — don't fingerprint, so it retries next poll
         store.set_meta("self_test_observed_key", key)
         self._log_message(f"🔋 Observed UPS self-test: {enum} ({raw!r})")
 

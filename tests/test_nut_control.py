@@ -89,11 +89,11 @@ def test_list_commands_credentialed_uses_auth_path(monkeypatch):
     monkeypatch.setattr(nc, "run_command",
                         lambda *a, **k: pytest.fail("must not use anon path"))
     ok, commands, _ = nc.list_commands(
-        "UPS@h", username="mon", password="mon", timeout=6)  # noqa: S106
+        "UPS@h", username="mon-user", password="mon-pass", timeout=6)  # noqa: S106
     assert ok and commands == ["test.battery.start"]
-    assert captured["cmd"] == ["upscmd", "-u", "mon", "-l", "UPS@h"]
-    assert "mon" == captured["password"]
-    assert "mon" not in captured["cmd"][3:]      # password never in argv
+    assert captured["cmd"] == ["upscmd", "-u", "mon-user", "-l", "UPS@h"]
+    assert captured["password"] == "mon-pass"
+    assert "mon-pass" not in captured["cmd"]      # password never in argv
     assert captured["timeout"] == 6
 
 
