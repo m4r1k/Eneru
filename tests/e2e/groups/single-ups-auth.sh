@@ -146,7 +146,7 @@ YAML
 if eneru validate --config /tmp/config-e2e-control-noauth.yaml >/tmp/test53-val.log 2>&1; then
   echo "FAIL: nut_control without auth was accepted"; cat /tmp/test53-val.log; exit 1
 fi
-grep -q "nut_control.enabled requires api.auth.enabled" /tmp/test53-val.log \
+grep -q "nut_control.enabled requires API authentication" /tmp/test53-val.log \
   || { echo "FAIL: missing fail-closed message"; cat /tmp/test53-val.log; exit 1; }
 echo "PASS: nut_control without auth is rejected at startup"
 
