@@ -8,29 +8,29 @@ Codename: testing
 Architectures: all
 Components: main
 Description: Eneru UPS Monitor packages (testing)
-Date: Tue, 30 Jun 2026 15:38:01 +0000
+Date: Wed, 01 Jul 2026 14:30:45 +0000
 MD5Sum:
- 67f56e5e5d00a6d0b7fd0ef741b2c6d6 557 main/binary-all/Packages.gz
+ 03a88bdb14d46de30fda4bff6de6710f 557 main/binary-all/Packages.gz
  e0f2c47f182bcd49d85f50a13b59c264 794 main/binary-all/Packages
 SHA1:
- 8b326e67cba175dee1103a262139a79615e080e5 557 main/binary-all/Packages.gz
+ d22c030d49839736a9a6a2703faff640a8c4f34a 557 main/binary-all/Packages.gz
  3ad744753a6332a7db466be6f9cdf12b26efef48 794 main/binary-all/Packages
 SHA256:
- 876965f06f48cb6123c48dc89bef40d02064701512d4ecf2a9f113179a04f2b0 557 main/binary-all/Packages.gz
+ a64746ad7476b3bfb630eb0101fc42fce4321e2be46dd93ba49863f70e2a3334 557 main/binary-all/Packages.gz
  b32a42f2208409fefb7659e2ad86d7b6e97616bfde2cbb41632c18e39b3a2911 794 main/binary-all/Packages
 -----BEGIN PGP SIGNATURE-----
 
-iQIzBAEBCgAdFiEEWVbOf3R4twP7zVv0hAK87i1Wf24FAmpD4tkACgkQhAK87i1W
-f25iUg/+LctcR7Tk0hlVJ8RDgvl5HermFaSQhOXukh+nq3VQg33ntX+TLUHDGksQ
-4i5V90WQtPd4gecA+gEe4XvS2DHFIlN3Mw7iAw4dceXTEMp3a0OU3yaWuefkqjy4
-yRANbudTGxFh+YBhpoJi3V2zxO5aHrz6aoDRMG0LC7KxX5J8ZMPeGsHA4zEVqwvo
-kwCmqyucimQPmaY898TaV8vaNUoYlX4XjTkZD9vmIGEjXpTv/OkNKPR9PpeVuxL2
-XCywWnjBz3Tuqj2b/SlA8QZUAcz73mvtP8AqPkrINibtC+TTLm+24A/WxRbC2+9o
-DEjZAkc/XW80M1FKv9o0j/mxqNH6bkHFQm7GQHceDbRwRiMbrjnsEfP656cSLa7f
-D/dNRtpzQaoM1ElphjjMbsYYYjv1d4ZKmvjIXfcbTGRUOqXFJtz5cNVcVeCAFLy4
-sU0sgGv2cVEZ0/3TuvkNhT8OmhTFpJDcIsDPYJMNtTJdZJVWZXF3hp/vf2mX4kxO
-4UyII6uWBWpyi/DmKatB6b9ABsKOzrza+nsLeUGnomMLzV8nvAU6c2JDHupia1je
-uCmk+a+lO+sUJI4MLBNYzGe0hY0lhKtz17xwb7AcpQAwHhIh0QbtXCMs1VE4sZ5B
-Tb8/Ope2Ex1Yvo4TCbKOHO0X9FOyUjeQ4hQIkAvA82SIIQM2+GQ=
-=DK/E
+iQIzBAEBCgAdFiEEWVbOf3R4twP7zVv0hAK87i1Wf24FAmpFJJUACgkQhAK87i1W
+f262cw/9H+E7az2068Y1PYSfZKZrY7m1W8J3uVFvCYTDSYfGN0U+NEBRZnRnoQNt
+RSz4D56LW+h/otgqyiQ0FZutPaw0tw4TOCf5s6+5ZHe7gEiLh1mPmunZKGx1fkwX
+ABoBzYB1yasi69THGu6b+5JIheV6Nt0u4suAlnrEr2DfHhRm2Ei5GhzBN3BtJpU1
+rTUiKbPTn8ZKlcksH+GbGayykvnUSghZZ/et4K8ZoTMKvwOLdf9usFtc/fIqhsti
+2nBYLZaHzCYXwoiNc8xGztdTgbC/M77SNsL8Na5/TefFxmw14lnmcW6YIJuINwt/
+D377V4auyv5l1iaRj7O22apKKtzwPtd8rkJy1u3NJDbO9XVjwTrxV5sklzY2kR1H
+gkXJdpzdh7tQMdPr0C/bK52+AJe8cxikjMzm/9AEIucSV/GS706f0pnHIGOL0sEF
+nGMUOwJ+J/o4/WeWNDKA4ufuIKX7E6ipjeiBXKpgGuOJNOr1IF42llqrBxo78/gt
+zt/9p2zEiUJiT1YOhXN9PJxFoweEINUTi2Q8zC7JbUHKsR3H8L/G22PLfthg+VMZ
+mfIx/RJdAcGOWK+9sA/sVbsM3nC7zOVptub3hZz8D6afI1KUznAckETn4aCx9b5v
+iypXg1denmK2fWI/mjtmp99PLg6Se4tgN6DCdYqBLrPNV4Xv1sY=
+=h+AS
 -----END PGP SIGNATURE-----
