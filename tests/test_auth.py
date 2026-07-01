@@ -286,3 +286,73 @@ def test_require_bcrypt_missing_raises(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fake_import)
     with pytest.raises(AuthError):
         auth.require_bcrypt()
+
+
+# ----- auth_is_active (effective auth state, v6.1.2) -----
+
+from dataclasses import dataclass, field  # noqa: E402
+
+
+@dataclass
+class _AuthCfg:
+    enabled: bool = False
+    db_path: str = "/nonexistent/auth.db"
+    enabled_explicitly_set: bool = field(default=False)
+
+
+@pytest.mark.unit
+def test_auth_is_active_none_is_inactive():
+    assert auth.auth_is_active(None) is False
+
+
+@pytest.mark.unit
+def test_auth_is_active_explicit_flag_wins(tmp_path):
+    # Explicit True/False always wins, even against DB contents.
+    db = tmp_path / "auth.db"
+    AuthStore(db).create_user("admin", "correct horse")  # noqa: S106
+    off = _AuthCfg(enabled=False, db_path=str(db), enabled_explicitly_set=True)
+    on = _AuthCfg(enabled=True, db_path=str(db), enabled_explicitly_set=True)
+    assert auth.auth_is_active(off) is False    # explicit off beats DB users
+    assert auth.auth_is_active(on) is True
+
+
+@pytest.mark.unit
+def test_auth_is_active_db_users_activate_when_unset(tmp_path):
+    db = tmp_path / "auth.db"
+    cfg = _AuthCfg(enabled=False, db_path=str(db), enabled_explicitly_set=False)
+    assert auth.auth_is_active(cfg) is False     # no DB yet -> inactive
+    AuthStore(db).create_user("admin", "correct horse")  # noqa: S106
+    assert auth.auth_is_active(cfg) is True       # a user -> active, no restart
+
+
+@pytest.mark.unit
+def test_auth_is_active_missing_db_is_inactive(tmp_path):
+    cfg = _AuthCfg(enabled=False, db_path=str(tmp_path / "nope.db"))
+    assert auth.auth_is_active(cfg) is False
+
+
+@pytest.mark.unit
+def test_auth_is_active_enabled_without_explicit_flag_is_active():
+    # enabled=True but enabled_explicitly_set=False (a value assembled in code)
+    # still activates without touching the DB.
+    assert auth.auth_is_active(_AuthCfg(enabled=True)) is True
+
+
+@pytest.mark.unit
+def test_auth_is_active_no_db_path_is_inactive():
+    # Unset flag + no db_path -> inactive (never touches the filesystem).
+    assert auth.auth_is_active(_AuthCfg(enabled=False, db_path="")) is False
+
+
+@pytest.mark.unit
+def test_auth_is_active_broken_db_fails_closed(tmp_path, monkeypatch):
+    # An existing but unreadable/corrupt auth DB must fail CLOSED to "active" so
+    # writes keep demanding credentials rather than silently reopening.
+    db = tmp_path / "auth.db"
+    db.write_text("not a database")
+
+    def boom(self):
+        raise sqlite3.DatabaseError("file is not a database")
+    monkeypatch.setattr(auth.AuthStore, "user_count", boom)
+    cfg = _AuthCfg(enabled=False, db_path=str(db), enabled_explicitly_set=False)
+    assert auth.auth_is_active(cfg) is True

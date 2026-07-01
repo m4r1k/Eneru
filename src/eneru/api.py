@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from eneru import nut_control as nutctl
 from eneru import self_test as selftest
-from eneru.auth import AuthStore
+from eneru.auth import AuthStore, auth_is_active
 from eneru.status import (
     HISTORY_METRICS,
     collect_status,
@@ -185,29 +185,13 @@ API_ENDPOINTS = (
 
 
 def _auth_is_active(config: Any) -> bool:
-    """Whether API authentication is effectively enforced.
+    """Whether API authentication is effectively enforced for ``config``.
 
-    An explicit ``api.auth.enabled`` (true *or* false) always wins. When it is
-    left unset, auth is active iff the auth DB already has at least one user — so
-    "create a user, then sign in" works **with no restart**, while a fresh
-    install with no users stays open (v5.3 read-only behavior). The DB is never
-    created as a side effect of this check. Once the DB file exists, a
-    broken/unreadable DB fails closed to "active": reads that require auth stay
-    gated and writes require credentials rather than silently reopening.
+    Thin wrapper over :func:`eneru.auth.auth_is_active` (the shared source of
+    truth, also used by config validation): an explicit ``api.auth.enabled``
+    always wins; when unset, auth is active iff the auth DB already has a user.
     """
-    auth_cfg = getattr(getattr(config, "api", None), "auth", None)
-    if auth_cfg is None:
-        return False
-    if getattr(auth_cfg, "enabled_explicitly_set", False):
-        return bool(auth_cfg.enabled)
-    if auth_cfg.enabled:
-        return True
-    try:
-        if not os.path.exists(auth_cfg.db_path):
-            return False
-        return AuthStore(auth_cfg.db_path).user_count() > 0
-    except Exception:
-        return True
+    return auth_is_active(getattr(getattr(config, "api", None), "auth", None))
 
 
 class EneruAPIServer:
@@ -914,26 +898,36 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         return 404, "application/json", self._not_found("Endpoint not found")
 
     def _run_self_test(self, ups_name: str) -> Tuple[int, str, Any]:
-        """Issue a UPS self-test (auth-gated, audited). Goes through the same
-        nut_control allowlist as the manual command path -- the self-test
-        command must be allowlisted."""
+        """Issue a UPS self-test (auth-gated, audited).
+
+        Authentication (enforced by ``_authorize(write=True)``) is the real
+        privilege gate. Permission to issue the command comes from
+        ``self_test.self_test_control``: enabling ``self_test`` grants exactly
+        ``self_test.command`` (v6.1.2), OR the general control surface allows it
+        (``nut_control.enabled`` + allowlist). The general ``/command`` and
+        variable endpoints still require ``nut_control.enabled`` independently."""
         principal = self._authorize(write=True)
-        self._require_nut_control()
         real = self._resolve_ups_name(ups_name)
         if real is None:
             return 404, "application/json", self._not_found("UPS not found")
         nc = self._effective_nut_control(real)
-        command = self._effective_self_test(real).command
-        if not nutctl.command_allowed(command, nc.allowed_commands):
+        st_cfg = self._effective_self_test(real)
+        command = st_cfg.command
+        if not command:
+            raise APIBadRequest("self_test.command is not configured")
+        permitted, nc = selftest.self_test_control(nc, st_cfg, command)
+        if not permitted:
             self._audit(principal, "self-test", f"{real}:{command}", "denied")
             raise APIForbidden(
-                f"self_test.command {command!r} is not in allowed_commands")
+                "self-test is not permitted: enable self_test, or enable "
+                "nut_control and add the command to allowed_commands")
         # Preflight against `upscmd -l` like the scheduled/direct paths, so the
         # API honors the same "self-disable if unsupported" contract the docs
         # promise rather than letting NUT reject it after the fact.
         try:
             exposed = selftest.discover_self_test_command(
-                real, command, timeout=nc.timeout)
+                real, command, username=nc.username, password=nc.password,
+                timeout=nc.timeout)
         except selftest.SelfTestUnavailable as exc:
             self._audit(principal, "self-test", f"{real}:{command}", "failed")
             return 502, "application/json", self._error("NUT_ERROR", str(exc))
@@ -1158,7 +1152,8 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if real is None:
             return 404, "application/json", self._not_found("UPS not found")
         nc = self._effective_nut_control(real)
-        ok, commands, err = nutctl.list_commands(real, timeout=nc.timeout)
+        ok, commands, err = nutctl.list_commands(
+            real, username=nc.username, password=nc.password, timeout=nc.timeout)
         if not ok:
             return 502, "application/json", self._error("NUT_ERROR", err)
         allowed = set(nc.allowed_commands)
@@ -1311,6 +1306,12 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         auth_enabled = self._auth_active()
         nut_enabled = bool(getattr(getattr(self.api_config, "nut_control", None),
                                    "enabled", False))
+        # v6.1.2: self-test is reachable when self_test is enabled (its own narrow
+        # permission) OR the general control surface is on — global or per-UPS.
+        self_test_enabled = bool(
+            getattr(getattr(self.api_config, "self_test", None), "enabled", False)
+            or any(getattr(getattr(g, "self_test", None), "enabled", False)
+                   for g in getattr(self.api_config, "ups_groups", [])))
 
         def _visible(path: str) -> bool:
             if path == "/metrics":
@@ -1325,9 +1326,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     path.startswith("/api/v1/ups/{name}/variables"):
                 return nut_enabled
             if path == "/api/v1/ups/{name}/self-test":
-                # POST self-test needs auth (write) AND nut_control, exactly like
-                # the manual control path.
-                return auth_enabled and nut_enabled
+                # POST self-test needs auth (write) AND permission — either
+                # self_test enabled (its own narrow grant) or the general
+                # nut_control surface.
+                return auth_enabled and (self_test_enabled or nut_enabled)
             return True
 
         return [dict(e) for e in API_ENDPOINTS if _visible(e["path"])]

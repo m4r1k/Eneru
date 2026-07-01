@@ -59,6 +59,85 @@ def test_list_commands_failure(monkeypatch):
 
 
 @pytest.mark.unit
+def test_list_commands_anonymous_when_no_creds(monkeypatch):
+    # With no credentials, listing stays on the plain (anonymous) runner.
+    captured = {}
+    monkeypatch.setattr(nc, "run_command",
+                        lambda cmd, timeout=10: captured.update(cmd=cmd)
+                        or (0, "  test.battery.start - x\n", ""))
+    monkeypatch.setattr(nc, "_run_auth_command",
+                        lambda *a, **k: pytest.fail("must not use auth path"))
+    ok, commands, _ = nc.list_commands("UPS@h")
+    assert ok and commands == ["test.battery.start"]
+    assert captured["cmd"] == ["upscmd", "-l", "UPS@h"]
+
+
+@pytest.mark.unit
+def test_list_commands_credentialed_uses_auth_path(monkeypatch):
+    # Regression: some upsd only list commands to a logged-in client. With creds,
+    # listing goes through the PTY auth path (password never on argv) with the
+    # `upscmd -u user -l ups` shape.
+    captured = {}
+
+    def fake_auth(cmd, password, timeout=10):
+        captured["cmd"] = cmd
+        captured["password"] = password
+        captured["timeout"] = timeout
+        return 0, "  test.battery.start - Start a battery test\n", ""
+
+    monkeypatch.setattr(nc, "_run_auth_command", fake_auth)
+    monkeypatch.setattr(nc, "run_command",
+                        lambda *a, **k: pytest.fail("must not use anon path"))
+    ok, commands, _ = nc.list_commands(
+        "UPS@h", username="mon-user", password="mon-pass", timeout=6)  # noqa: S106
+    assert ok and commands == ["test.battery.start"]
+    assert captured["cmd"] == ["upscmd", "-u", "mon-user", "-l", "UPS@h"]
+    assert captured["password"] == "mon-pass"
+    assert "mon-pass" not in captured["cmd"]      # password never in argv
+    assert captured["timeout"] == 6
+
+
+@pytest.mark.unit
+def test_validated_auth_command_accepts_credentialed_list():
+    safe_cmd, err = nc._validated_auth_command_argv(
+        ["upscmd", "-u", "mon", "-l", "UPS@h"])
+    assert err == ""
+    assert safe_cmd == ["upscmd", "-u", "mon", "-l", "UPS@h"]
+    # has_username must be true so the runner enforces the username/password pair.
+    assert nc._auth_command_has_username(safe_cmd) is True
+
+
+@pytest.mark.unit
+def test_validated_auth_command_list_rejects_bad_data_positions():
+    # username and ups are the only data positions; both are validated.
+    assert nc._validated_auth_command_argv(
+        ["upscmd", "-u", "", "-l", "UPS@h"])[0] is None
+    assert nc._validated_auth_command_argv(
+        ["upscmd", "-u", "mon", "-l", "UPS;id"])[0] is None
+
+
+@pytest.mark.unit
+def test_popen_credentialed_list_builds_literal_argv(monkeypatch):
+    # The authenticated-list spawn site must keep `-l` a literal and place the
+    # validated username/ups in fixed positions (CodeQL invariant). Stub Popen
+    # so nothing actually execs.
+    captured = {}
+
+    class _FakeProc:
+        pass
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        return _FakeProc()
+
+    monkeypatch.setattr(nc.subprocess, "Popen", fake_popen)
+    proc = nc._popen_validated_auth_command(
+        ["upscmd", "-u", "mon", "-l", "UPS@h"], slave_fd=5)
+    assert isinstance(proc, _FakeProc)
+    assert captured["argv"] == ["upscmd", "-u", "mon", "-l", "UPS@h"]
+
+
+@pytest.mark.unit
 def test_run_instant_command_does_not_put_password_in_argv(monkeypatch):
     captured = {}
 

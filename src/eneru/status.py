@@ -18,6 +18,7 @@ from eneru.remote_health import (
 from eneru.redundancy import effective_redundancy_health
 from eneru.stats import StatsStore
 from eneru.utils import command_exists
+from eneru.version import __version__
 
 
 HISTORY_METRICS = {
@@ -259,8 +260,14 @@ def collect_status(source: Any) -> Dict[str, Any]:
     """Collect all live UPS statuses from a source object."""
     monitors = iter_monitors(source)
     config = getattr(source, "config", None)
+    # Detect once and surface at the top level (alongside `version`) so consumers
+    # can read the running build AND where it runs — baremetal / container /
+    # Kubernetes — without digging into the nested `runtime` object below.
+    runtime_label = _runtime_context_label()
     payload: Dict[str, Any] = {
         "generatedAt": time.time(),
+        "version": __version__,
+        "runtimeContext": runtime_label,
         "ups": [monitor_status(m) for m in monitors],
         "redundancyGroups": redundancy_group_statuses(source, config),
     }
@@ -270,7 +277,7 @@ def collect_status(source: Any) -> Dict[str, Any]:
         health_rows = live_remote_health(source, config)
         loopback_row = _loopback_health_row(health_rows)
         payload["runtime"] = {
-            "context": _runtime_context_label(),
+            "context": runtime_label,
             "loopbackDelegate": _loopback_runtime_summary(config, loopback_row),
         }
     return payload

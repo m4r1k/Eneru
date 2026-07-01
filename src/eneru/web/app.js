@@ -2834,9 +2834,19 @@ function initTabs() {
 
 // ----- polling -----
 
+// Daemon build + runtime context, learned from the /api/v1/ups payload and shown
+// in the footer ahead of the "Updated · <time>" so the running version and where
+// it runs (baremetal / container / Kubernetes) are always visible.
+let daemonVersion = null;
+let daemonRuntime = null;
+
 function setStatus(msg) {
-  document.getElementById("status-line").textContent =
-    msg + " · " + new Date().toLocaleTimeString();
+  const bits = [];
+  if (daemonVersion) bits.push("Eneru v" + daemonVersion);
+  if (daemonRuntime) bits.push(daemonRuntime);
+  bits.push(msg);
+  bits.push(new Date().toLocaleTimeString());
+  document.getElementById("status-line").textContent = bits.join(" · ");
 }
 
 async function refresh() {
@@ -2867,6 +2877,13 @@ async function refresh() {
   if (rh.ok) remoteHealthSnapshot = (rh.data && rh.data.servers) || [];
 
   const ups = await api("/api/v1/ups");
+  if (ups.ok && ups.data) {
+    if (ups.data.version) daemonVersion = ups.data.version;
+    // Prefer the top-level runtimeContext; fall back to the nested runtime block.
+    const rc = ups.data.runtimeContext
+      || (ups.data.runtime && ups.data.runtime.context);
+    if (rc) daemonRuntime = rc;
+  }
   if (ups.ok) {
     // Poll-driven redraws must not yank the operator back to the top of a tab
     // they have scrolled (battery health, energy cards, overview, …). Explicit

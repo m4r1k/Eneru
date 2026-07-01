@@ -57,16 +57,19 @@ class TestNormalize:
 class TestDiscover:
     @pytest.mark.unit
     def test_returns_command_when_exposed(self, monkeypatch):
-        monkeypatch.setattr(self_test.nutctl, "list_commands",
-                            lambda ups, timeout=10: (True, ["test.battery.start",
-                                                            "beeper.toggle"], ""))
+        monkeypatch.setattr(
+            self_test.nutctl, "list_commands",
+            lambda ups, username="", password="", timeout=10:
+                (True, ["test.battery.start", "beeper.toggle"], ""))
         assert self_test.discover_self_test_command(
             "U@h", "test.battery.start") == "test.battery.start"
 
     @pytest.mark.unit
     def test_none_when_not_exposed(self, monkeypatch):
-        monkeypatch.setattr(self_test.nutctl, "list_commands",
-                            lambda ups, timeout=10: (True, ["beeper.toggle"], ""))
+        monkeypatch.setattr(
+            self_test.nutctl, "list_commands",
+            lambda ups, username="", password="", timeout=10:
+                (True, ["beeper.toggle"], ""))
         assert self_test.discover_self_test_command(
             "U@h", "test.battery.start") is None
 
@@ -75,10 +78,77 @@ class TestDiscover:
         # A transient upscmd -l failure must be distinguishable from "command
         # genuinely not exposed" (None), so callers can retry instead of skipping
         # a whole 30-day cadence.
-        monkeypatch.setattr(self_test.nutctl, "list_commands",
-                            lambda ups, timeout=10: (False, [], "upscmd error"))
+        monkeypatch.setattr(
+            self_test.nutctl, "list_commands",
+            lambda ups, username="", password="", timeout=10:
+                (False, [], "upscmd error"))
         with pytest.raises(self_test.SelfTestUnavailable):
             self_test.discover_self_test_command("U@h", "test.battery.start")
+
+    @pytest.mark.unit
+    def test_forwards_credentials_to_list(self, monkeypatch):
+        # Regression: some upsd only list commands to a logged-in client, so
+        # discovery MUST forward nut_control credentials to `upscmd -l`.
+        captured = {}
+
+        def fake_list(ups, username="", password="", timeout=10):
+            captured.update(ups=ups, username=username, password=password,
+                            timeout=timeout)
+            return True, ["test.battery.start"], ""
+
+        monkeypatch.setattr(self_test.nutctl, "list_commands", fake_list)
+        self_test.discover_self_test_command(
+            "U@h", "test.battery.start",
+            username="mon-user", password="mon-pass", timeout=7)  # noqa: S106
+        assert captured == {"ups": "U@h", "username": "mon-user",
+                            "password": "mon-pass", "timeout": 7}
+
+
+# --------------------------------------------------------------------------
+# self_test_control (v6.1.2 narrow permission)
+# --------------------------------------------------------------------------
+
+class _ST:
+    def __init__(self, enabled):
+        self.enabled = enabled
+
+
+class TestSelfTestControl:
+    @pytest.mark.unit
+    def test_self_test_enabled_auto_allows_command(self):
+        # nut_control off + command NOT allowlisted, but self_test on -> permitted,
+        # and the effective nut_control has the command added to its allowlist.
+        nc = _nc(enabled=False, allowed_commands=[])
+        permitted, eff = self_test.self_test_control(
+            nc, _ST(True), "test.battery.start")
+        assert permitted is True
+        assert "test.battery.start" in eff.allowed_commands
+        # The general control surface is untouched: original object unchanged.
+        assert nc.allowed_commands == []
+
+    @pytest.mark.unit
+    def test_self_test_disabled_falls_back_to_general_allowlist(self):
+        # self_test off: permitted only when the GENERAL control surface allows it.
+        nc = _nc(enabled=True, allowed_commands=["test.battery.start"])
+        permitted, eff = self_test.self_test_control(
+            nc, _ST(False), "test.battery.start")
+        assert permitted is True
+        assert eff is nc  # unchanged
+
+    @pytest.mark.unit
+    def test_disabled_and_not_allowlisted_is_denied(self):
+        nc = _nc(enabled=False, allowed_commands=[])
+        permitted, _eff = self_test.self_test_control(
+            nc, _ST(False), "test.battery.start")
+        assert permitted is False
+
+    @pytest.mark.unit
+    def test_general_control_off_denies_even_if_allowlisted(self):
+        # allowlisted but nut_control disabled + self_test disabled -> denied.
+        nc = _nc(enabled=False, allowed_commands=["test.battery.start"])
+        permitted, _eff = self_test.self_test_control(
+            nc, _ST(False), "test.battery.start")
+        assert permitted is False
 
 
 # --------------------------------------------------------------------------

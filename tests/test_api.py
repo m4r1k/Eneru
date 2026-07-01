@@ -66,6 +66,12 @@ def test_collect_status_is_read_only_shape(monitor):
     assert payload["ups"][0]["groupId"] == "TestUPS-localhost"
     assert payload["ups"][0]["powerQuality"]["inputVoltage"] == "229.4"
     assert payload["ups"][0]["powerQuality"]["voltageState"] == "NORMAL"
+    # v6.1.2: the daemon version + runtime context are surfaced at the top level
+    # (dashboard footer), the latter mirroring the nested runtime.context.
+    from eneru.version import __version__
+    assert payload["version"] == __version__
+    assert payload["runtimeContext"] == payload["runtime"]["context"]
+    assert isinstance(payload["runtimeContext"], str) and payload["runtimeContext"]
 
 
 @pytest.mark.unit

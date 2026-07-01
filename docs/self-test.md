@@ -1,44 +1,62 @@
 # Self-test
 
-Eneru can issue a UPS **battery self-test** — on a schedule, from the CLI, or
-from the dashboard — and record the result so it feeds the
-[battery-health score](battery-health.md). It uses the same NUT `upscmd` path as
-[UPS control](nut-control.md), so the same safety rules apply.
+Eneru handles UPS **battery self-tests** two ways:
 
-## Safety model
+1. **Observe** the result of a test the UPS ran on its own — on the device's own
+   schedule or triggered by hand — and record it (no configuration required).
+2. **Issue** a test itself — on a schedule, from the CLI, or from the dashboard.
 
-A self-test is a **write surface**. Enabling the scheduled test requires **all**
-of the following, or the daemon refuses to start — a scheduled test must never be
-a back door around the v6.0 control allowlist:
+Both feed the [battery-health score](battery-health.md). Issuing uses the same
+NUT `upscmd` path as [UPS control](nut-control.md).
 
-- `nut_control.enabled: true` with valid `upsd.users` credentials,
-- `api.auth.enabled: true` (auth-off always means read-only), and
-- `self_test.command` listed in `nut_control.allowed_commands`.
+## Observing device-run tests (no config)
 
-The same allowlist check runs on the scheduled path, the API path, and the
-`--direct` CLI path — none is exempt. If `upscmd -l` does not actually expose the
-configured command, the feature self-disables for that UPS with a logged warning.
+On every poll Eneru reads `ups.test.result` / `ups.test.date` and, when a new
+settled result appears (pass or fail), records it as a `source: device` row.
+This happens whether or not scheduled self-tests are enabled — many UPSes run a
+test on their own cadence (`ups.test.interval`), and some operators only ever
+test by hand. The latest result shows up in the dashboard, the API `selfTest`
+block, the Prometheus series, and the battery-health score with no setup.
+
+## Issuing tests: safety model
+
+Issuing a test is a **write surface**, so it always requires **API
+authentication** — an explicit `api.auth.enabled: true`, or simply a user in the
+auth DB (`eneru user create`), which activates auth with no restart. Auth-off
+always means read-only.
+
+Enabling `self_test` is its own narrow permission: it grants exactly the one
+command in `self_test.command`. You do **not** also need `nut_control.enabled`
+or that command on `nut_control.allowed_commands` — the general control surface
+(arbitrary `/command`, variable writes) stays gated separately. Credentials for
+`upscmd` still come from `nut_control.username`/`password` when your upsd
+requires a login to run instant commands.
+
+If `upscmd -l` does not expose the configured command, the feature self-disables
+for that UPS with a logged warning. Note that some upsd setups (notably UniFi's
+NUT) only return the command list to a **logged-in** client — Eneru forwards the
+`nut_control` credentials to `upscmd -l` so discovery works there.
 
 ## Configuration
 
 ```yaml
 api:
   auth:
-    enabled: true
-
-nut_control:
-  enabled: true
-  username: "eneru"
-  password: "secret"
-  allowed_commands:
-    - test.battery.start          # must include self_test.command
+    enabled: true            # or just: eneru user create <name>
 
 self_test:
   enabled: true
-  schedule: monthly               # daily | weekly | monthly | "every <N>d|h|m"
-  time: "03:00"                   # wall-clock for calendar schedules
-  command: test.battery.start     # adapts to what upscmd -l exposes
-  result_poll_after: 60           # seconds to wait before reading the result
+  schedule: monthly          # daily | weekly | monthly | "every <N>d|h|m"
+  time: "03:00"              # wall-clock for calendar schedules
+  command: test.battery.start # adapts to what upscmd -l exposes
+  result_poll_after: 60      # seconds to wait before reading the result
+
+# Only needed if your upsd requires a login for upscmd (list/issue). The
+# self_test command above is auto-permitted; you do NOT need nut_control.enabled
+# or an allowed_commands entry just for self-test.
+nut_control:
+  username: "eneru"
+  password: "secret"
 ```
 
 `schedule` accepts `daily`, `weekly`, `monthly`, or an interval such as
@@ -79,11 +97,14 @@ it when no daemon is running. `--ups` defaults to the only configured UPS.
 
 ## API and dashboard
 
-- `POST /api/v1/ups/{name}/self-test` — auth-gated, audited, allowlist-checked.
-- The latest result appears in the `selfTest` block of `GET /api/v1/ups`. (The
-  `GET /api/v1/ups/{name}/battery-health` endpoint returns the health score and
-  replacement projection; the self-test result lives in the status `selfTest`
-  block.)
+- `POST /api/v1/ups/{name}/self-test` — auth-gated and audited. Permitted when
+  `self_test` is enabled (grants exactly `self_test.command`) or the general
+  `nut_control` surface allows the command.
+- The latest result appears in the `selfTest` block of `GET /api/v1/ups`,
+  including its `source` (`device` for an observed test, `scheduler`/`api`/`cli`
+  for one Eneru issued). (The `GET /api/v1/ups/{name}/battery-health` endpoint
+  returns the health score and replacement projection; the self-test result
+  lives in the status `selfTest` block.)
 - The dashboard **Control** tab has a per-UPS *Run self-test* button; the
   **Battery** tab shows the latest result.
 - **Prometheus** → `eneru_ups_self_test_result{result="passed|failed|..."}`
@@ -91,8 +112,11 @@ it when no daemon is running. `--ups` defaults to the only configured UPS.
 
 ## Testing it for real
 
-The NUT **dummy driver has no INSTCMD**, so self-test has no end-to-end CI
-coverage (the logic is unit-tested). On real hardware, confirm `upscmd -l` lists
-your test command first — e.g. the Ubiquiti TOWER_1000VA exposes
-`test.battery.start` — then run `eneru self-test run` and check
+The NUT **dummy driver has no INSTCMD**, so *issuing* a test has no end-to-end CI
+coverage (the issue logic is unit-tested). The **observe** path *is* covered
+end-to-end: the E2E suite serves a dummy UPS reporting `ups.test.result` and
+asserts Eneru records a `source: device` row surfaced via the API. On real
+hardware, confirm `upscmd -l` lists your test command first — e.g. the Ubiquiti
+TOWER_1000VA exposes `test.battery.start` (pass `nut_control` credentials if your
+upsd requires a login to list) — then run `eneru self-test run` and check
 `eneru self-test status`.

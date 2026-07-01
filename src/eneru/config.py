@@ -2582,12 +2582,16 @@ class ConfigLoader:
         # Fail-closed: UPS control is a write surface, so it must never be
         # reachable without authentication. "Auth disabled" means read-only,
         # full stop — refuse to start rather than expose unauthenticated control.
-        if config.nut_control.enabled and not config.api.auth.enabled:
+        # Honor the EFFECTIVE auth state (explicit api.auth.enabled OR a user
+        # already in the auth DB), matching how the API decides enforcement at
+        # runtime — so "create a user, then enable control" doesn't false-error.
+        from eneru.auth import auth_is_active as _auth_is_active
+        if config.nut_control.enabled and not _auth_is_active(config.api.auth):
             messages.append(
-                "ERROR: nut_control.enabled requires api.auth.enabled — UPS "
+                "ERROR: nut_control.enabled requires API authentication — UPS "
                 "control endpoints are write operations and must be "
-                "authenticated. Enable api.auth and create a user with "
-                "'eneru user create' first."
+                "authenticated. Set api.auth.enabled: true or create a user "
+                "with 'eneru user create' first."
             )
 
         messages.extend(cls._validate_v61(config))
@@ -2605,7 +2609,6 @@ class ConfigLoader:
         # Imported lazily to avoid any import-cycle risk at config import time.
         from eneru.self_test import parse_schedule as _parse_schedule
         from eneru.scheduler import parse_hhmm as _parse_hhmm
-        from eneru import nut_control as _nutctl
         from eneru.scheduler import parse_weekday as _parse_weekday
 
         st_glob = config.self_test
@@ -2665,39 +2668,46 @@ class ConfigLoader:
                 f"ERROR: reports.format must be one of "
                 f"{', '.join(_REPORT_FORMATS)}, got {reports.format!r}")
 
-        # Self-test is a scheduled write surface. Validate the EFFECTIVE config
-        # per UPS (per-UPS override else global) against the EFFECTIVE
-        # nut_control, so a per-UPS-narrowed allowlist or a global command that
-        # isn't in a group's own allowlist is caught — a scheduled test can never
-        # be a back door around the v6.0 control allowlist.
+        # Self-test is a scheduled write surface. Authentication is the real
+        # privilege gate (a self-test issues a NUT control command), so enabling
+        # self_test requires EFFECTIVE auth — an explicit api.auth.enabled OR a
+        # user already in the auth DB, matching how the API decides enforcement
+        # at runtime. From v6.1.2, enabling self_test is its OWN narrow
+        # permission: it grants exactly self_test.command without also needing
+        # nut_control.enabled or that command on nut_control.allowed_commands
+        # (the general control surface is unchanged; see self_test.self_test_control).
+        # Credentials for upscmd still come from nut_control.username/password
+        # when the UPS requires auth for INSTCMD — that can't be validated here.
+        from eneru.auth import auth_is_active as _auth_is_active
+        auth_active = _auth_is_active(config.api.auth)
         for group in config.ups_groups:
             st = getattr(group, "self_test", None) or config.self_test
             if not st.enabled:
                 continue
             name = group.ups.name
-            nc = group.nut_control or config.nut_control
-            if not nc.enabled:
+            if not auth_active:
                 messages.append(
-                    f"ERROR: self_test for UPS '{name}' requires "
-                    "nut_control.enabled (per-UPS or global) — self-tests issue "
-                    "a UPS command via NUT control.")
-            if not config.api.auth.enabled:
-                messages.append(
-                    f"ERROR: self_test for UPS '{name}' requires "
-                    "api.auth.enabled — a scheduled self-test is privileged.")
+                    f"ERROR: self_test for UPS '{name}' requires API "
+                    "authentication — set api.auth.enabled: true or create a "
+                    "user with 'eneru user create'. A scheduled self-test is "
+                    "privileged.")
             cmd = (st.command or "").strip() if st.command else ""
             if not cmd:
                 messages.append(
                     f"ERROR: self_test for UPS '{name}' is enabled but has no "
-                    "command — set self_test.command (per-UPS or global) to a "
-                    "command on nut_control.allowed_commands "
-                    "(e.g. 'test.battery.start').")
-            elif not _nutctl.command_allowed(cmd, nc.allowed_commands):
+                    "command — set self_test.command (per-UPS or global) to the "
+                    "instant command your UPS exposes (e.g. 'test.battery.start').")
+            elif not cmd.startswith("test."):
+                # Enabling self_test auto-permits exactly this command WITHOUT the
+                # nut_control allowlist, so a non-test command here (e.g.
+                # shutdown.return, load.off) is a real control grant. Warn — don't
+                # block — so a deliberate vendor test command that isn't named
+                # test.* still works, but an accidental footgun is visible.
                 messages.append(
-                    f"ERROR: self_test.command '{st.command}' for UPS '{name}' "
-                    "is not in nut_control.allowed_commands — a scheduled test "
-                    "must not bypass the control allowlist. Add it to "
-                    "nut_control.allowed_commands.")
+                    f"WARNING: self_test.command '{cmd}' for UPS '{name}' is not "
+                    "a battery-test command (no 'test.' prefix). Enabling "
+                    "self_test grants exactly this command via NUT, bypassing the "
+                    "nut_control allowlist — confirm this is intentional.")
 
         # Battery-health numeric fields must be numbers (a quoted/typo'd YAML
         # value would otherwise blow up the runtime int()/float() coercions).

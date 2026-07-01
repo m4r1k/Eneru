@@ -146,7 +146,7 @@ YAML
 if eneru validate --config /tmp/config-e2e-control-noauth.yaml >/tmp/test53-val.log 2>&1; then
   echo "FAIL: nut_control without auth was accepted"; cat /tmp/test53-val.log; exit 1
 fi
-grep -q "nut_control.enabled requires api.auth.enabled" /tmp/test53-val.log \
+grep -q "nut_control.enabled requires API authentication" /tmp/test53-val.log \
   || { echo "FAIL: missing fail-closed message"; cat /tmp/test53-val.log; exit 1; }
 echo "PASS: nut_control without auth is rejected at startup"
 
@@ -502,6 +502,114 @@ kill "$DAEMON_PID" 2>/dev/null || true
 wait "$DAEMON_PID" 2>/dev/null || true
 trap - EXIT
 echo "PASS: event wide-range query, auth-gated delete, and history validation verified"
+)
+
+# ======================================================================
+# Test 57: self-test — passive observation + softened permission (v6.1.2)
+# ======================================================================
+# Two v6.1.2 behaviours the pre-6.1.2 suite never exercised:
+#   (A) enabling self_test no longer requires nut_control.enabled, and
+#       effective auth may come from a USER IN THE AUTH DB (not only the
+#       api.auth.enabled flag) -- so `eneru validate` accepts that shape;
+#   (B) Eneru passively records the UPS's OWN self-test result
+#       (ups.test.result / ups.test.date) as a source=device row, surfaced
+#       in the /api/v1/ups selfTest block, regardless of self_test being on.
+# The dummy-ups driver has no INSTCMD, so ISSUING a test cannot be E2E'd;
+# (A)+(B) are the reachable — and previously-missing — self-test coverage.
+echo ">>> Running: Test 57: self-test passive observation + softened permission"
+(
+set -euo pipefail
+
+ST_AUTH_DB="$(mktemp -d)/auth.db"
+printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$ST_AUTH_DB" \
+  || { echo "FAIL: could not create auth user"; exit 1; }
+
+# --- (A) validate: self_test on + nut_control OFF + auth via DB user -> OK ---
+cat > /tmp/config-e2e-selftest-soft.yaml <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+behavior:
+  dry_run: true
+statistics:
+  enabled: true
+  db_directory: "$(mktemp -d)"
+api:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 9100
+  auth:
+    db_path: "$ST_AUTH_DB"
+    require_for_reads: false
+self_test:
+  enabled: true
+  command: test.battery.start
+notifications:
+  enabled: false
+local_shutdown:
+  enabled: false
+YAML
+
+if ! eneru validate --config /tmp/config-e2e-selftest-soft.yaml >/tmp/test57-val.log 2>&1; then
+  echo "FAIL: self_test + auth-via-DB-user + nut_control off should validate"
+  cat /tmp/test57-val.log; exit 1
+fi
+echo "PASS: self_test validates without nut_control.enabled (auth via DB user)"
+
+# --- (A negative) self_test on but NO auth at all -> validation error ---
+cat > /tmp/config-e2e-selftest-noauth.yaml <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+api:
+  auth:
+    db_path: "$(mktemp -d)/empty-auth.db"
+self_test:
+  enabled: true
+  command: test.battery.start
+YAML
+if eneru validate --config /tmp/config-e2e-selftest-noauth.yaml >/tmp/test57-noauth.log 2>&1; then
+  echo "FAIL: self_test without any auth must be rejected at validation"
+  cat /tmp/test57-noauth.log; exit 1
+fi
+grep -q "requires API authentication" /tmp/test57-noauth.log \
+  || { echo "FAIL: expected 'requires API authentication' error"; cat /tmp/test57-noauth.log; exit 1; }
+echo "PASS: self_test without auth is rejected at validation"
+
+# --- (B) passive observation: the UPS reports its own last self-test ---
+apply_scenario self-test-passed
+timeout 30s eneru run --config /tmp/config-e2e-selftest-soft.yaml > /tmp/test57-daemon.log 2>&1 &
+DAEMON_PID=$!
+trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
+
+for _ in $(seq 1 30); do
+  curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 && break
+  sleep 0.5
+done
+
+# Poll the anonymous /api/v1/ups read until the observer has recorded the
+# device result into the selfTest block (record commits immediately).
+RESULT=""; SOURCE=""; DATE=""
+for _ in $(seq 1 40); do
+  if curl -fsS http://127.0.0.1:9100/api/v1/ups > /tmp/test57-ups.json 2>/dev/null; then
+    RESULT=$(python3 -c "import json;d=json.load(open('/tmp/test57-ups.json'));st=(d.get('ups') or [{}])[0].get('selfTest') or {};print(st.get('result') or '-')")
+    if [ "$RESULT" = "passed" ]; then
+      SOURCE=$(python3 -c "import json;d=json.load(open('/tmp/test57-ups.json'));st=(d.get('ups') or [{}])[0].get('selfTest') or {};print(st.get('source') or '-')")
+      DATE=$(python3 -c "import json;d=json.load(open('/tmp/test57-ups.json'));st=(d.get('ups') or [{}])[0].get('selfTest') or {};print(st.get('date') or '-')")
+      break
+    fi
+  fi
+  sleep 0.5
+done
+
+[ "$RESULT" = "passed" ]     || { echo "FAIL: selfTest.result was '$RESULT', expected passed"; cat /tmp/test57-daemon.log; exit 1; }
+[ "$SOURCE" = "device" ]     || { echo "FAIL: selfTest.source was '$SOURCE', expected device"; cat /tmp/test57-daemon.log; exit 1; }
+[ "$DATE" = "2026-06-02" ]   || { echo "FAIL: selfTest.date was '$DATE', expected 2026-06-02"; cat /tmp/test57-daemon.log; exit 1; }
+grep -q "Observed UPS self-test: passed" /tmp/test57-daemon.log \
+  || { echo "FAIL: daemon did not log the passive observation"; cat /tmp/test57-daemon.log; exit 1; }
+
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+trap - EXIT
+echo "PASS: passive self-test observation surfaced via API (source=device)"
 )
 echo ""
 echo "=== Group 'single-ups-auth' completed successfully ==="

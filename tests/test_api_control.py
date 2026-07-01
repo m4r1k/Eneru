@@ -76,8 +76,10 @@ def test_control_requires_auth(minimal_config):
 @pytest.mark.unit
 def test_list_commands_intersects_allowlist(minimal_config, monkeypatch):
     _enable(minimal_config)
-    monkeypatch.setattr(apimod.nutctl, "list_commands",
-                        lambda ups, timeout=10: (True, ["beeper.toggle", "load.off"], ""))
+    monkeypatch.setattr(
+        apimod.nutctl, "list_commands",
+        lambda ups, username="", password="", timeout=10:
+            (True, ["beeper.toggle", "load.off"], ""))
     h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/commands")
     status, _, payload = (lambda hh: (hh.headers.__setitem__(
         "Authorization", f"Bearer {_token(hh)}"), hh._route())[1])(h)
@@ -112,8 +114,9 @@ def test_list_variables_filtered(minimal_config, monkeypatch):
 @pytest.mark.unit
 def test_list_commands_nut_error_502(minimal_config, monkeypatch):
     _enable(minimal_config)
-    monkeypatch.setattr(apimod.nutctl, "list_commands",
-                        lambda ups, timeout=10: (False, [], "driver down"))
+    monkeypatch.setattr(
+        apimod.nutctl, "list_commands",
+        lambda ups, username="", password="", timeout=10: (False, [], "driver down"))
     h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/commands")
     h.headers["Authorization"] = f"Bearer {_token(h)}"
     assert h._route()[0] == 502
@@ -400,6 +403,88 @@ def test_run_self_test_denied_not_allowlisted(minimal_config, monkeypatch):
     minimal_config.self_test.command = "test.battery.start"   # not allowlisted
     monkeypatch.setattr(apimod.selftest, "issue_self_test",
                         lambda *a, **k: pytest.fail("must not issue denied cmd"))
+    logs = []
+    h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/self-test",
+                         method_body=b"{}", logs=logs)
+    h.api_source = _src_with_store("UPS@h")
+    h.headers["Authorization"] = f"Bearer {_token(h)}"
+    with pytest.raises(APIForbidden):
+        h._route_post()
+    assert any("denied" in line for line in logs)
+
+
+@pytest.mark.unit
+def test_run_self_test_permitted_by_self_test_flag_without_nut_control(
+        minimal_config, monkeypatch):
+    # v6.1.2: self_test enabled is its own permission — the API issues the
+    # configured command even with nut_control OFF and no allowlist, and hands
+    # issue_self_test an effective nut_control with the command auto-allowlisted.
+    minimal_config.api.auth.enabled = True
+    minimal_config.self_test.enabled = True
+    minimal_config.self_test.command = "test.battery.start"
+    minimal_config.nut_control.enabled = False
+    minimal_config.nut_control.allowed_commands = []
+    captured = {}
+    monkeypatch.setattr(apimod.selftest, "discover_self_test_command",
+                        lambda ups, cmd, **k: cmd)
+
+    def _issue(ups, cmd, nc, store, source="api"):
+        captured["allowed"] = list(nc.allowed_commands)
+        captured["source"] = source
+        return {"ok": True, "test_id": 9, "error": ""}
+    monkeypatch.setattr(apimod.selftest, "issue_self_test", _issue)
+    h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/self-test",
+                         method_body=b"{}")
+    h.api_source = _src_with_store("UPS@h", store=_open_store_stub())
+    h.headers["Authorization"] = f"Bearer {_token(h)}"
+    status, _, payload = h._route_post()
+    assert status == 200 and payload["testId"] == 9
+    assert "test.battery.start" in captured["allowed"]   # auto-allowed
+    assert captured["source"] == "api"
+
+
+@pytest.mark.unit
+def test_general_command_still_forbidden_when_only_self_test_enabled(
+        minimal_config, monkeypatch):
+    # Adversarial (v6.1.2): the self_test softening must NOT widen the general
+    # control surface. With self_test ON but nut_control OFF, POST /command is
+    # still 403 — even for the very command self_test would auto-permit.
+    minimal_config.api.auth.enabled = True
+    minimal_config.self_test.enabled = True
+    minimal_config.self_test.command = "test.battery.start"
+    minimal_config.nut_control.enabled = False
+    monkeypatch.setattr(apimod.nutctl, "run_instant_command",
+                        lambda *a, **k: pytest.fail("must not reach NUT"))
+    h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/command",
+                         method_body=b'{"command":"test.battery.start"}')
+    h.api_source = _src_with_store("UPS@h")
+    h.headers["Authorization"] = f"Bearer {_token(h)}"
+    with pytest.raises(APIForbidden):
+        h._route_post()
+
+
+@pytest.mark.unit
+def test_run_self_test_empty_command_is_400(minimal_config):
+    minimal_config.api.auth.enabled = True
+    minimal_config.self_test.enabled = True
+    minimal_config.self_test.command = ""      # misconfigured
+    h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/self-test",
+                         method_body=b"{}")
+    h.api_source = _src_with_store("UPS@h")
+    h.headers["Authorization"] = f"Bearer {_token(h)}"
+    with pytest.raises(APIBadRequest):
+        h._route_post()
+
+
+@pytest.mark.unit
+def test_run_self_test_denied_when_neither_permission(minimal_config, monkeypatch):
+    # self_test disabled AND nut_control disabled -> forbidden.
+    minimal_config.api.auth.enabled = True
+    minimal_config.self_test.enabled = False
+    minimal_config.self_test.command = "test.battery.start"
+    minimal_config.nut_control.enabled = False
+    monkeypatch.setattr(apimod.selftest, "issue_self_test",
+                        lambda *a, **k: pytest.fail("must not issue"))
     logs = []
     h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/self-test",
                          method_body=b"{}", logs=logs)

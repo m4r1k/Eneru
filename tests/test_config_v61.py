@@ -159,30 +159,94 @@ class TestUnknownKeys:
 
 class TestCrossFieldValidation:
     @pytest.mark.unit
-    def test_self_test_requires_nut_control_and_auth(self):
-        _, errs = _validate("ups:\n  name: U@h\nself_test:\n  enabled: true\n")
-        assert any("requires nut_control.enabled" in e for e in errs)
-        assert any("requires api.auth.enabled" in e for e in errs)
+    def test_self_test_requires_only_auth(self, tmp_path):
+        # v6.1.2: self_test enabled with no auth -> ONE error (auth). It no longer
+        # requires nut_control.enabled — enabling self_test grants its command.
+        missing = tmp_path / "nope.db"
+        _, errs = _validate(
+            "ups:\n  name: U@h\n"
+            f"api:\n  auth:\n    db_path: '{missing}'\n"
+            "self_test:\n  enabled: true\n")
+        assert any("requires API authentication" in e for e in errs)
+        assert not any("nut_control" in e for e in errs)
 
     @pytest.mark.unit
-    def test_self_test_command_must_be_allowlisted(self):
+    def test_self_test_permits_command_without_nut_control(self):
+        # v6.1.2: self_test enabled + auth on, but nut_control DISABLED and the
+        # command NOT on any allowlist -> NO errors (self_test is its own
+        # permission for exactly its command).
         _, errs = _validate(
             "ups:\n  name: U@h\napi:\n  auth:\n    enabled: true\n"
-            "nut_control:\n  enabled: true\n  allowed_commands: [beeper.toggle]\n"
             "self_test:\n  enabled: true\n  command: test.battery.start\n")
-        assert any("not in nut_control.allowed_commands" in e for e in errs)
+        assert errs == []
 
     @pytest.mark.unit
-    def test_per_ups_self_test_override_is_validated(self):
-        # Global self_test disabled, but a per-UPS override enables it with a
-        # non-allowlisted command and no auth -> must be caught.
+    def test_self_test_non_test_command_warns_but_validates(self, tmp_path):
+        # A non-test self_test.command is a real control grant (v6.1.2), so it
+        # WARNS — but does not block: a deliberate vendor command still works.
+        from eneru.auth import AuthStore
+        db = tmp_path / "auth.db"
+        AuthStore(db).create_user("admin", "correct horse")  # noqa: S106
+        raw = yaml.safe_load(
+            "ups:\n  name: U@h\n"
+            f"api:\n  auth:\n    db_path: '{db}'\n"
+            "self_test:\n  enabled: true\n  command: shutdown.return\n")
+        msgs = ConfigLoader.validate_config(ConfigLoader._parse_config(raw), raw)
+        assert not any(m.startswith("ERROR") for m in msgs)      # still valid
+        assert any(m.startswith("WARNING") and "shutdown.return" in m
+                   and "bypassing the nut_control allowlist" in m for m in msgs)
+
+    @pytest.mark.unit
+    def test_self_test_test_command_does_not_warn(self, tmp_path):
+        from eneru.auth import AuthStore
+        db = tmp_path / "auth.db"
+        AuthStore(db).create_user("admin", "correct horse")  # noqa: S106
+        raw = yaml.safe_load(
+            "ups:\n  name: U@h\n"
+            f"api:\n  auth:\n    db_path: '{db}'\n"
+            "self_test:\n  enabled: true\n  command: test.battery.start\n")
+        msgs = ConfigLoader.validate_config(ConfigLoader._parse_config(raw), raw)
+        assert not any("bypassing the nut_control allowlist" in m for m in msgs)
+
+    @pytest.mark.unit
+    def test_self_test_auth_via_db_user(self, tmp_path):
+        # request #2: api.auth.enabled is NOT set, but a user exists in the auth
+        # DB -> effective auth is active, so self_test validation passes.
+        from eneru.auth import AuthStore
+        db = tmp_path / "auth.db"
+        AuthStore(db).create_user("admin", "correct horse")  # noqa: S106
         _, errs = _validate(
+            "ups:\n  name: U@h\n"
+            f"api:\n  auth:\n    db_path: '{db}'\n"
+            "self_test:\n  enabled: true\n  command: test.battery.start\n")
+        assert errs == []
+
+    @pytest.mark.unit
+    def test_self_test_auth_explicitly_disabled_still_errors(self, tmp_path):
+        # An explicit api.auth.enabled: false wins even if the DB has a user.
+        from eneru.auth import AuthStore
+        db = tmp_path / "auth.db"
+        AuthStore(db).create_user("admin", "correct horse")  # noqa: S106
+        _, errs = _validate(
+            "ups:\n  name: U@h\n"
+            f"api:\n  auth:\n    enabled: false\n    db_path: '{db}'\n"
+            "self_test:\n  enabled: true\n")
+        assert any("requires API authentication" in e for e in errs)
+
+    @pytest.mark.unit
+    def test_per_ups_self_test_override_requires_auth(self, tmp_path):
+        # Global self_test disabled, but a per-UPS override enables it with no
+        # auth -> the auth error is raised for that UPS (nut_control no longer
+        # required, and the command is auto-permitted).
+        missing = tmp_path / "nope.db"
+        _, errs = _validate(
+            f"api:\n  auth:\n    db_path: '{missing}'\n"
             "self_test:\n  enabled: false\n"
             "ups:\n  - name: U1@h\n    self_test:\n      enabled: true\n"
             "      command: shutdown.return\n")
-        assert any("U1@h" in e and "nut_control.enabled" in e for e in errs)
-        assert any("U1@h" in e and "api.auth.enabled" in e for e in errs)
-        assert any("shutdown.return" in e and "U1@h" in e for e in errs)
+        assert any("U1@h" in e and "requires API authentication" in e
+                   for e in errs)
+        assert not any("nut_control" in e for e in errs)
 
     @pytest.mark.unit
     def test_per_ups_self_test_override_valid(self):
@@ -194,20 +258,33 @@ class TestCrossFieldValidation:
         assert errs == []
 
     @pytest.mark.unit
-    def test_global_self_test_vs_per_ups_narrowed_allowlist(self):
-        # Global self_test enabled with the default command, but one UPS narrows
-        # its OWN nut_control allowlist to exclude it -> caught for that UPS
-        # (validated against the resolved per-UPS config, not just the global).
+    def test_per_ups_narrowed_allowlist_no_longer_blocks_self_test(self):
+        # v6.1.2: a per-UPS allowlist that excludes the self_test command no
+        # longer blocks it — self_test auto-permits exactly its own command.
         _, errs = _validate(
             "api:\n  auth:\n    enabled: true\n"
             "nut_control:\n  enabled: true\n  allowed_commands: [test.battery.start]\n"
             "self_test:\n  enabled: true\n  command: test.battery.start\n"
             "ups:\n  - name: U1@h\n"
-            "  - name: U2@h\n    nut_control:\n      enabled: true\n"
+            "  - name: U2@h\n    nut_control:\n"
             "      allowed_commands: [beeper.toggle]\n")
-        assert any("U2@h" in e and "not in nut_control.allowed_commands" in e
-                   for e in errs)
-        assert not any("U1@h" in e for e in errs)   # U1 inherits the global allowlist
+        assert errs == []
+
+    @pytest.mark.unit
+    def test_nut_control_requires_auth_effective_via_db_user(self, tmp_path):
+        # The global nut_control->auth rule also honors effective auth: a user in
+        # the DB satisfies it even without api.auth.enabled.
+        from eneru.auth import AuthStore
+        db = tmp_path / "auth.db"
+        base = ("ups:\n  name: U@h\n"
+                "nut_control:\n  enabled: true\n"
+                "  allowed_commands: [beeper.toggle]\n")
+        missing = tmp_path / "nope.db"
+        _, errs = _validate(base + f"api:\n  auth:\n    db_path: '{missing}'\n")
+        assert any("requires API authentication" in e for e in errs)
+        AuthStore(db).create_user("admin", "correct horse")  # noqa: S106
+        _, errs2 = _validate(base + f"api:\n  auth:\n    db_path: '{db}'\n")
+        assert not any("requires API authentication" in e for e in errs2)
 
     @pytest.mark.unit
     @pytest.mark.parametrize("field,val", [

@@ -1984,20 +1984,24 @@ def _self_test_run_api(
 def _self_test_run_direct(
         config: Config, group: UPSGroupConfig, name: str) -> None:
     from eneru import self_test as selftest
-    from eneru.nut_control import command_allowed, command_lock
+    from eneru.nut_control import command_lock
     nc = _effective_nut_control(config, group)
-    if not nc.enabled:
-        print("nut_control is not enabled. --direct issues a real command via "
-              "NUT and needs nut_control credentials + allowlist in the config.")
-        sys.exit(2)
+    st_cfg = getattr(group, "self_test", None) or config.self_test
     command = _resolve_self_test_command(config, group)
-    if not command_allowed(command, nc.allowed_commands):
-        print(f"self_test.command {command!r} is not in "
-              "nut_control.allowed_commands; refusing (the direct path is not "
-              "exempt from the control allowlist).")
+    # self_test is its own narrow permission (v6.1.2): enabling it grants exactly
+    # this command, else the general control surface must allow it. Returns the
+    # effective nut_control (command guaranteed allowlisted; creds inherited).
+    permitted, nc = selftest.self_test_control(nc, st_cfg, command)
+    if not permitted:
+        print("Self-test is not permitted by the config: enable self_test, or "
+              "enable nut_control and add the command to allowed_commands. "
+              "--direct issues a real command via NUT and needs nut_control "
+              "credentials in the config.")
         sys.exit(2)
     try:
-        cmd = selftest.discover_self_test_command(name, command, timeout=nc.timeout)
+        cmd = selftest.discover_self_test_command(
+            name, command, username=nc.username, password=nc.password,
+            timeout=nc.timeout)
     except selftest.SelfTestUnavailable as exc:
         print(f"Could not query the UPS ({exc}); try again.")
         sys.exit(1)

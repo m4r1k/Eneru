@@ -190,7 +190,7 @@ Validation catches YAML errors, invalid enum values, local-resource ownership mi
 | `mqtt` | Global | Optional outbound MQTT status publishing |
 | `nut_control` | Global, overridable per group | UPS control via NUT (write surface; requires API auth) |
 | `battery_health` | Global, overridable per UPS | Battery health score + replacement prediction (v6.1) |
-| `self_test` | Global, overridable per UPS | Scheduled UPS battery self-test (v6.1; write surface) |
+| `self_test` | Global, overridable per UPS | UPS battery self-test — observe device-run results (no config) and optionally issue on a schedule (v6.1; issuing is a write surface) |
 | `reports` | Global | Periodic summary reports via the notification channel (v6.1) |
 | `energy` | Global | kWh and optional cost tracking (v6.1) |
 | `notifications` | Global | Apprise URLs, retry, coalescing, and event suppression |
@@ -341,7 +341,7 @@ The API is opt-in and binds to localhost by default when enabled. With `api.auth
 | `mqtt.broker` | `""` | Broker URL: `mqtt://host:port` for plaintext or `mqtts://host:port` for TLS via the system trust store (default port 8883 for `mqtts`). |
 | `mqtt.topic_prefix` | `eneru` | Topic prefix; messages publish to `<topic_prefix>/status` (QoS 0, retain false) |
 | `mqtt.publish_interval` | `10` | Republish at this interval even when the status fingerprint is unchanged |
-| `nut_control.enabled` | `false` | Enable UPS control (upscmd/upsrw). Requires `api.auth.enabled` or startup fails (write surface). See [UPS control](nut-control.md) |
+| `nut_control.enabled` | `false` | Enable UPS control (upscmd/upsrw). Requires API auth — `api.auth.enabled` **or** a user in the auth DB — or startup fails (write surface). See [UPS control](nut-control.md) |
 | `nut_control.username` | `""` | NUT `upsd.users` account with INSTCMD/SET actions |
 | `nut_control.password` | `""` | Password for that NUT account |
 | `nut_control.allowed_commands` | `[]` | Allowlisted instant commands (e.g. `test.battery.start`, `beeper.toggle`). Calibration/FSD omitted by default |

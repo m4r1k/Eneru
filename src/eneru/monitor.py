@@ -2104,13 +2104,14 @@ class UPSGroupMonitor(
 
         # If connection_state == "FAILED": already notified, nothing to do
 
-    def _run_periodic_tasks(self) -> None:
+    def _run_periodic_tasks(self, ups_data: Optional[Dict[str, str]] = None) -> None:
         """End-of-iteration per-UPS periodic tasks (v6.1).
 
         Time-gated and fully failure-isolated: any exception here is logged
         and swallowed so a scheduler/health hiccup can never interrupt the
         poll loop or the shutdown path. The battery-health interval is read
-        live from config (SAFE hot-reload). Self-test is wired in B6.
+        live from config (SAFE hot-reload). ``ups_data`` is the latest
+        successful poll, used by the passive self-test observer.
         """
         try:
             bh = self._resolve_battery_health_config()
@@ -2127,6 +2128,12 @@ class UPSGroupMonitor(
             self._run_self_test_task()
         except Exception as exc:
             self._log_message(f"⚠️  self-test task failed: {exc}")
+        # Passive observation: record a self-test the UPS ran on its own
+        # (device schedule or a manual test), independent of self_test.enabled.
+        try:
+            self._check_observed_self_test(ups_data)
+        except Exception as exc:
+            self._log_message(f"⚠️  self-test observer failed: {exc}")
         # Reports are daemon-wide (one digest). In multi-UPS mode the
         # coordinator owns them; a per-group monitor must not send N copies.
         try:
@@ -2167,6 +2174,46 @@ class UPSGroupMonitor(
                     and getattr(group, "nut_control", None)):
                 return group.nut_control
         return glob
+
+    def _check_observed_self_test(self, ups_data: Optional[Dict[str, str]]) -> None:
+        """Record a self-test the UPS ran on its own (device schedule or manual).
+
+        ELI5: your UPS keeps its own logbook — "last test: passed, 2026-06-02".
+        Eneru reads that logbook on every poll and copies a NEW settled entry
+        into its own records exactly once. A fingerprint in the meta table stops
+        it re-copying the same entry, and it stands down while an Eneru-issued
+        test is mid-flight (that path owns its own row). This runs regardless of
+        whether scheduled self-tests are enabled — some UPSes test on their own
+        cadence, and some operators only ever test by hand.
+        """
+        store = getattr(self, "_stats_store", None)
+        if store is None or not getattr(store, "is_open", False):
+            return
+        raw = (ups_data or {}).get("ups.test.result")
+        if not raw:
+            return  # this UPS doesn't report a test result
+        enum = selftest.normalize_result(raw)
+        # Only persist a SETTLED, meaningful result. running/unknown churn while a
+        # test is in flight or was never run; unsupported is one-time noise.
+        if enum not in ("passed", "failed"):
+            return
+        date = (ups_data or {}).get("ups.test.date") or ""
+        key = f"{date}|{raw}"
+        # Fingerprint of the last result Eneru already accounted for — via this
+        # observer OR its own scheduled finalise (which stamps the same key).
+        if store.get_meta("self_test_observed_key") == key:
+            return
+        # Never race the scheduled path: it owns the row for a test it issued.
+        if self._self_test_pending_id is not None:
+            return
+        # command="" — Eneru issued nothing; this is the device's own test.
+        test_id = store.record_self_test(
+            "", "device", result_raw=raw, result_enum=enum,
+            result_date=(date or None))
+        if test_id is None:
+            return  # write failed — don't fingerprint, so it retries next poll
+        store.set_meta("self_test_observed_key", key)
+        self._log_message(f"🔋 Observed UPS self-test: {enum} ({raw!r})")
 
     def _run_self_test_task(self) -> None:
         """Issue / poll the scheduled UPS self-test (v6.1).
@@ -2214,6 +2261,10 @@ class UPSGroupMonitor(
                 enum = selftest.record_self_test_result(
                     store, self._self_test_pending_id, raw, date)
                 self._log_message(f"🔋 Self-test result: {enum} ({raw!r})")
+                # Stamp the observer fingerprint so the passive path doesn't
+                # re-record the same result Eneru just finalised.
+                store.set_meta(
+                    "self_test_observed_key", f"{date or ''}|{raw or ''}")
                 self._self_test_pending_id = None
                 self._self_test_poll_due_mono = None
                 store.set_meta("self_test_pending_id", "")  # cleared
@@ -2224,11 +2275,12 @@ class UPSGroupMonitor(
         if not cfg.enabled:
             return
         nc = self._resolve_nut_control_config()
-        # Defense-in-depth: never issue a control command unless nut_control is
-        # enabled (validation requires this for the global case; this also
-        # covers a per-UPS self_test override paired with control disabled).
-        if not nc.enabled:
-            return
+        # self_test is its own narrow permission (v6.1.2): enabling it grants
+        # exactly cfg.command even when nut_control is otherwise off. Auth is the
+        # real privilege gate and is enforced at config-validation time, so it
+        # is not re-checked here. The effective nut_control (cfg.command
+        # guaranteed on its allowlist; credentials/timeout inherited) is built
+        # at issue time below.
 
         # 2) Due? (calendar/interval via the shared scheduler helpers)
         try:
@@ -2272,7 +2324,8 @@ class UPSGroupMonitor(
         # 30-day) cadence; a genuine "not exposed" still consumes the cycle.
         try:
             cmd = selftest.discover_self_test_command(
-                self._poll_target, cfg.command, timeout=nc.timeout)
+                self._poll_target, cfg.command, username=nc.username,
+                password=nc.password, timeout=nc.timeout)
         except selftest.SelfTestUnavailable as exc:
             self._log_message(
                 f"⚠️  self-test discovery failed ({exc}); retrying next cycle")
@@ -2287,9 +2340,12 @@ class UPSGroupMonitor(
         # Serialize against the API control path (same per-UPS lock identity) so
         # a scheduled self-test can't race an operator-issued command/self-test
         # on the same device.
+        # Build the effective control the issue path uses: self_test.enabled
+        # auto-allows exactly `cmd` (the general allowlist is untouched).
+        _permitted, eff_nc = selftest.self_test_control(nc, cfg, cmd)
         with nutctl.command_lock(self._poll_target):
             result = selftest.issue_self_test(
-                self._poll_target, cmd, nc, store, source="scheduler")
+                self._poll_target, cmd, eff_nc, store, source="scheduler")
         if result["ok"]:
             # Stamp the cadence ONLY once the issue succeeds: a failed issue
             # (NUT error, transient lock contention) must retry next cycle, not
@@ -2598,6 +2654,6 @@ class UPSGroupMonitor(
             # v6.1: time-gated per-UPS periodic tasks (battery-health update,
             # self-test). Failure-isolated so a scheduler hiccup can never
             # touch the poll/shutdown path.
-            self._run_periodic_tasks()
+            self._run_periodic_tasks(ups_data)
 
             self._stop_event.wait(self.config.ups.check_interval)
