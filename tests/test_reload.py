@@ -43,12 +43,16 @@ def test_load_and_validate_non_mapping(tmp_path):
 
 @pytest.mark.unit
 def test_load_and_validate_validation_error(tmp_path):
-    # fail-closed: nut_control without auth
+    # fail-closed: nut_control without auth. db_path points at a nonexistent file
+    # so effective-auth is deterministically inactive (no stray users).
+    missing = tmp_path / "nope.db"
     p = _write(tmp_path / "c.yaml",
-               "ups:\n  name: U@h\nnut_control:\n  enabled: true\n")
+               "ups:\n  name: U@h\nnut_control:\n  enabled: true\n"
+               f"api:\n  auth:\n    db_path: '{missing}'\n")
     cfg, errors = reloadmod.load_and_validate(p)
     assert cfg is None
-    assert any("nut_control.enabled requires api.auth.enabled" in e for e in errors)
+    assert any("nut_control.enabled requires API authentication" in e
+               for e in errors)
 
 
 @pytest.mark.unit

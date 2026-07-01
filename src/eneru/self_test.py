@@ -11,7 +11,8 @@ exercised end-to-end (the maintainer validates it against real hardware).
 Everything here keeps I/O behind ``nut_control`` so tests mock it.
 """
 
-from typing import Dict, Optional
+from dataclasses import replace
+from typing import Dict, Optional, Tuple
 
 from eneru import nut_control as nutctl
 from eneru.scheduler import Schedule
@@ -24,6 +25,7 @@ __all__ = [
     "normalize_result",
     "parse_schedule",
     "record_self_test_result",
+    "self_test_control",
 ]
 
 
@@ -62,6 +64,7 @@ def normalize_result(raw: Optional[str]) -> str:
 
 
 def discover_self_test_command(ups_name: str, command: str, *,
+                               username: str = "", password: str = "",
                                timeout: int = 10) -> Optional[str]:
     """Return ``command`` if ``upscmd -l`` actually exposes it, else ``None``.
 
@@ -69,11 +72,58 @@ def discover_self_test_command(ups_name: str, command: str, *,
     UPS). A *transient* ``upscmd -l`` failure raises ``SelfTestUnavailable`` so
     the caller can retry instead of mistaking a dropped connection for an
     unsupported command (which on a 30-day cadence would skip a whole cycle).
+
+    Credentials are forwarded to ``upscmd -l`` because some upsd setups only
+    return the command list to a logged-in client — without them the list comes
+    back empty and a supported command looks unsupported.
     """
-    ok, commands, err = nutctl.list_commands(ups_name, timeout=timeout)
+    ok, commands, err = nutctl.list_commands(
+        ups_name, username=username, password=password, timeout=timeout)
     if not ok:
         raise SelfTestUnavailable(err or "upscmd -l failed")
     return command if command in commands else None
+
+
+def _with_command_allowed(nut_control, command: str):
+    """A copy of ``nut_control`` with ``command`` guaranteed on its allowlist."""
+    allowed = list(getattr(nut_control, "allowed_commands", None) or [])
+    if command and command not in allowed:
+        allowed.append(command)
+        return replace(nut_control, allowed_commands=allowed)
+    return nut_control
+
+
+def self_test_control(nut_control, self_test_cfg,
+                      command: str) -> Tuple[bool, object]:
+    """Decide whether ``command`` may be issued as a self-test, and under what
+    effective ``nut_control``. Returns ``(permitted, effective_nut_control)``.
+
+    ELI5: a self-test used to need a full key ring — flip nut_control on AND put
+    the test command on its allowlist AND turn auth on. That was three keys for
+    one door. From v6.1.2, turning ``self_test`` on is its own key that opens
+    exactly ONE door: the single command you configured in ``self_test.command``.
+    Every other control door (arbitrary commands, variable writes) still needs
+    the old key ring. Authentication is still mandatory — that lock never comes
+    off — but it is enforced by the caller / config validation, not here.
+
+    Precedence:
+      * ``self_test.enabled`` → permitted; the returned ``nut_control`` has
+        ``command`` guaranteed on its allowlist (so :func:`issue_self_test`'s
+        shared allowlist check still passes) while inheriting the configured
+        credentials / timeout unchanged.
+      * else if the GENERAL control surface already allows it
+        (``nut_control.enabled`` AND ``command`` on the allowlist) → permitted,
+        ``nut_control`` returned unchanged (v6.0/v6.1 behavior).
+      * else → not permitted.
+    """
+    if bool(getattr(self_test_cfg, "enabled", False)):
+        return True, _with_command_allowed(nut_control, command)
+    if (bool(getattr(nut_control, "enabled", False))
+            and nutctl.command_allowed(command,
+                                       getattr(nut_control, "allowed_commands",
+                                               None))):
+        return True, nut_control
+    return False, nut_control
 
 
 def issue_self_test(ups_name: str, command: str, nut_control, store, *,

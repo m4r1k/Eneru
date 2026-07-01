@@ -215,14 +215,49 @@ class TestRunSelfTestTask:
         assert mon.logs == []
 
     @pytest.mark.unit
-    def test_nut_control_disabled_is_defense_in_depth(self, store):
-        # self_test enabled but nut_control disabled -> never issue (the per-UPS
-        # override case validation can't catch).
-        cfg = _cfg("self_test:\n  enabled: true\n  command: test.battery.start\n"
+    def test_issues_without_nut_control_enabled(self, store, monkeypatch):
+        # v6.1.2: self_test is its own permission — enabling it grants exactly
+        # its command even when nut_control is disabled. When DUE, it issues, and
+        # the effective nut_control handed to issue_self_test has the command
+        # auto-allowlisted.
+        cfg = _cfg("api:\n  auth:\n    enabled: true\n"
+                   "self_test:\n  enabled: true\n  command: test.battery.start\n"
                    "ups:\n  name: U@h\n")
         mon = _make_monitor(cfg, store)
+        store.set_meta("self_test_last_run", "0")     # due now
+        captured = {}
+        monkeypatch.setattr(selftest, "discover_self_test_command",
+                            lambda *a, **k: "test.battery.start")
+
+        def _issue(ups, cmd, nc, s, source="scheduler"):
+            captured["allowed"] = list(nc.allowed_commands)
+            return {"ok": True, "test_id": 5, "error": ""}
+        monkeypatch.setattr(selftest, "issue_self_test", _issue)
         mon._run_self_test_task()
-        assert store.latest_self_test() is None
+        assert mon._self_test_pending_id == 5
+        assert "test.battery.start" in captured["allowed"]
+
+    @pytest.mark.unit
+    def test_discovery_receives_nut_control_credentials(self, store, monkeypatch):
+        # Regression: discovery must forward credentials so `upscmd -l` works on
+        # an upsd that only lists commands to a logged-in client.
+        cfg = _cfg("api:\n  auth:\n    enabled: true\n"
+                   "nut_control:\n  enabled: true\n  username: mon\n  password: mon\n"
+                   "  allowed_commands: [test.battery.start]\n"
+                   "self_test:\n  enabled: true\n  command: test.battery.start\n"
+                   "ups:\n  name: U@h\n")
+        mon = _make_monitor(cfg, store)
+        store.set_meta("self_test_last_run", "0")     # due now
+        seen = {}
+
+        def _discover(ups, command, *, username="", password="", timeout=10):
+            seen.update(username=username, password=password)
+            return command
+        monkeypatch.setattr(selftest, "discover_self_test_command", _discover)
+        monkeypatch.setattr(selftest, "issue_self_test",
+                            lambda *a, **k: {"ok": True, "test_id": 1, "error": ""})
+        mon._run_self_test_task()
+        assert seen == {"username": "mon", "password": "mon"}
 
     @pytest.mark.unit
     def test_first_sight_seeds_baseline(self, store):
@@ -431,3 +466,117 @@ class TestRunSelfTestTask:
         mon = _make_monitor(_cfg(_ENABLED), store)
         mon._run_self_test_task()
         assert store.get_meta("self_test_pending_id") == ""   # corrupt value scrubbed
+
+
+# --------------------------------------------------------------------------
+# _check_observed_self_test (v6.1.2 passive observation)
+# --------------------------------------------------------------------------
+
+class TestObservedSelfTest:
+    @pytest.mark.unit
+    def test_records_device_result(self, store):
+        # A UPS that ran its own test (device schedule / manual) is recorded even
+        # with self_test disabled — regardless of whether Eneru schedules tests.
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        mon._check_observed_self_test(
+            {"ups.test.result": "done and passed", "ups.test.date": "2026-06-02"})
+        latest = store.latest_self_test()
+        assert latest["result_enum"] == "passed"
+        assert latest["result_date"] == "2026-06-02"
+        assert latest["source"] == "device"
+        assert latest["command"] == ""       # Eneru issued nothing
+        assert any("Observed UPS self-test: passed" in m for m in mon.logs)
+
+    @pytest.mark.unit
+    def test_dedups_same_result(self, store):
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        data = {"ups.test.result": "done and passed", "ups.test.date": "2026-06-02"}
+        mon._check_observed_self_test(data)
+        first = store.latest_self_test()["id"]
+        mon._check_observed_self_test(data)               # unchanged -> no new row
+        assert store.latest_self_test()["id"] == first
+
+    @pytest.mark.unit
+    def test_new_test_records_again(self, store):
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        mon._check_observed_self_test(
+            {"ups.test.result": "done and passed", "ups.test.date": "2026-06-02"})
+        first = store.latest_self_test()["id"]
+        mon._check_observed_self_test(
+            {"ups.test.result": "done and passed", "ups.test.date": "2026-07-02"})
+        latest = store.latest_self_test()
+        assert latest["id"] != first
+        assert latest["result_date"] == "2026-07-02"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("raw", ["in progress", "No test initiated",
+                                     "not supported"])
+    def test_skips_non_terminal_results(self, store, raw):
+        # running/unknown/unsupported are churny or one-time noise — only settled
+        # pass/fail is persisted passively.
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        mon._check_observed_self_test({"ups.test.result": raw})
+        assert store.latest_self_test() is None
+
+    @pytest.mark.unit
+    def test_skips_when_no_result_or_failed_poll(self, store):
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        mon._check_observed_self_test({"battery.charge": "100"})   # UPS reports no test
+        mon._check_observed_self_test(None)                        # failed poll
+        mon._check_observed_self_test({})                          # empty
+        assert store.latest_self_test() is None
+
+    @pytest.mark.unit
+    def test_stands_down_while_eneru_test_pending(self, store):
+        # The scheduled path owns the row for a test it issued; the observer must
+        # not double-record the same result.
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        mon._self_test_pending_id = 42
+        mon._check_observed_self_test(
+            {"ups.test.result": "done and passed", "ups.test.date": "2026-06-02"})
+        assert store.latest_self_test() is None
+
+    @pytest.mark.unit
+    def test_records_without_date(self, store):
+        # Some UPSes report a result but no ups.test.date.
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        mon._check_observed_self_test({"ups.test.result": "Battery test failed"})
+        latest = store.latest_self_test()
+        assert latest["result_enum"] == "failed"
+        assert latest["result_date"] is None
+
+    @pytest.mark.unit
+    def test_no_store_is_safe(self):
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), None)
+        mon._check_observed_self_test({"ups.test.result": "done and passed"})  # no raise
+
+    @pytest.mark.unit
+    def test_observer_failure_isolated(self, store):
+        cfg = _cfg("ups:\n  name: U@h\n")
+        mon = _make_monitor(cfg, store)
+        mon._update_battery_health_periodic = lambda *a: None
+
+        def boom(_data):
+            raise RuntimeError("obs-boom")
+        mon._check_observed_self_test = boom
+        mon._run_periodic_tasks({"ups.test.result": "done and passed"})
+        assert any("self-test observer failed" in m for m in mon.logs)
+
+    @pytest.mark.unit
+    def test_scheduled_finalize_stamps_observed_key(self, store, monkeypatch):
+        # After Eneru finalises its OWN test, the observer must not re-record the
+        # same result: the finalise stamps the observer fingerprint.
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        mon._self_test_pending_id = 3
+        mon._self_test_poll_due_mono = time.monotonic() - 1
+        mon._get_ups_var = lambda var: {"ups.test.result": "done and passed",
+                                        "ups.test.date": "2026-06-02"}.get(var)
+        monkeypatch.setattr(selftest, "record_self_test_result",
+                            lambda s, tid, raw, date: "passed")
+        mon._run_self_test_task()
+        assert store.get_meta("self_test_observed_key") == "2026-06-02|done and passed"
+        # A subsequent observation of that same result is a no-op.
+        before = store.latest_self_test()
+        mon._check_observed_self_test(
+            {"ups.test.result": "done and passed", "ups.test.date": "2026-06-02"})
+        assert store.latest_self_test() == before

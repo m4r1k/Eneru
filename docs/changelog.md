@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.2] - 2026-07-01
+
+Self-test fixes driven by real UniFi UPS testing, on top of 6.1.1. No shutdown
+behavior changes.
+
+### Fixed
+
+- **Self-test discovery ignored NUT credentials.** `upscmd -l` ran anonymously,
+  so on an upsd that only lists instant commands to a logged-in client (notably
+  UniFi's NUT) discovery came back empty and a supported test looked unsupported
+  ("does not expose 'test.battery.start'"). Discovery now forwards the
+  `nut_control` credentials to `upscmd -l`, with the password kept off argv.
+  Anonymous listing is unchanged when no credentials are set.
+- **Self-test validation ignored auth-DB users.** Enabling `self_test` demanded
+  `api.auth.enabled: true` even when auth was already active because a user
+  existed in the auth DB. Validation — and the `nut_control` → auth rule — now
+  honor the same effective-auth state the API enforces at runtime.
+
+### Changed
+
+- **Self-test no longer needs the full nut_control setup.** Enabling `self_test`
+  is now its own narrow permission granting exactly `self_test.command`; you no
+  longer also have to set `nut_control.enabled` and list the command in
+  `nut_control.allowed_commands`. API authentication is still required, and the
+  general control surface (arbitrary commands, variable writes) is untouched.
+  Credentials for `upscmd` still come from `nut_control` when your upsd requires
+  a login.
+
+### Added
+
+- **Passive self-test observation.** Eneru reads `ups.test.result` /
+  `ups.test.date` on every poll and records a `source: device` result whenever a
+  new pass/fail appears, whether or not scheduled self-tests are enabled. A UPS
+  that tests on its own cadence, or one you test by hand, now surfaces in the
+  dashboard, API, Prometheus, and the battery-health score with no configuration.
+  This path is covered end-to-end; issuing a test still is not, as the dummy NUT
+  driver has no INSTCMD.
+- **Daemon version + runtime in the dashboard footer.** The footer shows the
+  running Eneru version and where it runs (baremetal / container / Kubernetes)
+  ahead of the update time. Both are top-level fields in `GET /api/v1/ups`:
+  `version` (new) and `runtimeContext` (mirrors the existing `runtime.context`).
+
+---
+
 ## [6.1.1] - 2026-06-30
 
 Dashboard UX polish and bug fixes on top of 6.1.0. No config, API, or shutdown

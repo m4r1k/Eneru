@@ -135,6 +135,15 @@ jobs:
             grep -q "Test 56: Event management" tests/e2e/groups/single-ups-auth.sh
           fi
 
+      - name: Verify v6.1.2 self-test E2E coverage is wired
+        if: matrix.group == 'single-ups-auth'
+        run: |
+          # v6.1.2 wiring guard: passive self-test observation + softened
+          # permission (self_test without nut_control; effective auth via DB
+          # user) must stay present, and the scenario file it depends on.
+          grep -q "Test 57: self-test passive observation" tests/e2e/groups/single-ups-auth.sh
+          grep -q "^ups.test.result:" tests/e2e/scenarios/self-test-passed.dev
+
       - name: Collect logs on failure
         if: failure()
         run: |

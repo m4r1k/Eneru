@@ -1,0 +1,28 @@
+# Scenario: Online + the UPS reports its OWN last self-test result.
+# Used by the v6.1.2 passive self-test observation E2E: Eneru must read
+# ups.test.result / ups.test.date during normal polling and record a
+# `source=device` self_tests row (no INSTCMD issued), regardless of whether
+# scheduled self-tests are enabled. The dummy-ups driver has no INSTCMD, so
+# this is the only way to exercise self-test state end-to-end.
+ups.status: OL CHRG
+ups.load: 25
+
+battery.charge: 100
+battery.runtime: 1800
+battery.voltage: 54.0
+
+input.voltage: 230.5
+input.voltage.nominal: 230
+input.frequency: 50.0
+input.transfer.low: 170
+input.transfer.high: 280
+
+output.voltage: 230.0
+
+# The UPS's own self-test bookkeeping (device schedule / manual test).
+ups.test.result: done and passed
+ups.test.date: 2026-06-02
+ups.test.interval: 2592000
+
+device.mfr: Eneru
+device.model: E2E Test UPS

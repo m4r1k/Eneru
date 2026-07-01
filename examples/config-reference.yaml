@@ -216,11 +216,18 @@ battery_health:
     min_history_days: 14
 
 # ==============================================================================
-# SELF-TEST (v6.1) — scheduled UPS battery self-test
+# SELF-TEST (v6.1) — UPS battery self-test
 # ==============================================================================
-# A WRITE surface like nut_control: enabling it requires nut_control.enabled AND
-# api.auth.enabled AND that `command` is in nut_control.allowed_commands, so a
-# scheduled test can never bypass the control allowlist. See docs/self-test.md.
+# Two things (see docs/self-test.md):
+#  * OBSERVE — with NO config, Eneru reads ups.test.result / ups.test.date every
+#    poll and records a `source: device` result (a test the UPS ran on its own or
+#    that you triggered by hand). Surfaced in the dashboard/API/Prometheus.
+#  * ISSUE (below) — a WRITE surface. It requires API authentication (either
+#    api.auth.enabled OR a user in the auth DB). Enabling self_test is its OWN
+#    narrow permission that grants exactly `command` — you do NOT also need
+#    nut_control.enabled or that command in nut_control.allowed_commands. If your
+#    upsd requires a login for upscmd, set nut_control.username/password (the
+#    command list and issue calls use them).
 self_test:
   enabled: false
   # daily | weekly | monthly, or "every <N>d/h/m" (e.g. "every 30d").
@@ -228,7 +235,7 @@ self_test:
   # Wall-clock time for calendar schedules (HH:MM, daemon local time).
   time: "03:00"
   # The instant command to issue. Adapts to whatever `upscmd -l` exposes; many
-  # UPSes only support `test.battery.start`. Must be on the control allowlist.
+  # UPSes only support `test.battery.start`. Enabling self_test auto-permits it.
   command: test.battery.start
   # Seconds to wait after issuing before polling ups.test.result.
   result_poll_after: 60

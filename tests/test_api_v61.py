@@ -49,6 +49,18 @@ class TestSelfTestApiResolution:
             "ups:\n  name: U@h\n")
         paths = {e["path"] for e in h._available_endpoints()}
         assert "/api/v1/ups/{name}/self-test" in paths
+
+    @pytest.mark.unit
+    def test_self_test_endpoint_visible_when_self_test_enabled_without_nut_control(self):
+        # v6.1.2: self_test enabled advertises the endpoint even with nut_control
+        # off — enabling self_test is its own permission.
+        h = object.__new__(EneruAPIHandler)
+        h.api_config = _parse_cfg(
+            "api:\n  auth:\n    enabled: true\n"
+            "self_test:\n  enabled: true\n  command: test.battery.start\n"
+            "ups:\n  name: U@h\n")
+        paths = {e["path"] for e in h._available_endpoints()}
+        assert "/api/v1/ups/{name}/self-test" in paths
 from eneru.monitor import UPSGroupMonitor
 from eneru.state import MonitorState
 from eneru.stats import StatsStore

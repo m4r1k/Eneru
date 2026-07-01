@@ -32,7 +32,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 SCHEMA_VERSION = 1
@@ -375,6 +375,39 @@ class AuthStore:
             )
         return {"id": row["id"], "label": row["label"], "role": row["role"],
                 "kind": "api_key"}
+
+
+def auth_is_active(auth_cfg: Any) -> bool:
+    """Whether API authentication is effectively enforced for ``auth_cfg``.
+
+    ELI5: the config file is one light switch, the account book is another.
+    Auth is "on" if the operator flicked the switch (``api.auth.enabled``,
+    true *or* false, always wins) OR — when they never touched the switch —
+    the account book already has at least one name in it. So "create a user,
+    then just sign in" works with no restart and no config edit.
+
+    Shared by the API request path AND config validation so both agree on the
+    same effective state (a user in the DB is enough; the raw ``enabled`` flag
+    is not the only source of truth). The DB is never created as a side effect
+    of the check; once the DB file exists, a broken/unreadable DB fails closed
+    to "active" so writes keep demanding credentials rather than silently
+    reopening.
+    """
+    if auth_cfg is None:
+        return False
+    if getattr(auth_cfg, "enabled_explicitly_set", False):
+        return bool(auth_cfg.enabled)
+    if getattr(auth_cfg, "enabled", False):
+        return True
+    db_path = getattr(auth_cfg, "db_path", None)
+    if not db_path:
+        return False
+    try:
+        if not os.path.exists(db_path):
+            return False
+        return AuthStore(db_path).user_count() > 0
+    except Exception:
+        return True
 
 
 def _validate_username(username: str) -> str:

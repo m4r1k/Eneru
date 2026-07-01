@@ -85,6 +85,18 @@ def _validated_auth_command_argv(cmd: List[str]) -> Tuple[Optional[List[str]], s
     binary = cmd[0]
     args = cmd[1:]
     if binary == "upscmd":
+        # Authenticated LIST: `upscmd -u user -l ups`. Some upsd setups (e.g.
+        # UniFi's NUT) only return the instant-command list to a logged-in
+        # client, so listing must be able to carry credentials just like an
+        # INSTCMD. `-l` is a fixed literal we control (never validated as data).
+        if len(args) == 4 and args[0] == "-u" and args[2] == "-l":
+            username, error = _safe_auth_data_arg(args[1])
+            if error:
+                return None, error
+            ups_name, error = _safe_auth_data_arg(args[3])
+            if error:
+                return None, error
+            return ["upscmd", "-u", username, "-l", ups_name], ""
         if len(args) == 2:
             ups_name, error = _safe_auth_data_arg(args[0])
             if error:
@@ -160,6 +172,15 @@ def _popen_validated_auth_command(
         if len(safe_cmd) == 3:
             return subprocess.Popen(
                 ["upscmd", safe_cmd[1], safe_cmd[2]],
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+            )
+        if safe_cmd[3] == "-l":
+            # Authenticated list: upscmd -u user -l ups (keep -l a literal).
+            return subprocess.Popen(
+                ["upscmd", "-u", safe_cmd[2], "-l", safe_cmd[4]],
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
@@ -285,12 +306,22 @@ def _run_auth_command(
                     pass
 
 
-def list_commands(ups_name: str, *, timeout: int = 10) -> Tuple[bool, List[str], str]:
+def list_commands(ups_name: str, *, username: str = "", password: str = "",
+                  timeout: int = 10) -> Tuple[bool, List[str], str]:
     """Return the instant commands a UPS supports (``upscmd -l``).
 
-    Listing needs no credentials. Returns ``(ok, commands, error)``.
+    Returns ``(ok, commands, error)``. Pass ``username``/``password`` when the
+    upsd requires a logged-in client to list commands — some setups (notably
+    UniFi's NUT) return an EMPTY list to an anonymous ``upscmd -l``, which would
+    otherwise look like "the UPS doesn't expose the command". When both are
+    given the credentialed PTY path is used (password never on argv); otherwise
+    it falls back to an anonymous listing (unchanged v6.0 behavior).
     """
-    code, out, err = run_command(["upscmd", "-l", ups_name], timeout=timeout)
+    if username and password:
+        code, out, err = _run_auth_command(
+            ["upscmd", "-u", username, "-l", ups_name], password, timeout=timeout)
+    else:
+        code, out, err = run_command(["upscmd", "-l", ups_name], timeout=timeout)
     if code != 0:
         return False, [], (err.strip() or out.strip() or f"upscmd exited {code}")
     return True, _parse_command_list(out), ""
