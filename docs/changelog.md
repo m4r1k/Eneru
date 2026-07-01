@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.3] - 2026-07-01
+
+Two self-test bug fixes on top of 6.1.2, from live UniFi hardware. No shutdown
+behavior changes.
+
+### Fixed
+
+- **Self-test "does not expose" on UPSes that list commands without
+  descriptions.** `upscmd -l` was only parsed in the standard
+  `name - description` form, so a UPS that lists bare command names (e.g.
+  Ubiquiti/UniFi: `test.battery.start` with no description) produced an empty
+  list — a supported command looked unsupported and every Run-self-test failed.
+  The parser now accepts both the described and description-less forms while
+  still rejecting the header and prose lines. (The 6.1.2 credentialed-`upscmd -l`
+  change fixed a different case; this is the one that affected UniFi.)
+- **Duplicated "Last self-test" on the Battery tab.** Once 6.1.2 began recording
+  device results, the battery-health card showed self-test twice — as a
+  score-factor meter and again as the actual result. It now appears once, as the
+  "Passed/Failed · date" result (the same duplication in the detail modal is gone
+  too).
+
+---
+
 ## [6.1.2] - 2026-07-01
 
 Self-test fixes driven by real UniFi UPS testing, on top of 6.1.1. No shutdown

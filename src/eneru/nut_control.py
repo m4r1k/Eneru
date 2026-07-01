@@ -330,17 +330,29 @@ def list_commands(ups_name: str, *, username: str = "", password: str = "",
 def _parse_command_list(text: str) -> List[str]:
     """Extract command names from ``upscmd -l`` output.
 
-    Lines look like ``  beeper.toggle - Toggle the UPS beeper``; the header line
-    ``Instant commands supported on UPS ...:`` has no `` - `` token.
+    Two formats occur in the wild:
+      * standard NUT drivers: ``  beeper.toggle - Toggle the UPS beeper``
+      * description-less (e.g. Ubiquiti/UniFi): bare ``test.battery.start``
+    Take the FIRST whitespace-delimited token of each line — the command name in
+    BOTH shapes — and keep it only if it looks like a NUT instant command (dotted
+    lowercase). The header line ``Instant commands supported on UPS ...:`` and any
+    blank lines fall out because their first token isn't a valid command name.
+    (Earlier versions required a `` - `` separator and so returned NOTHING for the
+    description-less format, making a supported command look unsupported.)
     """
     commands: List[str] = []
     for line in text.splitlines():
         line = line.strip()
-        if " - " not in line:
+        if not line:
             continue
-        name = line.split(" - ", 1)[0].strip()
+        # Standard "name - description": take the part before the separator.
+        # Description-less: the WHOLE line must itself be the command name — so a
+        # bare "test.battery.start" is accepted while prose ("noise line without
+        # separator", the "Instant commands..." header) is rejected because it
+        # isn't a single command token.
+        name = line.split(" - ", 1)[0].strip() if " - " in line else line
         # A NUT instant command is dotted lowercase tokens (e.g. test.battery.start).
-        if name and re.fullmatch(r"[a-z0-9.+-]+", name):
+        if re.fullmatch(r"[a-z0-9.+-]+", name):
             commands.append(name)
     return commands
 
