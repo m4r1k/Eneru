@@ -59,6 +59,44 @@ def test_list_commands_failure(monkeypatch):
 
 
 @pytest.mark.unit
+def test_parse_command_list_bare_names():
+    # Regression (v6.1.3): Ubiquiti/UniFi lists commands with NO " - description"
+    # suffix. The pre-6.1.3 parser required " - " and returned NOTHING here,
+    # making a supported command look unsupported ("does not expose").
+    raw = ("Instant commands supported on UPS [ups]:\n\n"
+           "test.battery.start\nload.off\nload.on\nshutdown.reboot\n")
+    assert nc._parse_command_list(raw) == [
+        "test.battery.start", "load.off", "load.on", "shutdown.reboot"]
+
+
+@pytest.mark.unit
+def test_parse_command_list_standard_format_still_works():
+    raw = ("Instant commands supported on UPS [ups]:\n\n"
+           "  beeper.toggle - Toggle the UPS beeper\n"
+           "  test.battery.start - Start a battery test\n")
+    assert nc._parse_command_list(raw) == ["beeper.toggle", "test.battery.start"]
+
+
+@pytest.mark.unit
+def test_parse_command_list_skips_header_and_blanks():
+    assert nc._parse_command_list("") == []
+    # Header-only (no command tokens) yields nothing — the header's first token
+    # "Instant" is not a valid dotted-lowercase command name.
+    assert nc._parse_command_list(
+        "Instant commands supported on UPS [ups]:\n\n") == []
+
+
+@pytest.mark.unit
+def test_list_commands_bare_format_end_to_end(monkeypatch):
+    monkeypatch.setattr(
+        nc, "run_command",
+        lambda cmd, timeout=10:
+            (0, "Instant commands supported on UPS [ups]:\n\ntest.battery.start\n", ""))
+    ok, commands, _ = nc.list_commands("UPS@h")
+    assert ok and commands == ["test.battery.start"]
+
+
+@pytest.mark.unit
 def test_list_commands_anonymous_when_no_creds(monkeypatch):
     # With no credentials, listing stays on the plain (anonymous) runner.
     captured = {}

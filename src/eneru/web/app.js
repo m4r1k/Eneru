@@ -578,7 +578,7 @@ function closeDetail() {
 
 const BH_TERM_LABELS = {
   capacity: "Capacity trend", runtime: "Runtime vs nominal",
-  self_test: "Last self-test", anomaly: "Anomalies", age: "Battery age",
+  anomaly: "Anomalies", age: "Battery age",
 };
 const BH_TERM_HELP = {
   capacity: "Runtime trend over time vs the nominal full runtime. Needs about "
@@ -586,7 +586,6 @@ const BH_TERM_HELP = {
     + "than guessing (a few days of jitter would otherwise look like total loss).",
   runtime: "Current runtime under load vs the expected full runtime. n/a until "
     + "the nominal runtime is configured or learned at a full charge.",
-  self_test: "Result of the latest battery self-test — only a pass or fail counts.",
   anomaly: "Confirmed battery anomalies; each one lowers the score.",
   age: "Battery age vs its expected service life (set battery_install_date and "
     + "expected_life_years).",
@@ -614,8 +613,11 @@ function batteryHealthRows(bh, opts) {
     rows.push(detailRow("Replace in", "~" + Math.round(bh.replacementDaysRemaining) + " days"));
   }
   // Per-term breakdown: each sub-score (0-100) or n/a when that term has no data.
+  // NOTE: self_test is deliberately NOT a meter here — it's shown once as its
+  // actual "Passed/Failed · date" result (Battery tab row + detail modal
+  // section). A 0-100 self-test bar duplicated that under the same label.
   const terms = bh.terms || {};
-  ["capacity", "runtime", "self_test", "anomaly", "age"].forEach((k) => {
+  ["capacity", "runtime", "anomaly", "age"].forEach((k) => {
     if (!(k in terms)) return;
     const v = terms[k];
     // Each factor gets a small 0-100 meter next to its number, so "why is the
