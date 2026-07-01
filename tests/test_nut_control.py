@@ -117,6 +117,27 @@ def test_validated_auth_command_list_rejects_bad_data_positions():
 
 
 @pytest.mark.unit
+def test_popen_credentialed_list_builds_literal_argv(monkeypatch):
+    # The authenticated-list spawn site must keep `-l` a literal and place the
+    # validated username/ups in fixed positions (CodeQL invariant). Stub Popen
+    # so nothing actually execs.
+    captured = {}
+
+    class _FakeProc:
+        pass
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        return _FakeProc()
+
+    monkeypatch.setattr(nc.subprocess, "Popen", fake_popen)
+    proc = nc._popen_validated_auth_command(
+        ["upscmd", "-u", "mon", "-l", "UPS@h"], slave_fd=5)
+    assert isinstance(proc, _FakeProc)
+    assert captured["argv"] == ["upscmd", "-u", "mon", "-l", "UPS@h"]
+
+
+@pytest.mark.unit
 def test_run_instant_command_does_not_put_password_in_argv(monkeypatch):
     captured = {}
 
