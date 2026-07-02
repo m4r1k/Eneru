@@ -637,18 +637,12 @@ function renderRedundancy() {
   const all = scopeIsAll();
   if (!all) groups = groups.filter((g) => (g.upsSources || []).includes(currentScope()));
   gwrap.replaceChildren();
-  // The "configure redundancy groups" hint only makes sense in the fleet view
-  // (All UPS, >1 UPS, none configured); a scoped view just hides the section.
-  gsec.hidden = groups.length === 0 && !(all && rows.length > 1);
-  if (groups.length === 0) {
-    if (all && rows.length > 1) {
-      gwrap.appendChild(el("div", { class: "card" }, [
-        el("p", { class: "chart-note", text: "No redundancy groups configured. "
-          + "Group UPSes so a shutdown only triggers when quorum is lost — see the "
-          + "redundancy-groups docs." })]));
-    }
-    return;
-  }
+  // Only surface the Redundancy section when groups are actually configured.
+  // The vast majority run independent UPSes, for whom an empty "configure
+  // redundancy groups" hint is permanent noise on the Overview — hide it
+  // entirely rather than advertising a feature they haven't opted into.
+  gsec.hidden = groups.length === 0;
+  if (groups.length === 0) return;
   groups.forEach((g) => {
     const sources = g.upsSources || [];
     const healthy = groupHealthyCount(g, rows);
@@ -801,8 +795,9 @@ const BH_TERM_HELP = {
   runtime: "Current runtime under load vs the expected full runtime. n/a until "
     + "the nominal runtime is configured or learned at a full charge.",
   anomaly: "Confirmed battery anomalies; each one lowers the score.",
-  age: "Battery age vs its expected service life (set battery_install_date and "
-    + "expected_life_years).",
+  age: "Battery age vs its expected service life. Higher is younger; a low "
+    + "score means the battery is near or past its expected life. Set this "
+    + "UPS's own battery_install_date + expected_life_years (they're per-UPS).",
 };
 
 // Build the v6.1 battery-health rows shared by the detail modal and the Battery
@@ -850,6 +845,14 @@ function batteryHealthRows(bh, opts) {
       fill.style.setProperty("--w", pct + "%");
       value.appendChild(el("span", { class: "term-meter" }, [fill]));
       value.appendChild(el("b", { class: cls, text: String(Math.round(v)) }));
+    }
+    // Age is the one sub-score that inverts intuition: "0" means OLD (past its
+    // expected life), not new. Show the actual age next to it so a low number
+    // reads as "worn out", not "brand new / not reported".
+    if (k === "age" && bh.ageYears != null) {
+      value.appendChild(el("span", { class: "term-age",
+        text: "~" + bh.ageYears.toFixed(1) + " yr"
+          + (bh.expectedLifeYears ? " / " + bh.expectedLifeYears + " yr" : "") }));
     }
     rows.push(el("div", { class: "row term-row" }, [
       el("span", { class: "label-tip" },

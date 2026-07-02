@@ -330,6 +330,10 @@ class BatteryMonitorMixin:
             min_history_days=min_history_days,
         )
         score, confidence, available = prediction.composite_score(terms)
+        # Carry the raw age alongside the 0-100 age sub-score so the UI can show
+        # "this battery is ~N years old" — a bare age score of 0 otherwise reads
+        # like "brand new" when it actually means "past its expected life".
+        age_years = prediction.battery_age_years(cfg.battery_install_date, now)
         return {
             "score": score,
             "confidence": round(confidence, 3),
@@ -337,6 +341,9 @@ class BatteryMonitorMixin:
             "terms": terms,
             "runtime_s": runtime_s,
             "nominalRuntime": nominal,
+            "installDate": cfg.battery_install_date,
+            "expectedLifeYears": cfg.expected_life_years,
+            "ageYears": round(age_years, 2) if age_years is not None else None,
             "ts": int(now),
         }
 

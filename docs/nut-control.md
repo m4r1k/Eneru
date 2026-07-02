@@ -105,3 +105,8 @@ ups:
       allowed_commands: [test.battery.start, beeper.toggle]
   - name: "UPS2@hostB"     # no override -> uses the global credentials
 ```
+
+`self_test` and `battery_health` are per-UPS overridable the same way — set
+`self_test.command` per device (vendors differ; see [self-test.md](self-test.md))
+and give each battery its own `battery_health.battery_install_date`. A complete,
+copy-pasteable multi-UPS block lives in `examples/config-reference.yaml`.

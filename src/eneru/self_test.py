@@ -22,10 +22,12 @@ __all__ = [
     "SelfTestUnavailable",
     "discover_self_test_command",
     "issue_self_test",
+    "list_supported_commands",
     "normalize_result",
     "parse_schedule",
     "record_self_test_result",
     "self_test_control",
+    "test_command_candidates",
 ]
 
 
@@ -63,6 +65,39 @@ def normalize_result(raw: Optional[str]) -> str:
     return "unknown"
 
 
+def list_supported_commands(ups_name: str, *,
+                            username: str = "", password: str = "",
+                            timeout: int = 10) -> list:
+    """Return the instant commands ``upscmd -l`` exposes for this UPS.
+
+    A *transient* ``upscmd -l`` failure raises ``SelfTestUnavailable`` (distinct
+    from an empty-but-successful list) so callers can retry instead of mistaking
+    a dropped connection for "nothing supported".
+
+    Credentials are forwarded because some upsd setups only return the command
+    list to a logged-in client — without them the list comes back empty and a
+    supported command looks unsupported.
+    """
+    ok, commands, err = nutctl.list_commands(
+        ups_name, username=username, password=password, timeout=timeout)
+    if not ok:
+        raise SelfTestUnavailable(err or "upscmd -l failed")
+    return commands
+
+
+def test_command_candidates(commands) -> list:
+    """The startable battery-test commands from an ``upscmd -l`` list.
+
+    Powers a "did you mean" hint when the configured ``self_test.command`` isn't
+    offered: many UPSes (e.g. APC via usbhid-ups) expose
+    ``test.battery.start.quick`` / ``test.battery.start.deep`` but NOT the bare
+    ``test.battery.start`` default. ``test.battery.stop`` is excluded — it ends a
+    test, it doesn't start one.
+    """
+    return sorted(c for c in (commands or [])
+                  if c.startswith("test.") and "start" in c)
+
+
 def discover_self_test_command(ups_name: str, command: str, *,
                                username: str = "", password: str = "",
                                timeout: int = 10) -> Optional[str]:
@@ -72,15 +107,9 @@ def discover_self_test_command(ups_name: str, command: str, *,
     UPS). A *transient* ``upscmd -l`` failure raises ``SelfTestUnavailable`` so
     the caller can retry instead of mistaking a dropped connection for an
     unsupported command (which on a 30-day cadence would skip a whole cycle).
-
-    Credentials are forwarded to ``upscmd -l`` because some upsd setups only
-    return the command list to a logged-in client — without them the list comes
-    back empty and a supported command looks unsupported.
     """
-    ok, commands, err = nutctl.list_commands(
+    commands = list_supported_commands(
         ups_name, username=username, password=password, timeout=timeout)
-    if not ok:
-        raise SelfTestUnavailable(err or "upscmd -l failed")
     return command if command in commands else None
 
 

@@ -35,6 +35,19 @@ release; no config or shutdown behavior changes.
   a UPS reports too little AC telemetry to judge.
 - Self-test result casing, a duplicated Config heading, and config-card spacing
   for long UPS names.
+- **Self-test "command not exposed" is now actionable.** When the configured
+  `self_test.command` isn't offered by a UPS — e.g. APC (via `usbhid-ups`) exposes
+  `test.battery.start.quick` / `.deep`, not the bare `test.battery.start` — the API
+  and CLI now list the battery-test commands the UPS *does* expose so you can set
+  the right one (per-UPS in multi-UPS mode).
+- **Battery age no longer looks broken.** The age factor is a 0-100 sub-score where
+  `0` means "at/past expected life"; the Battery view now shows the actual age
+  (e.g. "~10.0 yr / 5 yr") beside it, so a low score reads as a worn battery rather
+  than "0 = new / not reported". Age is per-UPS: a UPS without its own
+  `battery_install_date` reads "n/a" instead of borrowing another battery's date.
+- The empty **"no redundancy groups configured" hint is gone** from Overview for
+  the majority who run independent UPSes; the section now appears only when
+  redundancy groups actually exist.
 
 ### Changed
 
@@ -59,6 +72,10 @@ release; no config or shutdown behavior changes.
   narrow-viewport handling.
 - The API listen backlog is raised so bursts of concurrent dashboard requests
   aren't refused.
+- Documented per-UPS overrides (credentials, self-test command, battery install
+  date) with a copy-pasteable multi-UPS example in the config reference and the
+  nut-control / self-test guides — the capability already existed but was easy to
+  miss.
 
 ### Notes
 

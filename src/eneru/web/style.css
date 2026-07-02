@@ -328,6 +328,8 @@ footer { padding: 0.6rem 1.25rem; color: var(--muted); font-size: 0.85rem;
 .term-meter-fill.ok { background: var(--ok); }
 .term-meter-fill.warn { background: var(--warn); }
 .term-meter-fill.crit { background: var(--crit); }
+/* Actual battery age shown beside the age sub-score so "0" reads as "old". */
+.term-age { color: var(--muted); font-size: 0.85em; white-space: nowrap; }
 .graph .area.bh { fill: var(--accent-weak); }
 meter.bar.ok::-webkit-meter-optimum-value { background: var(--ok); }
 meter.bar.warn::-webkit-meter-optimum-value { background: var(--warn); }

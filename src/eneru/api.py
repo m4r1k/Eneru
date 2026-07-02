@@ -937,17 +937,24 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         # API honors the same "self-disable if unsupported" contract the docs
         # promise rather than letting NUT reject it after the fact.
         try:
-            exposed = selftest.discover_self_test_command(
-                real, command, username=nc.username, password=nc.password,
+            supported = selftest.list_supported_commands(
+                real, username=nc.username, password=nc.password,
                 timeout=nc.timeout)
         except selftest.SelfTestUnavailable as exc:
             self._audit(principal, "self-test", f"{real}:{command}", "failed")
             return 502, "application/json", self._error("NUT_ERROR", str(exc))
-        if exposed is None:
+        if command not in supported:
             self._audit(principal, "self-test", f"{real}:{command}", "failed")
+            # Point the operator at what this UPS actually offers — many devices
+            # expose test.battery.start.quick/.deep, not the bare default — so a
+            # 422 is actionable ("set self_test.command to X") not a dead end.
+            candidates = selftest.test_command_candidates(supported)
+            hint = (" Available battery-test commands: " + ", ".join(candidates)
+                    + " — set this UPS's self_test.command to one of them."
+                    ) if candidates else ""
             return 422, "application/json", self._error(
                 "UNSUPPORTED",
-                f"UPS {real} does not expose {command!r} (upscmd -l)")
+                f"UPS {real} does not expose {command!r} (upscmd -l).{hint}")
         # A self-test must record a `running` row so its result can be finalised
         # later; without an open stats store it would orphan that state, so
         # refuse (mirrors the CLI --direct and scheduler guards). A store that

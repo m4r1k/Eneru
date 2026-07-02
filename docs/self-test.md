@@ -37,6 +37,19 @@ for that UPS with a logged warning. Note that some upsd setups (notably UniFi's
 NUT) only return the command list to a **logged-in** client — Eneru forwards the
 `nut_control` credentials to `upscmd -l` so discovery works there.
 
+**The command name varies by vendor.** The `test.battery.start` default is not
+universal: APC devices via the `usbhid-ups` driver expose
+`test.battery.start.quick` and `test.battery.start.deep` (plus
+`test.battery.stop`) but **not** the bare `test.battery.start`. When the
+configured command isn't offered, the CLI and the API's 422 response now list
+the battery-test commands the UPS *does* expose, so you can set `self_test.command`
+to the right one. Run `upscmd -l <ups>` yourself to see the full list.
+
+**Multi-UPS:** the self-test command is per-UPS. When UPSes live on different
+upsd servers, set `self_test.command` (and, if that upsd needs a login,
+`nut_control.username` / `password`) under each `ups:` list entry — see the
+multi-UPS example in `examples/config-reference.yaml`.
+
 ## Configuration
 
 ```yaml

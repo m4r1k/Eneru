@@ -82,6 +82,21 @@ class TestCompute:
         assert "runtime" in health["availableTerms"]
         assert "self_test" in health["availableTerms"]
         assert "age" in health["availableTerms"]
+        # v6.1.4: the raw age is carried alongside the sub-score so the UI can
+        # explain a low age term ("~1.0 yr / 5 yr") instead of a bare "0".
+        assert health["installDate"] == "2025-06-01"
+        assert health["expectedLifeYears"] == 5
+        assert health["ageYears"] == pytest.approx(1.0, abs=0.05)
+
+    @pytest.mark.unit
+    def test_age_fields_unavailable_without_install_date(self, store):
+        cfg = _config("ups:\n  name: U@h\n"
+                      "battery_health:\n  battery_install_date: null\n")
+        mon = _Mon(cfg, store)
+        health = mon._compute_battery_health(cfg.battery_health, time.time())
+        assert health["installDate"] is None
+        assert health["ageYears"] is None
+        assert "age" not in health["availableTerms"]
 
     @pytest.mark.unit
     def test_nominal_runtime_learned_at_full_charge(self, store):

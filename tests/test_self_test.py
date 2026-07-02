@@ -105,6 +105,43 @@ class TestDiscover:
 
 
 # --------------------------------------------------------------------------
+# list_supported_commands / test_command_candidates (v6.1.4 "did you mean")
+# --------------------------------------------------------------------------
+
+class TestCandidates:
+    @pytest.mark.unit
+    def test_list_supported_returns_full_list(self, monkeypatch):
+        monkeypatch.setattr(
+            self_test.nutctl, "list_commands",
+            lambda ups, username="", password="", timeout=10:
+                (True, ["beeper.toggle", "test.battery.start.quick"], ""))
+        assert self_test.list_supported_commands("U@h") == [
+            "beeper.toggle", "test.battery.start.quick"]
+
+    @pytest.mark.unit
+    def test_list_supported_raises_on_transient_failure(self, monkeypatch):
+        monkeypatch.setattr(
+            self_test.nutctl, "list_commands",
+            lambda ups, username="", password="", timeout=10: (False, [], "boom"))
+        with pytest.raises(self_test.SelfTestUnavailable):
+            self_test.list_supported_commands("U@h")
+
+    @pytest.mark.unit
+    def test_candidates_are_startable_tests_only(self):
+        # APC-style list: quick/deep are candidates; stop (ends a test) and
+        # non-test commands are not.
+        cmds = ["beeper.enable", "load.off", "test.battery.start.deep",
+                "test.battery.start.quick", "test.battery.stop"]
+        assert self_test.test_command_candidates(cmds) == [
+            "test.battery.start.deep", "test.battery.start.quick"]
+
+    @pytest.mark.unit
+    def test_candidates_empty_when_no_tests(self):
+        assert self_test.test_command_candidates(["beeper.toggle"]) == []
+        assert self_test.test_command_candidates(None) == []
+
+
+# --------------------------------------------------------------------------
 # self_test_control (v6.1.2 narrow permission)
 # --------------------------------------------------------------------------
 

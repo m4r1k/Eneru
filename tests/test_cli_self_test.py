@@ -194,8 +194,8 @@ class TestRunDirect:
         monkeypatch.setattr(cli, "_load_config", lambda a: _config(SINGLE))
         monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: _FakeStore())
         from eneru import self_test as st
-        monkeypatch.setattr(st, "discover_self_test_command",
-                            lambda *a, **k: "test.battery.start")
+        monkeypatch.setattr(st, "list_supported_commands",
+                            lambda *a, **k: ["test.battery.start"])
         monkeypatch.setattr(st, "issue_self_test",
                             lambda *a, **k: {"ok": True, "test_id": 1, "error": ""})
         cli._cmd_self_test_run(_args(direct=True))
@@ -209,8 +209,8 @@ class TestRunDirect:
         monkeypatch.setattr(cli, "_load_config", lambda a: _config(SINGLE))
         monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: None)
         from eneru import self_test as st
-        monkeypatch.setattr(st, "discover_self_test_command",
-                            lambda *a, **k: "test.battery.start")
+        monkeypatch.setattr(st, "list_supported_commands",
+                            lambda *a, **k: ["test.battery.start"])
         called = {"issued": False}
         monkeypatch.setattr(
             st, "issue_self_test",
@@ -241,13 +241,17 @@ class TestRunDirect:
         assert e.value.code == 2
 
     @pytest.mark.unit
-    def test_command_not_exposed_exits(self, monkeypatch):
+    def test_command_not_exposed_exits(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_load_config", lambda a: _config(SINGLE))
         from eneru import self_test as st
-        monkeypatch.setattr(st, "discover_self_test_command", lambda *a, **k: None)
+        # The UPS exposes quick, not the configured bare command: the CLI exits
+        # non-zero AND prints the available startable tests to guide the fix.
+        monkeypatch.setattr(st, "list_supported_commands",
+                            lambda *a, **k: ["test.battery.start.quick", "beeper.toggle"])
         with pytest.raises(SystemExit) as e:
             cli._cmd_self_test_run(_args(direct=True))
         assert e.value.code == 1
+        assert "test.battery.start.quick" in capsys.readouterr().out
 
     @pytest.mark.unit
     def test_direct_uses_per_ups_command(self, monkeypatch):
@@ -260,13 +264,13 @@ class TestRunDirect:
         monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: _FakeStore())
         from eneru import self_test as st
         seen = {}
+        monkeypatch.setattr(st, "list_supported_commands",
+                            lambda *a, **k: ["test.battery.start.quick"])
 
-        def _disc(name, cmd, **k):
+        def _issue(name, cmd, nc, store, **k):
             seen["cmd"] = cmd
-            return cmd
-        monkeypatch.setattr(st, "discover_self_test_command", _disc)
-        monkeypatch.setattr(st, "issue_self_test",
-                            lambda *a, **k: {"ok": True, "test_id": 1, "error": ""})
+            return {"ok": True, "test_id": 1, "error": ""}
+        monkeypatch.setattr(st, "issue_self_test", _issue)
         cli._cmd_self_test_run(_args(ups="U1@h", direct=True))
         assert seen["cmd"] == "test.battery.start.quick"   # per-UPS override, not global
 
@@ -285,15 +289,15 @@ class TestRunDirect:
             "    nut_control:\n      enabled: true\n"
             "      allowed_commands: [test.battery.start]\n")
         monkeypatch.setattr(cli, "_load_config", lambda a: cfg)
-        called = {"discover": False}
+        called = {"listed": False}
         from eneru import self_test as st
         monkeypatch.setattr(
-            st, "discover_self_test_command",
-            lambda *a, **k: called.__setitem__("discover", True) or "x")
+            st, "list_supported_commands",
+            lambda *a, **k: called.__setitem__("listed", True) or ["x"])
         with pytest.raises(SystemExit) as e:
             cli._cmd_self_test_run(_args(ups="U1@h", direct=True))
         assert e.value.code == 2
-        assert called["discover"] is False   # never got past the enabled gate
+        assert called["listed"] is False   # never got past the enabled gate
 
     @pytest.mark.unit
     def test_direct_per_ups_override_inherits_global_enabled(self, monkeypatch):
@@ -312,8 +316,8 @@ class TestRunDirect:
         monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: _FakeStore())
         from eneru import self_test as st
         seen = {}
-        monkeypatch.setattr(st, "discover_self_test_command",
-                            lambda *a, **k: "test.battery.start")
+        monkeypatch.setattr(st, "list_supported_commands",
+                            lambda *a, **k: ["test.battery.start"])
 
         def _issue(name, cmd, nc, store, **k):
             seen["enabled"] = nc.enabled
@@ -329,8 +333,8 @@ class TestRunDirect:
         monkeypatch.setattr(cli, "_load_config", lambda a: _config(SINGLE))
         monkeypatch.setattr(cli, "_open_stats_store", lambda c, g: _FakeStore())
         from eneru import self_test as st
-        monkeypatch.setattr(st, "discover_self_test_command",
-                            lambda *a, **k: "test.battery.start")
+        monkeypatch.setattr(st, "list_supported_commands",
+                            lambda *a, **k: ["test.battery.start"])
         monkeypatch.setattr(st, "issue_self_test",
                             lambda *a, **k: {"ok": False, "test_id": None, "error": "nope"})
         with pytest.raises(SystemExit) as e:
