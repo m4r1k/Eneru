@@ -399,6 +399,13 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/web/favicon.svg
+    dst: /opt/ups-monitor/eneru/web/favicon.svg
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   # Systemd service file (use /lib for packages, not /etc)
   - src: packaging/eneru.service
     dst: /lib/systemd/system/eneru.service

@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Eneru</title>
-  <!-- Inline ⚡ favicon (a lightning-bolt path, so it renders without an emoji
-       font and needs no extra packaged asset). -->
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M13 2 L4 14 h6 l-1 8 9-12 h-6 z' fill='%234f8cf7'/%3E%3C/svg%3E">
+  <!-- Packaged ⚡ favicon served same-origin. A data: URL was blocked by the
+       strict CSP (img-src falls back to default-src 'self', which forbids data:). -->
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -170,6 +170,7 @@
         </label>
       </div>
       <div id="energy-graph" class="graph"></div>
+      <p class="chart-note" id="energy-note" hidden></p>
       <p class="chart-note" id="energy-events-note" hidden></p>
     </section>
 

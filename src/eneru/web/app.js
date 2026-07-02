@@ -828,8 +828,13 @@ function batteryHealthRows(bh, opts) {
     } else {
       const cls = scoreClass(v);
       const pct = Math.max(0, Math.min(100, v));
-      value.appendChild(el("span", { class: "term-meter" },
-        [el("span", { class: "term-meter-fill " + cls, style: "width:" + pct + "%" })]));
+      // Width is set via a CSSOM custom property, NOT an inline style attribute:
+      // the dashboard's strict CSP (no style-src 'unsafe-inline') blocks the
+      // style="" attribute, which previously left every bar at its default full
+      // width — so the meters silently lied. CSSOM .style.setProperty is exempt.
+      const fill = el("span", { class: "term-meter-fill " + cls });
+      fill.style.setProperty("--w", pct + "%");
+      value.appendChild(el("span", { class: "term-meter" }, [fill]));
       value.appendChild(el("b", { class: cls, text: String(Math.round(v)) }));
     }
     rows.push(el("div", { class: "row term-row" }, [
@@ -1269,8 +1274,17 @@ function applyEventFilters() {
   const rows = visibleEvents();
   const colspan = String(3 + (signedIn ? 1 : 0) + (multi ? 1 : 0));
   if (rows.length === 0) {
-    body.appendChild(el("tr", null, [
-      el("td", { colspan, text: "No events." })]));
+    // Contextual empty state — distinguish "genuinely nothing" from "filtered
+    // out" so the operator knows whether to widen the filters. (heuristic M6)
+    const rangeSel = document.getElementById("event-range");
+    const rangeTxt = rangeSel ? rangeSel.options[rangeSel.selectedIndex].text.toLowerCase() : "range";
+    const filtered = document.getElementById("event-source-filter").value
+      || document.getElementById("event-text-filter").value.trim()
+      || document.getElementById("event-tier").value !== "power";
+    const msg = filtered
+      ? "No matching events — try a wider range or tier."
+      : "No power events in the " + rangeTxt + ".";
+    body.appendChild(el("tr", null, [el("td", { colspan, text: msg })]));
     return;
   }
   rows.forEach((e) => {
@@ -1302,6 +1316,9 @@ async function deleteSelected() {
   const chosen = visibleEvents().filter(
     (e) => selectedEvents.has(eventKey(e)) && e.id !== undefined && e.id !== null);
   if (chosen.length === 0) return;
+  // Deleting event history is irreversible — confirm first. (heuristic M7)
+  if (!window.confirm("Delete " + chosen.length + " selected event"
+      + (chosen.length === 1 ? "" : "s") + "? This can't be undone.")) return;
   // Group the chosen events by UPS name (the DELETE path is
   // /api/v1/ups/{name}/events). Every event carries BOTH a raw `ups`
   // (group.ups.name) and a sanitized `source` (the groupId that eventKey uses
@@ -2109,6 +2126,17 @@ function drawEnergyChart(hostId, rows, options) {
   // watts is a real measurement (then they genuinely differ).
   const realWatts = pts.some((p) => typeof p.watts === "number" && p.estimated === false);
   const showLoad = !wattS || realWatts;
+  // Explain the single line when watts are estimated (the Load% line is hidden
+  // because it's an identical shape), so it doesn't look like a series vanished.
+  const enote = document.getElementById("energy-note");
+  if (enote) {
+    if (wattS && !realWatts) {
+      enote.textContent = "Power is estimated from load × rated power; the Load% "
+        + "line (an identical shape) is hidden. Set energy.nominal_power for "
+        + "measured watts.";
+      enote.hidden = false;
+    } else { enote.hidden = true; enote.textContent = ""; }
+  }
 
   // Hover crosshair + readout for whichever line(s) are shown. The capture rect
   // is added now, BELOW the outage bands + event markers added next, so those
@@ -2692,7 +2720,7 @@ function renderConfigTab() {
   }
   // The (sanitized) config as a colored, collapsible tree — each section
   // expands/collapses on its own.
-  body.appendChild(el("h2", { text: "Configuration (JSON)" }));
+  body.appendChild(el("h2", { text: "Raw config (JSON)" }));
   body.appendChild(el("div", { class: "json-tree" }, [jsonNode(undefined, cfg, true)]));
 }
 

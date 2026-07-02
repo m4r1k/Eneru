@@ -307,7 +307,8 @@ footer { padding: 0.6rem 1.25rem; color: var(--muted); font-size: 0.85rem;
 .term-value { display: inline-flex; align-items: center; gap: 0.5rem; }
 .term-meter { display: inline-block; width: 56px; height: 6px; border-radius: 3px;
   background: var(--line-strong); overflow: hidden; }
-.term-meter-fill { display: block; height: 100%; background: var(--muted); }
+.term-meter-fill { display: block; height: 100%; width: var(--w, 0%);
+  background: var(--muted); }
 .term-meter-fill.ok { background: var(--ok); }
 .term-meter-fill.warn { background: var(--warn); }
 .term-meter-fill.crit { background: var(--crit); }

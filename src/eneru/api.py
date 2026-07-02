@@ -42,6 +42,7 @@ _STATIC_CONTENT_TYPES = {
     ".html": "text/html",
     ".js": "application/javascript",
     ".css": "text/css",
+    ".svg": "image/svg+xml",
 }
 _DASHBOARD_INDEX = "index.html"
 # A conservative charset for upsrw values. NUT values are short tokens (numbers,
@@ -59,6 +60,7 @@ _CONTENT_TYPE_HEADERS = {
     "text/html": "text/html; charset=utf-8",
     "application/javascript": "application/javascript; charset=utf-8",
     "text/css": "text/css; charset=utf-8",
+    "image/svg+xml": "image/svg+xml; charset=utf-8",
 }
 
 # Serialize control writes per UPS so two concurrent requests can't race an
@@ -194,19 +196,6 @@ def _auth_is_active(config: Any) -> bool:
     return auth_is_active(getattr(getattr(config, "api", None), "auth", None))
 
 
-class _EneruHTTPServer(ThreadingHTTPServer):
-    """Threaded server with a deeper listen backlog.
-
-    The stdlib default ``request_queue_size`` is 5, so a short burst of
-    concurrent connections (a browser dashboard polling several endpoints at
-    once, plus a scripted client) can overflow the accept queue and surface as
-    intermittent ``connection refused`` even though the daemon is healthy and
-    every handler runs on its own worker thread. 128 absorbs realistic bursts.
-    """
-
-    request_queue_size = 128
-
-
 class EneruAPIServer:
     """Small stdlib HTTP server for read-only observability endpoints."""
 
@@ -253,9 +242,19 @@ class EneruAPIServer:
 
         addr = (self.config.api.bind, int(self.config.api.port))
         try:
-            self._httpd = _EneruHTTPServer(addr, Handler)
+            # bind_and_activate=False so we can raise the listen backlog before
+            # listen() is called. The stdlib default request_queue_size is 5, so a
+            # burst of concurrent dashboard/API connections could overflow the
+            # accept queue and surface as intermittent "connection refused" even
+            # though the daemon is healthy and every handler runs on its own
+            # worker thread. 128 absorbs realistic bursts.
+            self._httpd = ThreadingHTTPServer(addr, Handler, bind_and_activate=False)
+            self._httpd.request_queue_size = 128
+            self._httpd.server_bind()
+            self._httpd.server_activate()
         except OSError as exc:
             self.log_fn(f"⚠️  API server failed to bind {addr[0]}:{addr[1]}: {exc}")
+            self._httpd = None
             return
         # v6.0: worker threads are NON-daemon. The API now has non-idempotent
         # write endpoints (control commands, config reload), so a worker must
