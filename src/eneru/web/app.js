@@ -1650,6 +1650,28 @@ function drawChart(hostId, series, options) {
     line(pad, gy, W - 5, gy, "grid");
   }
 
+  // X-axis time ticks — a time series with no time reference is unreadable
+  // (outage bands + event markers otherwise float in an unanchored window).
+  const spanDays = tspan / 86400;
+  const fmtTick = (ts) => {
+    const dt = new Date(ts * 1000);
+    return spanDays <= 2
+      ? dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      : dt.toLocaleDateString([], { month: "short", day: "numeric" });
+  };
+  const N_TICKS = 4;
+  for (let i = 0; i <= N_TICKS; i++) {
+    const tts = t0 + (tspan * i) / N_TICKS;
+    const tx = x(tts);
+    const tk = document.createElementNS(SVG_NS, "text");
+    tk.setAttribute("x", tx.toFixed(1));
+    tk.setAttribute("y", (H - pad + 15).toFixed(1));
+    tk.setAttribute("text-anchor", i === 0 ? "start" : i === N_TICKS ? "end" : "middle");
+    tk.setAttribute("class", "lbl xtick");
+    tk.textContent = fmtTick(tts);
+    svg.appendChild(tk);
+  }
+
   // Voltage threshold band: a faint zone bounded by dashed edge lines (reads as
   // thresholds, not a slab of page-tint), plus the nominal center line.
   if (wantBand && bands.low != null && bands.high != null) {
@@ -1700,15 +1722,30 @@ function drawChart(hostId, series, options) {
     }
   }
 
-  // The data line.
-  let d = "";
-  pts.forEach((p) => {
-    if (typeof p.value !== "number" || isNaN(p.value)) return;
-    d += (d ? " L" : "M") + x(p.ts).toFixed(1) + " " + y(p.value).toFixed(1);
+  // The data line. Break the path across gaps (a run of missing samples longer
+  // than ~2.5x the typical spacing) so we don't draw a confident straight line
+  // over data we don't have — and a rejected reading reads as a gap, not an
+  // invented trend or a plunge to zero.
+  const drawn = pts.filter((p) => typeof p.value === "number" && !isNaN(p.value));
+  let gapThresh = Infinity;
+  if (drawn.length > 2) {
+    const gaps = [];
+    for (let i = 1; i < drawn.length; i++) gaps.push(drawn[i].ts - drawn[i - 1].ts);
+    gaps.sort((a, b) => a - b);
+    const med = gaps[Math.floor(gaps.length / 2)] || 0;
+    if (med > 0) gapThresh = med * 2.5;
+  }
+  let d = "", prevTs = null, hasGap = false;
+  drawn.forEach((p) => {
+    const move = prevTs === null || (p.ts - prevTs) > gapThresh;
+    if (move && prevTs !== null) hasGap = true;
+    d += (d ? " " : "") + (move ? "M" : "L") + x(p.ts).toFixed(1) + " " + y(p.value).toFixed(1);
+    prevTs = p.ts;
   });
   // Subtle gradient area fill under the line (single-series charts without a
-  // threshold band) — premium depth, not a flat slab.
-  if (!wantBand && d) {
+  // threshold band) — skipped when the path has gaps, since a single closed fill
+  // would span the missing region.
+  if (!wantBand && d && !hasGap) {
     const gid = hostId + "-areagrad";
     const defs = document.createElementNS(SVG_NS, "defs");
     const grad = document.createElementNS(SVG_NS, "linearGradient");
@@ -1722,7 +1759,7 @@ function drawChart(hostId, series, options) {
     });
     defs.appendChild(grad); svg.appendChild(defs);
     const area = document.createElementNS(SVG_NS, "path");
-    const xL = x(pts[pts.length - 1].ts).toFixed(1), xF = x(pts[0].ts).toFixed(1);
+    const xL = x(drawn[drawn.length - 1].ts).toFixed(1), xF = x(drawn[0].ts).toFixed(1);
     area.setAttribute("d", `${d} L${xL} ${(H - pad).toFixed(1)} L${xF} ${(H - pad).toFixed(1)} Z`);
     area.setAttribute("class", "area"); area.setAttribute("fill", `url(#${gid})`);
     svg.appendChild(area);

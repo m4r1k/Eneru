@@ -16,7 +16,7 @@
   --crit: #ef5b5b; --crit-rgb: 239,91,91;
   --line: #262b36;
   --line-strong: #313845;
-  --grid: rgba(255,255,255,0.05);
+  --grid: rgba(255,255,255,0.09);
   /* tinted status/accent surfaces */
   --accent-weak: rgba(var(--accent-rgb), 0.14);
   --ok-weak:   rgba(var(--ok-rgb), 0.13);
@@ -36,7 +36,7 @@
     --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f6; --text: #161a22;
     --text-2: #2f3744; --muted: #5b6473; --accent: #2563eb; --accent-rgb: 37,99,235;
     --on-accent: #ffffff; --line: #e6e9ef; --line-strong: #dde1e9;
-    --grid: rgba(15,20,30,0.06);
+    --grid: rgba(15,20,30,0.10);
     --shadow-sm: 0 1px 2px rgba(15,20,30,0.05);
     --shadow-md: 0 4px 16px -6px rgba(15,20,30,0.14);
     --shadow-lg: 0 16px 40px -14px rgba(15,20,30,0.22);
@@ -46,7 +46,7 @@
   --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f6; --text: #161a22;
   --text-2: #2f3744; --muted: #5b6473; --accent: #2563eb; --accent-rgb: 37,99,235;
   --on-accent: #ffffff; --line: #e6e9ef; --line-strong: #dde1e9;
-  --grid: rgba(15,20,30,0.06);
+  --grid: rgba(15,20,30,0.10);
   --shadow-sm: 0 1px 2px rgba(15,20,30,0.05);
   --shadow-md: 0 4px 16px -6px rgba(15,20,30,0.14);
   --shadow-lg: 0 16px 40px -14px rgba(15,20,30,0.22);
@@ -526,10 +526,13 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .sd-step-detail { color: var(--muted); font-size: 0.78rem; margin-top: 0.15rem; }
 
 /* Energy dual-line chart: load% (kindred accent, translucent) + power (W). */
-.graph .plot-load { stroke: var(--accent); opacity: 0.45; fill: none; }
-.graph .plot-watts { stroke: var(--ok); fill: none; }
+/* Data series use a categorical palette (accent blue + violet), NOT the status
+   green — a power line drawn in "good green" misreads, and status hues are
+   reserved for status. Full opacity so identity isn't carried by transparency. */
+.graph .plot-load { stroke: var(--accent); fill: none; }
+.graph .plot-watts { stroke: #a78bfa; fill: none; }
 .graph rect.plot-load { stroke: none; fill: var(--accent); opacity: 0.55; }
-.graph rect.plot-watts { stroke: none; fill: var(--ok); }
+.graph rect.plot-watts { stroke: none; fill: #a78bfa; }
 
 @media (max-width: 640px) {
   .var-form { grid-template-columns: 1fr; }
