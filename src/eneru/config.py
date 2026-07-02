@@ -1308,13 +1308,23 @@ class ConfigLoader:
         base = base or BatteryHealthConfig()
         raw_rep = bh_data.get('replacement')
         rep = raw_rep if isinstance(raw_rep, dict) else {}
+        # PyYAML parses an UNQUOTED `battery_install_date: 2016-06-25` as a
+        # datetime.date, which is not JSON-serializable and breaks the status
+        # payload. Normalize to the "YYYY-MM-DD" string the scorer + API expect,
+        # so quoting the date in config is optional.
+        install_date = bh_data.get(
+            'battery_install_date', base.battery_install_date)
+        if install_date is not None and not isinstance(install_date, str):
+            try:
+                install_date = install_date.strftime("%Y-%m-%d")
+            except (AttributeError, ValueError):
+                install_date = str(install_date)
         return BatteryHealthConfig(
             enabled=bh_data.get('enabled', base.enabled),
             update_interval=bh_data.get('update_interval', base.update_interval),
             nominal_runtime_seconds=bh_data.get(
                 'nominal_runtime_seconds', base.nominal_runtime_seconds),
-            battery_install_date=bh_data.get(
-                'battery_install_date', base.battery_install_date),
+            battery_install_date=install_date,
             expected_life_years=bh_data.get(
                 'expected_life_years', base.expected_life_years),
             warn_score=bh_data.get('warn_score', base.warn_score),

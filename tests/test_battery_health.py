@@ -89,6 +89,21 @@ class TestCompute:
         assert health["ageYears"] == pytest.approx(1.0, abs=0.05)
 
     @pytest.mark.unit
+    def test_unquoted_install_date_is_json_serializable(self, store):
+        # Regression: an UNQUOTED `battery_install_date: 2016-06-25` parses as a
+        # datetime.date; it must be normalized to a string so the status payload
+        # (json.dumps) doesn't raise "Object of type date is not JSON serializable".
+        import json
+        cfg = _config("ups:\n  name: U@h\n"
+                      "battery_health:\n  battery_install_date: 2016-06-25\n")
+        assert cfg.battery_health.battery_install_date == "2016-06-25"
+        assert isinstance(cfg.battery_health.battery_install_date, str)
+        mon = _Mon(cfg, store)
+        health = mon._compute_battery_health(cfg.battery_health, time.time())
+        assert health["installDate"] == "2016-06-25"
+        json.dumps(health)   # must not raise
+
+    @pytest.mark.unit
     def test_age_fields_unavailable_without_install_date(self, store):
         cfg = _config("ups:\n  name: U@h\n"
                       "battery_health:\n  battery_install_date: null\n")
