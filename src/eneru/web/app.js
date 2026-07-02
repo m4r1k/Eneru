@@ -102,6 +102,7 @@ const ICONS = {
   gauge:   "M4.5 16.5a8 8 0 1 1 15 0 M12 13l3-3",
   check:   "M5 12.5 9.5 17 19 7",
   alert:   "M12 4 21 19H3z M12 10v4 M12 16.6v.4",
+  info:    "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 11v5 M12 7.6v.4",
   close:   "M6 6l12 12 M18 6 6 18",
   power:   "M12 3v9 M7.8 6.4a7 7 0 1 0 8.4 0",
   vm:      "M3 5h18v11H3z M8 20h8 M11 16v4",
@@ -208,6 +209,15 @@ function numOrNull(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Format a numeric telemetry value with its unit, or null when it's
+// missing/empty. An empty string ("") from a monitoring-only UPS passes a bare
+// `!= null` check, so callers that concatenated a unit first rendered a stray
+// " V"/" Hz"/" °C" with no number. Routing unit'd fields through here makes a
+// blank read as "—" (null → detailRow/configKv/hintedRow render the dash).
+function fmtUnit(v, unit) {
+  return numOrNull(v) != null ? v + " " + unit : null;
+}
+
 function statusClass(status) {
   const s = (status || "").toUpperCase();
   if (s.includes("OB") || s.includes("LB") || s.includes("FSD")) return "crit";
@@ -262,18 +272,53 @@ function formatRuntimeSeconds(value) {
 }
 
 const CHART_UPS_SELECTS = ["power-ups", "battery-ups", "energy-ups"];
+const SCOPE_ALL = "__all__";
 
-// Populate every per-chart UPS <select> with the current UPS list, keeping the
-// selection SHARED across the Power/Battery/Energy tabs (like the Range control)
-// so switching tabs doesn't snap back to a different UPS.
+// The global UPS scope (header selector). "" / missing → All UPS.
+function currentScope() {
+  const s = document.getElementById("global-ups");
+  return (s && s.value) || SCOPE_ALL;
+}
+function scopeIsAll() { return currentScope() === SCOPE_ALL; }
+
+// Concrete UPS name for single-series views (charts): the scoped UPS, or the
+// primary (first) UPS when scope is "All".
+function scopedName() {
+  const scope = currentScope();
+  if (scope !== SCOPE_ALL && lastUpsRows.some((u) => u.name === scope)) return scope;
+  return lastUpsRows.length ? lastUpsRows[0].name : "";
+}
+
+// UPS rows honoring the scope: every row under "All", else just the scoped one.
+// Used by the per-UPS card grids (line quality / battery health / energy).
+function scopedRows() {
+  const scope = currentScope();
+  if (scope === SCOPE_ALL) return lastUpsRows;
+  const one = lastUpsRows.filter((u) => u.name === scope);
+  return one.length ? one : lastUpsRows;
+}
+
+// Populate the header global UPS selector and mirror the pick into the (now
+// hidden) per-tab chart selects so the existing chart controllers, which read
+// their upsSelId, resolve to the scoped/primary UPS. The global selector is the
+// single source of truth; the per-tab dropdowns are retired from the UI.
 function populateChartUpsSelects(rows) {
-  // Prefer an existing selection that is still valid; else the first UPS.
-  let chosen = "";
-  for (const id of CHART_UPS_SELECTS) {
-    const s = document.getElementById(id);
-    if (s && s.value) { chosen = s.value; break; }
+  const g = document.getElementById("global-ups");
+  const wrap = document.getElementById("global-ups-wrap");
+  const multi = rows.length > 1;
+  // Preserve a valid prior scope; default to All. Single-UPS → that UPS, no control.
+  let scope = g && g.value ? g.value : SCOPE_ALL;
+  if (scope !== SCOPE_ALL && !rows.some((u) => u.name === scope)) scope = SCOPE_ALL;
+  if (!multi) scope = rows.length ? rows[0].name : SCOPE_ALL;
+  if (wrap) wrap.hidden = !multi;
+  if (g) {
+    g.replaceChildren();
+    if (multi) g.appendChild(el("option", { value: SCOPE_ALL, text: "All UPS" }));
+    rows.forEach((u) => g.appendChild(el("option", { value: u.name, text: u.label || u.name })));
+    g.value = scope;
   }
-  if (!rows.some((u) => u.name === chosen)) chosen = rows.length ? rows[0].name : "";
+  const chosen = (scope === SCOPE_ALL || !rows.some((u) => u.name === scope))
+    ? (rows.length ? rows[0].name : "") : scope;
   CHART_UPS_SELECTS.forEach((id) => {
     const sel = document.getElementById(id);
     if (!sel) return;
@@ -281,14 +326,60 @@ function populateChartUpsSelects(rows) {
     rows.forEach((u) =>
       sel.appendChild(el("option", { value: u.name, text: u.label || u.name })));
     if (chosen) sel.value = chosen;
+    const lbl = sel.closest("label");
+    if (lbl) lbl.hidden = true;   // retired: the global selector drives these
   });
+}
+
+// React to a global-scope change: mirror into the chart selects, refresh the
+// scope-dependent chrome, and redraw the active tab.
+function onScopeChanged() {
+  const chosen = scopedName();
+  CHART_UPS_SELECTS.forEach((id) => {
+    const s = document.getElementById(id);
+    if (s && chosen) s.value = chosen;
+  });
+  applyScopeChrome();
+  onTabActivated(activeTab);
+}
+
+// The global selector drives the scoped tabs; on Events it also seeds the Source
+// filter (so it's still doing something), and only on Config is it truly inert —
+// dim + explain it only there. aria-label carries the reason for AT users.
+function applyScopeChrome() {
+  const wrap = document.getElementById("global-ups-wrap");
+  if (wrap) {
+    const inert = activeTab === "config";
+    wrap.classList.toggle("inactive", inert);
+    const msg = inert ? "Config is fleet-wide; the UPS selector doesn't apply here"
+      : (activeTab === "events" ? "Filters the events by UPS" : "");
+    wrap.title = msg;
+    if (msg) wrap.setAttribute("aria-label", "UPS to show — " + msg);
+    else wrap.removeAttribute("aria-label");
+  }
+  if (activeTab === "events") seedEventSourceFromScope();
+}
+
+// The header UPS selector is the Events source control now (the separate Source
+// dropdown is retired), so mirror the scope into the events source filter —
+// "All UPS" → all sources, a pick → that UPS.
+function seedEventSourceFromScope() {
+  const src = document.getElementById("event-source-filter");
+  if (!src) return;
+  const scope = currentScope();
+  const target = scope === SCOPE_ALL ? "" : scope;
+  if (src.value === target) return;
+  if (target === "" || [...src.options].some((o) => o.value === target)) {
+    src.value = target;
+    if (typeof applyEventFilters === "function") applyEventFilters();
+  }
 }
 
 // ----- Overview hero + KPI summary (rc9) -----------------------------------
 
 // SVG battery ring gauge: a track circle + a value arc (dasharray), centered
 // label. Colored by status class. The signature visual of the Overview.
-function batteryRing(pct, statusCls) {
+function batteryRing(pct, statusCls, caption) {
   const R = 52, C = 2 * Math.PI * R;
   const p = Math.max(0, Math.min(100, isNaN(pct) ? 0 : pct));
   const svg = document.createElementNS(SVG_NS, "svg");
@@ -313,7 +404,9 @@ function batteryRing(pct, statusCls) {
     t.textContent = s; svg.appendChild(t);
   };
   txt("ring-big", 60, isNaN(pct) ? "—" : Math.round(p) + "%");
-  txt("ring-cap", 78, p >= 95 ? "CHARGED" : p >= 20 ? "ON LINE" : "LOW");
+  // Caption is a CHARGE band, not a power word ("ON LINE" read as a power state
+  // even mid-outage). heroCard overrides it to "ON BATTERY" during an outage.
+  txt("ring-cap", 78, caption || (p >= 95 ? "CHARGED" : p >= 20 ? "READY" : "LOW"));
   return svg;
 }
 
@@ -321,24 +414,49 @@ function heroCard(u) {
   const charge = parseFloat(u.batteryCharge);
   const sCls = statusClass(u.status);
   const pq = u.powerQuality || {};
-  const wrap = el("div", { class: "hero card-click s-" + sCls, tabindex: "0",
+  const st = (u.status || "").toUpperCase();
+  const onBattery = st.includes("OB");
+  const low = st.includes("LB") || st.includes("FSD");
+  // Ring turns amber the moment we're on battery (red once low/FSD), and the
+  // caption says ON BATTERY — so an outage doesn't read as a calm green ring.
+  const ringCls = low ? "crit" : (onBattery ? "warn" : (batteryClass(charge) || sCls));
+  const wrap = el("div", { class: "hero card-click s-" + sCls
+    + (onBattery ? " hero-alarm" : ""), tabindex: "0",
     role: "button", title: "View details" });
-  wrap.appendChild(batteryRing(charge, batteryClass(charge) || sCls));
-  const vital = (label, value) => el("div", null, [
+  wrap.appendChild(batteryRing(charge, ringCls, onBattery ? "ON BATTERY" : null));
+  const vital = (label, value, cls) => el("div", null, [
     el("div", { class: "v-label", text: label }),
-    el("div", { class: "v-value", text: value }),
+    el("div", { class: "v-value" + (cls ? " " + cls : ""), text: value }),
   ]);
+  const title = el("div", { class: "hero-title" }, [
+    icon("battery"), el("h3", { text: u.label || u.name }),
+    el("span", { class: "badge " + sCls, text: u.status || "—" }),
+  ]);
+  // Promote time-on-battery to a prominent alarm chip during an outage — it's
+  // the number the operator needs first, and it was the last, easily-missed vital.
+  if (onBattery) {
+    title.appendChild(el("span", { class: "badge " + (low ? "crit" : "warn") + " hero-ob",
+      text: "ON BATTERY · " + (u.timeOnBattery != null ? u.timeOnBattery + "s" : "—") }));
+  }
+  const vitals = [
+    vital("Runtime", formatRuntimeSeconds(u.runtime)),
+    vital("Load", u.load != null ? u.load + "%" : "—"),
+    vital("Input", pq.inputVoltage != null ? pq.inputVoltage + " V" : "—"),
+  ];
+  // Time-on-battery only when actually on battery — a permanent "0s" is noise,
+  // and during an outage it's already the prominent ON BATTERY chip in the title.
+  if (onBattery) {
+    vitals.push(vital("On battery",
+      u.timeOnBattery != null ? u.timeOnBattery + "s" : "—", low ? "crit" : "warn"));
+  }
+  // Surface line quality on the Overview only when it's NOT good — otherwise it's
+  // buried on the Power tab where the operator rarely looks. (operator #14)
+  const lq = lineQuality(pq);
+  if (lq.cls === "warn" || lq.cls === "crit") {
+    vitals.push(vital("Line quality", lq.label, lq.cls));
+  }
   wrap.appendChild(el("div", { class: "hero-main" }, [
-    el("div", { class: "hero-title" }, [
-      icon("battery"), el("h3", { text: u.label || u.name }),
-      el("span", { class: "badge " + sCls, text: u.status || "—" }),
-    ]),
-    el("div", { class: "hero-vitals" }, [
-      vital("Runtime", formatRuntimeSeconds(u.runtime)),
-      vital("Load", u.load != null ? u.load + "%" : "—"),
-      vital("Input", pq.inputVoltage != null ? pq.inputVoltage + " V" : "—"),
-      vital("On battery", u.timeOnBattery != null ? u.timeOnBattery + "s" : "—"),
-    ]),
+    title, el("div", { class: "hero-vitals" }, vitals),
   ]));
   const open = () => openDetail(u.name);
   wrap.addEventListener("click", open);
@@ -375,90 +493,156 @@ function renderOverviewSummary(rows) {
     hero.appendChild(el("p", { class: "chart-note", text: "No UPS data yet." }));
     return;
   }
-  // Hero shows the worst-status UPS so a problem surfaces immediately.
+  // The global UPS selector scopes the Overview too: a single pick drives the
+  // hero + KPIs to that UPS; "All UPS" shows the whole fleet (worst status,
+  // lowest health, total energy). The fleet strip above always lists every UPS.
+  const picked = !scopeIsAll() && rows.filter((u) => u.name === currentScope());
+  const view = (picked && picked.length) ? picked : rows;
+
+  // Hero shows the (scoped) worst-status UPS so a problem surfaces immediately.
   const rank = { crit: 0, warn: 1, ok: 2 };
-  const primary = rows.slice().sort(
+  const primary = view.slice().sort(
     (a, b) => rank[statusClass(a.status)] - rank[statusClass(b.status)])[0];
   hero.appendChild(heroCard(primary));
 
   // Three drill-through KPI cards surfacing the v6.1 data otherwise buried on
-  // other tabs: battery health, energy today, last self-test.
-  const bh = primary.batteryHealth;
-  summary.appendChild(kpiCard({
-    iconName: "shield", label: "Battery health",
-    value: bh && bh.score != null ? Math.round(bh.score) : "—",
-    unit: bh && bh.score != null ? "/100" : "",
-    cap: bh && bh.confidence != null ? "confidence " + Math.round(bh.confidence * 100) + "%"
-      : "no data yet",
-    valueStatus: bh ? scoreClass(bh.score) : null, tab: "battery" }));
+  // other tabs. Under "All UPS" they summarize ACROSS the fleet (worst battery
+  // health, total energy, worst self-test); scoped to one UPS they show its
+  // values. (operator #11, plan #4)
+  const multi = view.length > 1;
+  const named = (u) => u.label || u.name;
 
-  const en = primary.energy;
-  summary.appendChild(kpiCard({
-    iconName: "chart", label: "Energy today",
-    value: en && en.todayKwh != null ? en.todayKwh.toFixed(2) : "—",
-    unit: en && en.todayKwh != null ? " kWh" : "",
-    cap: en && en.todayCostFormatted ? en.todayCostFormatted + " today"
-      : (en && en.monthKwh != null ? en.monthKwh.toFixed(1) + " kWh this month" : "—"),
-    tab: "energy" }));
+  // Battery health: the lowest score in the fleet (the one that needs attention).
+  const bhRows = view.filter((u) => u.batteryHealth && u.batteryHealth.score != null);
+  if (bhRows.length) {
+    const worst = bhRows.slice().sort(
+      (a, b) => a.batteryHealth.score - b.batteryHealth.score)[0];
+    const bh = worst.batteryHealth;
+    summary.appendChild(kpiCard({
+      iconName: "shield", label: multi ? "Battery health · lowest" : "Battery health",
+      value: Math.round(bh.score), unit: "/100",
+      cap: (multi ? named(worst) + " · " : "")
+        + (bh.confidence != null ? "confidence " + Math.round(bh.confidence * 100) + "%" : ""),
+      valueStatus: (bh.confidence != null && bh.confidence < 0.75)
+        ? "muted" : scoreClass(bh.score), tab: "battery" }));
+  } else {
+    summary.appendChild(kpiCard({ iconName: "shield", label: "Battery health",
+      value: "—", unit: "", cap: "no data yet", tab: "battery" }));
+  }
 
-  // Self-test KPI only when a test has actually run — a "never run" box is noise
-  // (and most UPSes never get one). The Battery tab still explains the term.
-  const st = primary.selfTest;
-  if (st && ["passed", "failed", "running"].includes(st.result)) {
+  // Energy today: the fleet total (a single UPS keeps its cost caption).
+  const enRows = view.filter((u) => u.energy && u.energy.todayKwh != null);
+  if (enRows.length) {
+    const totalKwh = enRows.reduce((s, u) => s + u.energy.todayKwh, 0);
+    let cap;
+    if (multi) {
+      cap = enRows.length + " of " + view.length + " UPS · today";
+    } else {
+      const en = enRows[0].energy;
+      cap = en.todayCostFormatted ? en.todayCostFormatted + " today"
+        : (en.monthKwh != null ? en.monthKwh.toFixed(1) + " kWh this month" : "today");
+    }
+    summary.appendChild(kpiCard({
+      iconName: "chart", label: multi ? "Energy today · fleet" : "Energy today",
+      value: totalKwh.toFixed(2), unit: " kWh", cap, tab: "energy" }));
+  } else {
+    summary.appendChild(kpiCard({ iconName: "chart", label: "Energy today",
+      value: "—", unit: "", cap: "—", tab: "energy" }));
+  }
+
+  // Last self-test: the worst result across the fleet (failed > running > passed),
+  // so a single failed test isn't masked by another UPS's pass. Only shown once
+  // a test has actually run somewhere.
+  const stRows = view.filter(
+    (u) => u.selfTest && ["passed", "failed", "running"].includes(u.selfTest.result));
+  if (stRows.length) {
+    const rankSt = { failed: 0, running: 1, passed: 2 };
+    const worstSt = stRows.slice().sort(
+      (a, b) => rankSt[a.selfTest.result] - rankSt[b.selfTest.result])[0];
+    const st = worstSt.selfTest;
     const stStatus = { passed: "ok", failed: "crit", running: "warn" }[st.result] || null;
     summary.appendChild(kpiCard({
-      iconName: "check", label: "Last self-test",
+      iconName: "check", label: multi ? "Self-test · worst" : "Last self-test",
       value: titleCase(st.result),
-      cap: st.date ? st.date : "", valueStatus: stStatus, tab: "battery" }));
+      cap: multi ? named(worstSt) + (st.date ? " · " + st.date : "") : (st.date || ""),
+      valueStatus: stStatus, tab: "battery" }));
   }
 }
 
+// A neutral "monitoring only" tag for a non-local (remote-monitored) UPS, so it
+// reads differently from the UPS that actually protects this host. (operator #4)
+function monitoringBadge(u) {
+  return u && u.isLocal === false
+    ? el("span", { class: "badge muted mon-badge", text: "monitoring only" }) : null;
+}
+
+// Persistent fleet-status strip (above the tabs, every tab): each UPS at a
+// glance so a second UPS is never below the fold during an outage. Chips drill
+// into the detail modal. Hidden for a single-UPS deployment. (operator #1)
+function renderFleetStrip(rows) {
+  const strip = document.getElementById("fleet-strip");
+  if (!strip) return;
+  strip.replaceChildren();
+  if (rows.length <= 1) { strip.hidden = true; return; }
+  strip.hidden = false;
+  rows.forEach((u) => {
+    const cls = statusClass(u.status);
+    const charge = parseFloat(u.batteryCharge);
+    // Full accessible name — the status/charge/runtime/monitoring live in
+    // separate spans that a screen reader would run together ambiguously.
+    const aria = (u.label || u.name) + ": " + (u.status || "unknown") + ", "
+      + (isNaN(charge) ? "charge unknown" : charge + "% charge") + ", "
+      + formatRuntimeSeconds(u.runtime) + " runtime"
+      + (u.isLocal === false ? ", monitoring only" : "") + " — view details";
+    const chip = el("button", { class: "fleet-chip s-" + cls, type: "button",
+      title: "View " + (u.label || u.name) + " details", "aria-label": aria }, [
+      el("span", { class: "fleet-name", text: u.label || u.name }),
+      el("span", { class: "badge " + cls, text: u.status || "—" }),
+      el("span", { class: "fleet-metric",
+        text: (isNaN(charge) ? "—" : charge + "%") + " · " + formatRuntimeSeconds(u.runtime) }),
+      u.isLocal === false ? el("span", { class: "fleet-tag", text: "monitoring" }) : null,
+      el("span", { class: "fleet-go", "aria-hidden": "true", text: "›" }),
+    ].filter(Boolean));
+    chip.addEventListener("click", () => openDetail(u.name));
+    strip.appendChild(chip);
+  });
+}
+
 function renderUps(payload) {
-  const wrap = document.getElementById("ups-cards");
-  wrap.replaceChildren();
   const rows = (payload && payload.ups) || [];
   lastUpsRows = rows;
-  rows.forEach((u) => {
-    const charge = parseFloat(u.batteryCharge);
-    const barValue = isNaN(charge) ? 0 : Math.max(0, Math.min(100, charge));
-    const card = el("div", { class: "card card-click", tabindex: "0",
-      role: "button", title: "View details" }, [
-      el("h3", { text: u.label || u.name }),
-      el("div", { class: "row" }, [
-        el("span", { text: "Status" }),
-        el("span", { class: "badge " + statusClass(u.status), text: u.status || "—" }),
-      ]),
-      el("div", { class: "row" }, [el("span", { text: "Battery" }),
-        el("b", { class: batteryClass(charge), text: isNaN(charge) ? "—" : charge + "%" })]),
-      el("meter", {
-        class: "bar " + batteryClass(charge),
-        min: "0", max: "100", value: String(barValue),
-        "aria-label": "Battery charge",
-      }),
-      el("div", { class: "row" }, [el("span", { text: "Runtime" }),
-        el("b", { text: formatRuntimeSeconds(u.runtime) })]),
-      el("div", { class: "row" }, [el("span", { text: "Load" }),
-        el("b", { text: u.load != null ? u.load + "%" : "—" })]),
-    ]);
-    card.classList.add("s-" + statusClass(u.status));   // status accent rail
-    card.addEventListener("click", () => openDetail(u.name));
-    card.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDetail(u.name); }
-    });
-    wrap.appendChild(card);
-  });
   populateChartUpsSelects(rows);
-  // Single UPS → the Overview is the hero + KPI summary; the raw per-UPS card
-  // grid only appears for a fleet (multi-UPS).
-  document.getElementById("ups-section").hidden = rows.length <= 1;
+  renderFleetStrip(rows);
+  // The per-UPS "UPS status" grid is retired — it duplicated the always-on fleet
+  // strip (every UPS at a glance, chips drill into the detail modal) and the
+  // scoped hero. Keep the section element hidden. (v6.1.4 review)
+  const upsSec = document.getElementById("ups-section");
+  if (upsSec) upsSec.hidden = true;
   renderOverviewSummary(rows);
 
-  const groups = (payload && payload.redundancyGroups) || [];
-  lastGroups = groups;
+  lastGroups = (payload && payload.redundancyGroups) || [];
+  renderRedundancy();
+  renderRemoteHealth();
+  updateEventSourceFilter(rows, lastGroups);
+}
+
+// Redundancy-groups section, scoped by the global selector (groups are per-UPS
+// via upsSources). Re-rendered on scope change from onTabActivated("overview").
+function renderRedundancy() {
   const gsec = document.getElementById("groups-section");
   const gwrap = document.getElementById("group-cards");
+  if (!gsec || !gwrap) return;
+  const rows = lastUpsRows;
+  let groups = lastGroups || [];
+  const all = scopeIsAll();
+  if (!all) groups = groups.filter((g) => (g.upsSources || []).includes(currentScope()));
   gwrap.replaceChildren();
+  // Only surface the Redundancy section when groups are actually configured.
+  // The vast majority run independent UPSes, for whom an empty "configure
+  // redundancy groups" hint is permanent noise on the Overview — hide it
+  // entirely rather than advertising a feature they haven't opted into.
   gsec.hidden = groups.length === 0;
+  if (groups.length === 0) return;
   groups.forEach((g) => {
     const sources = g.upsSources || [];
     const healthy = groupHealthyCount(g, rows);
@@ -473,8 +657,6 @@ function renderUps(payload) {
         el("b", { text: String(sources.length) })]),
     ]));
   });
-  renderRemoteHealth();
-  updateEventSourceFilter(rows, groups);
 }
 
 // ----- UPS detail drill-down (Slice D) -----
@@ -521,7 +703,14 @@ function renderRemoteHealth() {
   const sec = document.getElementById("remote-section");
   const wrap = document.getElementById("remote-cards");
   if (!sec || !wrap) return;
-  const servers = remoteHealthSnapshot || [];
+  // Remote servers are per-UPS shutdown targets (row.group = owning UPS label),
+  // so honor the global scope: scoped to one UPS → just its servers; "All" → all.
+  let servers = remoteHealthSnapshot || [];
+  if (!scopeIsAll()) {
+    const u = lastUpsRows.find((r) => r.name === currentScope());
+    const lbl = u && (u.label || u.name);
+    servers = servers.filter((s) => s.group === lbl);
+  }
   sec.hidden = servers.length === 0;
   if (!servers.length) { wrap.replaceChildren(); return; }
   wrap.replaceChildren(...servers.map((r) => {
@@ -544,7 +733,8 @@ function renderRemoteHealth() {
     if (r.latency_ms != null && reachable) {
       rows.push(configKv("Latency", Math.round(r.latency_ms) + " ms"));
     }
-    rows.push(configKv("Checked", relTime(r.last_checked_at)));
+    rows.push(hintedRow("Last checked", relTime(r.last_checked_at),
+      r.last_checked_at ? new Date(r.last_checked_at * 1000).toLocaleString() : null));
     if (r.consecutive_failures) {
       rows.push(el("div", { class: "row" }, [el("span", { text: "Failures" }),
         el("b", { class: "crit", text: String(r.consecutive_failures) })]));
@@ -561,15 +751,33 @@ function openDetail(name) {
   detailReturnFocus = document.activeElement;
   openDetailName = name;
   renderDetail(name);
-  document.getElementById("detail-modal").hidden = false;
+  const modal = document.getElementById("detail-modal");
+  modal.hidden = false;
   // Pull focus into the dialog so Tab stays among its controls and assistive
   // tech announces it; the close button is the first focusable element.
   document.getElementById("detail-close").focus();
+  // Trap Tab within the dialog and close on Esc so keyboard/AT users can't tab
+  // out to the page behind it and can always dismiss it. (a11y #10)
+  const onKey = (ev) => {
+    if (ev.key === "Escape") { ev.preventDefault(); closeDetail(); return; }
+    if (ev.key !== "Tab") return;
+    const f = Array.from(modal.querySelectorAll(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+      .filter((e) => !e.disabled && e.offsetParent !== null);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+    else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+  };
+  modal.addEventListener("keydown", onKey);
+  modal._trap = onKey;
 }
 
 function closeDetail() {
+  const modal = document.getElementById("detail-modal");
+  if (modal._trap) { modal.removeEventListener("keydown", modal._trap); modal._trap = null; }
   openDetailName = null;
-  document.getElementById("detail-modal").hidden = true;
+  modal.hidden = true;
   if (detailReturnFocus && typeof detailReturnFocus.focus === "function") {
     detailReturnFocus.focus();
   }
@@ -587,8 +795,9 @@ const BH_TERM_HELP = {
   runtime: "Current runtime under load vs the expected full runtime. n/a until "
     + "the nominal runtime is configured or learned at a full charge.",
   anomaly: "Confirmed battery anomalies; each one lowers the score.",
-  age: "Battery age vs its expected service life (set battery_install_date and "
-    + "expected_life_years).",
+  age: "Battery age vs its expected service life. Higher is younger; a low "
+    + "score means the battery is near or past its expected life. Set this "
+    + "UPS's own battery_install_date + expected_life_years (they're per-UPS).",
 };
 
 // Build the v6.1 battery-health rows shared by the detail modal and the Battery
@@ -628,9 +837,22 @@ function batteryHealthRows(bh, opts) {
     } else {
       const cls = scoreClass(v);
       const pct = Math.max(0, Math.min(100, v));
-      value.appendChild(el("span", { class: "term-meter" },
-        [el("span", { class: "term-meter-fill " + cls, style: "width:" + pct + "%" })]));
+      // Width is set via a CSSOM custom property, NOT an inline style attribute:
+      // the dashboard's strict CSP (no style-src 'unsafe-inline') blocks the
+      // style="" attribute, which previously left every bar at its default full
+      // width — so the meters silently lied. CSSOM .style.setProperty is exempt.
+      const fill = el("span", { class: "term-meter-fill " + cls });
+      fill.style.setProperty("--w", pct + "%");
+      value.appendChild(el("span", { class: "term-meter" }, [fill]));
       value.appendChild(el("b", { class: cls, text: String(Math.round(v)) }));
+    }
+    // Age is the one sub-score that inverts intuition: "0" means OLD (past its
+    // expected life), not new. Show the actual age next to it so a low number
+    // reads as "worn out", not "brand new / not reported".
+    if (k === "age" && bh.ageYears != null) {
+      value.appendChild(el("span", { class: "term-age",
+        text: "~" + bh.ageYears.toFixed(1) + " yr"
+          + (bh.expectedLifeYears ? " / " + bh.expectedLifeYears + " yr" : "") }));
     }
     rows.push(el("div", { class: "row term-row" }, [
       el("span", { class: "label-tip" },
@@ -701,8 +923,10 @@ function energyRows(en) {
 function renderDetail(name) {
   const u = lastUpsRows.find((r) => r.name === name);
   const body = document.getElementById("detail-body");
-  document.getElementById("detail-title").textContent =
-    (u && (u.label || u.name)) || name;
+  const titleEl = document.getElementById("detail-title");
+  titleEl.textContent = (u && (u.label || u.name)) || name;
+  const mb = monitoringBadge(u);
+  if (mb) titleEl.appendChild(mb);
   if (!u) { body.replaceChildren(el("p", { text: "No data for this UPS." })); return; }
   const pq = u.powerQuality || {};
   const sections = [];
@@ -718,24 +942,24 @@ function renderDetail(name) {
   ]));
 
   sections.push(detailSection("Power quality", [
-    hintedRow("Input voltage", pq.inputVoltage != null ? pq.inputVoltage + " V" : null,
+    hintedRow("Input voltage", fmtUnit(pq.inputVoltage, "V"),
       "Mains voltage entering the UPS. Eneru classifies brownout (sag) and surge "
       + "against the configured warning band — the shaded thresholds on the Power "
       + "tab — not arbitrary cutoffs."),
-    hintedRow("Output voltage", pq.outputVoltage != null ? pq.outputVoltage + " V" : null,
+    hintedRow("Output voltage", fmtUnit(pq.outputVoltage, "V"),
       "Voltage delivered to the load. On line power the UPS regulates / AVR-"
       + "corrects it toward nominal; during an outage it's inverter output from "
       + "the battery."),
-    hintedRow("Battery voltage", pq.batteryVoltage != null ? pq.batteryVoltage + " V" : null,
+    hintedRow("Battery voltage", fmtUnit(pq.batteryVoltage, "V"),
       "Terminal voltage of the battery string. It sags under load and as charge "
       + "depletes; on line power it floats near the charger's nominal."),
-    hintedRow("Input frequency", pq.inputFrequency != null ? pq.inputFrequency + " Hz" : null,
+    hintedRow("Input frequency", fmtUnit(pq.inputFrequency, "Hz"),
       "Mains frequency. Nominal is 50 Hz (EU) or 60 Hz (US); sustained excursions "
       + "point to unstable mains or generator power."),
-    hintedRow("Output frequency", pq.outputFrequency != null ? pq.outputFrequency + " Hz" : null,
+    hintedRow("Output frequency", fmtUnit(pq.outputFrequency, "Hz"),
       "Frequency the UPS delivers. Line-interactive units track the mains on line "
       + "power and synthesize nominal on battery."),
-    hintedRow("Temperature", pq.temperature != null ? pq.temperature + " °C" : null,
+    hintedRow("Temperature", fmtUnit(pq.temperature, "°C"),
       "As reported by the UPS. Many models (including some UniFi UPS firmware) "
       + "report a fixed placeholder such as a constant 25 °C rather than a live "
       + "sensor reading."),
@@ -747,13 +971,15 @@ function renderDetail(name) {
   }
   // v6.1 Energy (today/month kWh + optional cost; cost hidden when disabled).
   if (u.energy) {
-    sections.push(detailSection("Energy", energyRows(u.energy)));
+    sections.push(detailSection(
+      u.energy.estimated ? "Energy (estimated)" : "Energy",
+      energyRows(u.energy)));
   }
   // v6.1 Self-test (latest normalized result).
   const st = u.selfTest;
   if (st) {
     sections.push(detailSection("Self-test", [
-      detailRow("Result", st.result || "unknown"),
+      detailRow("Result", st.result ? titleCase(st.result) : "unknown"),
       detailRow("When", st.date || null),
     ]));
   }
@@ -762,7 +988,7 @@ function renderDetail(name) {
   const cfgUps = ((cfgSnapshot && cfgSnapshot.ups) || []).find((c) => c.name === name);
   if (cfgUps) {
     const rows = [
-      detailRow("Local host", cfgUps.isLocal ? "yes" : "no"),
+      detailRow("Triggers local shutdown", cfgUps.isLocal ? "yes" : "no — monitoring only"),
       detailRow("Remote servers", (cfgUps.remoteServers || []).length),
     ];
     (cfgUps.remoteServers || []).forEach((s, i) =>
@@ -1001,7 +1227,8 @@ function timeSortHeader() {
     type: "button",
     class: "th-sort",
     text: label,
-    "aria-label": "Sort events by time",
+    "aria-label": "Sort events by time, currently "
+      + (eventSortDirection === "asc" ? "ascending" : "descending"),
     "aria-pressed": eventSortDirection === "desc" ? "true" : "false",
   });
   btn.addEventListener("click", toggleEventSort);
@@ -1035,22 +1262,46 @@ function updateDeleteButton() {
   btn.textContent = n ? ("Delete selected (" + n + ")") : "Delete selected";
 }
 
+// Human label for the UPS that emitted an event (matches the same fields the
+// source filter does). Used by the multi-UPS Source column.
+function eventSourceLabel(e) {
+  const u = lastUpsRows.find((r) =>
+    r.name === e.ups || r.name === e.source || r.name === e.group
+    || r.groupId === e.source || r.groupId === e.group);
+  return u ? (u.label || u.name) : (e.ups || e.source || e.group || "—");
+}
+
 function applyEventFilters() {
   const body = document.querySelector("#events tbody");
   body.replaceChildren();
   const signedIn = !!token();
+  // Show a Source column only in a fleet, so a multi-UPS "All sources" view
+  // isn't ambiguous. (operator #8)
+  const multi = lastUpsRows.length > 1;
   // The selection column + Delete action only exist when signed in; keep the
   // header and empty-state colspan in sync so widths never mismatch.
   document.getElementById("events-head").replaceChildren(...[
     ...(signedIn ? [el("th", { text: "" })] : []),
-    timeSortHeader(), el("th", { text: "Type" }),
+    timeSortHeader(),
+    ...(multi ? [el("th", { text: "Source" })] : []),
+    el("th", { text: "Type" }),
     el("th", { text: "Detail" }),
   ]);
   updateDeleteButton();
   const rows = visibleEvents();
+  const colspan = String(3 + (signedIn ? 1 : 0) + (multi ? 1 : 0));
   if (rows.length === 0) {
-    body.appendChild(el("tr", null, [
-      el("td", { colspan: signedIn ? "4" : "3", text: "No events." })]));
+    // Contextual empty state — distinguish "genuinely nothing" from "filtered
+    // out" so the operator knows whether to widen the filters. (heuristic M6)
+    const rangeSel = document.getElementById("event-range");
+    const rangeTxt = rangeSel ? rangeSel.options[rangeSel.selectedIndex].text.toLowerCase() : "range";
+    const filtered = document.getElementById("event-source-filter").value
+      || document.getElementById("event-text-filter").value.trim()
+      || document.getElementById("event-tier").value !== "power";
+    const msg = filtered
+      ? "No matching events — try a wider range or tier."
+      : "No power events in the " + rangeTxt + ".";
+    body.appendChild(el("tr", null, [el("td", { colspan, text: msg })]));
     return;
   }
   rows.forEach((e) => {
@@ -1066,8 +1317,9 @@ function applyEventFilters() {
       });
       const td = el("td"); td.appendChild(cb); cells.push(td);
     }
+    cells.push(el("td", { text: ts }));
+    if (multi) cells.push(el("td", { class: "ev-src", text: eventSourceLabel(e) }));
     cells.push(
-      el("td", { text: ts }),
       el("td", null, [eventTypeBadge(e)]),
       el("td", { text: e.detail || e.details || "" }),
     );
@@ -1081,6 +1333,9 @@ async function deleteSelected() {
   const chosen = visibleEvents().filter(
     (e) => selectedEvents.has(eventKey(e)) && e.id !== undefined && e.id !== null);
   if (chosen.length === 0) return;
+  // Deleting event history is irreversible — confirm first. (heuristic M7)
+  if (!window.confirm("Delete " + chosen.length + " selected event"
+      + (chosen.length === 1 ? "" : "s") + "? This can't be undone.")) return;
   // Group the chosen events by UPS name (the DELETE path is
   // /api/v1/ups/{name}/events). Every event carries BOTH a raw `ups`
   // (group.ups.name) and a sanitized `source` (the groupId that eventKey uses
@@ -1140,7 +1395,14 @@ function eventMarkerClass(type) {
 // chart marker color, so a marker and its row read the same at a glance.
 function eventTypeBadge(e) {
   const type = e.eventType || e.event || "";
-  const cls = eventMarkerClass(type);
+  let cls = eventMarkerClass(type);
+  // Fold a command / self-test OUTCOME into the tone so "… -> failed" isn't a
+  // neutral bell identical to "… -> ok" (self-test is a KPI + battery-card row).
+  const detail = (e.detail || e.details || "").toLowerCase();
+  const m = detail.match(/(?:->|→)\s*([a-z]+)\b/);
+  if (m && ["failed", "error", "timeout"].includes(m[1])) cls = "ev-crit";
+  else if (/\bfailed\b/.test(detail)) cls = "ev-crit";
+  else if (cls === "ev-info" && m && ["ok", "passed", "done", "success"].includes(m[1])) cls = "ev-ok";
   const tone = { "ev-ok": "ok", "ev-warn": "warn", "ev-crit": "crit" }[cls] || "info";
   const ico = { "ev-ok": "check", "ev-warn": "alert", "ev-crit": "alert" }[cls] || "bell";
   return el("span", { class: "ev-badge " + tone }, [icon(ico), el("span", { text: type })]);
@@ -1301,6 +1563,7 @@ function metricMinSpan(metric) {
 // `series`: [{ y(v)->py, valueAt(point)->number, fmt(number)->string, label }].
 function addChartHover(svg, geom, series) {
   const { x, W, H, pad } = geom;
+  const readout = geom.readout;   // persistent top-right value/min/max/time readout
   const base = (series.find((s) => s.pts && s.pts.length) || {}).pts || [];
   const cross = document.createElementNS(SVG_NS, "g");
   cross.setAttribute("class", "crosshair");
@@ -1332,7 +1595,10 @@ function addChartHover(svg, geom, series) {
   // Hide the crosshair + floating tip. Used on mouseleave AND on every early
   // exit from move(): a sample with no plottable value (a gap) must clear any
   // readout left pinned by a prior move, not leave it stuck until mouseleave.
-  const hideHover = () => { cross.style.display = "none"; hideTip(); };
+  const hideHover = () => {
+    cross.style.display = "none"; hideTip();
+    if (readout) readout.textContent = readout.getAttribute("data-idle") || "";
+  };
   const move = (ev) => {
     if (!base.length) return hideHover();
     const r = svg.getBoundingClientRect();
@@ -1355,6 +1621,29 @@ function addChartHover(svg, geom, series) {
       }
     });
     if (!valueLines.length) return hideHover();
+    // Persistent readout: actual value at this time, plus the min–max of the
+    // surrounding bucket for a stats-band chart (the "what was the range here").
+    if (readout) {
+      const prim = series[0];
+      const av = prim.valueAt(p);
+      if (typeof av === "number" && !isNaN(av)) {
+        let txt = prim.fmt(av);
+        if (geom.band && base.length > 2) {
+          const spanS = base[base.length - 1].ts - base[0].ts;
+          const halfW = Math.max(1, (spanS / Math.max(1, W - pad - 5)) * 3);
+          let mn = Infinity, mx = -Infinity;
+          for (const q of base) {
+            if (Math.abs(q.ts - p.ts) > halfW) continue;
+            const qv = prim.valueAt(q);
+            if (typeof qv === "number" && !isNaN(qv)) { if (qv < mn) mn = qv; if (qv > mx) mx = qv; }
+          }
+          if (mn !== Infinity && mx > mn) txt += "  ·  ↓" + prim.fmt(mn) + " ↑" + prim.fmt(mx);
+        }
+        txt += "  ·  " + new Date(p.ts * 1000)
+          .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        readout.textContent = txt;
+      }
+    }
     cross.style.display = "";
     showTip(valueLines.concat([el("div", { class: "tip-sub",
       text: new Date(p.ts * 1000).toLocaleString() })]),
@@ -1368,6 +1657,155 @@ function addChartHover(svg, geom, series) {
 
 // Draw `series` (a /history payload) into the host element, with optional
 // `bands` (voltage thresholds) and `events` (overlay markers).
+// ---- shared chart helpers (v6.1.4) ----------------------------------------
+// Pad a degenerate (flat) value domain so a constant series (a steady 100%
+// charge, a fixed runtime) doesn't collapse onto the bottom axis and read as
+// empty. Returns [min, max].
+function padFlatDomain(min, max) {
+  if (max > min) return [min, max];
+  const p = Math.max(1, Math.abs(min) * 0.02);
+  return [min - p, max + p];
+}
+
+// Gap threshold for breaking a line across missing data: ~3x the median sample
+// spacing (so a routine poll hiccup doesn't fragment a dense series, but a real
+// outage-length gap breaks the path). Returns Infinity when too few points.
+function chartGapThresh(drawn) {
+  if (drawn.length <= 2) return Infinity;
+  const gaps = [];
+  for (let i = 1; i < drawn.length; i++) gaps.push(drawn[i].ts - drawn[i - 1].ts);
+  gaps.sort((a, b) => a - b);
+  const med = gaps[Math.floor(gaps.length / 2)] || 0;
+  return med > 0 ? med * 3 : Infinity;
+}
+
+// Min/max decimation: reduce a dense point run to ~2 points per bucket (the
+// bucket's min AND max value, in time order) so a 24h/2s series (~19k points,
+// an unreadable "barcode") thins to ~1-2 points/pixel while spikes survive.
+function decimateMinMax(seg, valueOf, buckets) {
+  if (seg.length <= buckets * 2) return seg;
+  const out = [], per = seg.length / buckets;
+  for (let b = 0; b < buckets; b++) {
+    const start = Math.floor(b * per), end = Math.min(seg.length, Math.floor((b + 1) * per));
+    if (end <= start) continue;
+    let mn = seg[start], mx = seg[start];
+    for (let i = start + 1; i < end; i++) {
+      if (valueOf(seg[i]) < valueOf(mn)) mn = seg[i];
+      if (valueOf(seg[i]) > valueOf(mx)) mx = seg[i];
+    }
+    const a = mn.ts <= mx.ts ? mn : mx, z = mn.ts <= mx.ts ? mx : mn;
+    out.push(a); if (z !== a) out.push(z);
+  }
+  return out;
+}
+
+// Build an SVG path that BREAKS across real gaps and decimates dense segments.
+// Splits `drawn` (numeric, ts-sorted) into gap-free segments, decimates each to
+// its width share, and starts a new sub-path (M) per segment. Returns {d,hasGap}.
+function gapDecimatedPath(drawn, valueOf, x, y, plotWidth) {
+  if (!drawn.length) return { d: "", hasGap: false };
+  const thresh = chartGapThresh(drawn);
+  const segs = []; let seg = [], prev = null;
+  drawn.forEach((p) => {
+    if (prev !== null && (p.ts - prev) > thresh) { segs.push(seg); seg = []; }
+    seg.push(p); prev = p.ts;
+  });
+  if (seg.length) segs.push(seg);
+  const budgetTotal = Math.max(2, Math.floor(plotWidth));
+  let d = "";
+  segs.forEach((s) => {
+    const budget = Math.max(2, Math.round(budgetTotal * s.length / drawn.length));
+    const ps = decimateMinMax(s, valueOf, budget);
+    ps.forEach((p, i) => {
+      d += (d ? " " : "") + (i === 0 ? "M" : "L")
+        + x(p.ts).toFixed(1) + " " + y(valueOf(p)).toFixed(1);
+    });
+  });
+  return { d, hasGap: segs.length > 1 };
+}
+
+// Home-Assistant-style statistics rendering for a DENSE series: bucket the
+// points per-pixel and return a min–max envelope band (bandD) + a mean line
+// (meanD), gap-aware (a new sub-path per gap-free segment). For a sparse series
+// bandD is empty and meanD is just the raw line. This turns a 24h/2s "barcode"
+// into a readable trend with high/low context.
+function statsBandPaths(drawn, valueOf, x, y, plotWidth) {
+  if (!drawn.length) return { meanD: "", bandD: "", hasGap: false };
+  const thresh = chartGapThresh(drawn);
+  const segs = []; let seg = [], prev = null;
+  drawn.forEach((p) => {
+    if (prev !== null && (p.ts - prev) > thresh) { segs.push(seg); seg = []; }
+    seg.push(p); prev = p.ts;
+  });
+  if (seg.length) segs.push(seg);
+  const budgetTotal = Math.max(2, Math.floor(plotWidth));
+  const dense = drawn.length > budgetTotal * 3;   // ≥3 points/pixel → worth banding
+  let meanD = "", bandD = "";
+  segs.forEach((s) => {
+    const budget = Math.max(2, Math.round(budgetTotal * s.length / drawn.length));
+    if (dense && s.length > budget * 2) {
+      const buckets = [], per = s.length / budget;
+      for (let b = 0; b < budget; b++) {
+        const st = Math.floor(b * per), en = Math.min(s.length, Math.floor((b + 1) * per));
+        if (en <= st) continue;
+        let mn = Infinity, mx = -Infinity, sum = 0;
+        for (let i = st; i < en; i++) {
+          const v = valueOf(s[i]); if (v < mn) mn = v; if (v > mx) mx = v; sum += v;
+        }
+        buckets.push({ ts: s[Math.floor((st + en) / 2)].ts, min: mn, max: mx, mean: sum / (en - st) });
+      }
+      buckets.forEach((bk, i) => {
+        meanD += (meanD ? " " : "") + (i === 0 ? "M" : "L")
+          + x(bk.ts).toFixed(1) + " " + y(bk.mean).toFixed(1);
+      });
+      let top = "", bot = "";
+      buckets.forEach((bk, i) => {
+        top += (i === 0 ? "M" : "L") + x(bk.ts).toFixed(1) + " " + y(bk.max).toFixed(1) + " ";
+      });
+      for (let i = buckets.length - 1; i >= 0; i--) {
+        bot += "L" + x(buckets[i].ts).toFixed(1) + " " + y(buckets[i].min).toFixed(1) + " ";
+      }
+      if (buckets.length) bandD += top + bot + "Z ";
+    } else {
+      s.forEach((p, i) => {
+        meanD += (meanD ? " " : "") + (i === 0 ? "M" : "L")
+          + x(p.ts).toFixed(1) + " " + y(valueOf(p)).toFixed(1);
+      });
+    }
+  });
+  return { meanD, bandD: bandD.trim(), hasGap: segs.length > 1 };
+}
+
+// X-axis time ticks: count scales with width; times snap to round steps; the
+// date is shown for day+ steps and at local-midnight boundaries within a
+// sub-day window that crosses midnight. Appended to `svg`.
+function drawTimeTicks(svg, t0, t1, x, W, H, bottomPad, leftPad) {
+  const spanS = Math.max(1, t1 - t0);
+  const target = Math.max(2, Math.min(8, Math.floor((W - leftPad - 5) / 90)));
+  const STEPS = [60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200,
+                 86400, 172800, 604800, 1209600, 2592000];
+  let step = STEPS[STEPS.length - 1];
+  for (const s of STEPS) { if (spanS / s <= target) { step = s; break; } }
+  const crosses = new Date(t0 * 1000).toDateString() !== new Date(t1 * 1000).toDateString();
+  const yy = (H - bottomPad + 15).toFixed(1);
+  const fmt = (ts) => {
+    const dt = new Date(ts * 1000);
+    if (step >= 86400) return dt.toLocaleDateString([], { month: "short", day: "numeric" });
+    if (crosses && dt.getHours() === 0 && dt.getMinutes() === 0) {
+      return dt.toLocaleDateString([], { month: "short", day: "numeric" });
+    }
+    return dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  };
+  for (let ts = Math.ceil(t0 / step) * step; ts <= t1; ts += step) {
+    const tx = x(ts);
+    if (tx < leftPad - 1 || tx > W - 4) continue;
+    const t = document.createElementNS(SVG_NS, "text");
+    t.setAttribute("x", tx.toFixed(1)); t.setAttribute("y", yy);
+    t.setAttribute("text-anchor", "middle"); t.setAttribute("class", "lbl xtick");
+    t.textContent = fmt(ts); svg.appendChild(t);
+  }
+}
+
 function drawChart(hostId, series, options) {
   options = options || {};
   const host = document.getElementById(hostId);
@@ -1380,9 +1818,14 @@ function drawChart(hostId, series, options) {
   if (!W) return;
   host.replaceChildren();
   const pts = (series && series.data) || [];
-  const H = 220, pad = 34;
+  const H = 220, pad = 34, padT = options.metric ? 20 : 8;
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  // Expose the chart to assistive tech as a labelled image (the per-point data
+  // is also reachable via the metric selectors + the API). (a11y #8)
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label",
+    (options.metric ? metricLabel(options.metric) : "Metric") + " over the selected range");
   const line = (x1, y1, x2, y2, cls) => {
     const l = document.createElementNS(SVG_NS, "line");
     l.setAttribute("x1", x1); l.setAttribute("y1", y1);
@@ -1392,16 +1835,30 @@ function drawChart(hostId, series, options) {
     svg.appendChild(l);
   };
   line(pad, H - pad, W - 5, H - pad, "axis");
-  line(pad, 5, pad, H - pad, "axis");
+  line(pad, padT, pad, H - pad, "axis");
 
   // Metric name + unit, top-centered, so the numbers on the axis are identifiable.
   if (options.metric) {
     const t = document.createElementNS(SVG_NS, "text");
     t.setAttribute("x", (W / 2).toFixed(0)); t.setAttribute("y", "12");
     t.setAttribute("text-anchor", "middle"); t.setAttribute("class", "chart-title");
-    t.textContent = metricLabel(options.metric);
+    // Name the UPS the (single-series) chart is showing, so "All UPS" makes clear
+    // it's the primary — the per-UPS comparison lives in the cards above.
+    let title = metricLabel(options.metric);
+    if (options.upsLabel) {
+      title += " · " + options.upsLabel + (options.scopeAll ? " (primary)" : "");
+    }
+    t.textContent = title;
     svg.appendChild(t);
   }
+
+  // Persistent top-right readout — live actual value (+ bucket min/max on a
+  // stats-band chart) at the hovered time; idle shows the latest reading.
+  const readout = document.createElementNS(SVG_NS, "text");
+  readout.setAttribute("x", (W - 5).toFixed(0)); readout.setAttribute("y", "12");
+  readout.setAttribute("text-anchor", "end");
+  readout.setAttribute("class", "chart-readout");
+  svg.appendChild(readout);
 
   const vals = pts.map((p) => p.value).filter((v) => typeof v === "number" && !isNaN(v));
   const bands = options.bands || null;
@@ -1413,7 +1870,14 @@ function drawChart(hostId, series, options) {
     const t = document.createElementNS(SVG_NS, "text");
     t.setAttribute("x", W / 2); t.setAttribute("y", H / 2);
     t.setAttribute("text-anchor", "middle"); t.setAttribute("class", "lbl");
-    t.textContent = "Not enough data yet"; svg.appendChild(t);
+    // Distinguish "this UPS never reports this metric" (a monitoring-only UPS
+    // with no frequency/output-voltage/temperature) from "still warming up", so
+    // a new user doesn't wait for data that will never come.
+    t.textContent = options.unavailable
+      ? (options.upsLabel || "This UPS") + " doesn't report "
+        + metricLabel(options.metric || "").toLowerCase()
+      : "Not enough data yet";
+    svg.appendChild(t);
     host.appendChild(svg);
     return;
   }
@@ -1436,17 +1900,26 @@ function drawChart(hostId, series, options) {
     min = mid - floor / 2;
     max = mid + floor / 2;
   }
+  // Pad a still-flat domain so a constant series doesn't pin to the axis.
+  [min, max] = padFlatDomain(min, max);
   const span = (max - min) || 1;
-  const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts, tspan = (t1 - t0) || 1;
+  // Domain is the REQUESTED window when known (so leading/trailing silence shows
+  // as empty space), else the data extent.
+  const t0 = (options.from != null) ? options.from : pts[0].ts;
+  const t1 = (options.to != null) ? options.to : pts[pts.length - 1].ts;
+  const tspan = (t1 - t0) || 1;
   const x = (t) => pad + ((t - t0) / tspan) * (W - pad - 5);
-  const y = (v) => (H - pad) - ((v - min) / span) * (H - pad - 5);
+  const y = (v) => (H - pad) - ((v - min) / span) * (H - pad - padT);
 
   // Horizontal gridlines (quarter divisions) — the single biggest "this is a
   // real chart" cue. Drawn first, behind everything.
   for (let i = 1; i <= 3; i++) {
-    const gy = (5 + i * (H - pad - 5) / 4).toFixed(1);
+    const gy = (padT + i * (H - pad - padT) / 4).toFixed(1);
     line(pad, gy, W - 5, gy, "grid");
   }
+
+  // X-axis time ticks (shared helper: width-scaled count, round-time snapping).
+  drawTimeTicks(svg, t0, t1, x, W, H, pad, pad);
 
   // Voltage threshold band: a faint zone bounded by dashed edge lines (reads as
   // thresholds, not a slab of page-tint), plus the nominal center line.
@@ -1465,11 +1938,17 @@ function drawChart(hostId, series, options) {
     line(pad, y(bands.nominal).toFixed(1), W - 5, y(bands.nominal).toFixed(1), "band-nominal");
   }
 
+  // Dense series → HA-style min–max band + mean line; sparse → plain line.
+  // Computed BEFORE the hover so the crosshair readout can report bucket min/max.
+  const drawn = pts.filter((p) => typeof p.value === "number" && !isNaN(p.value));
+  const stats = statsBandPaths(drawn, (p) => p.value, x, y, W - pad - 5);
+  const d = stats.meanD, hasGap = stats.hasGap;
+
   // Hover crosshair + value readout. The capture rect is added now, BELOW the
   // outage bands + event markers added next, so those keep their own tooltips
   // and the readout only fires over empty plot area. The crosshair group itself
   // is appended last (on top of the plotted line).
-  const crosshair = addChartHover(svg, { x, W, H, pad },
+  const crosshair = addChartHover(svg, { x, W, H, pad, readout, band: !!stats.bandD },
     [{ label: metricLabel(metric), pts,
        valueAt: (p) => p.value, y, fmt: (v) => formatMetricValue(metric, v) }]);
 
@@ -1498,15 +1977,22 @@ function drawChart(hostId, series, options) {
     }
   }
 
-  // The data line.
-  let d = "";
-  pts.forEach((p) => {
-    if (typeof p.value !== "number" || isNaN(p.value)) return;
-    d += (d ? " L" : "M") + x(p.ts).toFixed(1) + " " + y(p.value).toFixed(1);
-  });
+  // The data line. Break the path across gaps (a run of missing samples longer
+  // than ~2.5x the typical spacing) so we don't draw a confident straight line
+  // over data we don't have — and a rejected reading reads as a gap, not an
+  // invented trend or a plunge to zero.
+  if (stats.bandD) {
+    const band = document.createElementNS(SVG_NS, "path");
+    band.setAttribute("d", stats.bandD); band.setAttribute("class", "plot-band");
+    svg.appendChild(band);
+  }
   // Subtle gradient area fill under the line (single-series charts without a
-  // threshold band) — premium depth, not a flat slab.
-  if (!wantBand && d) {
+  // threshold band) — skipped when the path has gaps, since a single closed fill
+  // would span the missing region.
+  // Area fill only when the domain baseline is zero — a fill rising from a
+  // non-zero minimum (voltage 207, a zoomed 98% charge) implies quantity-from-
+  // zero that isn't there. Zero-based metrics keep the fill. (data-viz #11)
+  if (!wantBand && d && !hasGap && !stats.bandD && min <= 0.001) {
     const gid = hostId + "-areagrad";
     const defs = document.createElementNS(SVG_NS, "defs");
     const grad = document.createElementNS(SVG_NS, "linearGradient");
@@ -1520,7 +2006,7 @@ function drawChart(hostId, series, options) {
     });
     defs.appendChild(grad); svg.appendChild(defs);
     const area = document.createElementNS(SVG_NS, "path");
-    const xL = x(pts[pts.length - 1].ts).toFixed(1), xF = x(pts[0].ts).toFixed(1);
+    const xL = x(drawn[drawn.length - 1].ts).toFixed(1), xF = x(drawn[0].ts).toFixed(1);
     area.setAttribute("d", `${d} L${xL} ${(H - pad).toFixed(1)} L${xF} ${(H - pad).toFixed(1)} Z`);
     area.setAttribute("class", "area"); area.setAttribute("fill", `url(#${gid})`);
     svg.appendChild(area);
@@ -1540,6 +2026,8 @@ function drawChart(hostId, series, options) {
     dot.setAttribute("cy", y(lastPt.value).toFixed(1));
     dot.setAttribute("r", "3.5"); dot.setAttribute("class", "now-dot");
     svg.appendChild(dot);
+    const idle = "now " + formatMetricValue(metric, lastPt.value);
+    readout.setAttribute("data-idle", idle); readout.textContent = idle;
   }
   const lab = (txt, yy) => {
     const t = document.createElementNS(SVG_NS, "text");
@@ -1742,6 +2230,8 @@ function makeChart(opts) {
     state.series = series;
     state.events = events;
     state.hiddenEvents = hidden;
+    state.from = from;   // requested window → chart domain (trailing gaps show)
+    state.to = to;
     if (opts.bands) {
       const u = lastUpsRows.find((r) => r.name === ups);
       const pq = (u && u.powerQuality) || {};
@@ -1754,9 +2244,27 @@ function makeChart(opts) {
     draw();
   }
 
+  function upsLabel() {
+    const u = lastUpsRows.find((r) => r.name === upsName());
+    return (u && (u.label || u.name)) || "";
+  }
+  // True when the selected UPS never reports this metric (its live value is
+  // empty) — so the empty chart can say "not reported" vs "warming up".
+  function metricUnavailable() {
+    const field = { voltage: "inputVoltage", output_voltage: "outputVoltage",
+      frequency: "inputFrequency", temperature: "temperature" }[metric()];
+    if (!field) return false;
+    const u = lastUpsRows.find((r) => r.name === upsName());
+    return numOrNull(((u && u.powerQuality) || {})[field]) == null;
+  }
   function draw() {
     drawChart(opts.hostId, state.series, {
       metric: metric(),
+      // Only label the UPS in a fleet; a lone UPS needs no disambiguation.
+      upsLabel: lastUpsRows.length > 1 ? upsLabel() : "",
+      scopeAll: typeof scopeIsAll === "function" && scopeIsAll(),
+      unavailable: metricUnavailable(),
+      from: state.from, to: state.to,
       bands: opts.bands ? state.thresholds : null,
       events: opts.events ? state.events : null,
     });
@@ -1818,6 +2326,17 @@ function drawEnergyChart(hostId, rows, options) {
   mkline(pad, H - pad, W - 5, H - pad, "axis");
   mkline(pad, 5, pad, H - pad, "axis");
 
+  // Title names the UPS the (single-series) chart shows — "· Lab (primary)"
+  // under "All UPS" — so it's clear which UPS, like the metric charts.
+  if (options.upsLabel) {
+    const tt = document.createElementNS(SVG_NS, "text");
+    tt.setAttribute("x", (W / 2).toFixed(0)); tt.setAttribute("y", "12");
+    tt.setAttribute("text-anchor", "middle"); tt.setAttribute("class", "chart-title");
+    tt.textContent = "Load & power · " + options.upsLabel
+      + (options.scopeAll ? " (primary)" : "");
+    svg.appendChild(tt);
+  }
+
   const pts = rows || [];
   const loads = pts.map((p) => p.loadPct).filter((v) => typeof v === "number" && !isNaN(v));
   const watts = pts.map((p) => p.watts).filter((v) => typeof v === "number" && !isNaN(v));
@@ -1829,13 +2348,16 @@ function drawEnergyChart(hostId, rows, options) {
     host.appendChild(svg);
     return;
   }
-  const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts, tspan = (t1 - t0) || 1;
+  const t0 = (options.from != null) ? options.from : pts[0].ts;
+  const t1 = (options.to != null) ? options.to : pts[pts.length - 1].ts;
+  const tspan = (t1 - t0) || 1;
   const x = (t) => pad + ((t - t0) / tspan) * (W - pad - 5);
 
   function scale(vals, floorZero) {
     if (vals.length < 2) return null;
     let mn = Math.min(...vals), mx = Math.max(...vals);
     if (floorZero) mn = Math.min(mn, 0);
+    [mn, mx] = padFlatDomain(mn, mx);
     const span = (mx - mn) || 1;
     return { mn, mx, y: (v) => (H - pad) - ((v - mn) / span) * (H - pad - 5) };
   }
@@ -1846,6 +2368,17 @@ function drawEnergyChart(hostId, rows, options) {
   // watts is a real measurement (then they genuinely differ).
   const realWatts = pts.some((p) => typeof p.watts === "number" && p.estimated === false);
   const showLoad = !wattS || realWatts;
+  // Explain the single line when watts are estimated (the Load% line is hidden
+  // because it's an identical shape), so it doesn't look like a series vanished.
+  const enote = document.getElementById("energy-note");
+  if (enote) {
+    if (wattS && !realWatts) {
+      enote.textContent = "Power is estimated from load × rated power; the Load% "
+        + "line (an identical shape) is hidden. Set energy.nominal_power for "
+        + "measured watts.";
+      enote.hidden = false;
+    } else { enote.hidden = true; enote.textContent = ""; }
+  }
 
   // Hover crosshair + readout for whichever line(s) are shown. The capture rect
   // is added now, BELOW the outage bands + event markers added next, so those
@@ -1855,7 +2388,21 @@ function drawEnergyChart(hostId, rows, options) {
     valueAt: (p) => p.watts, fmt: (v) => v.toFixed(0) + " W" });
   if (showLoad && loadS) hoverSeries.push({ label: "Load", pts, y: loadS.y,
     valueAt: (p) => p.loadPct, fmt: (v) => v.toFixed(0) + " %" });
-  const crosshair = addChartHover(svg, { x, W, H, pad }, hoverSeries);
+  // Persistent top-right readout (actual + bucket min/max on the primary series).
+  const readout = document.createElementNS(SVG_NS, "text");
+  readout.setAttribute("x", (W - 5).toFixed(0)); readout.setAttribute("y", "12");
+  readout.setAttribute("text-anchor", "end");
+  readout.setAttribute("class", "chart-readout");
+  svg.appendChild(readout);
+  const dense = pts.length > Math.max(2, W - pad - 5) * 3;
+  const lastVal = hoverSeries.length
+    ? [...pts].reverse().map((p) => hoverSeries[0].valueAt(p))
+        .find((v) => typeof v === "number" && !isNaN(v)) : null;
+  if (lastVal != null) {
+    const idle = "now " + hoverSeries[0].fmt(lastVal);
+    readout.setAttribute("data-idle", idle); readout.textContent = idle;
+  }
+  const crosshair = addChartHover(svg, { x, W, H, pad, readout, band: dense }, hoverSeries);
 
   // Outage spans behind the markers (see appendOutageBands).
   appendOutageBands(svg, options.events || [], x, t0, t1, 5, H - pad);
@@ -1865,22 +2412,26 @@ function drawEnergyChart(hostId, rows, options) {
       appendEventMarker(svg, e, x(e.ts).toFixed(1), 5, (H - pad).toFixed(1));
     });
 
-  function plot(key, sc, cls) {
+  function plot(key, sc, cls, bandCls) {
     if (!sc) return;
-    let d = "";
-    pts.forEach((p) => {
-      const v = p[key];
-      if (typeof v !== "number" || isNaN(v)) return;
-      d += (d ? " L" : "M") + x(p.ts).toFixed(1) + " " + sc.y(v).toFixed(1);
-    });
-    if (!d) return;
+    const drawn = pts.filter((p) => typeof p[key] === "number" && !isNaN(p[key]));
+    // Same HA-style stats rendering as the metric charts: a dense series draws a
+    // min–max band + mean line (was an unreadable dense spike mass); sparse → line.
+    const stats = statsBandPaths(drawn, (p) => p[key], x, sc.y, W - pad - 5);
+    if (stats.bandD) {
+      const band = document.createElementNS(SVG_NS, "path");
+      band.setAttribute("d", stats.bandD); band.setAttribute("class", bandCls);
+      svg.appendChild(band);
+    }
+    if (!stats.meanD) return;
     const path = document.createElementNS(SVG_NS, "path");
-    path.setAttribute("d", d); path.setAttribute("class", cls);
+    path.setAttribute("d", stats.meanD); path.setAttribute("class", cls);
     path.setAttribute("vector-effect", "non-scaling-stroke");
     svg.appendChild(path);
   }
-  if (wattS) plot("watts", wattS, "plot plot-watts");
-  if (showLoad) plot("loadPct", loadS, "plot plot-load");
+  drawTimeTicks(svg, t0, t1, x, W, H, pad, pad);   // anchor the window in time
+  if (wattS) plot("watts", wattS, "plot plot-watts", "plot-band-watts");
+  if (showLoad) plot("loadPct", loadS, "plot plot-load", "plot-band-load");
 
   // Legend + per-line max labels (each line has its own unit/scale).
   let lx = pad + 4;
@@ -1892,12 +2443,12 @@ function drawEnergyChart(hostId, rows, options) {
     const t = document.createElementNS(SVG_NS, "text");
     t.setAttribute("x", lx + 14); t.setAttribute("y", 11);
     t.setAttribute("class", "lbl");
-    t.textContent = label + (max != null ? (" (max " + max.toFixed(0) + unit + ")") : "");
+    t.textContent = label;   // the max is on the y-axis; no need to repeat it here
     svg.appendChild(t);
-    lx += 150;
+    lx += 70;
   };
-  if (wattS) legend("Power", "plot-watts", wattS.mx, "W");
-  if (showLoad && loadS) legend("Load", "plot-load", loadS.mx, "%");
+  if (wattS) legend("Power", "plot-watts");
+  if (showLoad && loadS) legend("Load", "plot-load");
   // Min/max axis numbers for the primary series (watts if present, else load).
   const prim = wattS || loadS;
   if (prim) {
@@ -1926,12 +2477,17 @@ function drawSimpleSeries(host, pts, opts) {
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   const t0 = pts[0].ts;
   const tLast = pts[pts.length - 1].ts;
-  // Extend the x-axis to opts.tEnd (e.g. a future replacement date) so a marker
-  // beyond the data is visible; the plotted line still stops at the last reading.
-  const t1 = (opts.tEnd != null && opts.tEnd > tLast) ? opts.tEnd : tLast;
+  // Extend the x-axis toward opts.tEnd (e.g. a future replacement date) so a
+  // marker beyond the data is visible — but CAP the extension at 2x the data
+  // span so a far-off ETA (years out) doesn't crush the real history into a few
+  // pixels. A capped-off ETA is shown as an edge annotation by the caller.
+  const dataSpan = Math.max(1, tLast - t0);
+  const t1 = (opts.tEnd != null && opts.tEnd > tLast)
+    ? Math.min(opts.tEnd, tLast + 2 * dataSpan) : tLast;
   const span = Math.max(1, t1 - t0);
-  const lo = opts.min != null ? opts.min : Math.min(...pts.map((p) => p.value));
-  const hi = opts.max != null ? opts.max : Math.max(...pts.map((p) => p.value));
+  let lo = opts.min != null ? opts.min : Math.min(...pts.map((p) => p.value));
+  let hi = opts.max != null ? opts.max : Math.max(...pts.map((p) => p.value));
+  if (opts.min == null && opts.max == null) [lo, hi] = padFlatDomain(lo, hi);
   const rng = Math.max(1e-9, hi - lo);
   const x = (ts) => pad + (ts - t0) / span * (W - pad - padR);
   const y = (v) => padT + (1 - (v - lo) / rng) * (H - padT - pad);
@@ -1942,6 +2498,7 @@ function drawSimpleSeries(host, pts, opts) {
     ln.setAttribute("y1", yy); ln.setAttribute("y2", yy);
     ln.setAttribute("class", "grid"); svg.appendChild(ln);
   }
+  drawTimeTicks(svg, t0, t1, x, W, H, pad, pad);   // shared time axis
   const txt = (s, xx, yy, cls, anchor) => {
     const t = document.createElementNS(SVG_NS, "text");
     t.setAttribute("x", xx); t.setAttribute("y", yy); t.setAttribute("class", cls);
@@ -1993,8 +2550,12 @@ function drawSimpleSeries(host, pts, opts) {
   // Vertical markers (e.g. the projected replacement date), with a label kept
   // inside the plot.
   (opts.vmarkers || []).forEach((m) => {
-    if (m.ts == null || m.ts < t0 || m.ts > t1) return;
-    const mx = x(m.ts);
+    if (m.ts == null || m.ts < t0) return;
+    // A far-future ETA past the capped x-axis is PINNED to the right edge (its
+    // real date is in the label) instead of dropped — otherwise "Replace ~YYYY-MM"
+    // silently vanishes exactly when replacement is furthest out.
+    const mts = Math.min(m.ts, t1);
+    const mx = x(mts);
     const ln = document.createElementNS(SVG_NS, "line");
     ln.setAttribute("x1", mx.toFixed(1)); ln.setAttribute("x2", mx.toFixed(1));
     ln.setAttribute("y1", padT); ln.setAttribute("y2", H - pad);
@@ -2042,10 +2603,20 @@ function makeEnergyChart(opts) {
     state.rows = rows;
     state.events = r.events;
     state.hiddenEvents = r.hidden;
+    state.from = from; state.to = to;
     draw();
   }
+  function upsLabel() {
+    const u = lastUpsRows.find((r) => r.name === upsName());
+    return (u && (u.label || u.name)) || "";
+  }
   function draw() {
-    drawEnergyChart(opts.hostId, state.rows, { events: state.events });
+    drawEnergyChart(opts.hostId, state.rows, {
+      events: state.events,
+      upsLabel: lastUpsRows.length > 1 ? upsLabel() : "",
+      scopeAll: typeof scopeIsAll === "function" && scopeIsAll(),
+      from: state.from, to: state.to,
+    });
     setEventsHint(opts.eventsNoteId, state.hiddenEvents);
   }
   function observe() {
@@ -2097,7 +2668,7 @@ function renderBatteryHealthTab() {
   const wrap = document.getElementById("battery-health");
   if (!wrap) return;
   wrap.replaceChildren();
-  const rows = lastUpsRows;
+  const rows = scopedRows();
   if (!rows.length) {
     wrap.appendChild(el("p", { class: "chart-note", text: "No UPS data yet." }));
     return;
@@ -2106,7 +2677,13 @@ function renderBatteryHealthTab() {
     const bh = u.batteryHealth;
     const st = u.selfTest;
     if (bh) {
-      const scoreTxt = bh.score != null ? Math.round(bh.score) + "/100" : "unknown";
+      // Temper the badge on confidence: a 100/100 built on 2 default terms at
+      // 60% confidence shouldn't shout green like a fully-measured 100. Below
+      // ~0.75 confidence the badge goes neutral and shows the % inline. (heuristic H1)
+      const lowConf = bh.confidence != null && bh.confidence < 0.75;
+      const scoreTxt = (bh.score != null ? Math.round(bh.score) + "/100" : "unknown")
+        + (lowConf ? " · " + Math.round(bh.confidence * 100) + "%" : "");
+      const badgeCls = lowConf ? "muted" : scoreClass(bh.score);
       // Header badge carries the score, so the rows omit it (no duplicate).
       const cardRows = batteryHealthRows(bh, { includeScore: false });
       // Only show a self-test row once a test has actually run.
@@ -2118,8 +2695,8 @@ function renderBatteryHealthTab() {
         ]));
       }
       wrap.appendChild(widgetCard(u.label || u.name, cardRows,
-        { badge: scoreTxt, badgeClass: scoreClass(bh.score),
-          icon: "shield", iconClass: scoreClass(bh.score) }));
+        { badge: scoreTxt, badgeClass: badgeCls,
+          icon: "shield", iconClass: badgeCls }));
     } else {
       wrap.appendChild(widgetCard(u.label || u.name,
         [el("p", { class: "chart-note", text: "Battery health not available." })],
@@ -2164,8 +2741,15 @@ async function renderBatteryHealthGraph() {
   const scores = pts.map((p) => p.value);
   let floorRef = Math.min.apply(null, scores);
   if (repl.thresholdScore != null) floorRef = Math.min(floorRef, repl.thresholdScore);
+  // Name the UPS in the title (with "(primary)" under All UPS), matching the
+  // other charts — the cards above show every UPS, so the trend needs to say
+  // whose it is.
+  const bhU = lastUpsRows.find((r) => r.name === name);
+  const bhLabel = bhU ? (bhU.label || bhU.name) : name;
+  const title = "Health score"
+    + (lastUpsRows.length > 1 ? " · " + bhLabel + (scopeIsAll() ? " (primary)" : "") : "");
   const opts = {
-    title: "Health score", unit: "",
+    title, unit: "",
     min: Math.max(0, Math.floor((floorRef - 8) / 5) * 5), max: 100,
   };
   // Mark the replacement threshold (horizontal) and the projected replacement
@@ -2199,7 +2783,7 @@ function renderEnergyTab() {
   const wrap = document.getElementById("energy-cards");
   if (!wrap) return;
   wrap.replaceChildren();
-  const rows = lastUpsRows;
+  const rows = scopedRows();
   if (!rows.length) {
     wrap.appendChild(el("p", { class: "chart-note", text: "No UPS data yet." }));
     return;
@@ -2209,7 +2793,10 @@ function renderEnergyTab() {
     const en = u.energy;
     if (en) {
       if (energyCostConfigured(en)) costConfigured = true;
-      wrap.appendChild(widgetCard(u.label || u.name, energyRows(en), { icon: "chart" }));
+      wrap.appendChild(widgetCard(u.label || u.name, energyRows(en),
+        en.estimated
+          ? { icon: "chart", badge: "estimated", badgeClass: "muted" }
+          : { icon: "chart" }));
     } else {
       wrap.appendChild(widgetCard(u.label || u.name,
         [el("p", { class: "chart-note",
@@ -2242,12 +2829,23 @@ function lineQuality(pq) {
   const banded = inV != null && lo != null && hi != null;
   const active = (v) => String(v || "").toUpperCase() === "ACTIVE";
   const vState = String(pq.voltageState || "").toUpperCase();
+  // A real fault wins regardless of how sparse the rest of the telemetry is.
   if ((banded && (inV < lo || inV > hi)) || active(pq.overloadState)
       || active(pq.bypassState) || (vState && vState !== "NORMAL")) {
     return { cls: "crit", label: "Poor" };
   }
+  // Only "Unknown" when there's truly nothing to judge — no input voltage AND no
+  // regulation state. A monitoring-only UPS that reports in-band input voltage
+  // and normal regulation states is legitimately "Good", even without frequency
+  // / output-voltage telemetry (those rows just don't render). (v6.1.4 review)
+  const freq = numOrNull(pq.inputFrequency);
+  const anyState = [pq.voltageState, pq.avrState, pq.bypassState, pq.overloadState]
+    .some((s) => s != null && s !== "");
+  if (inV == null && !anyState) {
+    return { cls: "muted", label: "Unknown" };
+  }
   const nearEdge = banded && (inV < lo + (hi - lo) * 0.1 || inV > hi - (hi - lo) * 0.1);
-  if (active(pq.avrState) || nearEdge || !nearNominalFreq(numOrNull(pq.inputFrequency))) {
+  if (active(pq.avrState) || nearEdge || !nearNominalFreq(freq)) {
     return { cls: "warn", label: "Fair" };
   }
   return { cls: "ok", label: "Good" };
@@ -2257,27 +2855,27 @@ function lineQuality(pq) {
 // amber when Active.
 function stateRow(label, value) {
   const v = String(value || "").toUpperCase();
-  const cls = v === "ACTIVE" ? "warn" : (v === "NORMAL" || v === "INACTIVE" ? "ok" : "");
+  // Idle/quiet states (Normal / Inactive) read NEUTRAL, not green — green means
+  // "active & good", and a wall of green for features that are simply OFF flattens
+  // the hierarchy so a real ACTIVE (amber) doesn't stand out. (heuristic M2/M5)
+  const cls = v === "ACTIVE" ? "warn" : (v === "NORMAL" || v === "INACTIVE" ? "muted" : "");
   return el("div", { class: "row" }, [el("span", { text: label }),
     el("span", { class: "badge " + cls, text: titleCase(value) })]);
 }
 
-function renderLineQuality() {
-  const wrap = document.getElementById("line-quality");
-  if (!wrap) return;
-  wrap.replaceChildren();
-  const sel = document.getElementById("power-ups");
-  const name = sel && sel.value;
-  const u = lastUpsRows.find((r) => r.name === name) || lastUpsRows[0];
+// One line-quality card for a UPS. In a multi-UPS fleet the header carries the
+// UPS name (so "All UPS" renders a card each); a lone UPS keeps "Line quality".
+function lineQualityCard(u) {
   const pq = u && u.powerQuality;
-  if (!pq) return;   // nothing to summarize; the chart below still renders
+  if (!pq) return null;
   const q = lineQuality(pq);
   const inV = numOrNull(pq.inputVoltage);
   const lo = numOrNull(pq.warningLow), hi = numOrNull(pq.warningHigh);
   const banded = inV != null && lo != null && hi != null;
+  const title = lastUpsRows.length > 1 ? (u.label || u.name) : "Line quality";
   const rows = [el("div", { class: "card-head" }, [
     el("span", { class: "card-ico s-" + q.cls }, [icon("gauge")]),
-    el("h3", { text: "Line quality" }),
+    el("h3", { text: title }),
     el("span", { class: "badge " + q.cls, text: q.label }),
   ])];
   rows.push(el("div", { class: "row" }, [
@@ -2288,18 +2886,31 @@ function renderLineQuality() {
     el("b", { class: banded && (inV < lo || inV > hi) ? "crit" : "ok",
       text: inV != null ? inV + " V" : "—" }),
   ]));
-  if (pq.outputVoltage != null) rows.push(configKv("Output", pq.outputVoltage + " V"));
-  if (pq.inputFrequency != null) {
+  const outV = fmtUnit(pq.outputVoltage, "V");
+  if (outV) rows.push(configKv("Output", outV));
+  const freqN = numOrNull(pq.inputFrequency);
+  if (freqN != null) {
     rows.push(el("div", { class: "row" }, [el("span", { text: "Frequency" }),
-      el("b", { class: nearNominalFreq(numOrNull(pq.inputFrequency)) ? "ok" : "warn",
+      el("b", { class: nearNominalFreq(freqN) ? "ok" : "warn",
         text: pq.inputFrequency + " Hz" })]));
   }
   [["Voltage", pq.voltageState], ["AVR", pq.avrState], ["Bypass", pq.bypassState],
    ["Overload", pq.overloadState]].forEach(([lab, val]) => {
     if (val != null && val !== "") rows.push(stateRow(lab, val));
   });
-  if (pq.temperature != null) rows.push(configKv("Temperature", pq.temperature + " °C"));
-  wrap.appendChild(el("div", { class: "card s-" + q.cls }, rows));
+  const temp = fmtUnit(pq.temperature, "°C");
+  if (temp) rows.push(configKv("Temperature", temp));
+  return el("div", { class: "card s-" + q.cls }, rows);
+}
+
+function renderLineQuality() {
+  const wrap = document.getElementById("line-quality");
+  if (!wrap) return;
+  wrap.replaceChildren();
+  scopedRows().forEach((u) => {
+    const card = lineQualityCard(u);
+    if (card) wrap.appendChild(card);
+  });
 }
 
 // ----- config tab ----------------------------------------------------------
@@ -2376,7 +2987,7 @@ function renderConfigTab() {
   (cfg.ups || []).forEach((c) => {
     cards.push(widgetCard(c.label || c.name, [
       configKv("Name", c.name),
-      configKv("Local host", c.isLocal ? "yes" : "no"),
+      configKv("Triggers local shutdown", c.isLocal ? "yes" : "no — monitoring only"),
       configKv("Remote servers", (c.remoteServers || []).length),
     ], { icon: "battery" }));
   });
@@ -2397,7 +3008,7 @@ function renderConfigTab() {
   }
   // The (sanitized) config as a colored, collapsible tree — each section
   // expands/collapses on its own.
-  body.appendChild(el("h2", { text: "Configuration (JSON)" }));
+  body.appendChild(el("h2", { text: "Raw config (JSON)" }));
   body.appendChild(el("div", { class: "json-tree" }, [jsonNode(undefined, cfg, true)]));
 }
 
@@ -2621,7 +3232,10 @@ async function doLogout() {
 // Real ARIA tabs: roving tabindex, arrow-key nav, and URL-hash routing so views
 // are linkable. The 10s refresh redraws only the active tab's chart/widgets.
 
-const TAB_IDS = ["overview", "power", "battery", "energy", "events", "control", "shutdown", "config"];
+const TAB_IDS = ["overview", "power", "battery", "energy", "control", "shutdown", "events", "config"];
+// Tabs whose content is scoped by the global UPS selector. Events (own Source
+// filter) and Config (fleet-wide) are intentionally excluded.
+const SCOPED_TABS = ["overview", "power", "battery", "energy", "shutdown"];
 let activeTab = "overview";
 
 function tabButtons() {
@@ -2663,6 +3277,7 @@ function selectTab(name, opts) {
   // instead of inheriting the previous tab's scroll position.
   if (opts.updateHash) window.scrollTo(0, 0);
   onTabActivated(name);
+  applyScopeChrome();
 }
 
 // Draw/refresh whatever the freshly-activated tab needs from the latest data.
@@ -2698,35 +3313,31 @@ function shutdownTriggerNodes(name, plan) {
   const coord = plan && plan.coordinatorMode ? " — coordinator-run" : "";
   if (groups.length) {
     return groups.map((g) => el("div", { class: "sd-trigger" }, [
-      icon("alert"),
+      icon("info"),
       el("span", { text: "Triggers when group “" + g.name + "” drops below "
         + g.minHealthy + " of " + (g.upsSources || []).length + " healthy" + coord }),
     ]));
   }
-  return [el("div", { class: "sd-trigger" }, [icon("alert"),
+  return [el("div", { class: "sd-trigger" }, [icon("info"),
     el("span", { text: "Triggers when this UPS reaches low battery or a forced "
       + "shutdown (FSD)" + coord })])];
 }
 
 let _sdGen = 0;
-async function renderShutdownPlan() {
-  const host = document.getElementById("shutdown-plan");
-  if (!host) return;
-  const name = populateShutdownUpsSelect();
-  if (!name) {
-    host.replaceChildren(el("p", { class: "chart-note", text: "No UPS data yet." }));
+// Append one UPS's shutdown-plan body (trigger + phase flow) into a container.
+function appendShutdownPlanBody(host, name, plan) {
+  // A monitoring-only UPS whose plan has NO enabled phase runs nothing on this
+  // host — don't render a full (all-skipped) sequence + a "triggers…" banner
+  // that reads as if it does. Say plainly that it takes no action.
+  const anyEnabled = (plan.phases || []).some((p) => p.enabled);
+  if (!anyEnabled) {
+    host.appendChild(el("p", { class: "sd-noop" },
+      [icon("info"), el("span", { text: "Monitoring only — Eneru runs no shutdown "
+        + "actions for this UPS. It doesn't power this host, so losing it triggers "
+        + "nothing here (it's still monitored, with events and alerts)." })]));
+    if (plan.note) host.appendChild(el("p", { class: "chart-note", text: plan.note }));
     return;
   }
-  const myGen = ++_sdGen;
-  const res = await api("/api/v1/ups/" + encodeURIComponent(name) + "/shutdown-plan");
-  if (myGen !== _sdGen) return;
-  const plan = res.ok && res.data && res.data.plan;
-  if (!plan) {
-    host.replaceChildren(el("p", { class: "chart-note",
-      text: "Shutdown plan unavailable." }));
-    return;
-  }
-  host.replaceChildren();
   shutdownTriggerNodes(name, plan).forEach((nd) => host.appendChild(nd));
   const intro = el("p", { class: "chart-note" },
     [el("span", { text: "What runs when a power-loss shutdown is triggered, top "
@@ -2792,8 +3403,48 @@ async function renderShutdownPlan() {
   host.appendChild(flow);
 }
 
+// Render shutdown plans driven by the global UPS scope. Under "All UPS" (fleet)
+// every plan is stacked so a monitoring-only UPS's "only remote shutdown runs"
+// explanation is visible without hunting a dropdown; a single scope shows just
+// that UPS's plan under a clear "Viewing plan for" header. (operator #3)
+async function renderShutdownPlan() {
+  const host = document.getElementById("shutdown-plan");
+  if (!host) return;
+  const ctl = document.getElementById("shutdown-controls");
+  if (ctl) ctl.hidden = true;   // the header UPS selector is the scope control now
+  const rows = lastUpsRows;
+  if (!rows.length) {
+    host.replaceChildren(el("p", { class: "chart-note", text: "No UPS data yet." }));
+    return;
+  }
+  const targets = (scopeIsAll() && rows.length > 1)
+    ? rows.slice()
+    : rows.filter((u) => u.name === scopedName());
+  const stacked = targets.length > 1;
+  const myGen = ++_sdGen;
+  host.replaceChildren();
+  for (const u of targets) {
+    const res = await api("/api/v1/ups/" + encodeURIComponent(u.name) + "/shutdown-plan");
+    if (myGen !== _sdGen) return;   // a newer render superseded us
+    const plan = res.ok && res.data && res.data.plan;
+    const section = el("div", { class: "sd-plan" });
+    section.appendChild(el("div", { class: "sd-plan-title card-title" },
+      [el("h3", { text: (stacked ? "Plan · " : "Viewing plan for: ") + (u.label || u.name) }),
+       monitoringBadge(u)].filter(Boolean)));
+    if (!plan) {
+      section.appendChild(el("p", { class: "chart-note", text: "Shutdown plan unavailable." }));
+    } else {
+      appendShutdownPlanBody(section, u.name, plan);
+    }
+    host.appendChild(section);
+  }
+}
+
 function onTabActivated(name) {
-  if (name === "power") { renderLineQuality(); if (charts.power) charts.power.load(); }
+  if (name === "overview") {
+    renderOverviewSummary(lastUpsRows); renderRedundancy(); renderRemoteHealth();
+  }
+  else if (name === "power") { renderLineQuality(); if (charts.power) charts.power.load(); }
   else if (name === "battery") { renderBatteryHealthTab(); if (charts.battery) charts.battery.load(); }
   else if (name === "energy") { renderEnergyTab(); if (charts.energy) charts.energy.load(); }
   else if (name === "shutdown") renderShutdownPlan();
@@ -2930,6 +3581,12 @@ async function init() {
   charts.energy = makeEnergyChart({ hostId: "energy-graph", upsSelId: "energy-ups",
     rangeSelId: "energy-range", eventsNoteId: "energy-events-note" });
   Object.values(charts).forEach((c) => c.observe());
+
+  // Global UPS scope selector drives Power/Battery/Energy/Shutdown + the scoped
+  // card grids. It is the single source of truth; the per-tab dropdowns are
+  // hidden and mirrored from it (see populateChartUpsSelects/onScopeChanged).
+  const gsel = document.getElementById("global-ups");
+  if (gsel) gsel.addEventListener("change", onScopeChanged);
 
   // Shutdown-tab UPS selector: re-render the plan for the chosen UPS/group.
   const sdSel = document.getElementById("shutdown-ups");

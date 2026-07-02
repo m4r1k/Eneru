@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.4] - 2026-07-02
+
+Multi-UPS correctness and a dashboard overhaul for multi-UPS deployments, driven
+by adding a second, monitoring-only UPS to a running system. Shipped as a bug-fix
+release; no config or shutdown behavior changes.
+
+### Fixed
+
+- **Adding a second UPS orphaned all prior history.** Going from one UPS to
+  multiple switched the stats store from `default.db` to per-UPS databases, so
+  the pre-existing UPS's months of history, events, and aggregates vanished from
+  the dashboard, API, CLI, TUI, and reports. On the first multi-UPS boot Eneru
+  now migrates `default.db` into the first group's per-UPS database — idempotent
+  and restart-safe — so history survives the transition.
+- **Spurious 0% battery-charge spikes.** A network-polled (monitoring-only) UPS
+  that returns a transient `0` for `battery.charge` on a partial poll no longer
+  writes a false zero while on line power (mirrors the existing input-voltage
+  guard), so the charge graph and its AVG/MIN aggregates stay clean.
+- **Missing power-quality telemetry rendered as bare units** — "V" / "Hz" / "°C"
+  with no number for a monitoring-only UPS; empty values now read "—".
+- **Battery-health factor meters rendered full-width regardless of value** — the
+  strict CSP stripped their inline width, so the meters silently lied; the bars
+  now reflect the real 0-100 scores. The `data:` favicon (also CSP-blocked) is
+  now a packaged same-origin asset.
+- The line-quality verdict reads **Unknown** (not a confident green "Good") when
+  a UPS reports too little AC telemetry to judge.
+- Self-test result casing, a duplicated Config heading, and config-card spacing
+  for long UPS names.
+- **Self-test "command not exposed" is now actionable.** When the configured
+  `self_test.command` isn't offered by a UPS — e.g. APC (via `usbhid-ups`) exposes
+  `test.battery.start.quick` / `.deep`, not the bare `test.battery.start` — the API
+  and CLI now list the battery-test commands the UPS *does* expose so you can set
+  the right one (per-UPS in multi-UPS mode).
+- **Battery age no longer looks broken.** The age factor is a 0-100 sub-score where
+  `0` means "at/past expected life"; the Battery view now shows the actual age
+  (e.g. "~10.0 yr / 5 yr") beside it, so a low score reads as a worn battery rather
+  than "0 = new / not reported". Age is per-UPS: a UPS without its own
+  `battery_install_date` reads "n/a" instead of borrowing another battery's date.
+- The empty **"no redundancy groups configured" hint is gone** from Overview for
+  the majority who run independent UPSes; the section now appears only when
+  redundancy groups actually exist.
+
+### Changed
+
+- **A global UPS selector** in the header (default "All UPS") scopes the Power /
+  Battery / Energy / Shutdown tabs and the per-UPS card grids; the per-tab UPS
+  dropdowns are retired. Overview stays fleet-wide.
+- **Overview summarizes the whole fleet** — a persistent fleet-status strip, a
+  "monitoring only" badge on non-local UPSes, and headline KPIs that report the
+  worst battery health, total energy, and worst self-test across all UPSes rather
+  than a single one.
+- **Shutdown plans are per-UPS and discoverable** — "All UPS" stacks every plan,
+  and a monitoring-only UPS shows why it runs no local shutdown.
+- Tab order moves Events and Config to the end; Events gains a Source column and
+  is seeded from the global UPS selection.
+- Status colors are calibrated: on-battery urgency (amber ring, "ON BATTERY"),
+  confidence-tempered battery-health badges, neutral idle regulation states, and
+  a neutral (not alarm) shutdown-trigger banner.
+- Charts gain a time axis, break across data gaps instead of bridging them, and
+  use a categorical (non-status) series palette.
+- Accessibility: WCAG AA status-color contrast, a modal focus trap + Esc, visible
+  focus rings, `prefers-reduced-motion`, ARIA on charts / modals / controls, and
+  narrow-viewport handling.
+- The API listen backlog is raised so bursts of concurrent dashboard requests
+  aren't refused.
+- Documented per-UPS overrides (credentials, self-test command, battery install
+  date) with a copy-pasteable multi-UPS example in the config reference and the
+  nut-control / self-test guides — the capability already existed but was easy to
+  miss.
+
+### Notes
+
+- Deferred to a follow-up: hero instantaneous watts; a chart-core consolidation
+  (small-multiples for Load & power, nice-number y-ticks, shape-encoded event
+  markers, health-trend hover); and a couple of UI nits.
+
+---
+
 ## [6.1.3] - 2026-07-01
 
 Two self-test bug fixes on top of 6.1.2, from live UniFi hardware. No shutdown

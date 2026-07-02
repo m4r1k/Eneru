@@ -4,15 +4,21 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Eneru</title>
-  <!-- Inline ⚡ favicon (a lightning-bolt path, so it renders without an emoji
-       font and needs no extra packaged asset). -->
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M13 2 L4 14 h6 l-1 8 9-12 h-6 z' fill='%234f8cf7'/%3E%3C/svg%3E">
+  <!-- Packaged ⚡ favicon served same-origin. A data: URL was blocked by the
+       strict CSP (img-src falls back to default-src 'self', which forbids data:). -->
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header>
     <h1><svg class="ic brand-bolt" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3 6 13h5l-1 8 8-11h-5z"/></svg>Eneru</h1>
     <div id="authbox" class="authbox">
+      <!-- Global UPS scope: drives Power/Battery/Energy/Shutdown + the scoped
+           Overview/Battery/Energy cards. "All UPS" keeps the fleet comparison.
+           Hidden for single-UPS deployments (wired in app.js). -->
+      <label class="ups-scope" id="global-ups-wrap" hidden>UPS
+        <select id="global-ups" aria-label="UPS to show"></select>
+      </label>
       <label class="theme-pick">Theme
         <select id="theme-select" aria-label="Color theme">
           <option value="system">System</option>
@@ -31,6 +37,16 @@
   <!-- Tab bar (Nutify-style). Real ARIA tabs: arrow-key nav + hash sync wired in
        app.js, which also prepends each tab's inline-SVG icon (see TAB_ICONS).
        The Control tab is hidden until authenticated + nut_control. -->
+  <!-- Persistent fleet-status strip: every UPS at-a-glance on every tab, so a
+       second UPS is never below the fold during an outage. Hidden for a
+       single-UPS deployment (wired in app.js). -->
+  <!-- Not role=status: it's rebuilt every 10s poll, so a live region would
+       re-announce the whole fleet each cycle. The #banner is the live alarm. -->
+  <div id="fleet-strip" class="fleet-strip" aria-label="Fleet status" hidden></div>
+
+  <!-- Tab order: scoped telemetry tabs first (driven by the global UPS
+       selector), then the unscoped tail (Events has its own filter, Config is
+       fleet-wide) after a divider. -->
   <nav id="tabs" class="tabs" role="tablist" aria-label="Dashboard sections">
     <button class="tab" role="tab" id="tab-overview" data-tab="overview"
             aria-controls="panel-overview" aria-selected="true">Overview</button>
@@ -40,12 +56,13 @@
             aria-controls="panel-battery" aria-selected="false" tabindex="-1">Battery</button>
     <button class="tab" role="tab" id="tab-energy" data-tab="energy"
             aria-controls="panel-energy" aria-selected="false" tabindex="-1">Energy</button>
-    <button class="tab" role="tab" id="tab-events" data-tab="events"
-            aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
     <button class="tab" role="tab" id="tab-control" data-tab="control"
             aria-controls="panel-control" aria-selected="false" tabindex="-1" hidden>Control</button>
     <button class="tab" role="tab" id="tab-shutdown" data-tab="shutdown"
             aria-controls="panel-shutdown" aria-selected="false" tabindex="-1">Shutdown</button>
+    <span class="tab-divider" aria-hidden="true"></span>
+    <button class="tab" role="tab" id="tab-events" data-tab="events"
+            aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
     <button class="tab" role="tab" id="tab-config" data-tab="config"
             aria-controls="panel-config" aria-selected="false" tabindex="-1">Config</button>
   </nav>
@@ -95,6 +112,7 @@
             <option value="86400" selected>Last 24 hours</option>
             <option value="604800">Last 7 days</option>
             <option value="2592000">Last 30 days</option>
+            <option value="all">All</option>
           </select>
         </label>
       </div>
@@ -128,6 +146,7 @@
             <option value="86400" selected>Last 24 hours</option>
             <option value="604800">Last 7 days</option>
             <option value="2592000">Last 30 days</option>
+            <option value="all">All</option>
           </select>
         </label>
       </div>
@@ -150,10 +169,12 @@
             <option value="86400" selected>Last 24 hours</option>
             <option value="604800">Last 7 days</option>
             <option value="2592000">Last 30 days</option>
+            <option value="all">All</option>
           </select>
         </label>
       </div>
       <div id="energy-graph" class="graph"></div>
+      <p class="chart-note" id="energy-note" hidden></p>
       <p class="chart-note" id="energy-events-note" hidden></p>
     </section>
 
@@ -162,7 +183,10 @@
              aria-labelledby="tab-events" tabindex="0" hidden>
       <h2>Events</h2>
       <div class="event-filters">
-        <label>Source
+        <!-- Source is driven by the header UPS selector (no redundant second
+             dropdown); the select stays in the DOM, hidden, as the filter's
+             internal state. -->
+        <label hidden>Source
           <select id="event-source-filter">
             <option value="">All sources</option>
           </select>
@@ -198,7 +222,7 @@
         <button type="button" id="event-load-older">Load older</button>
       </div>
       <table id="events" class="events">
-        <thead><tr id="events-head"><th><button id="event-sort-time" type="button" class="th-sort">Time ↑</button></th><th>Type</th><th>Detail</th></tr></thead>
+        <thead><tr id="events-head"><th><button id="event-sort-time" type="button" class="th-sort" aria-label="Sort by time, ascending" aria-pressed="true">Time ↑</button></th><th>Type</th><th>Detail</th></tr></thead>
         <tbody></tbody>
       </table>
     </section>
@@ -235,8 +259,9 @@
 
   <!-- Login dialog -->
   <div id="login-modal" class="modal" hidden>
-    <form id="login-form" class="modal-card">
-      <h3>Sign in</h3>
+    <form id="login-form" class="modal-card" role="dialog" aria-modal="true"
+          aria-labelledby="login-title">
+      <h3 id="login-title">Sign in</h3>
       <label>Username <input id="login-user" autocomplete="username"></label>
       <label>Password <input id="login-pass" type="password" autocomplete="current-password"></label>
       <div class="modal-actions">
@@ -252,7 +277,9 @@
     <div class="modal-card detail-card" role="dialog" aria-modal="true" aria-labelledby="detail-title">
       <div class="modal-head">
         <h3 id="detail-title">UPS details</h3>
-        <button type="button" id="detail-close" aria-label="Close">✕</button>
+        <button type="button" id="detail-close" aria-label="Close">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12 M18 6 6 18"/></svg>
+        </button>
       </div>
       <div id="detail-body"></div>
     </div>

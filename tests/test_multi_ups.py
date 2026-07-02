@@ -282,6 +282,50 @@ class TestMultiUPSCoordinator:
         assert len(coord._monitors) == 0
 
     @pytest.mark.unit
+    def test_migrate_legacy_default_db_preserves_history(self, tmp_path):
+        """single→multi migration folds the WAL in, moves a single self-contained
+        file, and leaves no stranded default.db* sidecars (v6.1.4 review)."""
+        from eneru.stats import StatsStore
+        legacy = tmp_path / "default.db"
+        s = StatsStore(legacy)
+        s.open()
+        s.record_self_test("test.battery.start", "scheduler")   # real WAL write
+        s.close()
+        config = self._make_config([
+            UPSGroupConfig(ups=UPSConfig(name="ups@10.0.0.1"), is_local=True),
+        ])
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        coord._migrate_legacy_default_db(tmp_path)
+        # The legacy file and every sidecar are gone (migration complete)...
+        assert not legacy.exists()
+        assert not (tmp_path / "default.db-wal").exists()
+        assert not (tmp_path / "default.db-shm").exists()
+        # ...and the row survived into the first group's per-UPS DB.
+        target = tmp_path / "ups-10.0.0.1.db"
+        assert target.exists()
+        s2 = StatsStore(target)
+        s2.open()
+        assert s2.latest_self_test() is not None
+        s2.close()
+
+    @pytest.mark.unit
+    def test_migrate_legacy_default_db_idempotent_when_target_exists(self, tmp_path):
+        """If a per-UPS DB already exists, leave default.db untouched (no clobber)."""
+        from eneru.stats import StatsStore
+        legacy = tmp_path / "default.db"
+        s = StatsStore(legacy); s.open(); s.close()
+        target = tmp_path / "ups-10.0.0.1.db"
+        t = StatsStore(target); t.open(); t.close()
+        config = self._make_config([
+            UPSGroupConfig(ups=UPSConfig(name="ups@10.0.0.1"), is_local=True),
+        ])
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        coord._migrate_legacy_default_db(tmp_path)
+        assert legacy.exists() and target.exists()   # both preserved
+
+    @pytest.mark.unit
     def test_is_local_triggers_local_shutdown(self):
         """is_local group triggers _handle_local_shutdown."""
         config = self._make_config([

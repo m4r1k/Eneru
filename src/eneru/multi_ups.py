@@ -26,7 +26,7 @@ from eneru.remote_health import RemoteHealthManager, remote_health_sidecar_path
 from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
 from eneru.redundancy import RedundancyGroupEvaluator, RedundancyGroupExecutor
 from eneru.stats import StatsStore
-from eneru.status import redundancy_state_file_path
+from eneru.status import redundancy_state_file_path, sanitize_name
 from eneru.lifecycle import (
     REASON_SEQUENCE_COMPLETE,
     REASON_SIGNAL,
@@ -183,6 +183,10 @@ class MultiUPSCoordinator:
         # a notification worker is configured. Otherwise the markers
         # would leak across configurations (P2 finding from review).
         stats_dir = Path(self.config.statistics.db_directory)
+        # Before any monitor opens a write connection: rescue a single-UPS
+        # deployment's default.db into the first group's per-UPS DB, so adding
+        # a second UPS never silently orphans months of history.
+        self._migrate_legacy_default_db(stats_dir)
         shutdown_marker = read_shutdown_marker(stats_dir)
         upgrade_marker = read_upgrade_marker(stats_dir)
 
@@ -270,6 +274,80 @@ class MultiUPSCoordinator:
                     self._log(
                         f"⚠️  Failed to close stats DB {db_path.name}: {e}"
                     )
+
+    def _migrate_legacy_default_db(self, stats_dir: Path) -> None:
+        """One-time: promote the single-UPS ``default.db`` to the first group's
+        per-UPS stats DB when a deployment becomes multi-UPS.
+
+        A single-UPS install writes stats to ``default.db``. The moment a
+        second UPS is configured, ``stats_db_path_for_group`` switches every
+        group to ``<sanitized-name>.db`` -- and the pre-existing UPS's whole
+        history (raw + agg_5min + agg_hourly + events + battery_health) is
+        stranded in ``default.db``, read by nothing. This renames it into the
+        first group's per-UPS file so history, events, and the aggregate tiers
+        survive the transition on web, CLI, TUI, and reports at once.
+
+        Runs in the coordinator's pre-writer window (before any monitor opens
+        its write connection). Idempotent and restart-safe: no-op once the
+        rename has happened (``default.db`` gone) or if a per-UPS DB already
+        exists (leave both untouched rather than clobber live history)."""
+        if not self.config.ups_groups:
+            return
+        legacy = stats_dir / "default.db"
+        if not legacy.exists():
+            return
+        first = self.config.ups_groups[0]
+        target = stats_dir / f"{sanitize_name(first.ups.name)}.db"
+        if target.exists():
+            # A per-UPS DB is already accumulating; a blind rename would lose
+            # it. Leave default.db in place (recoverable) rather than guess a
+            # merge -- the pre-multi-UPS history can be merged manually.
+            return
+        try:
+            # Fold any committed WAL frames back into default.db BEFORE moving it.
+            # A clean single-UPS stop checkpoints on close, but a crash can leave a
+            # populated default.db-wal; renaming only the main file would strand
+            # those committed frames in an orphaned sidecar while the migration
+            # looks "done" (default.db gone). checkpoint(TRUNCATE) collapses the
+            # WAL into the DB and empties the sidecar first, so the single file we
+            # move is self-contained.
+            self._checkpoint_wal(legacy)
+            legacy.rename(target)
+            # Post-checkpoint the sidecars hold no committed data, so relocating
+            # them is just tidy-up: best-effort PER FILE (a failure here can no
+            # longer lose data) rather than a rename that could abort mid-way.
+            for suffix in ("-wal", "-shm"):
+                side = stats_dir / f"default.db{suffix}"
+                if side.exists():
+                    try:
+                        side.replace(stats_dir / f"{target.name}{suffix}")
+                    except OSError:
+                        try:
+                            side.unlink()
+                        except OSError:
+                            pass
+            self._log(
+                f"📦  Migrated single-UPS history {legacy.name} → {target.name} "
+                f"for {first.ups.label} (single→multi-UPS transition)")
+        except OSError as e:
+            self._log(
+                f"⚠️  Could not migrate {legacy.name} → {target.name}: {e} "
+                f"(history for {first.ups.label} may be unavailable until fixed)")
+
+    @staticmethod
+    def _checkpoint_wal(db_path: Path) -> None:
+        """Fold WAL frames into the main DB file and truncate the ``-wal`` sidecar
+        so the file is self-contained before it is moved. Best-effort: a missing
+        DB, a non-WAL DB, or a checkpoint error is a no-op (the sidecar relocation
+        in the caller is the fallback)."""
+        try:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            pass
 
     def _read_last_seen_version_from_first_group(self, stats_dir):
         """Read meta.last_seen_version from the first group's stats DB

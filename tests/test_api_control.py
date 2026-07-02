@@ -341,8 +341,8 @@ def test_store_for_ups_resolves_monitor(minimal_config):
 def test_run_self_test_issues(minimal_config, monkeypatch):
     _enable(minimal_config)
     minimal_config.nut_control.allowed_commands = ["test.battery.start"]
-    monkeypatch.setattr(apimod.selftest, "discover_self_test_command",
-                        lambda *a, **k: "test.battery.start")
+    monkeypatch.setattr(apimod.selftest, "list_supported_commands",
+                        lambda *a, **k: ["test.battery.start"])
     monkeypatch.setattr(apimod.selftest, "issue_self_test",
                         lambda *a, **k: {"ok": True, "test_id": 5, "error": ""})
     logs = []
@@ -363,8 +363,8 @@ def test_run_self_test_503_without_open_store(minimal_config, monkeypatch, store
     # missing store (None) and the present-but-closed store (_conn is None).
     _enable(minimal_config)
     minimal_config.nut_control.allowed_commands = ["test.battery.start"]
-    monkeypatch.setattr(apimod.selftest, "discover_self_test_command",
-                        lambda *a, **k: "test.battery.start")
+    monkeypatch.setattr(apimod.selftest, "list_supported_commands",
+                        lambda *a, **k: ["test.battery.start"])
     monkeypatch.setattr(apimod.selftest, "issue_self_test",
                         lambda *a, **k: pytest.fail("must not issue without a store"))
     if store == "closed":
@@ -384,8 +384,11 @@ def test_run_self_test_503_without_open_store(minimal_config, monkeypatch, store
 def test_run_self_test_unsupported_422(minimal_config, monkeypatch):
     _enable(minimal_config)
     minimal_config.nut_control.allowed_commands = ["test.battery.start"]
-    monkeypatch.setattr(apimod.selftest, "discover_self_test_command",
-                        lambda *a, **k: None)   # not exposed by the UPS
+    # The UPS exposes quick/deep but NOT the configured bare command (APC case):
+    # the 422 must name the startable tests so the operator can pick one.
+    monkeypatch.setattr(apimod.selftest, "list_supported_commands",
+                        lambda *a, **k: ["test.battery.start.quick",
+                                         "test.battery.stop", "beeper.toggle"])
     monkeypatch.setattr(apimod.selftest, "issue_self_test",
                         lambda *a, **k: pytest.fail("must not issue an unsupported cmd"))
     h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/self-test",
@@ -394,6 +397,9 @@ def test_run_self_test_unsupported_422(minimal_config, monkeypatch):
     h.headers["Authorization"] = f"Bearer {_token(h)}"
     status, _, payload = h._route_post()
     assert status == 422 and payload["error"]["code"] == "UNSUPPORTED"
+    msg = payload["error"]["message"]
+    assert "test.battery.start.quick" in msg      # candidate surfaced
+    assert "test.battery.stop" not in msg         # stop is not a startable test
 
 
 @pytest.mark.unit
@@ -425,8 +431,8 @@ def test_run_self_test_permitted_by_self_test_flag_without_nut_control(
     minimal_config.nut_control.enabled = False
     minimal_config.nut_control.allowed_commands = []
     captured = {}
-    monkeypatch.setattr(apimod.selftest, "discover_self_test_command",
-                        lambda ups, cmd, **k: cmd)
+    monkeypatch.setattr(apimod.selftest, "list_supported_commands",
+                        lambda *a, **k: ["test.battery.start"])
 
     def _issue(ups, cmd, nc, store, source="api"):
         captured["allowed"] = list(nc.allowed_commands)

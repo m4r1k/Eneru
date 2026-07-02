@@ -84,7 +84,21 @@ def test_coordinator_mode_is_handoff(cfg):
     plan = build_shutdown_plan(cfg, is_local=True, coordinator_mode=True)
     term = plan["phases"][-1]
     assert term["id"] == "local-poweroff" and term["title"] == "Group handoff"
+    assert term["enabled"] and term["steps"]     # a local group owns the poweroff
     assert plan["note"] and "coordinator" in plan["note"].lower()
+
+
+@pytest.mark.unit
+def test_coordinator_mode_non_local_skips_handoff(cfg):
+    # A non-local (monitoring-only) UPS in coordinator mode must NOT show an
+    # enabled host-poweroff handoff — losing a UPS that doesn't power this host
+    # triggers nothing here (mirrors _on_group_shutdown, which won't poweroff).
+    plan = build_shutdown_plan(cfg, is_local=False, coordinator_mode=True)
+    term = plan["phases"][-1]
+    assert term["id"] == "local-poweroff"
+    assert not term["enabled"]
+    assert term["skipped"] == "non-local group"
+    assert term["steps"] == []
 
 
 @pytest.mark.unit

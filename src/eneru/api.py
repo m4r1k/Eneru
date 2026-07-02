@@ -42,6 +42,7 @@ _STATIC_CONTENT_TYPES = {
     ".html": "text/html",
     ".js": "application/javascript",
     ".css": "text/css",
+    ".svg": "image/svg+xml",
 }
 _DASHBOARD_INDEX = "index.html"
 # A conservative charset for upsrw values. NUT values are short tokens (numbers,
@@ -59,6 +60,7 @@ _CONTENT_TYPE_HEADERS = {
     "text/html": "text/html; charset=utf-8",
     "application/javascript": "application/javascript; charset=utf-8",
     "text/css": "text/css; charset=utf-8",
+    "image/svg+xml": "image/svg+xml; charset=utf-8",
 }
 
 # Serialize control writes per UPS so two concurrent requests can't race an
@@ -240,9 +242,27 @@ class EneruAPIServer:
 
         addr = (self.config.api.bind, int(self.config.api.port))
         try:
-            self._httpd = ThreadingHTTPServer(addr, Handler)
+            # bind_and_activate=False so we can raise the listen backlog before
+            # listen() is called. The stdlib default request_queue_size is 5, so a
+            # burst of concurrent dashboard/API connections could overflow the
+            # accept queue and surface as intermittent "connection refused" even
+            # though the daemon is healthy and every handler runs on its own
+            # worker thread. 128 absorbs realistic bursts.
+            self._httpd = ThreadingHTTPServer(addr, Handler, bind_and_activate=False)
+            self._httpd.request_queue_size = 128
+            self._httpd.server_bind()
+            self._httpd.server_activate()
         except OSError as exc:
             self.log_fn(f"⚠️  API server failed to bind {addr[0]}:{addr[1]}: {exc}")
+            # bind_and_activate=False bypasses TCPServer.__init__'s cleanup, so a
+            # failed server_bind() leaves the freshly-created socket open. Close it
+            # explicitly to avoid leaking the fd on a retry / repeated reload.
+            if self._httpd is not None:
+                try:
+                    self._httpd.server_close()
+                except OSError:
+                    pass
+            self._httpd = None
             return
         # v6.0: worker threads are NON-daemon. The API now has non-idempotent
         # write endpoints (control commands, config reload), so a worker must
@@ -925,17 +945,24 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         # API honors the same "self-disable if unsupported" contract the docs
         # promise rather than letting NUT reject it after the fact.
         try:
-            exposed = selftest.discover_self_test_command(
-                real, command, username=nc.username, password=nc.password,
+            supported = selftest.list_supported_commands(
+                real, username=nc.username, password=nc.password,
                 timeout=nc.timeout)
         except selftest.SelfTestUnavailable as exc:
             self._audit(principal, "self-test", f"{real}:{command}", "failed")
             return 502, "application/json", self._error("NUT_ERROR", str(exc))
-        if exposed is None:
+        if command not in supported:
             self._audit(principal, "self-test", f"{real}:{command}", "failed")
+            # Point the operator at what this UPS actually offers — many devices
+            # expose test.battery.start.quick/.deep, not the bare default — so a
+            # 422 is actionable ("set self_test.command to X") not a dead end.
+            candidates = selftest.test_command_candidates(supported)
+            hint = (" Available battery-test commands: " + ", ".join(candidates)
+                    + " — set this UPS's self_test.command to one of them."
+                    ) if candidates else ""
             return 422, "application/json", self._error(
                 "UNSUPPORTED",
-                f"UPS {real} does not expose {command!r} (upscmd -l)")
+                f"UPS {real} does not expose {command!r} (upscmd -l).{hint}")
         # A self-test must record a `running` row so its result can be finalised
         # later; without an open stats store it would orphan that state, so
         # refuse (mirrors the CLI --direct and scheduler guards). A store that

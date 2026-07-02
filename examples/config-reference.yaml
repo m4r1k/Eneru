@@ -27,6 +27,47 @@ ups:
     # Send a warning after this many grace-period recoveries (flaps) within 24h (default: 5)
     flap_threshold: 5
 
+# ------------------------------------------------------------------------------
+# MULTI-UPS (list form) — watch several UPSes, each on its own upsd if needed.
+# ------------------------------------------------------------------------------
+# Make `ups:` a LIST instead of the single mapping above. Each entry is an
+# independent group. The global `nut_control:`, `self_test:`, and
+# `battery_health:` sections lower in this file are the DEFAULTS; any of them can
+# be OVERRIDDEN per UPS right here — because credentials, the self-test command,
+# and battery facts are device-specific. Unset fields in a per-UPS block inherit
+# the global default (an explicitly-empty allowed_commands means deny-all).
+#
+# ups:
+#   # --- The UPS that powers THIS host (drives local shutdown). ---
+#   - name: "ups@192.168.178.11"
+#     display_name: "Lab"
+#     is_local: true
+#
+#   # --- A second UPS on a DIFFERENT upsd (e.g. a Pi NUT server), monitor-only. ---
+#   - name: "apc@192.168.178.225"
+#     display_name: "APC"
+#     is_local: false                # never powers off this host; watch/notify only
+#     check_interval: 5
+#     # Independent AUTH: this UPS lives on another upsd with its own upsd.users.
+#     # These creds are used for upscmd (list + issue) against THIS device only;
+#     # the global nut_control.enabled still gates the write feature overall.
+#     nut_control:
+#       username: "apc-monitor"
+#       password: "<this-upsd's-secret>"
+#       allowed_commands:
+#         - test.battery.start.quick
+#     # Independent COMMAND: APC exposes quick/deep, not the bare default. Enabling
+#     # self_test auto-permits exactly this command for this UPS.
+#     self_test:
+#       enabled: true
+#       command: test.battery.start.quick
+#     # Independent BATTERY facts: the age term needs THIS battery's own install
+#     # date. Leave unset to read "unavailable" rather than borrowing the global
+#     # (Lab) date — a physical battery's age can't be inherited from another.
+#     battery_health:
+#       battery_install_date: "2021-06-25"
+#       expected_life_years: 5.0
+
 # ==============================================================================
 # SHUTDOWN TRIGGERS
 # ==============================================================================
@@ -234,8 +275,13 @@ self_test:
   schedule: monthly
   # Wall-clock time for calendar schedules (HH:MM, daemon local time).
   time: "03:00"
-  # The instant command to issue. Adapts to whatever `upscmd -l` exposes; many
-  # UPSes only support `test.battery.start`. Enabling self_test auto-permits it.
+  # The instant command to issue. It must be one that `upscmd -l` actually
+  # exposes for the UPS. Many devices differ from the default: APC (via
+  # usbhid-ups) offers `test.battery.start.quick` / `test.battery.start.deep`
+  # (and `test.battery.stop`), NOT the bare `test.battery.start`. If the
+  # configured command isn't exposed, the API/CLI tell you which test commands
+  # ARE available so you can set the right one (per-UPS in multi-UPS mode).
+  # Enabling self_test auto-permits exactly this command.
   command: test.battery.start
   # Seconds to wait after issuing before polling ups.test.result.
   result_poll_after: 60

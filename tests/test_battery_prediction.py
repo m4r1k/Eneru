@@ -93,6 +93,22 @@ class TestTermScores:
         now = P.datetime(2026, 6, 1).timestamp()
         assert P.age_score("2030-01-01", 5.0, now) == 100.0  # negative age -> full
 
+    @pytest.mark.unit
+    def test_battery_age_years(self):
+        now = P.datetime(2026, 6, 1).timestamp()
+        assert P.battery_age_years("2025-06-01", now) == pytest.approx(1.0, abs=0.01)
+        # A very old battery (drives the age sub-score to 0 while still reporting
+        # a real age the UI can show) — the case behind "Battery age shows 0".
+        assert P.battery_age_years("2016-06-01", now) == pytest.approx(10.0, abs=0.05)
+        assert P.age_score("2016-06-01", 5.0, now) == 0.0  # ~10y > 5y expected
+
+    @pytest.mark.unit
+    def test_battery_age_years_unset_bad_and_future(self):
+        assert P.battery_age_years(None, 1000.0) is None
+        assert P.battery_age_years("not-a-date", 1000.0) is None
+        now = P.datetime(2026, 6, 1).timestamp()
+        assert P.battery_age_years("2030-01-01", now) == 0.0  # future -> 0, not negative
+
 
 # --------------------------------------------------------------------------
 # composite

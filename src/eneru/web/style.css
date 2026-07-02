@@ -7,16 +7,19 @@
   --panel-2: #1e222c;
   --text: #e7eaf0;
   --text-2: #c2c8d4;
-  --muted: #99a2b2;
+  --muted: #a8b2c2;
   --accent: #5b93f7;
   --accent-rgb: 91,147,247;
   --on-accent: #0b0e13;
-  --ok: #4ccb6e;   --ok-rgb: 76,203,110;
-  --warn: #e7a13a; --warn-rgb: 231,161,58;
-  --crit: #ef5b5b; --crit-rgb: 239,91,91;
+  /* Dark-mode status colors brightened to clear WCAG AA (4.5:1) on --bg; light
+     theme re-pins the original hues below (they read better on white). */
+  --ok: #5fdb7e;   --ok-rgb: 95,219,126;
+  --warn: #f0b940; --warn-rgb: 240,185,64;
+  --crit: #ff6b6b; --crit-rgb: 255,107,107;
+  --watts: #b794ff;   /* 2nd data series (power) — distinct from accent blue */
   --line: #262b36;
   --line-strong: #313845;
-  --grid: rgba(255,255,255,0.05);
+  --grid: rgba(255,255,255,0.09);
   /* tinted status/accent surfaces */
   --accent-weak: rgba(var(--accent-rgb), 0.14);
   --ok-weak:   rgba(var(--ok-rgb), 0.13);
@@ -36,7 +39,11 @@
     --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f6; --text: #161a22;
     --text-2: #2f3744; --muted: #5b6473; --accent: #2563eb; --accent-rgb: 37,99,235;
     --on-accent: #ffffff; --line: #e6e9ef; --line-strong: #dde1e9;
-    --grid: rgba(15,20,30,0.06);
+    --ok: #1f9d55;   --ok-rgb: 31,157,85;
+    --warn: #b0730a; --warn-rgb: 176,115,10;
+    --crit: #d64545; --crit-rgb: 214,69,69;
+    --watts: #6d28d9;
+    --grid: rgba(15,20,30,0.10);
     --shadow-sm: 0 1px 2px rgba(15,20,30,0.05);
     --shadow-md: 0 4px 16px -6px rgba(15,20,30,0.14);
     --shadow-lg: 0 16px 40px -14px rgba(15,20,30,0.22);
@@ -46,7 +53,11 @@
   --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f6; --text: #161a22;
   --text-2: #2f3744; --muted: #5b6473; --accent: #2563eb; --accent-rgb: 37,99,235;
   --on-accent: #ffffff; --line: #e6e9ef; --line-strong: #dde1e9;
-  --grid: rgba(15,20,30,0.06);
+  --ok: #1f9d55;   --ok-rgb: 31,157,85;
+  --warn: #b0730a; --warn-rgb: 176,115,10;
+  --crit: #d64545; --crit-rgb: 214,69,69;
+    --watts: #6d28d9;
+  --grid: rgba(15,20,30,0.10);
   --shadow-sm: 0 1px 2px rgba(15,20,30,0.05);
   --shadow-md: 0 4px 16px -6px rgba(15,20,30,0.14);
   --shadow-lg: 0 16px 40px -14px rgba(15,20,30,0.22);
@@ -79,15 +90,20 @@ h2 { font-size: 0.8125rem; color: var(--muted); text-transform: uppercase;
   transition: transform .14s ease, box-shadow .14s ease, border-color .14s ease; }
 .card h3 { margin: 0 0 0.6rem; font-size: 1rem; font-weight: 600; }
 .card .row { display: flex; justify-content: space-between; padding: 0.18rem 0;
-  color: var(--muted); font-size: 0.9375rem; }
+  gap: 0.25rem 1rem; color: var(--muted); font-size: 0.9375rem; }
 .card .row b { color: var(--text-2); font-weight: 600;
   font-variant-numeric: tabular-nums; }
+/* Only the row's DIRECT value (e.g. a long config host) may wrap; the numeric
+   <b> nested inside a term meter must NOT (else "100" broke to "10"/"0"). */
+.card .row > b { min-width: 0; text-align: right; overflow-wrap: anywhere; }
 /* Status shown ONCE per card: a 2px accent strip on top (not green-on-everything). */
-.card.s-ok::before, .card.s-warn::before, .card.s-crit::before {
+.card.s-ok::before, .card.s-warn::before, .card.s-crit::before,
+.card.s-muted::before {
   content: ""; position: absolute; inset: 0 0 auto 0; height: 2px; }
 .card.s-ok::before   { background: var(--ok); }
 .card.s-warn::before { background: var(--warn); }
 .card.s-crit::before { background: var(--crit); }
+.card.s-muted::before { background: var(--muted); }
 
 /* ===== rc9 redesign components =================================== */
 
@@ -107,6 +123,7 @@ h2 { font-size: 0.8125rem; color: var(--muted); text-transform: uppercase;
 .card-ico.s-ok { background: var(--ok-weak); color: var(--ok); }
 .card-ico.s-warn { background: var(--warn-weak); color: var(--warn); }
 .card-ico.s-crit { background: var(--crit-weak); color: var(--crit); }
+.card-ico.s-muted { background: rgba(148,163,184,0.16); color: var(--muted); }
 
 /* Clickable cards (overview summary / UPS cards): lift on hover. */
 .card-click { cursor: pointer; }
@@ -131,6 +148,12 @@ h2 { font-size: 0.8125rem; color: var(--muted); text-transform: uppercase;
 .hero-vitals .v-label { color: var(--muted); font-size: 0.8125rem; }
 .hero-vitals .v-value { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.01em;
   font-variant-numeric: tabular-nums; }
+.hero-vitals .v-value.warn { color: var(--warn); }
+.hero-vitals .v-value.crit { color: var(--crit); }
+/* Outage urgency: an on-battery hero tints amber and carries a prominent
+   ON BATTERY · <time> chip so a live outage never reads as a calm green ring. */
+.hero.hero-alarm { background: var(--warn-weak); }
+.hero-ob { margin-left: 0.25rem; }
 @media (max-width: 560px) { .hero { grid-template-columns: 1fr; text-align: center; } }
 
 /* Battery ring gauge (SVG). */
@@ -176,6 +199,10 @@ select:focus-visible, input:not([type="checkbox"]):focus-visible {
 .graph .plot { fill: none; stroke: var(--accent); stroke-width: 2;
   stroke-linejoin: round; stroke-linecap: round; }
 .graph .area { stroke: none; }
+/* HA-style statistics band: translucent min–max envelope behind the mean line. */
+.graph .plot-band { fill: rgba(var(--accent-rgb), 0.16); stroke: none; }
+.graph .plot-band-watts { fill: var(--watts); opacity: 0.16; stroke: none; }
+.graph .plot-band-load { fill: var(--accent); opacity: 0.14; stroke: none; }
 .graph .now-dot { fill: var(--accent); stroke: var(--panel); stroke-width: 2; }
 .graph .now-dot.s-warn { fill: var(--warn); }
 .graph .now-dot.s-crit { fill: var(--crit); }
@@ -193,6 +220,7 @@ select:focus-visible, input:not([type="checkbox"]):focus-visible {
 .badge.warn { background: rgba(245,166,35,0.15); color: var(--warn); }
 .badge.crit { background: rgba(255,92,92,0.15); color: var(--crit); }
 .badge.info { background: rgba(167,139,250,0.16); color: #a78bfa; }
+.badge.muted { background: rgba(148,163,184,0.22); color: var(--text-2); }
 /* Events-table Type cell: icon-led severity badge (matches chart marker color) */
 .ev-badge { display: inline-flex; align-items: center; gap: 0.35rem;
   padding: 0.12rem 0.55rem; border-radius: 999px; font-size: 0.8rem;
@@ -231,8 +259,14 @@ select, input:not([type="checkbox"]) { background: var(--panel-2); color: var(--
 .graph .lbl { fill: var(--muted); font-size: 11px; }
 .graph .chart-title { fill: var(--muted); font-size: 11px; font-weight: 600;
                       letter-spacing: 0.03em; }
-.events { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-.events th, .events td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--line); }
+/* Live value/min/max/time readout, top-right of a chart (updates on hover). */
+.graph .chart-readout { fill: var(--text); font-size: 12px; font-weight: 600;
+                        font-variant-numeric: tabular-nums; }
+.events { width: 100%; border-collapse: collapse; font-size: 0.9rem;
+  table-layout: fixed; }
+.events th, .events td { text-align: left; padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere; word-break: break-word; }
 .events th { color: var(--muted); font-weight: 600; }
 .th-sort { appearance: none; border: 0; background: transparent; color: inherit; font: inherit; font-weight: 600; padding: 0; cursor: pointer; }
 .th-sort:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -289,10 +323,13 @@ footer { padding: 0.6rem 1.25rem; color: var(--muted); font-size: 0.85rem;
 .term-value { display: inline-flex; align-items: center; gap: 0.5rem; }
 .term-meter { display: inline-block; width: 56px; height: 6px; border-radius: 3px;
   background: var(--line-strong); overflow: hidden; }
-.term-meter-fill { display: block; height: 100%; background: var(--muted); }
+.term-meter-fill { display: block; height: 100%; width: var(--w, 0%);
+  background: var(--muted); }
 .term-meter-fill.ok { background: var(--ok); }
 .term-meter-fill.warn { background: var(--warn); }
 .term-meter-fill.crit { background: var(--crit); }
+/* Actual battery age shown beside the age sub-score so "0" reads as "old". */
+.term-age { color: var(--muted); font-size: 0.85em; white-space: nowrap; }
 .graph .area.bh { fill: var(--accent-weak); }
 meter.bar.ok::-webkit-meter-optimum-value { background: var(--ok); }
 meter.bar.warn::-webkit-meter-optimum-value { background: var(--warn); }
@@ -306,11 +343,16 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 
 /* UPS detail modal */
 .detail-card { width: min(560px, 94vw); max-height: 85vh; overflow: auto; }
-.modal-head { display: flex; align-items: center; justify-content: space-between; }
+/* Keep the title + close button pinned so ✕ is always reachable on a long,
+   scrolled modal (a monitoring-only UPS's detail runs past the fold). */
+.modal-head { display: flex; align-items: center; justify-content: space-between;
+  position: sticky; top: 0; background: var(--panel); padding-bottom: 0.5rem;
+  z-index: 1; }
 .modal-head h3 { margin: 0; }
 .modal-head button { background: var(--panel-2); color: var(--text);
                      border: 1px solid var(--line); }
 .detail-section { margin-top: 0.5rem; }
+@media (max-width: 480px) { .detail-card { width: 96vw; } }
 .detail-section h4 { margin: 0 0 0.3rem; color: var(--muted); font-size: 0.8rem;
                      text-transform: uppercase; letter-spacing: 0.04em; }
 .detail-section .row { display: flex; justify-content: space-between;
@@ -331,7 +373,7 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 }
 .tab:hover { color: var(--text); }
 .tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
-.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* Inline-SVG tab icons inherit currentColor → muted, brightening to accent when
    the tab is selected (no emoji font dependency). */
 .tab { display: inline-flex; align-items: center; gap: 0.4rem; }
@@ -340,6 +382,53 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 /* Keep a visible focus indicator on a focused panel for keyboard users. */
 .panel:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px;
                        border-radius: 6px; }
+/* Divider between the scoped telemetry tabs and the unscoped tail (Events/Config). */
+.tab-divider { align-self: stretch; width: 1px; margin: 0.4rem 0.5rem;
+  background: var(--line); }
+
+/* ----- Global UPS scope + fleet-status strip (v6.1.4) -------------------- */
+/* Header UPS scope selector — the primary scope control, so it reads as a
+   distinct pill (not another muted 'Theme'-style dropdown); dimmed a touch on
+   the tabs it doesn't affect (Events/Config), with a tooltip explaining why. */
+.ups-scope { display: inline-flex; align-items: center; gap: 0.4rem;
+  color: var(--text); font-size: 0.9rem; font-weight: 600;
+  background: var(--accent-weak); border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-radius: var(--r-pill); padding: 0.15rem 0.7rem; }
+.ups-scope select { font: inherit; font-weight: 600; color: var(--text);
+  background: transparent; border: 0; cursor: pointer; }
+.ups-scope.inactive { opacity: 0.6; }
+/* Windows High Contrast / forced-colors: don't rely on the accent-weak fill —
+   draw a real border and use system colors. */
+@media (forced-colors: active) {
+  .ups-scope { border: 1px solid CanvasText; background: Canvas; }
+  .fleet-chip { border: 1px solid CanvasText; }
+}
+/* Persistent fleet-status strip: chips, one per UPS, on every tab. */
+.fleet-strip { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;
+  padding: 0.5rem 1.25rem; max-width: 1100px; margin: 0 auto;
+  box-sizing: content-box; }
+.fleet-chip { display: inline-flex; align-items: center; gap: 0.45rem;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+  padding: 0.25rem 0.7rem; cursor: pointer; font: inherit; color: var(--text); }
+.fleet-chip:hover { border-color: var(--accent); }
+.fleet-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.fleet-chip.s-warn { border-color: var(--warn); }
+.fleet-chip.s-crit { border-color: var(--crit); }
+.fleet-name { font-weight: 600; }
+.fleet-metric { color: var(--muted); font-size: 0.85rem;
+  font-variant-numeric: tabular-nums; }
+.fleet-tag { color: var(--muted); font-size: 0.72rem; text-transform: uppercase;
+  letter-spacing: 0.04em; }
+.fleet-go { color: var(--muted); font-size: 1.1rem; line-height: 1; margin-left: 0.1rem; }
+.fleet-chip:hover .fleet-go { color: var(--accent); }
+/* Card header title row (title + optional badge, e.g. "monitoring only"). */
+.card-title { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.card-title h3 { margin: 0; }
+.mon-badge { font-size: 0.72rem; }
+/* Stacked shutdown plans ("All UPS" compares every plan). */
+.sd-plan + .sd-plan { border-top: 1px solid var(--line); margin-top: 1.5rem;
+  padding-top: 1rem; }
+.sd-plan-title { margin: 0.25rem 0 0.75rem; }
 .panel > h2:first-child { margin-top: 0; }
 
 /* Widget cards with a title + status badge (Battery / Energy tabs). The base
@@ -364,7 +453,7 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .tip.ev-ok   { border-left-color: var(--ok); }
 .tip.ev-warn { border-left-color: var(--warn); }
 .tip.ev-crit { border-left-color: var(--crit); }
-.tip.ev-info { border-left-color: #a78bfa; }
+.tip.ev-info { border-left-color: #14b8a6; }
 
 /* "?" help hint — reveals a tooltip on hover/focus (replaces verbose footnotes). */
 .label-tip { display: inline-flex; align-items: center; }
@@ -373,7 +462,8 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
   background: var(--panel-2); color: var(--muted); font-size: 0.7rem;
   font-weight: 700; line-height: 1; cursor: help; user-select: none; }
 .help:hover, .help:focus-visible { background: var(--accent-weak);
-  color: var(--accent); outline: none; }
+  color: var(--accent); }
+.help:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* Config tab: colored, collapsible JSON tree (each section folds on its own) */
 .json-tree { background: var(--panel); border: 1px solid var(--line);
@@ -422,8 +512,10 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
    used to swallow pointer events over the lower part of the guide, so the
    tooltip only appeared when hovering above the plotted data. */
 .graph .grid, .graph .axis, .graph .area, .graph .plot, .graph .plot-load,
-.graph .plot-watts, .graph .now-dot, .graph .band, .graph .band-edge,
-.graph .band-nominal, .graph .chart-title { pointer-events: none; }
+.graph .plot-watts, .graph .plot-band, .graph .plot-band-watts,
+.graph .plot-band-load, .graph .now-dot, .graph .band,
+.graph .band-edge, .graph .band-nominal, .graph .chart-title,
+.graph .chart-readout { pointer-events: none; }
 .graph .ev-line { stroke-width: 1; opacity: 0.12; }
 .graph .ev-hit { stroke: transparent; stroke-width: 11; }
 /* Hover crosshair: a transparent capture rect over the plot area drives a
@@ -440,15 +532,22 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .graph .ev-crit { stroke: var(--crit); fill: var(--crit); }   /* outage / danger */
 .graph .ev-warn { stroke: var(--warn); fill: var(--warn); }   /* over-voltage / overload */
 .graph .ev-ok   { stroke: var(--ok);   fill: var(--ok); }     /* power restored / recovered */
-.graph .ev-info { stroke: #a78bfa; fill: #a78bfa; }           /* other — violet, not the plot blue */
+.graph .ev-info { stroke: #14b8a6; fill: #14b8a6; }           /* info — teal, distinct from the violet power line */
 
 /* Shutdown plan: an ordered top-to-bottom flow with a connector between phases.
    Parallel phases lay their steps out side by side; skipped phases are muted. */
+/* Descriptive ("this is what triggers a shutdown"), so neutral/info — not the
+   amber alarm styling it used to have, which cried wolf on every load. */
 .sd-trigger { display: flex; align-items: center; gap: 0.5rem;
   margin: 0.3rem 0 0.9rem; padding: 0.6rem 0.85rem; border-radius: var(--r-md);
-  background: var(--warn-weak); border: 1px solid rgba(var(--warn-rgb), 0.4);
+  background: var(--accent-weak); border: 1px solid var(--line);
   font-size: 0.9rem; }
-.sd-trigger .ic { width: 16px; height: 16px; color: var(--warn); flex: none; }
+.sd-trigger .ic { width: 16px; height: 16px; color: var(--muted); flex: none; }
+/* Monitoring-only UPS: no shutdown sequence — a calm, informative note. */
+.sd-noop { display: flex; align-items: center; gap: 0.5rem; margin: 0.3rem 0 0.9rem;
+  padding: 0.7rem 0.9rem; border-radius: var(--r-md); background: var(--accent-weak);
+  border: 1px solid var(--line); font-size: 0.95rem; }
+.sd-noop .ic { width: 18px; height: 18px; color: var(--muted); flex: none; }
 .sd-flow { display: flex; flex-direction: column; margin-top: 0.5rem; }
 .sd-node { position: relative; border: 1px solid var(--line-strong);
   border-radius: var(--r-md); background: var(--panel); padding: 0.85rem 1rem;
@@ -480,10 +579,13 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .sd-step-detail { color: var(--muted); font-size: 0.78rem; margin-top: 0.15rem; }
 
 /* Energy dual-line chart: load% (kindred accent, translucent) + power (W). */
-.graph .plot-load { stroke: var(--accent); opacity: 0.45; fill: none; }
-.graph .plot-watts { stroke: var(--ok); fill: none; }
+/* Data series use a categorical palette (accent blue + violet), NOT the status
+   green — a power line drawn in "good green" misreads, and status hues are
+   reserved for status. Full opacity so identity isn't carried by transparency. */
+.graph .plot-load { stroke: var(--accent); fill: none; }
+.graph .plot-watts { stroke: var(--watts); fill: none; stroke-dasharray: 6 3; }
 .graph rect.plot-load { stroke: none; fill: var(--accent); opacity: 0.55; }
-.graph rect.plot-watts { stroke: none; fill: var(--ok); }
+.graph rect.plot-watts { stroke: none; fill: var(--watts); }
 
 @media (max-width: 640px) {
   .var-form { grid-template-columns: 1fr; }
@@ -491,4 +593,22 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
   .authbox { flex-wrap: wrap; }
   .tabs { padding: 0 0.5rem; }
   .tab { padding: 0.5rem 0.6rem; }
+}
+/* Narrow phones: scroll the tab bar horizontally instead of wrapping the 7 tabs
+   into a ragged block; keep the divider from collapsing. (a11y #13) */
+@media (max-width: 500px) {
+  .tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch;
+    gap: 0; }
+  .tab { flex: 0 0 auto; font-size: 0.85rem; }
+  .tab-divider { display: none; }
+  .fleet-strip { overflow-x: auto; flex-wrap: nowrap; }
+  .fleet-chip { flex: 0 0 auto; }
+}
+/* Respect reduced-motion: drop card lifts, ring sweeps, and other transitions
+   for users who ask for it. (a11y #6) */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+  }
 }

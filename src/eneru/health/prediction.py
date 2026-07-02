@@ -21,6 +21,7 @@ __all__ = [
     "TERM_WEIGHTS",
     "age_score",
     "anomaly_score",
+    "battery_age_years",
     "capacity_score",
     "composite_score",
     "compute_terms",
@@ -106,22 +107,30 @@ def anomaly_score(anomaly_count: int, *, penalty: float = 25.0) -> float:
     return _clamp(100.0 - max(0, anomaly_count) * penalty)
 
 
-def age_score(battery_install_date: Optional[str],
-              expected_life_years: float,
-              now: float) -> Optional[float]:
-    """Battery age vs expected life. Unavailable if the install date is unset
-    or unparseable."""
-    if not battery_install_date or expected_life_years is None \
-            or expected_life_years <= 0:
+def battery_age_years(battery_install_date: Optional[str],
+                      now: float) -> Optional[float]:
+    """Battery age in years from its install date. ``None`` when the date is
+    unset or unparseable; never negative (a future install date reads as 0)."""
+    if not battery_install_date:
         return None
     try:
         installed = datetime.strptime(
             str(battery_install_date).strip(), "%Y-%m-%d").timestamp()
     except (ValueError, TypeError):
         return None
-    age_years = (now - installed) / (365.25 * 86400)
-    if age_years < 0:
-        age_years = 0.0
+    return max(0.0, (now - installed) / (365.25 * 86400))
+
+
+def age_score(battery_install_date: Optional[str],
+              expected_life_years: float,
+              now: float) -> Optional[float]:
+    """Battery age vs expected life. Unavailable if the install date is unset
+    or unparseable."""
+    if expected_life_years is None or expected_life_years <= 0:
+        return None
+    age_years = battery_age_years(battery_install_date, now)
+    if age_years is None:
+        return None
     return _clamp(100.0 * (1.0 - age_years / expected_life_years))
 
 

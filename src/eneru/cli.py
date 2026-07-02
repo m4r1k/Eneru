@@ -1999,15 +1999,22 @@ def _self_test_run_direct(
               "credentials in the config.")
         sys.exit(2)
     try:
-        cmd = selftest.discover_self_test_command(
-            name, command, username=nc.username, password=nc.password,
+        supported = selftest.list_supported_commands(
+            name, username=nc.username, password=nc.password,
             timeout=nc.timeout)
     except selftest.SelfTestUnavailable as exc:
         print(f"Could not query the UPS ({exc}); try again.")
         sys.exit(1)
-    if cmd is None:
+    if command not in supported:
+        # Surface the startable tests this UPS actually offers (APC & friends
+        # expose test.battery.start.quick/.deep, not the bare default).
+        candidates = selftest.test_command_candidates(supported)
         print(f"UPS {name} does not expose {command!r} (upscmd -l); nothing to do.")
+        if candidates:
+            print("   Available battery-test commands: " + ", ".join(candidates))
+            print("   Set this UPS's self_test.command to one of them.")
         sys.exit(1)
+    cmd = command
     store = _open_stats_store(config, group)
     if store is None:
         # Without the stats DB the issued test records no `running` row, so its

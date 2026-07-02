@@ -189,10 +189,18 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
 
     # 7) Terminal step — coordinator handoff, or the local host poweroff.
     if coordinator_mode:
+        # The coordinator performs the single host poweroff — but that is a
+        # LOCAL-ownership action. A non-local (monitoring-only) group must NOT
+        # show a host-poweroff handoff: losing a UPS that doesn't power this host
+        # triggers nothing here. Gate it exactly like the other local phases.
+        handoff_skip = _local_skip(is_local, delegated, True)
+        handoff_on = handoff_skip is None
         phases.append(_phase(
-            "local-poweroff", "Group handoff", enabled=True,
+            "local-poweroff", "Group handoff", enabled=handoff_on,
+            skipped=handoff_skip,
             steps=[{"label": "Report group shutdown complete to the coordinator",
-                    "detail": "the coordinator performs the host poweroff"}]))
+                    "detail": "the coordinator performs the host poweroff"}]
+            if handoff_on else []))
     else:
         ls = config.local_shutdown
         # Host poweroff is a LOCAL-ownership action: gate it the same way as the

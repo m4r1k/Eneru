@@ -110,6 +110,27 @@ def _to_input_voltage(value, *, ups_status: str) -> Optional[float]:
     return f
 
 
+def _to_battery_charge(value, *, ups_status: str) -> Optional[float]:
+    """Sanitize ``battery.charge`` against on-line phantom zeros.
+
+    A network-polled UPS (notably a monitoring-only NUT slave) occasionally
+    returns ``0`` for ``battery.charge`` on a partial / mid-transition poll --
+    seen as brief ``OL LB RB`` / ``ALARM OL`` flaps in the log. Stored
+    verbatim it draws a false plunge-to-zero on the charge graph and drags the
+    AVG/MIN aggregates. A genuine 0% only occurs deep in an outage -- on line
+    power the UPS would have shut down long before -- so drop a ``<= 0`` reading
+    only while on-line (mirrors ``_to_input_voltage``); on battery / FSD the low
+    reading is kept so real depletion history stays intact.
+    """
+    f = _to_float(value)
+    if f is None:
+        return None
+    status = ups_status or ""
+    if f <= 0.0 and "OL" in status and "OB" not in status and "FSD" not in status:
+        return None
+    return f
+
+
 def _sample_from_ups_data(
     ups_data: Dict[str, str],
     *,
@@ -128,7 +149,7 @@ def _sample_from_ups_data(
     return (
         int(ts if ts is not None else time.time()),
         status,
-        _to_float(ups_data.get("battery.charge")),
+        _to_battery_charge(ups_data.get("battery.charge"), ups_status=status),
         _to_float(ups_data.get("battery.runtime")),
         _to_float(ups_data.get("ups.load")),
         _to_input_voltage(ups_data.get("input.voltage"), ups_status=status),
