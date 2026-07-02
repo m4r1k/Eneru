@@ -1522,6 +1522,45 @@ class TestInputVoltageContextualFilter:
         from eneru.stats import _to_input_voltage
         assert _to_input_voltage("-1.0", ups_status="OL") is None
 
+
+class TestBatteryChargeContextualFilter:
+    """``_to_battery_charge`` drops a phantom 0% (or negative) battery.charge
+    only while on line power; on battery / FSD a low reading is real depletion
+    history and must survive (mirrors the input-voltage filter, v6.1.4)."""
+
+    @pytest.mark.unit
+    def test_zero_charge_on_line_dropped(self):
+        # The monitoring-only-UPS partial-poll case behind the "spurious 0%
+        # spikes" bug: a transient 0 while OL is not a real deep discharge.
+        from eneru.stats import _to_battery_charge
+        assert _to_battery_charge("0", ups_status="OL") is None
+        assert _to_battery_charge("0.0", ups_status="OL CHRG") is None
+        assert _to_battery_charge(0, ups_status="ALARM OL") is None
+        assert _to_battery_charge("-1", ups_status="OL") is None
+
+    @pytest.mark.unit
+    def test_zero_charge_on_battery_or_fsd_kept(self):
+        # Deep outage: a genuine low/zero charge must persist so real depletion
+        # shows on the graph + aggregates.
+        from eneru.stats import _to_battery_charge
+        assert _to_battery_charge("0", ups_status="OB DISCHRG") == 0.0
+        assert _to_battery_charge("0", ups_status="OL OB") == 0.0   # transient flap
+        assert _to_battery_charge("0", ups_status="OB FSD") == 0.0
+        assert _to_battery_charge("0", ups_status="FSD") == 0.0
+
+    @pytest.mark.unit
+    def test_normal_charge_passes_through(self):
+        from eneru.stats import _to_battery_charge
+        assert _to_battery_charge("100", ups_status="OL") == 100.0
+        assert _to_battery_charge("42.5", ups_status="OB DISCHRG") == 42.5
+
+    @pytest.mark.unit
+    def test_empty_and_non_numeric_return_none(self):
+        from eneru.stats import _to_battery_charge
+        assert _to_battery_charge("", ups_status="OL") is None
+        assert _to_battery_charge(None, ups_status="OB") is None
+        assert _to_battery_charge("abc", ups_status="OL") is None
+
     @pytest.mark.unit
     def test_sample_roundtrip_filters_on_line_zero(self, store):
         """End-to-end: buffer_sample with status=OL + input.voltage=0

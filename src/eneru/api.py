@@ -254,6 +254,14 @@ class EneruAPIServer:
             self._httpd.server_activate()
         except OSError as exc:
             self.log_fn(f"⚠️  API server failed to bind {addr[0]}:{addr[1]}: {exc}")
+            # bind_and_activate=False bypasses TCPServer.__init__'s cleanup, so a
+            # failed server_bind() leaves the freshly-created socket open. Close it
+            # explicitly to avoid leaking the fd on a retry / repeated reload.
+            if self._httpd is not None:
+                try:
+                    self._httpd.server_close()
+                except OSError:
+                    pass
             self._httpd = None
             return
         # v6.0: worker threads are NON-daemon. The API now has non-idempotent

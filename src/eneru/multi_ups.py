@@ -304,12 +304,28 @@ class MultiUPSCoordinator:
             # merge -- the pre-multi-UPS history can be merged manually.
             return
         try:
+            # Fold any committed WAL frames back into default.db BEFORE moving it.
+            # A clean single-UPS stop checkpoints on close, but a crash can leave a
+            # populated default.db-wal; renaming only the main file would strand
+            # those committed frames in an orphaned sidecar while the migration
+            # looks "done" (default.db gone). checkpoint(TRUNCATE) collapses the
+            # WAL into the DB and empties the sidecar first, so the single file we
+            # move is self-contained.
+            self._checkpoint_wal(legacy)
             legacy.rename(target)
-            # Carry any SQLite WAL/SHM sidecars so no committed data is lost.
+            # Post-checkpoint the sidecars hold no committed data, so relocating
+            # them is just tidy-up: best-effort PER FILE (a failure here can no
+            # longer lose data) rather than a rename that could abort mid-way.
             for suffix in ("-wal", "-shm"):
                 side = stats_dir / f"default.db{suffix}"
                 if side.exists():
-                    side.rename(stats_dir / f"{target.name}{suffix}")
+                    try:
+                        side.replace(stats_dir / f"{target.name}{suffix}")
+                    except OSError:
+                        try:
+                            side.unlink()
+                        except OSError:
+                            pass
             self._log(
                 f"📦  Migrated single-UPS history {legacy.name} → {target.name} "
                 f"for {first.ups.label} (single→multi-UPS transition)")
@@ -317,6 +333,21 @@ class MultiUPSCoordinator:
             self._log(
                 f"⚠️  Could not migrate {legacy.name} → {target.name}: {e} "
                 f"(history for {first.ups.label} may be unavailable until fixed)")
+
+    @staticmethod
+    def _checkpoint_wal(db_path: Path) -> None:
+        """Fold WAL frames into the main DB file and truncate the ``-wal`` sidecar
+        so the file is self-contained before it is moved. Best-effort: a missing
+        DB, a non-WAL DB, or a checkpoint error is a no-op (the sidecar relocation
+        in the caller is the fallback)."""
+        try:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            pass
 
     def _read_last_seen_version_from_first_group(self, stats_dir):
         """Read meta.last_seen_version from the first group's stats DB

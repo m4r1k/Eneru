@@ -2550,8 +2550,12 @@ function drawSimpleSeries(host, pts, opts) {
   // Vertical markers (e.g. the projected replacement date), with a label kept
   // inside the plot.
   (opts.vmarkers || []).forEach((m) => {
-    if (m.ts == null || m.ts < t0 || m.ts > t1) return;
-    const mx = x(m.ts);
+    if (m.ts == null || m.ts < t0) return;
+    // A far-future ETA past the capped x-axis is PINNED to the right edge (its
+    // real date is in the label) instead of dropped — otherwise "Replace ~YYYY-MM"
+    // silently vanishes exactly when replacement is furthest out.
+    const mts = Math.min(m.ts, t1);
+    const mx = x(mts);
     const ln = document.createElementNS(SVG_NS, "line");
     ln.setAttribute("x1", mx.toFixed(1)); ln.setAttribute("x2", mx.toFixed(1));
     ln.setAttribute("y1", padT); ln.setAttribute("y2", H - pad);
