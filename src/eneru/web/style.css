@@ -199,6 +199,8 @@ select:focus-visible, input:not([type="checkbox"]):focus-visible {
 .graph .plot { fill: none; stroke: var(--accent); stroke-width: 2;
   stroke-linejoin: round; stroke-linecap: round; }
 .graph .area { stroke: none; }
+/* HA-style statistics band: translucent min–max envelope behind the mean line. */
+.graph .plot-band { fill: rgba(var(--accent-rgb), 0.16); stroke: none; }
 .graph .now-dot { fill: var(--accent); stroke: var(--panel); stroke-width: 2; }
 .graph .now-dot.s-warn { fill: var(--warn); }
 .graph .now-dot.s-crit { fill: var(--crit); }
@@ -410,6 +412,8 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
   font-variant-numeric: tabular-nums; }
 .fleet-tag { color: var(--muted); font-size: 0.72rem; text-transform: uppercase;
   letter-spacing: 0.04em; }
+.fleet-go { color: var(--muted); font-size: 1.1rem; line-height: 1; margin-left: 0.1rem; }
+.fleet-chip:hover .fleet-go { color: var(--accent); }
 /* Card header title row (title + optional badge, e.g. "monitoring only"). */
 .card-title { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .card-title h3 { margin: 0; }
@@ -501,8 +505,8 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
    used to swallow pointer events over the lower part of the guide, so the
    tooltip only appeared when hovering above the plotted data. */
 .graph .grid, .graph .axis, .graph .area, .graph .plot, .graph .plot-load,
-.graph .plot-watts, .graph .now-dot, .graph .band, .graph .band-edge,
-.graph .band-nominal, .graph .chart-title { pointer-events: none; }
+.graph .plot-watts, .graph .plot-band, .graph .now-dot, .graph .band,
+.graph .band-edge, .graph .band-nominal, .graph .chart-title { pointer-events: none; }
 .graph .ev-line { stroke-width: 1; opacity: 0.12; }
 .graph .ev-hit { stroke: transparent; stroke-width: 11; }
 /* Hover crosshair: a transparent capture rect over the plot area drives a

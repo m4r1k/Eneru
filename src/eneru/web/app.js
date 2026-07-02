@@ -440,9 +440,13 @@ function heroCard(u) {
     vital("Runtime", formatRuntimeSeconds(u.runtime)),
     vital("Load", u.load != null ? u.load + "%" : "—"),
     vital("Input", pq.inputVoltage != null ? pq.inputVoltage + " V" : "—"),
-    vital("On battery", u.timeOnBattery != null ? u.timeOnBattery + "s" : "—",
-      onBattery ? (low ? "crit" : "warn") : null),
   ];
+  // Time-on-battery only when actually on battery — a permanent "0s" is noise,
+  // and during an outage it's already the prominent ON BATTERY chip in the title.
+  if (onBattery) {
+    vitals.push(vital("On battery",
+      u.timeOnBattery != null ? u.timeOnBattery + "s" : "—", low ? "crit" : "warn"));
+  }
   // Surface line quality on the Overview only when it's NOT good — otherwise it's
   // buried on the Power tab where the operator rarely looks. (operator #14)
   const lq = lineQuality(pq);
@@ -595,6 +599,7 @@ function renderFleetStrip(rows) {
       el("span", { class: "fleet-metric",
         text: (isNaN(charge) ? "—" : charge + "%") + " · " + formatRuntimeSeconds(u.runtime) }),
       u.isLocal === false ? el("span", { class: "fleet-tag", text: "monitoring" }) : null,
+      el("span", { class: "fleet-go", "aria-hidden": "true", text: "›" }),
     ].filter(Boolean));
     chip.addEventListener("click", () => openDetail(u.name));
     strip.appendChild(chip);
@@ -613,20 +618,34 @@ function renderUps(payload) {
   if (upsSec) upsSec.hidden = true;
   renderOverviewSummary(rows);
 
-  const groups = (payload && payload.redundancyGroups) || [];
-  lastGroups = groups;
+  lastGroups = (payload && payload.redundancyGroups) || [];
+  renderRedundancy();
+  renderRemoteHealth();
+  updateEventSourceFilter(rows, lastGroups);
+}
+
+// Redundancy-groups section, scoped by the global selector (groups are per-UPS
+// via upsSources). Re-rendered on scope change from onTabActivated("overview").
+function renderRedundancy() {
   const gsec = document.getElementById("groups-section");
   const gwrap = document.getElementById("group-cards");
+  if (!gsec || !gwrap) return;
+  const rows = lastUpsRows;
+  let groups = lastGroups || [];
+  const all = scopeIsAll();
+  if (!all) groups = groups.filter((g) => (g.upsSources || []).includes(currentScope()));
   gwrap.replaceChildren();
-  // In a fleet with no redundancy groups configured, show a discoverable hint
-  // rather than hiding the section entirely — otherwise the feature is invisible.
-  // Single-UPS deployments (where groups make no sense) still hide it. (operator #15)
-  gsec.hidden = groups.length === 0 && rows.length <= 1;
-  if (groups.length === 0 && rows.length > 1) {
-    gwrap.appendChild(el("div", { class: "card" }, [
-      el("p", { class: "chart-note", text: "No redundancy groups configured. "
-        + "Group UPSes so a shutdown only triggers when quorum is lost — see the "
-        + "redundancy-groups docs." })]));
+  // The "configure redundancy groups" hint only makes sense in the fleet view
+  // (All UPS, >1 UPS, none configured); a scoped view just hides the section.
+  gsec.hidden = groups.length === 0 && !(all && rows.length > 1);
+  if (groups.length === 0) {
+    if (all && rows.length > 1) {
+      gwrap.appendChild(el("div", { class: "card" }, [
+        el("p", { class: "chart-note", text: "No redundancy groups configured. "
+          + "Group UPSes so a shutdown only triggers when quorum is lost — see the "
+          + "redundancy-groups docs." })]));
+    }
+    return;
   }
   groups.forEach((g) => {
     const sources = g.upsSources || [];
@@ -642,8 +661,6 @@ function renderUps(payload) {
         el("b", { text: String(sources.length) })]),
     ]));
   });
-  renderRemoteHealth();
-  updateEventSourceFilter(rows, groups);
 }
 
 // ----- UPS detail drill-down (Slice D) -----
@@ -690,7 +707,14 @@ function renderRemoteHealth() {
   const sec = document.getElementById("remote-section");
   const wrap = document.getElementById("remote-cards");
   if (!sec || !wrap) return;
-  const servers = remoteHealthSnapshot || [];
+  // Remote servers are per-UPS shutdown targets (row.group = owning UPS label),
+  // so honor the global scope: scoped to one UPS → just its servers; "All" → all.
+  let servers = remoteHealthSnapshot || [];
+  if (!scopeIsAll()) {
+    const u = lastUpsRows.find((r) => r.name === currentScope());
+    const lbl = u && (u.label || u.name);
+    servers = servers.filter((s) => s.group === lbl);
+  }
   sec.hidden = servers.length === 0;
   if (!servers.length) { wrap.replaceChildren(); return; }
   wrap.replaceChildren(...servers.map((r) => {
@@ -713,7 +737,8 @@ function renderRemoteHealth() {
     if (r.latency_ms != null && reachable) {
       rows.push(configKv("Latency", Math.round(r.latency_ms) + " ms"));
     }
-    rows.push(configKv("Last checked", relTime(r.last_checked_at)));
+    rows.push(hintedRow("Last checked", relTime(r.last_checked_at),
+      r.last_checked_at ? new Date(r.last_checked_at * 1000).toLocaleString() : null));
     if (r.consecutive_failures) {
       rows.push(el("div", { class: "row" }, [el("span", { text: "Failures" }),
         el("b", { class: "crit", text: String(r.consecutive_failures) })]));
@@ -1365,7 +1390,14 @@ function eventMarkerClass(type) {
 // chart marker color, so a marker and its row read the same at a glance.
 function eventTypeBadge(e) {
   const type = e.eventType || e.event || "";
-  const cls = eventMarkerClass(type);
+  let cls = eventMarkerClass(type);
+  // Fold a command / self-test OUTCOME into the tone so "… -> failed" isn't a
+  // neutral bell identical to "… -> ok" (self-test is a KPI + battery-card row).
+  const detail = (e.detail || e.details || "").toLowerCase();
+  const m = detail.match(/(?:->|→)\s*([a-z]+)\b/);
+  if (m && ["failed", "error", "timeout"].includes(m[1])) cls = "ev-crit";
+  else if (/\bfailed\b/.test(detail)) cls = "ev-crit";
+  else if (cls === "ev-info" && m && ["ok", "passed", "done", "success"].includes(m[1])) cls = "ev-ok";
   const tone = { "ev-ok": "ok", "ev-warn": "warn", "ev-crit": "crit" }[cls] || "info";
   const ico = { "ev-ok": "check", "ev-warn": "alert", "ev-crit": "alert" }[cls] || "bell";
   return el("span", { class: "ev-badge " + tone }, [icon(ico), el("span", { text: type })]);
@@ -1615,6 +1647,103 @@ function chartGapThresh(drawn) {
   return med > 0 ? med * 3 : Infinity;
 }
 
+// Min/max decimation: reduce a dense point run to ~2 points per bucket (the
+// bucket's min AND max value, in time order) so a 24h/2s series (~19k points,
+// an unreadable "barcode") thins to ~1-2 points/pixel while spikes survive.
+function decimateMinMax(seg, valueOf, buckets) {
+  if (seg.length <= buckets * 2) return seg;
+  const out = [], per = seg.length / buckets;
+  for (let b = 0; b < buckets; b++) {
+    const start = Math.floor(b * per), end = Math.min(seg.length, Math.floor((b + 1) * per));
+    if (end <= start) continue;
+    let mn = seg[start], mx = seg[start];
+    for (let i = start + 1; i < end; i++) {
+      if (valueOf(seg[i]) < valueOf(mn)) mn = seg[i];
+      if (valueOf(seg[i]) > valueOf(mx)) mx = seg[i];
+    }
+    const a = mn.ts <= mx.ts ? mn : mx, z = mn.ts <= mx.ts ? mx : mn;
+    out.push(a); if (z !== a) out.push(z);
+  }
+  return out;
+}
+
+// Build an SVG path that BREAKS across real gaps and decimates dense segments.
+// Splits `drawn` (numeric, ts-sorted) into gap-free segments, decimates each to
+// its width share, and starts a new sub-path (M) per segment. Returns {d,hasGap}.
+function gapDecimatedPath(drawn, valueOf, x, y, plotWidth) {
+  if (!drawn.length) return { d: "", hasGap: false };
+  const thresh = chartGapThresh(drawn);
+  const segs = []; let seg = [], prev = null;
+  drawn.forEach((p) => {
+    if (prev !== null && (p.ts - prev) > thresh) { segs.push(seg); seg = []; }
+    seg.push(p); prev = p.ts;
+  });
+  if (seg.length) segs.push(seg);
+  const budgetTotal = Math.max(2, Math.floor(plotWidth));
+  let d = "";
+  segs.forEach((s) => {
+    const budget = Math.max(2, Math.round(budgetTotal * s.length / drawn.length));
+    const ps = decimateMinMax(s, valueOf, budget);
+    ps.forEach((p, i) => {
+      d += (d ? " " : "") + (i === 0 ? "M" : "L")
+        + x(p.ts).toFixed(1) + " " + y(valueOf(p)).toFixed(1);
+    });
+  });
+  return { d, hasGap: segs.length > 1 };
+}
+
+// Home-Assistant-style statistics rendering for a DENSE series: bucket the
+// points per-pixel and return a min–max envelope band (bandD) + a mean line
+// (meanD), gap-aware (a new sub-path per gap-free segment). For a sparse series
+// bandD is empty and meanD is just the raw line. This turns a 24h/2s "barcode"
+// into a readable trend with high/low context.
+function statsBandPaths(drawn, valueOf, x, y, plotWidth) {
+  if (!drawn.length) return { meanD: "", bandD: "", hasGap: false };
+  const thresh = chartGapThresh(drawn);
+  const segs = []; let seg = [], prev = null;
+  drawn.forEach((p) => {
+    if (prev !== null && (p.ts - prev) > thresh) { segs.push(seg); seg = []; }
+    seg.push(p); prev = p.ts;
+  });
+  if (seg.length) segs.push(seg);
+  const budgetTotal = Math.max(2, Math.floor(plotWidth));
+  const dense = drawn.length > budgetTotal * 3;   // ≥3 points/pixel → worth banding
+  let meanD = "", bandD = "";
+  segs.forEach((s) => {
+    const budget = Math.max(2, Math.round(budgetTotal * s.length / drawn.length));
+    if (dense && s.length > budget * 2) {
+      const buckets = [], per = s.length / budget;
+      for (let b = 0; b < budget; b++) {
+        const st = Math.floor(b * per), en = Math.min(s.length, Math.floor((b + 1) * per));
+        if (en <= st) continue;
+        let mn = Infinity, mx = -Infinity, sum = 0;
+        for (let i = st; i < en; i++) {
+          const v = valueOf(s[i]); if (v < mn) mn = v; if (v > mx) mx = v; sum += v;
+        }
+        buckets.push({ ts: s[Math.floor((st + en) / 2)].ts, min: mn, max: mx, mean: sum / (en - st) });
+      }
+      buckets.forEach((bk, i) => {
+        meanD += (meanD ? " " : "") + (i === 0 ? "M" : "L")
+          + x(bk.ts).toFixed(1) + " " + y(bk.mean).toFixed(1);
+      });
+      let top = "", bot = "";
+      buckets.forEach((bk, i) => {
+        top += (i === 0 ? "M" : "L") + x(bk.ts).toFixed(1) + " " + y(bk.max).toFixed(1) + " ";
+      });
+      for (let i = buckets.length - 1; i >= 0; i--) {
+        bot += "L" + x(buckets[i].ts).toFixed(1) + " " + y(buckets[i].min).toFixed(1) + " ";
+      }
+      if (buckets.length) bandD += top + bot + "Z ";
+    } else {
+      s.forEach((p, i) => {
+        meanD += (meanD ? " " : "") + (i === 0 ? "M" : "L")
+          + x(p.ts).toFixed(1) + " " + y(valueOf(p)).toFixed(1);
+      });
+    }
+  });
+  return { meanD, bandD: bandD.trim(), hasGap: segs.length > 1 };
+}
+
 // X-axis time ticks: count scales with width; times snap to round steps; the
 // date is shown for day+ steps and at local-midnight boundaries within a
 // sub-day window that crosses midnight. Appended to `svg`.
@@ -1701,7 +1830,14 @@ function drawChart(hostId, series, options) {
     const t = document.createElementNS(SVG_NS, "text");
     t.setAttribute("x", W / 2); t.setAttribute("y", H / 2);
     t.setAttribute("text-anchor", "middle"); t.setAttribute("class", "lbl");
-    t.textContent = "Not enough data yet"; svg.appendChild(t);
+    // Distinguish "this UPS never reports this metric" (a monitoring-only UPS
+    // with no frequency/output-voltage/temperature) from "still warming up", so
+    // a new user doesn't wait for data that will never come.
+    t.textContent = options.unavailable
+      ? (options.upsLabel || "This UPS") + " doesn't report "
+        + metricLabel(options.metric || "").toLowerCase()
+      : "Not enough data yet";
+    svg.appendChild(t);
     host.appendChild(svg);
     return;
   }
@@ -1800,25 +1936,21 @@ function drawChart(hostId, series, options) {
   // over data we don't have — and a rejected reading reads as a gap, not an
   // invented trend or a plunge to zero.
   const drawn = pts.filter((p) => typeof p.value === "number" && !isNaN(p.value));
-  let gapThresh = Infinity;
-  if (drawn.length > 2) {
-    const gaps = [];
-    for (let i = 1; i < drawn.length; i++) gaps.push(drawn[i].ts - drawn[i - 1].ts);
-    gaps.sort((a, b) => a - b);
-    const med = gaps[Math.floor(gaps.length / 2)] || 0;
-    if (med > 0) gapThresh = med * 2.5;
+  // Dense series → HA-style min–max band + mean line; sparse → plain line.
+  const stats = statsBandPaths(drawn, (p) => p.value, x, y, W - pad - 5);
+  const d = stats.meanD, hasGap = stats.hasGap;
+  if (stats.bandD) {
+    const band = document.createElementNS(SVG_NS, "path");
+    band.setAttribute("d", stats.bandD); band.setAttribute("class", "plot-band");
+    svg.appendChild(band);
   }
-  let d = "", prevTs = null, hasGap = false;
-  drawn.forEach((p) => {
-    const move = prevTs === null || (p.ts - prevTs) > gapThresh;
-    if (move && prevTs !== null) hasGap = true;
-    d += (d ? " " : "") + (move ? "M" : "L") + x(p.ts).toFixed(1) + " " + y(p.value).toFixed(1);
-    prevTs = p.ts;
-  });
   // Subtle gradient area fill under the line (single-series charts without a
   // threshold band) — skipped when the path has gaps, since a single closed fill
   // would span the missing region.
-  if (!wantBand && d && !hasGap) {
+  // Area fill only when the domain baseline is zero — a fill rising from a
+  // non-zero minimum (voltage 207, a zoomed 98% charge) implies quantity-from-
+  // zero that isn't there. Zero-based metrics keep the fill. (data-viz #11)
+  if (!wantBand && d && !hasGap && !stats.bandD && min <= 0.001) {
     const gid = hostId + "-areagrad";
     const defs = document.createElementNS(SVG_NS, "defs");
     const grad = document.createElementNS(SVG_NS, "linearGradient");
@@ -2072,12 +2204,22 @@ function makeChart(opts) {
     const u = lastUpsRows.find((r) => r.name === upsName());
     return (u && (u.label || u.name)) || "";
   }
+  // True when the selected UPS never reports this metric (its live value is
+  // empty) — so the empty chart can say "not reported" vs "warming up".
+  function metricUnavailable() {
+    const field = { voltage: "inputVoltage", output_voltage: "outputVoltage",
+      frequency: "inputFrequency", temperature: "temperature" }[metric()];
+    if (!field) return false;
+    const u = lastUpsRows.find((r) => r.name === upsName());
+    return numOrNull(((u && u.powerQuality) || {})[field]) == null;
+  }
   function draw() {
     drawChart(opts.hostId, state.series, {
       metric: metric(),
       // Only label the UPS in a fleet; a lone UPS needs no disambiguation.
       upsLabel: lastUpsRows.length > 1 ? upsLabel() : "",
       scopeAll: typeof scopeIsAll === "function" && scopeIsAll(),
+      unavailable: metricUnavailable(),
       from: state.from, to: state.to,
       bands: opts.bands ? state.thresholds : null,
       events: opts.events ? state.events : null,
@@ -2202,13 +2344,7 @@ function drawEnergyChart(hostId, rows, options) {
   function plot(key, sc, cls) {
     if (!sc) return;
     const drawn = pts.filter((p) => typeof p[key] === "number" && !isNaN(p[key]));
-    const thresh = chartGapThresh(drawn);   // break the line across real gaps
-    let d = "", prev = null;
-    drawn.forEach((p) => {
-      const move = prev === null || (p.ts - prev) > thresh;
-      d += (d ? " " : "") + (move ? "M" : "L") + x(p.ts).toFixed(1) + " " + sc.y(p[key]).toFixed(1);
-      prev = p.ts;
-    });
+    const { d } = gapDecimatedPath(drawn, (p) => p[key], x, sc.y, W - pad - 5);
     if (!d) return;
     const path = document.createElementNS(SVG_NS, "path");
     path.setAttribute("d", d); path.setAttribute("class", cls);
@@ -2229,12 +2365,12 @@ function drawEnergyChart(hostId, rows, options) {
     const t = document.createElementNS(SVG_NS, "text");
     t.setAttribute("x", lx + 14); t.setAttribute("y", 11);
     t.setAttribute("class", "lbl");
-    t.textContent = label + (max != null ? (" (max " + max.toFixed(0) + unit + ")") : "");
+    t.textContent = label;   // the max is on the y-axis; no need to repeat it here
     svg.appendChild(t);
-    lx += 150;
+    lx += 70;
   };
-  if (wattS) legend("Power", "plot-watts", wattS.mx, "W");
-  if (showLoad && loadS) legend("Load", "plot-load", loadS.mx, "%");
+  if (wattS) legend("Power", "plot-watts");
+  if (showLoad && loadS) legend("Load", "plot-load");
   // Min/max axis numbers for the primary series (watts if present, else load).
   const prim = wattS || loadS;
   if (prim) {
@@ -3201,7 +3337,9 @@ async function renderShutdownPlan() {
 }
 
 function onTabActivated(name) {
-  if (name === "overview") renderOverviewSummary(lastUpsRows);
+  if (name === "overview") {
+    renderOverviewSummary(lastUpsRows); renderRedundancy(); renderRemoteHealth();
+  }
   else if (name === "power") { renderLineQuality(); if (charts.power) charts.power.load(); }
   else if (name === "battery") { renderBatteryHealthTab(); if (charts.battery) charts.battery.load(); }
   else if (name === "energy") { renderEnergyTab(); if (charts.energy) charts.energy.load(); }
