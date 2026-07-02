@@ -374,6 +374,10 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .card-title { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .card-title h3 { margin: 0; }
 .mon-badge { font-size: 0.72rem; }
+/* Stacked shutdown plans ("All UPS" compares every plan). */
+.sd-plan + .sd-plan { border-top: 1px solid var(--line); margin-top: 1.5rem;
+  padding-top: 1rem; }
+.sd-plan-title { margin: 0.25rem 0 0.75rem; }
 .panel > h2:first-child { margin-top: 0; }
 
 /* Widget cards with a title + status badge (Battery / Energy tabs). The base

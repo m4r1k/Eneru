@@ -2904,24 +2904,8 @@ function shutdownTriggerNodes(name, plan) {
 }
 
 let _sdGen = 0;
-async function renderShutdownPlan() {
-  const host = document.getElementById("shutdown-plan");
-  if (!host) return;
-  const name = populateShutdownUpsSelect();
-  if (!name) {
-    host.replaceChildren(el("p", { class: "chart-note", text: "No UPS data yet." }));
-    return;
-  }
-  const myGen = ++_sdGen;
-  const res = await api("/api/v1/ups/" + encodeURIComponent(name) + "/shutdown-plan");
-  if (myGen !== _sdGen) return;
-  const plan = res.ok && res.data && res.data.plan;
-  if (!plan) {
-    host.replaceChildren(el("p", { class: "chart-note",
-      text: "Shutdown plan unavailable." }));
-    return;
-  }
-  host.replaceChildren();
+// Append one UPS's shutdown-plan body (trigger + phase flow) into a container.
+function appendShutdownPlanBody(host, name, plan) {
   shutdownTriggerNodes(name, plan).forEach((nd) => host.appendChild(nd));
   const intro = el("p", { class: "chart-note" },
     [el("span", { text: "What runs when a power-loss shutdown is triggered, top "
@@ -2985,6 +2969,43 @@ async function renderShutdownPlan() {
     flow.appendChild(node);
   });
   host.appendChild(flow);
+}
+
+// Render shutdown plans driven by the global UPS scope. Under "All UPS" (fleet)
+// every plan is stacked so a monitoring-only UPS's "only remote shutdown runs"
+// explanation is visible without hunting a dropdown; a single scope shows just
+// that UPS's plan under a clear "Viewing plan for" header. (operator #3)
+async function renderShutdownPlan() {
+  const host = document.getElementById("shutdown-plan");
+  if (!host) return;
+  const ctl = document.getElementById("shutdown-controls");
+  if (ctl) ctl.hidden = true;   // the header UPS selector is the scope control now
+  const rows = lastUpsRows;
+  if (!rows.length) {
+    host.replaceChildren(el("p", { class: "chart-note", text: "No UPS data yet." }));
+    return;
+  }
+  const targets = (scopeIsAll() && rows.length > 1)
+    ? rows.slice()
+    : rows.filter((u) => u.name === scopedName());
+  const stacked = targets.length > 1;
+  const myGen = ++_sdGen;
+  host.replaceChildren();
+  for (const u of targets) {
+    const res = await api("/api/v1/ups/" + encodeURIComponent(u.name) + "/shutdown-plan");
+    if (myGen !== _sdGen) return;   // a newer render superseded us
+    const plan = res.ok && res.data && res.data.plan;
+    const section = el("div", { class: "sd-plan" });
+    section.appendChild(el("div", { class: "sd-plan-title card-title" },
+      [el("h3", { text: (stacked ? "Plan · " : "Viewing plan for: ") + (u.label || u.name) }),
+       monitoringBadge(u)].filter(Boolean)));
+    if (!plan) {
+      section.appendChild(el("p", { class: "chart-note", text: "Shutdown plan unavailable." }));
+    } else {
+      appendShutdownPlanBody(section, u.name, plan);
+    }
+    host.appendChild(section);
+  }
 }
 
 function onTabActivated(name) {
