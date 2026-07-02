@@ -134,6 +134,12 @@ h2 { font-size: 0.8125rem; color: var(--muted); text-transform: uppercase;
 .hero-vitals .v-label { color: var(--muted); font-size: 0.8125rem; }
 .hero-vitals .v-value { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.01em;
   font-variant-numeric: tabular-nums; }
+.hero-vitals .v-value.warn { color: var(--warn); }
+.hero-vitals .v-value.crit { color: var(--crit); }
+/* Outage urgency: an on-battery hero tints amber and carries a prominent
+   ON BATTERY · <time> chip so a live outage never reads as a calm green ring. */
+.hero.hero-alarm { background: var(--warn-weak); }
+.hero-ob { margin-left: 0.25rem; }
 @media (max-width: 560px) { .hero { grid-template-columns: 1fr; text-align: center; } }
 
 /* Battery ring gauge (SVG). */
@@ -482,11 +488,13 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 
 /* Shutdown plan: an ordered top-to-bottom flow with a connector between phases.
    Parallel phases lay their steps out side by side; skipped phases are muted. */
+/* Descriptive ("this is what triggers a shutdown"), so neutral/info — not the
+   amber alarm styling it used to have, which cried wolf on every load. */
 .sd-trigger { display: flex; align-items: center; gap: 0.5rem;
   margin: 0.3rem 0 0.9rem; padding: 0.6rem 0.85rem; border-radius: var(--r-md);
-  background: var(--warn-weak); border: 1px solid rgba(var(--warn-rgb), 0.4);
+  background: var(--accent-weak); border: 1px solid var(--line);
   font-size: 0.9rem; }
-.sd-trigger .ic { width: 16px; height: 16px; color: var(--warn); flex: none; }
+.sd-trigger .ic { width: 16px; height: 16px; color: var(--muted); flex: none; }
 .sd-flow { display: flex; flex-direction: column; margin-top: 0.5rem; }
 .sd-node { position: relative; border: 1px solid var(--line-strong);
   border-radius: var(--r-md); background: var(--panel); padding: 0.85rem 1rem;

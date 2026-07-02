@@ -102,6 +102,7 @@ const ICONS = {
   gauge:   "M4.5 16.5a8 8 0 1 1 15 0 M12 13l3-3",
   check:   "M5 12.5 9.5 17 19 7",
   alert:   "M12 4 21 19H3z M12 10v4 M12 16.6v.4",
+  info:    "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 11v5 M12 7.6v.4",
   close:   "M6 6l12 12 M18 6 6 18",
   power:   "M12 3v9 M7.8 6.4a7 7 0 1 0 8.4 0",
   vm:      "M3 5h18v11H3z M8 20h8 M11 16v4",
@@ -371,7 +372,7 @@ function seedEventSourceFromScope() {
 
 // SVG battery ring gauge: a track circle + a value arc (dasharray), centered
 // label. Colored by status class. The signature visual of the Overview.
-function batteryRing(pct, statusCls) {
+function batteryRing(pct, statusCls, caption) {
   const R = 52, C = 2 * Math.PI * R;
   const p = Math.max(0, Math.min(100, isNaN(pct) ? 0 : pct));
   const svg = document.createElementNS(SVG_NS, "svg");
@@ -396,7 +397,9 @@ function batteryRing(pct, statusCls) {
     t.textContent = s; svg.appendChild(t);
   };
   txt("ring-big", 60, isNaN(pct) ? "—" : Math.round(p) + "%");
-  txt("ring-cap", 78, p >= 95 ? "CHARGED" : p >= 20 ? "ON LINE" : "LOW");
+  // Caption is a CHARGE band, not a power word ("ON LINE" read as a power state
+  // even mid-outage). heroCard overrides it to "ON BATTERY" during an outage.
+  txt("ring-cap", 78, caption || (p >= 95 ? "CHARGED" : p >= 20 ? "READY" : "LOW"));
   return svg;
 }
 
@@ -404,24 +407,45 @@ function heroCard(u) {
   const charge = parseFloat(u.batteryCharge);
   const sCls = statusClass(u.status);
   const pq = u.powerQuality || {};
-  const wrap = el("div", { class: "hero card-click s-" + sCls, tabindex: "0",
+  const st = (u.status || "").toUpperCase();
+  const onBattery = st.includes("OB");
+  const low = st.includes("LB") || st.includes("FSD");
+  // Ring turns amber the moment we're on battery (red once low/FSD), and the
+  // caption says ON BATTERY — so an outage doesn't read as a calm green ring.
+  const ringCls = low ? "crit" : (onBattery ? "warn" : (batteryClass(charge) || sCls));
+  const wrap = el("div", { class: "hero card-click s-" + sCls
+    + (onBattery ? " hero-alarm" : ""), tabindex: "0",
     role: "button", title: "View details" });
-  wrap.appendChild(batteryRing(charge, batteryClass(charge) || sCls));
-  const vital = (label, value) => el("div", null, [
+  wrap.appendChild(batteryRing(charge, ringCls, onBattery ? "ON BATTERY" : null));
+  const vital = (label, value, cls) => el("div", null, [
     el("div", { class: "v-label", text: label }),
-    el("div", { class: "v-value", text: value }),
+    el("div", { class: "v-value" + (cls ? " " + cls : ""), text: value }),
   ]);
+  const title = el("div", { class: "hero-title" }, [
+    icon("battery"), el("h3", { text: u.label || u.name }),
+    el("span", { class: "badge " + sCls, text: u.status || "—" }),
+  ]);
+  // Promote time-on-battery to a prominent alarm chip during an outage — it's
+  // the number the operator needs first, and it was the last, easily-missed vital.
+  if (onBattery) {
+    title.appendChild(el("span", { class: "badge " + (low ? "crit" : "warn") + " hero-ob",
+      text: "ON BATTERY · " + (u.timeOnBattery != null ? u.timeOnBattery + "s" : "—") }));
+  }
+  const vitals = [
+    vital("Runtime", formatRuntimeSeconds(u.runtime)),
+    vital("Load", u.load != null ? u.load + "%" : "—"),
+    vital("Input", pq.inputVoltage != null ? pq.inputVoltage + " V" : "—"),
+    vital("On battery", u.timeOnBattery != null ? u.timeOnBattery + "s" : "—",
+      onBattery ? (low ? "crit" : "warn") : null),
+  ];
+  // Surface line quality on the Overview only when it's NOT good — otherwise it's
+  // buried on the Power tab where the operator rarely looks. (operator #14)
+  const lq = lineQuality(pq);
+  if (lq.cls === "warn" || lq.cls === "crit") {
+    vitals.push(vital("Line quality", lq.label, lq.cls));
+  }
   wrap.appendChild(el("div", { class: "hero-main" }, [
-    el("div", { class: "hero-title" }, [
-      icon("battery"), el("h3", { text: u.label || u.name }),
-      el("span", { class: "badge " + sCls, text: u.status || "—" }),
-    ]),
-    el("div", { class: "hero-vitals" }, [
-      vital("Runtime", formatRuntimeSeconds(u.runtime)),
-      vital("Load", u.load != null ? u.load + "%" : "—"),
-      vital("Input", pq.inputVoltage != null ? pq.inputVoltage + " V" : "—"),
-      vital("On battery", u.timeOnBattery != null ? u.timeOnBattery + "s" : "—"),
-    ]),
+    title, el("div", { class: "hero-vitals" }, vitals),
   ]));
   const open = () => openDetail(u.name);
   wrap.addEventListener("click", open);
@@ -482,7 +506,8 @@ function renderOverviewSummary(rows) {
       value: Math.round(bh.score), unit: "/100",
       cap: (multi ? named(worst) + " · " : "")
         + (bh.confidence != null ? "confidence " + Math.round(bh.confidence * 100) + "%" : ""),
-      valueStatus: scoreClass(bh.score), tab: "battery" }));
+      valueStatus: (bh.confidence != null && bh.confidence < 0.75)
+        ? "muted" : scoreClass(bh.score), tab: "battery" }));
   } else {
     summary.appendChild(kpiCard({ iconName: "shield", label: "Battery health",
       value: "—", unit: "", cap: "no data yet", tab: "battery" }));
@@ -606,7 +631,16 @@ function renderUps(payload) {
   const gsec = document.getElementById("groups-section");
   const gwrap = document.getElementById("group-cards");
   gwrap.replaceChildren();
-  gsec.hidden = groups.length === 0;
+  // In a fleet with no redundancy groups configured, show a discoverable hint
+  // rather than hiding the section entirely — otherwise the feature is invisible.
+  // Single-UPS deployments (where groups make no sense) still hide it. (operator #15)
+  gsec.hidden = groups.length === 0 && rows.length <= 1;
+  if (groups.length === 0 && rows.length > 1) {
+    gwrap.appendChild(el("div", { class: "card" }, [
+      el("p", { class: "chart-note", text: "No redundancy groups configured. "
+        + "Group UPSes so a shutdown only triggers when quorum is lost — see the "
+        + "redundancy-groups docs." })]));
+  }
   groups.forEach((g) => {
     const sources = g.upsSources || [];
     const healthy = groupHealthyCount(g, rows);
@@ -692,7 +726,7 @@ function renderRemoteHealth() {
     if (r.latency_ms != null && reachable) {
       rows.push(configKv("Latency", Math.round(r.latency_ms) + " ms"));
     }
-    rows.push(configKv("Checked", relTime(r.last_checked_at)));
+    rows.push(configKv("Last checked", relTime(r.last_checked_at)));
     if (r.consecutive_failures) {
       rows.push(el("div", { class: "row" }, [el("span", { text: "Failures" }),
         el("b", { class: "crit", text: String(r.consecutive_failures) })]));
@@ -914,7 +948,7 @@ function renderDetail(name) {
   const cfgUps = ((cfgSnapshot && cfgSnapshot.ups) || []).find((c) => c.name === name);
   if (cfgUps) {
     const rows = [
-      detailRow("Local host", cfgUps.isLocal ? "yes" : "no"),
+      detailRow("Triggers local shutdown", cfgUps.isLocal ? "yes" : "no — monitoring only"),
       detailRow("Remote servers", (cfgUps.remoteServers || []).length),
     ];
     (cfgUps.remoteServers || []).forEach((s, i) =>
@@ -2274,7 +2308,13 @@ function renderBatteryHealthTab() {
     const bh = u.batteryHealth;
     const st = u.selfTest;
     if (bh) {
-      const scoreTxt = bh.score != null ? Math.round(bh.score) + "/100" : "unknown";
+      // Temper the badge on confidence: a 100/100 built on 2 default terms at
+      // 60% confidence shouldn't shout green like a fully-measured 100. Below
+      // ~0.75 confidence the badge goes neutral and shows the % inline. (heuristic H1)
+      const lowConf = bh.confidence != null && bh.confidence < 0.75;
+      const scoreTxt = (bh.score != null ? Math.round(bh.score) + "/100" : "unknown")
+        + (lowConf ? " · " + Math.round(bh.confidence * 100) + "%" : "");
+      const badgeCls = lowConf ? "muted" : scoreClass(bh.score);
       // Header badge carries the score, so the rows omit it (no duplicate).
       const cardRows = batteryHealthRows(bh, { includeScore: false });
       // Only show a self-test row once a test has actually run.
@@ -2286,8 +2326,8 @@ function renderBatteryHealthTab() {
         ]));
       }
       wrap.appendChild(widgetCard(u.label || u.name, cardRows,
-        { badge: scoreTxt, badgeClass: scoreClass(bh.score),
-          icon: "shield", iconClass: scoreClass(bh.score) }));
+        { badge: scoreTxt, badgeClass: badgeCls,
+          icon: "shield", iconClass: badgeCls }));
     } else {
       wrap.appendChild(widgetCard(u.label || u.name,
         [el("p", { class: "chart-note", text: "Battery health not available." })],
@@ -2438,7 +2478,10 @@ function lineQuality(pq) {
 // amber when Active.
 function stateRow(label, value) {
   const v = String(value || "").toUpperCase();
-  const cls = v === "ACTIVE" ? "warn" : (v === "NORMAL" || v === "INACTIVE" ? "ok" : "");
+  // Idle/quiet states (Normal / Inactive) read NEUTRAL, not green — green means
+  // "active & good", and a wall of green for features that are simply OFF flattens
+  // the hierarchy so a real ACTIVE (amber) doesn't stand out. (heuristic M2/M5)
+  const cls = v === "ACTIVE" ? "warn" : (v === "NORMAL" || v === "INACTIVE" ? "muted" : "");
   return el("div", { class: "row" }, [el("span", { text: label }),
     el("span", { class: "badge " + cls, text: titleCase(value) })]);
 }
@@ -2567,7 +2610,7 @@ function renderConfigTab() {
   (cfg.ups || []).forEach((c) => {
     cards.push(widgetCard(c.label || c.name, [
       configKv("Name", c.name),
-      configKv("Local host", c.isLocal ? "yes" : "no"),
+      configKv("Triggers local shutdown", c.isLocal ? "yes" : "no — monitoring only"),
       configKv("Remote servers", (c.remoteServers || []).length),
     ], { icon: "battery" }));
   });
@@ -2893,12 +2936,12 @@ function shutdownTriggerNodes(name, plan) {
   const coord = plan && plan.coordinatorMode ? " — coordinator-run" : "";
   if (groups.length) {
     return groups.map((g) => el("div", { class: "sd-trigger" }, [
-      icon("alert"),
+      icon("info"),
       el("span", { text: "Triggers when group “" + g.name + "” drops below "
         + g.minHealthy + " of " + (g.upsSources || []).length + " healthy" + coord }),
     ]));
   }
-  return [el("div", { class: "sd-trigger" }, [icon("alert"),
+  return [el("div", { class: "sd-trigger" }, [icon("info"),
     el("span", { text: "Triggers when this UPS reaches low battery or a forced "
       + "shutdown (FSD)" + coord })])];
 }
