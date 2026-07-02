@@ -352,23 +352,25 @@ function applyScopeChrome() {
     const inert = activeTab === "config";
     wrap.classList.toggle("inactive", inert);
     const msg = inert ? "Config is fleet-wide; the UPS selector doesn't apply here"
-      : (activeTab === "events" ? "Also seeds the Events source filter" : "");
+      : (activeTab === "events" ? "Filters the events by UPS" : "");
     wrap.title = msg;
     if (msg) wrap.setAttribute("aria-label", "UPS to show — " + msg);
     else wrap.removeAttribute("aria-label");
   }
-  if (activeTab === "events" && !scopeIsAll()) seedEventSourceFromScope();
+  if (activeTab === "events") seedEventSourceFromScope();
 }
 
-// Seed the Events Source filter from the global scope, but NEVER override a
-// manual pick — only seed when the filter is still on "All sources". (review)
+// The header UPS selector is the Events source control now (the separate Source
+// dropdown is retired), so mirror the scope into the events source filter —
+// "All UPS" → all sources, a pick → that UPS.
 function seedEventSourceFromScope() {
   const src = document.getElementById("event-source-filter");
   if (!src) return;
   const scope = currentScope();
-  if (scope === SCOPE_ALL || src.value !== "") return;
-  if ([...src.options].some((o) => o.value === scope)) {
-    src.value = scope;
+  const target = scope === SCOPE_ALL ? "" : scope;
+  if (src.value === target) return;
+  if (target === "" || [...src.options].some((o) => o.value === target)) {
+    src.value = target;
     if (typeof applyEventFilters === "function") applyEventFilters();
   }
 }
@@ -2282,6 +2284,17 @@ function drawEnergyChart(hostId, rows, options) {
   mkline(pad, H - pad, W - 5, H - pad, "axis");
   mkline(pad, 5, pad, H - pad, "axis");
 
+  // Title names the UPS the (single-series) chart shows — "· Lab (primary)"
+  // under "All UPS" — so it's clear which UPS, like the metric charts.
+  if (options.upsLabel) {
+    const tt = document.createElementNS(SVG_NS, "text");
+    tt.setAttribute("x", (W / 2).toFixed(0)); tt.setAttribute("y", "12");
+    tt.setAttribute("text-anchor", "middle"); tt.setAttribute("class", "chart-title");
+    tt.textContent = "Load & power · " + options.upsLabel
+      + (options.scopeAll ? " (primary)" : "");
+    svg.appendChild(tt);
+  }
+
   const pts = rows || [];
   const loads = pts.map((p) => p.loadPct).filter((v) => typeof v === "number" && !isNaN(v));
   const watts = pts.map((p) => p.watts).filter((v) => typeof v === "number" && !isNaN(v));
@@ -2293,7 +2306,9 @@ function drawEnergyChart(hostId, rows, options) {
     host.appendChild(svg);
     return;
   }
-  const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts, tspan = (t1 - t0) || 1;
+  const t0 = (options.from != null) ? options.from : pts[0].ts;
+  const t1 = (options.to != null) ? options.to : pts[pts.length - 1].ts;
+  const tspan = (t1 - t0) || 1;
   const x = (t) => pad + ((t - t0) / tspan) * (W - pad - 5);
 
   function scale(vals, floorZero) {
@@ -2341,19 +2356,26 @@ function drawEnergyChart(hostId, rows, options) {
       appendEventMarker(svg, e, x(e.ts).toFixed(1), 5, (H - pad).toFixed(1));
     });
 
-  function plot(key, sc, cls) {
+  function plot(key, sc, cls, bandCls) {
     if (!sc) return;
     const drawn = pts.filter((p) => typeof p[key] === "number" && !isNaN(p[key]));
-    const { d } = gapDecimatedPath(drawn, (p) => p[key], x, sc.y, W - pad - 5);
-    if (!d) return;
+    // Same HA-style stats rendering as the metric charts: a dense series draws a
+    // min–max band + mean line (was an unreadable dense spike mass); sparse → line.
+    const stats = statsBandPaths(drawn, (p) => p[key], x, sc.y, W - pad - 5);
+    if (stats.bandD) {
+      const band = document.createElementNS(SVG_NS, "path");
+      band.setAttribute("d", stats.bandD); band.setAttribute("class", bandCls);
+      svg.appendChild(band);
+    }
+    if (!stats.meanD) return;
     const path = document.createElementNS(SVG_NS, "path");
-    path.setAttribute("d", d); path.setAttribute("class", cls);
+    path.setAttribute("d", stats.meanD); path.setAttribute("class", cls);
     path.setAttribute("vector-effect", "non-scaling-stroke");
     svg.appendChild(path);
   }
   drawTimeTicks(svg, t0, t1, x, W, H, pad, pad);   // anchor the window in time
-  if (wattS) plot("watts", wattS, "plot plot-watts");
-  if (showLoad) plot("loadPct", loadS, "plot plot-load");
+  if (wattS) plot("watts", wattS, "plot plot-watts", "plot-band-watts");
+  if (showLoad) plot("loadPct", loadS, "plot plot-load", "plot-band-load");
 
   // Legend + per-line max labels (each line has its own unit/scale).
   let lx = pad + 4;
@@ -2521,10 +2543,20 @@ function makeEnergyChart(opts) {
     state.rows = rows;
     state.events = r.events;
     state.hiddenEvents = r.hidden;
+    state.from = from; state.to = to;
     draw();
   }
+  function upsLabel() {
+    const u = lastUpsRows.find((r) => r.name === upsName());
+    return (u && (u.label || u.name)) || "";
+  }
   function draw() {
-    drawEnergyChart(opts.hostId, state.rows, { events: state.events });
+    drawEnergyChart(opts.hostId, state.rows, {
+      events: state.events,
+      upsLabel: lastUpsRows.length > 1 ? upsLabel() : "",
+      scopeAll: typeof scopeIsAll === "function" && scopeIsAll(),
+      from: state.from, to: state.to,
+    });
     setEventsHint(opts.eventsNoteId, state.hiddenEvents);
   }
   function observe() {

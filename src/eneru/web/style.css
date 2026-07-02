@@ -201,6 +201,8 @@ select:focus-visible, input:not([type="checkbox"]):focus-visible {
 .graph .area { stroke: none; }
 /* HA-style statistics band: translucent min–max envelope behind the mean line. */
 .graph .plot-band { fill: rgba(var(--accent-rgb), 0.16); stroke: none; }
+.graph .plot-band-watts { fill: var(--watts); opacity: 0.16; stroke: none; }
+.graph .plot-band-load { fill: var(--accent); opacity: 0.14; stroke: none; }
 .graph .now-dot { fill: var(--accent); stroke: var(--panel); stroke-width: 2; }
 .graph .now-dot.s-warn { fill: var(--warn); }
 .graph .now-dot.s-crit { fill: var(--crit); }
@@ -505,7 +507,8 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
    used to swallow pointer events over the lower part of the guide, so the
    tooltip only appeared when hovering above the plotted data. */
 .graph .grid, .graph .axis, .graph .area, .graph .plot, .graph .plot-load,
-.graph .plot-watts, .graph .plot-band, .graph .now-dot, .graph .band,
+.graph .plot-watts, .graph .plot-band, .graph .plot-band-watts,
+.graph .plot-band-load, .graph .now-dot, .graph .band,
 .graph .band-edge, .graph .band-nominal, .graph .chart-title { pointer-events: none; }
 .graph .ev-line { stroke-width: 1; opacity: 0.12; }
 .graph .ev-hit { stroke: transparent; stroke-width: 11; }

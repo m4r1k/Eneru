@@ -183,7 +183,10 @@
              aria-labelledby="tab-events" tabindex="0" hidden>
       <h2>Events</h2>
       <div class="event-filters">
-        <label>Source
+        <!-- Source is driven by the header UPS selector (no redundant second
+             dropdown); the select stays in the DOM, hidden, as the filter's
+             internal state. -->
+        <label hidden>Source
           <select id="event-source-filter">
             <option value="">All sources</option>
           </select>

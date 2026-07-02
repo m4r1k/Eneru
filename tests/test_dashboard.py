@@ -177,7 +177,7 @@ def test_dashboard_formats_runtime_for_humans(minimal_config):
     assert "function formatRuntimeSeconds" in js
     assert 'return Math.floor(seconds / 3600) + "h "' in js
     assert 'return Math.floor(seconds / 60) + "m " + (seconds % 60) + "s"' in js
-    assert 'text: formatRuntimeSeconds(u.runtime)' in js
+    assert 'vital("Runtime", formatRuntimeSeconds(u.runtime))' in js
     assert 'detailRow("Runtime", formatRuntimeSeconds(u.runtime))' in js
     assert 'metric === "runtime"' in js
 
