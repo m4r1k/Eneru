@@ -482,21 +482,27 @@ function renderOverviewSummary(rows) {
     hero.appendChild(el("p", { class: "chart-note", text: "No UPS data yet." }));
     return;
   }
-  // Hero shows the worst-status UPS so a problem surfaces immediately.
+  // The global UPS selector scopes the Overview too: a single pick drives the
+  // hero + KPIs to that UPS; "All UPS" shows the whole fleet (worst status,
+  // lowest health, total energy). The fleet strip above always lists every UPS.
+  const picked = !scopeIsAll() && rows.filter((u) => u.name === currentScope());
+  const view = (picked && picked.length) ? picked : rows;
+
+  // Hero shows the (scoped) worst-status UPS so a problem surfaces immediately.
   const rank = { crit: 0, warn: 1, ok: 2 };
-  const primary = rows.slice().sort(
+  const primary = view.slice().sort(
     (a, b) => rank[statusClass(a.status)] - rank[statusClass(b.status)])[0];
   hero.appendChild(heroCard(primary));
 
   // Three drill-through KPI cards surfacing the v6.1 data otherwise buried on
-  // other tabs. In a fleet these summarize ACROSS all UPSes (worst battery
-  // health, total energy, worst self-test) so a second UPS is never hidden —
-  // the header is "System", not "the primary UPS". (operator #11, plan #4)
-  const multi = rows.length > 1;
+  // other tabs. Under "All UPS" they summarize ACROSS the fleet (worst battery
+  // health, total energy, worst self-test); scoped to one UPS they show its
+  // values. (operator #11, plan #4)
+  const multi = view.length > 1;
   const named = (u) => u.label || u.name;
 
   // Battery health: the lowest score in the fleet (the one that needs attention).
-  const bhRows = rows.filter((u) => u.batteryHealth && u.batteryHealth.score != null);
+  const bhRows = view.filter((u) => u.batteryHealth && u.batteryHealth.score != null);
   if (bhRows.length) {
     const worst = bhRows.slice().sort(
       (a, b) => a.batteryHealth.score - b.batteryHealth.score)[0];
@@ -514,12 +520,12 @@ function renderOverviewSummary(rows) {
   }
 
   // Energy today: the fleet total (a single UPS keeps its cost caption).
-  const enRows = rows.filter((u) => u.energy && u.energy.todayKwh != null);
+  const enRows = view.filter((u) => u.energy && u.energy.todayKwh != null);
   if (enRows.length) {
     const totalKwh = enRows.reduce((s, u) => s + u.energy.todayKwh, 0);
     let cap;
     if (multi) {
-      cap = enRows.length + " of " + rows.length + " UPS · today";
+      cap = enRows.length + " of " + view.length + " UPS · today";
     } else {
       const en = enRows[0].energy;
       cap = en.todayCostFormatted ? en.todayCostFormatted + " today"
@@ -536,7 +542,7 @@ function renderOverviewSummary(rows) {
   // Last self-test: the worst result across the fleet (failed > running > passed),
   // so a single failed test isn't masked by another UPS's pass. Only shown once
   // a test has actually run somewhere.
-  const stRows = rows.filter(
+  const stRows = view.filter(
     (u) => u.selfTest && ["passed", "failed", "running"].includes(u.selfTest.result));
   if (stRows.length) {
     const rankSt = { failed: 0, running: 1, passed: 2 };
@@ -585,45 +591,15 @@ function renderFleetStrip(rows) {
 }
 
 function renderUps(payload) {
-  const wrap = document.getElementById("ups-cards");
-  wrap.replaceChildren();
   const rows = (payload && payload.ups) || [];
   lastUpsRows = rows;
-  rows.forEach((u) => {
-    const charge = parseFloat(u.batteryCharge);
-    const barValue = isNaN(charge) ? 0 : Math.max(0, Math.min(100, charge));
-    const card = el("div", { class: "card card-click", tabindex: "0",
-      role: "button", title: "View details" }, [
-      el("div", { class: "card-title" },
-        [el("h3", { text: u.label || u.name }), monitoringBadge(u)].filter(Boolean)),
-      el("div", { class: "row" }, [
-        el("span", { text: "Status" }),
-        el("span", { class: "badge " + statusClass(u.status), text: u.status || "—" }),
-      ]),
-      el("div", { class: "row" }, [el("span", { text: "Battery" }),
-        el("b", { class: batteryClass(charge), text: isNaN(charge) ? "—" : charge + "%" })]),
-      el("meter", {
-        class: "bar " + batteryClass(charge),
-        min: "0", max: "100", value: String(barValue),
-        "aria-label": "Battery charge for " + (u.label || u.name),
-      }),
-      el("div", { class: "row" }, [el("span", { text: "Runtime" }),
-        el("b", { text: formatRuntimeSeconds(u.runtime) })]),
-      el("div", { class: "row" }, [el("span", { text: "Load" }),
-        el("b", { text: u.load != null ? u.load + "%" : "—" })]),
-    ]);
-    card.classList.add("s-" + statusClass(u.status));   // status accent rail
-    card.addEventListener("click", () => openDetail(u.name));
-    card.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDetail(u.name); }
-    });
-    wrap.appendChild(card);
-  });
   populateChartUpsSelects(rows);
   renderFleetStrip(rows);
-  // Single UPS → the Overview is the hero + KPI summary; the raw per-UPS card
-  // grid only appears for a fleet (multi-UPS).
-  document.getElementById("ups-section").hidden = rows.length <= 1;
+  // The per-UPS "UPS status" grid is retired — it duplicated the always-on fleet
+  // strip (every UPS at a glance, chips drill into the detail modal) and the
+  // scoped hero. Keep the section element hidden. (v6.1.4 review)
+  const upsSec = document.getElementById("ups-section");
+  if (upsSec) upsSec.hidden = true;
   renderOverviewSummary(rows);
 
   const groups = (payload && payload.redundancyGroups) || [];
@@ -3155,7 +3131,8 @@ async function renderShutdownPlan() {
 }
 
 function onTabActivated(name) {
-  if (name === "power") { renderLineQuality(); if (charts.power) charts.power.load(); }
+  if (name === "overview") renderOverviewSummary(lastUpsRows);
+  else if (name === "power") { renderLineQuality(); if (charts.power) charts.power.load(); }
   else if (name === "battery") { renderBatteryHealthTab(); if (charts.battery) charts.battery.load(); }
   else if (name === "energy") { renderEnergyTab(); if (charts.energy) charts.energy.load(); }
   else if (name === "shutdown") renderShutdownPlan();
