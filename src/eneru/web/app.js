@@ -343,26 +343,31 @@ function onScopeChanged() {
   onTabActivated(activeTab);
 }
 
-// The global selector only affects the scoped tabs; on Events (own filter) and
-// Config (fleet-wide) it does nothing, so dim it there to avoid a "broken
-// control" read. On Events, seed the Source filter from the current scope.
+// The global selector drives the scoped tabs; on Events it also seeds the Source
+// filter (so it's still doing something), and only on Config is it truly inert —
+// dim + explain it only there. aria-label carries the reason for AT users.
 function applyScopeChrome() {
   const wrap = document.getElementById("global-ups-wrap");
-  const scoped = SCOPED_TABS.includes(activeTab);
   if (wrap) {
-    wrap.classList.toggle("inactive", !scoped);
-    wrap.title = scoped ? "" : "This tab isn't scoped by the UPS selector";
+    const inert = activeTab === "config";
+    wrap.classList.toggle("inactive", inert);
+    const msg = inert ? "Config is fleet-wide; the UPS selector doesn't apply here"
+      : (activeTab === "events" ? "Also seeds the Events source filter" : "");
+    wrap.title = msg;
+    if (msg) wrap.setAttribute("aria-label", "UPS to show — " + msg);
+    else wrap.removeAttribute("aria-label");
   }
   if (activeTab === "events" && !scopeIsAll()) seedEventSourceFromScope();
 }
 
-// Seed the Events Source filter from the global scope (still user-overridable).
+// Seed the Events Source filter from the global scope, but NEVER override a
+// manual pick — only seed when the filter is still on "All sources". (review)
 function seedEventSourceFromScope() {
   const src = document.getElementById("event-source-filter");
   if (!src) return;
   const scope = currentScope();
-  if (scope === SCOPE_ALL) return;
-  if ([...src.options].some((o) => o.value === scope) && src.value !== scope) {
+  if (scope === SCOPE_ALL || src.value !== "") return;
+  if ([...src.options].some((o) => o.value === scope)) {
     src.value = scope;
     if (typeof applyEventFilters === "function") applyEventFilters();
   }
@@ -577,8 +582,14 @@ function renderFleetStrip(rows) {
   rows.forEach((u) => {
     const cls = statusClass(u.status);
     const charge = parseFloat(u.batteryCharge);
+    // Full accessible name — the status/charge/runtime/monitoring live in
+    // separate spans that a screen reader would run together ambiguously.
+    const aria = (u.label || u.name) + ": " + (u.status || "unknown") + ", "
+      + (isNaN(charge) ? "charge unknown" : charge + "% charge") + ", "
+      + formatRuntimeSeconds(u.runtime) + " runtime"
+      + (u.isLocal === false ? ", monitoring only" : "") + " — view details";
     const chip = el("button", { class: "fleet-chip s-" + cls, type: "button",
-      title: "View " + (u.label || u.name) + " details" }, [
+      title: "View " + (u.label || u.name) + " details", "aria-label": aria }, [
       el("span", { class: "fleet-name", text: u.label || u.name }),
       el("span", { class: "badge " + cls, text: u.status || "—" }),
       el("span", { class: "fleet-metric",
@@ -1582,6 +1593,58 @@ function addChartHover(svg, geom, series) {
 
 // Draw `series` (a /history payload) into the host element, with optional
 // `bands` (voltage thresholds) and `events` (overlay markers).
+// ---- shared chart helpers (v6.1.4) ----------------------------------------
+// Pad a degenerate (flat) value domain so a constant series (a steady 100%
+// charge, a fixed runtime) doesn't collapse onto the bottom axis and read as
+// empty. Returns [min, max].
+function padFlatDomain(min, max) {
+  if (max > min) return [min, max];
+  const p = Math.max(1, Math.abs(min) * 0.02);
+  return [min - p, max + p];
+}
+
+// Gap threshold for breaking a line across missing data: ~3x the median sample
+// spacing (so a routine poll hiccup doesn't fragment a dense series, but a real
+// outage-length gap breaks the path). Returns Infinity when too few points.
+function chartGapThresh(drawn) {
+  if (drawn.length <= 2) return Infinity;
+  const gaps = [];
+  for (let i = 1; i < drawn.length; i++) gaps.push(drawn[i].ts - drawn[i - 1].ts);
+  gaps.sort((a, b) => a - b);
+  const med = gaps[Math.floor(gaps.length / 2)] || 0;
+  return med > 0 ? med * 3 : Infinity;
+}
+
+// X-axis time ticks: count scales with width; times snap to round steps; the
+// date is shown for day+ steps and at local-midnight boundaries within a
+// sub-day window that crosses midnight. Appended to `svg`.
+function drawTimeTicks(svg, t0, t1, x, W, H, bottomPad, leftPad) {
+  const spanS = Math.max(1, t1 - t0);
+  const target = Math.max(2, Math.min(8, Math.floor((W - leftPad - 5) / 90)));
+  const STEPS = [60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200,
+                 86400, 172800, 604800, 1209600, 2592000];
+  let step = STEPS[STEPS.length - 1];
+  for (const s of STEPS) { if (spanS / s <= target) { step = s; break; } }
+  const crosses = new Date(t0 * 1000).toDateString() !== new Date(t1 * 1000).toDateString();
+  const yy = (H - bottomPad + 15).toFixed(1);
+  const fmt = (ts) => {
+    const dt = new Date(ts * 1000);
+    if (step >= 86400) return dt.toLocaleDateString([], { month: "short", day: "numeric" });
+    if (crosses && dt.getHours() === 0 && dt.getMinutes() === 0) {
+      return dt.toLocaleDateString([], { month: "short", day: "numeric" });
+    }
+    return dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  };
+  for (let ts = Math.ceil(t0 / step) * step; ts <= t1; ts += step) {
+    const tx = x(ts);
+    if (tx < leftPad - 1 || tx > W - 4) continue;
+    const t = document.createElementNS(SVG_NS, "text");
+    t.setAttribute("x", tx.toFixed(1)); t.setAttribute("y", yy);
+    t.setAttribute("text-anchor", "middle"); t.setAttribute("class", "lbl xtick");
+    t.textContent = fmt(ts); svg.appendChild(t);
+  }
+}
+
 function drawChart(hostId, series, options) {
   options = options || {};
   const host = document.getElementById(hostId);
@@ -1594,7 +1657,7 @@ function drawChart(hostId, series, options) {
   if (!W) return;
   host.replaceChildren();
   const pts = (series && series.data) || [];
-  const H = 220, pad = 34;
+  const H = 220, pad = 34, padT = options.metric ? 20 : 8;
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   // Expose the chart to assistive tech as a labelled image (the per-point data
@@ -1611,7 +1674,7 @@ function drawChart(hostId, series, options) {
     svg.appendChild(l);
   };
   line(pad, H - pad, W - 5, H - pad, "axis");
-  line(pad, 5, pad, H - pad, "axis");
+  line(pad, padT, pad, H - pad, "axis");
 
   // Metric name + unit, top-centered, so the numbers on the axis are identifiable.
   if (options.metric) {
@@ -1661,39 +1724,26 @@ function drawChart(hostId, series, options) {
     min = mid - floor / 2;
     max = mid + floor / 2;
   }
+  // Pad a still-flat domain so a constant series doesn't pin to the axis.
+  [min, max] = padFlatDomain(min, max);
   const span = (max - min) || 1;
-  const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts, tspan = (t1 - t0) || 1;
+  // Domain is the REQUESTED window when known (so leading/trailing silence shows
+  // as empty space), else the data extent.
+  const t0 = (options.from != null) ? options.from : pts[0].ts;
+  const t1 = (options.to != null) ? options.to : pts[pts.length - 1].ts;
+  const tspan = (t1 - t0) || 1;
   const x = (t) => pad + ((t - t0) / tspan) * (W - pad - 5);
-  const y = (v) => (H - pad) - ((v - min) / span) * (H - pad - 5);
+  const y = (v) => (H - pad) - ((v - min) / span) * (H - pad - padT);
 
   // Horizontal gridlines (quarter divisions) — the single biggest "this is a
   // real chart" cue. Drawn first, behind everything.
   for (let i = 1; i <= 3; i++) {
-    const gy = (5 + i * (H - pad - 5) / 4).toFixed(1);
+    const gy = (padT + i * (H - pad - padT) / 4).toFixed(1);
     line(pad, gy, W - 5, gy, "grid");
   }
 
-  // X-axis time ticks — a time series with no time reference is unreadable
-  // (outage bands + event markers otherwise float in an unanchored window).
-  const spanDays = tspan / 86400;
-  const fmtTick = (ts) => {
-    const dt = new Date(ts * 1000);
-    return spanDays <= 2
-      ? dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-      : dt.toLocaleDateString([], { month: "short", day: "numeric" });
-  };
-  const N_TICKS = 4;
-  for (let i = 0; i <= N_TICKS; i++) {
-    const tts = t0 + (tspan * i) / N_TICKS;
-    const tx = x(tts);
-    const tk = document.createElementNS(SVG_NS, "text");
-    tk.setAttribute("x", tx.toFixed(1));
-    tk.setAttribute("y", (H - pad + 15).toFixed(1));
-    tk.setAttribute("text-anchor", i === 0 ? "start" : i === N_TICKS ? "end" : "middle");
-    tk.setAttribute("class", "lbl xtick");
-    tk.textContent = fmtTick(tts);
-    svg.appendChild(tk);
-  }
+  // X-axis time ticks (shared helper: width-scaled count, round-time snapping).
+  drawTimeTicks(svg, t0, t1, x, W, H, pad, pad);
 
   // Voltage threshold band: a faint zone bounded by dashed edge lines (reads as
   // thresholds, not a slab of page-tint), plus the nominal center line.
@@ -2004,6 +2054,8 @@ function makeChart(opts) {
     state.series = series;
     state.events = events;
     state.hiddenEvents = hidden;
+    state.from = from;   // requested window → chart domain (trailing gaps show)
+    state.to = to;
     if (opts.bands) {
       const u = lastUpsRows.find((r) => r.name === ups);
       const pq = (u && u.powerQuality) || {};
@@ -2026,6 +2078,7 @@ function makeChart(opts) {
       // Only label the UPS in a fleet; a lone UPS needs no disambiguation.
       upsLabel: lastUpsRows.length > 1 ? upsLabel() : "",
       scopeAll: typeof scopeIsAll === "function" && scopeIsAll(),
+      from: state.from, to: state.to,
       bands: opts.bands ? state.thresholds : null,
       events: opts.events ? state.events : null,
     });
@@ -2105,6 +2158,7 @@ function drawEnergyChart(hostId, rows, options) {
     if (vals.length < 2) return null;
     let mn = Math.min(...vals), mx = Math.max(...vals);
     if (floorZero) mn = Math.min(mn, 0);
+    [mn, mx] = padFlatDomain(mn, mx);
     const span = (mx - mn) || 1;
     return { mn, mx, y: (v) => (H - pad) - ((v - mn) / span) * (H - pad - 5) };
   }
@@ -2147,11 +2201,13 @@ function drawEnergyChart(hostId, rows, options) {
 
   function plot(key, sc, cls) {
     if (!sc) return;
-    let d = "";
-    pts.forEach((p) => {
-      const v = p[key];
-      if (typeof v !== "number" || isNaN(v)) return;
-      d += (d ? " L" : "M") + x(p.ts).toFixed(1) + " " + sc.y(v).toFixed(1);
+    const drawn = pts.filter((p) => typeof p[key] === "number" && !isNaN(p[key]));
+    const thresh = chartGapThresh(drawn);   // break the line across real gaps
+    let d = "", prev = null;
+    drawn.forEach((p) => {
+      const move = prev === null || (p.ts - prev) > thresh;
+      d += (d ? " " : "") + (move ? "M" : "L") + x(p.ts).toFixed(1) + " " + sc.y(p[key]).toFixed(1);
+      prev = p.ts;
     });
     if (!d) return;
     const path = document.createElementNS(SVG_NS, "path");
@@ -2159,6 +2215,7 @@ function drawEnergyChart(hostId, rows, options) {
     path.setAttribute("vector-effect", "non-scaling-stroke");
     svg.appendChild(path);
   }
+  drawTimeTicks(svg, t0, t1, x, W, H, pad, pad);   // anchor the window in time
   if (wattS) plot("watts", wattS, "plot plot-watts");
   if (showLoad) plot("loadPct", loadS, "plot plot-load");
 
@@ -2206,12 +2263,17 @@ function drawSimpleSeries(host, pts, opts) {
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   const t0 = pts[0].ts;
   const tLast = pts[pts.length - 1].ts;
-  // Extend the x-axis to opts.tEnd (e.g. a future replacement date) so a marker
-  // beyond the data is visible; the plotted line still stops at the last reading.
-  const t1 = (opts.tEnd != null && opts.tEnd > tLast) ? opts.tEnd : tLast;
+  // Extend the x-axis toward opts.tEnd (e.g. a future replacement date) so a
+  // marker beyond the data is visible — but CAP the extension at 2x the data
+  // span so a far-off ETA (years out) doesn't crush the real history into a few
+  // pixels. A capped-off ETA is shown as an edge annotation by the caller.
+  const dataSpan = Math.max(1, tLast - t0);
+  const t1 = (opts.tEnd != null && opts.tEnd > tLast)
+    ? Math.min(opts.tEnd, tLast + 2 * dataSpan) : tLast;
   const span = Math.max(1, t1 - t0);
-  const lo = opts.min != null ? opts.min : Math.min(...pts.map((p) => p.value));
-  const hi = opts.max != null ? opts.max : Math.max(...pts.map((p) => p.value));
+  let lo = opts.min != null ? opts.min : Math.min(...pts.map((p) => p.value));
+  let hi = opts.max != null ? opts.max : Math.max(...pts.map((p) => p.value));
+  if (opts.min == null && opts.max == null) [lo, hi] = padFlatDomain(lo, hi);
   const rng = Math.max(1e-9, hi - lo);
   const x = (ts) => pad + (ts - t0) / span * (W - pad - padR);
   const y = (v) => padT + (1 - (v - lo) / rng) * (H - padT - pad);
@@ -2222,6 +2284,7 @@ function drawSimpleSeries(host, pts, opts) {
     ln.setAttribute("y1", yy); ln.setAttribute("y2", yy);
     ln.setAttribute("class", "grid"); svg.appendChild(ln);
   }
+  drawTimeTicks(svg, t0, t1, x, W, H, pad, pad);   // shared time axis
   const txt = (s, xx, yy, cls, anchor) => {
     const t = document.createElementNS(SVG_NS, "text");
     t.setAttribute("x", xx); t.setAttribute("y", yy); t.setAttribute("class", cls);
@@ -2450,8 +2513,15 @@ async function renderBatteryHealthGraph() {
   const scores = pts.map((p) => p.value);
   let floorRef = Math.min.apply(null, scores);
   if (repl.thresholdScore != null) floorRef = Math.min(floorRef, repl.thresholdScore);
+  // Name the UPS in the title (with "(primary)" under All UPS), matching the
+  // other charts — the cards above show every UPS, so the trend needs to say
+  // whose it is.
+  const bhU = lastUpsRows.find((r) => r.name === name);
+  const bhLabel = bhU ? (bhU.label || bhU.name) : name;
+  const title = "Health score"
+    + (lastUpsRows.length > 1 ? " · " + bhLabel + (scopeIsAll() ? " (primary)" : "") : "");
   const opts = {
-    title: "Health score", unit: "",
+    title, unit: "",
     min: Math.max(0, Math.floor((floorRef - 8) / 5) * 5), max: 100,
   };
   // Mark the replacement threshold (horizontal) and the projected replacement

@@ -40,8 +40,9 @@
   <!-- Persistent fleet-status strip: every UPS at-a-glance on every tab, so a
        second UPS is never below the fold during an outage. Hidden for a
        single-UPS deployment (wired in app.js). -->
-  <div id="fleet-strip" class="fleet-strip" role="status"
-       aria-label="Fleet status" hidden></div>
+  <!-- Not role=status: it's rebuilt every 10s poll, so a live region would
+       re-announce the whole fleet each cycle. The #banner is the live alarm. -->
+  <div id="fleet-strip" class="fleet-strip" aria-label="Fleet status" hidden></div>
 
   <!-- Tab order: scoped telemetry tabs first (driven by the global UPS
        selector), then the unscoped tail (Events has its own filter, Config is

@@ -16,6 +16,7 @@
   --ok: #5fdb7e;   --ok-rgb: 95,219,126;
   --warn: #f0b940; --warn-rgb: 240,185,64;
   --crit: #ff6b6b; --crit-rgb: 255,107,107;
+  --watts: #b794ff;   /* 2nd data series (power) — distinct from accent blue */
   --line: #262b36;
   --line-strong: #313845;
   --grid: rgba(255,255,255,0.09);
@@ -41,6 +42,7 @@
     --ok: #1f9d55;   --ok-rgb: 31,157,85;
     --warn: #b0730a; --warn-rgb: 176,115,10;
     --crit: #d64545; --crit-rgb: 214,69,69;
+    --watts: #6d28d9;
     --grid: rgba(15,20,30,0.10);
     --shadow-sm: 0 1px 2px rgba(15,20,30,0.05);
     --shadow-md: 0 4px 16px -6px rgba(15,20,30,0.14);
@@ -54,6 +56,7 @@
   --ok: #1f9d55;   --ok-rgb: 31,157,85;
   --warn: #b0730a; --warn-rgb: 176,115,10;
   --crit: #d64545; --crit-rgb: 214,69,69;
+    --watts: #6d28d9;
   --grid: rgba(15,20,30,0.10);
   --shadow-sm: 0 1px 2px rgba(15,20,30,0.05);
   --shadow-md: 0 4px 16px -6px rgba(15,20,30,0.14);
@@ -87,9 +90,12 @@ h2 { font-size: 0.8125rem; color: var(--muted); text-transform: uppercase;
   transition: transform .14s ease, box-shadow .14s ease, border-color .14s ease; }
 .card h3 { margin: 0 0 0.6rem; font-size: 1rem; font-weight: 600; }
 .card .row { display: flex; justify-content: space-between; padding: 0.18rem 0;
-  color: var(--muted); font-size: 0.9375rem; }
+  gap: 0.25rem 1rem; color: var(--muted); font-size: 0.9375rem; }
 .card .row b { color: var(--text-2); font-weight: 600;
   font-variant-numeric: tabular-nums; }
+/* Only the row's DIRECT value (e.g. a long config host) may wrap; the numeric
+   <b> nested inside a term meter must NOT (else "100" broke to "10"/"0"). */
+.card .row > b { min-width: 0; text-align: right; overflow-wrap: anywhere; }
 /* Status shown ONCE per card: a 2px accent strip on top (not green-on-everything). */
 .card.s-ok::before, .card.s-warn::before, .card.s-crit::before,
 .card.s-muted::before {
@@ -210,7 +216,7 @@ select:focus-visible, input:not([type="checkbox"]):focus-visible {
 .badge.warn { background: rgba(245,166,35,0.15); color: var(--warn); }
 .badge.crit { background: rgba(255,92,92,0.15); color: var(--crit); }
 .badge.info { background: rgba(167,139,250,0.16); color: #a78bfa; }
-.badge.muted { background: rgba(148,163,184,0.16); color: var(--muted); }
+.badge.muted { background: rgba(148,163,184,0.22); color: var(--text-2); }
 /* Events-table Type cell: icon-led severity badge (matches chart marker color) */
 .ev-badge { display: inline-flex; align-items: center; gap: 0.35rem;
   padding: 0.12rem 0.55rem; border-radius: 999px; font-size: 0.8rem;
@@ -249,8 +255,11 @@ select, input:not([type="checkbox"]) { background: var(--panel-2); color: var(--
 .graph .lbl { fill: var(--muted); font-size: 11px; }
 .graph .chart-title { fill: var(--muted); font-size: 11px; font-weight: 600;
                       letter-spacing: 0.03em; }
-.events { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-.events th, .events td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--line); }
+.events { width: 100%; border-collapse: collapse; font-size: 0.9rem;
+  table-layout: fixed; }
+.events th, .events td { text-align: left; padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere; word-break: break-word; }
 .events th { color: var(--muted); font-weight: 600; }
 .th-sort { appearance: none; border: 0; background: transparent; color: inherit; font: inherit; font-weight: 600; padding: 0; cursor: pointer; }
 .th-sort:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -376,9 +385,15 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
   color: var(--text); font-size: 0.9rem; font-weight: 600;
   background: var(--accent-weak); border: 1px solid rgba(var(--accent-rgb), 0.35);
   border-radius: var(--r-pill); padding: 0.15rem 0.7rem; }
-.ups-scope select { font: inherit; font-weight: 600; color: var(--accent);
+.ups-scope select { font: inherit; font-weight: 600; color: var(--text);
   background: transparent; border: 0; cursor: pointer; }
-.ups-scope.inactive { opacity: 0.55; }
+.ups-scope.inactive { opacity: 0.6; }
+/* Windows High Contrast / forced-colors: don't rely on the accent-weak fill —
+   draw a real border and use system colors. */
+@media (forced-colors: active) {
+  .ups-scope { border: 1px solid CanvasText; background: Canvas; }
+  .fleet-chip { border: 1px solid CanvasText; }
+}
 /* Persistent fleet-status strip: chips, one per UPS, on every tab. */
 .fleet-strip { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;
   padding: 0.5rem 1.25rem; max-width: 1100px; margin: 0 auto;
@@ -427,7 +442,7 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .tip.ev-ok   { border-left-color: var(--ok); }
 .tip.ev-warn { border-left-color: var(--warn); }
 .tip.ev-crit { border-left-color: var(--crit); }
-.tip.ev-info { border-left-color: #a78bfa; }
+.tip.ev-info { border-left-color: #14b8a6; }
 
 /* "?" help hint — reveals a tooltip on hover/focus (replaces verbose footnotes). */
 .label-tip { display: inline-flex; align-items: center; }
@@ -504,7 +519,7 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .graph .ev-crit { stroke: var(--crit); fill: var(--crit); }   /* outage / danger */
 .graph .ev-warn { stroke: var(--warn); fill: var(--warn); }   /* over-voltage / overload */
 .graph .ev-ok   { stroke: var(--ok);   fill: var(--ok); }     /* power restored / recovered */
-.graph .ev-info { stroke: #a78bfa; fill: #a78bfa; }           /* other — violet, not the plot blue */
+.graph .ev-info { stroke: #14b8a6; fill: #14b8a6; }           /* info — teal, distinct from the violet power line */
 
 /* Shutdown plan: an ordered top-to-bottom flow with a connector between phases.
    Parallel phases lay their steps out side by side; skipped phases are muted. */
@@ -550,9 +565,9 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
    green — a power line drawn in "good green" misreads, and status hues are
    reserved for status. Full opacity so identity isn't carried by transparency. */
 .graph .plot-load { stroke: var(--accent); fill: none; }
-.graph .plot-watts { stroke: #a78bfa; fill: none; }
+.graph .plot-watts { stroke: var(--watts); fill: none; stroke-dasharray: 6 3; }
 .graph rect.plot-load { stroke: none; fill: var(--accent); opacity: 0.55; }
-.graph rect.plot-watts { stroke: none; fill: #a78bfa; }
+.graph rect.plot-watts { stroke: none; fill: var(--watts); }
 
 @media (max-width: 640px) {
   .var-form { grid-template-columns: 1fr; }
