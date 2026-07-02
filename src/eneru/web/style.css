@@ -344,6 +344,36 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 /* Keep a visible focus indicator on a focused panel for keyboard users. */
 .panel:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px;
                        border-radius: 6px; }
+/* Divider between the scoped telemetry tabs and the unscoped tail (Events/Config). */
+.tab-divider { align-self: stretch; width: 1px; margin: 0.4rem 0.5rem;
+  background: var(--line); }
+
+/* ----- Global UPS scope + fleet-status strip (v6.1.4) -------------------- */
+/* Header UPS scope selector; dimmed on tabs it doesn't affect (Events/Config). */
+.ups-scope { display: inline-flex; align-items: center; gap: 0.35rem;
+  color: var(--muted); font-size: 0.85rem; }
+.ups-scope select { font: inherit; }
+.ups-scope.inactive { opacity: 0.45; }
+/* Persistent fleet-status strip: chips, one per UPS, on every tab. */
+.fleet-strip { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;
+  padding: 0.5rem 1.25rem; max-width: 1100px; margin: 0 auto;
+  box-sizing: content-box; }
+.fleet-chip { display: inline-flex; align-items: center; gap: 0.45rem;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+  padding: 0.25rem 0.7rem; cursor: pointer; font: inherit; color: var(--text); }
+.fleet-chip:hover { border-color: var(--accent); }
+.fleet-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.fleet-chip.s-warn { border-color: var(--warn); }
+.fleet-chip.s-crit { border-color: var(--crit); }
+.fleet-name { font-weight: 600; }
+.fleet-metric { color: var(--muted); font-size: 0.85rem;
+  font-variant-numeric: tabular-nums; }
+.fleet-tag { color: var(--muted); font-size: 0.72rem; text-transform: uppercase;
+  letter-spacing: 0.04em; }
+/* Card header title row (title + optional badge, e.g. "monitoring only"). */
+.card-title { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.card-title h3 { margin: 0; }
+.mon-badge { font-size: 0.72rem; }
 .panel > h2:first-child { margin-top: 0; }
 
 /* Widget cards with a title + status badge (Battery / Energy tabs). The base

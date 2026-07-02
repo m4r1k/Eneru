@@ -271,18 +271,53 @@ function formatRuntimeSeconds(value) {
 }
 
 const CHART_UPS_SELECTS = ["power-ups", "battery-ups", "energy-ups"];
+const SCOPE_ALL = "__all__";
 
-// Populate every per-chart UPS <select> with the current UPS list, keeping the
-// selection SHARED across the Power/Battery/Energy tabs (like the Range control)
-// so switching tabs doesn't snap back to a different UPS.
+// The global UPS scope (header selector). "" / missing → All UPS.
+function currentScope() {
+  const s = document.getElementById("global-ups");
+  return (s && s.value) || SCOPE_ALL;
+}
+function scopeIsAll() { return currentScope() === SCOPE_ALL; }
+
+// Concrete UPS name for single-series views (charts): the scoped UPS, or the
+// primary (first) UPS when scope is "All".
+function scopedName() {
+  const scope = currentScope();
+  if (scope !== SCOPE_ALL && lastUpsRows.some((u) => u.name === scope)) return scope;
+  return lastUpsRows.length ? lastUpsRows[0].name : "";
+}
+
+// UPS rows honoring the scope: every row under "All", else just the scoped one.
+// Used by the per-UPS card grids (line quality / battery health / energy).
+function scopedRows() {
+  const scope = currentScope();
+  if (scope === SCOPE_ALL) return lastUpsRows;
+  const one = lastUpsRows.filter((u) => u.name === scope);
+  return one.length ? one : lastUpsRows;
+}
+
+// Populate the header global UPS selector and mirror the pick into the (now
+// hidden) per-tab chart selects so the existing chart controllers, which read
+// their upsSelId, resolve to the scoped/primary UPS. The global selector is the
+// single source of truth; the per-tab dropdowns are retired from the UI.
 function populateChartUpsSelects(rows) {
-  // Prefer an existing selection that is still valid; else the first UPS.
-  let chosen = "";
-  for (const id of CHART_UPS_SELECTS) {
-    const s = document.getElementById(id);
-    if (s && s.value) { chosen = s.value; break; }
+  const g = document.getElementById("global-ups");
+  const wrap = document.getElementById("global-ups-wrap");
+  const multi = rows.length > 1;
+  // Preserve a valid prior scope; default to All. Single-UPS → that UPS, no control.
+  let scope = g && g.value ? g.value : SCOPE_ALL;
+  if (scope !== SCOPE_ALL && !rows.some((u) => u.name === scope)) scope = SCOPE_ALL;
+  if (!multi) scope = rows.length ? rows[0].name : SCOPE_ALL;
+  if (wrap) wrap.hidden = !multi;
+  if (g) {
+    g.replaceChildren();
+    if (multi) g.appendChild(el("option", { value: SCOPE_ALL, text: "All UPS" }));
+    rows.forEach((u) => g.appendChild(el("option", { value: u.name, text: u.label || u.name })));
+    g.value = scope;
   }
-  if (!rows.some((u) => u.name === chosen)) chosen = rows.length ? rows[0].name : "";
+  const chosen = (scope === SCOPE_ALL || !rows.some((u) => u.name === scope))
+    ? (rows.length ? rows[0].name : "") : scope;
   CHART_UPS_SELECTS.forEach((id) => {
     const sel = document.getElementById(id);
     if (!sel) return;
@@ -290,7 +325,46 @@ function populateChartUpsSelects(rows) {
     rows.forEach((u) =>
       sel.appendChild(el("option", { value: u.name, text: u.label || u.name })));
     if (chosen) sel.value = chosen;
+    const lbl = sel.closest("label");
+    if (lbl) lbl.hidden = true;   // retired: the global selector drives these
   });
+}
+
+// React to a global-scope change: mirror into the chart selects, refresh the
+// scope-dependent chrome, and redraw the active tab.
+function onScopeChanged() {
+  const chosen = scopedName();
+  CHART_UPS_SELECTS.forEach((id) => {
+    const s = document.getElementById(id);
+    if (s && chosen) s.value = chosen;
+  });
+  applyScopeChrome();
+  onTabActivated(activeTab);
+}
+
+// The global selector only affects the scoped tabs; on Events (own filter) and
+// Config (fleet-wide) it does nothing, so dim it there to avoid a "broken
+// control" read. On Events, seed the Source filter from the current scope.
+function applyScopeChrome() {
+  const wrap = document.getElementById("global-ups-wrap");
+  const scoped = SCOPED_TABS.includes(activeTab);
+  if (wrap) {
+    wrap.classList.toggle("inactive", !scoped);
+    wrap.title = scoped ? "" : "This tab isn't scoped by the UPS selector";
+  }
+  if (activeTab === "events" && !scopeIsAll()) seedEventSourceFromScope();
+}
+
+// Seed the Events Source filter from the global scope (still user-overridable).
+function seedEventSourceFromScope() {
+  const src = document.getElementById("event-source-filter");
+  if (!src) return;
+  const scope = currentScope();
+  if (scope === SCOPE_ALL) return;
+  if ([...src.options].some((o) => o.value === scope) && src.value !== scope) {
+    src.value = scope;
+    if (typeof applyEventFilters === "function") applyEventFilters();
+  }
 }
 
 // ----- Overview hero + KPI summary (rc9) -----------------------------------
@@ -391,35 +465,98 @@ function renderOverviewSummary(rows) {
   hero.appendChild(heroCard(primary));
 
   // Three drill-through KPI cards surfacing the v6.1 data otherwise buried on
-  // other tabs: battery health, energy today, last self-test.
-  const bh = primary.batteryHealth;
-  summary.appendChild(kpiCard({
-    iconName: "shield", label: "Battery health",
-    value: bh && bh.score != null ? Math.round(bh.score) : "—",
-    unit: bh && bh.score != null ? "/100" : "",
-    cap: bh && bh.confidence != null ? "confidence " + Math.round(bh.confidence * 100) + "%"
-      : "no data yet",
-    valueStatus: bh ? scoreClass(bh.score) : null, tab: "battery" }));
+  // other tabs. In a fleet these summarize ACROSS all UPSes (worst battery
+  // health, total energy, worst self-test) so a second UPS is never hidden —
+  // the header is "System", not "the primary UPS". (operator #11, plan #4)
+  const multi = rows.length > 1;
+  const named = (u) => u.label || u.name;
 
-  const en = primary.energy;
-  summary.appendChild(kpiCard({
-    iconName: "chart", label: "Energy today",
-    value: en && en.todayKwh != null ? en.todayKwh.toFixed(2) : "—",
-    unit: en && en.todayKwh != null ? " kWh" : "",
-    cap: en && en.todayCostFormatted ? en.todayCostFormatted + " today"
-      : (en && en.monthKwh != null ? en.monthKwh.toFixed(1) + " kWh this month" : "—"),
-    tab: "energy" }));
+  // Battery health: the lowest score in the fleet (the one that needs attention).
+  const bhRows = rows.filter((u) => u.batteryHealth && u.batteryHealth.score != null);
+  if (bhRows.length) {
+    const worst = bhRows.slice().sort(
+      (a, b) => a.batteryHealth.score - b.batteryHealth.score)[0];
+    const bh = worst.batteryHealth;
+    summary.appendChild(kpiCard({
+      iconName: "shield", label: multi ? "Battery health · lowest" : "Battery health",
+      value: Math.round(bh.score), unit: "/100",
+      cap: (multi ? named(worst) + " · " : "")
+        + (bh.confidence != null ? "confidence " + Math.round(bh.confidence * 100) + "%" : ""),
+      valueStatus: scoreClass(bh.score), tab: "battery" }));
+  } else {
+    summary.appendChild(kpiCard({ iconName: "shield", label: "Battery health",
+      value: "—", unit: "", cap: "no data yet", tab: "battery" }));
+  }
 
-  // Self-test KPI only when a test has actually run — a "never run" box is noise
-  // (and most UPSes never get one). The Battery tab still explains the term.
-  const st = primary.selfTest;
-  if (st && ["passed", "failed", "running"].includes(st.result)) {
+  // Energy today: the fleet total (a single UPS keeps its cost caption).
+  const enRows = rows.filter((u) => u.energy && u.energy.todayKwh != null);
+  if (enRows.length) {
+    const totalKwh = enRows.reduce((s, u) => s + u.energy.todayKwh, 0);
+    let cap;
+    if (multi) {
+      cap = enRows.length + " of " + rows.length + " UPS · today";
+    } else {
+      const en = enRows[0].energy;
+      cap = en.todayCostFormatted ? en.todayCostFormatted + " today"
+        : (en.monthKwh != null ? en.monthKwh.toFixed(1) + " kWh this month" : "today");
+    }
+    summary.appendChild(kpiCard({
+      iconName: "chart", label: multi ? "Energy today · fleet" : "Energy today",
+      value: totalKwh.toFixed(2), unit: " kWh", cap, tab: "energy" }));
+  } else {
+    summary.appendChild(kpiCard({ iconName: "chart", label: "Energy today",
+      value: "—", unit: "", cap: "—", tab: "energy" }));
+  }
+
+  // Last self-test: the worst result across the fleet (failed > running > passed),
+  // so a single failed test isn't masked by another UPS's pass. Only shown once
+  // a test has actually run somewhere.
+  const stRows = rows.filter(
+    (u) => u.selfTest && ["passed", "failed", "running"].includes(u.selfTest.result));
+  if (stRows.length) {
+    const rankSt = { failed: 0, running: 1, passed: 2 };
+    const worstSt = stRows.slice().sort(
+      (a, b) => rankSt[a.selfTest.result] - rankSt[b.selfTest.result])[0];
+    const st = worstSt.selfTest;
     const stStatus = { passed: "ok", failed: "crit", running: "warn" }[st.result] || null;
     summary.appendChild(kpiCard({
-      iconName: "check", label: "Last self-test",
+      iconName: "check", label: multi ? "Self-test · worst" : "Last self-test",
       value: titleCase(st.result),
-      cap: st.date ? st.date : "", valueStatus: stStatus, tab: "battery" }));
+      cap: multi ? named(worstSt) + (st.date ? " · " + st.date : "") : (st.date || ""),
+      valueStatus: stStatus, tab: "battery" }));
   }
+}
+
+// A neutral "monitoring only" tag for a non-local (remote-monitored) UPS, so it
+// reads differently from the UPS that actually protects this host. (operator #4)
+function monitoringBadge(u) {
+  return u && u.isLocal === false
+    ? el("span", { class: "badge muted mon-badge", text: "monitoring only" }) : null;
+}
+
+// Persistent fleet-status strip (above the tabs, every tab): each UPS at a
+// glance so a second UPS is never below the fold during an outage. Chips drill
+// into the detail modal. Hidden for a single-UPS deployment. (operator #1)
+function renderFleetStrip(rows) {
+  const strip = document.getElementById("fleet-strip");
+  if (!strip) return;
+  strip.replaceChildren();
+  if (rows.length <= 1) { strip.hidden = true; return; }
+  strip.hidden = false;
+  rows.forEach((u) => {
+    const cls = statusClass(u.status);
+    const charge = parseFloat(u.batteryCharge);
+    const chip = el("button", { class: "fleet-chip s-" + cls, type: "button",
+      title: "View " + (u.label || u.name) + " details" }, [
+      el("span", { class: "fleet-name", text: u.label || u.name }),
+      el("span", { class: "badge " + cls, text: u.status || "—" }),
+      el("span", { class: "fleet-metric",
+        text: (isNaN(charge) ? "—" : charge + "%") + " · " + formatRuntimeSeconds(u.runtime) }),
+      u.isLocal === false ? el("span", { class: "fleet-tag", text: "monitoring" }) : null,
+    ].filter(Boolean));
+    chip.addEventListener("click", () => openDetail(u.name));
+    strip.appendChild(chip);
+  });
 }
 
 function renderUps(payload) {
@@ -432,7 +569,8 @@ function renderUps(payload) {
     const barValue = isNaN(charge) ? 0 : Math.max(0, Math.min(100, charge));
     const card = el("div", { class: "card card-click", tabindex: "0",
       role: "button", title: "View details" }, [
-      el("h3", { text: u.label || u.name }),
+      el("div", { class: "card-title" },
+        [el("h3", { text: u.label || u.name }), monitoringBadge(u)].filter(Boolean)),
       el("div", { class: "row" }, [
         el("span", { text: "Status" }),
         el("span", { class: "badge " + statusClass(u.status), text: u.status || "—" }),
@@ -457,6 +595,7 @@ function renderUps(payload) {
     wrap.appendChild(card);
   });
   populateChartUpsSelects(rows);
+  renderFleetStrip(rows);
   // Single UPS → the Overview is the hero + KPI summary; the raw per-UPS card
   // grid only appears for a fleet (multi-UPS).
   document.getElementById("ups-section").hidden = rows.length <= 1;
@@ -710,8 +849,10 @@ function energyRows(en) {
 function renderDetail(name) {
   const u = lastUpsRows.find((r) => r.name === name);
   const body = document.getElementById("detail-body");
-  document.getElementById("detail-title").textContent =
-    (u && (u.label || u.name)) || name;
+  const titleEl = document.getElementById("detail-title");
+  titleEl.textContent = (u && (u.label || u.name)) || name;
+  const mb = monitoringBadge(u);
+  if (mb) titleEl.appendChild(mb);
   if (!u) { body.replaceChildren(el("p", { text: "No data for this UPS." })); return; }
   const pq = u.powerQuality || {};
   const sections = [];
@@ -1046,22 +1187,37 @@ function updateDeleteButton() {
   btn.textContent = n ? ("Delete selected (" + n + ")") : "Delete selected";
 }
 
+// Human label for the UPS that emitted an event (matches the same fields the
+// source filter does). Used by the multi-UPS Source column.
+function eventSourceLabel(e) {
+  const u = lastUpsRows.find((r) =>
+    r.name === e.ups || r.name === e.source || r.name === e.group
+    || r.groupId === e.source || r.groupId === e.group);
+  return u ? (u.label || u.name) : (e.ups || e.source || e.group || "—");
+}
+
 function applyEventFilters() {
   const body = document.querySelector("#events tbody");
   body.replaceChildren();
   const signedIn = !!token();
+  // Show a Source column only in a fleet, so a multi-UPS "All sources" view
+  // isn't ambiguous. (operator #8)
+  const multi = lastUpsRows.length > 1;
   // The selection column + Delete action only exist when signed in; keep the
   // header and empty-state colspan in sync so widths never mismatch.
   document.getElementById("events-head").replaceChildren(...[
     ...(signedIn ? [el("th", { text: "" })] : []),
-    timeSortHeader(), el("th", { text: "Type" }),
+    timeSortHeader(),
+    ...(multi ? [el("th", { text: "Source" })] : []),
+    el("th", { text: "Type" }),
     el("th", { text: "Detail" }),
   ]);
   updateDeleteButton();
   const rows = visibleEvents();
+  const colspan = String(3 + (signedIn ? 1 : 0) + (multi ? 1 : 0));
   if (rows.length === 0) {
     body.appendChild(el("tr", null, [
-      el("td", { colspan: signedIn ? "4" : "3", text: "No events." })]));
+      el("td", { colspan, text: "No events." })]));
     return;
   }
   rows.forEach((e) => {
@@ -1077,8 +1233,9 @@ function applyEventFilters() {
       });
       const td = el("td"); td.appendChild(cb); cells.push(td);
     }
+    cells.push(el("td", { text: ts }));
+    if (multi) cells.push(el("td", { class: "ev-src", text: eventSourceLabel(e) }));
     cells.push(
-      el("td", { text: ts }),
       el("td", null, [eventTypeBadge(e)]),
       el("td", { text: e.detail || e.details || "" }),
     );
@@ -2108,7 +2265,7 @@ function renderBatteryHealthTab() {
   const wrap = document.getElementById("battery-health");
   if (!wrap) return;
   wrap.replaceChildren();
-  const rows = lastUpsRows;
+  const rows = scopedRows();
   if (!rows.length) {
     wrap.appendChild(el("p", { class: "chart-note", text: "No UPS data yet." }));
     return;
@@ -2210,7 +2367,7 @@ function renderEnergyTab() {
   const wrap = document.getElementById("energy-cards");
   if (!wrap) return;
   wrap.replaceChildren();
-  const rows = lastUpsRows;
+  const rows = scopedRows();
   if (!rows.length) {
     wrap.appendChild(el("p", { class: "chart-note", text: "No UPS data yet." }));
     return;
@@ -2286,22 +2443,19 @@ function stateRow(label, value) {
     el("span", { class: "badge " + cls, text: titleCase(value) })]);
 }
 
-function renderLineQuality() {
-  const wrap = document.getElementById("line-quality");
-  if (!wrap) return;
-  wrap.replaceChildren();
-  const sel = document.getElementById("power-ups");
-  const name = sel && sel.value;
-  const u = lastUpsRows.find((r) => r.name === name) || lastUpsRows[0];
+// One line-quality card for a UPS. In a multi-UPS fleet the header carries the
+// UPS name (so "All UPS" renders a card each); a lone UPS keeps "Line quality".
+function lineQualityCard(u) {
   const pq = u && u.powerQuality;
-  if (!pq) return;   // nothing to summarize; the chart below still renders
+  if (!pq) return null;
   const q = lineQuality(pq);
   const inV = numOrNull(pq.inputVoltage);
   const lo = numOrNull(pq.warningLow), hi = numOrNull(pq.warningHigh);
   const banded = inV != null && lo != null && hi != null;
+  const title = lastUpsRows.length > 1 ? (u.label || u.name) : "Line quality";
   const rows = [el("div", { class: "card-head" }, [
     el("span", { class: "card-ico s-" + q.cls }, [icon("gauge")]),
-    el("h3", { text: "Line quality" }),
+    el("h3", { text: title }),
     el("span", { class: "badge " + q.cls, text: q.label }),
   ])];
   rows.push(el("div", { class: "row" }, [
@@ -2326,7 +2480,17 @@ function renderLineQuality() {
   });
   const temp = fmtUnit(pq.temperature, "°C");
   if (temp) rows.push(configKv("Temperature", temp));
-  wrap.appendChild(el("div", { class: "card s-" + q.cls }, rows));
+  return el("div", { class: "card s-" + q.cls }, rows);
+}
+
+function renderLineQuality() {
+  const wrap = document.getElementById("line-quality");
+  if (!wrap) return;
+  wrap.replaceChildren();
+  scopedRows().forEach((u) => {
+    const card = lineQualityCard(u);
+    if (card) wrap.appendChild(card);
+  });
 }
 
 // ----- config tab ----------------------------------------------------------
@@ -2648,7 +2812,10 @@ async function doLogout() {
 // Real ARIA tabs: roving tabindex, arrow-key nav, and URL-hash routing so views
 // are linkable. The 10s refresh redraws only the active tab's chart/widgets.
 
-const TAB_IDS = ["overview", "power", "battery", "energy", "events", "control", "shutdown", "config"];
+const TAB_IDS = ["overview", "power", "battery", "energy", "control", "shutdown", "events", "config"];
+// Tabs whose content is scoped by the global UPS selector. Events (own Source
+// filter) and Config (fleet-wide) are intentionally excluded.
+const SCOPED_TABS = ["overview", "power", "battery", "energy", "shutdown"];
 let activeTab = "overview";
 
 function tabButtons() {
@@ -2690,6 +2857,7 @@ function selectTab(name, opts) {
   // instead of inheriting the previous tab's scroll position.
   if (opts.updateHash) window.scrollTo(0, 0);
   onTabActivated(name);
+  applyScopeChrome();
 }
 
 // Draw/refresh whatever the freshly-activated tab needs from the latest data.
@@ -2957,6 +3125,12 @@ async function init() {
   charts.energy = makeEnergyChart({ hostId: "energy-graph", upsSelId: "energy-ups",
     rangeSelId: "energy-range", eventsNoteId: "energy-events-note" });
   Object.values(charts).forEach((c) => c.observe());
+
+  // Global UPS scope selector drives Power/Battery/Energy/Shutdown + the scoped
+  // card grids. It is the single source of truth; the per-tab dropdowns are
+  // hidden and mirrored from it (see populateChartUpsSelects/onScopeChanged).
+  const gsel = document.getElementById("global-ups");
+  if (gsel) gsel.addEventListener("change", onScopeChanged);
 
   // Shutdown-tab UPS selector: re-render the plan for the chosen UPS/group.
   const sdSel = document.getElementById("shutdown-ups");

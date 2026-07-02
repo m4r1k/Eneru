@@ -13,6 +13,12 @@
   <header>
     <h1><svg class="ic brand-bolt" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3 6 13h5l-1 8 8-11h-5z"/></svg>Eneru</h1>
     <div id="authbox" class="authbox">
+      <!-- Global UPS scope: drives Power/Battery/Energy/Shutdown + the scoped
+           Overview/Battery/Energy cards. "All UPS" keeps the fleet comparison.
+           Hidden for single-UPS deployments (wired in app.js). -->
+      <label class="ups-scope" id="global-ups-wrap" hidden>UPS
+        <select id="global-ups" aria-label="UPS to show"></select>
+      </label>
       <label class="theme-pick">Theme
         <select id="theme-select" aria-label="Color theme">
           <option value="system">System</option>
@@ -31,6 +37,15 @@
   <!-- Tab bar (Nutify-style). Real ARIA tabs: arrow-key nav + hash sync wired in
        app.js, which also prepends each tab's inline-SVG icon (see TAB_ICONS).
        The Control tab is hidden until authenticated + nut_control. -->
+  <!-- Persistent fleet-status strip: every UPS at-a-glance on every tab, so a
+       second UPS is never below the fold during an outage. Hidden for a
+       single-UPS deployment (wired in app.js). -->
+  <div id="fleet-strip" class="fleet-strip" role="status"
+       aria-label="Fleet status" hidden></div>
+
+  <!-- Tab order: scoped telemetry tabs first (driven by the global UPS
+       selector), then the unscoped tail (Events has its own filter, Config is
+       fleet-wide) after a divider. -->
   <nav id="tabs" class="tabs" role="tablist" aria-label="Dashboard sections">
     <button class="tab" role="tab" id="tab-overview" data-tab="overview"
             aria-controls="panel-overview" aria-selected="true">Overview</button>
@@ -40,12 +55,13 @@
             aria-controls="panel-battery" aria-selected="false" tabindex="-1">Battery</button>
     <button class="tab" role="tab" id="tab-energy" data-tab="energy"
             aria-controls="panel-energy" aria-selected="false" tabindex="-1">Energy</button>
-    <button class="tab" role="tab" id="tab-events" data-tab="events"
-            aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
     <button class="tab" role="tab" id="tab-control" data-tab="control"
             aria-controls="panel-control" aria-selected="false" tabindex="-1" hidden>Control</button>
     <button class="tab" role="tab" id="tab-shutdown" data-tab="shutdown"
             aria-controls="panel-shutdown" aria-selected="false" tabindex="-1">Shutdown</button>
+    <span class="tab-divider" aria-hidden="true"></span>
+    <button class="tab" role="tab" id="tab-events" data-tab="events"
+            aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
     <button class="tab" role="tab" id="tab-config" data-tab="config"
             aria-controls="panel-config" aria-selected="false" tabindex="-1">Config</button>
   </nav>
