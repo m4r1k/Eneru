@@ -208,6 +208,15 @@ function numOrNull(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Format a numeric telemetry value with its unit, or null when it's
+// missing/empty. An empty string ("") from a monitoring-only UPS passes a bare
+// `!= null` check, so callers that concatenated a unit first rendered a stray
+// " V"/" Hz"/" °C" with no number. Routing unit'd fields through here makes a
+// blank read as "—" (null → detailRow/configKv/hintedRow render the dash).
+function fmtUnit(v, unit) {
+  return numOrNull(v) != null ? v + " " + unit : null;
+}
+
 function statusClass(status) {
   const s = (status || "").toUpperCase();
   if (s.includes("OB") || s.includes("LB") || s.includes("FSD")) return "crit";
@@ -718,24 +727,24 @@ function renderDetail(name) {
   ]));
 
   sections.push(detailSection("Power quality", [
-    hintedRow("Input voltage", pq.inputVoltage != null ? pq.inputVoltage + " V" : null,
+    hintedRow("Input voltage", fmtUnit(pq.inputVoltage, "V"),
       "Mains voltage entering the UPS. Eneru classifies brownout (sag) and surge "
       + "against the configured warning band — the shaded thresholds on the Power "
       + "tab — not arbitrary cutoffs."),
-    hintedRow("Output voltage", pq.outputVoltage != null ? pq.outputVoltage + " V" : null,
+    hintedRow("Output voltage", fmtUnit(pq.outputVoltage, "V"),
       "Voltage delivered to the load. On line power the UPS regulates / AVR-"
       + "corrects it toward nominal; during an outage it's inverter output from "
       + "the battery."),
-    hintedRow("Battery voltage", pq.batteryVoltage != null ? pq.batteryVoltage + " V" : null,
+    hintedRow("Battery voltage", fmtUnit(pq.batteryVoltage, "V"),
       "Terminal voltage of the battery string. It sags under load and as charge "
       + "depletes; on line power it floats near the charger's nominal."),
-    hintedRow("Input frequency", pq.inputFrequency != null ? pq.inputFrequency + " Hz" : null,
+    hintedRow("Input frequency", fmtUnit(pq.inputFrequency, "Hz"),
       "Mains frequency. Nominal is 50 Hz (EU) or 60 Hz (US); sustained excursions "
       + "point to unstable mains or generator power."),
-    hintedRow("Output frequency", pq.outputFrequency != null ? pq.outputFrequency + " Hz" : null,
+    hintedRow("Output frequency", fmtUnit(pq.outputFrequency, "Hz"),
       "Frequency the UPS delivers. Line-interactive units track the mains on line "
       + "power and synthesize nominal on battery."),
-    hintedRow("Temperature", pq.temperature != null ? pq.temperature + " °C" : null,
+    hintedRow("Temperature", fmtUnit(pq.temperature, "°C"),
       "As reported by the UPS. Many models (including some UniFi UPS firmware) "
       + "report a fixed placeholder such as a constant 25 °C rather than a live "
       + "sensor reading."),
@@ -747,13 +756,15 @@ function renderDetail(name) {
   }
   // v6.1 Energy (today/month kWh + optional cost; cost hidden when disabled).
   if (u.energy) {
-    sections.push(detailSection("Energy", energyRows(u.energy)));
+    sections.push(detailSection(
+      u.energy.estimated ? "Energy (estimated)" : "Energy",
+      energyRows(u.energy)));
   }
   // v6.1 Self-test (latest normalized result).
   const st = u.selfTest;
   if (st) {
     sections.push(detailSection("Self-test", [
-      detailRow("Result", st.result || "unknown"),
+      detailRow("Result", st.result ? titleCase(st.result) : "unknown"),
       detailRow("When", st.date || null),
     ]));
   }
@@ -2209,7 +2220,10 @@ function renderEnergyTab() {
     const en = u.energy;
     if (en) {
       if (energyCostConfigured(en)) costConfigured = true;
-      wrap.appendChild(widgetCard(u.label || u.name, energyRows(en), { icon: "chart" }));
+      wrap.appendChild(widgetCard(u.label || u.name, energyRows(en),
+        en.estimated
+          ? { icon: "chart", badge: "estimated", badgeClass: "muted" }
+          : { icon: "chart" }));
     } else {
       wrap.appendChild(widgetCard(u.label || u.name,
         [el("p", { class: "chart-note",
@@ -2242,12 +2256,22 @@ function lineQuality(pq) {
   const banded = inV != null && lo != null && hi != null;
   const active = (v) => String(v || "").toUpperCase() === "ACTIVE";
   const vState = String(pq.voltageState || "").toUpperCase();
+  // A real fault wins regardless of how sparse the rest of the telemetry is.
   if ((banded && (inV < lo || inV > hi)) || active(pq.overloadState)
       || active(pq.bypassState) || (vState && vState !== "NORMAL")) {
     return { cls: "crit", label: "Poor" };
   }
+  // A monitoring-only UPS may report almost no AC telemetry (empty frequency /
+  // output voltage). Without a usable input voltage and at least one of
+  // frequency / output voltage there isn't enough to assert "Good" — say so
+  // rather than paint a confident green verdict over blank rows.
+  const freq = numOrNull(pq.inputFrequency);
+  const outV = numOrNull(pq.outputVoltage);
+  if (inV == null || (freq == null && outV == null)) {
+    return { cls: "muted", label: "Unknown" };
+  }
   const nearEdge = banded && (inV < lo + (hi - lo) * 0.1 || inV > hi - (hi - lo) * 0.1);
-  if (active(pq.avrState) || nearEdge || !nearNominalFreq(numOrNull(pq.inputFrequency))) {
+  if (active(pq.avrState) || nearEdge || !nearNominalFreq(freq)) {
     return { cls: "warn", label: "Fair" };
   }
   return { cls: "ok", label: "Good" };
@@ -2288,17 +2312,20 @@ function renderLineQuality() {
     el("b", { class: banded && (inV < lo || inV > hi) ? "crit" : "ok",
       text: inV != null ? inV + " V" : "—" }),
   ]));
-  if (pq.outputVoltage != null) rows.push(configKv("Output", pq.outputVoltage + " V"));
-  if (pq.inputFrequency != null) {
+  const outV = fmtUnit(pq.outputVoltage, "V");
+  if (outV) rows.push(configKv("Output", outV));
+  const freqN = numOrNull(pq.inputFrequency);
+  if (freqN != null) {
     rows.push(el("div", { class: "row" }, [el("span", { text: "Frequency" }),
-      el("b", { class: nearNominalFreq(numOrNull(pq.inputFrequency)) ? "ok" : "warn",
+      el("b", { class: nearNominalFreq(freqN) ? "ok" : "warn",
         text: pq.inputFrequency + " Hz" })]));
   }
   [["Voltage", pq.voltageState], ["AVR", pq.avrState], ["Bypass", pq.bypassState],
    ["Overload", pq.overloadState]].forEach(([lab, val]) => {
     if (val != null && val !== "") rows.push(stateRow(lab, val));
   });
-  if (pq.temperature != null) rows.push(configKv("Temperature", pq.temperature + " °C"));
+  const temp = fmtUnit(pq.temperature, "°C");
+  if (temp) rows.push(configKv("Temperature", temp));
   wrap.appendChild(el("div", { class: "card s-" + q.cls }, rows));
 }
 

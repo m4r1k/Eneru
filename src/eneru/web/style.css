@@ -83,11 +83,13 @@ h2 { font-size: 0.8125rem; color: var(--muted); text-transform: uppercase;
 .card .row b { color: var(--text-2); font-weight: 600;
   font-variant-numeric: tabular-nums; }
 /* Status shown ONCE per card: a 2px accent strip on top (not green-on-everything). */
-.card.s-ok::before, .card.s-warn::before, .card.s-crit::before {
+.card.s-ok::before, .card.s-warn::before, .card.s-crit::before,
+.card.s-muted::before {
   content: ""; position: absolute; inset: 0 0 auto 0; height: 2px; }
 .card.s-ok::before   { background: var(--ok); }
 .card.s-warn::before { background: var(--warn); }
 .card.s-crit::before { background: var(--crit); }
+.card.s-muted::before { background: var(--muted); }
 
 /* ===== rc9 redesign components =================================== */
 
@@ -107,6 +109,7 @@ h2 { font-size: 0.8125rem; color: var(--muted); text-transform: uppercase;
 .card-ico.s-ok { background: var(--ok-weak); color: var(--ok); }
 .card-ico.s-warn { background: var(--warn-weak); color: var(--warn); }
 .card-ico.s-crit { background: var(--crit-weak); color: var(--crit); }
+.card-ico.s-muted { background: rgba(148,163,184,0.16); color: var(--muted); }
 
 /* Clickable cards (overview summary / UPS cards): lift on hover. */
 .card-click { cursor: pointer; }
@@ -193,6 +196,7 @@ select:focus-visible, input:not([type="checkbox"]):focus-visible {
 .badge.warn { background: rgba(245,166,35,0.15); color: var(--warn); }
 .badge.crit { background: rgba(255,92,92,0.15); color: var(--crit); }
 .badge.info { background: rgba(167,139,250,0.16); color: #a78bfa; }
+.badge.muted { background: rgba(148,163,184,0.16); color: var(--muted); }
 /* Events-table Type cell: icon-led severity badge (matches chart marker color) */
 .ev-badge { display: inline-flex; align-items: center; gap: 0.35rem;
   padding: 0.12rem 0.55rem; border-radius: 999px; font-size: 0.8rem;

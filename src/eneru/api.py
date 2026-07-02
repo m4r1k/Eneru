@@ -194,6 +194,19 @@ def _auth_is_active(config: Any) -> bool:
     return auth_is_active(getattr(getattr(config, "api", None), "auth", None))
 
 
+class _EneruHTTPServer(ThreadingHTTPServer):
+    """Threaded server with a deeper listen backlog.
+
+    The stdlib default ``request_queue_size`` is 5, so a short burst of
+    concurrent connections (a browser dashboard polling several endpoints at
+    once, plus a scripted client) can overflow the accept queue and surface as
+    intermittent ``connection refused`` even though the daemon is healthy and
+    every handler runs on its own worker thread. 128 absorbs realistic bursts.
+    """
+
+    request_queue_size = 128
+
+
 class EneruAPIServer:
     """Small stdlib HTTP server for read-only observability endpoints."""
 
@@ -240,7 +253,7 @@ class EneruAPIServer:
 
         addr = (self.config.api.bind, int(self.config.api.port))
         try:
-            self._httpd = ThreadingHTTPServer(addr, Handler)
+            self._httpd = _EneruHTTPServer(addr, Handler)
         except OSError as exc:
             self.log_fn(f"⚠️  API server failed to bind {addr[0]}:{addr[1]}: {exc}")
             return

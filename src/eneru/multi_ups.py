@@ -26,7 +26,7 @@ from eneru.remote_health import RemoteHealthManager, remote_health_sidecar_path
 from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
 from eneru.redundancy import RedundancyGroupEvaluator, RedundancyGroupExecutor
 from eneru.stats import StatsStore
-from eneru.status import redundancy_state_file_path
+from eneru.status import redundancy_state_file_path, sanitize_name
 from eneru.lifecycle import (
     REASON_SEQUENCE_COMPLETE,
     REASON_SIGNAL,
@@ -183,6 +183,10 @@ class MultiUPSCoordinator:
         # a notification worker is configured. Otherwise the markers
         # would leak across configurations (P2 finding from review).
         stats_dir = Path(self.config.statistics.db_directory)
+        # Before any monitor opens a write connection: rescue a single-UPS
+        # deployment's default.db into the first group's per-UPS DB, so adding
+        # a second UPS never silently orphans months of history.
+        self._migrate_legacy_default_db(stats_dir)
         shutdown_marker = read_shutdown_marker(stats_dir)
         upgrade_marker = read_upgrade_marker(stats_dir)
 
@@ -270,6 +274,49 @@ class MultiUPSCoordinator:
                     self._log(
                         f"⚠️  Failed to close stats DB {db_path.name}: {e}"
                     )
+
+    def _migrate_legacy_default_db(self, stats_dir: Path) -> None:
+        """One-time: promote the single-UPS ``default.db`` to the first group's
+        per-UPS stats DB when a deployment becomes multi-UPS.
+
+        A single-UPS install writes stats to ``default.db``. The moment a
+        second UPS is configured, ``stats_db_path_for_group`` switches every
+        group to ``<sanitized-name>.db`` -- and the pre-existing UPS's whole
+        history (raw + agg_5min + agg_hourly + events + battery_health) is
+        stranded in ``default.db``, read by nothing. This renames it into the
+        first group's per-UPS file so history, events, and the aggregate tiers
+        survive the transition on web, CLI, TUI, and reports at once.
+
+        Runs in the coordinator's pre-writer window (before any monitor opens
+        its write connection). Idempotent and restart-safe: no-op once the
+        rename has happened (``default.db`` gone) or if a per-UPS DB already
+        exists (leave both untouched rather than clobber live history)."""
+        if not self.config.ups_groups:
+            return
+        legacy = stats_dir / "default.db"
+        if not legacy.exists():
+            return
+        first = self.config.ups_groups[0]
+        target = stats_dir / f"{sanitize_name(first.ups.name)}.db"
+        if target.exists():
+            # A per-UPS DB is already accumulating; a blind rename would lose
+            # it. Leave default.db in place (recoverable) rather than guess a
+            # merge -- the pre-multi-UPS history can be merged manually.
+            return
+        try:
+            legacy.rename(target)
+            # Carry any SQLite WAL/SHM sidecars so no committed data is lost.
+            for suffix in ("-wal", "-shm"):
+                side = stats_dir / f"default.db{suffix}"
+                if side.exists():
+                    side.rename(stats_dir / f"{target.name}{suffix}")
+            self._log(
+                f"📦  Migrated single-UPS history {legacy.name} → {target.name} "
+                f"for {first.ups.label} (single→multi-UPS transition)")
+        except OSError as e:
+            self._log(
+                f"⚠️  Could not migrate {legacy.name} → {target.name}: {e} "
+                f"(history for {first.ups.label} may be unavailable until fixed)")
 
     def _read_last_seen_version_from_first_group(self, stats_dir):
         """Read meta.last_seen_version from the first group's stats DB
