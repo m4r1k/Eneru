@@ -259,6 +259,9 @@ select, input:not([type="checkbox"]) { background: var(--panel-2); color: var(--
 .graph .lbl { fill: var(--muted); font-size: 11px; }
 .graph .chart-title { fill: var(--muted); font-size: 11px; font-weight: 600;
                       letter-spacing: 0.03em; }
+/* Live value/min/max/time readout, top-right of a chart (updates on hover). */
+.graph .chart-readout { fill: var(--text); font-size: 12px; font-weight: 600;
+                        font-variant-numeric: tabular-nums; }
 .events { width: 100%; border-collapse: collapse; font-size: 0.9rem;
   table-layout: fixed; }
 .events th, .events td { text-align: left; padding: 0.4rem 0.6rem;
@@ -509,7 +512,8 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .graph .grid, .graph .axis, .graph .area, .graph .plot, .graph .plot-load,
 .graph .plot-watts, .graph .plot-band, .graph .plot-band-watts,
 .graph .plot-band-load, .graph .now-dot, .graph .band,
-.graph .band-edge, .graph .band-nominal, .graph .chart-title { pointer-events: none; }
+.graph .band-edge, .graph .band-nominal, .graph .chart-title,
+.graph .chart-readout { pointer-events: none; }
 .graph .ev-line { stroke-width: 1; opacity: 0.12; }
 .graph .ev-hit { stroke: transparent; stroke-width: 11; }
 /* Hover crosshair: a transparent capture rect over the plot area drives a
@@ -537,6 +541,11 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
   background: var(--accent-weak); border: 1px solid var(--line);
   font-size: 0.9rem; }
 .sd-trigger .ic { width: 16px; height: 16px; color: var(--muted); flex: none; }
+/* Monitoring-only UPS: no shutdown sequence — a calm, informative note. */
+.sd-noop { display: flex; align-items: center; gap: 0.5rem; margin: 0.3rem 0 0.9rem;
+  padding: 0.7rem 0.9rem; border-radius: var(--r-md); background: var(--accent-weak);
+  border: 1px solid var(--line); font-size: 0.95rem; }
+.sd-noop .ic { width: 18px; height: 18px; color: var(--muted); flex: none; }
 .sd-flow { display: flex; flex-direction: column; margin-top: 0.5rem; }
 .sd-node { position: relative; border: 1px solid var(--line-strong);
   border-radius: var(--r-md); background: var(--panel); padding: 0.85rem 1rem;

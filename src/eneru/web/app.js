@@ -1560,6 +1560,7 @@ function metricMinSpan(metric) {
 // `series`: [{ y(v)->py, valueAt(point)->number, fmt(number)->string, label }].
 function addChartHover(svg, geom, series) {
   const { x, W, H, pad } = geom;
+  const readout = geom.readout;   // persistent top-right value/min/max/time readout
   const base = (series.find((s) => s.pts && s.pts.length) || {}).pts || [];
   const cross = document.createElementNS(SVG_NS, "g");
   cross.setAttribute("class", "crosshair");
@@ -1591,7 +1592,10 @@ function addChartHover(svg, geom, series) {
   // Hide the crosshair + floating tip. Used on mouseleave AND on every early
   // exit from move(): a sample with no plottable value (a gap) must clear any
   // readout left pinned by a prior move, not leave it stuck until mouseleave.
-  const hideHover = () => { cross.style.display = "none"; hideTip(); };
+  const hideHover = () => {
+    cross.style.display = "none"; hideTip();
+    if (readout) readout.textContent = readout.getAttribute("data-idle") || "";
+  };
   const move = (ev) => {
     if (!base.length) return hideHover();
     const r = svg.getBoundingClientRect();
@@ -1614,6 +1618,29 @@ function addChartHover(svg, geom, series) {
       }
     });
     if (!valueLines.length) return hideHover();
+    // Persistent readout: actual value at this time, plus the min–max of the
+    // surrounding bucket for a stats-band chart (the "what was the range here").
+    if (readout) {
+      const prim = series[0];
+      const av = prim.valueAt(p);
+      if (typeof av === "number" && !isNaN(av)) {
+        let txt = prim.fmt(av);
+        if (geom.band && base.length > 2) {
+          const spanS = base[base.length - 1].ts - base[0].ts;
+          const halfW = Math.max(1, (spanS / Math.max(1, W - pad - 5)) * 3);
+          let mn = Infinity, mx = -Infinity;
+          for (const q of base) {
+            if (Math.abs(q.ts - p.ts) > halfW) continue;
+            const qv = prim.valueAt(q);
+            if (typeof qv === "number" && !isNaN(qv)) { if (qv < mn) mn = qv; if (qv > mx) mx = qv; }
+          }
+          if (mn !== Infinity && mx > mn) txt += "  ·  ↓" + prim.fmt(mn) + " ↑" + prim.fmt(mx);
+        }
+        txt += "  ·  " + new Date(p.ts * 1000)
+          .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        readout.textContent = txt;
+      }
+    }
     cross.style.display = "";
     showTip(valueLines.concat([el("div", { class: "tip-sub",
       text: new Date(p.ts * 1000).toLocaleString() })]),
@@ -1822,6 +1849,14 @@ function drawChart(hostId, series, options) {
     svg.appendChild(t);
   }
 
+  // Persistent top-right readout — live actual value (+ bucket min/max on a
+  // stats-band chart) at the hovered time; idle shows the latest reading.
+  const readout = document.createElementNS(SVG_NS, "text");
+  readout.setAttribute("x", (W - 5).toFixed(0)); readout.setAttribute("y", "12");
+  readout.setAttribute("text-anchor", "end");
+  readout.setAttribute("class", "chart-readout");
+  svg.appendChild(readout);
+
   const vals = pts.map((p) => p.value).filter((v) => typeof v === "number" && !isNaN(v));
   const bands = options.bands || null;
   const metric = options.metric;
@@ -1900,11 +1935,17 @@ function drawChart(hostId, series, options) {
     line(pad, y(bands.nominal).toFixed(1), W - 5, y(bands.nominal).toFixed(1), "band-nominal");
   }
 
+  // Dense series → HA-style min–max band + mean line; sparse → plain line.
+  // Computed BEFORE the hover so the crosshair readout can report bucket min/max.
+  const drawn = pts.filter((p) => typeof p.value === "number" && !isNaN(p.value));
+  const stats = statsBandPaths(drawn, (p) => p.value, x, y, W - pad - 5);
+  const d = stats.meanD, hasGap = stats.hasGap;
+
   // Hover crosshair + value readout. The capture rect is added now, BELOW the
   // outage bands + event markers added next, so those keep their own tooltips
   // and the readout only fires over empty plot area. The crosshair group itself
   // is appended last (on top of the plotted line).
-  const crosshair = addChartHover(svg, { x, W, H, pad },
+  const crosshair = addChartHover(svg, { x, W, H, pad, readout, band: !!stats.bandD },
     [{ label: metricLabel(metric), pts,
        valueAt: (p) => p.value, y, fmt: (v) => formatMetricValue(metric, v) }]);
 
@@ -1937,10 +1978,6 @@ function drawChart(hostId, series, options) {
   // than ~2.5x the typical spacing) so we don't draw a confident straight line
   // over data we don't have — and a rejected reading reads as a gap, not an
   // invented trend or a plunge to zero.
-  const drawn = pts.filter((p) => typeof p.value === "number" && !isNaN(p.value));
-  // Dense series → HA-style min–max band + mean line; sparse → plain line.
-  const stats = statsBandPaths(drawn, (p) => p.value, x, y, W - pad - 5);
-  const d = stats.meanD, hasGap = stats.hasGap;
   if (stats.bandD) {
     const band = document.createElementNS(SVG_NS, "path");
     band.setAttribute("d", stats.bandD); band.setAttribute("class", "plot-band");
@@ -1986,6 +2023,8 @@ function drawChart(hostId, series, options) {
     dot.setAttribute("cy", y(lastPt.value).toFixed(1));
     dot.setAttribute("r", "3.5"); dot.setAttribute("class", "now-dot");
     svg.appendChild(dot);
+    const idle = "now " + formatMetricValue(metric, lastPt.value);
+    readout.setAttribute("data-idle", idle); readout.textContent = idle;
   }
   const lab = (txt, yy) => {
     const t = document.createElementNS(SVG_NS, "text");
@@ -2346,7 +2385,21 @@ function drawEnergyChart(hostId, rows, options) {
     valueAt: (p) => p.watts, fmt: (v) => v.toFixed(0) + " W" });
   if (showLoad && loadS) hoverSeries.push({ label: "Load", pts, y: loadS.y,
     valueAt: (p) => p.loadPct, fmt: (v) => v.toFixed(0) + " %" });
-  const crosshair = addChartHover(svg, { x, W, H, pad }, hoverSeries);
+  // Persistent top-right readout (actual + bucket min/max on the primary series).
+  const readout = document.createElementNS(SVG_NS, "text");
+  readout.setAttribute("x", (W - 5).toFixed(0)); readout.setAttribute("y", "12");
+  readout.setAttribute("text-anchor", "end");
+  readout.setAttribute("class", "chart-readout");
+  svg.appendChild(readout);
+  const dense = pts.length > Math.max(2, W - pad - 5) * 3;
+  const lastVal = hoverSeries.length
+    ? [...pts].reverse().map((p) => hoverSeries[0].valueAt(p))
+        .find((v) => typeof v === "number" && !isNaN(v)) : null;
+  if (lastVal != null) {
+    const idle = "now " + hoverSeries[0].fmt(lastVal);
+    readout.setAttribute("data-idle", idle); readout.textContent = idle;
+  }
+  const crosshair = addChartHover(svg, { x, W, H, pad, readout, band: dense }, hoverSeries);
 
   // Outage spans behind the markers (see appendOutageBands).
   appendOutageBands(svg, options.events || [], x, t0, t1, 5, H - pad);
@@ -3266,6 +3319,18 @@ function shutdownTriggerNodes(name, plan) {
 let _sdGen = 0;
 // Append one UPS's shutdown-plan body (trigger + phase flow) into a container.
 function appendShutdownPlanBody(host, name, plan) {
+  // A monitoring-only UPS whose plan has NO enabled phase runs nothing on this
+  // host — don't render a full (all-skipped) sequence + a "triggers…" banner
+  // that reads as if it does. Say plainly that it takes no action.
+  const anyEnabled = (plan.phases || []).some((p) => p.enabled);
+  if (!anyEnabled) {
+    host.appendChild(el("p", { class: "sd-noop" },
+      [icon("info"), el("span", { text: "Monitoring only — Eneru runs no shutdown "
+        + "actions for this UPS. It doesn't power this host, so losing it triggers "
+        + "nothing here (it's still monitored, with events and alerts)." })]));
+    if (plan.note) host.appendChild(el("p", { class: "chart-note", text: plan.note }));
+    return;
+  }
   shutdownTriggerNodes(name, plan).forEach((nd) => host.appendChild(nd));
   const intro = el("p", { class: "chart-note" },
     [el("span", { text: "What runs when a power-loss shutdown is triggered, top "
