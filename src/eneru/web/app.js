@@ -605,7 +605,7 @@ function renderUps(payload) {
       el("meter", {
         class: "bar " + batteryClass(charge),
         min: "0", max: "100", value: String(barValue),
-        "aria-label": "Battery charge",
+        "aria-label": "Battery charge for " + (u.label || u.name),
       }),
       el("div", { class: "row" }, [el("span", { text: "Runtime" }),
         el("b", { text: formatRuntimeSeconds(u.runtime) })]),
@@ -743,15 +743,33 @@ function openDetail(name) {
   detailReturnFocus = document.activeElement;
   openDetailName = name;
   renderDetail(name);
-  document.getElementById("detail-modal").hidden = false;
+  const modal = document.getElementById("detail-modal");
+  modal.hidden = false;
   // Pull focus into the dialog so Tab stays among its controls and assistive
   // tech announces it; the close button is the first focusable element.
   document.getElementById("detail-close").focus();
+  // Trap Tab within the dialog and close on Esc so keyboard/AT users can't tab
+  // out to the page behind it and can always dismiss it. (a11y #10)
+  const onKey = (ev) => {
+    if (ev.key === "Escape") { ev.preventDefault(); closeDetail(); return; }
+    if (ev.key !== "Tab") return;
+    const f = Array.from(modal.querySelectorAll(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+      .filter((e) => !e.disabled && e.offsetParent !== null);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+    else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+  };
+  modal.addEventListener("keydown", onKey);
+  modal._trap = onKey;
 }
 
 function closeDetail() {
+  const modal = document.getElementById("detail-modal");
+  if (modal._trap) { modal.removeEventListener("keydown", modal._trap); modal._trap = null; }
   openDetailName = null;
-  document.getElementById("detail-modal").hidden = true;
+  modal.hidden = true;
   if (detailReturnFocus && typeof detailReturnFocus.focus === "function") {
     detailReturnFocus.focus();
   }
@@ -1187,7 +1205,8 @@ function timeSortHeader() {
     type: "button",
     class: "th-sort",
     text: label,
-    "aria-label": "Sort events by time",
+    "aria-label": "Sort events by time, currently "
+      + (eventSortDirection === "asc" ? "ascending" : "descending"),
     "aria-pressed": eventSortDirection === "desc" ? "true" : "false",
   });
   btn.addEventListener("click", toggleEventSort);
@@ -1585,6 +1604,11 @@ function drawChart(hostId, series, options) {
   const H = 220, pad = 34;
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  // Expose the chart to assistive tech as a labelled image (the per-point data
+  // is also reachable via the metric selectors + the API). (a11y #8)
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label",
+    (options.metric ? metricLabel(options.metric) : "Metric") + " over the selected range");
   const line = (x1, y1, x2, y2, cls) => {
     const l = document.createElementNS(SVG_NS, "line");
     l.setAttribute("x1", x1); l.setAttribute("y1", y1);

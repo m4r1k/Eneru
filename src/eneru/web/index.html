@@ -214,7 +214,7 @@
         <button type="button" id="event-load-older">Load older</button>
       </div>
       <table id="events" class="events">
-        <thead><tr id="events-head"><th><button id="event-sort-time" type="button" class="th-sort">Time ↑</button></th><th>Type</th><th>Detail</th></tr></thead>
+        <thead><tr id="events-head"><th><button id="event-sort-time" type="button" class="th-sort" aria-label="Sort by time, ascending" aria-pressed="true">Time ↑</button></th><th>Type</th><th>Detail</th></tr></thead>
         <tbody></tbody>
       </table>
     </section>
@@ -251,8 +251,9 @@
 
   <!-- Login dialog -->
   <div id="login-modal" class="modal" hidden>
-    <form id="login-form" class="modal-card">
-      <h3>Sign in</h3>
+    <form id="login-form" class="modal-card" role="dialog" aria-modal="true"
+          aria-labelledby="login-title">
+      <h3 id="login-title">Sign in</h3>
       <label>Username <input id="login-user" autocomplete="username"></label>
       <label>Password <input id="login-pass" type="password" autocomplete="current-password"></label>
       <div class="modal-actions">
@@ -268,7 +269,9 @@
     <div class="modal-card detail-card" role="dialog" aria-modal="true" aria-labelledby="detail-title">
       <div class="modal-head">
         <h3 id="detail-title">UPS details</h3>
-        <button type="button" id="detail-close" aria-label="Close">✕</button>
+        <button type="button" id="detail-close" aria-label="Close">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12 M18 6 6 18"/></svg>
+        </button>
       </div>
       <div id="detail-body"></div>
     </div>
