@@ -369,11 +369,16 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
   background: var(--line); }
 
 /* ----- Global UPS scope + fleet-status strip (v6.1.4) -------------------- */
-/* Header UPS scope selector; dimmed on tabs it doesn't affect (Events/Config). */
-.ups-scope { display: inline-flex; align-items: center; gap: 0.35rem;
-  color: var(--muted); font-size: 0.85rem; }
-.ups-scope select { font: inherit; }
-.ups-scope.inactive { opacity: 0.45; }
+/* Header UPS scope selector — the primary scope control, so it reads as a
+   distinct pill (not another muted 'Theme'-style dropdown); dimmed a touch on
+   the tabs it doesn't affect (Events/Config), with a tooltip explaining why. */
+.ups-scope { display: inline-flex; align-items: center; gap: 0.4rem;
+  color: var(--text); font-size: 0.9rem; font-weight: 600;
+  background: var(--accent-weak); border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-radius: var(--r-pill); padding: 0.15rem 0.7rem; }
+.ups-scope select { font: inherit; font-weight: 600; color: var(--accent);
+  background: transparent; border: 0; cursor: pointer; }
+.ups-scope.inactive { opacity: 0.55; }
 /* Persistent fleet-status strip: chips, one per UPS, on every tab. */
 .fleet-strip { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;
   padding: 0.5rem 1.25rem; max-width: 1100px; margin: 0 auto;

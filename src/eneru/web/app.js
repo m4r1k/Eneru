@@ -1642,7 +1642,13 @@ function drawChart(hostId, series, options) {
     const t = document.createElementNS(SVG_NS, "text");
     t.setAttribute("x", (W / 2).toFixed(0)); t.setAttribute("y", "12");
     t.setAttribute("text-anchor", "middle"); t.setAttribute("class", "chart-title");
-    t.textContent = metricLabel(options.metric);
+    // Name the UPS the (single-series) chart is showing, so "All UPS" makes clear
+    // it's the primary — the per-UPS comparison lives in the cards above.
+    let title = metricLabel(options.metric);
+    if (options.upsLabel) {
+      title += " · " + options.upsLabel + (options.scopeAll ? " (primary)" : "");
+    }
+    t.textContent = title;
     svg.appendChild(t);
   }
 
@@ -2034,9 +2040,16 @@ function makeChart(opts) {
     draw();
   }
 
+  function upsLabel() {
+    const u = lastUpsRows.find((r) => r.name === upsName());
+    return (u && (u.label || u.name)) || "";
+  }
   function draw() {
     drawChart(opts.hostId, state.series, {
       metric: metric(),
+      // Only label the UPS in a fleet; a lone UPS needs no disambiguation.
+      upsLabel: lastUpsRows.length > 1 ? upsLabel() : "",
+      scopeAll: typeof scopeIsAll === "function" && scopeIsAll(),
       bands: opts.bands ? state.thresholds : null,
       events: opts.events ? state.events : null,
     });
@@ -2547,13 +2560,14 @@ function lineQuality(pq) {
       || active(pq.bypassState) || (vState && vState !== "NORMAL")) {
     return { cls: "crit", label: "Poor" };
   }
-  // A monitoring-only UPS may report almost no AC telemetry (empty frequency /
-  // output voltage). Without a usable input voltage and at least one of
-  // frequency / output voltage there isn't enough to assert "Good" — say so
-  // rather than paint a confident green verdict over blank rows.
+  // Only "Unknown" when there's truly nothing to judge — no input voltage AND no
+  // regulation state. A monitoring-only UPS that reports in-band input voltage
+  // and normal regulation states is legitimately "Good", even without frequency
+  // / output-voltage telemetry (those rows just don't render). (v6.1.4 review)
   const freq = numOrNull(pq.inputFrequency);
-  const outV = numOrNull(pq.outputVoltage);
-  if (inV == null || (freq == null && outV == null)) {
+  const anyState = [pq.voltageState, pq.avrState, pq.bypassState, pq.overloadState]
+    .some((s) => s != null && s !== "");
+  if (inV == null && !anyState) {
     return { cls: "muted", label: "Unknown" };
   }
   const nearEdge = banded && (inV < lo + (hi - lo) * 0.1 || inV > hi - (hi - lo) * 0.1);
