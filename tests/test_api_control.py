@@ -324,8 +324,19 @@ def _open_store_stub():
     """A stats-store stand-in the self-test POST guard treats as available:
     it exposes a non-None ``_conn`` (the API refuses to issue when the store is
     None or its ``_conn`` is None — i.e. unopened/closed)."""
-    from types import SimpleNamespace
-    return SimpleNamespace(_conn=object(), is_open=True)
+    class Store:
+        _conn = object()
+        is_open = True
+
+        def __init__(self):
+            self.meta = {}
+
+        def set_meta(self, key, value):
+            self.meta[key] = value
+
+        def get_meta(self, key):
+            return self.meta.get(key)
+    return Store()
 
 
 @pytest.mark.unit
@@ -338,20 +349,24 @@ def test_store_for_ups_resolves_monitor(minimal_config):
 
 
 @pytest.mark.unit
-def test_run_self_test_issues(minimal_config, monkeypatch):
+def test_run_self_test_issues_and_persists_monitor_handoff(minimal_config, monkeypatch):
     _enable(minimal_config)
     minimal_config.nut_control.allowed_commands = ["test.battery.start"]
+    monkeypatch.setattr(apimod.time, "time", lambda: 1000.0)
     monkeypatch.setattr(apimod.selftest, "list_supported_commands",
                         lambda *a, **k: ["test.battery.start"])
     monkeypatch.setattr(apimod.selftest, "issue_self_test",
                         lambda *a, **k: {"ok": True, "test_id": 5, "error": ""})
     logs = []
+    store = _open_store_stub()
     h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/self-test",
                          method_body=b"{}", logs=logs)
-    h.api_source = _src_with_store("UPS@h", store=_open_store_stub())
+    h.api_source = _src_with_store("UPS@h", store=store)
     h.headers["Authorization"] = f"Bearer {_token(h)}"
     status, _, payload = h._route_post()
     assert status == 200 and payload["status"] == "issued" and payload["testId"] == 5
+    assert store.meta[apimod.selftest.PENDING_ID_META] == "5"
+    assert store.meta[apimod.selftest.PENDING_DUE_TS_META] == "1060"
     assert any("-> ok" in line for line in logs)         # audited
 
 

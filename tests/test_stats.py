@@ -927,10 +927,28 @@ class TestV7StoreMethods:
             s.close()
 
     @pytest.mark.unit
+    def test_latest_running_self_test_ignores_finished_rows(self, tmp_path):
+        s = self._open(tmp_path)
+        try:
+            old = s.record_self_test("test.battery.start", "scheduler",
+                                     started_ts=1000)
+            s.update_self_test_result(
+                old, result_raw="Done and passed", result_enum="passed")
+            running = s.record_self_test("test.battery.start", "api",
+                                         started_ts=2000)
+            latest = s.latest_running_self_test()
+            assert latest["id"] == running
+            assert latest["source"] == "api"
+            assert latest["result_enum"] == "running"
+        finally:
+            s.close()
+
+    @pytest.mark.unit
     def test_latest_self_test_none_when_empty(self, tmp_path):
         s = self._open(tmp_path)
         try:
             assert s.latest_self_test() is None
+            assert s.latest_running_self_test() is None
         finally:
             s.close()
 
@@ -964,6 +982,7 @@ class TestV7StoreMethods:
         assert s.record_self_test("test.battery.start", "cli") is None
         s.update_self_test_result(1, result_raw="x", result_enum="passed")
         assert s.latest_self_test() is None
+        assert s.latest_running_self_test() is None
         assert s.power_samples(0, 100) == []
 
     @pytest.mark.unit
@@ -978,6 +997,7 @@ class TestV7StoreMethods:
         assert s.record_self_test("test.battery.start", "cli") is None
         s.update_self_test_result(1, result_raw="x", result_enum="passed")
         assert s.latest_self_test() is None
+        assert s.latest_running_self_test() is None
         assert s.power_samples(0, 9999) == []
 
 
@@ -2614,6 +2634,7 @@ class TestV7ConnRaceUnderLock:
             assert s.update_self_test_result(
                 1, result_raw="x", result_enum="passed") is None
             assert s.latest_self_test() is None
+            assert s.latest_running_self_test() is None
             assert s.power_samples(0, 9999) == []
             assert s.query_range("battery_charge", 0, 9999) == []
         finally:

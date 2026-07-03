@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [6.1.5] - Unreleased
+
+Bug-fix release for APC self-test completion and the browser dashboard's
+power-quality display, plus clearer APC self-test configuration guidance from
+live hardware testing.
+
+### Fixed
+
+- **AVR boost/trim now count as active regulation in the Power tab.** The API
+  reports AVR as `INACTIVE`, `BOOST`, or `TRIM`, while bypass and overload use
+  the binary `ACTIVE` / `INACTIVE` shape. The dashboard now treats `BOOST` and
+  `TRIM` as active AVR states for the line-quality verdict and badge styling
+  instead of only recognizing the literal `ACTIVE` value.
+- **API-started self-tests now finish their dashboard row.** The API already
+  wrote a `running` row when NUT accepted a self-test, but it did not persist
+  the row id and result-poll timer the monitor needs to complete that row. The
+  API and scheduler now share the same pending-test handoff, and the monitor can
+  adopt the newest legacy `running` row left behind by earlier 6.1.x builds.
+
+### Notes
+
+- APC Back-UPS models driven by `usbhid-ups` commonly expose
+  `test.battery.start.quick` and `test.battery.start.deep`, not the generic
+  `test.battery.start`. Set `self_test.command` per UPS when enabling issued
+  tests for those units.
+
+---
+
 ## [6.1.4] - 2026-07-02
 
 Multi-UPS correctness and a dashboard overhaul for multi-UPS deployments, driven

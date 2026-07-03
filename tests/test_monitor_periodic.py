@@ -376,7 +376,8 @@ class TestRunSelfTestTask:
         mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)  # self_test OFF
         mon._self_test_pending_id = 9
         mon._self_test_poll_due_mono = time.monotonic() - 1   # poll window elapsed
-        store.set_meta("self_test_pending_id", "9")
+        store.set_meta(selftest.PENDING_ID_META, "9")
+        store.set_meta(selftest.PENDING_DUE_TS_META, str(int(time.time()) - 1))
         mon._get_ups_var = lambda var: {"ups.test.result": "Done and passed",
                                         "ups.test.date": "2026-06-28"}.get(var)
         monkeypatch.setattr(selftest, "record_self_test_result",
@@ -384,7 +385,8 @@ class TestRunSelfTestTask:
         mon._run_self_test_task()
         assert mon._self_test_pending_id is None
         assert mon._self_test_poll_due_mono is None
-        assert store.get_meta("self_test_pending_id") == ""
+        assert store.get_meta(selftest.PENDING_ID_META) == ""
+        assert store.get_meta(selftest.PENDING_DUE_TS_META) == ""
         assert any("Self-test result: passed" in m for m in mon.logs)
 
     @pytest.mark.unit
@@ -439,13 +441,14 @@ class TestRunSelfTestTask:
         monkeypatch.setattr(selftest, "issue_self_test",
                             lambda *a, **k: {"ok": True, "test_id": 9, "error": ""})
         mon._run_self_test_task()
-        assert store.get_meta("self_test_pending_id") == "9"
+        assert store.get_meta(selftest.PENDING_ID_META) == "9"
+        assert store.get_meta(selftest.PENDING_DUE_TS_META) is not None
 
     @pytest.mark.unit
     def test_recovers_in_flight_test_after_restart(self, store, monkeypatch):
         # Simulate a restart: a pending id is in meta but the in-memory fields
         # are fresh (None). The next tick must adopt + finalize it.
-        store.set_meta("self_test_pending_id", "11")
+        store.set_meta(selftest.PENDING_ID_META, "11")
         mon = _make_monitor(_cfg(_ENABLED), store)
         mon._get_ups_var = lambda var: {"ups.test.result": "Done and passed",
                                         "ups.test.date": "2026-06-28"}.get(var)
@@ -458,15 +461,50 @@ class TestRunSelfTestTask:
         mon._run_self_test_task()
         assert recorded["id"] == 11                # adopted the persisted id
         assert mon._self_test_pending_id is None   # finalized
-        assert store.get_meta("self_test_pending_id") == ""   # cleared
+        assert store.get_meta(selftest.PENDING_ID_META) == ""   # cleared
+        assert store.get_meta(selftest.PENDING_DUE_TS_META) == ""
+
+    @pytest.mark.unit
+    def test_recovers_in_flight_test_but_waits_for_due_timestamp(self, store):
+        store.set_meta(selftest.PENDING_ID_META, "12")
+        store.set_meta(selftest.PENDING_DUE_TS_META, str(int(time.time()) + 600))
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        mon._get_ups_var = lambda var: pytest.fail("poll should wait for due timestamp")
+        mon._run_self_test_task()
+        assert mon._self_test_pending_id == 12
+        assert store.get_meta(selftest.PENDING_ID_META) == "12"
+
+    @pytest.mark.unit
+    def test_adopts_running_api_row_without_pending_meta(self, store, monkeypatch):
+        # v6.1.4 API-created rows did not write self_test_pending_* meta. The
+        # monitor should still pick up the newest running row and finish it.
+        started = int(time.time()) - 120
+        tid = store.record_self_test("test.battery.start", "api",
+                                     started_ts=started)
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        mon._get_ups_var = lambda var: {"ups.test.result": "Done and passed",
+                                        "ups.test.date": "2026-07-03"}.get(var)
+        recorded = {}
+        original_record = selftest.record_self_test_result
+
+        def _rec(s, test_id, raw, date):
+            recorded["id"] = test_id
+            return original_record(s, test_id, raw, date)
+        monkeypatch.setattr(selftest, "record_self_test_result", _rec)
+        mon._run_self_test_task()
+        assert recorded["id"] == tid
+        assert store.latest_self_test()["result_enum"] == "passed"
+        assert store.get_meta(selftest.PENDING_ID_META) == ""
 
     @pytest.mark.unit
     def test_corrupt_pending_id_is_cleared(self, store):
-        store.set_meta("self_test_pending_id", "not-an-int")
+        store.set_meta(selftest.PENDING_ID_META, "not-an-int")
+        store.set_meta(selftest.PENDING_DUE_TS_META, str(int(time.time()) + 60))
         store.set_meta("self_test_last_run", str(int(time.time())))  # not due -> stop early
         mon = _make_monitor(_cfg(_ENABLED), store)
         mon._run_self_test_task()
-        assert store.get_meta("self_test_pending_id") == ""   # corrupt value scrubbed
+        assert store.get_meta(selftest.PENDING_ID_META) == ""   # corrupt value scrubbed
+        assert store.get_meta(selftest.PENDING_DUE_TS_META) == ""
 
 
 # --------------------------------------------------------------------------

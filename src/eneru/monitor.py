@@ -2235,19 +2235,36 @@ class UPSGroupMonitor(
         if store is None or not getattr(store, "is_open", False):
             return
 
-        # 0) Recover an in-flight test persisted before a restart. The pending id
-        # lives in meta (the monotonic poll timer resets across restarts), so a
-        # crash between "issued" and "result polled" would otherwise orphan the
-        # ``running`` row forever. Adopt it and poll on this tick — the test was
-        # issued before the restart, so its result is almost certainly ready.
+        # 0) Recover an in-flight test persisted before a restart or issued by
+        # the API. ELI5: the row id is the order ticket, and the due timestamp is
+        # the kitchen timer. If either the scheduler or API starts a test, the
+        # monitor can pick up the ticket later without polling too early.
         if self._self_test_pending_id is None:
-            pend = store.get_meta("self_test_pending_id")
+            pend = store.get_meta(selftest.PENDING_ID_META)
             if pend:
                 try:
                     self._self_test_pending_id = int(pend)
-                    self._self_test_poll_due_mono = time.monotonic()
+                    delay = 0.0
+                    due_raw = store.get_meta(selftest.PENDING_DUE_TS_META)
+                    if due_raw:
+                        try:
+                            delay = max(0.0, float(due_raw) - time.time())
+                        except (TypeError, ValueError):
+                            store.set_meta(selftest.PENDING_DUE_TS_META, "")
+                    self._self_test_poll_due_mono = time.monotonic() + delay
                 except (TypeError, ValueError):
-                    store.set_meta("self_test_pending_id", "")
+                    selftest.clear_pending_self_test(store)
+            else:
+                latest_running = getattr(
+                    store, "latest_running_self_test", lambda: None)()
+                if latest_running:
+                    due_ts = selftest.self_test_poll_due_ts(
+                        latest_running["started_ts"], cfg.result_poll_after)
+                    self._self_test_pending_id = int(latest_running["id"])
+                    self._self_test_poll_due_mono = (
+                        time.monotonic() + max(0.0, due_ts - time.time()))
+                    selftest.persist_pending_self_test(
+                        store, self._self_test_pending_id, due_ts)
 
         # 1) Finalise a pending test once its poll window has elapsed. This runs
         # BEFORE the cfg.enabled / nut_control gates below: a config change that
@@ -2267,7 +2284,7 @@ class UPSGroupMonitor(
                     "self_test_observed_key", f"{date or ''}|{raw or ''}")
                 self._self_test_pending_id = None
                 self._self_test_poll_due_mono = None
-                store.set_meta("self_test_pending_id", "")  # cleared
+                selftest.clear_pending_self_test(store)
             return  # never issue while one is in flight
 
         # Now honor the current config: a disabled self_test issues nothing
@@ -2354,11 +2371,13 @@ class UPSGroupMonitor(
             store.set_meta("self_test_last_run", str(int(now)))
             self._self_test_retry_after_mono = None
             self._self_test_pending_id = result["test_id"]
-            self._self_test_poll_due_mono = (
-                time.monotonic() + max(1, int(cfg.result_poll_after)))
+            poll_delay = max(1, int(cfg.result_poll_after))
+            self._self_test_poll_due_mono = time.monotonic() + poll_delay
             if store is not None and result["test_id"] is not None:
                 # Persist so a restart before the poll can recover + finalise it.
-                store.set_meta("self_test_pending_id", str(result["test_id"]))
+                selftest.persist_pending_self_test(
+                    store, result["test_id"],
+                    selftest.self_test_poll_due_ts(time.time(), poll_delay))
             self._log_message(
                 f"🔋 Self-test issued ({cmd}); polling result in "
                 f"{cfg.result_poll_after}s")
