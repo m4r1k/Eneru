@@ -18,15 +18,20 @@ from eneru import nut_control as nutctl
 from eneru.scheduler import Schedule
 
 __all__ = [
+    "PENDING_DUE_TS_META",
+    "PENDING_ID_META",
     "RESULT_ENUMS",
     "SelfTestUnavailable",
+    "clear_pending_self_test",
     "discover_self_test_command",
     "issue_self_test",
     "list_supported_commands",
     "normalize_result",
     "parse_schedule",
+    "persist_pending_self_test",
     "record_self_test_result",
     "self_test_control",
+    "self_test_poll_due_ts",
     "test_command_candidates",
 ]
 
@@ -40,6 +45,8 @@ class SelfTestUnavailable(Exception):
 # ``ups.test.result`` string is unbounded and vendor-specific, so it is stored
 # alongside but never used as a label/enum directly.
 RESULT_ENUMS = ("passed", "failed", "running", "unknown", "unsupported")
+PENDING_ID_META = "self_test_pending_id"
+PENDING_DUE_TS_META = "self_test_pending_due_ts"
 
 
 def normalize_result(raw: Optional[str]) -> str:
@@ -181,6 +188,27 @@ def issue_self_test(ups_name: str, command: str, nut_control, store, *,
                 test_id, result_raw=err, result_enum="failed")
         return {"ok": False, "test_id": test_id, "error": err}
     return {"ok": True, "test_id": test_id, "error": ""}
+
+
+def self_test_poll_due_ts(started_ts: float, result_poll_after: int) -> int:
+    """Return the wall-clock timestamp when an issued self-test may be polled."""
+    return int(float(started_ts) + max(1, int(result_poll_after)))
+
+
+def persist_pending_self_test(store, test_id: Optional[int], due_ts: int) -> None:
+    """Persist the in-flight self-test handoff used by API/scheduler -> monitor."""
+    if store is None or test_id is None:
+        return
+    store.set_meta(PENDING_ID_META, str(int(test_id)))
+    store.set_meta(PENDING_DUE_TS_META, str(int(due_ts)))
+
+
+def clear_pending_self_test(store) -> None:
+    """Clear persisted in-flight self-test handoff metadata."""
+    if store is None:
+        return
+    store.set_meta(PENDING_ID_META, "")
+    store.set_meta(PENDING_DUE_TS_META, "")
 
 
 def record_self_test_result(store, test_id: Optional[int],

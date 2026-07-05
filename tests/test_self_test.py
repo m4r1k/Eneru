@@ -44,6 +44,7 @@ class TestNormalize:
         ("Self-test unsupported", "unsupported"),
         ("", "unknown"),
         (None, "unknown"),
+        ("n/a", "unknown"),
         ("weird vendor string", "unknown"),
     ])
     def test_normalize(self, raw, expected):
@@ -237,6 +238,47 @@ class TestIssue:
                                       timeout=9), store)
         assert captured == {"ups": "U@h", "cmd": "test.battery.start",
                             "user": "bob", "pw": "s3cret", "timeout": 9}
+
+    @pytest.mark.unit
+    def test_success_without_store_runs_without_recording(self, monkeypatch):
+        monkeypatch.setattr(self_test.nutctl, "run_instant_command",
+                            lambda *a, **k: (True, "Initiating test", ""))
+        r = self_test.issue_self_test("U@h", "test.battery.start", _nc(), None)
+        assert r == {"ok": True, "test_id": None, "error": ""}
+
+    @pytest.mark.unit
+    def test_failure_without_store_is_safe(self, monkeypatch):
+        monkeypatch.setattr(self_test.nutctl, "run_instant_command",
+                            lambda *a, **k: (False, "", "access denied"))
+        r = self_test.issue_self_test("U@h", "test.battery.start", _nc(), None)
+        assert r == {"ok": False, "test_id": None, "error": "access denied"}
+
+
+# --------------------------------------------------------------------------
+# pending handoff helpers
+# --------------------------------------------------------------------------
+
+class TestPendingHandoff:
+    @pytest.mark.unit
+    def test_poll_due_ts_clamps_delay(self):
+        assert self_test.self_test_poll_due_ts(1000.4, 60) == 1060
+        assert self_test.self_test_poll_due_ts(1000, 0) == 1001
+
+    @pytest.mark.unit
+    def test_persist_and_clear_pending_self_test(self, store):
+        self_test.persist_pending_self_test(store, 7, 1060)
+        assert store.get_meta(self_test.PENDING_ID_META) == "7"
+        assert store.get_meta(self_test.PENDING_DUE_TS_META) == "1060"
+        self_test.clear_pending_self_test(store)
+        assert store.get_meta(self_test.PENDING_ID_META) == ""
+        assert store.get_meta(self_test.PENDING_DUE_TS_META) == ""
+
+    @pytest.mark.unit
+    def test_pending_helpers_noop_without_store_or_id(self, store):
+        self_test.persist_pending_self_test(None, 7, 1060)
+        self_test.persist_pending_self_test(store, None, 1060)
+        self_test.clear_pending_self_test(None)
+        assert store.get_meta(self_test.PENDING_ID_META) is None
 
 
 # --------------------------------------------------------------------------

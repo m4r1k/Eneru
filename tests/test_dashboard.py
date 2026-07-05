@@ -1,5 +1,8 @@
 """Unit tests for the v6.0 dashboard static serving (api.py + eneru.web)."""
 
+import json
+import subprocess
+import textwrap
 from io import BytesIO
 from unittest.mock import MagicMock
 
@@ -466,6 +469,74 @@ def test_dashboard_line_quality_card(minimal_config):
     # Reads the UPS regulation states the daemon exposes.
     for state in ("voltageState", "avrState", "bypassState", "overloadState"):
         assert state in js
+    # AVR is ternary in the API: BOOST/TRIM are active regulation states, not
+    # the literal ACTIVE used by the binary bypass/overload flags.
+    assert "function isAvrActive" in js
+    assert '"BOOST", "TRIM"' in js
+    assert "isAvrActive(pq.avrState)" in js
+    assert "isBinaryActive(pq.bypassState)" in js
+
+
+@pytest.mark.unit
+def test_dashboard_line_quality_state_behavior(minimal_config):
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    start = js.index("function nearNominalFreq")
+    end = js.index("function lineQualityCard")
+    helpers = js[start:end]
+    script = textwrap.dedent(f"""
+        function numOrNull(v) {{
+          if (v === undefined || v === null || v === "") return null;
+          const n = Number(v);
+          return Number.isFinite(n) ? n : null;
+        }}
+        function titleCase(v) {{ return String(v || ""); }}
+        function el(tag, opts, children) {{
+          return {{ tag, opts: opts || {{}}, children: children || [] }};
+        }}
+        {helpers}
+        const base = {{
+          inputVoltage: "230", warningLow: 207, warningHigh: 253,
+          voltageState: "NORMAL", avrState: "INACTIVE",
+          bypassState: "INACTIVE", overloadState: "INACTIVE"
+        }};
+        const cases = [
+          [{{ ...base, avrState: "BOOST" }}, {{ cls: "warn", label: "Fair" }}],
+          [{{ ...base, avrState: "TRIM" }}, {{ cls: "warn", label: "Fair" }}],
+          [{{ ...base, bypassState: "BOOST" }}, {{ cls: "ok", label: "Good" }}],
+          [{{ ...base, overloadState: "TRIM" }}, {{ cls: "ok", label: "Good" }}],
+          [{{ ...base, bypassState: "ACTIVE" }}, {{ cls: "crit", label: "Poor" }}],
+          [{{ ...base, overloadState: "ACTIVE" }}, {{ cls: "crit", label: "Poor" }}],
+        ];
+        for (const [input, expected] of cases) {{
+          const actual = lineQuality(input);
+          if (JSON.stringify(actual) !== JSON.stringify(expected)) {{
+            throw new Error(`lineQuality mismatch: ${{JSON.stringify(input)}} -> `
+              + `${{JSON.stringify(actual)}} expected ${{JSON.stringify(expected)}}`);
+          }}
+        }}
+        function rowClass(label, value) {{
+          return stateRow(label, value).children[1].opts.class;
+        }}
+        const rows = {{
+          avrBoost: rowClass("AVR", "BOOST"),
+          avrTrim: rowClass("AVR", "TRIM"),
+          bypassBoost: rowClass("Bypass", "BOOST"),
+          overloadTrim: rowClass("Overload", "TRIM"),
+          bypassActive: rowClass("Bypass", "ACTIVE"),
+          overloadActive: rowClass("Overload", "ACTIVE"),
+        }};
+        process.stdout.write(JSON.stringify(rows));
+    """)
+    result = subprocess.run(["node", "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    rows = json.loads(result.stdout)
+    assert rows["avrBoost"] == "badge warn"
+    assert rows["avrTrim"] == "badge warn"
+    assert rows["bypassBoost"] == "badge "
+    assert rows["overloadTrim"] == "badge "
+    assert rows["bypassActive"] == "badge warn"
+    assert rows["overloadActive"] == "badge warn"
 
 
 @pytest.mark.unit

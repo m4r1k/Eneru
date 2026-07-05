@@ -1515,6 +1515,36 @@ class StatsStore:
             "source": r[6],
         }
 
+    def latest_running_self_test(self) -> Optional[Dict[str, Any]]:
+        """Return the most-recent running self-test row, or ``None``."""
+        if self._conn is None:
+            return None
+        try:
+            with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return None
+                cur = self._conn.execute(
+                    """
+                    SELECT id, started_ts, command, result_raw, result_enum,
+                           result_date, source
+                    FROM self_tests
+                    WHERE result_enum = 'running'
+                    ORDER BY started_ts DESC, id DESC
+                    LIMIT 1
+                    """
+                )
+                r = cur.fetchone()
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: latest_running_self_test failed: {e}")
+            return None
+        if r is None:
+            return None
+        return {
+            "id": int(r[0]), "started_ts": int(r[1]), "command": r[2],
+            "result_raw": r[3], "result_enum": r[4], "result_date": r[5],
+            "source": r[6],
+        }
+
     def power_samples(
         self,
         start_ts: int,

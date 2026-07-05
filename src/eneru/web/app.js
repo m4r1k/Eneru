@@ -2827,11 +2827,10 @@ function lineQuality(pq) {
   const inV = numOrNull(pq.inputVoltage);
   const lo = numOrNull(pq.warningLow), hi = numOrNull(pq.warningHigh);
   const banded = inV != null && lo != null && hi != null;
-  const active = (v) => String(v || "").toUpperCase() === "ACTIVE";
   const vState = String(pq.voltageState || "").toUpperCase();
   // A real fault wins regardless of how sparse the rest of the telemetry is.
-  if ((banded && (inV < lo || inV > hi)) || active(pq.overloadState)
-      || active(pq.bypassState) || (vState && vState !== "NORMAL")) {
+  if ((banded && (inV < lo || inV > hi)) || isBinaryActive(pq.overloadState)
+      || isBinaryActive(pq.bypassState) || (vState && vState !== "NORMAL")) {
     return { cls: "crit", label: "Poor" };
   }
   // Only "Unknown" when there's truly nothing to judge — no input voltage AND no
@@ -2845,20 +2844,30 @@ function lineQuality(pq) {
     return { cls: "muted", label: "Unknown" };
   }
   const nearEdge = banded && (inV < lo + (hi - lo) * 0.1 || inV > hi - (hi - lo) * 0.1);
-  if (active(pq.avrState) || nearEdge || !nearNominalFreq(freq)) {
+  if (isAvrActive(pq.avrState) || nearEdge || !nearNominalFreq(freq)) {
     return { cls: "warn", label: "Fair" };
   }
   return { cls: "ok", label: "Good" };
 }
 
+function isBinaryActive(value) {
+  return String(value || "").toUpperCase() === "ACTIVE";
+}
+
+function isAvrActive(value) {
+  return ["ACTIVE", "BOOST", "TRIM"].includes(String(value || "").toUpperCase());
+}
+
 // A regulation-state row whose badge is green when quiet (Normal/Inactive) and
-// amber when Active.
+// amber when active. AVR's active states are BOOST/TRIM; bypass/overload use
+// the binary ACTIVE flag.
 function stateRow(label, value) {
   const v = String(value || "").toUpperCase();
+  const active = label === "AVR" ? isAvrActive(v) : isBinaryActive(v);
   // Idle/quiet states (Normal / Inactive) read NEUTRAL, not green — green means
   // "active & good", and a wall of green for features that are simply OFF flattens
   // the hierarchy so a real ACTIVE (amber) doesn't stand out. (heuristic M2/M5)
-  const cls = v === "ACTIVE" ? "warn" : (v === "NORMAL" || v === "INACTIVE" ? "muted" : "");
+  const cls = active ? "warn" : (v === "NORMAL" || v === "INACTIVE" ? "muted" : "");
   return el("div", { class: "row" }, [el("span", { text: label }),
     el("span", { class: "badge " + cls, text: titleCase(value) })]);
 }

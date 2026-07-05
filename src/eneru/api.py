@@ -980,6 +980,9 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     "ok" if result["ok"] else "failed")
         if not result["ok"]:
             return 502, "application/json", self._error("NUT_ERROR", result["error"])
+        selftest.persist_pending_self_test(
+            store, result["test_id"],
+            selftest.self_test_poll_due_ts(time.time(), st_cfg.result_poll_after))
         return 200, "application/json", {"ups": real, "command": command,
                                          "status": "issued",
                                          "testId": result["test_id"]}
