@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from eneru.utils import format_seconds
 
@@ -53,6 +53,21 @@ RESTART_DOWNTIME_THRESHOLD_SECS = 30
 REASON_SIGNAL = "signal"
 REASON_SEQUENCE_COMPLETE = "sequence_complete"
 REASON_FATAL = "fatal"
+
+
+def poweroff_command_parts(command: object) -> List[str]:
+    """Split a configured ``local_shutdown.command`` into argv, tolerating
+    ``None``.
+
+    ISS-013/ISS-015: an EMPTY result means "no valid poweroff command",
+    and callers MUST NOT write the ``SHUTDOWN_SEQUENCE_COMPLETE`` recovery
+    marker in that case — otherwise the next boot logs a false "Recovered"
+    even though the host never powered off. The single-UPS (``monitor.py``)
+    and coordinator (``multi_ups.py``) shutdown paths share this so the
+    validate-before-marker contract has one definition instead of two
+    copies that already drifted once (the ISS-015 ordering bug).
+    """
+    return str(command or "").split()
 
 
 def _marker_path(directory: Path, name: str) -> Path:

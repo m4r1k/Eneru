@@ -477,6 +477,78 @@ def test_api_do_get_uses_whitelisted_content_type():
 
 
 @pytest.mark.unit
+def test_api_do_head_probe_sends_headers_only():
+    """ISS-061: HEAD on /health and /ready returns the same headers (incl.
+    Content-Length) but no body."""
+    for path in ("/health", "/ready"):
+        handler = object.__new__(EneruAPIHandler)
+        handler.path = path
+        handler._route = lambda: (200, "application/json", {"status": "ok"})
+        headers = []
+        handler.send_response = lambda status: headers.append(("status", status))
+        handler.send_header = lambda key, value: headers.append((key, value))
+        handler.end_headers = lambda: None
+        handler.wfile = BytesIO()
+
+        handler.do_HEAD()
+
+        assert ("status", 200) in headers
+        assert any(k == "Content-Length" for k, _ in headers)
+        assert handler.wfile.getvalue() == b""  # HEAD carries no body
+
+
+@pytest.mark.unit
+def test_api_do_head_non_probe_path_405():
+    """ISS-061: HEAD on a payload route is 405 (we don't ship a body-less 200)."""
+    handler = object.__new__(EneruAPIHandler)
+    handler.path = "/api/v1/ups"
+    headers = []
+    handler.send_response = lambda status: headers.append(("status", status))
+    handler.send_header = lambda key, value: headers.append((key, value))
+    handler.end_headers = lambda: None
+    handler.wfile = BytesIO()
+
+    handler.do_HEAD()
+
+    assert ("status", 405) in headers
+    assert handler.wfile.getvalue() == b""  # HEAD: still no body, even on 405
+
+
+@pytest.mark.unit
+def test_api_read_json_body_rejects_chunked():
+    """ISS-061: a chunked Transfer-Encoding (no Content-Length) is rejected
+    rather than mis-read as an empty body."""
+    from eneru.api import APILengthRequired
+    handler = object.__new__(EneruAPIHandler)
+    handler.headers = {"Transfer-Encoding": "chunked"}
+    handler.rfile = BytesIO(b"")
+    with pytest.raises(APILengthRequired):
+        handler._read_json_body()
+
+
+@pytest.mark.unit
+def test_api_dispatch_maps_length_required_to_411():
+    """ISS-061: APILengthRequired surfaces as a 411 error envelope."""
+    from eneru.api import APILengthRequired
+    handler = object.__new__(EneruAPIHandler)
+
+    def _boom():
+        raise APILengthRequired("chunked not supported")
+
+    headers = []
+    handler.send_response = lambda status: headers.append(("status", status))
+    handler.send_header = lambda key, value: None
+    handler.end_headers = lambda: None
+    handler.wfile = BytesIO()
+
+    handler._dispatch(_boom)
+
+    assert ("status", 411) in headers
+    body = json.loads(handler.wfile.getvalue())
+    assert body["error"]["code"] == "LENGTH_REQUIRED"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "path,message",
     [
@@ -686,6 +758,16 @@ def test_api_parse_int_param_rejects_below_minimum(minimal_config):
 
 
 @pytest.mark.unit
+def test_api_parse_int_param_default_none_returns_none_when_absent():
+    """ISS-029: default=None with an absent param returns None, not int('None')
+    (which would raise a spurious 400)."""
+    from eneru.api import _parse_int_param
+    assert _parse_int_param({}, "before", None) is None
+    # Present value still parses normally.
+    assert _parse_int_param({"before": ["42"]}, "before", None) == 42
+
+
+@pytest.mark.unit
 def test_api_prometheus_metrics_include_remote_health_per_ups(minimal_config, monitor):
     """When a UPS has a remote-health manager exposing servers, the
     metrics endpoint must emit per-server status + consecutive_failures
@@ -728,6 +810,22 @@ def test_json_formatter_adds_group_and_redacts_secrets():
     assert payload["message"].startswith("MQTT broker")
     assert "secret" not in json.dumps(payload)
     assert "abc123" not in json.dumps(payload)
+
+
+@pytest.mark.unit
+def test_timezone_formatter_also_redacts_secrets():
+    """ISS-063: the plain-text formatter (journal/stdout/file) must redact
+    credentials too, not just the JSON one."""
+    from eneru.logger import TimezoneFormatter
+    formatter = TimezoneFormatter("%(message)s")
+    record = logging.LogRecord(
+        "ups-monitor", logging.INFO, __file__, 1,
+        "MQTT broker mqtt://user:secret@example:1883 token=abc123",
+        (), None,
+    )
+    out = formatter.format(record)
+    assert "secret" not in out
+    assert "abc123" not in out
 
 
 @pytest.mark.unit
@@ -1372,6 +1470,45 @@ def test_api_server_start_is_idempotent_when_already_running(minimal_config):
 
 
 @pytest.mark.unit
+def test_handler_has_read_timeout():
+    """ISS-007: the handler must carry a socket read timeout so header/request-
+    line reads are bounded (else a stalled client hangs server shutdown)."""
+    from eneru.api import REQUEST_READ_TIMEOUT_SECONDS
+    assert EneruAPIHandler.timeout == REQUEST_READ_TIMEOUT_SECONDS
+    assert EneruAPIHandler.timeout is not None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(30)  # a regression would HANG stop(); fail fast instead
+def test_stalled_connection_does_not_hang_stop(minimal_config):
+    """ISS-007: a client that connects and never sends a request line must not
+    block EneruAPIServer.stop() indefinitely; the handler timeout lets the
+    non-daemon worker exit so server_close()'s join completes."""
+    import socket as _socket
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    minimal_config.api.port = 0  # OS-assigned ephemeral port
+    server = EneruAPIServer(MagicMock(), minimal_config)
+    elapsed = None
+    with patch.object(EneruAPIHandler, "timeout", 0.5):
+        server.start()
+        assert server._httpd is not None
+        host, port = server._httpd.server_address[:2]
+        sock = _socket.create_connection((host, port), timeout=2)
+        try:
+            time.sleep(0.1)  # let the worker accept and block on the read
+            start = time.monotonic()
+            server.stop()
+            elapsed = time.monotonic() - start
+        finally:
+            sock.close()
+    # stop() must return within a few timeout windows, not hang forever.
+    assert elapsed is not None and elapsed < 5
+
+
+@pytest.mark.unit
 def test_api_server_start_logs_bind_failure_and_returns(minimal_config):
     from unittest.mock import patch
     from eneru.api import EneruAPIServer
@@ -1424,6 +1561,29 @@ def test_api_server_start_notes_auth_off_on_non_loopback_bind(minimal_config):
         assert bind_idx is not None, log
         assert note_idx is not None, log
         assert bind_idx < note_idx, log
+        # ISS-009: a non-loopback bind must warn about cleartext transport.
+        assert any(
+            "PLAIN HTTP" in m and "unencrypted" in m and "TLS reverse proxy" in m
+            for m in log
+        ), log
+    finally:
+        server.stop()
+
+
+@pytest.mark.unit
+def test_api_no_cleartext_warning_on_loopback_bind(minimal_config):
+    """ISS-009: the cleartext-transport warning fires ONLY for non-loopback binds."""
+    from unittest.mock import patch
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    log = []
+    server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
+    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+        server.start()
+    try:
+        assert not any("PLAIN HTTP" in m for m in log), log
     finally:
         server.stop()
 

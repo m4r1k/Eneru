@@ -18,6 +18,21 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
+# ISS-052: assert a daemon run exited cleanly (0) or via `timeout` (124),
+# never a crash. This replaces the old `|| true` on the stats daemon runs,
+# which masked ANY exit code -- the exact pattern single-ups-core.sh:38-52
+# documents as having previously hidden crashes. Best-effort cleanup/diagnostic
+# commands (ls/tail/kill/wait) legitimately keep `|| true`.
+# Usage: assert_daemon_exit <rc> <logfile>
+assert_daemon_exit() {
+  local rc="$1" log="$2"
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+    echo "FAIL: eneru exited with code $rc (expected 0=clean exit-after-shutdown or 124=timeout)"
+    tail -30 "$log" 2>/dev/null || true
+    exit 1
+  fi
+}
+
 # Shared E2E helpers (apply_scenario: poll-until-applied scenario swaps).
 . "$E2E_DIR/groups/lib.sh"
 
@@ -48,7 +63,11 @@ done
 # Run for ~50s -- worst case 30s for the connection wait + 10s
 # for the writer to flush + headroom. PYTHONUNBUFFERED keeps
 # stdout flushing under tee.
-PYTHONUNBUFFERED=1 timeout 50s eneru run --config $E2E_DIR/config-e2e-stats.yaml --exit-after-shutdown 2>&1 | tee /tmp/test28.log || true
+set +e
+PYTHONUNBUFFERED=1 timeout 50s eneru run --config $E2E_DIR/config-e2e-stats.yaml --exit-after-shutdown 2>&1 | tee /tmp/test28.log
+RC=${PIPESTATUS[0]}
+set -e
+assert_daemon_exit "$RC" /tmp/test28.log
 
 # 1. DB file must exist (single-UPS uses the "default.db" filename)
 DB="/tmp/eneru-e2e-stats/default.db"
@@ -118,6 +137,10 @@ EOF
 apply_scenario online-charging
 sleep 2
 
+# ISS-052: this run is DELIBERATELY given a broken stats config; the daemon
+# is expected to log "stats store open failed" and keep polling, and the
+# assertions below verify exactly that. The exit code is intentionally not
+# asserted here (unlike the other daemon runs), so the `|| true` stays.
 timeout 10s eneru run --config /tmp/config-e2e-stats-broken.yaml --exit-after-shutdown 2>&1 | tee /tmp/test29.log || true
 
 # The daemon must have logged the warning AND kept polling.
@@ -161,7 +184,11 @@ if [ ! -f "$DB" ] || [ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM samples')" -lt 1 ]
     sleep 1
   done
 
-  PYTHONUNBUFFERED=1 timeout 50s eneru run --config $E2E_DIR/config-e2e-stats.yaml --exit-after-shutdown > /tmp/test30-daemon.log 2>&1 || true
+  set +e
+  PYTHONUNBUFFERED=1 timeout 50s eneru run --config $E2E_DIR/config-e2e-stats.yaml --exit-after-shutdown > /tmp/test30-daemon.log 2>&1
+  RC=${PIPESTATUS[0]}
+  set -e
+  assert_daemon_exit "$RC" /tmp/test30-daemon.log
 fi
 
 if [ ! -f "$DB" ]; then
@@ -209,7 +236,11 @@ if [ ! -f "$DB" ]; then
     fi
     sleep 1
   done
-  PYTHONUNBUFFERED=1 timeout 50s eneru run --config $E2E_DIR/config-e2e-stats.yaml --exit-after-shutdown > /tmp/test31-daemon.log 2>&1 || true
+  set +e
+  PYTHONUNBUFFERED=1 timeout 50s eneru run --config $E2E_DIR/config-e2e-stats.yaml --exit-after-shutdown > /tmp/test31-daemon.log 2>&1
+  RC=${PIPESTATUS[0]}
+  set -e
+  assert_daemon_exit "$RC" /tmp/test31-daemon.log
 fi
 
 if [ ! -f "$DB" ]; then
@@ -351,9 +382,13 @@ T_START=$(date +%s)
 
 # Run for ~15s -- long enough for the autodetect window
 # (10 polls at 1 Hz) to fill and the re-snap to fire.
+set +e
 PYTHONUNBUFFERED=1 timeout 15s eneru run \
   --config $E2E_DIR/config-e2e-voltage-autodetect.yaml \
-  > /tmp/test32-daemon.log 2>&1 || true
+  > /tmp/test32-daemon.log 2>&1
+RC=${PIPESTATUS[0]}
+set -e
+assert_daemon_exit "$RC" /tmp/test32-daemon.log
 
 echo "--- daemon log (last 40 lines) ---"
 tail -40 /tmp/test32-daemon.log

@@ -103,6 +103,45 @@ For wide-range viewing and paging, `/api/v1/events` also accepts `from`/`to` (Un
 
 **Deleting events.** `DELETE /api/v1/ups/<name>/events` removes selected events. It requires authentication (writes are hard-disabled when `api.auth` is off -> 403; missing credential -> 401). The JSON body is `{"items": [{"id": <int>, "ts": <int>, "eventType": "<str>"}, ...]}` (max 1000 items -> 413; malformed -> 400). Each row is matched on all three fields, so a stale client can only delete the exact rows it last saw. A mismatch deletes nothing. The response is `{"ups": "<name>", "deleted": <count>}`; if statistics is disabled the endpoint returns 503. Deletions are recorded to the events table as `EVENTS_DELETED` audit rows.
 
+## Transport security
+
+The embedded API speaks **plain HTTP** — it has no built-in TLS. On loopback
+(`127.0.0.1`, the default) that is fine. If you bind it to a routable address,
+login passwords and bearer tokens travel unencrypted, so put a TLS-terminating
+reverse proxy in front and keep the daemon on loopback. The daemon logs a
+cleartext-transport warning at startup for any non-loopback bind.
+
+Minimal Caddy:
+
+```caddyfile
+ups.example.com {
+    reverse_proxy 127.0.0.1:9191
+}
+```
+
+Minimal nginx:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name ups.example.com;
+    ssl_certificate     /etc/ssl/ups.crt;
+    ssl_certificate_key /etc/ssl/ups.key;
+    location / { proxy_pass http://127.0.0.1:9191; }
+}
+```
+
+Then set `api.bind: 127.0.0.1` and point clients at the proxy.
+
+> **Note on login throttling behind a proxy.** The daemon's built-in login
+> throttle (10 failed logins per minute → HTTP 429) keys on the *immediate*
+> peer IP. Behind a reverse proxy every request appears to come from the proxy
+> (loopback), so the throttle becomes global — a burst of bad logins can return
+> 429 to all users at once. `X-Forwarded-For` is deliberately not trusted (it's
+> spoofable). When you front Eneru with a proxy, rely on the **proxy's** own
+> per-client rate limiting for login endpoints and treat the daemon throttle as
+> a coarse backstop.
+
 ## Health and readiness
 
 `/health` returns 200 when the API server can answer.

@@ -72,6 +72,21 @@ def test_session_expiry(monkeypatch):
     assert token not in mgr._sessions  # expired entry is reaped
 
 
+@pytest.mark.unit
+def test_session_validate_rejects_non_string_and_empty():
+    """ISS-061: constant-time validate short-circuits non-str / empty tokens
+    (secrets.compare_digest would otherwise raise TypeError on them)."""
+    mgr = SessionManager(3600)
+    mgr.create({"username": "a", "kind": "user"})
+    assert mgr.validate("") is None
+    assert mgr.validate(None) is None
+    assert mgr.validate(123) is None
+    # ISS-061: a non-ASCII token must return None cleanly, NOT raise TypeError
+    # from compare_digest (header values decode to arbitrary latin-1). A raise
+    # here would turn a bad credential into a 500 on every authed route.
+    assert mgr.validate("Bearer-\x80\xff-garbage") is None
+
+
 # ----- _authorize matrix -----
 
 @pytest.mark.unit
@@ -372,6 +387,136 @@ def test_login_backend_error_503(minimal_config, tmp_path):
     status, _, payload = h._route_post()
     assert status == 503
     assert payload["error"]["code"] == "AUTH_UNAVAILABLE"
+
+
+@pytest.mark.unit
+def test_login_throttled_after_burst(minimal_config, tmp_path):
+    """ISS-032: after LOGIN_FAIL_MAX bad logins the next attempt gets 429 before
+    the auth backend is even consulted."""
+    import eneru.api as api_mod
+    _enable_auth(minimal_config)
+    store = AuthStore(tmp_path / "auth.db")
+    store.create_user("alice", "s3cret")
+
+    def _bad():
+        body = json.dumps({"username": "alice", "password": "wrong"}).encode()
+        return _handler(minimal_config, auth_store=store,
+                        sessions=SessionManager(3600),
+                        path="/api/v1/auth/login", body=body)
+
+    for _ in range(api_mod.LOGIN_FAIL_MAX):
+        with pytest.raises(APIUnauthorized):
+            _bad()._route_post()
+    status, _, payload = _bad()._route_post()
+    assert status == 429
+    assert payload["error"]["code"] == "TOO_MANY_ATTEMPTS"
+
+
+@pytest.mark.unit
+def test_ready_minimal_for_anonymous_under_require_for_reads(
+    minimal_config, monkeypatch,
+):
+    """ISS-030: an anonymous /ready probe under require_for_reads gets only the
+    boolean, not the UPS/remote topology; the probe is never 401'd."""
+    _enable_auth(minimal_config, require_for_reads=True)
+    monkeypatch.setattr("eneru.api.readiness", lambda src: {
+        "ready": True, "ups": [{"name": "UPS@secret-host"}],
+        "reasons": ["some detail"],
+    })
+    h = _handler(minimal_config, sessions=SessionManager(3600), path="/ready")
+    status, _, payload = h._route()
+    assert status == 200
+    assert payload == {"ready": True}
+
+
+@pytest.mark.unit
+def test_ready_full_for_authenticated_under_require_for_reads(
+    minimal_config, monkeypatch,
+):
+    """ISS-030: an authenticated caller still gets the detailed readiness."""
+    _enable_auth(minimal_config, require_for_reads=True)
+    full = {"ready": True, "ups": [{"name": "UPS@host"}], "reasons": []}
+    monkeypatch.setattr("eneru.api.readiness", lambda src: dict(full))
+    sessions = SessionManager(3600)
+    token = sessions.create({"username": "a", "role": "admin", "kind": "user"})
+    h = _handler(minimal_config, sessions=sessions, path="/ready",
+                 headers={"Authorization": f"Bearer {token}"})
+    status, _, payload = h._route()
+    assert status == 200
+    assert "ups" in payload and payload["ups"]
+
+
+@pytest.mark.unit
+def test_config_reload_rejected_uses_error_envelope(minimal_config):
+    """ISS-028: a rejected reload returns the standard {"error":{code,message}}
+    envelope with the report under `details`, not the raw report dict."""
+    _enable_auth(minimal_config)
+    sessions = SessionManager(3600)
+    token = sessions.create({"username": "a", "role": "admin", "kind": "user"})
+    source = MagicMock()
+    source.reload_config.return_value = {
+        "reloaded": False, "errors": ["bad: nope"], "restartRequired": [],
+    }
+    h = _handler(minimal_config, source=source, sessions=sessions,
+                 path="/api/v1/config/reload",
+                 headers={"Authorization": f"Bearer {token}"})
+    status, _, payload = h._route_post()
+    assert status == 400
+    assert payload["error"]["code"] == "RELOAD_REJECTED"
+    assert payload["details"]["errors"] == ["bad: nope"]
+
+
+@pytest.mark.unit
+def test_login_throttle_memory_is_bounded(monkeypatch):
+    """ISS-032: the tracked-IP table stays bounded (sweep expired, then evict
+    oldest) so IP-rotation on a direct bind can't grow it without limit."""
+    import eneru.api as api_mod
+    monkeypatch.setattr(api_mod, "LOGIN_TRACKED_IPS_MAX", 3)
+    clock = [1000.0]
+    monkeypatch.setattr(api_mod.time, "monotonic", lambda: clock[0])
+
+    for i in range(3):
+        api_mod._login_record_failure(f"a{i}")
+    assert len(api_mod._login_failures) == 3
+    # Advance past the window so the a* entries are expired; the next record
+    # triggers the expired-sweep branch.
+    clock[0] = 1000.0 + api_mod.LOGIN_FAIL_WINDOW_SECONDS + 1
+    api_mod._login_record_failure("b0")
+    assert len(api_mod._login_failures) <= 3
+    # A burst of fresh (non-expired) IPs past the cap exercises the oldest-evict
+    # (popitem) path.
+    for i in range(6):
+        api_mod._login_record_failure(f"c{i}")
+    assert len(api_mod._login_failures) <= 3
+
+
+@pytest.mark.unit
+def test_login_success_clears_throttle(minimal_config, tmp_path):
+    """ISS-032: a successful login resets the per-IP failure counter."""
+    import eneru.api as api_mod
+    _enable_auth(minimal_config)
+    store = AuthStore(tmp_path / "auth.db")
+    store.create_user("alice", "s3cret")
+
+    for _ in range(api_mod.LOGIN_FAIL_MAX - 1):
+        body = json.dumps({"username": "alice", "password": "wrong"}).encode()
+        h = _handler(minimal_config, auth_store=store,
+                     sessions=SessionManager(3600),
+                     path="/api/v1/auth/login", body=body)
+        with pytest.raises(APIUnauthorized):
+            h._route_post()
+
+    ok_body = json.dumps({"username": "alice", "password": "s3cret"}).encode()
+    ok = _handler(minimal_config, auth_store=store, sessions=SessionManager(3600),
+                  path="/api/v1/auth/login", body=ok_body)
+    assert ok._route_post()[0] == 200
+
+    # Counter cleared: a fresh burst up to the cap is allowed again, not throttled.
+    bad_body = json.dumps({"username": "alice", "password": "wrong"}).encode()
+    h = _handler(minimal_config, auth_store=store, sessions=SessionManager(3600),
+                 path="/api/v1/auth/login", body=bad_body)
+    with pytest.raises(APIUnauthorized):  # 401, not 429
+        h._route_post()
 
 
 # ----- logout -----

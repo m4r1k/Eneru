@@ -78,6 +78,47 @@ package-data drift, and docs/examples drift. Each code finding has a regression
 test that fails against the pre-fix behavior, so the same class of bug cannot
 silently return.
 
+## Pre-release code review (v6.1.6)
+
+v6.1.6 is, on paper, a bugfix release — and a point release is emphatically
+*not* where 64 fixes across the whole tree normally belong. It carries this
+much deliberately: the maintainer wanted Eneru operating at the best possible
+level rather than spreading the work across several minors or deferring it, so
+the entire remediation landed in one advertised bugfix instead.
+
+The work came out of a second full-repository adversarial audit in the same
+spirit as the v6.0.0 pass above — source, tests, CI, packaging, deployment
+manifests, and config parsing all read in full at HEAD, not just a release
+diff. The 64 findings clustered into four systemic patterns:
+
+- **Triplicated shutdown orchestration that drifts.** The single-UPS,
+  coordinator, and redundancy paths each carried near-copies of the loopback
+  success predicate, the marker-before-validation ordering guard, and the name
+  sanitizers, and a fix applied to one copy had repeatedly been missed in the
+  others. Consolidated into shared helpers (`select_loopback_results`,
+  `loopback_poweroff_sent`, `poweroff_command_parts`, one `sanitize_name`).
+- **Validation gaps that surface as raw tracebacks.** Scalar/null config
+  sections, non-numeric thresholds, and unknown keys in legacy config shapes
+  crashed or silently defaulted instead of producing a clean error. Every
+  parse path now guards its shape and sweeps unknown keys.
+- **Concurrency / clock hazards in the daemon loop.** Wall-clock deltas,
+  modulo-clock log throttles, non-serialized reloads, and `time.monotonic`
+  cooldowns seeded at `0.0` (which never fire on a fresh boot) were replaced
+  with monotonic timing, `None` sentinels, and a reload lock.
+- **Documented guarantees CI didn't enforce.** The ≥95%-per-file coverage bar
+  lived only in prose, the `integration` pytest marker selected zero tests, a
+  required E2E check could pass while SKIPping its core assertion, and CI
+  installed a hand-picked dependency subset that drifted from `pyproject`.
+  Each is now enforced by a CI gate.
+
+The Critical tier was the shutdown decision path: a SIGTERM aborting an
+in-flight single-UPS poweroff, a coordinator writing the "recovered" marker
+before validating the poweroff command, and delegated-loopback success being
+misclassified as failure. As in v6.0.0, every code finding ships with a
+regression test that fails against the pre-fix behavior, per-file coverage
+stays at or above 95%, and the AI review bots (CodeRabbit, cubic) ran over the
+combined change set before merge.
+
 ## CI layout
 
 | Workflow | File | What it checks |
@@ -105,9 +146,15 @@ Then run tests from inside the activated venv:
 ```bash
 pytest
 pytest -m unit
-pytest -m integration
 pytest --cov=src/eneru --cov-report=term
 ```
+
+<!-- ISS-050: there is no `pytest -m integration` selector. Cross-component
+integration coverage is the shell-based E2E suite under tests/e2e/ (run by
+the E2E workflow), not pytest-marked tests, so the ghost marker was removed
+rather than advertised. -->
+
+
 
 Validate example configs:
 

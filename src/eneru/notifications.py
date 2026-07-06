@@ -65,8 +65,13 @@ class NotificationWorker:
       oldest pending rows get ``cancelled (backlog_overflow)``.
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, logger: Optional[Any] = None):
         self.config = config
+        # ISS-060: route operational warnings through the structured logger
+        # when the caller has one (the daemon does), falling back to print
+        # for pre-logger-init / one-shot CLI paths. Composes with ISS-008's
+        # URL redaction (callers redact before passing the message text).
+        self._logger = logger
         self._stop_event = threading.Event()
         self._wakeup_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
@@ -97,6 +102,18 @@ class NotificationWorker:
 
     # ----- lifecycle -----
 
+    def _warn(self, message: str) -> None:
+        """Emit an operational message via the structured logger when the
+        worker was given one, else fall back to ``print`` (ISS-060)."""
+        logger = self._logger
+        if logger is not None:
+            try:
+                logger.log(message)
+                return
+            except Exception:
+                pass  # never let a logging failure swallow the message
+        print(message)
+
     def start(self) -> bool:
         """Initialize Apprise and start the background worker thread."""
         if not self.config.notifications.enabled:
@@ -106,12 +123,18 @@ class NotificationWorker:
         if not self.config.notifications.urls:
             return False
 
+        from eneru.utils import redact_apprise_url
         self._apprise_instance = apprise.Apprise()
         for url in self.config.notifications.urls:
             if not self._apprise_instance.add(url):
-                print(f"Warning: Failed to add notification URL: {url}")
+                # ISS-008: never echo the raw URL -- it embeds webhook
+                # tokens/passwords. Log the scheme only.
+                self._warn(
+                    "Warning: Failed to add notification URL: "
+                    f"{redact_apprise_url(url)}"
+                )
         if len(self._apprise_instance) == 0:
-            print("Warning: No valid notification URLs configured")
+            self._warn("Warning: No valid notification URLs configured")
             return False
 
         self._stop_event.clear()
@@ -141,7 +164,7 @@ class NotificationWorker:
             if pending > 0:
                 # Informational, not an error: the rows aren't lost,
                 # they just go out on the next start.
-                print(
+                self._warn(
                     f"ℹ️  Notification worker stopping with {pending} "
                     f"message(s) still pending in the persistent queue "
                     f"— they will deliver on the next start."
@@ -221,10 +244,11 @@ class NotificationWorker:
             store: Destination StatsStore. Defaults to the first
                 registered store; falls back to in-memory buffer if no
                 store is registered yet (multi-UPS coordinator startup).
-            blocking: Reserved for future use. The v5.1 worker honoured
-                this for the ``--test-notifications`` CLI; v5.2's DB
-                queue means delivery is asynchronous by design. Kept in
-                the signature for back-compat; ignored.
+            blocking: DEPRECATED, ignored. The v5.1 worker honoured this
+                for the ``--test-notifications`` CLI; v5.2's DB queue makes
+                delivery asynchronous by design. Kept in the signature for
+                back-compat only. ISS-063: slated for removal in the next
+                MINOR release — callers must stop passing it.
 
         Returns the new notification id, or ``None`` if the send was
         buffered (no store yet) or the worker isn't initialized.
@@ -272,7 +296,7 @@ class NotificationWorker:
         excess = len(self._memory_buffer) - cap
         del self._memory_buffer[:excess]
         if not getattr(self, "_buffer_overflow_warned", False):
-            print(
+            self._warn(
                 f"⚠️  Notification memory buffer exceeded {cap} entries — "
                 "oldest dropped. Stats DB unreachable? Check "
                 f"{self.config.statistics.db_directory if hasattr(self.config, 'statistics') else '/var/lib/eneru'} "
@@ -445,18 +469,31 @@ class NotificationWorker:
         """Return the oldest pending row across all registered stores
         whose backoff window has elapsed, or ``None`` if nothing is due.
 
-        Scans up to ``max_pending`` pending rows per store in a single
-        SELECT so a head-of-queue cluster of backed-off rows can't
-        starve newer due rows (CR P1). The previous ``limit=10`` made
-        row 11+ invisible until the head drained, which never happened
-        when the head was a poison message with ``max_attempts=0``.
+        A head-of-queue cluster of backed-off rows must not starve newer
+        due rows (CR P1): the previous ``limit=10`` made row 11+ invisible
+        until the head drained, which never happened when the head was a
+        poison message with ``max_attempts=0``. But scanning the full
+        ``max_pending`` (10k) backlog every 1 s tick is wasteful (ISS-036).
+
+        Reconcile both: only rows that have already FAILED carry a
+        ``_backoff`` entry, so the number of currently-suppressed rows is
+        exactly how far past the head we might have to look to find a due
+        row. Fetch that many extra rows plus a small floor — bounded by
+        the backlog cap so the worst case never exceeds the old behaviour,
+        while the common case (few/no rows in backoff) scans only ~50.
 
         Returned tuple: ``(store, ts, id, body, notify_type, attempts)``.
         """
         now_mono = time.monotonic()
         best: Optional[Tuple] = None
-        scan_cap = max(50,
-                       int(self.config.notifications.max_pending or 10000))
+        suppressed = sum(1 for na in self._backoff.values() if na > now_mono)
+        # cubic P2: a non-positive max_pending means "no cap" (unlimited
+        # backlog); treat it as the 10k default here, NOT a literal small
+        # number — otherwise `max(50, -1)` would clamp the scan to 50 and
+        # reintroduce the head-of-queue starvation this bound guards against.
+        raw_pending_cap = int(self.config.notifications.max_pending or 10000)
+        pending_cap = raw_pending_cap if raw_pending_cap > 0 else 10000
+        scan_cap = min(max(50, suppressed + 50), pending_cap)
         with self._stores_lock:
             stores_snapshot = list(self._stores)
         for store in stores_snapshot:
@@ -582,6 +619,42 @@ class NotificationWorker:
             stores_snapshot = list(self._stores)
         for store in stores_snapshot:
             store.prune_old_notifications(retention, max_age)
+        self._prune_backoff(stores_snapshot)
+
+    def _prune_backoff(self, stores_snapshot: List[StatsStore]) -> None:
+        """Retain only ``_backoff`` entries whose ``(db_path, row_id)`` is
+        still a pending row (ISS-036).
+
+        Backoff keys are added in ``_process_one`` on a delivery failure
+        but only removed there on success / ``max_attempts``. Rows
+        cancelled out-of-band — by the backlog cap, coalescing, or TTL
+        expiry — would otherwise leak their entry forever, growing the
+        dict for the life of the process. Reconciling against the live
+        pending set on the same once-a-minute cadence as the DB prune
+        bounds the dict to the actual backlog.
+        """
+        if not self._backoff:
+            return
+        live = set()
+        queried_paths = set()
+        for store in stores_snapshot:
+            ids = store.pending_notification_ids()
+            if ids is None:
+                # Transient error / store closed: we can't enumerate this
+                # store's live rows, so leave its backoff entries alone
+                # rather than wiping (and thereby resetting) their retry
+                # timers on a hiccup.
+                continue
+            queried_paths.add(str(store.db_path))
+            for row_id in ids:
+                live.add((str(store.db_path), int(row_id)))
+        # Only prune keys belonging to a store we successfully queried.
+        stale = [
+            key for key in self._backoff
+            if key[0] in queried_paths and key not in live
+        ]
+        for key in stale:
+            self._backoff.pop(key, None)
 
     # ----- accessors (mostly for tests + status displays) -----
 

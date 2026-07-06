@@ -33,6 +33,7 @@ from eneru.lifecycle import (
     classify_startup,
     delete_shutdown_marker,
     delete_upgrade_marker,
+    poweroff_command_parts,
     read_shutdown_marker,
     read_upgrade_marker,
     write_shutdown_marker,
@@ -162,7 +163,8 @@ class MultiUPSCoordinator:
 
         # Initialize shared notification worker
         if self.config.notifications.enabled and APPRISE_AVAILABLE:
-            self._notification_worker = NotificationWorker(self.config)
+            self._notification_worker = NotificationWorker(
+                self.config, logger=self._logger)
             if self._notification_worker.start():
                 count = self._notification_worker.get_service_count()
                 self._log(f"📢  Notifications: enabled ({count} service(s))")
@@ -246,10 +248,7 @@ class MultiUPSCoordinator:
         silently skipped.
         """
         for group in self.config.ups_groups:
-            sanitized = (group.ups.name
-                         .replace("@", "-")
-                         .replace(":", "-")
-                         .replace("/", "-"))
+            sanitized = sanitize_name(group.ups.name)
             db_path = stats_dir / f"{sanitized}.db"
             if not db_path.exists():
                 continue
@@ -361,7 +360,7 @@ class MultiUPSCoordinator:
         if not self.config.ups_groups:
             return None
         first = self.config.ups_groups[0]
-        sanitized = first.ups.name.replace("@", "-").replace(":", "-").replace("/", "-")
+        sanitized = sanitize_name(first.ups.name)
         db_path = stats_dir / f"{sanitized}.db"
         try:
             conn = StatsStore.open_readonly(db_path)
@@ -411,7 +410,7 @@ class MultiUPSCoordinator:
             )
 
             # Sanitize UPS name for file paths
-            sanitized = group.ups.name.replace("@", "-").replace(":", "-").replace("/", "-")
+            sanitized = sanitize_name(group.ups.name)
             prefix = f"[{group.ups.label}] "
 
             in_rg = group.ups.name in self._in_redundancy
@@ -735,29 +734,46 @@ class MultiUPSCoordinator:
                         self._notification_worker.flush(timeout=5)
                     else:
                         time.sleep(5)
-                    # Slice 3: tag this shutdown as power-loss-triggered so
-                    # the next start can emit "📊  Recovered" and the Slice 4
-                    # bonus folds the prev shutdown into a richer message.
-                    # (Single-UPS path already does this in monitor.py;
-                    # coordinator mode was missing it — caught in pre-push
-                    # review.)
-                    write_shutdown_marker(
-                        Path(self.config.statistics.db_directory),
-                        version=__version__,
-                        reason=REASON_SEQUENCE_COMPLETE,
-                    )
-                    # Defense-in-depth: config validation already rejects an
-                    # empty/None command at load, but a programmatically-built
-                    # Config could still reach here. str()+strip guards against
-                    # None.split() / run_command([]) silently no-op'ing the
-                    # poweroff after peers were already drained.
-                    cmd_parts = str(self.config.local_shutdown.command or "").split()
+                    # ISS-015: validate the poweroff command BEFORE writing the
+                    # SHUTDOWN_SEQUENCE_COMPLETE recovery marker. Config
+                    # validation already rejects an empty/None command at load,
+                    # but a programmatically-built Config could still reach here.
+                    # If the command is empty the host never powers off, so
+                    # writing the marker would make the next boot log a false
+                    # "Recovered". The single-UPS path (monitor.py) already
+                    # validates first; the coordinator copy had drifted. str()+
+                    # split guards against None.split() / run_command([]).
+                    cmd_parts = poweroff_command_parts(
+                        self.config.local_shutdown.command)
                     if not cmd_parts:
                         self._log(
                             "❌  local_shutdown.command is empty -- cannot power off "
                             "the host. Set local_shutdown.command to a valid command."
                         )
+                        # ISS-015: match the single-UPS path (monitor.py), which
+                        # also notifies on an incomplete sequence so operators
+                        # learn the host is still up rather than only seeing it
+                        # in the journal.
+                        if self._notification_worker:
+                            self._notification_worker.send(
+                                "❌  **Shutdown Sequence Incomplete**\n"
+                                "Host poweroff command is empty; the host is "
+                                "still up.",
+                                "failure",
+                                category="shutdown_summary",
+                            )
                     else:
+                        # Slice 3: tag this shutdown as power-loss-triggered so
+                        # the next start can emit "📊  Recovered" and the Slice 4
+                        # bonus folds the prev shutdown into a richer message.
+                        # (Single-UPS path already does this in monitor.py;
+                        # coordinator mode was missing it — caught in pre-push
+                        # review.)
+                        write_shutdown_marker(
+                            Path(self.config.statistics.db_directory),
+                            version=__version__,
+                            reason=REASON_SEQUENCE_COMPLETE,
+                        )
                         if self.config.local_shutdown.message:
                             cmd_parts.append(self.config.local_shutdown.message)
                         run_command(cmd_parts)
@@ -926,13 +942,45 @@ class MultiUPSCoordinator:
         Updates the coordinator's shared config and each per-group monitor's
         config in place. Returns a report (also used by the API endpoint).
         """
-        from eneru.reload import perform_reload
-        monitor_configs = [m.config for m in self._monitors]
-        report = perform_reload(self.config, monitor_configs, self.config.config_path)
-        if report.get("reloaded") and report.get("subsystems"):
-            self._apply_subsystem_reload(report["subsystems"])
-        self._log_reload_report(report)
-        return report
+        from eneru.reload import perform_reload, _RELOAD_LOCK
+        # ISS-027: hold the reload lock across the WHOLE operation -- parse +
+        # section swap + executor re-point + worker bounce -- so a concurrent
+        # SIGHUP and API reload can't interleave the non-thread-safe worker
+        # bounce in _apply_subsystem_reload.
+        with _RELOAD_LOCK:
+            monitor_configs = [m.config for m in self._monitors]
+            report = perform_reload(
+                self.config, monitor_configs, self.config.config_path)
+            if report.get("reloaded"):
+                # ISS-004: propagate the swapped section objects to the
+                # redundancy executors' private Configs (_repoint_executor_configs).
+                self._repoint_executor_configs()
+                if report.get("subsystems"):
+                    self._apply_subsystem_reload(report["subsystems"])
+            self._log_reload_report(report)
+            return report
+
+    def _repoint_executor_configs(self) -> None:
+        """ISS-004: re-bind each redundancy executor's shared config sections.
+
+        Each RedundancyGroupExecutor builds a private ``Config`` at startup whose
+        ``behavior``/``notifications``/``local_shutdown``/``logging`` are the SAME
+        objects as the base config. ``apply_reload`` swaps the coordinator's
+        sections to NEW objects, orphaning the executors' references -- so a live
+        ``behavior.dry_run`` toggle never reached the redundancy shutdown path.
+        Re-point the executors at the coordinator's current objects after every
+        applied reload. (Executor configs are deliberately NOT passed into
+        ``apply_reload``: their synthetic single-group topology would trip its
+        ups_groups diff and falsely report a restart-required change.)
+        """
+        executors = getattr(self, "_redundancy_executors", None) or {}
+        for executor in executors.values():
+            cfg = getattr(executor, "config", None)
+            if cfg is None:
+                continue
+            for section in ("behavior", "notifications",
+                            "local_shutdown", "logging"):
+                setattr(cfg, section, getattr(self.config, section))
 
     def _apply_subsystem_reload(self, subsystems: list) -> None:
         """Re-init live subsystems across the coordinator (best-effort)."""

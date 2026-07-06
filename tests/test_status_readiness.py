@@ -1031,6 +1031,16 @@ class TestStatusHelpers:
         assert sanitize_name("a/b") == "a-b"
 
     @pytest.mark.unit
+    def test_sanitize_name_is_the_shared_utils_helper(self):
+        """ISS-013: status re-exports the single utils.sanitize_name so the
+        stats/state path sanitizer has one definition. None is tolerated
+        (→ "") to preserve the config-path behaviour."""
+        from eneru.status import sanitize_name as status_sanitize
+        from eneru.utils import sanitize_name as utils_sanitize
+        assert status_sanitize is utils_sanitize
+        assert utils_sanitize(None) == ""
+
+    @pytest.mark.unit
     def test_stats_db_path_uses_default_for_single_ups(self, tmp_path):
         from eneru.status import stats_db_path_for_group
         from eneru import StatsConfig

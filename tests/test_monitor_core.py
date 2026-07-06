@@ -1919,18 +1919,25 @@ class TestCheckDependencies:
         assert "/sbin/shutdown" in seen
 
     @pytest.mark.unit
-    def test_missing_required_command_exits(self, tmp_path, capsys):
+    def test_missing_required_command_raises(self, tmp_path):
+        """ISS-006: raise RuntimeError (not sys.exit) so coordinator-mode's
+        `except Exception` crash handler can see it instead of SystemExit
+        silently killing the per-group thread."""
         monitor = make_monitor(tmp_path)
         monitor.config.ups_groups[0].is_local = False
         monitor.config.local_shutdown.enabled = False
+        monitor._log_message = MagicMock()
 
         with patch("eneru.monitor.command_exists", return_value=False):
-            with pytest.raises(SystemExit) as exc_info:
+            with pytest.raises(RuntimeError) as exc_info:
                 monitor._check_dependencies()
-        assert exc_info.value.code == 1
-        out = capsys.readouterr().out
-        assert "Missing required commands" in out
-        assert "upsc" in out
+        assert "Missing required commands" in str(exc_info.value)
+        assert "upsc" in str(exc_info.value)
+        # And it was logged (visible in coordinator mode, unlike the old print).
+        assert any(
+            "Missing required commands" in str(call.args[0])
+            for call in monitor._log_message.call_args_list
+        )
 
     @pytest.mark.unit
     def test_missing_logger_warns_but_does_not_exit(self, tmp_path):
@@ -2830,6 +2837,51 @@ class TestCleanupAndExit:
         worker.flush.assert_called_once()
         worker.stop.assert_called_once()
         monitor._send_notification.assert_not_called()
+
+    @pytest.mark.unit
+    def test_signal_ignored_while_shutdown_sequence_in_flight(self, tmp_path):
+        """ISS-001: a real SIGTERM/SIGINT arriving while the shutdown sequence
+        runs on the main thread must be ignored (return, no SystemExit) so it
+        cannot abort the in-flight host poweroff. Nothing is torn down."""
+        monitor = make_monitor(tmp_path)
+        monitor._stop_stats = MagicMock()
+        monitor._stop_event = MagicMock()
+        worker = MagicMock()
+        monitor._notification_worker = worker
+        monitor._log_message = MagicMock()
+        monitor._shutdown_sequence_in_flight = True
+        # Even with the guard flag on disk, an in-flight sequence takes priority.
+        monitor._shutdown_flag_path.touch()
+
+        # Returns normally (no SystemExit) and tears nothing down.
+        # 15 == SIGTERM (matches the numeric convention used across this class).
+        assert monitor._cleanup_and_exit(15, None) is None
+        monitor._stop_event.set.assert_not_called()
+        monitor._stop_stats.assert_not_called()
+        worker.flush.assert_not_called()
+        assert any(
+            "ignoring" in str(call.args[0]).lower()
+            for call in monitor._log_message.call_args_list
+        )
+
+    @pytest.mark.unit
+    def test_internal_exit_after_shutdown_still_exits_during_sequence(
+        self, tmp_path,
+    ):
+        """ISS-001: the internal _exit_after_shutdown call passes signum=None and
+        must still exit even mid-sequence — the ignore branch is gated on a real
+        signal number so it does not swallow the intentional exit."""
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        monitor._stop_stats = MagicMock()
+        monitor._notification_worker = MagicMock()
+        monitor._send_notification = MagicMock()
+        monitor._shutdown_sequence_in_flight = True
+        monitor._shutdown_flag_path.touch()  # guard active → exit(0) path
+
+        with pytest.raises(SystemExit) as exc_info:
+            monitor._cleanup_and_exit(None, None)
+        assert exc_info.value.code == 0
 
     @pytest.mark.unit
     def test_graceful_stop_enqueues_lifecycle_notification(self, tmp_path):
@@ -4040,6 +4092,63 @@ class TestMainLoopBranchCoverage:
         monitor._handle_on_battery.assert_called_once()
         monitor._handle_on_line.assert_not_called()
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize("status", ["OFF", "BYPASS", "DISCHRG"])
+    def test_neutral_status_routes_to_neither_handler(self, tmp_path, status):
+        """ISS-019: statuses without OL/OB/FSD (OFF, BYPASS, bare DISCHRG) take
+        no power-state action and don't crash. Token matching also stops
+        `CHRG in DISCHRG` from aliasing bare DISCHRG onto the on-line path."""
+        monitor = make_monitor(tmp_path)
+        monitor._handle_on_battery = MagicMock()
+        monitor._handle_on_line = MagicMock()
+        monitor.state.previous_status = "OL"
+        monitor.state.connection_state = "OK"
+
+        _run_one_iteration(monitor, (True, {
+            "ups.status": status, "battery.charge": "80",
+            "battery.runtime": "1200", "ups.load": "30",
+        }, ""))
+
+        monitor._handle_on_battery.assert_not_called()
+        monitor._handle_on_line.assert_not_called()
+
+    @pytest.mark.unit
+    def test_ol_chrg_routes_to_on_line(self, tmp_path):
+        """ISS-019: `OL CHRG` still routes to the on-line handler under tokens."""
+        monitor = make_monitor(tmp_path)
+        monitor._handle_on_battery = MagicMock()
+        monitor._handle_on_line = MagicMock()
+        monitor.state.previous_status = "OB"
+        monitor.state.connection_state = "OK"
+
+        _run_one_iteration(monitor, (True, {
+            "ups.status": "OL CHRG", "battery.charge": "95",
+            "battery.runtime": "3000", "ups.load": "20",
+        }, ""))
+
+        monitor._handle_on_line.assert_called_once()
+        monitor._handle_on_battery.assert_not_called()
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("status", ["OB LB", "OB DISCHRG LB", "OB DISCHRG"])
+    def test_multiflag_on_battery_statuses_route_to_on_battery(self, tmp_path, status):
+        """ISS-019: safety-critical low-battery routing — real multi-flag NUT
+        statuses carrying OB (with LB/DISCHRG) still hit the on-battery handler
+        under token matching."""
+        monitor = make_monitor(tmp_path)
+        monitor._handle_on_battery = MagicMock()
+        monitor._handle_on_line = MagicMock()
+        monitor.state.previous_status = "OL"
+        monitor.state.connection_state = "OK"
+
+        _run_one_iteration(monitor, (True, {
+            "ups.status": status, "battery.charge": "15",
+            "battery.runtime": "120", "ups.load": "40",
+        }, ""))
+
+        monitor._handle_on_battery.assert_called_once()
+        monitor._handle_on_line.assert_not_called()
+
 
 class TestT3DepletionRateBranches:
     """Cover the T3 depletion-rate branches: ignored during stabilization,
@@ -4200,3 +4309,219 @@ class TestStopStatsDefensive:
 
         # Must not raise.
         monitor._stop_stats()
+
+
+class TestWaitForInitialConnectionInterruptible:
+    """ISS-021: startup connection wait must honor the stop event."""
+
+    @pytest.mark.unit
+    def test_stop_event_aborts_wait_promptly(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._get_all_ups_data = MagicMock(return_value=(False, {}, ""))
+        monitor._log_message = MagicMock()
+        monitor._stop_event.set()  # request stop before the wait
+
+        start = time.monotonic()
+        monitor._wait_for_initial_connection()
+        elapsed = time.monotonic() - start
+
+        # Must not have slept the 5s retry interval.
+        assert elapsed < 2
+        assert any(
+            "interrupted" in str(call.args[0]).lower()
+            for call in monitor._log_message.call_args_list
+        )
+
+
+class TestReportsRequireNotificationWorker:
+    """ISS-023: single-UPS report send must be gated on a live worker so the
+    last-run stamp is not advanced for an undelivered digest."""
+
+    @pytest.mark.unit
+    def test_reports_skipped_without_worker(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.reports.enabled = True
+        monitor._notification_worker = None
+        with patch("eneru.monitor.reports_mod.maybe_send_due_reports") as m:
+            monitor._run_periodic_tasks()
+        m.assert_not_called()
+
+    @pytest.mark.unit
+    def test_reports_run_with_worker(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.reports.enabled = True
+        monitor._notification_worker = MagicMock()
+        with patch("eneru.monitor.reports_mod.maybe_send_due_reports") as m:
+            monitor._run_periodic_tasks()
+        m.assert_called_once()
+
+
+class TestStartupDependencyMarker:
+    """ISS-006: a startup missing-dependency is an environment problem, not a
+    runtime crash — it must not write the FATAL marker (which would misclassify
+    the next successful start as 'exited fatally'), while genuine runtime
+    exceptions still do."""
+
+    @pytest.mark.unit
+    def test_dependency_error_skips_fatal_marker(self, tmp_path):
+        from eneru.monitor import DependencyError
+        monitor = make_monitor(tmp_path)
+        monitor._initialize = MagicMock(side_effect=DependencyError("no upsc"))
+        monitor._send_notification = MagicMock()
+        monitor._log_message = MagicMock()
+        with patch("eneru.monitor.write_shutdown_marker") as marker:
+            with pytest.raises(DependencyError):
+                monitor.run()
+        marker.assert_not_called()
+
+    @pytest.mark.unit
+    def test_runtime_fatal_still_writes_marker(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._initialize = MagicMock()
+        monitor._main_loop = MagicMock(side_effect=RuntimeError("boom"))
+        monitor._send_notification = MagicMock()
+        monitor._log_message = MagicMock()
+        with patch("eneru.monitor.write_shutdown_marker") as marker:
+            with pytest.raises(RuntimeError):
+                monitor.run()
+        marker.assert_called_once()
+
+
+class TestPR6OnBatteryLogic:
+    """ISS-016 (advisory clear), ISS-018 (monotonic log throttle), ISS-020
+    (monotonic on-battery timing) exercised through _handle_on_battery."""
+
+    def _stable_on_battery(self, monitor, *, secs_ago):
+        """Put the monitor mid-outage with timing anchored `secs_ago` back."""
+        monitor.config.triggers.extended_time.enabled = False
+        monitor.config.triggers.on_battery_stabilization_delay = 0
+        monitor.state.previous_status = "OB"  # continuing outage, no fresh reset
+        monitor.state.on_battery_start_time = int(time.time()) - secs_ago
+        monitor.state.on_battery_start_mono = time.monotonic() - secs_ago
+
+    @pytest.mark.unit
+    def test_advisory_trigger_cleared_on_clean_reading(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = True
+        self._stable_on_battery(monitor, secs_ago=30)
+        monitor.state.trigger_active = True
+        monitor.state.trigger_reason = "prior transient dip"
+
+        # A healthy reading (charge/runtime well above thresholds) => no reason.
+        monitor._handle_on_battery({
+            "ups.status": "OB", "battery.charge": "95",
+            "battery.runtime": "3600", "ups.load": "10",
+        })
+        assert monitor.state.trigger_active is False
+
+    @pytest.mark.unit
+    def test_advisory_trigger_kept_while_still_critical(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = True
+        self._stable_on_battery(monitor, secs_ago=30)
+        monitor.state.trigger_active = True
+
+        # Still below the low-battery threshold => reason persists, stays latched.
+        monitor._handle_on_battery({
+            "ups.status": "OB", "battery.charge": "1",
+            "battery.runtime": "5", "ups.load": "10",
+        })
+        assert monitor.state.trigger_active is True
+
+    @pytest.mark.unit
+    def test_advisory_trigger_kept_during_stabilization(self, tmp_path):
+        """ISS-016 guard: a latched trigger must NOT be cleared while still in
+        the on-battery stabilization window, even on a clean reading."""
+        monitor = make_monitor(tmp_path)
+        monitor._in_redundancy_group = True
+        monitor.config.triggers.extended_time.enabled = False
+        monitor.config.triggers.on_battery_stabilization_delay = 300
+        monitor.state.previous_status = "OB"
+        monitor.state.on_battery_start_time = int(time.time()) - 5
+        monitor.state.on_battery_start_mono = time.monotonic() - 5
+        monitor.state.trigger_active = True
+
+        monitor._handle_on_battery({
+            "ups.status": "OB", "battery.charge": "95",
+            "battery.runtime": "3600", "ups.load": "10",
+        })
+        assert monitor.state.trigger_active is True
+
+    @pytest.mark.unit
+    def test_on_battery_status_log_throttled_on_monotonic(self, tmp_path, monkeypatch):
+        monitor = make_monitor(tmp_path)
+        monitor.config.triggers.extended_time.enabled = False
+        monitor.config.triggers.on_battery_stabilization_delay = 0
+        monitor.state.previous_status = "OB"
+        monitor.state.on_battery_start_time = int(time.time())
+        clock = [1000.0]
+        monkeypatch.setattr("eneru.monitor.time.monotonic", lambda: clock[0])
+        monitor.state.on_battery_start_mono = 1000.0
+        logs = []
+        monitor._log_message = logs.append
+        data = {"ups.status": "OB", "battery.charge": "50",
+                "battery.runtime": "600", "ups.load": "20"}
+
+        monitor._handle_on_battery(data)      # t=1000 -> logs
+        clock[0] = 1001.0
+        monitor._handle_on_battery(data)      # +1s -> throttled
+        clock[0] = 1007.0
+        monitor._handle_on_battery(data)      # +6s -> logs again
+
+        ob_logs = [m for m in logs if "On battery:" in m]
+        assert len(ob_logs) == 2
+
+    @pytest.mark.unit
+    def test_time_on_battery_survives_wall_clock_jump(self, tmp_path, monkeypatch):
+        """ISS-020: an NTP step backward mid-outage must not shrink the computed
+        time-on-battery (it's anchored on the monotonic clock). Observe the real
+        on-battery log line the handler emits."""
+        monitor = make_monitor(tmp_path)
+        monitor.config.triggers.extended_time.enabled = False
+        monitor.config.triggers.on_battery_stabilization_delay = 0
+        monitor.state.previous_status = "OB"
+        monitor.state.on_battery_start_time = int(time.time())
+        # Pin monotonic to a fixed value (its real epoch is ~boot time and can be
+        # < 120 on a fresh CI runner, which would make a `monotonic()-120` anchor
+        # negative). Anchor 120s before "now".
+        monkeypatch.setattr("eneru.monitor.time.monotonic", lambda: 5000.0)
+        monitor.state.on_battery_start_mono = 5000.0 - 120  # 2 min in
+        logs = []
+        monitor._log_message = logs.append
+
+        # Wall clock jumps BACKWARD; monotonic is unaffected.
+        monkeypatch.setattr("eneru.monitor.time.time", lambda: 1.0)
+        monitor._handle_on_battery({
+            "ups.status": "OB", "battery.charge": "80",
+            "battery.runtime": "1200", "ups.load": "20",
+        })
+        ob_logs = [m for m in logs if "On battery:" in m]
+        assert ob_logs, "expected an on-battery status log line"
+        # ~2 minutes on battery from the monotonic anchor, NOT a wall-derived
+        # negative/near-zero value.
+        assert "Time on battery: 2m" in ob_logs[0]
+
+
+class TestUpscNameDiagnosticCooldown:
+    """ISS-022: the ~10s `upsc -l` name diagnostic must be rate-limited so a
+    flapping server doesn't stall the poll thread once per flap."""
+
+    @pytest.mark.unit
+    def test_probe_gated_by_cooldown(self, tmp_path, monkeypatch):
+        monitor = make_monitor(tmp_path)
+        monitor.state.previous_status = "OL"  # not on battery
+        monitor.state.connection_state = "OK"
+        monitor._run_ups_name_diagnostic = MagicMock()
+        clock = [10000.0]
+        monkeypatch.setattr("eneru.monitor.time.monotonic", lambda: clock[0])
+
+        # First failure episode: count -> 1, cooldown elapsed -> probe runs.
+        _run_one_iteration(monitor, (False, {}, "connection refused"))
+        assert monitor._run_ups_name_diagnostic.call_count == 1
+
+        # A recovery resets the counter; another failure 60s later is inside the
+        # 10-minute cooldown, so the probe must NOT run again.
+        monitor.state.connection_error_count = 0
+        clock[0] += 60
+        _run_one_iteration(monitor, (False, {}, "connection refused"))
+        assert monitor._run_ups_name_diagnostic.call_count == 1

@@ -68,6 +68,54 @@ class RemoteShutdownResult:
         )
 
 
+def loopback_poweroff_sent(result: "RemoteShutdownResult") -> bool:
+    """True when the Phase-C delegated host poweroff was actually delivered.
+
+    ISS-005: unlike ``RemoteShutdownResult.success``, this deliberately IGNORES
+    Phase-A drain failures (``crashed`` / ``error``). When a loopback delegate's
+    pre-action crashes but the poweroff command still went out, the host IS
+    powering off, so the sequence must be treated as complete (write the
+    SHUTDOWN_SEQUENCE_COMPLETE marker, no failure notification) — the drain
+    failure is a reporting nuance, not a missed shutdown. This is the shared
+    predicate for the monitor and redundancy loopback paths, which previously
+    diverged (monitor used ``all(r.success)`` and misclassified a delivered
+    poweroff as failed).
+    """
+    return bool(
+        result.completed
+        and result.shutdown_sent
+        and not result.timed_out
+    )
+
+
+def select_loopback_results(
+    remote_servers: List[RemoteServerConfig],
+    results: List["RemoteShutdownResult"],
+) -> List["RemoteShutdownResult"]:
+    """Return the subset of remote-shutdown ``results`` that belong to an
+    enabled ``is_host_loopback`` server.
+
+    A loopback entry's executed shutdown_command is what actually powers
+    off THIS host, so the delegated-shutdown paths (single-UPS monitor and
+    the redundancy executor) key their "did the poweroff go out?" decision
+    on exactly these results. Matched by the ``(name-or-host, host)`` pair
+    against the configured servers.
+
+    ISS-013: previously duplicated verbatim as an inline list-comprehension
+    in both ``monitor.py`` and ``redundancy.py`` — one source of truth now.
+    """
+    return [
+        result for result in results
+        if any(
+            server.enabled
+            and server.is_host_loopback is True
+            and (server.name or server.host) == result.server
+            and server.host == result.host
+            for server in remote_servers
+        )
+    ]
+
+
 class RemoteShutdownMixin:
     """Mixin: SSH-based remote-server orchestration and shutdown."""
 

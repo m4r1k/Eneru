@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ main ]
 
+# ISS-042: least-privilege token. This workflow only reads the repo and runs
+# tests; the Codecov upload uses its own CODECOV_TOKEN, not GITHUB_TOKEN.
+permissions:
+  contents: read
+
 # All third-party action invocations are SHA-pinned (with the
 # corresponding tag in a comment) so a moved tag in the upstream
 # action repo cannot silently change what runs in CI. Refresh
@@ -17,6 +22,8 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    # ISS-042: a hung test run should fail fast, not sit on the 6h default.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -45,14 +52,49 @@ jobs:
         allow-prereleases: true
 
     - name: Install dependencies
+      # ISS-043/044: one dependency source of truth. Install the `dev` extra
+      # (pytest + xdist + cov + mock + timeout + playwright) plus every
+      # optional feature extra so the paho-mqtt-present code path is actually
+      # exercised in CI, instead of hand-picking a subset that drifts from
+      # pyproject.
       run: |
         python -m pip install --upgrade pip
-        pip install -e ".[notifications,auth]"
-        pip install pytest pytest-cov pytest-mock pytest-xdist
+        pip install -e ".[dev,notifications,auth,mqtt]"
+        python -c "import paho.mqtt; print('paho-mqtt', paho.mqtt.__version__)"
 
     - name: Run tests
+      # --timeout (pytest-timeout, from the dev extra) is the CI backstop for a
+      # hung test; the per-test `timeout` marker overrides it where needed.
       run: |
-        pytest -n auto --cov=src/eneru --cov-report=xml --cov-report=term
+        pytest -n auto --timeout=120 --cov=src/eneru \
+          --cov-report=xml --cov-report=json --cov-report=term
+
+    - name: Enforce per-file coverage bar (>=95%)
+      # ISS-012: AGENTS.md mandates >=95% line+branch per file, but nothing
+      # enforced it (no --cov-fail-under; Codecov informational). Gate it on the
+      # 3.12 lane (the one that also uploads coverage) so a regression cannot
+      # merge green. One enforcing lane avoids duplicate noise across the matrix.
+      if: matrix.python-version == '3.12'
+      run: |
+        python - <<'PY'
+        import json, sys
+        bar = 95.0
+        data = json.load(open("coverage.json"))
+        offenders = [
+            (m["summary"]["percent_covered"], path)
+            for path, m in sorted(data["files"].items())
+            if m["summary"]["percent_covered"] < bar
+        ]
+        total = data["totals"]["percent_covered"]
+        if total < bar:
+            offenders.append((total, "TOTAL"))
+        if offenders:
+            print(f"::error::coverage below {bar}% (line+branch):")
+            for pct, path in offenders:
+                print(f"  {pct:6.2f}%  {path}")
+            sys.exit(1)
+        print(f"All files >= {bar}% per file (total {total:.2f}%).")
+        PY
 
     - name: Upload coverage to Codecov
       # 3.12 is in both the reduced PR matrix and the full push matrix, so
@@ -72,3 +114,32 @@ jobs:
           echo "Validating $config..."
           python -m eneru validate --config "$config"
         done
+
+    - name: Validate embedded Kubernetes ConfigMap config
+      # ISS-053: the config.yaml baked into deploy/kubernetes/*.yaml was
+      # validated by no CI job, so it could drift from the schema silently.
+      # Extract every ConfigMap's config.yaml and run the real validator on it.
+      run: |
+        python - <<'PY'
+        import glob, pathlib, subprocess, sys, tempfile, yaml
+        failures = 0
+        for manifest in sorted(glob.glob("deploy/kubernetes/*.yaml")):
+            for doc in yaml.safe_load_all(pathlib.Path(manifest).read_text()):
+                if not isinstance(doc, dict) or doc.get("kind") != "ConfigMap":
+                    continue
+                cfg = (doc.get("data") or {}).get("config.yaml")
+                if not cfg:
+                    continue
+                name = doc.get("metadata", {}).get("name", "?")
+                print(f"Validating ConfigMap {name} in {manifest}...")
+                with tempfile.NamedTemporaryFile(
+                    "w", suffix=".yaml", delete=False
+                ) as tf:
+                    tf.write(cfg)
+                    path = tf.name
+                rc = subprocess.call(
+                    [sys.executable, "-m", "eneru", "validate", "--config", path]
+                )
+                failures += rc != 0
+        sys.exit(1 if failures else 0)
+        PY

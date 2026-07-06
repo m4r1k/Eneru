@@ -65,8 +65,13 @@ def _patch_apprise(mock_apprise, *, succeed=True,
     return mock_instance
 
 
-def _wait_until(predicate, timeout=2.0, poll=0.02):
-    """Block until predicate() is truthy or the timeout elapses."""
+def _wait_until(predicate, timeout=5.0, poll=0.02):
+    """Block until predicate() is truthy or the timeout elapses.
+
+    ISS-054: default timeout widened from 2 s to 5 s for headroom on a
+    loaded CI runner — this is already the robust bounded-poll pattern
+    (returns as soon as the condition holds), so a larger cap only costs
+    wall-clock on genuine failures, never on the happy path."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -170,6 +175,26 @@ class TestWorkerLifecycle:
         # before that on a non-stuck loop.
         assert _wait_until(lambda: not worker._worker_thread.is_alive(),
                            timeout=2.5)
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_add_failure_redacts_url(self, mock_apprise, capsys):
+        """ISS-008: a failed add() must not echo the raw Apprise URL (it embeds
+        webhook tokens); only the scheme is printed."""
+        mock_instance = MagicMock()
+        mock_apprise.Apprise.return_value = mock_instance
+        mock_instance.add.return_value = False  # simulate a rejected URL
+        mock_instance.__len__ = lambda self: 0
+        config = Config()
+        config.notifications = NotificationsConfig(
+            enabled=True, urls=["discord://id/SUPERSECRETTOKEN"],
+        )
+        worker = NotificationWorker(config)
+        assert worker.start() is False  # no valid URLs
+        out = capsys.readouterr().out
+        assert "discord://***" in out
+        assert "SUPERSECRETTOKEN" not in out
 
     @pytest.mark.unit
     def test_send_is_noop_when_uninitialized(self):
@@ -484,6 +509,112 @@ class TestRetryAndBackoff:
             "SELECT status FROM notifications WHERE body='stays-pending'",
         )
         assert row[0] == "pending"
+
+
+# ==============================================================================
+# Backoff-map hygiene + bounded due scan (ISS-036)
+# ==============================================================================
+
+class TestBackoffMapHygiene:
+    """ISS-036: the in-memory ``_backoff`` map must not leak entries for
+    rows cancelled out-of-band, and the due-candidate scan must stay
+    bounded without reintroducing head-of-queue starvation."""
+
+    @pytest.mark.unit
+    def test_prune_backoff_drops_entries_for_nonpending_rows(
+        self, notification_config, registered_store,
+    ):
+        worker = NotificationWorker(notification_config)
+        worker._stores = [registered_store]
+        live_id = registered_store.enqueue_notification(
+            "live", "info", "general")
+        dead_id = registered_store.enqueue_notification(
+            "dead", "info", "general")
+        # Cancel one row out-of-band (as cap/coalesce/TTL would).
+        registered_store.cancel_notification(dead_id, "coalesced")
+        dbp = str(registered_store.db_path)
+        worker._backoff = {
+            (dbp, live_id): 1.0,               # still pending      -> keep
+            (dbp, dead_id): 1.0,               # cancelled          -> drop
+            (dbp, 999999): 1.0,                # never existed      -> drop
+            # Key for a store we did NOT query this pass: conservatively
+            # retained (we can't prove its row is gone).
+            ("/gone/other.db", live_id): 1.0,
+        }
+        worker._prune_backoff([registered_store])
+        assert (dbp, live_id) in worker._backoff
+        assert (dbp, dead_id) not in worker._backoff
+        assert (dbp, 999999) not in worker._backoff
+        assert ("/gone/other.db", live_id) in worker._backoff
+
+    @pytest.mark.unit
+    def test_prune_backoff_keeps_entries_when_store_query_errors(
+        self, notification_config, registered_store,
+    ):
+        """A transient ``pending_notification_ids`` failure (returns None)
+        must NOT wipe that store's backoff timers — otherwise a DB hiccup
+        would reset every message's exponential backoff to "retry now"."""
+        worker = NotificationWorker(notification_config)
+        worker._stores = [registered_store]
+        registered_store.pending_notification_ids = lambda: None
+        dbp = str(registered_store.db_path)
+        worker._backoff = {(dbp, 1): 1.0, (dbp, 2): 1.0}
+        worker._prune_backoff([registered_store])
+        assert worker._backoff == {(dbp, 1): 1.0, (dbp, 2): 1.0}
+
+    @pytest.mark.unit
+    def test_prune_backoff_noop_when_empty(
+        self, notification_config, registered_store,
+    ):
+        worker = NotificationWorker(notification_config)
+        worker._stores = [registered_store]
+        worker._backoff = {}
+        worker._prune_backoff([registered_store])
+        assert worker._backoff == {}
+
+    @pytest.mark.unit
+    def test_due_scan_cap_is_small_when_no_backoff(
+        self, notification_config, registered_store,
+    ):
+        """Common case: with nothing backed off, the SELECT fetches only
+        the ~50 floor rows instead of the full max_pending backlog."""
+        worker = NotificationWorker(notification_config)
+        worker._stores = [registered_store]
+        for i in range(5):
+            registered_store.enqueue_notification(f"m{i}", "info", "general")
+        captured = {}
+        real = registered_store.next_pending_notifications
+
+        def spy(limit=10, offset=0):
+            captured["limit"] = limit
+            return real(limit=limit, offset=offset)
+
+        registered_store.next_pending_notifications = spy
+        worker._backoff = {}
+        worker._next_due_candidate()
+        assert captured["limit"] == 50
+
+    @pytest.mark.unit
+    def test_due_scan_grows_past_backed_off_head_no_starvation(
+        self, notification_config, registered_store,
+    ):
+        """A cluster of backed-off head rows must not hide a newer due row
+        (CR P1): the scan window grows by the number of suppressed rows."""
+        worker = NotificationWorker(notification_config)
+        worker._stores = [registered_store]
+        ids = [
+            registered_store.enqueue_notification(
+                f"m{i}", "info", "general", ts=1000 + i)
+            for i in range(60)
+        ]
+        dbp = str(registered_store.db_path)
+        future = time.monotonic() + 10_000
+        for rid in ids[:55]:
+            worker._backoff[(dbp, rid)] = future
+        cand = worker._next_due_candidate()
+        assert cand is not None
+        # Oldest DUE row is the 56th (first one not backed off).
+        assert cand[2] == ids[55]
 
 
 # ==============================================================================

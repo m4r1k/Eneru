@@ -12,8 +12,8 @@ spec:
     fsGroup: 10001
   containers:
     - name: eneru
-      image: ghcr.io/m4r1k/eneru:latest
-      imagePullPolicy: Always
+      # ISS-053: pin to a released version, not :latest (see remote-deployment.yaml).
+      image: ghcr.io/m4r1k/eneru:6.1.6
       securityContext:
         readOnlyRootFilesystem: true
         allowPrivilegeEscalation: false
@@ -72,6 +72,10 @@ spec:
   volumes:
     - name: config
       configMap:
+        # ISS-053: the `eneru-config` ConfigMap is NOT defined in this file —
+        # it lives in remote-deployment.yaml. Apply that manifest first, or
+        # copy its ConfigMap block here, before applying this Pod. (Mirrors
+        # the eneru-ssh-key Secret note elsewhere in these manifests.)
         name: eneru-config
     # Ephemeral: fine for a throwaway Pod, but accept-new host-key trust
     # (/var/lib/eneru/known_hosts) and the stats/auth DBs are re-learned/reset

@@ -625,6 +625,35 @@ class TestCoordinatorReportSender:
         coord._maybe_send_reports()
         assert called == [True]
 
+    @pytest.mark.unit
+    def test_maybe_send_reports_failure_is_isolated(self, monkeypatch):
+        """A reports failure must be logged and swallowed, never propagated."""
+        from eneru import reports as reports_mod
+        coord = self._coord_reports_enabled()
+        coord._notification_worker = MagicMock()
+        logs = []
+        coord._log = logs.append
+
+        def boom(*a, **k):
+            raise RuntimeError("report-boom")
+        monkeypatch.setattr(reports_mod, "maybe_send_due_reports_multi", boom)
+        coord._maybe_send_reports()  # must not raise
+        assert any("reports task failed" in m for m in logs)
+
+    @pytest.mark.unit
+    def test_repoint_executor_configs_skips_configless_executor(self, tmp_path):
+        """ISS-004 defensive path: an executor without a .config attribute is
+        skipped rather than crashing the reload."""
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+
+        class _NoConfig:
+            pass  # no `.config` attribute
+
+        coord._redundancy_executors = {"x": _NoConfig()}
+        # Must not raise even though the executor has no config.
+        coord._repoint_executor_configs()
+
 
 # ==============================================================================
 # UPS MONITOR COORDINATOR MODE
@@ -1496,11 +1525,45 @@ class TestCoordinatorRealLocalShutdown:
         coord._notification_worker = None
 
         with patch("eneru.multi_ups.time.sleep"), \
-             patch("eneru.multi_ups.run_command") as mock_run:
+             patch("eneru.multi_ups.run_command") as mock_run, \
+             patch("eneru.multi_ups.write_shutdown_marker") as mock_marker:
             coord._handle_local_shutdown("UPS1")
 
         mock_run.assert_not_called()
+        # ISS-015: the SHUTDOWN_SEQUENCE_COMPLETE recovery marker must NOT be
+        # written when the poweroff was skipped — otherwise the next boot logs a
+        # false "Recovered" though the host never powered off. The command is now
+        # validated BEFORE the marker write (the single-UPS path already did).
+        mock_marker.assert_not_called()
         assert any("local_shutdown.command is empty" in line for line in logs)
+
+    @pytest.mark.unit
+    def test_real_shutdown_empty_command_notifies_incomplete(self, tmp_path):
+        """ISS-015: with a notification worker, the coordinator's empty-command
+        branch sends an 'Incomplete' failure notification (parity with the
+        single-UPS path) so operators learn the host is still up."""
+        config = _coord_config(
+            tmp_path,
+            behavior=BehaviorConfig(dry_run=False),
+            local_shutdown=LocalShutdownConfig(enabled=True, command="   "),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        worker = MagicMock()
+        coord._notification_worker = worker
+
+        with patch("eneru.multi_ups.time.sleep"), \
+             patch("eneru.multi_ups.run_command") as mock_run, \
+             patch("eneru.multi_ups.write_shutdown_marker") as mock_marker:
+            coord._handle_local_shutdown("UPS1")
+
+        mock_run.assert_not_called()
+        mock_marker.assert_not_called()
+        # An 'Incomplete' failure notification is emitted so operators learn the
+        # host is still up (it follows the optimistic 'shutting down' message the
+        # coordinator sends before command validation).
+        bodies = [call.args[0] for call in worker.send.call_args_list]
+        assert any("Incomplete" in body for body in bodies)
 
     @pytest.mark.unit
     def test_disabled_local_shutdown_clears_flag(self, tmp_path):

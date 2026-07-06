@@ -27,6 +27,13 @@ Think of it like `/etc/passwd` + `/etc/shadow` for the API:
   now so v7.0 can add `operator`/`viewer` RBAC without a migration; until then,
   every authenticated principal is an admin and non-admin roles are rejected.
 
+## Transport security
+
+The API is plain HTTP, so passwords and bearer tokens are sent unencrypted over
+the wire. Keep `api.bind` on loopback and, if the API must be reachable off-host,
+front it with a TLS reverse proxy — see the "Transport security" section in
+`observability-api.md`. The daemon warns at startup on any non-loopback bind.
+
 ## Requirements
 
 The store needs the `bcrypt` package. The deb package and the container image

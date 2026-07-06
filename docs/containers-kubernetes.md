@@ -387,7 +387,12 @@ remote_servers entry.
 
 The Kubernetes examples under `deploy/kubernetes/` are remote-only.
 They run as UID 10001, mount config through a ConfigMap, mount SSH
-keys through a Secret, and use HTTP probes:
+keys through a Secret, and use HTTP probes. Unlike the `docker run`
+snippets above, these committed manifests pin an explicit image version
+(not `:latest`) because they're meant to be `kubectl apply`'d as-is —
+bump the tag deliberately on upgrade. `remote-pod.yaml` reuses the
+`eneru-config` ConfigMap defined in `remote-deployment.yaml`, so apply
+the deployment (or copy that ConfigMap) first:
 
 ```bash
 kubectl apply -f deploy/kubernetes/remote-deployment.yaml

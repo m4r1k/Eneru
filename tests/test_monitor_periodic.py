@@ -38,6 +38,7 @@ def _make_monitor(cfg, store=None, *, coordinator_mode=False):
     mon.state = MonitorState()
     mon._stats_store = store
     mon._coordinator_mode = coordinator_mode
+    mon._notification_worker = None
     mon._last_health_update_mono = None
     mon._self_test_pending_id = None
     mon._self_test_poll_due_mono = None
@@ -106,6 +107,7 @@ class TestRunPeriodicTasks:
                    "reports:\n  enabled: true\n  daily: true\n")
         mon = _make_monitor(cfg, store)
         mon._update_battery_health_periodic = lambda *a: None
+        mon._notification_worker = object()  # ISS-023: reports need a worker
         seen = {}
 
         def _fake_reports(c, s, name, enq, **k):
@@ -132,6 +134,7 @@ class TestRunPeriodicTasks:
         cfg = _cfg("ups:\n  name: U@h\nreports:\n  enabled: true\n  daily: true\n")
         mon = _make_monitor(cfg, store)
         mon._update_battery_health_periodic = lambda *a: None
+        mon._notification_worker = object()  # ISS-023: reports need a worker
 
         def boom(*a, **k):
             raise RuntimeError("report-boom")

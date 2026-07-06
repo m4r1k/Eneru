@@ -83,7 +83,10 @@ where = ["src"]
 # regardless of install method (pip vs deb/rpm).
 "eneru.completion" = ["*.bash", "*.zsh", "*.fish"]
 # Ship the dashboard assets so importlib.resources can serve them (pip path).
-"eneru.web" = ["*.html", "*.css", "*.js"]
+# ISS-011: *.svg is required for favicon.svg (added v6.1.4, referenced by
+# index.html) — without it every wheel/pip install and the official OCI image
+# 404s the favicon while deb/rpm (nfpm) ship it.
+"eneru.web" = ["*.html", "*.css", "*.js", "*.svg"]
 
 [tool.setuptools.dynamic]
 # Resolve directly from src/eneru/version.py — pointing at
@@ -91,21 +94,12 @@ where = ["src"]
 # so any future top-level import added there could break wheel builds.
 version = {attr = "eneru.version.__version__"}
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-addopts = "-v --tb=short --strict-markers"
-markers = [
-    "unit: Unit tests (fast, isolated)",
-    "integration: Integration tests (may require external services)",
-    "slow: Slow tests",
-]
-filterwarnings = [
-    "ignore::DeprecationWarning",
-]
+# ISS-049: pytest configuration lives in pytest.ini (authoritative). A
+# [tool.pytest.ini_options] block here was dead (pytest.ini takes precedence)
+# AND contradicted it — it re-added the deliberately-removed blanket
+# `ignore::DeprecationWarning` and was missing markers — so it would have
+# silently changed test behavior the moment pytest.ini was removed. Keep the
+# config in one place.
 
 [tool.coverage.run]
 source = ["src/eneru"]

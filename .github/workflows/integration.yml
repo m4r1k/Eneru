@@ -23,10 +23,18 @@ on:
 env:
   NFPM_VERSION: "2.41.3"
 
+# ISS-042: least-privilege token. Integration builds deb/rpm/wheel and smoke-
+# tests them across OSes; it reads the repo and pulls public images but never
+# writes releases, packages, or pages.
+permissions:
+  contents: read
+
 jobs:
   # Build packages once, then test on multiple OSes
   build-packages:
     runs-on: ubuntu-latest
+    # ISS-042: bound a hung build instead of the 6h default.
+    timeout-minutes: 30
     outputs:
       version: ${{ steps.version.outputs.VERSION }}
     steps:

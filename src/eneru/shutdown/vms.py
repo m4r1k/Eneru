@@ -39,6 +39,13 @@ class VMShutdownMixin:
                 exit_code, stdout, stderr = run_command(["virsh", "shutdown", vm])
                 if stdout.strip():
                     self._log_message(f"    {stdout.strip()}")
+                # ISS-040: surface a failed shutdown request instead of moving on
+                # silently (the wait loop below still force-destroys stragglers).
+                if exit_code != 0:
+                    detail = f": {stderr.strip()[:200]}" if stderr and stderr.strip() else ""
+                    self._log_message(
+                        f"  ⚠️  virsh shutdown {vm} returned rc={exit_code}{detail}"
+                    )
 
         if self.config.behavior.dry_run:
             return
@@ -91,6 +98,11 @@ class VMShutdownMixin:
             self._log_message("  ⚠️  Timeout reached. Force destroying remaining VMs.")
             for vm in remaining_vms:
                 self._log_message(f"  ⚡  Force destroying VM: {vm}")
-                run_command(["virsh", "destroy", vm])
+                rc, _, err = run_command(["virsh", "destroy", vm])
+                if rc != 0:
+                    detail = f": {err.strip()[:200]}" if err and err.strip() else ""
+                    self._log_message(
+                        f"  ⚠️  virsh destroy {vm} returned rc={rc}{detail}"
+                    )
 
         self._log_message("  ✅  All VMs shutdown complete")

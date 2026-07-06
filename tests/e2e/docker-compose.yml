@@ -66,21 +66,23 @@ services:
     networks:
       - eneru-e2e
 
-  # Target containers that Eneru will stop during shutdown sequence
+  # Target containers that Eneru will stop during shutdown sequence.
+  # ISS-064: pinned to specific tags (not rolling :alpine / :latest) so PR CI
+  # is reproducible — matches the mqtt-broker pin below. Bump deliberately.
   target-nginx:
-    image: nginx:alpine
+    image: nginx:1.27-alpine
     container_name: eneru-target-nginx
     networks:
       - eneru-e2e
 
   target-redis:
-    image: redis:alpine
+    image: redis:7.4-alpine
     container_name: eneru-target-redis
     networks:
       - eneru-e2e
 
   target-alpine:
-    image: alpine:latest
+    image: alpine:3.20
     container_name: eneru-target-alpine
     command: ["sleep", "infinity"]
     networks:

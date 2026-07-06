@@ -14,7 +14,107 @@ from eneru import (
     UnmountConfig,
 )
 from eneru import utils as eneru_utils
-from eneru.shutdown.remote import RemoteShutdownResult
+from eneru.shutdown.remote import RemoteShutdownResult, loopback_poweroff_sent
+
+
+class TestLoopbackPoweroffSent:
+    """ISS-005: the shared predicate the monitor and redundancy loopback paths
+    both use to decide whether the delegated host poweroff was delivered. Unlike
+    RemoteShutdownResult.success it ignores Phase-A drain failures."""
+
+    @pytest.mark.unit
+    def test_true_when_poweroff_delivered(self):
+        result = RemoteShutdownResult(
+            server="host-loopback", host="127.0.0.1", shutdown_sent=True,
+        )
+        assert loopback_poweroff_sent(result) is True
+
+    @pytest.mark.unit
+    def test_true_even_when_phase_a_crashed_or_errored(self):
+        """The poweroff went out; a Phase-A drain crash/error must NOT flip the
+        predicate to False (that is the exact monitor/redundancy divergence)."""
+        crashed = RemoteShutdownResult(
+            server="host-loopback", host="127.0.0.1",
+            shutdown_sent=True, crashed=True, error="drain crashed",
+        )
+        assert crashed.success is False          # success is stricter
+        assert loopback_poweroff_sent(crashed) is True
+
+    @pytest.mark.unit
+    def test_false_when_poweroff_not_sent(self):
+        result = RemoteShutdownResult(
+            server="host-loopback", host="127.0.0.1",
+            shutdown_sent=False, error="ssh failed",
+        )
+        assert loopback_poweroff_sent(result) is False
+
+    @pytest.mark.unit
+    def test_false_when_timed_out(self):
+        result = RemoteShutdownResult(
+            server="host-loopback", host="127.0.0.1",
+            shutdown_sent=True, timed_out=True,
+        )
+        assert loopback_poweroff_sent(result) is False
+
+    @pytest.mark.unit
+    def test_redundancy_uses_the_shared_helper(self):
+        """Convergence guard: redundancy must call the shared module helper, not
+        re-introduce a private copy that can drift from the monitor path."""
+        import eneru.redundancy as redundancy
+        assert redundancy.loopback_poweroff_sent is loopback_poweroff_sent
+        assert not hasattr(
+            redundancy.RedundancyGroupExecutor, "_loopback_poweroff_sent"
+        )
+
+
+class TestSelectLoopbackResults:
+    """ISS-013: the loopback-result selector shared by the monitor and
+    redundancy delegated-shutdown paths — previously a verbatim inline
+    list-comprehension copy-pasted in both."""
+
+    @staticmethod
+    def _server(**kw):
+        from types import SimpleNamespace
+        base = dict(enabled=True, is_host_loopback=True,
+                    name=None, host="127.0.0.1")
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    @pytest.mark.unit
+    def test_matches_enabled_loopback_by_name_host_pair(self):
+        from eneru.shutdown.remote import select_loopback_results
+        srv = self._server(name="lo", host="127.0.0.1")
+        r_match = RemoteShutdownResult(
+            server="lo", host="127.0.0.1", shutdown_sent=True)
+        r_other = RemoteShutdownResult(
+            server="other", host="10.0.0.9", shutdown_sent=True)
+        assert select_loopback_results([srv], [r_match, r_other]) == [r_match]
+
+    @pytest.mark.unit
+    def test_falls_back_to_host_when_name_unset(self):
+        from eneru.shutdown.remote import select_loopback_results
+        srv = self._server(name=None, host="127.0.0.1")
+        r = RemoteShutdownResult(
+            server="127.0.0.1", host="127.0.0.1", shutdown_sent=True)
+        assert select_loopback_results([srv], [r]) == [r]
+
+    @pytest.mark.unit
+    def test_excludes_disabled_and_non_loopback_servers(self):
+        from eneru.shutdown.remote import select_loopback_results
+        disabled = self._server(name="lo", host="127.0.0.1", enabled=False)
+        not_lo = self._server(name="lo", host="127.0.0.1",
+                              is_host_loopback=False)
+        r = RemoteShutdownResult(
+            server="lo", host="127.0.0.1", shutdown_sent=True)
+        assert select_loopback_results([disabled, not_lo], [r]) == []
+
+    @pytest.mark.unit
+    def test_monitor_and_redundancy_use_the_shared_helper(self):
+        import eneru.monitor as monitor
+        import eneru.redundancy as redundancy
+        from eneru.shutdown.remote import select_loopback_results
+        assert monitor.select_loopback_results is select_loopback_results
+        assert redundancy.select_loopback_results is select_loopback_results
 
 
 class TestRemoteActionTemplates:

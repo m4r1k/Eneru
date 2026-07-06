@@ -56,13 +56,15 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
+        # ISS-043/044: same single source of truth as validate.yml — the
+        # release gate must run the identical dependency set (incl. mqtt) it
+        # ships, not a narrower hand-picked subset.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[notifications,auth]"
-          pip install pytest pytest-cov pytest-mock
+          pip install -e ".[dev,notifications,auth,mqtt]"
 
       - name: Run tests
-        run: pytest -v
+        run: pytest -v --timeout=120
 
       - name: Validate configuration
         run: python -m eneru validate --config examples/config-reference.yaml
@@ -76,16 +78,19 @@ jobs:
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             # Manual trigger — use input version
             VERSION="$INPUT_VERSION"
-            # Strict allow-list: the version is later interpolated into
-            # `sed` and other shell calls. Reject anything that isn't a
-            # PEP-440-style release or pre-release (rc/alpha/beta).
-            if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){1,2}(-(rc|alpha|beta)[0-9]+)?$'; then
-              echo "Invalid version: $VERSION" >&2
-              exit 1
-            fi
           else
             # Release trigger — extract from tag (e.g., v4.3.0 -> 4.3.0)
             VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
+
+          # ISS-064: validate BOTH paths with the same strict allow-list. The
+          # version is interpolated into `sed` and other shell calls below, and
+          # a hand-typed or mis-pushed tag (e.g. `v6.1.6 `, `v6.1.6-foo`) must
+          # be rejected here rather than corrupting a package name downstream.
+          # PEP-440-style release or pre-release (rc/alpha/beta) only.
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){1,2}(-(rc|alpha|beta)[0-9]+)?$'; then
+            echo "Invalid version: $VERSION" >&2
+            exit 1
           fi
 
           # Get short commit hash for code version
@@ -203,22 +208,49 @@ jobs:
         run: |
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
 
+      # ISS-064: decide up front whether gh-pages exists rather than relying on
+      # `continue-on-error` on the checkout. With continue-on-error, a TRANSIENT
+      # checkout failure (network, rate limit) on an existing branch would be
+      # masked, the next step would init a fresh empty gh-pages, and the final
+      # push would OVERWRITE every published package. An explicit ls-remote gate
+      # makes "branch missing" the only path that initializes.
+      - name: Detect gh-pages branch
+        id: ghpages
+        run: |
+          # ISS-064: distinguish "branch genuinely missing" (ls-remote exit 2)
+          # from a transient/auth failure (exit 128). Only a true miss may
+          # initialize a fresh gh-pages; any other error ABORTS the release,
+          # because initializing on a transient error and then pushing would
+          # overwrite every published package.
+          set +e
+          git ls-remote --exit-code --heads \
+            "https://github.com/${{ github.repository }}.git" gh-pages >/dev/null 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif [ "$rc" -eq 2 ]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::git ls-remote for gh-pages failed (exit $rc); aborting to avoid overwriting published packages." >&2
+            exit 1
+          fi
+
       - name: Checkout gh-pages branch
+        if: steps.ghpages.outputs.exists == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           ref: gh-pages
           path: gh-pages
           fetch-depth: 0
-        continue-on-error: true
 
-      - name: Initialize gh-pages if needed
+      - name: Initialize gh-pages if missing
+        if: steps.ghpages.outputs.exists == 'false'
         run: |
-          if [ ! -d "gh-pages" ]; then
-            mkdir -p gh-pages
-            cd gh-pages
-            git init
-            git checkout -b gh-pages
-          fi
+          mkdir -p gh-pages
+          cd gh-pages
+          git init
+          git checkout -b gh-pages
 
       - name: Migrate pre-release packages to testing channel
         run: |
@@ -571,14 +603,18 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Stable Packages" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          ls -la gh-pages/deb/pool/main/*.deb >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "No stable deb packages"
-          ls -la gh-pages/rpm/*.rpm >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "No stable rpm packages"
+          # ISS-064: group the ls + fallback so the "No ... packages" line also
+          # lands in the step summary. With `ls >> SUMMARY || echo ...`, the
+          # fallback echoes to stdout (job log) instead, leaving a bare ``` ```
+          # block in the summary whenever a pool is empty.
+          { ls -la gh-pages/deb/pool/main/*.deb 2>/dev/null || echo "No stable deb packages"; } >> "$GITHUB_STEP_SUMMARY"
+          { ls -la gh-pages/rpm/*.rpm 2>/dev/null || echo "No stable rpm packages"; } >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Testing Packages" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          ls -la gh-pages/deb/pool/testing/*.deb >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "No testing deb packages"
-          ls -la gh-pages/rpm/testing/*.rpm >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "No testing rpm packages"
+          { ls -la gh-pages/deb/pool/testing/*.deb 2>/dev/null || echo "No testing deb packages"; } >> "$GITHUB_STEP_SUMMARY"
+          { ls -la gh-pages/rpm/testing/*.rpm 2>/dev/null || echo "No testing rpm packages"; } >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Package Repository" >> $GITHUB_STEP_SUMMARY

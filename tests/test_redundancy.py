@@ -658,24 +658,28 @@ class TestEvaluatorThreadLifecycle:
         executor = MagicMock()
         executor.shutdown.return_value = True
         stop_event = threading.Event()
+        # ISS-054: use a WIDE startup grace so the in-grace observation below
+        # sits far from the boundary. The old 0.5 s grace + 0.1 s observation
+        # could flip on a stalled CI runner: if the grace elapsed before the
+        # assertion ran, the first evaluation fired on the still-UNKNOWN
+        # members and the test failed spuriously. A 30 s grace makes the
+        # 0.2 s observation unraceable (pytest-timeout is the backstop). The
+        # post-grace "healthy members don't fire" path is covered separately
+        # by TestEvaluatorThreadLifecycle (grace=0, healthy quorum).
         ev = RedundancyGroupEvaluator(
             group, monitors, executor,
             stop_event=stop_event, logger=None, tick=0.05,
-            startup_grace_seconds=0.5,  # short grace for the test
+            startup_grace_seconds=30.0,
         )
         ev.start()
-        # Inside the grace window: no evaluation yet -> shutdown not called.
-        time.sleep(0.1)
-        executor.shutdown.assert_not_called()
-        # Before the grace expires, swap in healthy snapshots for both members.
-        for m in monitors.values():
-            with m.state._lock:
-                m.state.latest_update_time = time.time()
-                m.state.latest_status = "OL"
-        # Wait past the grace + a couple of ticks.
-        time.sleep(0.6)
-        stop_event.set()
-        ev.join(timeout=2)
+        try:
+            # Deep inside the grace window: no evaluation has run, so the
+            # spurious all-UNKNOWN startup state cannot fire a shutdown.
+            time.sleep(0.2)
+            executor.shutdown.assert_not_called()
+        finally:
+            stop_event.set()
+            ev.join(timeout=2)
         executor.shutdown.assert_not_called()
 
     @pytest.mark.unit

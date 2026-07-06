@@ -21,7 +21,7 @@ from eneru import (
     RemoteServerConfig, LocalShutdownConfig, MonitorState,
 )
 from eneru.monitor import UPSGroupMonitor
-from eneru.shutdown.remote import RemoteShutdownResult
+from eneru.shutdown.remote import RemotePreShutdownResult, RemoteShutdownResult
 
 
 def _make_delegated_monitor(
@@ -166,6 +166,39 @@ class TestDelegatedShutdownSequence:
         assert "containers" not in calls
         assert "sync" not in calls
         assert "unmount" not in calls
+
+    @pytest.mark.unit
+    def test_pre_command_failure_surfaces_partial_drain_warning(self, tmp_path):
+        """cubic P2: an ordinary pre-shutdown command that exits non-zero
+        increments pre_commands.failed WITHOUT setting crashed/error, so
+        RemoteShutdownResult.success stays True. The delegated path must still
+        warn about the partial drain (and still complete, since the poweroff
+        was delivered) rather than silently logging SEQUENCE COMPLETE."""
+        monitor = _make_delegated_monitor(tmp_path)
+        logs = []
+        monitor._log_message = lambda m: logs.append(m)
+        monitor._shutdown_vms = lambda: None
+        monitor._shutdown_containers = lambda: None
+        monitor._sync_filesystems = lambda: None
+        monitor._unmount_filesystems = lambda: None
+
+        def remote_spy():
+            r = RemoteShutdownResult(
+                server="host-loopback", host="127.0.0.1",
+                shutdown_sent=True, dry_run=monitor.config.behavior.dry_run,
+                pre_commands=RemotePreShutdownResult(failed=1),
+            )
+            assert r.success is True  # the exact case cubic flagged
+            return [r]
+        monitor._shutdown_remote_servers = remote_spy
+
+        with _patch_runtime("container (Docker)"):
+            monitor._execute_shutdown_sequence()
+
+        assert any(
+            "partially failed" in m and "pre-shutdown command" in m
+            for m in logs
+        ), logs
 
     @pytest.mark.unit
     def test_still_runs_remote_servers_phase(self, tmp_path):
@@ -351,10 +384,11 @@ class TestDelegatedShutdownSequence:
 
         with _patch_runtime("container (Docker)"), \
              patch("eneru.monitor.command_exists", side_effect=fake_exists):
-            with pytest.raises(SystemExit) as exc_info:
+            # ISS-006: RuntimeError (not SystemExit) so coordinator mode surfaces it.
+            with pytest.raises(RuntimeError) as exc_info:
                 monitor._check_dependencies()
 
-        assert exc_info.value.code == 1
+        assert "ssh" in str(exc_info.value)
 
     @pytest.mark.unit
     def test_delegated_shutdown_failure_does_not_mark_sequence_complete(self, tmp_path):
@@ -384,6 +418,48 @@ class TestDelegatedShutdownSequence:
         marker.assert_not_called()
         events_seen = [c.args[0] for c in event_log.call_args_list]
         assert "SHUTDOWN_SEQUENCE_COMPLETE" not in events_seen
+
+    @pytest.mark.unit
+    def test_delegated_poweroff_sent_with_drain_failure_marks_complete(
+        self, tmp_path,
+    ):
+        """ISS-005: a Phase-A drain crash (success=False because crashed/error)
+        while the Phase-C poweroff WAS delivered (shutdown_sent=True) must be
+        treated as a COMPLETE sequence — write the marker, log
+        SHUTDOWN_SEQUENCE_COMPLETE, warn about the partial drain — not reported
+        as a failed poweroff. Before the fix, monitor used all(r.success) and
+        misclassified this delivered poweroff as incomplete."""
+        monitor = _make_delegated_monitor(tmp_path, dry_run=False)
+        monitor._shutdown_remote_servers = lambda: [
+            RemoteShutdownResult(
+                server="host-loopback",
+                host="127.0.0.1",
+                shutdown_sent=True,   # Phase-C poweroff delivered
+                crashed=True,         # but a Phase-A pre-action crashed
+                error="pre-action drain crashed",
+            )
+        ]
+        event_log = MagicMock()
+        monitor._stats_store.log_event = event_log
+        monitor._log_message = MagicMock()
+        monitor._send_notification = MagicMock()
+
+        with _patch_runtime("container (Docker)"), \
+             patch("eneru.monitor.write_shutdown_marker") as marker:
+            monitor._execute_shutdown_sequence()
+
+        # Sequence recorded complete + recovery marker written.
+        marker.assert_called_once()
+        events_seen = [c.args[0] for c in event_log.call_args_list]
+        assert "SHUTDOWN_SEQUENCE_COMPLETE" in events_seen
+        # Partial drain surfaced as a warning, not a failure.
+        assert any(
+            "partially failed" in str(call.args[0]).lower()
+            for call in monitor._log_message.call_args_list
+        )
+        bodies = [call.args[0] for call in monitor._send_notification.call_args_list]
+        assert not any("Incomplete" in body for body in bodies)
+        assert any("Complete" in body for body in bodies)
 
     @pytest.mark.unit
     def test_delegated_shutdown_failure_clears_shutdown_flag(self, tmp_path):

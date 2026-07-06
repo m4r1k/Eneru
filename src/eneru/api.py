@@ -1,5 +1,6 @@
 """Embedded HTTP API, Prometheus endpoint, and (v6.0) authenticated write-path."""
 
+import collections
 import importlib.resources
 import json
 import math
@@ -35,6 +36,62 @@ MAX_BODY_BYTES = 64 * 1024
 # Bound reads from each client socket. Without this, a client can declare a
 # small Content-Length and drip bytes forever, pinning a non-daemon handler.
 REQUEST_READ_TIMEOUT_SECONDS = 10
+
+# ISS-032: in-memory per-source-IP login throttle. After LOGIN_FAIL_MAX failed
+# logins within LOGIN_FAIL_WINDOW_SECONDS, further attempts from that IP get 429
+# until the window rolls off. Process-local (resets on restart) and best-effort
+# behind a reverse proxy (keyed on the immediate peer), but it defeats naive
+# credential-stuffing against the daemon's own listener.
+LOGIN_FAIL_WINDOW_SECONDS = 60
+LOGIN_FAIL_MAX = 10
+# Cap the tracked-IP table so an attacker rotating source IPs (direct bind)
+# can't grow it without bound; on overflow we sweep expired buckets, then evict
+# the oldest-inserted key.
+LOGIN_TRACKED_IPS_MAX = 4096
+_login_failures: "collections.OrderedDict[str, collections.deque]" = (
+    collections.OrderedDict()
+)
+_login_failures_lock = threading.Lock()
+
+
+def _login_is_blocked(ip: str) -> bool:
+    """True if ``ip`` has hit the failed-login cap within the window."""
+    now = time.monotonic()
+    cutoff = now - LOGIN_FAIL_WINDOW_SECONDS
+    with _login_failures_lock:
+        dq = _login_failures.get(ip)
+        if not dq:
+            return False
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        if not dq:
+            _login_failures.pop(ip, None)
+            return False
+        return len(dq) >= LOGIN_FAIL_MAX
+
+
+def _login_record_failure(ip: str) -> None:
+    now = time.monotonic()
+    cutoff = now - LOGIN_FAIL_WINDOW_SECONDS
+    with _login_failures_lock:
+        dq = _login_failures.get(ip)
+        if dq is None:
+            # Bound memory: sweep fully-expired buckets, then evict oldest.
+            if len(_login_failures) >= LOGIN_TRACKED_IPS_MAX:
+                for k in [k for k, d in _login_failures.items()
+                          if not d or d[-1] < cutoff]:
+                    _login_failures.pop(k, None)
+                while len(_login_failures) >= LOGIN_TRACKED_IPS_MAX:
+                    _login_failures.popitem(last=False)
+            dq = _login_failures[ip] = collections.deque()
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        dq.append(now)
+
+
+def _login_clear(ip: str) -> None:
+    with _login_failures_lock:
+        _login_failures.pop(ip, None)
 
 # Dashboard static assets (served from the eneru.web package). Only these flat
 # names are servable; the strict name check below makes path traversal impossible.
@@ -86,6 +143,11 @@ class APIForbidden(Exception):
     """Raised when an action is not permitted in the current mode (403)."""
 
 
+class APILengthRequired(Exception):
+    """Raised when a body request omits Content-Length, e.g. a chunked
+    Transfer-Encoding the fixed-length reader can't bound (411)."""
+
+
 class SessionManager:
     """In-memory bearer-token sessions with a fixed TTL.
 
@@ -120,13 +182,30 @@ class SessionManager:
 
     def validate(self, token: str) -> Optional[Dict[str, Any]]:
         now = time.time()
+        if not isinstance(token, str) or not token:
+            return None
+        # ISS-061: match the presented token against stored session tokens with
+        # secrets.compare_digest so validation time doesn't leak how much of a
+        # guessed token was correct (a plain dict lookup compares byte-by-byte
+        # and short-circuits). Compare on BYTES: compare_digest raises
+        # TypeError on an ASCII-vs-non-ASCII str comparison, and header values
+        # decode to arbitrary latin-1, so a str compare would turn a bad token
+        # into a 500 instead of a clean 401. Session counts are tiny, so the
+        # linear scan is negligible.
+        token_bytes = token.encode("utf-8", "surrogatepass")
         with self._lock:
-            entry = self._sessions.get(token)
-            if entry is None:
+            matched_key = None
+            for stored in self._sessions:
+                if secrets.compare_digest(
+                    stored.encode("utf-8", "surrogatepass"), token_bytes
+                ):
+                    matched_key = stored
+                    break
+            if matched_key is None:
                 return None
-            principal, expiry = entry
+            principal, expiry = self._sessions[matched_key]
             if expiry < now:
-                del self._sessions[token]
+                del self._sessions[matched_key]
                 return None
             return principal
 
@@ -284,6 +363,14 @@ class EneruAPIServer:
         # closed, and anonymous /api/v1/config responses are sanitized.
         auth_on = _auth_is_active(self.config)
         if not _is_loopback_bind(self.config.api.bind):
+            # ISS-009: the API is HTTP-only, so an off-loopback bind sends login
+            # passwords and bearer tokens in cleartext. Say so explicitly and
+            # point at a TLS reverse proxy (see docs/observability-api.md).
+            self.log_fn(
+                f"⚠️  API bound to {addr[0]} over PLAIN HTTP — credentials and "
+                "tokens are sent unencrypted. Front it with a TLS reverse proxy "
+                "(nginx/caddy) or keep the bind on loopback."
+            )
             if auth_on:
                 self.log_fn(
                     f"ℹ️  API bound to {addr[0]} with auth enabled. Read endpoints "
@@ -329,6 +416,16 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     api_sessions: Any = None
     api_log: Any = None
 
+    # ISS-007: bound the request-line/header read. BaseHTTPRequestHandler applies
+    # this to the connection socket in setup(); without it, handle_one_request's
+    # rfile.readline() blocks forever on a client that connects and never sends a
+    # complete request line (slowloris). With daemon_threads=False that stalled
+    # worker makes server_close() (called from EneruAPIServer.stop() on SIGTERM)
+    # join it indefinitely, hanging daemon shutdown until systemd SIGKILLs. On
+    # timeout handle_one_request sets close_connection and the thread exits. The
+    # body read (below) restores this class value via previous_timeout.
+    timeout = REQUEST_READ_TIMEOUT_SECONDS
+
     server_version = "EneruAPI/1.0"
 
     def do_GET(self):  # noqa: N802 - stdlib hook
@@ -342,6 +439,25 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):  # noqa: N802 - stdlib hook
         self._dispatch(self._route_delete)
+
+    def do_HEAD(self):  # noqa: N802 - stdlib hook
+        # ISS-061: load balancers and uptime checks often probe with HEAD.
+        # Support it headers-only for the liveness/readiness endpoints (which
+        # is where a HEAD probe is meaningful); other paths get 405 so we
+        # don't ship a body-less 200 for routes that imply a payload.
+        path = urlparse(self.path).path
+        self._head_only = True
+        try:
+            if path in ("/health", "/ready"):
+                self._dispatch(self._route)
+            else:
+                # Still HEAD semantics: headers only, no body (RFC 9110).
+                self._finish(
+                    405, "application/json",
+                    self._error("METHOD_NOT_ALLOWED",
+                                "HEAD is only supported for /health and /ready"))
+        finally:
+            self._head_only = False
 
     def log_message(self, fmt, *args):  # noqa: A003 - stdlib hook
         return
@@ -362,6 +478,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         except APIForbidden as exc:
             status, content_type, body = (
                 403, "application/json", self._error("FORBIDDEN", str(exc)))
+        except APILengthRequired as exc:
+            status, content_type, body = (
+                411, "application/json",
+                self._error("LENGTH_REQUIRED", str(exc)))
         except Exception:
             status, content_type, body = (
                 500, "application/json",
@@ -395,6 +515,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if status == 401:
             self.send_header("WWW-Authenticate", "Bearer")
         self.end_headers()
+        # ISS-061: a HEAD response carries the same headers (incl. the
+        # would-be Content-Length) but no body, per RFC 9110.
+        if getattr(self, "_head_only", False):
+            return
         self.wfile.write(raw)
 
     def _serve_static(self, path: str) -> Optional[Tuple[str, bytes]]:
@@ -557,6 +681,14 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
     def _read_json_body(self) -> Dict[str, Any]:
         """Read + parse a JSON object body, bounded by ``MAX_BODY_BYTES``."""
+        # ISS-061: the body reader is strictly Content-Length framed. A
+        # chunked Transfer-Encoding has no Content-Length, so it would read as
+        # an empty body and silently mis-parse; reject it with 411 instead.
+        te = (self.headers.get("Transfer-Encoding") or "").lower()
+        if "chunked" in te:
+            raise APILengthRequired(
+                "chunked Transfer-Encoding is not supported; "
+                "send a Content-Length-framed body")
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -643,7 +775,17 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
         if path == "/ready":
             payload = readiness(self.api_source)
-            return (200 if payload["ready"] else 503), "application/json", payload
+            status = 200 if payload["ready"] else 503
+            # ISS-030: the full readiness payload lists UPS/remote names and
+            # not-ready reasons (topology disclosure). Under require_for_reads an
+            # unauthenticated probe gets only the boolean; authenticated callers
+            # (and the reads-open default) keep the detail. Probes never get 401.
+            auth_cfg = getattr(self.api_config.api, "auth", None)
+            if (self._auth_active()
+                    and getattr(auth_cfg, "require_for_reads", False)
+                    and self._authenticate_request(strict=False) is None):
+                return status, "application/json", {"ready": payload["ready"]}
+            return status, "application/json", payload
 
         # Auth bootstrap must stay open even when require_for_reads=true;
         # otherwise the dashboard cannot learn that it should show the login
@@ -1051,6 +1193,14 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         # background dashboard poll has refreshed /auth/state.
         if not self._auth_active(refresh=True):
             return 404, "application/json", self._not_found("Authentication is disabled")
+        client_addr = getattr(self, "client_address", None)
+        client_ip = client_addr[0] if client_addr else "?"
+        # ISS-032: reject brute-force bursts before touching the auth backend.
+        if _login_is_blocked(client_ip):
+            self._audit(None, "login", client_ip, "throttled")
+            return 429, "application/json", self._error(
+                "TOO_MANY_ATTEMPTS",
+                "too many failed login attempts; try again shortly")
         data = self._read_json_body()
         username = data.get("username")
         password = data.get("password")
@@ -1064,7 +1214,14 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             return 503, "application/json", self._error(
                 "AUTH_UNAVAILABLE", "authentication backend unavailable")
         if principal is None:
+            # ISS-032: count the failure (per IP) and audit it so credential-
+            # stuffing is both throttled and visible. Audit the SOURCE IP, not
+            # the attempted username -- a user who fat-fingers a password into
+            # the username field would otherwise have it persisted verbatim.
+            _login_record_failure(client_ip)
+            self._audit(None, "login", client_ip, "failed")
             raise APIUnauthorized("invalid credentials")
+        _login_clear(client_ip)  # ISS-032: reset the counter on success
         token = self.api_sessions.create(principal)
         return 200, "application/json", {
             "token": token,
@@ -1094,10 +1251,18 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             return 503, "application/json", self._error(
                 "RELOAD_UNAVAILABLE", "config reload is not supported here")
         report = source.reload_config()
+        reloaded = report.get("reloaded")
         self._audit(principal, "config", "reload",
-                    "ok" if report.get("reloaded") else "rejected")
-        status = 200 if report.get("reloaded") else 400
-        return status, "application/json", report
+                    "ok" if reloaded else "rejected")
+        if reloaded:
+            return 200, "application/json", report
+        # ISS-028: return the standard {"error":{code,message}} envelope on
+        # rejection (with the full reload report under `details`) instead of the
+        # raw report dict, so clients get a consistent error shape.
+        body = self._error(
+            "RELOAD_REJECTED", "config reload rejected; running config kept")
+        body["details"] = report
+        return 400, "application/json", body
 
     # ----- UPS control (v6.0) -----
 
@@ -1372,8 +1537,15 @@ def _parse_int_param(
     *,
     minimum: Optional[int] = None,
     maximum: Optional[int] = None,
-) -> int:
-    """Return one integer query parameter or raise ``APIBadRequest``."""
+) -> Optional[int]:
+    """Return one integer query parameter or raise ``APIBadRequest``.
+
+    Returns None when the param is absent and ``default`` is None (ISS-029)."""
+    # ISS-029: a caller may pass default=None to mean "optional / absent". Return
+    # None rather than stringifying None -> int("None") -> a spurious 400 (the
+    # latent foot-gun of the assembled-handler bug class).
+    if name not in qs and default is None:
+        return None
     raw = (qs.get(name) or [str(default)])[0]
     try:
         value = int(raw)

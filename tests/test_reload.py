@@ -353,6 +353,79 @@ def test_coordinator_reload_config(tmp_path):
 
 
 @pytest.mark.unit
+def test_reload_propagates_to_redundancy_executor(tmp_path):
+    """ISS-004: a live behavior.dry_run toggle must reach the redundancy
+    executor's private Config, not just the per-UPS monitors."""
+    from eneru.redundancy import RedundancyGroupExecutor
+    body = ("behavior:\n  dry_run: true\n"
+            "ups:\n  - name: U1@h\n  - name: U2@h\n"
+            "redundancy_groups:\n  - name: rg\n    ups_sources: [U1@h, U2@h]\n")
+    p = tmp_path / "a.yaml"
+    cfg = _load(_write(p, body))
+    coord = object.__new__(MultiUPSCoordinator)
+    coord.config = cfg
+    coord._monitors = []
+    coord._log = lambda *_: None
+    executor = RedundancyGroupExecutor(cfg.redundancy_groups[0], base_config=cfg)
+    coord._redundancy_executors = {"rg": executor}
+    assert executor.config.behavior.dry_run is True
+
+    _write(p, body.replace("dry_run: true", "dry_run: false"))
+    report = coord.reload_config()
+
+    assert report["reloaded"]
+    assert coord.config.behavior.dry_run is False
+    # The executor must see the new value AND share the coordinator's object.
+    assert executor.config.behavior.dry_run is False
+    assert executor.config.behavior is coord.config.behavior
+    # The full contract of _repoint_executor_configs: every shared section is
+    # re-pointed to the coordinator's current object, not just behavior.
+    assert executor.config.notifications is coord.config.notifications
+    assert executor.config.local_shutdown is coord.config.local_shutdown
+    assert executor.config.logging is coord.config.logging
+
+
+@pytest.mark.unit
+def test_perform_reload_is_serialized(tmp_path, monkeypatch):
+    """ISS-027: concurrent perform_reload calls (SIGHUP + API) must not overlap
+    their apply_reload bodies."""
+    import time
+    p = tmp_path / "a.yaml"
+    _write(p, "ups:\n  - name: U1@h\n")
+    primary = _load(str(p))
+
+    counters = {"cur": 0, "max": 0}
+    guard = threading.Lock()
+    real_apply = reloadmod.apply_reload
+
+    def slow_apply(*args, **kwargs):
+        with guard:
+            counters["cur"] += 1
+            counters["max"] = max(counters["max"], counters["cur"])
+        try:
+            time.sleep(0.05)
+            return real_apply(*args, **kwargs)
+        finally:
+            with guard:
+                counters["cur"] -= 1
+
+    monkeypatch.setattr(reloadmod, "apply_reload", slow_apply)
+    threads = [
+        threading.Thread(
+            target=lambda: reloadmod.perform_reload(primary, [], str(p))
+        )
+        for _ in range(4)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # The lock must have kept every apply_reload body strictly non-overlapping.
+    assert counters["max"] == 1
+
+
+@pytest.mark.unit
 def test_monitor_apply_subsystem_reload_bounces_workers():
     mon = object.__new__(UPSGroupMonitor)
     mon._coordinator_mode = False

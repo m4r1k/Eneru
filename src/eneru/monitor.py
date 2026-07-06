@@ -38,6 +38,7 @@ from eneru.lifecycle import (
     coalesce_recovered_with_prev_shutdown,
     delete_shutdown_marker,
     delete_upgrade_marker,
+    poweroff_command_parts,
     read_shutdown_marker,
     read_upgrade_marker,
     write_shutdown_marker,
@@ -46,9 +47,18 @@ from eneru.utils import run_command, command_exists, is_numeric, format_seconds
 from eneru.shutdown.vms import VMShutdownMixin
 from eneru.shutdown.containers import ContainerShutdownMixin
 from eneru.shutdown.filesystems import FilesystemShutdownMixin
-from eneru.shutdown.remote import RemoteShutdownMixin
+from eneru.shutdown.remote import (
+    RemoteShutdownMixin,
+    loopback_poweroff_sent,
+    select_loopback_results,
+)
 from eneru.health.voltage import VoltageMonitorMixin
 from eneru.health.battery import BatteryMonitorMixin
+# ISS-017: single source of truth for the connection-retry cadence. The poll
+# loop waits this many seconds between failed attempts, and health_model sizes
+# the pre-grace stale window off the same value — import it so the two can't
+# drift (health_model is a leaf module: no import cycle).
+from eneru.health_model import RETRY_WAIT_SECONDS as CONNECTION_RETRY_WAIT_SECONDS
 
 SLOW_NUT_LOG_THRESHOLD_SECONDS = 2.0
 SLOW_NUT_LOG_RATE_LIMIT_SECONDS = 300.0
@@ -102,6 +112,18 @@ def compute_effective_order(
     return result
 
 
+class DependencyError(RuntimeError):
+    """A required external command is missing at startup (ISS-006).
+
+    Raised by _check_dependencies instead of sys.exit(1) so coordinator mode's
+    ``except Exception`` crash handler catches it (SystemExit would bypass it and
+    silently kill the per-group thread). run()'s FATAL handler treats this as an
+    ENVIRONMENT problem, not a runtime crash: it does NOT write the FATAL marker,
+    so the next start (after the operator installs the tool) is not misclassified
+    as "exited fatally".
+    """
+
+
 class UPSGroupMonitor(
     VMShutdownMixin,
     ContainerShutdownMixin,
@@ -150,6 +172,28 @@ class UPSGroupMonitor(
         self._shutdown_flag_path = Path(config.logging.shutdown_flag_file + sfx)
         self._shutdown_in_progress = False
         self._shutdown_flag_unusable = False
+        # ISS-001: True only while _execute_shutdown_sequence is running. In
+        # single-UPS mode the sequence AND the SIGTERM/SIGINT handler both run
+        # on the main thread, so a signal landing mid-sequence would otherwise
+        # sys.exit(0) and abort the host poweroff. _cleanup_and_exit consults
+        # this flag to decline exiting while a sequence is in flight.
+        self._shutdown_sequence_in_flight = False
+        # ISS-018 / ISS-022 / ISS-019: monotonic throttle timestamps. None means
+        # "never fired" -> always fire the first time. A 0.0 sentinel would be
+        # WRONG: time.monotonic()'s zero point is arbitrary (~boot time), so on a
+        # host up for less than the cooldown, `monotonic() - 0.0 > cooldown` is
+        # false and the first event is wrongly suppressed (this broke NUT-name
+        # autodiscovery on fresh CI runners). Compare against None instead.
+        self._last_ob_status_log_mono = None
+        self._last_name_diagnostic_mono = None
+        self._last_unknown_status_log_mono = None
+        self._last_unknown_status_logged = ""
+        # ISS-055: last distinct state-file persist error, so a recurring disk
+        # failure is logged once per cause instead of silently swallowed.
+        self._last_state_save_error: Optional[str] = None
+        # ISS-059: throttle the "re-trigger ignored" warning to once per 60 s
+        # (None sentinel so it fires on first use regardless of uptime).
+        self._last_retrigger_warn_mono: Optional[float] = None
         self._battery_history_path = Path(config.logging.battery_history_file + sfx)
         self._state_file_path = Path(config.logging.state_file + sfx)
         self._remote_health_path = remote_health_sidecar_path(self._state_file_path)
@@ -323,16 +367,19 @@ class UPSGroupMonitor(
             )
             # Slice 3: tag this exit so the next start emits
             # "🚀  Restarted (last instance exited fatally)" rather than
-            # a generic Started.
-            try:
-                from pathlib import Path
-                write_shutdown_marker(
-                    Path(self.config.statistics.db_directory),
-                    version=__version__, reason=REASON_FATAL,
-                )
-            except Exception:
-                # Marker write must never mask the original FATAL.
-                pass
+            # a generic Started. ISS-006: a missing-dependency at startup is an
+            # environment problem, not a runtime crash — skip the marker so the
+            # next (fixed) start isn't misclassified as "exited fatally".
+            if not isinstance(e, DependencyError):
+                try:
+                    from pathlib import Path
+                    write_shutdown_marker(
+                        Path(self.config.statistics.db_directory),
+                        version=__version__, reason=REASON_FATAL,
+                    )
+                except Exception:
+                    # Marker write must never mask the original FATAL.
+                    pass
             raise
 
     def _initialize(self):
@@ -496,7 +543,8 @@ class UPSGroupMonitor(
             self.config.notifications.enabled = False
             return
 
-        self._notification_worker = NotificationWorker(self.config)
+        self._notification_worker = NotificationWorker(
+            self.config, logger=self.logger)
         if self._notification_worker.start():
             if self._stats_store._conn is not None:
                 self._notification_worker.register_store(self._stats_store)
@@ -873,8 +921,14 @@ class UPSGroupMonitor(
 
         if missing:
             error_msg = f"❌  FATAL ERROR: Missing required commands: {', '.join(missing)}"
-            print(error_msg)
-            sys.exit(1)
+            # ISS-006: raise instead of sys.exit(1). In coordinator mode this
+            # runs on a per-group daemon thread; SystemExit derives from
+            # BaseException and would bypass _run_monitor's `except Exception`,
+            # killing the thread silently (no crash notification, no logger
+            # record). A RuntimeError is caught there and by run()'s FATAL
+            # handler (single-UPS), so the failure is always visible.
+            self._log_message(error_msg)
+            raise DependencyError(error_msg)
 
         if not command_exists("logger") and not self._is_container_runtime:
             self._log_message(
@@ -1210,28 +1264,32 @@ class UPSGroupMonitor(
             self._slow_nut_poll_notified = True
 
     def _wait_for_initial_connection(self):
-        """Wait for initial connection to NUT server."""
+        """Wait for initial connection to NUT server (interruptible)."""
         self._log_message(f"⏳  Checking initial connection to {self.config.ups.name}...")
 
         max_wait = 30
         wait_interval = 5
-        time_waited = 0
-        connected = False
+        attempts = max_wait // wait_interval
 
-        while time_waited < max_wait:
+        for attempt in range(attempts):
             success, _, _ = self._get_all_ups_data()
             if success:
-                connected = True
                 self._log_message("✅  Initial connection successful.")
-                break
-            time.sleep(wait_interval)
-            time_waited += wait_interval
+                return
+            # ISS-021: wait on the stop event (not time.sleep) so a SIGTERM
+            # during startup interrupts immediately instead of blocking up to
+            # ~30s; and never sleep after the final attempt.
+            if attempt < attempts - 1:
+                if self._stop_event.wait(wait_interval):
+                    self._log_message(
+                        "🛑  Startup interrupted before initial connection."
+                    )
+                    return
 
-        if not connected:
-            self._log_message(
-                f"⚠️  WARNING: Failed to connect to {self.config.ups.name} "
-                f"within {max_wait}s. Proceeding, but voltage thresholds may default."
-            )
+        self._log_message(
+            f"⚠️  WARNING: Failed to connect to {self.config.ups.name} "
+            f"within {max_wait}s. Proceeding, but voltage thresholds may default."
+        )
 
     def _save_state(self, ups_data: Dict[str, str]):
         """Save current UPS state to file + buffer one stats sample."""
@@ -1254,8 +1312,16 @@ class UPSGroupMonitor(
             )
             temp_file.write_text(state_content)
             temp_file.replace(self._state_file_path)
-        except Exception:
-            pass
+            self._last_state_save_error = None
+        except Exception as exc:
+            # Persisting the state file is best-effort — the stats DB and the
+            # in-memory state are the sources of truth. Log once per distinct
+            # error (ISS-055) so a persistent disk problem is visible without
+            # spamming a line on every poll.
+            msg = str(exc)
+            if msg != getattr(self, "_last_state_save_error", None):
+                self._last_state_save_error = msg
+                self._log_message(f"⚠️  State file persist failed: {exc}")
 
         # Hot-path: append one sample to the in-memory deque (zero I/O).
         # The StatsWriter flushes the deque to SQLite every 10 s.
@@ -1302,7 +1368,22 @@ class UPSGroupMonitor(
             and not self._is_container_runtime
         )
 
-    def _execute_shutdown_sequence(self):
+    def _execute_shutdown_sequence(self) -> None:
+        """Execute the controlled shutdown sequence.
+
+        Thin wrapper that marks the sequence in flight for its entire duration
+        (ISS-001) so `_cleanup_and_exit` can decline to sys.exit() on a
+        SIGTERM/SIGINT that lands mid-sequence in single-UPS mode (where the
+        sequence and the signal handler share the main thread). The flag is
+        cleared in `finally` even if the implementation raises or exits.
+        """
+        self._shutdown_sequence_in_flight = True
+        try:
+            self._execute_shutdown_sequence_impl()
+        finally:
+            self._shutdown_sequence_in_flight = False
+
+    def _execute_shutdown_sequence_impl(self) -> None:
         """Execute the controlled shutdown sequence."""
         self._mark_shutdown_in_progress("starting shutdown sequence")
         sequence_start = time.monotonic()
@@ -1427,7 +1508,8 @@ class UPSGroupMonitor(
                 # must NOT write SHUTDOWN_SEQUENCE_COMPLETE / the recovery marker
                 # or leave the flag set (which would gate future triggers until
                 # line power returns). Report INCOMPLETE, clear the flag, bail.
-                cmd_parts = str(self.config.local_shutdown.command or "").split()
+                cmd_parts = poweroff_command_parts(
+                    self.config.local_shutdown.command)
                 if not cmd_parts:
                     self._log_message(
                         "❌  local_shutdown.command is empty -- host poweroff "
@@ -1481,21 +1563,16 @@ class UPSGroupMonitor(
             # v5.5: the loopback's shutdown_command (already executed during
             # _shutdown_remote_servers) is what actually powers off the host.
             # The container dies with it. Notify + flush + marker, then exit.
-            loopback_results = [
-                r for r in remote_results
-                if any(
-                    s.enabled
-                    and s.is_host_loopback is True
-                    and (s.name or s.host) == r.server
-                    and s.host == r.host
-                    for s in self.config.remote_servers
-                )
-            ]
-            if not loopback_results or not all(r.success for r in loopback_results):
+            loopback_results = select_loopback_results(
+                self.config.remote_servers, remote_results,
+            )
+            if not loopback_results or not all(
+                loopback_poweroff_sent(r) for r in loopback_results
+            ):
                 details = "; ".join(
                     r.error or "shutdown command was not sent"
                     for r in loopback_results
-                    if not r.success
+                    if not loopback_poweroff_sent(r)
                 ) or "loopback shutdown result missing"
                 self._log_message(
                     "❌  Delegated host poweroff failed; shutdown sequence "
@@ -1514,6 +1591,34 @@ class UPSGroupMonitor(
                 # trigger has to be allowed through.
                 self._clear_shutdown_in_progress()
                 return
+            # ISS-005: the poweroff WAS delivered (loopback_poweroff_sent is
+            # True for every loopback result), so the sequence is complete even
+            # if a Phase-A drain crashed. Surface the partial drain failure as a
+            # warning but still record completion + write the marker below.
+            # An ordinary pre-shutdown command that exits non-zero increments
+            # pre_commands.failed WITHOUT setting crashed/error, so it leaves
+            # r.success True; include that counter (cubic P2) or the partial-
+            # drain signal would be lost for exactly that case.
+            def _drain_detail(r):
+                if r.error:
+                    return r.error
+                failed = getattr(getattr(r, "pre_commands", None), "failed", 0)
+                if failed:
+                    return f"{failed} pre-shutdown command(s) failed"
+                return "Phase-A drain reported a failure"
+
+            drain_failures = "; ".join(
+                _drain_detail(r)
+                for r in loopback_results
+                if not r.success
+                or getattr(getattr(r, "pre_commands", None), "failed", 0)
+            )
+            if drain_failures:
+                self._log_message(
+                    "⚠️  Delegated host poweroff was sent, but a local drain "
+                    f"phase partially failed: {drain_failures}. The host is "
+                    "powering off; treating the sequence as complete."
+                )
             record_sequence_complete()
             self._log_message(
                 "🛰️  Host poweroff delegated to loopback SSH (already sent). "
@@ -1563,14 +1668,26 @@ class UPSGroupMonitor(
             # Surface gated re-triggers (bug #4). The early return used
             # to be silent, which made correlating "trigger conditions
             # met but nothing fired" with the stuck flag much harder
-            # than it should have been.
-            self._log_message(
-                f"⚠️  Shutdown trigger fired ({reason}) but a previous "
-                f"shutdown sequence is already in progress "
-                f"({self._shutdown_flag_path}). Ignoring re-trigger."
-            )
+            # than it should have been. ISS-059: throttle to once per 60 s --
+            # during a sustained outage this fires on every poll, and one
+            # line per poll drowns the journal.
+            now_mono = time.monotonic()
+            last = self._last_retrigger_warn_mono
+            if last is None or now_mono - last >= 60:
+                self._last_retrigger_warn_mono = now_mono
+                self._log_message(
+                    f"⚠️  Shutdown trigger fired ({reason}) but a previous "
+                    f"shutdown sequence is already in progress "
+                    f"({self._shutdown_flag_path}). Ignoring re-trigger."
+                )
             return
 
+        # cubic P1 (ISS-001 follow-up): mark the sequence in flight at the
+        # moment of admission — BEFORE the notification/event/wall work below —
+        # so a SIGTERM/SIGINT landing in that window can't unwind
+        # _cleanup_and_exit and abort the emergency shutdown before poweroff.
+        # _execute_shutdown_sequence re-sets it and clears it in its finally.
+        self._shutdown_sequence_in_flight = True
         self._mark_shutdown_in_progress("triggering immediate shutdown")
 
         # Send notification (non-blocking - fire and forget)
@@ -1607,12 +1724,17 @@ class UPSGroupMonitor(
         Returns a report dict (also used by the API reload endpoint). Never
         raises on a bad config — the daemon keeps running on the old one.
         """
-        from eneru.reload import perform_reload
-        report = perform_reload(self.config, [self.config], self.config.config_path)
-        if report.get("reloaded") and report.get("subsystems"):
-            self._apply_subsystem_reload(report["subsystems"])
-        self._log_reload_report(report)
-        return report
+        from eneru.reload import perform_reload, _RELOAD_LOCK
+        # ISS-027: hold the reload lock across parse + swap + worker bounce so a
+        # SIGHUP and an API reload can't race the non-thread-safe bounce in
+        # _apply_subsystem_reload.
+        with _RELOAD_LOCK:
+            report = perform_reload(
+                self.config, [self.config], self.config.config_path)
+            if report.get("reloaded") and report.get("subsystems"):
+                self._apply_subsystem_reload(report["subsystems"])
+            self._log_reload_report(report)
+            return report
 
     def _apply_subsystem_reload(self, subsystems: list) -> None:
         """Re-init live subsystems whose config changed (best-effort)."""
@@ -1708,6 +1830,25 @@ class UPSGroupMonitor(
         """Handle clean exit on signals."""
         from pathlib import Path
         stats_dir = Path(self.config.statistics.db_directory)
+
+        # ISS-001: A real SIGTERM/SIGINT arriving while the shutdown sequence
+        # is running on this (main) thread must NOT unwind it — sys.exit here
+        # would abort the sequence before the host poweroff (run_command) fires.
+        # Ignore the signal and let the in-flight sequence finish; its own
+        # completion path performs cleanup. `signum is None` is the internal
+        # _exit_after_shutdown call, which must still proceed to exit.
+        # Tradeoff: in the no-poweroff branches (local_shutdown disabled, empty
+        # command, failed delegate) the sequence returns without halting, the
+        # flag clears, and the daemon keeps running; the swallowed `systemctl
+        # stop` then degrades to a SIGKILL after TimeoutStopSec (skipping the
+        # graceful DAEMON_STOP path). Acceptable: never abort a live poweroff,
+        # and the sequence is short.
+        if signum is not None and self._shutdown_sequence_in_flight:
+            self._log_message(
+                "⚠️  Signal received during shutdown sequence — ignoring; "
+                "the in-flight poweroff sequence continues."
+            )
+            return
 
         self._stop_event.set()
         if self._remote_health_manager is not None:
@@ -1848,6 +1989,7 @@ class UPSGroupMonitor(
 
         if "OB" not in self.state.previous_status and "FSD" not in self.state.previous_status:
             self.state.on_battery_start_time = int(time.time())
+            self.state.on_battery_start_mono = time.monotonic()  # ISS-020
             self.state.extended_time_logged = False
             self.state.battery_history.clear()
 
@@ -1863,7 +2005,15 @@ class UPSGroupMonitor(
                 ])
 
         current_time = int(time.time())
-        time_on_battery = current_time - self.state.on_battery_start_time
+        # ISS-020: derive the trigger-relevant duration from the monotonic clock
+        # so an NTP step mid-outage can't skew T3-grace / T4 timing. Fall back to
+        # the wall delta only if the monotonic anchor is somehow unset.
+        if self.state.on_battery_start_mono > 0:
+            time_on_battery = int(
+                time.monotonic() - self.state.on_battery_start_mono
+            )
+        else:
+            time_on_battery = current_time - self.state.on_battery_start_time
         depletion_rate = self._calculate_depletion_rate(battery_charge)
         stabilization_delay = max(
             0, int(self.config.triggers.on_battery_stabilization_delay)
@@ -1961,9 +2111,25 @@ class UPSGroupMonitor(
                 self._record_advisory_trigger(shutdown_reason)
             else:
                 self._trigger_immediate_shutdown(shutdown_reason)
+        elif (self._in_redundancy_group and not stabilizing
+                and self.state.trigger_active):
+            # ISS-016: a clean on-battery reading (no trigger reason) while an
+            # advisory trigger is latched means conditions recovered (charge/
+            # runtime back above threshold). Clear the latch so one transient
+            # sub-threshold reading doesn't keep this member CRITICAL for the
+            # whole outage and bias quorum toward group shutdown. Only clear on a
+            # fully-clean reading, and never during stabilization.
+            # NOTE: an FSD-originated advisory (latched in _main_loop) would also
+            # clear here on a subsequent clean OB poll; in practice upsd keeps FSD
+            # latched, and the group evaluator re-latches on the next FSD poll.
+            self._clear_advisory_trigger()
 
-        # Log status every 5 seconds
-        if int(time.time()) % 5 == 0:
+        # Log on-battery status roughly every 5s. ISS-018: throttle on a
+        # monotonic timestamp, not `int(time.time()) % 5 == 0` -- with a 5s poll
+        # and an unlucky phase the modulo could never (or double-) fire.
+        if (self._last_ob_status_log_mono is None
+                or time.monotonic() - self._last_ob_status_log_mono >= 5):
+            self._last_ob_status_log_mono = time.monotonic()
             self._log_message(
                 f"🔋  On battery: {battery_charge}% ({format_seconds(battery_runtime)}), "
                 f"Load: {ups_load}%, Depletion: {depletion_rate}%/min, "
@@ -1994,6 +2160,7 @@ class UPSGroupMonitor(
                 ])
 
             self.state.on_battery_start_time = 0
+            self.state.on_battery_start_mono = 0.0  # ISS-020
             self.state.extended_time_logged = False
             self.state.battery_history.clear()
 
@@ -2137,7 +2304,12 @@ class UPSGroupMonitor(
         # Reports are daemon-wide (one digest). In multi-UPS mode the
         # coordinator owns them; a per-group monitor must not send N copies.
         try:
-            if not self._coordinator_mode and self.config.reports.enabled:
+            # ISS-023: skip when there is no notification worker. maybe_send_due
+            # _reports stamps last_report_sent_* even when the enqueue silently
+            # no-ops without a worker, so a whole period's digest would be lost.
+            # The coordinator path already guards this; mirror it here.
+            if (not self._coordinator_mode and self.config.reports.enabled
+                    and self._notification_worker is not None):
                 reports_mod.maybe_send_due_reports(
                     self.config, getattr(self, "_stats_store", None),
                     self.config.ups.name, self._enqueue_report)
@@ -2439,8 +2611,18 @@ class UPSGroupMonitor(
                     # must never sit in front of an FSB emergency shutdown, and a
                     # wrong ups.name could not have produced an "OB" status in the
                     # first place, so there is nothing to discover on that path.
+                    # ISS-022: the counter resets on every successful poll, so a
+                    # once-a-minute flap would pay the ~10s upsc -l probe on each
+                    # episode, stalling the poll thread (delays state publishing;
+                    # interacts with the health-model stale window). Gate it on a
+                    # 10-minute monotonic cooldown so a flapping server is probed
+                    # at most once per cooldown window.
                     if (self.state.connection_error_count == 1
-                            and "OB" not in self.state.previous_status):
+                            and "OB" not in self.state.previous_status
+                            and (self._last_name_diagnostic_mono is None
+                                 or time.monotonic()
+                                 - self._last_name_diagnostic_mono > 600)):
+                        self._last_name_diagnostic_mono = time.monotonic()
                         self._run_ups_name_diagnostic(error_msg)
                     self.state.stale_data_count = 0
                     # Off-battery: first hard error feeds the grace period as
@@ -2489,6 +2671,10 @@ class UPSGroupMonitor(
                         )
                     else:
                         self._failsafe_initiated = True
+                        # cubic P1: protect the failsafe shutdown from a signal
+                        # landing between admission and _execute_shutdown_sequence
+                        # (see _trigger_shutdown). Cleared in the sequence's finally.
+                        self._shutdown_sequence_in_flight = True
                         self._mark_shutdown_in_progress("starting failsafe shutdown")
                         self._log_message(
                             "🚨  FAILSAFE TRIGGERED (FSB): Connection lost or data persistently stale "
@@ -2516,7 +2702,7 @@ class UPSGroupMonitor(
                 elif is_failsafe_trigger:
                     self._handle_connection_failure(error_msg)
 
-                self._stop_event.wait(5)
+                self._stop_event.wait(CONNECTION_RETRY_WAIT_SECONDS)
                 continue
 
             # ==================================================================
@@ -2585,12 +2771,19 @@ class UPSGroupMonitor(
 
             ups_status = ups_data.get('ups.status', '')
 
+            # ISS-019: match on whitespace-separated status TOKENS, not
+            # substrings. NUT statuses are space-separated flags, so `"CHRG" in
+            # ups_status` also matched `DISCHRG` (shielded here only by elif
+            # order); token membership fixes that aliasing structurally and lets
+            # neutral statuses (OFF, BYPASS, bare DISCHRG) fall through cleanly.
+            status_tokens = set(ups_status.split())
+
             # Re-arm the FAILSAFE latch only when the outage is over: we have a
             # VALID status AND it shows line power. A missing/empty status is an
             # unresolved state, not "on line", so it must NOT re-arm the latch
             # mid-outage (cubic). On battery a reconnection alone doesn't end the
             # outage either, so the latch is per-outage, not per-reconnect.
-            if ups_status and "OB" not in ups_status and "FSD" not in ups_status:
+            if ups_status and "OB" not in status_tokens and "FSD" not in status_tokens:
                 self._failsafe_initiated = False
 
             if not ups_status:
@@ -2598,7 +2791,7 @@ class UPSGroupMonitor(
                     "❌  ERROR: Received data from UPS but 'ups.status' is missing. "
                     "Check NUT configuration."
                 )
-                self._stop_event.wait(5)
+                self._stop_event.wait(CONNECTION_RETRY_WAIT_SECONDS)
                 continue
 
             self._save_state(ups_data)
@@ -2618,7 +2811,7 @@ class UPSGroupMonitor(
             # POWER STATE ANALYSIS AND SHUTDOWN TRIGGERS
             # ==================================================================
 
-            if "FSD" in ups_status:
+            if "FSD" in status_tokens:
                 if self._in_redundancy_group:
                     self._record_advisory_trigger(
                         "UPS signaled FSD (Forced Shutdown) flag."
@@ -2628,11 +2821,30 @@ class UPSGroupMonitor(
                         "UPS signaled FSD (Forced Shutdown) flag."
                     )
 
-            elif "OB" in ups_status:
+            elif "OB" in status_tokens:
                 self._handle_on_battery(ups_data)
 
-            elif "OL" in ups_status or "CHRG" in ups_status:
+            elif "OL" in status_tokens or "CHRG" in status_tokens:
                 self._handle_on_line(ups_data)
+
+            else:
+                # ISS-019: neutral/unrecognized status (OFF, BYPASS, bare
+                # DISCHRG, ...). Neither on-line nor on-battery: take no power-
+                # state action and do not reset on_battery timing here. (The
+                # per-outage failsafe latch is handled separately above at its
+                # own re-arm check, which clears on any non-OB/non-FSD status.)
+                # Note it, throttled, for visibility; environment checks below
+                # still run on the raw status.
+                if (ups_status != self._last_unknown_status_logged
+                        or self._last_unknown_status_log_mono is None
+                        or time.monotonic() - self._last_unknown_status_log_mono
+                        >= 300):
+                    self._last_unknown_status_logged = ups_status
+                    self._last_unknown_status_log_mono = time.monotonic()
+                    self._log_message(
+                        f"ℹ️  UPS status '{ups_status}' is neither on-line nor "
+                        "on-battery; no power-state action taken."
+                    )
 
             # Battery anomaly detection (runs on every cycle with valid data)
             self._check_battery_anomaly(ups_data)
@@ -2663,10 +2875,22 @@ class UPSGroupMonitor(
                 self.state.latest_ups_temperature = ups_data.get('ups.temperature', '')
                 self.state.latest_input_frequency = ups_data.get('input.frequency', '')
                 self.state.latest_output_frequency = ups_data.get('output.frequency', '')
-                self.state.latest_time_on_battery = (
-                    int(time.time()) - self.state.on_battery_start_time
-                    if self.state.on_battery_start_time > 0 else 0
-                )
+                # ISS-020: publish the MONOTONIC on-battery duration. This field
+                # becomes snapshot.time_on_battery, which the redundancy
+                # evaluator's assess_health() feeds into DECISION logic
+                # (stabilization gate, depletion grace, extended-time), not just
+                # display — so an NTP step mid-outage must not skew it either.
+                # Wall fallback only if the monotonic anchor is unset.
+                if self.state.on_battery_start_mono > 0:
+                    self.state.latest_time_on_battery = int(
+                        time.monotonic() - self.state.on_battery_start_mono
+                    )
+                elif self.state.on_battery_start_time > 0:
+                    self.state.latest_time_on_battery = (
+                        int(time.time()) - self.state.on_battery_start_time
+                    )
+                else:
+                    self.state.latest_time_on_battery = 0
                 self.state.latest_update_time = time.time()
                 self.state.previous_status = ups_status
 

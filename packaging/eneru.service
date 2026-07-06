@@ -1,6 +1,9 @@
 [Unit]
 Description=Eneru - Intelligent UPS Monitoring & Shutdown Orchestration
-# Ensure dependencies are started first
+# Ensure dependencies are started first.
+# ISS-064: docker.service covers the Docker runtime. If you orchestrate Podman
+# containers instead, add `podman.service` (or your rootful `podman.socket`)
+# here so Eneru starts after the container runtime is up.
 After=network-online.target libvirtd.service docker.service
 Wants=network-online.target
 
@@ -31,7 +34,19 @@ KillMode=mixed
 
 # Basic Security hardening
 NoNewPrivileges=true
+# PrivateTmp is safe: no default flag/state path lives under /tmp (state,
+# battery-history and shutdown-flag default to /var/run; stats/auth to
+# /var/lib/eneru). Operators who point a path at /tmp must set PrivateTmp=false.
 PrivateTmp=true
+# ISS-047: additional hardening compatible with the daemon's duties (unmount,
+# libvirt/docker orchestration, host poweroff). Deliberately NOT set:
+# ProtectSystem / ProtectHome (would block unmount + poweroff), and any
+# syscall/capability filter that would break shelling out to shutdown tooling.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

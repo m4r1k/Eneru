@@ -1726,6 +1726,105 @@ notifications:
         captured = capsys.readouterr()
         assert "Invalid URL" in captured.out or "No valid notification URLs" in captured.out
 
+    @pytest.mark.unit
+    def test_test_notifications_invalid_url_is_redacted(self, tmp_path, capsys):
+        """ISS-034: an invalid URL is printed scheme-only — no token leak."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  name: "TestUPS@localhost"
+notifications:
+  urls:
+    - "discord://id/SUPERSECRETTOKEN"
+""")
+        mock_apprise = MagicMock()
+        inst = MagicMock()
+        mock_apprise.Apprise.return_value = inst
+        inst.add.return_value = False
+        mock_apprise.NotifyType.INFO = "info"
+        with patch.object(sys, "argv", [
+            "eneru", "test-notifications", "-c", str(config_file)
+        ]):
+            with patch("eneru.cli.APPRISE_AVAILABLE", True):
+                with patch.dict(sys.modules, {"apprise": mock_apprise}):
+                    with patch("eneru.cli.apprise", mock_apprise):
+                        with pytest.raises(SystemExit):
+                            main()
+        out = capsys.readouterr().out
+        assert "discord://***" in out
+        assert "SUPERSECRETTOKEN" not in out
+
+
+class TestCLIMainExceptionGuard:
+    """ISS-035: main() turns unexpected errors into a one-line message + exit 1
+    (no traceback), and Ctrl-C into exit 130."""
+
+    @pytest.mark.unit
+    def test_unexpected_exception_becomes_exit_1(self, tmp_path, monkeypatch, capsys):
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text('ups:\n  name: "U@localhost"\n')
+        monkeypatch.setattr(
+            "eneru.cli._cmd_validate",
+            MagicMock(side_effect=RuntimeError("boom")),
+        )
+        with patch.object(sys, "argv", ["eneru", "validate", "-c", str(cfg)]):
+            with pytest.raises(SystemExit) as ei:
+                main()
+        assert ei.value.code == 1
+        assert "Error: boom" in capsys.readouterr().err
+
+    @pytest.mark.unit
+    def test_keyboard_interrupt_becomes_exit_130(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text('ups:\n  name: "U@localhost"\n')
+        monkeypatch.setattr(
+            "eneru.cli._cmd_validate",
+            MagicMock(side_effect=KeyboardInterrupt()),
+        )
+        with patch.object(sys, "argv", ["eneru", "validate", "-c", str(cfg)]):
+            with pytest.raises(SystemExit) as ei:
+                main()
+        assert ei.value.code == 130
+
+    @pytest.mark.unit
+    def test_eneru_debug_reraises_traceback(self, tmp_path, monkeypatch):
+        """ISS-035: ENERU_DEBUG=1 re-raises the original exception for diagnosis."""
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text('ups:\n  name: "U@localhost"\n')
+        monkeypatch.setenv("ENERU_DEBUG", "1")
+        monkeypatch.setattr(
+            "eneru.cli._cmd_validate",
+            MagicMock(side_effect=RuntimeError("boom")),
+        )
+        with patch.object(sys, "argv", ["eneru", "validate", "-c", str(cfg)]):
+            with pytest.raises(RuntimeError, match="boom"):
+                main()
+
+    @pytest.mark.unit
+    def test_self_test_token_flags_deprecation_warning(self, capsys):
+        """ISS-033: --token/--api-key emit a deprecation warning steering to env."""
+        import argparse
+        from eneru.cli import _self_test_token
+        assert _self_test_token(argparse.Namespace(token="abc", api_key=None)) == "abc"
+        err = capsys.readouterr().err.lower()
+        assert "deprecated" in err and "eneru_api_token" in err
+
+    @pytest.mark.unit
+    def test_apikey_create_warns_when_auth_inactive(self, tmp_path, capsys):
+        """ISS-031: creating a key while auth is inactive warns it grants nothing."""
+        cfg = tmp_path / "c.yaml"
+        db = tmp_path / "auth.db"
+        cfg.write_text(
+            'ups:\n  name: "U@localhost"\n'
+            f'api:\n  auth:\n    db_path: "{db}"\n'
+        )
+        with patch.object(sys, "argv", [
+            "eneru", "apikey", "create", "--label", "ci", "-c", str(cfg),
+        ]):
+            main()
+        out = capsys.readouterr().out
+        assert "not active" in out.lower()
+
 
 class TestCLIDryRun:
     """Test --dry-run CLI flag on run subcommand."""

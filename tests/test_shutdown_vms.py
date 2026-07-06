@@ -203,3 +203,28 @@ def test_shutdown_vms_force_destroys_after_timeout(tmp_path):
     destroy_calls = [c for c in mock_run.call_args_list if c.args[0][:2] == ["virsh", "destroy"]]
     destroyed = {c.args[0][2] for c in destroy_calls}
     assert destroyed == {"vm1", "vm2"}
+
+
+@pytest.mark.unit
+def test_shutdown_vms_reports_failed_rc(tmp_path):
+    """ISS-040: failed virsh shutdown AND destroy both log ⚠️ with the rc."""
+    monitor = _make_vm_monitor(tmp_path, max_wait=5)
+    logs = []
+    monitor._log_message = logs.append
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["virsh", "list", "--name"]:
+            return (0, "vm1\n", "")
+        if cmd[:2] == ["virsh", "shutdown"]:
+            return (1, "", "shutdown refused")
+        if cmd[:2] == ["virsh", "destroy"]:
+            return (1, "", "domain not found")
+        return (0, "", "")
+
+    with patch("eneru.shutdown.vms.command_exists", return_value=True), \
+         patch("eneru.shutdown.vms.run_command", side_effect=fake_run), \
+         patch("eneru.shutdown.vms.time.sleep"):
+        monitor._shutdown_vms()
+
+    assert any("virsh shutdown vm1 returned rc=1" in m for m in logs), logs
+    assert any("virsh destroy vm1 returned rc=1" in m for m in logs), logs

@@ -32,14 +32,23 @@ from eneru.logger import UPSLogger
 from eneru.notifications import NotificationWorker
 from eneru.shutdown.containers import ContainerShutdownMixin
 from eneru.shutdown.filesystems import FilesystemShutdownMixin
-from eneru.shutdown.remote import RemoteShutdownMixin, RemoteShutdownResult
+from eneru.shutdown.remote import (
+    RemoteShutdownMixin,
+    loopback_poweroff_sent,
+    select_loopback_results,
+)
 from eneru.shutdown.vms import VMShutdownMixin
 from eneru.state import MonitorState
+from eneru.utils import sanitize_name
 
 
 def _sanitize(name: str) -> str:
-    """Sanitize a group name for filesystem flag-file names."""
-    return (name or "unnamed").replace("@", "-").replace(":", "-").replace("/", "-")
+    """Sanitize a group name for filesystem flag-file names.
+
+    ISS-013: the ``@``/``:``/``/`` substitution is delegated to the shared
+    ``utils.sanitize_name``; only the redundancy-specific ``unnamed``
+    fallback for a missing group name is kept here."""
+    return sanitize_name(name or "unnamed")
 
 
 def effective_redundancy_health(group: Any, raw: UPSHealth) -> UPSHealth:
@@ -92,6 +101,11 @@ class RedundancyGroupExecutor(
             filesystems=group.filesystems,
             is_local=group.is_local,
         )
+        # These shared sections are bound to base_config's OBJECTS. On a live
+        # reload they would go stale (the coordinator swaps its own to new
+        # objects); MultiUPSCoordinator._repoint_executor_configs re-binds this
+        # Config to the coordinator's current sections after every applied reload
+        # (ISS-004). Do not re-introduce a private copy that skips that step.
         self.config = Config(
             ups_groups=[synthetic_group],
             behavior=base_config.behavior,
@@ -292,15 +306,6 @@ class RedundancyGroupExecutor(
                 os.close(fd)
             probe.unlink(missing_ok=True)
 
-    @staticmethod
-    def _loopback_poweroff_sent(result: RemoteShutdownResult) -> bool:
-        """True once the delegated host poweroff command was accepted."""
-        return bool(
-            result.completed
-            and result.shutdown_sent
-            and not result.timed_out
-        )
-
     def _clear_failed_loopback_shutdown_state(self) -> None:
         """Best-effort re-arm after delegated host poweroff did not happen."""
         error: Optional[Exception] = None
@@ -462,24 +467,17 @@ class RedundancyGroupExecutor(
                 phase_failed = True
 
             if self._group.is_local and delegating:
-                loopback_results = [
-                    result for result in remote_results
-                    if any(
-                        server.enabled
-                        and server.is_host_loopback is True
-                        and (server.name or server.host) == result.server
-                        and server.host == result.host
-                        for server in self.config.remote_servers
-                    )
-                ]
+                loopback_results = select_loopback_results(
+                    self.config.remote_servers, remote_results,
+                )
                 if not loopback_results or not all(
-                    self._loopback_poweroff_sent(result)
+                    loopback_poweroff_sent(result)
                     for result in loopback_results
                 ):
                     details = "; ".join(
                         result.error or "shutdown command was not sent"
                         for result in loopback_results
-                        if not self._loopback_poweroff_sent(result)
+                        if not loopback_poweroff_sent(result)
                     ) or "loopback shutdown result missing"
                     self._log_message(
                         "❌  Delegated redundancy host poweroff failed; shutdown "
@@ -676,9 +674,10 @@ class RedundancyGroupEvaluator(threading.Thread):
         for ups_name in self._group.ups_sources:
             monitor = self._monitors.get(ups_name)
             if monitor is None:
+                # ISS-058: no monitor wired -> UNKNOWN outright. (The former
+                # check_interval/triggers assignments here were dead: they are
+                # only read inside the else branch's assess_health call.)
                 raw = UPSHealth.UNKNOWN
-                check_interval = 1
-                triggers = None
             else:
                 snap = monitor.state.snapshot()
                 # A member that has published at least one successful poll

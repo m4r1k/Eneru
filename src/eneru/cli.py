@@ -16,6 +16,7 @@ from eneru.notifications import APPRISE_AVAILABLE
 from eneru.redundancy import RedundancyGroupExecutor
 from eneru.remote_health import is_safe_probe_command, run_remote_probe
 from eneru.status import remote_health_for_config
+from eneru.utils import redact_apprise_url
 
 # Optional import for Apprise (needed for test notifications)
 try:
@@ -790,7 +791,18 @@ def _cmd_run(args):
         coordinator.run()
     else:
         monitor = UPSGroupMonitor(config, exit_after_shutdown=args.exit_after_shutdown)
-        monitor.run()
+        try:
+            monitor.run()
+        except RuntimeError:
+            # ISS-006: _check_dependencies now raises RuntimeError instead of
+            # sys.exit(1); run()'s FATAL handler already logged + notified, so
+            # exit cleanly with code 1 (as the old sys.exit(1) did) rather than
+            # letting a traceback escape.
+            # cubic P2: still honor ENERU_DEBUG (as main() does) so a crash can
+            # be diagnosed with a full traceback when explicitly requested.
+            if os.environ.get("ENERU_DEBUG"):
+                raise
+            raise SystemExit(1)
 
 
 def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
@@ -1069,10 +1081,10 @@ def _cmd_test_notifications(args):
     for url in config.notifications.urls:
         if apobj.add(url):
             valid_urls += 1
-            scheme = url.split('://')[0] if '://' in url else 'unknown'
-            print(f"  Added: {scheme}://***")
+            print(f"  Added: {redact_apprise_url(url)}")
         else:
-            print(f"  Invalid URL: {url[:30]}...")
+            # ISS-034: url[:30] leaked webhook IDs/partial tokens. Scheme only.
+            print(f"  Invalid URL: {redact_apprise_url(url)}")
 
     if valid_urls == 0:
         print("No valid notification URLs found.")
@@ -1756,6 +1768,25 @@ def _cmd_apikey_create(args):
     # Intentional: the key is shown exactly once and never stored in plaintext.
     print(f"API key: {key}")  # lgtm[py/clear-text-logging-sensitive-data]
     print("Store it now — only its hash is kept; it cannot be shown again.")
+    # ISS-031: an API key is inert until auth is actually enforced. Warn so the
+    # operator isn't left with a key that grants nothing. Best-effort — never let
+    # the check break key creation.
+    try:
+        auth_cfg = _load_config(args).api.auth
+        # cubic P3: if the key was created in a custom --auth-db, base the
+        # "users exist" part of the active check on THAT store, not the default
+        # config DB, so the guidance is accurate for custom auth-store workflows.
+        auth_db = getattr(args, "auth_db", None)
+        if auth_db and auth_cfg is not None:
+            auth_cfg.db_path = auth_db
+        if not auth.auth_is_active(auth_cfg):
+            print(
+                "⚠️  API authentication is not active yet (api.auth.enabled is "
+                "not true and no users exist), so this key will NOT grant access. "
+                "Set api.auth.enabled: true or create a user (`eneru user create`)."
+            )
+    except Exception:
+        pass
 
 
 def _cmd_apikey_list(args):
@@ -1838,6 +1869,16 @@ def _self_test_api_base(config: Config, args: argparse.Namespace) -> str:
 
 
 def _self_test_token(args: argparse.Namespace) -> str:
+    # ISS-033: --token / --api-key are accepted for back-compat but expose the
+    # secret in `ps` and shell history. Warn and steer to the env vars (removal
+    # deferred to a future major so existing scripts keep working).
+    if getattr(args, "token", None) or getattr(args, "api_key", None):
+        print(
+            "⚠️  --token/--api-key on the command line leak into `ps` and shell "
+            "history; prefer ENERU_API_TOKEN / ENERU_API_KEY (env). The flags "
+            "are deprecated and will be removed in a future major.",
+            file=sys.stderr,
+        )
     return (getattr(args, "token", None)
             or getattr(args, "api_key", None)
             or os.environ.get("ENERU_API_TOKEN")
@@ -2497,7 +2538,22 @@ def main():
         parser.print_help()
         sys.exit(0)
 
-    args.func(args)
+    # ISS-035: top-level guard so DB/permission/IO errors surface as a one-line
+    # message + exit 1 rather than a raw traceback. SystemExit (argparse errors,
+    # deliberate exits) passes through unchanged; KeyboardInterrupt -> 130. Set
+    # ENERU_DEBUG=1 to re-raise the full traceback for diagnosis.
+    try:
+        args.func(args)
+    except (KeyboardInterrupt):
+        print("\nInterrupted.", file=sys.stderr)
+        sys.exit(130)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - deliberate top-level catch-all
+        if os.environ.get("ENERU_DEBUG"):
+            raise
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

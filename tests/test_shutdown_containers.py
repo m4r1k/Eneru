@@ -263,6 +263,25 @@ def test_shutdown_containers_real_stop_call(tmp_path):
 
 
 @pytest.mark.unit
+def test_shutdown_containers_stop_failure_logs_warning(tmp_path):
+    """ISS-040: a non-zero container-stop rc logs ⚠️ (not ✅) and continues."""
+    monitor = _make_container_monitor(tmp_path, compose_available=False, stop_timeout=20)
+    logs = []
+    monitor._log_message = logs.append
+
+    def fake_run(cmd, **kwargs):
+        if cmd[-1] == "-q":
+            return (0, "abc123\n", "")
+        return (1, "", "permission denied")  # the stop fails
+
+    with patch("eneru.shutdown.containers.run_command", side_effect=fake_run):
+        monitor._shutdown_containers()
+
+    assert any("returned rc=1" in m for m in logs), logs
+    assert not any("containers stopped" in m for m in logs), logs
+
+
+@pytest.mark.unit
 def test_shutdown_containers_skips_current_container(tmp_path):
     """The remaining-container phase must not stop Eneru's own container."""
     monitor = _make_container_monitor(tmp_path, compose_available=False, stop_timeout=20)
@@ -696,7 +715,8 @@ def test_rootless_podman_stops_user_containers(tmp_path):
     # Verify the stop call was constructed correctly for alice only
     stop_calls = [c for c in calls if "stop" in c]
     assert len(stop_calls) == 1
-    assert stop_calls[0][:3] == ["sudo", "-u", "alice"]
+    # ISS-040: sudo runs non-interactive (-n) so it fails fast on a password prompt.
+    assert stop_calls[0][:4] == ["sudo", "-n", "-u", "alice"]
     assert "podman" in stop_calls[0]
     assert "abc123" in stop_calls[0]
     assert "def456" in stop_calls[0]
@@ -751,8 +771,8 @@ def test_rootless_podman_skips_blank_and_incomplete_loginctl_rows(
     with patch("eneru.shutdown.containers.run_command", side_effect=fake_run):
         monitor._shutdown_podman_user_containers()
 
-    sudo_calls = [cmd for cmd in calls if cmd[:2] == ["sudo", "-u"]]
-    assert sudo_calls == [["sudo", "-u", "alice", "podman", "ps", "-q"]]
+    sudo_calls = [cmd for cmd in calls if cmd[:2] == ["sudo", "-n"]]
+    assert sudo_calls == [["sudo", "-n", "-u", "alice", "podman", "ps", "-q"]]
 
 
 @pytest.mark.unit

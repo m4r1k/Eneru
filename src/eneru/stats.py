@@ -751,6 +751,29 @@ class StatsStore:
         """Roll samples into 5-min buckets, and 5-min into hourly buckets.
 
         Returns ``(rows_inserted_5min, rows_inserted_hourly)``.
+
+        ISS-037: instead of re-GROUP-BYing the entire ``samples`` /
+        ``agg_5min`` tables every cycle (rewriting every finalized bucket
+        on each tick), each tier keeps a persisted *watermark* — the
+        newest bucket start seen on the previous run. A run reprocesses
+        only buckets from ``watermark - one_bucket`` forward, so the
+        boundary bucket (which may still be collecting rows) is recomputed
+        from its full membership while older, already-finalized buckets
+        are left untouched. Samples are appended in time order, so a
+        bucket is never revisited once the watermark passes it. The
+        watermark lives in the key/value ``meta`` table, so this needs no
+        column change and therefore no ``SCHEMA_VERSION`` bump. When no
+        watermark exists yet (fresh DB / first run after upgrade) the
+        whole table is processed, which reproduces the pre-ISS-037 result
+        exactly.
+
+        Correctness rests on samples arriving in time order (they are
+        appended live at ~1 Hz). The one divergence from a full
+        re-aggregation is a backward wall-clock step larger than a bucket
+        (e.g. a big NTP correction): a sample landing in an
+        already-finalized older bucket would be folded in by a full
+        re-scan but skipped here. That is an accepted trade — buckets use
+        wall-clock ``ts`` and such a step corrupts the tiering regardless.
         """
         if self._conn is None:
             return (0, 0)
@@ -758,6 +781,21 @@ class StatsStore:
             with self._write() as conn:
                 if conn is None:
                     return (0, 0)
+
+                # ---- 5-min tier ----
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key='agg_5min_watermark'"
+                ).fetchone()
+                # cubic P2: tolerant parse — a malformed watermark (corrupt/
+                # tampered meta row) becomes None (full re-scan) instead of
+                # raising ValueError, which would bypass this method's
+                # sqlite/OSError handler and stop aggregation silently.
+                lo_5 = _to_int(row[0]) if row else None
+                if lo_5 is None:
+                    where_5, params_5 = "", ()
+                else:
+                    where_5 = f"WHERE ts >= {max(0, lo_5 - BUCKET_5MIN)}"
+                    params_5 = ()
                 inserted_5 = conn.execute(f"""
                     INSERT OR REPLACE INTO agg_5min (
                         ts,
@@ -783,8 +821,29 @@ class StatsStore:
                         AVG(input_frequency), AVG(output_frequency),
                         AVG(real_power), AVG(power_nominal)
                     FROM samples
+                    {where_5}
                     GROUP BY bucket
-                """).rowcount
+                """, params_5).rowcount
+                new_lo_5 = conn.execute(
+                    f"SELECT MAX((ts / {BUCKET_5MIN}) * {BUCKET_5MIN}) "
+                    "FROM samples"
+                ).fetchone()[0]
+                if new_lo_5 is not None:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO meta(key, value) VALUES "
+                        "('agg_5min_watermark', ?)", (str(int(new_lo_5)),),
+                    )
+
+                # ---- hourly tier ----
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key='agg_hourly_watermark'"
+                ).fetchone()
+                lo_h = _to_int(row[0]) if row else None  # cubic P2: tolerant parse
+                if lo_h is None:
+                    where_h, params_h = "", ()
+                else:
+                    where_h = f"WHERE ts >= {max(0, lo_h - BUCKET_HOURLY)}"
+                    params_h = ()
                 inserted_h = conn.execute(f"""
                     INSERT OR REPLACE INTO agg_hourly (
                         ts,
@@ -813,8 +872,18 @@ class StatsStore:
                         AVG(input_frequency_avg), AVG(output_frequency_avg),
                         AVG(real_power_avg), AVG(power_nominal_avg)
                     FROM agg_5min
+                    {where_h}
                     GROUP BY bucket
-                """).rowcount
+                """, params_h).rowcount
+                new_lo_h = conn.execute(
+                    f"SELECT MAX((ts / {BUCKET_HOURLY}) * {BUCKET_HOURLY}) "
+                    "FROM agg_5min"
+                ).fetchone()[0]
+                if new_lo_h is not None:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO meta(key, value) VALUES "
+                        "('agg_hourly_watermark', ?)", (str(int(new_lo_h)),),
+                    )
             return (max(0, inserted_5), max(0, inserted_h))
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: aggregate failed: {e}")
@@ -929,6 +998,28 @@ class StatsStore:
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: query_events failed: {e}")
             return []
+
+    def latest_event_ts(self, event_type: str) -> Optional[int]:
+        """Return MAX(ts) for one event_type, or None if there are none.
+
+        ISS-038: lets callers resolve e.g. the latest DAEMON_START without
+        loading every retained event row into Python just to take a max().
+        ``event_type`` is an internal identifier (never user input)."""
+        if self._conn is None:
+            return None
+        try:
+            with self._db_lock:
+                if self._conn is None:
+                    return None
+                cur = self._conn.execute(
+                    "SELECT MAX(ts) FROM events WHERE event_type = ?",
+                    (str(event_type),),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row and row[0] is not None else None
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: latest_event_ts failed: {e}")
+            return None
 
     def query_recent_events(
         self,
@@ -1207,6 +1298,33 @@ class StatsStore:
                 f"stats: pending_notification_count failed: {e}"
             )
             return 0
+
+    def pending_notification_ids(self) -> Optional[List[int]]:
+        """Return the ids of all pending rows in this store, or ``None`` if
+        the query could not run (store closed / transient SQLite error).
+
+        Used by the notification worker to reconcile its in-memory
+        per-message backoff map against the live queue (ISS-036), so
+        entries for rows cancelled out-of-band (cap / coalesce / TTL)
+        don't leak. The ``None`` return is distinct from an empty list so
+        the caller can tell "nothing pending" (safe to prune) apart from
+        "couldn't check" (must NOT prune, or a transient error would wipe
+        live backoff timers)."""
+        if self._conn is None:
+            return None
+        try:
+            with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return None
+                cur = self._conn.execute(
+                    "SELECT id FROM notifications WHERE status='pending'"
+                )
+                return [int(r[0]) for r in cur.fetchall()]
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(
+                f"stats: pending_notification_ids failed: {e}"
+            )
+            return None
 
     def cap_pending_notifications(self, max_pending: int) -> int:
         """Enforce the backlog cap. If pending count exceeds

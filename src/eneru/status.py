@@ -17,7 +17,7 @@ from eneru.remote_health import (
 )
 from eneru.redundancy import effective_redundancy_health
 from eneru.stats import StatsStore
-from eneru.utils import command_exists
+from eneru.utils import command_exists, sanitize_name
 from eneru.version import __version__
 
 
@@ -67,11 +67,6 @@ LIFECYCLE_EVENT_TYPES = {
     "SERVICE_UPGRADED",
     "SERVICE_RECOVERED",
 }
-
-
-def sanitize_name(name: str) -> str:
-    """Return the path-safe per-UPS identifier used by stats/state files."""
-    return name.replace("@", "-").replace(":", "-").replace("/", "-")
 
 
 def stats_db_path_for_group(config: Config, group: UPSGroupConfig) -> Path:

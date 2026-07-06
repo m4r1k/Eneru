@@ -10,6 +10,34 @@ CONTAINER_DEFAULT_KNOWN_HOSTS_FILE = "/var/lib/eneru/ssh/known_hosts"
 KNOWN_HOSTS_ENV = "ENERU_SSH_KNOWN_HOSTS_FILE"
 
 
+def redact_apprise_url(url: Any) -> str:
+    """Return an Apprise/notification URL with credentials stripped to scheme.
+
+    ISS-008/ISS-034: Apprise URLs embed webhook tokens/passwords
+    (e.g. ``discord://id/token``). Never log or print them verbatim -- emit only
+    ``scheme://***`` so the service type is still visible for debugging without
+    leaking the secret. Shared by the notification worker and the CLI.
+    """
+    text = str(url)
+    scheme = text.split("://", 1)[0] if "://" in text else "unknown"
+    return f"{scheme}://***"
+
+
+def sanitize_name(name: Any) -> str:
+    """Return the path-safe per-UPS identifier used by stats/state files.
+
+    ISS-013: single source of truth for the ``@``/``:``/``/`` → ``-``
+    substitution that was previously copy-pasted as inline ``.replace()``
+    chains in ``multi_ups.py``, a local ``_sanitize`` in ``redundancy.py``,
+    a nested ``_sanitize_name`` in ``config.py``, and ``status.sanitize_name``.
+    Lives in ``utils`` (which imports nothing from the daemon) so config.py
+    and redundancy.py can share it without an import cycle; ``status`` and
+    the rest re-export from here. Tolerates ``None`` (→ ``""``) to preserve
+    the config-path behaviour.
+    """
+    return (name or "").replace("@", "-").replace(":", "-").replace("/", "-")
+
+
 def is_numeric(value: Any) -> bool:
     """Check if a value is numeric (int or float).
 
@@ -66,6 +94,13 @@ def run_command(
         return 124, "", "Command timed out"
     except FileNotFoundError:
         return 127, "", f"Command not found: {cmd[0]}"
+    except (TypeError, ValueError):
+        # ISS-056: these signal a programming error in the CALLER (e.g. a
+        # non-list cmd, or an invalid argument to subprocess.run), not a
+        # runtime failure of the command. Masking them as a generic exit-1
+        # hides real bugs -- let them propagate. OSError / subprocess errors
+        # below stay swallowed (they're legitimate runtime conditions).
+        raise
     except Exception as e:
         return 1, "", str(e)
 

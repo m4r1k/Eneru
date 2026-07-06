@@ -29,10 +29,18 @@ import hashlib
 import os
 import secrets
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# ISS-062: os.umask is process-global, so the narrow-umask-around-connect below
+# must be serialized across ALL AuthStore sessions (including separate
+# instances) — otherwise a concurrent DB open could observe or restore the
+# wrong mask and create a -wal/-shm side file world-readable. The lock is held
+# only for connect + the WAL pragma (microseconds), never across a query.
+_UMASK_LOCK = threading.Lock()
 
 
 SCHEMA_VERSION = 1
@@ -169,10 +177,28 @@ class AuthStore:
         # Defensive mkdir: pip installs don't run nfpm's directory entry, so the
         # store must be willing to create its parent dir itself (mirrors stats).
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path))
+        # ISS-062: narrow the umask across connect + WAL setup so the auth DB
+        # (and its -wal/-shm side files, which hold credential data in transit)
+        # are created owner-only from the very first byte. _restrict_permissions
+        # below still tightens a pre-existing loose file, but without this a
+        # brand-new file would briefly exist at the process umask (0644 on a
+        # default 022) before that chmod runs. The umask is process-global, but
+        # the window is a couple of PRAGMAs and auth I/O is infrequent.
+        conn = None
+        # Serialize the umask window (see _UMASK_LOCK note) so concurrent
+        # sessions can't clobber each other's mask.
+        _UMASK_LOCK.acquire()
+        umask_held = True
+        old_umask = os.umask(0o077)
         try:
+            conn = sqlite3.connect(str(self.db_path))
             conn.row_factory = sqlite3.Row
+            # WAL/-shm side files are created here; keep the tight umask until
+            # they exist, then restore so the rest of the process is unaffected.
             conn.execute("PRAGMA journal_mode = WAL")
+            os.umask(old_umask)
+            _UMASK_LOCK.release()
+            umask_held = False
             conn.execute("PRAGMA synchronous = NORMAL")
             conn.execute("PRAGMA busy_timeout = 2000")
             if not self._schema_ready:
@@ -181,7 +207,14 @@ class AuthStore:
             with conn:
                 yield conn
         finally:
-            conn.close()
+            # If we failed before the inline restore, undo the mask and release
+            # the lock here so an exception can't leave the mask narrowed or the
+            # lock held for the whole process.
+            if umask_held:
+                os.umask(old_umask)
+                _UMASK_LOCK.release()
+            if conn is not None:
+                conn.close()
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         # Always re-assert owner-only permissions, even when the schema is

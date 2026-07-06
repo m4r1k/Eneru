@@ -252,8 +252,17 @@ class ContainerShutdownMixin:
                 # Stop containers with timeout
                 stop_cmd = [runtime, "stop", "-t", str(self.config.containers.stop_timeout)]
                 stop_cmd.extend(container_ids)
-                run_command(stop_cmd, timeout=self.config.containers.stop_timeout + 30)
-                self._log_message(f"  ✅  {runtime_display} containers stopped")
+                # ISS-040: check the return code instead of logging ✅ blindly.
+                rc, _, err = run_command(
+                    stop_cmd, timeout=self.config.containers.stop_timeout + 30)
+                if rc == 0:
+                    self._log_message(f"  ✅  {runtime_display} containers stopped")
+                else:
+                    detail = f": {err.strip()[:200]}" if err and err.strip() else ""
+                    self._log_message(
+                        f"  ⚠️  {runtime_display} container stop returned "
+                        f"rc={rc}{detail} (continuing best-effort)"
+                    )
 
         # Handle Podman rootless containers if configured
         if runtime == "podman" and self.config.containers.include_user_containers:
@@ -290,9 +299,11 @@ class ContainerShutdownMixin:
                 except ValueError:
                     continue
 
-                # Check for running containers as this user
+                # Check for running containers as this user. ISS-040: `sudo -n`
+                # (non-interactive) so a password-required sudo fails fast
+                # instead of blocking on a prompt until the run_command timeout.
                 exit_code, stdout, _ = run_command([
-                    "sudo", "-u", username,
+                    "sudo", "-n", "-u", username,
                     "podman", "ps", "-q"
                 ], timeout=10)
 
@@ -301,11 +312,19 @@ class ContainerShutdownMixin:
                     if container_ids:
                         self._log_message(f"  👤  Stopping {len(container_ids)} container(s) for user '{username}'")
                         stop_cmd = [
-                            "sudo", "-u", username,
+                            "sudo", "-n", "-u", username,
                             "podman", "stop", "-t", str(self.config.containers.stop_timeout)
                         ]
                         stop_cmd.extend(container_ids)
-                        run_command(stop_cmd, timeout=self.config.containers.stop_timeout + 30)
+                        rc, _, err = run_command(
+                            stop_cmd,
+                            timeout=self.config.containers.stop_timeout + 30)
+                        if rc != 0:
+                            detail = f": {err.strip()[:200]}" if err and err.strip() else ""
+                            self._log_message(
+                                f"  ⚠️  rootless podman stop for '{username}' "
+                                f"returned rc={rc}{detail}"
+                            )
 
         self._log_message("  ✅  Rootless Podman containers stopped")
 

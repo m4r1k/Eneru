@@ -17,6 +17,11 @@ from eneru import (
     ComposeFileConfig,
     RemoteServerConfig,
     RemoteCommandConfig,
+    ConnectionLossGracePeriodConfig,
+    RedundancyGroupConfig,
+    VMConfig,
+    FilesystemsConfig,
+    UnmountConfig,
 )
 from test_constants import (
     TEST_DISCORD_WEBHOOK_ID,
@@ -1500,3 +1505,254 @@ redundancy_groups:
         """Configs with no ``redundancy_groups`` section never reference them."""
         msgs = ConfigLoader.validate_config(default_config)
         assert not any("redundancy" in m.lower() for m in msgs)
+
+
+class TestV616ConfigValidation:
+    """v6.1.6 validation hardening: ISS-002/003/024/025/014."""
+
+    def _load(self, tmp_path, body):
+        path = tmp_path / "config.yaml"
+        path.write_text(body)
+        config = ConfigLoader.load(str(path))
+        raw = yaml.safe_load(body)
+        return config, raw
+
+    # ---- ISS-002: remote-server timeout fields ------------------------------
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("value", ['"30"', "1.5", "true", "0", "-5"])
+    def test_command_timeout_must_be_positive_int(self, tmp_path, value):
+        config, raw = self._load(tmp_path, f"""
+ups:
+  name: "TestUPS@localhost"
+remote_servers:
+  - name: "nas"
+    enabled: true
+    host: "10.0.0.5"
+    user: "root"
+    command_timeout: {value}
+""")
+        errors = _errors(ConfigLoader.validate_config(config, raw))
+        assert any("command_timeout must be a positive integer" in m for m in errors)
+
+    @pytest.mark.unit
+    def test_connect_timeout_must_be_positive_int(self, tmp_path):
+        config, raw = self._load(tmp_path, """
+ups:
+  name: "TestUPS@localhost"
+remote_servers:
+  - name: "nas"
+    enabled: true
+    host: "10.0.0.5"
+    user: "root"
+    connect_timeout: "10"
+""")
+        errors = _errors(ConfigLoader.validate_config(config, raw))
+        assert any("connect_timeout must be a positive integer" in m for m in errors)
+
+    @pytest.mark.unit
+    def test_pre_shutdown_command_timeout_must_be_positive_int(self, tmp_path):
+        config, raw = self._load(tmp_path, """
+ups:
+  name: "TestUPS@localhost"
+remote_servers:
+  - name: "nas"
+    enabled: true
+    host: "10.0.0.5"
+    user: "root"
+    pre_shutdown_commands:
+      - command: "echo hi"
+        timeout: "5"
+""")
+        errors = _errors(ConfigLoader.validate_config(config, raw))
+        assert any(
+            "pre_shutdown_commands[0].timeout must be a positive integer" in m
+            for m in errors
+        )
+
+    @pytest.mark.unit
+    def test_valid_timeouts_produce_no_timeout_error(self, tmp_path):
+        config, raw = self._load(tmp_path, """
+ups:
+  name: "TestUPS@localhost"
+remote_servers:
+  - name: "nas"
+    enabled: true
+    host: "10.0.0.5"
+    user: "root"
+    connect_timeout: 10
+    command_timeout: 30
+    pre_shutdown_commands:
+      - command: "echo hi"
+        timeout: 5
+""")
+        errors = _errors(ConfigLoader.validate_config(config, raw))
+        assert not any("timeout must be a positive integer" in m for m in errors)
+
+    # ---- ISS-003: connection-loss grace-period fields -----------------------
+
+    @pytest.mark.unit
+    def test_grace_duration_rejects_quoted_value_list_form(self, tmp_path):
+        config, raw = self._load(tmp_path, """
+ups:
+  - name: "TestUPS@localhost"
+    connection_loss_grace_period:
+      duration: "60"
+""")
+        errors = _errors(ConfigLoader.validate_config(config, raw))
+        assert any("grace_period.duration must be a positive number" in m
+                   for m in errors)
+
+    @pytest.mark.unit
+    def test_grace_duration_rejects_quoted_value_dict_form(self, tmp_path):
+        config, raw = self._load(tmp_path, """
+ups:
+  name: "TestUPS@localhost"
+  connection_loss_grace_period:
+    duration: "60"
+""")
+        errors = _errors(ConfigLoader.validate_config(config, raw))
+        assert any("grace_period.duration must be a positive number" in m
+                   for m in errors)
+
+    @pytest.mark.unit
+    def test_grace_flap_threshold_and_enabled_types(self, tmp_path):
+        config, raw = self._load(tmp_path, """
+ups:
+  name: "TestUPS@localhost"
+  connection_loss_grace_period:
+    flap_threshold: "3"
+    enabled: "yes"
+""")
+        errors = _errors(ConfigLoader.validate_config(config, raw))
+        assert any("grace_period.flap_threshold must be a positive integer" in m
+                   for m in errors)
+        assert any("grace_period.enabled must be a boolean" in m for m in errors)
+
+    @pytest.mark.unit
+    def test_grace_float_duration_is_valid(self, tmp_path):
+        config, raw = self._load(tmp_path, """
+ups:
+  name: "TestUPS@localhost"
+  connection_loss_grace_period:
+    duration: 1.5
+    flap_threshold: 3
+""")
+        errors = _errors(ConfigLoader.validate_config(config, raw))
+        assert not any("grace_period" in m for m in errors)
+
+    # ---- ISS-024: notifications sweep + honor `enabled` ----------------------
+
+    @pytest.mark.unit
+    def test_notifications_unknown_key_errors(self, tmp_path):
+        config, raw = self._load(tmp_path, """
+ups:
+  name: "TestUPS@localhost"
+notifications:
+  urls: ["json://localhost"]
+  titel: "typo"
+""")
+        errors = _errors(ConfigLoader.validate_config(config, raw))
+        assert any("unknown config key 'notifications.titel'" in m for m in errors)
+
+    @pytest.mark.unit
+    def test_notifications_enabled_false_disables_despite_urls(self, tmp_path):
+        config, _ = self._load(tmp_path, """
+ups:
+  name: "TestUPS@localhost"
+notifications:
+  enabled: false
+  urls: ["json://localhost"]
+""")
+        assert config.notifications.enabled is False
+        assert config.notifications.urls  # URLs still parsed
+
+    @pytest.mark.unit
+    def test_notifications_enabled_derived_when_absent(self, tmp_path):
+        config, _ = self._load(tmp_path, """
+ups:
+  name: "TestUPS@localhost"
+notifications:
+  urls: ["json://localhost"]
+""")
+        assert config.notifications.enabled is True
+
+    @pytest.mark.unit
+    def test_notifications_enabled_non_bool_errors(self, tmp_path):
+        config, raw = self._load(tmp_path, """
+ups:
+  name: "TestUPS@localhost"
+notifications:
+  enabled: "yes"
+  urls: ["json://localhost"]
+""")
+        errors = _errors(ConfigLoader.validate_config(config, raw))
+        assert any("notifications.enabled must be a boolean" in m for m in errors)
+        # cubic P2: the parse path must FAIL CLOSED for a non-bool value — a
+        # truthy string like "yes" must NOT bool()-coerce notifications back on
+        # if validation is bypassed.
+        assert config.notifications.enabled is False
+
+    # ---- ISS-025: legacy dict-form ups unknown-key sweep --------------------
+
+    @pytest.mark.unit
+    def test_dict_form_ups_unknown_key_errors(self, tmp_path):
+        config, raw = self._load(tmp_path, """
+ups:
+  name: "TestUPS@localhost"
+  check_intervall: 2
+""")
+        errors = _errors(ConfigLoader.validate_config(config, raw))
+        assert any("unknown config key 'ups.check_intervall'" in m for m in errors)
+
+    @pytest.mark.unit
+    def test_dict_form_ups_valid_keys_no_error(self, tmp_path):
+        config, raw = self._load(tmp_path, """
+ups:
+  name: "TestUPS@localhost"
+  check_interval: 2
+""")
+        errors = _errors(ConfigLoader.validate_config(config, raw))
+        assert not any("unknown config key 'ups." in m for m in errors)
+
+    # ---- ISS-014: redundancy-member advisory warning ------------------------
+
+    @pytest.mark.unit
+    def test_redundancy_member_with_resources_warns(self, tmp_path):
+        config, raw = self._load(tmp_path, """
+ups:
+  - name: "UPS-A@10.0.0.1"
+    remote_servers:
+      - name: "own-nas"
+        enabled: true
+        host: "10.0.0.9"
+        user: "root"
+  - name: "UPS-B@10.0.0.2"
+redundancy_groups:
+  - name: "rack"
+    ups_sources: ["UPS-A@10.0.0.1", "UPS-B@10.0.0.2"]
+""")
+        warnings = _warnings(ConfigLoader.validate_config(config, raw))
+        assert any(
+            "redundancy-group member" in m and "remote_servers" in m
+            for m in warnings
+        )
+
+    @pytest.mark.unit
+    def test_non_member_with_resources_no_advisory_warning(self, tmp_path):
+        config, raw = self._load(tmp_path, """
+ups:
+  - name: "UPS-A@10.0.0.1"
+  - name: "UPS-B@10.0.0.2"
+  - name: "UPS-C@10.0.0.3"
+    remote_servers:
+      - name: "own-nas"
+        enabled: true
+        host: "10.0.0.9"
+        user: "root"
+redundancy_groups:
+  - name: "rack"
+    ups_sources: ["UPS-A@10.0.0.1", "UPS-B@10.0.0.2"]
+""")
+        warnings = _warnings(ConfigLoader.validate_config(config, raw))
+        assert not any("redundancy-group member" in m for m in warnings)
