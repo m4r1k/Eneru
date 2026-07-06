@@ -1,2 +1,4 @@
-mkdocs>=1.5
-mkdocs-material>=9.0
+# Read the Docs build dependencies. ISS-048: keep these floors in lockstep
+# with the `docs` extra in pyproject.toml (they had drifted older).
+mkdocs>=1.6.1
+mkdocs-material>=9.7.1

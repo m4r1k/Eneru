@@ -19,6 +19,11 @@
 # elevation is needed for full local-host ownership via SSH delegation.
 # See docs/install-comparison.md for the three-profile framing.
 
+# ISS-045: base image is intentionally a mutable tag (NOT digest-pinned).
+# Combined with `apt-get upgrade -y` in the runtime stage, this pulls the
+# latest security patches on every build. A frozen digest would trade that
+# freshness for reproducibility and, in practice, drift stale (and possibly
+# vulnerable) between manual refreshes — the wrong tradeoff for a base OS.
 FROM python:3.12-slim-trixie AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

@@ -114,7 +114,9 @@ else
     echo ""
     echo "Next steps:"
     echo "  1. Edit configuration: nano /etc/ups-monitor/config.yaml"
-    echo "  2. Validate config:    python3 /opt/ups-monitor/eneru.py --validate-config"
+    # ISS-046: `validate` is a subcommand, not a `--validate-config` flag, and
+    # it needs the config path the line above references.
+    echo "  2. Validate config:    python3 /opt/ups-monitor/eneru.py validate --config /etc/ups-monitor/config.yaml"
     echo "  3. Enable the service: systemctl enable eneru.service"
     echo "  4. Start the service:  systemctl start eneru.service"
     echo ""

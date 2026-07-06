@@ -259,8 +259,22 @@ echo "=== Test 7: Notification Delivery ==="
 
 # Use ${VAR:-} default expansion so set -u doesn't abort on PR runs
 # where the secret isn't injected (forks, first-run PRs, etc.).
+#
+# ISS-051: an empty URL used to be an unconditional SKIP that still passed
+# the required check — so a silent secret rotation (or the secret never
+# being wired) could leave notification delivery untested indefinitely, a
+# failure mode e2e.yml itself has recorded. Now the context decides: when
+# the workflow can see the secret (non-fork push/PR) it exports
+# E2E_EXPECT_NOTIFICATION_SECRET=1, turning an empty URL into a hard FAIL.
+# Fork PRs (no secret access) keep the legitimate SKIP.
 if [ -z "${E2E_NOTIFICATION_URL:-}" ]; then
-  echo "SKIP: E2E_NOTIFICATION_URL secret not configured"
+  if [ "${E2E_EXPECT_NOTIFICATION_SECRET:-}" = "1" ]; then
+    echo "FAIL: E2E_NOTIFICATION_URL is empty but this context expects it"
+    echo "  (secret rotated/unset in the upstream repo?). Notification"
+    echo "  delivery must be exercised on non-fork runs."
+    exit 1
+  fi
+  echo "SKIP: E2E_NOTIFICATION_URL secret not configured (fork/no-secret context)"
   exit 0
 fi
 

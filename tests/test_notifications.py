@@ -65,8 +65,13 @@ def _patch_apprise(mock_apprise, *, succeed=True,
     return mock_instance
 
 
-def _wait_until(predicate, timeout=2.0, poll=0.02):
-    """Block until predicate() is truthy or the timeout elapses."""
+def _wait_until(predicate, timeout=5.0, poll=0.02):
+    """Block until predicate() is truthy or the timeout elapses.
+
+    ISS-054: default timeout widened from 2 s to 5 s for headroom on a
+    loaded CI runner — this is already the robust bounded-poll pattern
+    (returns as soon as the condition holds), so a larger cap only costs
+    wall-clock on genuine failures, never on the happy path."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():

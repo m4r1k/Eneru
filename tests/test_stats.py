@@ -2200,9 +2200,18 @@ class TestStatsWriterThread:
         try:
             for i in range(5):
                 store.buffer_sample(SAMPLE_UPS_DATA, ts=30_000_000 + i)
-            time.sleep(0.2)  # let the writer drain the buffer
-            cur = store._conn.execute("SELECT COUNT(*) FROM samples")
-            assert cur.fetchone()[0] == 5
+            # ISS-054: poll for the drain instead of a fixed sleep. The old
+            # `sleep(0.2); assert count == 5` could flip on a stalled runner
+            # where the writer hadn't flushed yet. Bounded so it can't hang.
+            deadline = time.monotonic() + 2.0
+            count = 0
+            while time.monotonic() < deadline:
+                count = store._conn.execute(
+                    "SELECT COUNT(*) FROM samples").fetchone()[0]
+                if count == 5:
+                    break
+                time.sleep(0.01)
+            assert count == 5
         finally:
             stop.set()
             w.join(timeout=2)

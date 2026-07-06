@@ -1,11 +1,6 @@
-pytest>=7.0.0
-pytest-cov>=4.0.0
-pytest-mock>=3.10.0
-pytest-timeout>=2.1.0
-pytest-xdist>=3.0.0
-PyYAML>=5.4.1
-apprise>=1.9.7
-bcrypt>=4.0.1
-paho-mqtt>=2.0.0
-mkdocs>=1.6.1
-mkdocs-material>=9.7.1
+# ISS-043/048: single source of truth. This file used to hand-list dev deps
+# and drifted from pyproject's `dev` extra (playwright missing here, mkdocs
+# listed here but living in the `docs` extra). Install the extras directly so
+# the two can never disagree again. Docs tooling lives in docs/requirements.txt
+# (consumed by Read the Docs) and the `docs` extra.
+-e .[dev,notifications,auth,mqtt]

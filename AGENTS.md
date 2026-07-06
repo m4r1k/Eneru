@@ -34,8 +34,8 @@ If you need to verify the installed deb/rpm package, invoke the package's own en
 uv venv /tmp/eneru-venv
 source /tmp/eneru-venv/bin/activate
 
-# Install package with all dev dependencies
-uv pip install -e ".[dev,notifications,docs]"
+# Install package with all dev dependencies (same extras CI installs, plus docs)
+uv pip install -e ".[dev,notifications,auth,mqtt,docs]"
 ```
 
 ## Commands
@@ -43,8 +43,7 @@ uv pip install -e ".[dev,notifications,docs]"
 ```bash
 # Testing (always inside virtualenv)
 pytest                              # Run all tests
-pytest -m unit                      # Unit tests only
-pytest -m integration               # Integration tests only
+pytest -m unit                      # Unit tests only (integration coverage is the E2E suite, tests/e2e/)
 pytest --cov=src/eneru              # With coverage
 
 # Development
@@ -353,6 +352,8 @@ The current pinned set (as of 2026-06-29):
 | `docker/build-push-action` | `v6` | `10e90e36…` |
 
 `nFPM` is similarly pinned (`NFPM_VERSION` env var in `release.yml` and `integration.yml`) and verified against the goreleaser-published `checksums.txt` before extraction. Bump the version constant and the checksum check still verifies the new download.
+
+The **Docker base image** (`Dockerfile`, `python:3.12-slim-trixie`) is deliberately NOT digest-pinned (ISS-045). A base OS image is the one dependency where freshness beats reproducibility: the mutable tag plus `apt-get upgrade -y` pulls current security patches on every build, whereas a frozen digest drifts stale (and potentially vulnerable) between manual refreshes. This is the intentional exception to the SHA-pinning convention above, which still governs GitHub Actions and nFPM.
 
 ## Changelog
 

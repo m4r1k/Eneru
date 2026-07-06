@@ -13,3 +13,14 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "chore"
+
+  # ISS-044: Python deps are all `>=` floors with no upper bounds, and nothing
+  # consumes uv.lock in CI, so a breaking major would land ungated. Dependabot
+  # on the pip ecosystem is the early-warning layer: floor bumps + security
+  # advisories arrive as PRs that the validate matrix gates before merge.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"

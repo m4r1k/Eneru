@@ -105,9 +105,15 @@ Then run tests from inside the activated venv:
 ```bash
 pytest
 pytest -m unit
-pytest -m integration
 pytest --cov=src/eneru --cov-report=term
 ```
+
+<!-- ISS-050: there is no `pytest -m integration` selector. Cross-component
+integration coverage is the shell-based E2E suite under tests/e2e/ (run by
+the E2E workflow), not pytest-marked tests, so the ghost marker was removed
+rather than advertised. -->
+
+
 
 Validate example configs:
 

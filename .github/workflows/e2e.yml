@@ -86,6 +86,12 @@ jobs:
           # matrix entry is harmless (only Test 7 reads it) and avoids
           # making the workflow group-aware.
           E2E_NOTIFICATION_URL: ${{ secrets.E2E_NOTIFICATION_URL }}
+          # ISS-051: on contexts that CAN see the secret (push to main, or a
+          # PR from a branch in this repo — not a fork), an empty
+          # E2E_NOTIFICATION_URL is a hard FAIL rather than a silent SKIP, so
+          # a rotated/unset secret can't leave Test 7 permanently un-run. Fork
+          # PRs have no secret access and legitimately keep the SKIP.
+          E2E_EXPECT_NOTIFICATION_SECRET: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.fork == false) && '1' || '' }}
           # Bypass the v5.4 "is_local requires root" startup check so
           # eneru runs as the runner user. Sudo-elevating eneru would
           # leave its SQLite DB and state files root-owned, which then

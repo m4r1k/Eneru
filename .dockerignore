@@ -15,3 +15,11 @@ uv.lock
 .claude
 tests/e2e/nut-dummy
 tests/e2e/ssh-target
+# ISS-045: keep doc/tooling edits from busting the builder's wheel-layer cache
+# (the builder does `COPY . .`). README.md is exempt — pyproject's
+# long_description reads it during the wheel build.
+docs
+tools
+coverage.xml
+*.md
+!README.md

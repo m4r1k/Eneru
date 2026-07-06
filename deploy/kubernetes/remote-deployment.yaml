@@ -66,8 +66,11 @@ spec:
         fsGroup: 10001
       containers:
         - name: eneru
-          image: ghcr.io/m4r1k/eneru:latest
-          imagePullPolicy: Always
+          # ISS-053: pin to a released version, not :latest. :latest +
+          # imagePullPolicy: Always gives every pod restart a surprise upgrade
+          # in production. Bump this tag deliberately when you upgrade; the
+          # default IfNotPresent pull policy then applies for a tagged image.
+          image: ghcr.io/m4r1k/eneru:6.1.6
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
