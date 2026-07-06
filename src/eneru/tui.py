@@ -20,6 +20,7 @@ from eneru.config import Config, UPSGroupConfig
 from eneru.graph import BrailleGraph
 from eneru.remote_health import read_remote_health_sidecar, remote_health_sidecar_path
 from eneru.stats import StatsStore
+from eneru.status import sanitize_name
 
 
 # Cycle order for the G key + --graph flag.
@@ -209,11 +210,8 @@ def stats_db_path_for(group: UPSGroupConfig, config: Config) -> Path:
 
     Mirrors the sanitisation in MultiUPSCoordinator and UPSGroupMonitor.
     """
-    name = group.ups.name
-    if config.multi_ups:
-        sanitized = name.replace("@", "-").replace(":", "-").replace("/", "-")
-    else:
-        sanitized = "default"
+    # ISS-039: reuse status.sanitize_name rather than re-implementing the chain.
+    sanitized = sanitize_name(group.ups.name) if config.multi_ups else "default"
     return Path(config.statistics.db_directory) / f"{sanitized}.db"
 
 
@@ -223,10 +221,9 @@ def state_file_path_for(group: UPSGroupConfig, config: Config) -> Path:
     Multi-UPS mode appends a sanitized suffix; single-UPS uses the bare
     path. Used by both ``collect_group_data`` and ``update_live_buffer``.
     """
-    name = group.ups.name
+    # ISS-039: reuse status.sanitize_name rather than re-implementing the chain.
     if config.multi_ups:
-        sanitized = name.replace("@", "-").replace(":", "-").replace("/", "-")
-        return Path(config.logging.state_file + f".{sanitized}")
+        return Path(config.logging.state_file + f".{sanitize_name(group.ups.name)}")
     return Path(config.logging.state_file)
 
 
@@ -341,12 +338,10 @@ def query_metric_series(
     conn = StatsStore.open_readonly(db_path)
     if conn is not None:
         try:
-            store = StatsStore(db_path)
-            store._conn = conn
-            try:
-                sqlite_series = store.query_range(column, start, end)
-            finally:
-                store._conn = None
+            # ISS-039: wrap the caller-owned connection instead of poking
+            # StatsStore._conn directly.
+            store = StatsStore.from_connection(conn)
+            sqlite_series = store.query_range(column, start, end)
         finally:
             try:
                 conn.close()
@@ -536,15 +531,13 @@ def query_events_for_display(
             continue
         any_db_seen = True
         try:
-            store = StatsStore(db_path)
-            store._conn = conn
-            try:
-                # Query from epoch to now -- no time window. Events are
-                # sparse (per-event, not per-poll) so the full table is
-                # tiny even after years of uptime.
-                events = store.query_events(0, int(time.time()))
-            finally:
-                store._conn = None
+            # ISS-039: wrap the caller-owned connection rather than poking
+            # StatsStore._conn directly.
+            store = StatsStore.from_connection(conn)
+            # Query from epoch to now -- no time window. Events are sparse
+            # (per-event, not per-poll) so the full table is tiny even after
+            # years of uptime.
+            events = store.query_events(0, int(time.time()))
             for ts, etype, detail in events:
                 if not _event_enabled(etype, verbosity):
                     continue

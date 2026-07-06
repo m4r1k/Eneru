@@ -2722,6 +2722,8 @@ class TestQueryMetricSeriesEdges:
         fake_store = MagicMock()
         fake_store.query_range.return_value = []
         store_cls = MagicMock(return_value=fake_store)
+        # ISS-039: the wrapper is now built via StatsStore.from_connection.
+        store_cls.from_connection.return_value = fake_store
         store_cls.open_readonly.return_value = bad_conn
         with patch("eneru.tui.StatsStore", store_cls):
             # No live buffer either → returns sqlite_series (empty).

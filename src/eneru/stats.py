@@ -930,6 +930,28 @@ class StatsStore:
             self._log_error_once(f"stats: query_events failed: {e}")
             return []
 
+    def latest_event_ts(self, event_type: str) -> Optional[int]:
+        """Return MAX(ts) for one event_type, or None if there are none.
+
+        ISS-038: lets callers resolve e.g. the latest DAEMON_START without
+        loading every retained event row into Python just to take a max().
+        ``event_type`` is an internal identifier (never user input)."""
+        if self._conn is None:
+            return None
+        try:
+            with self._db_lock:
+                if self._conn is None:
+                    return None
+                cur = self._conn.execute(
+                    "SELECT MAX(ts) FROM events WHERE event_type = ?",
+                    (str(event_type),),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row and row[0] is not None else None
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: latest_event_ts failed: {e}")
+            return None
+
     def query_recent_events(
         self,
         *,

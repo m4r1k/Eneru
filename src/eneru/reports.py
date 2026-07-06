@@ -198,12 +198,12 @@ def gather_report_sources(store, ups_name: str, energy_config, *,
     in_window_starts = [ts for ts, etype, _ in events if etype == "DAEMON_START"]
     # Resolve "running since" from ALL retained history (events are sparse and
     # retention-capped), so a daemon up longer than a year still reports its real
-    # start instead of "unknown".
-    wide = store.query_events(0, int(now)) if store else []
-    all_starts = [ts for ts, etype, _ in wide if etype == "DAEMON_START"]
+    # start instead of "unknown". ISS-038: a targeted MAX(ts) query instead of
+    # loading every retained event row just to take a max().
+    since = store.latest_event_ts("DAEMON_START") if store else None
     sources["uptime"] = {
         "daemon_starts": len(in_window_starts),
-        "since": max(all_starts) if all_starts else None,
+        "since": since,
     }
 
     # battery health: the most recent stored row.
