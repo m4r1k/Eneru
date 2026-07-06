@@ -386,6 +386,48 @@ class TestDelegatedShutdownSequence:
         assert "SHUTDOWN_SEQUENCE_COMPLETE" not in events_seen
 
     @pytest.mark.unit
+    def test_delegated_poweroff_sent_with_drain_failure_marks_complete(
+        self, tmp_path,
+    ):
+        """ISS-005: a Phase-A drain crash (success=False because crashed/error)
+        while the Phase-C poweroff WAS delivered (shutdown_sent=True) must be
+        treated as a COMPLETE sequence — write the marker, log
+        SHUTDOWN_SEQUENCE_COMPLETE, warn about the partial drain — not reported
+        as a failed poweroff. Before the fix, monitor used all(r.success) and
+        misclassified this delivered poweroff as incomplete."""
+        monitor = _make_delegated_monitor(tmp_path, dry_run=False)
+        monitor._shutdown_remote_servers = lambda: [
+            RemoteShutdownResult(
+                server="host-loopback",
+                host="127.0.0.1",
+                shutdown_sent=True,   # Phase-C poweroff delivered
+                crashed=True,         # but a Phase-A pre-action crashed
+                error="pre-action drain crashed",
+            )
+        ]
+        event_log = MagicMock()
+        monitor._stats_store.log_event = event_log
+        monitor._log_message = MagicMock()
+        monitor._send_notification = MagicMock()
+
+        with _patch_runtime("container (Docker)"), \
+             patch("eneru.monitor.write_shutdown_marker") as marker:
+            monitor._execute_shutdown_sequence()
+
+        # Sequence recorded complete + recovery marker written.
+        marker.assert_called_once()
+        events_seen = [c.args[0] for c in event_log.call_args_list]
+        assert "SHUTDOWN_SEQUENCE_COMPLETE" in events_seen
+        # Partial drain surfaced as a warning, not a failure.
+        assert any(
+            "partially failed" in str(call.args[0]).lower()
+            for call in monitor._log_message.call_args_list
+        )
+        bodies = [call.args[0] for call in monitor._send_notification.call_args_list]
+        assert not any("Incomplete" in body for body in bodies)
+        assert any("Complete" in body for body in bodies)
+
+    @pytest.mark.unit
     def test_delegated_shutdown_failure_clears_shutdown_flag(self, tmp_path):
         """CodeRabbit #3: when the delegated host poweroff fails, the
         re-entry flag must be cleared so subsequent triggers aren't

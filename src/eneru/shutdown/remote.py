@@ -68,6 +68,26 @@ class RemoteShutdownResult:
         )
 
 
+def loopback_poweroff_sent(result: "RemoteShutdownResult") -> bool:
+    """True when the Phase-C delegated host poweroff was actually delivered.
+
+    ISS-005: unlike ``RemoteShutdownResult.success``, this deliberately IGNORES
+    Phase-A drain failures (``crashed`` / ``error``). When a loopback delegate's
+    pre-action crashes but the poweroff command still went out, the host IS
+    powering off, so the sequence must be treated as complete (write the
+    SHUTDOWN_SEQUENCE_COMPLETE marker, no failure notification) — the drain
+    failure is a reporting nuance, not a missed shutdown. This is the shared
+    predicate for the monitor and redundancy loopback paths, which previously
+    diverged (monitor used ``all(r.success)`` and misclassified a delivered
+    poweroff as failed).
+    """
+    return bool(
+        result.completed
+        and result.shutdown_sent
+        and not result.timed_out
+    )
+
+
 class RemoteShutdownMixin:
     """Mixin: SSH-based remote-server orchestration and shutdown."""
 

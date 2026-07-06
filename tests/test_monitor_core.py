@@ -2832,6 +2832,51 @@ class TestCleanupAndExit:
         monitor._send_notification.assert_not_called()
 
     @pytest.mark.unit
+    def test_signal_ignored_while_shutdown_sequence_in_flight(self, tmp_path):
+        """ISS-001: a real SIGTERM/SIGINT arriving while the shutdown sequence
+        runs on the main thread must be ignored (return, no SystemExit) so it
+        cannot abort the in-flight host poweroff. Nothing is torn down."""
+        monitor = make_monitor(tmp_path)
+        monitor._stop_stats = MagicMock()
+        monitor._stop_event = MagicMock()
+        worker = MagicMock()
+        monitor._notification_worker = worker
+        monitor._log_message = MagicMock()
+        monitor._shutdown_sequence_in_flight = True
+        # Even with the guard flag on disk, an in-flight sequence takes priority.
+        monitor._shutdown_flag_path.touch()
+
+        # Returns normally (no SystemExit) and tears nothing down.
+        # 15 == SIGTERM (matches the numeric convention used across this class).
+        assert monitor._cleanup_and_exit(15, None) is None
+        monitor._stop_event.set.assert_not_called()
+        monitor._stop_stats.assert_not_called()
+        worker.flush.assert_not_called()
+        assert any(
+            "ignoring" in str(call.args[0]).lower()
+            for call in monitor._log_message.call_args_list
+        )
+
+    @pytest.mark.unit
+    def test_internal_exit_after_shutdown_still_exits_during_sequence(
+        self, tmp_path,
+    ):
+        """ISS-001: the internal _exit_after_shutdown call passes signum=None and
+        must still exit even mid-sequence — the ignore branch is gated on a real
+        signal number so it does not swallow the intentional exit."""
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        monitor._stop_stats = MagicMock()
+        monitor._notification_worker = MagicMock()
+        monitor._send_notification = MagicMock()
+        monitor._shutdown_sequence_in_flight = True
+        monitor._shutdown_flag_path.touch()  # guard active → exit(0) path
+
+        with pytest.raises(SystemExit) as exc_info:
+            monitor._cleanup_and_exit(None, None)
+        assert exc_info.value.code == 0
+
+    @pytest.mark.unit
     def test_graceful_stop_enqueues_lifecycle_notification(self, tmp_path):
         """No shutdown_flag on disk → graceful stop. Touch flag, log
         DAEMON_STOP, schedule deferred lifecycle notification, exit 0."""

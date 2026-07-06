@@ -735,29 +735,45 @@ class MultiUPSCoordinator:
                         self._notification_worker.flush(timeout=5)
                     else:
                         time.sleep(5)
-                    # Slice 3: tag this shutdown as power-loss-triggered so
-                    # the next start can emit "📊  Recovered" and the Slice 4
-                    # bonus folds the prev shutdown into a richer message.
-                    # (Single-UPS path already does this in monitor.py;
-                    # coordinator mode was missing it — caught in pre-push
-                    # review.)
-                    write_shutdown_marker(
-                        Path(self.config.statistics.db_directory),
-                        version=__version__,
-                        reason=REASON_SEQUENCE_COMPLETE,
-                    )
-                    # Defense-in-depth: config validation already rejects an
-                    # empty/None command at load, but a programmatically-built
-                    # Config could still reach here. str()+strip guards against
-                    # None.split() / run_command([]) silently no-op'ing the
-                    # poweroff after peers were already drained.
+                    # ISS-015: validate the poweroff command BEFORE writing the
+                    # SHUTDOWN_SEQUENCE_COMPLETE recovery marker. Config
+                    # validation already rejects an empty/None command at load,
+                    # but a programmatically-built Config could still reach here.
+                    # If the command is empty the host never powers off, so
+                    # writing the marker would make the next boot log a false
+                    # "Recovered". The single-UPS path (monitor.py) already
+                    # validates first; the coordinator copy had drifted. str()+
+                    # split guards against None.split() / run_command([]).
                     cmd_parts = str(self.config.local_shutdown.command or "").split()
                     if not cmd_parts:
                         self._log(
                             "❌  local_shutdown.command is empty -- cannot power off "
                             "the host. Set local_shutdown.command to a valid command."
                         )
+                        # ISS-015: match the single-UPS path (monitor.py), which
+                        # also notifies on an incomplete sequence so operators
+                        # learn the host is still up rather than only seeing it
+                        # in the journal.
+                        if self._notification_worker:
+                            self._notification_worker.send(
+                                "❌  **Shutdown Sequence Incomplete**\n"
+                                "Host poweroff command is empty; the host is "
+                                "still up.",
+                                "failure",
+                                category="shutdown_summary",
+                            )
                     else:
+                        # Slice 3: tag this shutdown as power-loss-triggered so
+                        # the next start can emit "📊  Recovered" and the Slice 4
+                        # bonus folds the prev shutdown into a richer message.
+                        # (Single-UPS path already does this in monitor.py;
+                        # coordinator mode was missing it — caught in pre-push
+                        # review.)
+                        write_shutdown_marker(
+                            Path(self.config.statistics.db_directory),
+                            version=__version__,
+                            reason=REASON_SEQUENCE_COMPLETE,
+                        )
                         if self.config.local_shutdown.message:
                             cmd_parts.append(self.config.local_shutdown.message)
                         run_command(cmd_parts)

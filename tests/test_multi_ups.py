@@ -1496,11 +1496,45 @@ class TestCoordinatorRealLocalShutdown:
         coord._notification_worker = None
 
         with patch("eneru.multi_ups.time.sleep"), \
-             patch("eneru.multi_ups.run_command") as mock_run:
+             patch("eneru.multi_ups.run_command") as mock_run, \
+             patch("eneru.multi_ups.write_shutdown_marker") as mock_marker:
             coord._handle_local_shutdown("UPS1")
 
         mock_run.assert_not_called()
+        # ISS-015: the SHUTDOWN_SEQUENCE_COMPLETE recovery marker must NOT be
+        # written when the poweroff was skipped — otherwise the next boot logs a
+        # false "Recovered" though the host never powered off. The command is now
+        # validated BEFORE the marker write (the single-UPS path already did).
+        mock_marker.assert_not_called()
         assert any("local_shutdown.command is empty" in line for line in logs)
+
+    @pytest.mark.unit
+    def test_real_shutdown_empty_command_notifies_incomplete(self, tmp_path):
+        """ISS-015: with a notification worker, the coordinator's empty-command
+        branch sends an 'Incomplete' failure notification (parity with the
+        single-UPS path) so operators learn the host is still up."""
+        config = _coord_config(
+            tmp_path,
+            behavior=BehaviorConfig(dry_run=False),
+            local_shutdown=LocalShutdownConfig(enabled=True, command="   "),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        worker = MagicMock()
+        coord._notification_worker = worker
+
+        with patch("eneru.multi_ups.time.sleep"), \
+             patch("eneru.multi_ups.run_command") as mock_run, \
+             patch("eneru.multi_ups.write_shutdown_marker") as mock_marker:
+            coord._handle_local_shutdown("UPS1")
+
+        mock_run.assert_not_called()
+        mock_marker.assert_not_called()
+        # An 'Incomplete' failure notification is emitted so operators learn the
+        # host is still up (it follows the optimistic 'shutting down' message the
+        # coordinator sends before command validation).
+        bodies = [call.args[0] for call in worker.send.call_args_list]
+        assert any("Incomplete" in body for body in bodies)
 
     @pytest.mark.unit
     def test_disabled_local_shutdown_clears_flag(self, tmp_path):

@@ -14,7 +14,57 @@ from eneru import (
     UnmountConfig,
 )
 from eneru import utils as eneru_utils
-from eneru.shutdown.remote import RemoteShutdownResult
+from eneru.shutdown.remote import RemoteShutdownResult, loopback_poweroff_sent
+
+
+class TestLoopbackPoweroffSent:
+    """ISS-005: the shared predicate the monitor and redundancy loopback paths
+    both use to decide whether the delegated host poweroff was delivered. Unlike
+    RemoteShutdownResult.success it ignores Phase-A drain failures."""
+
+    @pytest.mark.unit
+    def test_true_when_poweroff_delivered(self):
+        result = RemoteShutdownResult(
+            server="host-loopback", host="127.0.0.1", shutdown_sent=True,
+        )
+        assert loopback_poweroff_sent(result) is True
+
+    @pytest.mark.unit
+    def test_true_even_when_phase_a_crashed_or_errored(self):
+        """The poweroff went out; a Phase-A drain crash/error must NOT flip the
+        predicate to False (that is the exact monitor/redundancy divergence)."""
+        crashed = RemoteShutdownResult(
+            server="host-loopback", host="127.0.0.1",
+            shutdown_sent=True, crashed=True, error="drain crashed",
+        )
+        assert crashed.success is False          # success is stricter
+        assert loopback_poweroff_sent(crashed) is True
+
+    @pytest.mark.unit
+    def test_false_when_poweroff_not_sent(self):
+        result = RemoteShutdownResult(
+            server="host-loopback", host="127.0.0.1",
+            shutdown_sent=False, error="ssh failed",
+        )
+        assert loopback_poweroff_sent(result) is False
+
+    @pytest.mark.unit
+    def test_false_when_timed_out(self):
+        result = RemoteShutdownResult(
+            server="host-loopback", host="127.0.0.1",
+            shutdown_sent=True, timed_out=True,
+        )
+        assert loopback_poweroff_sent(result) is False
+
+    @pytest.mark.unit
+    def test_redundancy_uses_the_shared_helper(self):
+        """Convergence guard: redundancy must call the shared module helper, not
+        re-introduce a private copy that can drift from the monitor path."""
+        import eneru.redundancy as redundancy
+        assert redundancy.loopback_poweroff_sent is loopback_poweroff_sent
+        assert not hasattr(
+            redundancy.RedundancyGroupExecutor, "_loopback_poweroff_sent"
+        )
 
 
 class TestRemoteActionTemplates:

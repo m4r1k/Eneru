@@ -32,7 +32,10 @@ from eneru.logger import UPSLogger
 from eneru.notifications import NotificationWorker
 from eneru.shutdown.containers import ContainerShutdownMixin
 from eneru.shutdown.filesystems import FilesystemShutdownMixin
-from eneru.shutdown.remote import RemoteShutdownMixin, RemoteShutdownResult
+from eneru.shutdown.remote import (
+    RemoteShutdownMixin,
+    loopback_poweroff_sent,
+)
 from eneru.shutdown.vms import VMShutdownMixin
 from eneru.state import MonitorState
 
@@ -292,15 +295,6 @@ class RedundancyGroupExecutor(
                 os.close(fd)
             probe.unlink(missing_ok=True)
 
-    @staticmethod
-    def _loopback_poweroff_sent(result: RemoteShutdownResult) -> bool:
-        """True once the delegated host poweroff command was accepted."""
-        return bool(
-            result.completed
-            and result.shutdown_sent
-            and not result.timed_out
-        )
-
     def _clear_failed_loopback_shutdown_state(self) -> None:
         """Best-effort re-arm after delegated host poweroff did not happen."""
         error: Optional[Exception] = None
@@ -473,13 +467,13 @@ class RedundancyGroupExecutor(
                     )
                 ]
                 if not loopback_results or not all(
-                    self._loopback_poweroff_sent(result)
+                    loopback_poweroff_sent(result)
                     for result in loopback_results
                 ):
                     details = "; ".join(
                         result.error or "shutdown command was not sent"
                         for result in loopback_results
-                        if not self._loopback_poweroff_sent(result)
+                        if not loopback_poweroff_sent(result)
                     ) or "loopback shutdown result missing"
                     self._log_message(
                         "❌  Delegated redundancy host poweroff failed; shutdown "

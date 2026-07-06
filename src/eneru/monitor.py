@@ -46,7 +46,7 @@ from eneru.utils import run_command, command_exists, is_numeric, format_seconds
 from eneru.shutdown.vms import VMShutdownMixin
 from eneru.shutdown.containers import ContainerShutdownMixin
 from eneru.shutdown.filesystems import FilesystemShutdownMixin
-from eneru.shutdown.remote import RemoteShutdownMixin
+from eneru.shutdown.remote import RemoteShutdownMixin, loopback_poweroff_sent
 from eneru.health.voltage import VoltageMonitorMixin
 from eneru.health.battery import BatteryMonitorMixin
 
@@ -150,6 +150,12 @@ class UPSGroupMonitor(
         self._shutdown_flag_path = Path(config.logging.shutdown_flag_file + sfx)
         self._shutdown_in_progress = False
         self._shutdown_flag_unusable = False
+        # ISS-001: True only while _execute_shutdown_sequence is running. In
+        # single-UPS mode the sequence AND the SIGTERM/SIGINT handler both run
+        # on the main thread, so a signal landing mid-sequence would otherwise
+        # sys.exit(0) and abort the host poweroff. _cleanup_and_exit consults
+        # this flag to decline exiting while a sequence is in flight.
+        self._shutdown_sequence_in_flight = False
         self._battery_history_path = Path(config.logging.battery_history_file + sfx)
         self._state_file_path = Path(config.logging.state_file + sfx)
         self._remote_health_path = remote_health_sidecar_path(self._state_file_path)
@@ -1303,6 +1309,21 @@ class UPSGroupMonitor(
         )
 
     def _execute_shutdown_sequence(self):
+        """Execute the controlled shutdown sequence.
+
+        Thin wrapper that marks the sequence in flight for its entire duration
+        (ISS-001) so `_cleanup_and_exit` can decline to sys.exit() on a
+        SIGTERM/SIGINT that lands mid-sequence in single-UPS mode (where the
+        sequence and the signal handler share the main thread). The flag is
+        cleared in `finally` even if the implementation raises or exits.
+        """
+        self._shutdown_sequence_in_flight = True
+        try:
+            self._execute_shutdown_sequence_impl()
+        finally:
+            self._shutdown_sequence_in_flight = False
+
+    def _execute_shutdown_sequence_impl(self):
         """Execute the controlled shutdown sequence."""
         self._mark_shutdown_in_progress("starting shutdown sequence")
         sequence_start = time.monotonic()
@@ -1491,11 +1512,13 @@ class UPSGroupMonitor(
                     for s in self.config.remote_servers
                 )
             ]
-            if not loopback_results or not all(r.success for r in loopback_results):
+            if not loopback_results or not all(
+                loopback_poweroff_sent(r) for r in loopback_results
+            ):
                 details = "; ".join(
                     r.error or "shutdown command was not sent"
                     for r in loopback_results
-                    if not r.success
+                    if not loopback_poweroff_sent(r)
                 ) or "loopback shutdown result missing"
                 self._log_message(
                     "❌  Delegated host poweroff failed; shutdown sequence "
@@ -1514,6 +1537,21 @@ class UPSGroupMonitor(
                 # trigger has to be allowed through.
                 self._clear_shutdown_in_progress()
                 return
+            # ISS-005: the poweroff WAS delivered (loopback_poweroff_sent is
+            # True for every loopback result), so the sequence is complete even
+            # if a Phase-A drain crashed. Surface the partial drain failure as a
+            # warning but still record completion + write the marker below.
+            drain_failures = "; ".join(
+                r.error or "Phase-A drain reported a failure"
+                for r in loopback_results
+                if not r.success
+            )
+            if drain_failures:
+                self._log_message(
+                    "⚠️  Delegated host poweroff was sent, but a local drain "
+                    f"phase partially failed: {drain_failures}. The host is "
+                    "powering off; treating the sequence as complete."
+                )
             record_sequence_complete()
             self._log_message(
                 "🛰️  Host poweroff delegated to loopback SSH (already sent). "
@@ -1708,6 +1746,25 @@ class UPSGroupMonitor(
         """Handle clean exit on signals."""
         from pathlib import Path
         stats_dir = Path(self.config.statistics.db_directory)
+
+        # ISS-001: A real SIGTERM/SIGINT arriving while the shutdown sequence
+        # is running on this (main) thread must NOT unwind it — sys.exit here
+        # would abort the sequence before the host poweroff (run_command) fires.
+        # Ignore the signal and let the in-flight sequence finish; its own
+        # completion path performs cleanup. `signum is None` is the internal
+        # _exit_after_shutdown call, which must still proceed to exit.
+        # Tradeoff: in the no-poweroff branches (local_shutdown disabled, empty
+        # command, failed delegate) the sequence returns without halting, the
+        # flag clears, and the daemon keeps running; the swallowed `systemctl
+        # stop` then degrades to a SIGKILL after TimeoutStopSec (skipping the
+        # graceful DAEMON_STOP path). Acceptable: never abort a live poweroff,
+        # and the sequence is short.
+        if signum is not None and self._shutdown_sequence_in_flight:
+            self._log_message(
+                "⚠️  Signal received during shutdown sequence — ignoring; "
+                "the in-flight poweroff sequence continues."
+            )
+            return
 
         self._stop_event.set()
         if self._remote_health_manager is not None:
