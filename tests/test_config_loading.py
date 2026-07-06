@@ -459,3 +459,50 @@ redundancy_groups:
         assert config.redundancy_groups[0].name == "12345"
         assert all(isinstance(s, str)
                    for s in config.redundancy_groups[0].ups_sources)
+
+
+class TestScalarSectionGuards:
+    """ISS-026: a scalar/list where a mapping is required must surface a clean
+    error (SystemExit with an ERROR message), not a raw AttributeError
+    traceback out of _parse_config."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("body,section", [
+        ("behavior: true\n", "behavior"),
+        ("triggers: 5\n", "triggers"),
+        ("local_shutdown: yes\n", "local_shutdown"),
+        ("virtual_machines: 3\n", "virtual_machines"),
+        ("containers: 1\n", "containers"),
+        ("filesystems: 2\n", "filesystems"),
+        ("ups:\n  name: x\n  connection_loss_grace_period: 7\n",
+         "connection_loss_grace_period"),
+        # Multi-UPS list form (the modern default shape) -- per-entry sections.
+        ("ups:\n  - name: x@localhost\n    is_local: true\n"
+         "    virtual_machines: 3\n", "virtual_machines"),
+        ("ups:\n  - name: x@localhost\n    is_local: true\n"
+         "    containers: 3\n", "containers"),
+        ("ups:\n  - name: x@localhost\n    is_local: true\n"
+         "    filesystems: 3\n", "filesystems"),
+        # Redundancy-group per-entry section.
+        ("ups:\n  - name: a@localhost\n  - name: b@localhost\n"
+         "redundancy_groups:\n  - name: rg\n    is_local: true\n"
+         "    ups_sources: [a@localhost, b@localhost]\n"
+         "    virtual_machines: 3\n", "virtual_machines"),
+    ])
+    def test_scalar_section_raises_clean_error(
+        self, temp_config_file, body, section,
+    ):
+        temp_config_file.write_text(body)
+        with pytest.raises(SystemExit) as exc_info:
+            ConfigLoader.load(str(temp_config_file))
+        msg = str(exc_info.value)
+        assert "must be a mapping" in msg
+        assert section in msg
+
+    @pytest.mark.unit
+    def test_null_section_treated_as_absent(self, temp_config_file):
+        """An explicitly-null section (`behavior:` with no body) is treated as
+        omitted -> defaults, not an error."""
+        temp_config_file.write_text("behavior:\nups:\n  name: TestUPS@localhost\n")
+        config = ConfigLoader.load(str(temp_config_file))
+        assert config.behavior.dry_run is False

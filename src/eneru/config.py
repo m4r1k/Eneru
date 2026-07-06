@@ -637,6 +637,14 @@ class Config:
 # CONFIGURATION LOADER
 # ==============================================================================
 
+class ConfigSectionError(ValueError):
+    """A config section has the wrong shape (scalar/list where a mapping is
+    required). ISS-026: a dedicated subclass so ``load()`` catches ONLY this
+    structural error and never masks an unrelated ValueError raised deeper in
+    parsing as if it were a config-shape problem.
+    """
+
+
 class ConfigLoader:
     """Loads and validates configuration from YAML file."""
 
@@ -652,10 +660,41 @@ class ConfigLoader:
             return False
         return True
 
+    @staticmethod
+    def _is_number_nonbool_in_range(value: Any, *, minimum: float = None,
+                                    maximum: float = None) -> bool:
+        """Return True for int/float, excluding bool, inside optional bounds."""
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return False
+        if minimum is not None and value < minimum:
+            return False
+        if maximum is not None and value > maximum:
+            return False
+        return True
+
     DEFAULT_CONFIG_PATHS = [
         Path("/etc/ups-monitor/config.yaml"),
         Path("/etc/ups-monitor/config.yml"),
     ]
+
+    @staticmethod
+    def _as_mapping(section: str, value: Any) -> dict:
+        """Coerce a config section value to a mapping.
+
+        ISS-026: a null section (e.g. `behavior:` with no body) is treated as
+        absent -> {}. A scalar/list value is a structural error; raise a clean
+        ValueError so `load()` reports it as an ERROR line instead of crashing
+        `_parse_config` with a raw AttributeError traceback. Newer sections
+        (logging, statistics, api) already guarded this; older ones did not.
+        """
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return value
+        raise ConfigSectionError(
+            f"ERROR: '{section}' must be a mapping, got "
+            f"{type(value).__name__}."
+        )
 
     @staticmethod
     def _unknown_key_errors(section: str, data: Any,
@@ -722,8 +761,15 @@ class ConfigLoader:
             print("Using default configuration.")
             return config
 
-        # Parse configuration sections
-        config = cls._parse_config(data)
+        # Parse configuration sections. ISS-026: a structurally malformed
+        # section (a scalar/list where a mapping is required) raises ValueError
+        # inside _parse_config; surface it as a clean message + non-zero exit
+        # rather than a raw AttributeError traceback. Only cold start reaches
+        # here -- the reload path wraps its own parse.
+        try:
+            config = cls._parse_config(data)
+        except ConfigSectionError as exc:
+            raise SystemExit(str(exc))
         # v5.2.1: stash the source path so deferred_delivery can spawn
         # a systemd-run timer that re-loads the same YAML out-of-process.
         config.config_path = str(path)
@@ -772,7 +818,10 @@ class ConfigLoader:
     def _parse_ups_config(cls, ups_data: Dict[str, Any]) -> UPSConfig:
         """Parse a single UPS connection configuration."""
         defaults = UPSConfig()
-        grace_data = ups_data.get('connection_loss_grace_period', {})
+        grace_data = cls._as_mapping(
+            'connection_loss_grace_period',
+            ups_data.get('connection_loss_grace_period'),
+        )
         return UPSConfig(
             name=ups_data.get('name', defaults.name),
             display_name=ups_data.get('display_name'),
@@ -964,9 +1013,15 @@ class ConfigLoader:
         notif_max_age_days = 30
         notif_max_pending = 10000
         notif_retry_backoff_max = 300
+        # ISS-024: an explicit `enabled:` is honored (previously silently
+        # ignored -- enabled was derived solely from URL count, so
+        # `enabled: false` with urls kept notifying). None => derive from URLs.
+        notif_enabled = None
 
         if 'notifications' in data:
-            notif_data = data['notifications']
+            notif_data = cls._as_mapping('notifications', data['notifications'])
+            if 'enabled' in notif_data:
+                notif_enabled = notif_data.get('enabled')
             notif_title = notif_data.get('title')
             avatar_url = notif_data.get('avatar_url')
             notif_timeout = notif_data.get('timeout', 10)
@@ -1031,7 +1086,10 @@ class ConfigLoader:
                 notif_timeout = discord_data.get('timeout', notif_timeout)
 
         return NotificationsConfig(
-            enabled=len(notif_urls) > 0,
+            # ISS-024: honor an explicit enabled flag; otherwise derive it from
+            # whether any URLs are configured (the historical behavior).
+            enabled=(len(notif_urls) > 0 if notif_enabled is None
+                     else bool(notif_enabled)),
             urls=notif_urls,
             title=notif_title,
             avatar_url=avatar_url,
@@ -1058,8 +1116,9 @@ class ConfigLoader:
 
         # Parse global settings (shared across all UPS groups)
         if 'behavior' in data:
+            behavior_data = cls._as_mapping('behavior', data['behavior'])
             config.behavior = BehaviorConfig(
-                dry_run=data['behavior'].get('dry_run', False),
+                dry_run=behavior_data.get('dry_run', False),
             )
 
         if 'logging' in data:
@@ -1085,7 +1144,7 @@ class ConfigLoader:
         config.notifications = cls._parse_notifications(data)
 
         if 'local_shutdown' in data:
-            local_data = data['local_shutdown']
+            local_data = cls._as_mapping('local_shutdown', data['local_shutdown'])
             config.local_shutdown = LocalShutdownConfig(
                 enabled=local_data.get('enabled', True),
                 command=local_data.get('command', 'shutdown -h now'),
@@ -1098,7 +1157,9 @@ class ConfigLoader:
         # Parse global triggers (used as defaults for per-UPS triggers)
         global_triggers = TriggersConfig()
         if 'triggers' in data:
-            global_triggers = cls._parse_triggers_config(data['triggers'])
+            global_triggers = cls._parse_triggers_config(
+                cls._as_mapping('triggers', data['triggers'])
+            )
 
         # Statistics (always-on per-UPS SQLite store)
         if 'statistics' in data:
@@ -1252,7 +1313,7 @@ class ConfigLoader:
 
         vm_config = VMConfig()
         if 'virtual_machines' in data:
-            vm_data = data['virtual_machines']
+            vm_data = cls._as_mapping('virtual_machines', data['virtual_machines'])
             vm_config = VMConfig(
                 enabled=vm_data.get('enabled', False),
                 max_wait=vm_data.get('max_wait', 30),
@@ -1262,11 +1323,18 @@ class ConfigLoader:
         containers_data = data.get('containers', data.get('docker', {}))
         if containers_data:
             is_legacy_docker = 'docker' in data and 'containers' not in data
+            # ISS-026: reject a scalar `containers:`/`docker:` cleanly.
+            containers_data = cls._as_mapping(
+                'containers' if not is_legacy_docker else 'docker',
+                containers_data,
+            )
             containers_config = cls._parse_containers_config(containers_data, is_legacy_docker)
 
         fs_config = FilesystemsConfig()
         if 'filesystems' in data:
-            fs_config = cls._parse_filesystems_config(data['filesystems'])
+            fs_config = cls._parse_filesystems_config(
+                cls._as_mapping('filesystems', data['filesystems'])
+            )
 
         group = UPSGroupConfig(
             ups=ups_config,
@@ -1377,21 +1445,28 @@ class ConfigLoader:
             if 'remote_servers' in entry:
                 remote_servers = cls._parse_remote_servers(entry['remote_servers'])
 
-            # Local resources (only allowed if is_local)
+            # Local resources (only allowed if is_local). ISS-026: guard the
+            # per-entry sections so a scalar in the multi-UPS list form (the
+            # modern default shape) is a clean error, not a raw AttributeError.
             vm_config = VMConfig()
             if 'virtual_machines' in entry:
+                vm_data = cls._as_mapping('virtual_machines', entry['virtual_machines'])
                 vm_config = VMConfig(
-                    enabled=entry['virtual_machines'].get('enabled', False),
-                    max_wait=entry['virtual_machines'].get('max_wait', 30),
+                    enabled=vm_data.get('enabled', False),
+                    max_wait=vm_data.get('max_wait', 30),
                 )
 
             containers_config = ContainersConfig()
             if 'containers' in entry:
-                containers_config = cls._parse_containers_config(entry['containers'])
+                containers_config = cls._parse_containers_config(
+                    cls._as_mapping('containers', entry['containers'])
+                )
 
             fs_config = FilesystemsConfig()
             if 'filesystems' in entry:
-                fs_config = cls._parse_filesystems_config(entry['filesystems'])
+                fs_config = cls._parse_filesystems_config(
+                    cls._as_mapping('filesystems', entry['filesystems'])
+                )
 
             # Per-group UPS-control override. None => use the global config.
             # When present, unset fields INHERIT the global config (base), and an
@@ -1454,9 +1529,10 @@ class ConfigLoader:
             if 'remote_servers' in entry:
                 remote_servers = cls._parse_remote_servers(entry['remote_servers'])
 
+            # ISS-026: guard per-entry sections (same as the ups list form).
             vm_config = VMConfig()
             if 'virtual_machines' in entry:
-                vm_data = entry['virtual_machines']
+                vm_data = cls._as_mapping('virtual_machines', entry['virtual_machines'])
                 vm_config = VMConfig(
                     enabled=vm_data.get('enabled', False),
                     max_wait=vm_data.get('max_wait', 30),
@@ -1464,11 +1540,15 @@ class ConfigLoader:
 
             containers_config = ContainersConfig()
             if 'containers' in entry:
-                containers_config = cls._parse_containers_config(entry['containers'])
+                containers_config = cls._parse_containers_config(
+                    cls._as_mapping('containers', entry['containers'])
+                )
 
             fs_config = FilesystemsConfig()
             if 'filesystems' in entry:
-                fs_config = cls._parse_filesystems_config(entry['filesystems'])
+                fs_config = cls._parse_filesystems_config(
+                    cls._as_mapping('filesystems', entry['filesystems'])
+                )
 
             groups.append(RedundancyGroupConfig(
                 name=str(entry.get('name', '')),
@@ -1522,6 +1602,23 @@ class ConfigLoader:
                 {"enabled", "command", "message", "drain_on_local_shutdown",
                  "trigger_on", "wall"},
             ))
+            # ISS-024: notifications had no unknown-key sweep and silently
+            # ignored an explicit `enabled` -- both fixed. Sweep for typos and
+            # validate the enabled flag type.
+            messages.extend(cls._unknown_key_errors(
+                "notifications", raw_data.get("notifications", {}),
+                {"enabled", "urls", "discord", "title", "avatar_url", "timeout",
+                 "retry_interval", "suppress", "voltage_hysteresis_seconds",
+                 "retention_days", "max_attempts", "max_age_days",
+                 "max_pending", "retry_backoff_max"},
+            ))
+            raw_notif = raw_data.get("notifications", {})
+            if (isinstance(raw_notif, dict) and "enabled" in raw_notif
+                    and not isinstance(raw_notif["enabled"], bool)):
+                messages.append(
+                    "ERROR: notifications.enabled must be a boolean, got "
+                    f"{raw_notif['enabled']!r}"
+                )
             messages.extend(cls._unknown_key_errors(
                 "api", raw_data.get("api", {}),
                 {"enabled", "bind", "port", "auth"},
@@ -1772,32 +1869,43 @@ class ConfigLoader:
                 "unknown_counts_as", "is_local", "triggers", "remote_servers",
                 "virtual_machines", "containers", "filesystems",
             }
+            def _sweep_ups_entry(section, entry):
+                """Unknown-key + nested-safety sweep for one UPS entry.
+
+                ISS-025: shared by the list form AND the legacy dict form so a
+                typo like `check_intervall:` errors in either shape rather than
+                silently falling back to defaults in the most common config.
+                """
+                messages.extend(cls._unknown_key_errors(
+                    section, entry, ups_entry_keys,
+                ))
+                # Also sweep the nested connection_loss_grace_period sub-keys
+                # -- it's a safety sub-section, so a typo there must error too
+                # rather than silently fall back to defaults (cubic P2).
+                clgp = entry.get("connection_loss_grace_period")
+                if isinstance(clgp, dict):
+                    messages.extend(cls._unknown_key_errors(
+                        f"{section}.connection_loss_grace_period",
+                        clgp, {"enabled", "duration", "flap_threshold"},
+                    ))
+                _validate_triggers(
+                    f"{section}.triggers", entry.get("triggers", {}),
+                )
+                _validate_remote_servers(
+                    f"{section}.remote_servers",
+                    entry.get("remote_servers", []),
+                )
+
             ups_raw = raw_data.get("ups")
             if isinstance(ups_raw, list):
                 for idx, entry in enumerate(ups_raw):
                     if not isinstance(entry, dict):
                         continue
                     label = entry.get("name", idx)
-                    messages.extend(cls._unknown_key_errors(
-                        f"ups[{label!r}]", entry, ups_entry_keys,
-                    ))
-                    # Also sweep the nested connection_loss_grace_period sub-keys
-                    # -- it's a safety sub-section, so a typo there must error too
-                    # rather than silently fall back to defaults (cubic P2).
-                    clgp = entry.get("connection_loss_grace_period")
-                    if isinstance(clgp, dict):
-                        messages.extend(cls._unknown_key_errors(
-                            f"ups[{label!r}].connection_loss_grace_period",
-                            clgp, {"enabled", "duration", "flap_threshold"},
-                        ))
-                    _validate_triggers(
-                        f"ups[{label!r}].triggers",
-                        entry.get("triggers", {}),
-                    )
-                    _validate_remote_servers(
-                        f"ups[{label!r}].remote_servers",
-                        entry.get("remote_servers", []),
-                    )
+                    _sweep_ups_entry(f"ups[{label!r}]", entry)
+            elif isinstance(ups_raw, dict):
+                # Legacy dict form: a single UPS entry keyed directly under `ups`.
+                _sweep_ups_entry("ups", ups_raw)
             groups_raw = raw_data.get("redundancy_groups", []) or []
             if isinstance(groups_raw, list):
                 for idx, entry in enumerate(groups_raw):
@@ -2144,6 +2252,34 @@ class ConfigLoader:
                     f"must be an integer >= 1, got {mst!r}."
                 )
 
+            # ISS-003: connection_loss_grace_period fields feed unguarded
+            # comparisons in _handle_connection_failure (duration) and _main_loop
+            # (flap_threshold). A quoted value ("60") raises TypeError there,
+            # which propagates to run() and FATALs the daemon exactly when the
+            # NUT server flaps. Validate both config shapes here (both funnel
+            # through the same UPSConfig object). duration may be int or float.
+            grace = group.ups.connection_loss_grace_period
+            if not isinstance(grace.enabled, bool):
+                messages.append(
+                    f"ERROR: ups[{group.ups.label!r}]."
+                    f"connection_loss_grace_period.enabled must be a boolean, "
+                    f"got {grace.enabled!r}."
+                )
+            dur = grace.duration
+            if not cls._is_number_nonbool_in_range(dur, minimum=1):
+                messages.append(
+                    f"ERROR: ups[{group.ups.label!r}]."
+                    f"connection_loss_grace_period.duration must be a positive "
+                    f"number, got {dur!r}."
+                )
+            ft = grace.flap_threshold
+            if not cls._is_int_nonbool_in_range(ft, minimum=1):
+                messages.append(
+                    f"ERROR: ups[{group.ups.label!r}]."
+                    f"connection_loss_grace_period.flap_threshold must be a "
+                    f"positive integer, got {ft!r}."
+                )
+
         # Multi-UPS validation
         if config.multi_ups:
             # Check ownership: non-local groups must not have local resources
@@ -2358,6 +2494,36 @@ class ConfigLoader:
 
             redundancy_server_owners: Dict[tuple, str] = {}
 
+            # ISS-014: a UPS named in any redundancy group becomes fully
+            # advisory -- its own T1-T4/FSD triggers can no longer shut down the
+            # remote_servers / VMs / containers / filesystems configured under
+            # it; only group quorum loss (or drain_on_local_shutdown) does. That
+            # is easy to miss, so warn (non-breaking) when a member still
+            # carries its own shutdown resources. See docs/redundancy-groups.md.
+            redundancy_members = {
+                name for rg in config.redundancy_groups for name in rg.ups_sources
+            }
+            for group in config.ups_groups:
+                if group.ups.name not in redundancy_members:
+                    continue
+                owned = []
+                if group.remote_servers:
+                    owned.append("remote_servers")
+                if group.virtual_machines.enabled:
+                    owned.append("virtual_machines")
+                if group.containers.enabled:
+                    owned.append("containers")
+                if group.filesystems.unmount.enabled:
+                    owned.append("filesystems.unmount")
+                if owned:
+                    messages.append(
+                        f"WARNING: UPS '{group.ups.label}' is a redundancy-group "
+                        f"member, so its per-UPS triggers are advisory: the "
+                        f"{', '.join(owned)} configured under it shut down only "
+                        "on group quorum loss (or drain_on_local_shutdown), not "
+                        "on this UPS's own triggers."
+                    )
+
             for rg in config.redundancy_groups:
                 label = rg.name or "(unnamed)"
 
@@ -2556,6 +2722,35 @@ class ConfigLoader:
                         f"ERROR: Remote server '{display}': shutdown_safety_margin "
                         f"must be >= 0, got {margin}"
                     )
+
+                # ISS-002: connect_timeout/command_timeout feed the sum()/max()
+                # deadline arithmetic in shutdown/remote.py. A quoted YAML value
+                # ("30") passes through .get() untyped and raises TypeError there,
+                # which the monitor wrapper swallows -- silently skipping the whole
+                # remote phase INCLUDING a delegated host poweroff. Validate at
+                # load so the failure is a clean config error, not a lost shutdown.
+                ct = server.connect_timeout
+                if not cls._is_int_nonbool_in_range(ct, minimum=1):
+                    messages.append(
+                        f"ERROR: Remote server '{display}': connect_timeout must "
+                        f"be a positive integer, got {ct!r}"
+                    )
+                cmt = server.command_timeout
+                if not cls._is_int_nonbool_in_range(cmt, minimum=1):
+                    messages.append(
+                        f"ERROR: Remote server '{display}': command_timeout must "
+                        f"be a positive integer, got {cmt!r}"
+                    )
+                # Per-command timeout override (None = use the server default).
+                for idx, cmd in enumerate(server.pre_shutdown_commands):
+                    if cmd.timeout is None:
+                        continue
+                    if not cls._is_int_nonbool_in_range(cmd.timeout, minimum=1):
+                        messages.append(
+                            f"ERROR: Remote server '{display}': "
+                            f"pre_shutdown_commands[{idx}].timeout must be a "
+                            f"positive integer, got {cmd.timeout!r}"
+                        )
 
         # Validate trigger_on value
         if config.local_shutdown.trigger_on not in ("any", "none"):

@@ -107,6 +107,10 @@ Trigger condition met (advisory, redundancy group): battery below threshold
 
 For `min_healthy: 1`, that advisory condition only shuts down the protected resource if every other member has also stopped counting as healthy.
 
+### Member UPS authority
+
+Once a UPS is named in a redundancy group's `ups_sources`, it becomes **fully advisory**. Any `remote_servers`, `virtual_machines`, `containers`, or `filesystems` still configured under that UPS group are **no longer shut down by that UPS's own triggers** — only group quorum loss (or `drain_on_local_shutdown` on the local group) drains them. This is easy to miss: an operator reasonably expects per-UPS protection to keep working. Eneru emits a validation `WARNING` when a redundancy member still carries its own shutdown resources so the loss of per-UPS authority is explicit. Move those resources to the redundancy group's own `remote_servers` (or to the group's ownership) if you want them protected by quorum.
+
 ## Local ownership
 
 At most one group across the whole config can be `is_local: true`. That group may own local VMs, containers, filesystems, and local shutdown behavior.
