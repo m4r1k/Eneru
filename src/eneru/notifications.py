@@ -487,8 +487,12 @@ class NotificationWorker:
         now_mono = time.monotonic()
         best: Optional[Tuple] = None
         suppressed = sum(1 for na in self._backoff.values() if na > now_mono)
-        pending_cap = max(50,
-                          int(self.config.notifications.max_pending or 10000))
+        # cubic P2: a non-positive max_pending means "no cap" (unlimited
+        # backlog); treat it as the 10k default here, NOT a literal small
+        # number — otherwise `max(50, -1)` would clamp the scan to 50 and
+        # reintroduce the head-of-queue starvation this bound guards against.
+        raw_pending_cap = int(self.config.notifications.max_pending or 10000)
+        pending_cap = raw_pending_cap if raw_pending_cap > 0 else 10000
         scan_cap = min(max(50, suppressed + 50), pending_cap)
         with self._stores_lock:
             stores_snapshot = list(self._stores)

@@ -1682,6 +1682,12 @@ class UPSGroupMonitor(
                 )
             return
 
+        # cubic P1 (ISS-001 follow-up): mark the sequence in flight at the
+        # moment of admission — BEFORE the notification/event/wall work below —
+        # so a SIGTERM/SIGINT landing in that window can't unwind
+        # _cleanup_and_exit and abort the emergency shutdown before poweroff.
+        # _execute_shutdown_sequence re-sets it and clears it in its finally.
+        self._shutdown_sequence_in_flight = True
         self._mark_shutdown_in_progress("triggering immediate shutdown")
 
         # Send notification (non-blocking - fire and forget)
@@ -2665,6 +2671,10 @@ class UPSGroupMonitor(
                         )
                     else:
                         self._failsafe_initiated = True
+                        # cubic P1: protect the failsafe shutdown from a signal
+                        # landing between admission and _execute_shutdown_sequence
+                        # (see _trigger_shutdown). Cleared in the sequence's finally.
+                        self._shutdown_sequence_in_flight = True
                         self._mark_shutdown_in_progress("starting failsafe shutdown")
                         self._log_message(
                             "🚨  FAILSAFE TRIGGERED (FSB): Connection lost or data persistently stale "

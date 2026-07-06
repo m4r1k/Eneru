@@ -786,7 +786,11 @@ class StatsStore:
                 row = conn.execute(
                     "SELECT value FROM meta WHERE key='agg_5min_watermark'"
                 ).fetchone()
-                lo_5 = int(row[0]) if row and row[0] is not None else None
+                # cubic P2: tolerant parse — a malformed watermark (corrupt/
+                # tampered meta row) becomes None (full re-scan) instead of
+                # raising ValueError, which would bypass this method's
+                # sqlite/OSError handler and stop aggregation silently.
+                lo_5 = _to_int(row[0]) if row else None
                 if lo_5 is None:
                     where_5, params_5 = "", ()
                 else:
@@ -834,7 +838,7 @@ class StatsStore:
                 row = conn.execute(
                     "SELECT value FROM meta WHERE key='agg_hourly_watermark'"
                 ).fetchone()
-                lo_h = int(row[0]) if row and row[0] is not None else None
+                lo_h = _to_int(row[0]) if row else None  # cubic P2: tolerant parse
                 if lo_h is None:
                     where_h, params_h = "", ()
                 else:

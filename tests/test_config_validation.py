@@ -1688,6 +1688,10 @@ notifications:
 """)
         errors = _errors(ConfigLoader.validate_config(config, raw))
         assert any("notifications.enabled must be a boolean" in m for m in errors)
+        # cubic P2: the parse path must FAIL CLOSED for a non-bool value — a
+        # truthy string like "yes" must NOT bool()-coerce notifications back on
+        # if validation is bypassed.
+        assert config.notifications.enabled is False
 
     # ---- ISS-025: legacy dict-form ups unknown-key sweep --------------------
 

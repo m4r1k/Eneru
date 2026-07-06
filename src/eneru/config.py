@@ -1088,8 +1088,14 @@ class ConfigLoader:
         return NotificationsConfig(
             # ISS-024: honor an explicit enabled flag; otherwise derive it from
             # whether any URLs are configured (the historical behavior).
+            # cubic P2: fail CLOSED for a non-bool value — a YAML string like
+            # `enabled: "false"` is truthy, so bool() would flip an intended
+            # disable back on. validate_config separately reports the non-bool
+            # as an error; here we must not silently enable it if that check is
+            # bypassed. (YAML `enabled: false` parses to a real bool.)
             enabled=(len(notif_urls) > 0 if notif_enabled is None
-                     else bool(notif_enabled)),
+                     else (notif_enabled if isinstance(notif_enabled, bool)
+                           else False)),
             urls=notif_urls,
             title=notif_title,
             avatar_url=avatar_url,

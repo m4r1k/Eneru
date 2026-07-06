@@ -176,18 +176,16 @@ def block_journal_side_channels(request, monkeypatch):
 @pytest.fixture(autouse=True)
 def _reset_login_throttle():
     """ISS-032: the API login throttle is process-global module state; clear it
-    around every test so failed-login tests can't bleed into unrelated ones."""
-    try:
-        import eneru.api as _api
-        _api._login_failures.clear()
-    except Exception:
-        pass
+    around every test so failed-login tests can't bleed into unrelated ones.
+
+    cubic P2: no blanket try/except — `eneru.api` is a core module and
+    `_login_failures` is module-level state, so an ImportError or a rename
+    SHOULD fail loudly here (a swallowed error would silently drop throttle
+    isolation from every test), matching the other autouse fixtures above."""
+    import eneru.api as _api
+    _api._login_failures.clear()
     yield
-    try:
-        import eneru.api as _api
-        _api._login_failures.clear()
-    except Exception:
-        pass
+    _api._login_failures.clear()
 
 
 @pytest.fixture

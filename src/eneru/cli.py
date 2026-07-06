@@ -798,6 +798,10 @@ def _cmd_run(args):
             # sys.exit(1); run()'s FATAL handler already logged + notified, so
             # exit cleanly with code 1 (as the old sys.exit(1) did) rather than
             # letting a traceback escape.
+            # cubic P2: still honor ENERU_DEBUG (as main() does) so a crash can
+            # be diagnosed with a full traceback when explicitly requested.
+            if os.environ.get("ENERU_DEBUG"):
+                raise
             raise SystemExit(1)
 
 
@@ -1768,7 +1772,14 @@ def _cmd_apikey_create(args):
     # operator isn't left with a key that grants nothing. Best-effort — never let
     # the check break key creation.
     try:
-        if not auth.auth_is_active(_load_config(args).api.auth):
+        auth_cfg = _load_config(args).api.auth
+        # cubic P3: if the key was created in a custom --auth-db, base the
+        # "users exist" part of the active check on THAT store, not the default
+        # config DB, so the guidance is accurate for custom auth-store workflows.
+        auth_db = getattr(args, "auth_db", None)
+        if auth_db and auth_cfg is not None:
+            auth_cfg.db_path = auth_db
+        if not auth.auth_is_active(auth_cfg):
             print(
                 "⚠️  API authentication is not active yet (api.auth.enabled is "
                 "not true and no users exist), so this key will NOT grant access. "
