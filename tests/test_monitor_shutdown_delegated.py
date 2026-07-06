@@ -351,10 +351,11 @@ class TestDelegatedShutdownSequence:
 
         with _patch_runtime("container (Docker)"), \
              patch("eneru.monitor.command_exists", side_effect=fake_exists):
-            with pytest.raises(SystemExit) as exc_info:
+            # ISS-006: RuntimeError (not SystemExit) so coordinator mode surfaces it.
+            with pytest.raises(RuntimeError) as exc_info:
                 monitor._check_dependencies()
 
-        assert exc_info.value.code == 1
+        assert "ssh" in str(exc_info.value)
 
     @pytest.mark.unit
     def test_delegated_shutdown_failure_does_not_mark_sequence_complete(self, tmp_path):

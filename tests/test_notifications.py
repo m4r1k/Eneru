@@ -172,6 +172,26 @@ class TestWorkerLifecycle:
                            timeout=2.5)
 
     @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_add_failure_redacts_url(self, mock_apprise, capsys):
+        """ISS-008: a failed add() must not echo the raw Apprise URL (it embeds
+        webhook tokens); only the scheme is printed."""
+        mock_instance = MagicMock()
+        mock_apprise.Apprise.return_value = mock_instance
+        mock_instance.add.return_value = False  # simulate a rejected URL
+        mock_instance.__len__ = lambda self: 0
+        config = Config()
+        config.notifications = NotificationsConfig(
+            enabled=True, urls=["discord://id/SUPERSECRETTOKEN"],
+        )
+        worker = NotificationWorker(config)
+        assert worker.start() is False  # no valid URLs
+        out = capsys.readouterr().out
+        assert "discord://***" in out
+        assert "SUPERSECRETTOKEN" not in out
+
+    @pytest.mark.unit
     def test_send_is_noop_when_uninitialized(self):
         config = Config()
         config.notifications.enabled = False

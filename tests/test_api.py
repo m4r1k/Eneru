@@ -1372,6 +1372,45 @@ def test_api_server_start_is_idempotent_when_already_running(minimal_config):
 
 
 @pytest.mark.unit
+def test_handler_has_read_timeout():
+    """ISS-007: the handler must carry a socket read timeout so header/request-
+    line reads are bounded (else a stalled client hangs server shutdown)."""
+    from eneru.api import REQUEST_READ_TIMEOUT_SECONDS
+    assert EneruAPIHandler.timeout == REQUEST_READ_TIMEOUT_SECONDS
+    assert EneruAPIHandler.timeout is not None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(30)  # a regression would HANG stop(); fail fast instead
+def test_stalled_connection_does_not_hang_stop(minimal_config):
+    """ISS-007: a client that connects and never sends a request line must not
+    block EneruAPIServer.stop() indefinitely; the handler timeout lets the
+    non-daemon worker exit so server_close()'s join completes."""
+    import socket as _socket
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    minimal_config.api.port = 0  # OS-assigned ephemeral port
+    server = EneruAPIServer(MagicMock(), minimal_config)
+    elapsed = None
+    with patch.object(EneruAPIHandler, "timeout", 0.5):
+        server.start()
+        assert server._httpd is not None
+        host, port = server._httpd.server_address[:2]
+        sock = _socket.create_connection((host, port), timeout=2)
+        try:
+            time.sleep(0.1)  # let the worker accept and block on the read
+            start = time.monotonic()
+            server.stop()
+            elapsed = time.monotonic() - start
+        finally:
+            sock.close()
+    # stop() must return within a few timeout windows, not hang forever.
+    assert elapsed is not None and elapsed < 5
+
+
+@pytest.mark.unit
 def test_api_server_start_logs_bind_failure_and_returns(minimal_config):
     from unittest.mock import patch
     from eneru.api import EneruAPIServer

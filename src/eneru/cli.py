@@ -790,7 +790,14 @@ def _cmd_run(args):
         coordinator.run()
     else:
         monitor = UPSGroupMonitor(config, exit_after_shutdown=args.exit_after_shutdown)
-        monitor.run()
+        try:
+            monitor.run()
+        except RuntimeError:
+            # ISS-006: _check_dependencies now raises RuntimeError instead of
+            # sys.exit(1); run()'s FATAL handler already logged + notified, so
+            # exit cleanly with code 1 (as the old sys.exit(1) did) rather than
+            # letting a traceback escape.
+            raise SystemExit(1)
 
 
 def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):

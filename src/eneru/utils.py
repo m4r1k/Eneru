@@ -10,6 +10,19 @@ CONTAINER_DEFAULT_KNOWN_HOSTS_FILE = "/var/lib/eneru/ssh/known_hosts"
 KNOWN_HOSTS_ENV = "ENERU_SSH_KNOWN_HOSTS_FILE"
 
 
+def redact_apprise_url(url: Any) -> str:
+    """Return an Apprise/notification URL with credentials stripped to scheme.
+
+    ISS-008/ISS-034: Apprise URLs embed webhook tokens/passwords
+    (e.g. ``discord://id/token``). Never log or print them verbatim -- emit only
+    ``scheme://***`` so the service type is still visible for debugging without
+    leaking the secret. Shared by the notification worker and the CLI.
+    """
+    text = str(url)
+    scheme = text.split("://", 1)[0] if "://" in text else "unknown"
+    return f"{scheme}://***"
+
+
 def is_numeric(value: Any) -> bool:
     """Check if a value is numeric (int or float).
 

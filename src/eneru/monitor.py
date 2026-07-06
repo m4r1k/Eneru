@@ -102,6 +102,18 @@ def compute_effective_order(
     return result
 
 
+class DependencyError(RuntimeError):
+    """A required external command is missing at startup (ISS-006).
+
+    Raised by _check_dependencies instead of sys.exit(1) so coordinator mode's
+    ``except Exception`` crash handler catches it (SystemExit would bypass it and
+    silently kill the per-group thread). run()'s FATAL handler treats this as an
+    ENVIRONMENT problem, not a runtime crash: it does NOT write the FATAL marker,
+    so the next start (after the operator installs the tool) is not misclassified
+    as "exited fatally".
+    """
+
+
 class UPSGroupMonitor(
     VMShutdownMixin,
     ContainerShutdownMixin,
@@ -329,16 +341,19 @@ class UPSGroupMonitor(
             )
             # Slice 3: tag this exit so the next start emits
             # "🚀  Restarted (last instance exited fatally)" rather than
-            # a generic Started.
-            try:
-                from pathlib import Path
-                write_shutdown_marker(
-                    Path(self.config.statistics.db_directory),
-                    version=__version__, reason=REASON_FATAL,
-                )
-            except Exception:
-                # Marker write must never mask the original FATAL.
-                pass
+            # a generic Started. ISS-006: a missing-dependency at startup is an
+            # environment problem, not a runtime crash — skip the marker so the
+            # next (fixed) start isn't misclassified as "exited fatally".
+            if not isinstance(e, DependencyError):
+                try:
+                    from pathlib import Path
+                    write_shutdown_marker(
+                        Path(self.config.statistics.db_directory),
+                        version=__version__, reason=REASON_FATAL,
+                    )
+                except Exception:
+                    # Marker write must never mask the original FATAL.
+                    pass
             raise
 
     def _initialize(self):
@@ -879,8 +894,14 @@ class UPSGroupMonitor(
 
         if missing:
             error_msg = f"❌  FATAL ERROR: Missing required commands: {', '.join(missing)}"
-            print(error_msg)
-            sys.exit(1)
+            # ISS-006: raise instead of sys.exit(1). In coordinator mode this
+            # runs on a per-group daemon thread; SystemExit derives from
+            # BaseException and would bypass _run_monitor's `except Exception`,
+            # killing the thread silently (no crash notification, no logger
+            # record). A RuntimeError is caught there and by run()'s FATAL
+            # handler (single-UPS), so the failure is always visible.
+            self._log_message(error_msg)
+            raise DependencyError(error_msg)
 
         if not command_exists("logger") and not self._is_container_runtime:
             self._log_message(
@@ -1216,28 +1237,32 @@ class UPSGroupMonitor(
             self._slow_nut_poll_notified = True
 
     def _wait_for_initial_connection(self):
-        """Wait for initial connection to NUT server."""
+        """Wait for initial connection to NUT server (interruptible)."""
         self._log_message(f"⏳  Checking initial connection to {self.config.ups.name}...")
 
         max_wait = 30
         wait_interval = 5
-        time_waited = 0
-        connected = False
+        attempts = max_wait // wait_interval
 
-        while time_waited < max_wait:
+        for attempt in range(attempts):
             success, _, _ = self._get_all_ups_data()
             if success:
-                connected = True
                 self._log_message("✅  Initial connection successful.")
-                break
-            time.sleep(wait_interval)
-            time_waited += wait_interval
+                return
+            # ISS-021: wait on the stop event (not time.sleep) so a SIGTERM
+            # during startup interrupts immediately instead of blocking up to
+            # ~30s; and never sleep after the final attempt.
+            if attempt < attempts - 1:
+                if self._stop_event.wait(wait_interval):
+                    self._log_message(
+                        "🛑  Startup interrupted before initial connection."
+                    )
+                    return
 
-        if not connected:
-            self._log_message(
-                f"⚠️  WARNING: Failed to connect to {self.config.ups.name} "
-                f"within {max_wait}s. Proceeding, but voltage thresholds may default."
-            )
+        self._log_message(
+            f"⚠️  WARNING: Failed to connect to {self.config.ups.name} "
+            f"within {max_wait}s. Proceeding, but voltage thresholds may default."
+        )
 
     def _save_state(self, ups_data: Dict[str, str]):
         """Save current UPS state to file + buffer one stats sample."""
@@ -2199,7 +2224,12 @@ class UPSGroupMonitor(
         # Reports are daemon-wide (one digest). In multi-UPS mode the
         # coordinator owns them; a per-group monitor must not send N copies.
         try:
-            if not self._coordinator_mode and self.config.reports.enabled:
+            # ISS-023: skip when there is no notification worker. maybe_send_due
+            # _reports stamps last_report_sent_* even when the enqueue silently
+            # no-ops without a worker, so a whole period's digest would be lost.
+            # The coordinator path already guards this; mirror it here.
+            if (not self._coordinator_mode and self.config.reports.enabled
+                    and self._notification_worker is not None):
                 reports_mod.maybe_send_due_reports(
                     self.config, getattr(self, "_stats_store", None),
                     self.config.ups.name, self._enqueue_report)

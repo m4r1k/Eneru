@@ -1919,18 +1919,25 @@ class TestCheckDependencies:
         assert "/sbin/shutdown" in seen
 
     @pytest.mark.unit
-    def test_missing_required_command_exits(self, tmp_path, capsys):
+    def test_missing_required_command_raises(self, tmp_path):
+        """ISS-006: raise RuntimeError (not sys.exit) so coordinator-mode's
+        `except Exception` crash handler can see it instead of SystemExit
+        silently killing the per-group thread."""
         monitor = make_monitor(tmp_path)
         monitor.config.ups_groups[0].is_local = False
         monitor.config.local_shutdown.enabled = False
+        monitor._log_message = MagicMock()
 
         with patch("eneru.monitor.command_exists", return_value=False):
-            with pytest.raises(SystemExit) as exc_info:
+            with pytest.raises(RuntimeError) as exc_info:
                 monitor._check_dependencies()
-        assert exc_info.value.code == 1
-        out = capsys.readouterr().out
-        assert "Missing required commands" in out
-        assert "upsc" in out
+        assert "Missing required commands" in str(exc_info.value)
+        assert "upsc" in str(exc_info.value)
+        # And it was logged (visible in coordinator mode, unlike the old print).
+        assert any(
+            "Missing required commands" in str(call.args[0])
+            for call in monitor._log_message.call_args_list
+        )
 
     @pytest.mark.unit
     def test_missing_logger_warns_but_does_not_exit(self, tmp_path):
@@ -4245,3 +4252,79 @@ class TestStopStatsDefensive:
 
         # Must not raise.
         monitor._stop_stats()
+
+
+class TestWaitForInitialConnectionInterruptible:
+    """ISS-021: startup connection wait must honor the stop event."""
+
+    @pytest.mark.unit
+    def test_stop_event_aborts_wait_promptly(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._get_all_ups_data = MagicMock(return_value=(False, {}, ""))
+        monitor._log_message = MagicMock()
+        monitor._stop_event.set()  # request stop before the wait
+
+        start = time.monotonic()
+        monitor._wait_for_initial_connection()
+        elapsed = time.monotonic() - start
+
+        # Must not have slept the 5s retry interval.
+        assert elapsed < 2
+        assert any(
+            "interrupted" in str(call.args[0]).lower()
+            for call in monitor._log_message.call_args_list
+        )
+
+
+class TestReportsRequireNotificationWorker:
+    """ISS-023: single-UPS report send must be gated on a live worker so the
+    last-run stamp is not advanced for an undelivered digest."""
+
+    @pytest.mark.unit
+    def test_reports_skipped_without_worker(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.reports.enabled = True
+        monitor._notification_worker = None
+        with patch("eneru.monitor.reports_mod.maybe_send_due_reports") as m:
+            monitor._run_periodic_tasks()
+        m.assert_not_called()
+
+    @pytest.mark.unit
+    def test_reports_run_with_worker(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor.config.reports.enabled = True
+        monitor._notification_worker = MagicMock()
+        with patch("eneru.monitor.reports_mod.maybe_send_due_reports") as m:
+            monitor._run_periodic_tasks()
+        m.assert_called_once()
+
+
+class TestStartupDependencyMarker:
+    """ISS-006: a startup missing-dependency is an environment problem, not a
+    runtime crash — it must not write the FATAL marker (which would misclassify
+    the next successful start as 'exited fatally'), while genuine runtime
+    exceptions still do."""
+
+    @pytest.mark.unit
+    def test_dependency_error_skips_fatal_marker(self, tmp_path):
+        from eneru.monitor import DependencyError
+        monitor = make_monitor(tmp_path)
+        monitor._initialize = MagicMock(side_effect=DependencyError("no upsc"))
+        monitor._send_notification = MagicMock()
+        monitor._log_message = MagicMock()
+        with patch("eneru.monitor.write_shutdown_marker") as marker:
+            with pytest.raises(DependencyError):
+                monitor.run()
+        marker.assert_not_called()
+
+    @pytest.mark.unit
+    def test_runtime_fatal_still_writes_marker(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        monitor._initialize = MagicMock()
+        monitor._main_loop = MagicMock(side_effect=RuntimeError("boom"))
+        monitor._send_notification = MagicMock()
+        monitor._log_message = MagicMock()
+        with patch("eneru.monitor.write_shutdown_marker") as marker:
+            with pytest.raises(RuntimeError):
+                monitor.run()
+        marker.assert_called_once()

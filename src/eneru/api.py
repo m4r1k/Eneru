@@ -329,6 +329,16 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     api_sessions: Any = None
     api_log: Any = None
 
+    # ISS-007: bound the request-line/header read. BaseHTTPRequestHandler applies
+    # this to the connection socket in setup(); without it, handle_one_request's
+    # rfile.readline() blocks forever on a client that connects and never sends a
+    # complete request line (slowloris). With daemon_threads=False that stalled
+    # worker makes server_close() (called from EneruAPIServer.stop() on SIGTERM)
+    # join it indefinitely, hanging daemon shutdown until systemd SIGKILLs. On
+    # timeout handle_one_request sets close_connection and the thread exits. The
+    # body read (below) restores this class value via previous_timeout.
+    timeout = REQUEST_READ_TIMEOUT_SECONDS
+
     server_version = "EneruAPI/1.0"
 
     def do_GET(self):  # noqa: N802 - stdlib hook

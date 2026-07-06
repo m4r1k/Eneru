@@ -106,10 +106,16 @@ class NotificationWorker:
         if not self.config.notifications.urls:
             return False
 
+        from eneru.utils import redact_apprise_url
         self._apprise_instance = apprise.Apprise()
         for url in self.config.notifications.urls:
             if not self._apprise_instance.add(url):
-                print(f"Warning: Failed to add notification URL: {url}")
+                # ISS-008: never echo the raw URL -- it embeds webhook
+                # tokens/passwords. Log the scheme only.
+                print(
+                    "Warning: Failed to add notification URL: "
+                    f"{redact_apprise_url(url)}"
+                )
         if len(self._apprise_instance) == 0:
             print("Warning: No valid notification URLs configured")
             return False
