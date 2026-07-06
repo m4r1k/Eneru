@@ -88,6 +88,31 @@ def loopback_poweroff_sent(result: "RemoteShutdownResult") -> bool:
     )
 
 
+def select_loopback_results(remote_servers, results):
+    """Return the subset of remote-shutdown ``results`` that belong to an
+    enabled ``is_host_loopback`` server.
+
+    A loopback entry's executed shutdown_command is what actually powers
+    off THIS host, so the delegated-shutdown paths (single-UPS monitor and
+    the redundancy executor) key their "did the poweroff go out?" decision
+    on exactly these results. Matched by the ``(name-or-host, host)`` pair
+    against the configured servers.
+
+    ISS-013: previously duplicated verbatim as an inline list-comprehension
+    in both ``monitor.py`` and ``redundancy.py`` — one source of truth now.
+    """
+    return [
+        result for result in results
+        if any(
+            server.enabled
+            and server.is_host_loopback is True
+            and (server.name or server.host) == result.server
+            and server.host == result.host
+            for server in remote_servers
+        )
+    ]
+
+
 class RemoteShutdownMixin:
     """Mixin: SSH-based remote-server orchestration and shutdown."""
 

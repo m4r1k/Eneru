@@ -35,14 +35,20 @@ from eneru.shutdown.filesystems import FilesystemShutdownMixin
 from eneru.shutdown.remote import (
     RemoteShutdownMixin,
     loopback_poweroff_sent,
+    select_loopback_results,
 )
 from eneru.shutdown.vms import VMShutdownMixin
 from eneru.state import MonitorState
+from eneru.utils import sanitize_name
 
 
 def _sanitize(name: str) -> str:
-    """Sanitize a group name for filesystem flag-file names."""
-    return (name or "unnamed").replace("@", "-").replace(":", "-").replace("/", "-")
+    """Sanitize a group name for filesystem flag-file names.
+
+    ISS-013: the ``@``/``:``/``/`` substitution is delegated to the shared
+    ``utils.sanitize_name``; only the redundancy-specific ``unnamed``
+    fallback for a missing group name is kept here."""
+    return sanitize_name(name or "unnamed")
 
 
 def effective_redundancy_health(group: Any, raw: UPSHealth) -> UPSHealth:
@@ -461,16 +467,9 @@ class RedundancyGroupExecutor(
                 phase_failed = True
 
             if self._group.is_local and delegating:
-                loopback_results = [
-                    result for result in remote_results
-                    if any(
-                        server.enabled
-                        and server.is_host_loopback is True
-                        and (server.name or server.host) == result.server
-                        and server.host == result.host
-                        for server in self.config.remote_servers
-                    )
-                ]
+                loopback_results = select_loopback_results(
+                    self.config.remote_servers, remote_results,
+                )
                 if not loopback_results or not all(
                     loopback_poweroff_sent(result)
                     for result in loopback_results

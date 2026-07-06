@@ -1788,6 +1788,78 @@ class TestAggregate:
         finally:
             store._conn = original
 
+    @pytest.mark.unit
+    def test_aggregate_watermark_incremental_matches_full(self, tmp_path):
+        """ISS-037: incremental (watermarked) aggregation must produce the
+        byte-identical agg_5min / agg_hourly tables as a single full-table
+        re-aggregation. One store inserts everything then aggregates once;
+        another inserts + aggregates in three time-ordered chunks (which
+        advances the watermark between runs). The finalized-bucket rows
+        must match exactly, proving the watermark never skips or corrupts a
+        bucket."""
+        base = (20_000_000 // BUCKET_HOURLY) * BUCKET_HOURLY
+        # 15 five-minute buckets (>1 hour, so the hourly tier rolls too),
+        # 4 samples each.
+        all_ts = [
+            base + b * BUCKET_5MIN + i
+            for b in range(15)
+            for i in range(4)
+        ]
+
+        full = StatsStore(tmp_path / "full.db")
+        full.open()
+        inc = StatsStore(tmp_path / "inc.db")
+        inc.open()
+        try:
+            for ts in all_ts:
+                full.buffer_sample(SAMPLE_UPS_DATA, ts=ts)
+            full.flush()
+            full.aggregate()
+
+            chunk = len(all_ts) // 3
+            for c in range(3):
+                part = (all_ts[c * chunk:(c + 1) * chunk]
+                        if c < 2 else all_ts[c * chunk:])
+                for ts in part:
+                    inc.buffer_sample(SAMPLE_UPS_DATA, ts=ts)
+                inc.flush()
+                inc.aggregate()
+
+            cols5 = ("ts, battery_charge_avg, battery_charge_min, "
+                     "battery_charge_max, samples_count, ups_load_avg, "
+                     "input_voltage_avg")
+            f5 = full._conn.execute(
+                f"SELECT {cols5} FROM agg_5min ORDER BY ts").fetchall()
+            i5 = inc._conn.execute(
+                f"SELECT {cols5} FROM agg_5min ORDER BY ts").fetchall()
+            assert f5 == i5
+            assert len(f5) == 15
+
+            colsh = "ts, battery_charge_avg, samples_count, ups_load_avg"
+            fh = full._conn.execute(
+                f"SELECT {colsh} FROM agg_hourly ORDER BY ts").fetchall()
+            ih = inc._conn.execute(
+                f"SELECT {colsh} FROM agg_hourly ORDER BY ts").fetchall()
+            assert fh == ih
+
+            # Watermark persists in the key/value meta table (no schema
+            # column change → no SCHEMA_VERSION bump) and has advanced.
+            assert inc.get_meta("agg_5min_watermark") is not None
+            assert inc.get_meta("agg_hourly_watermark") is not None
+        finally:
+            full.close()
+            inc.close()
+
+    @pytest.mark.unit
+    def test_aggregate_watermark_does_not_bump_schema_version(self, store):
+        """ISS-037 stores the watermark as meta rows, not columns, so the
+        on-disk SCHEMA_VERSION is unchanged."""
+        from eneru.stats import SCHEMA_VERSION
+        store.buffer_sample(SAMPLE_UPS_DATA, ts=21_000_000)
+        store.flush()
+        store.aggregate()
+        assert store.get_meta("schema_version") == str(SCHEMA_VERSION)
+
 
 class TestPurge:
 

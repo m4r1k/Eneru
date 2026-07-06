@@ -23,6 +23,21 @@ def redact_apprise_url(url: Any) -> str:
     return f"{scheme}://***"
 
 
+def sanitize_name(name: Any) -> str:
+    """Return the path-safe per-UPS identifier used by stats/state files.
+
+    ISS-013: single source of truth for the ``@``/``:``/``/`` → ``-``
+    substitution that was previously copy-pasted as inline ``.replace()``
+    chains in ``multi_ups.py``, a local ``_sanitize`` in ``redundancy.py``,
+    a nested ``_sanitize_name`` in ``config.py``, and ``status.sanitize_name``.
+    Lives in ``utils`` (which imports nothing from the daemon) so config.py
+    and redundancy.py can share it without an import cycle; ``status`` and
+    the rest re-export from here. Tolerates ``None`` (→ ``""``) to preserve
+    the config-path behaviour.
+    """
+    return (name or "").replace("@", "-").replace(":", "-").replace("/", "-")
+
+
 def is_numeric(value: Any) -> bool:
     """Check if a value is numeric (int or float).
 

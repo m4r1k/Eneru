@@ -38,6 +38,7 @@ from eneru.lifecycle import (
     coalesce_recovered_with_prev_shutdown,
     delete_shutdown_marker,
     delete_upgrade_marker,
+    poweroff_command_parts,
     read_shutdown_marker,
     read_upgrade_marker,
     write_shutdown_marker,
@@ -46,7 +47,11 @@ from eneru.utils import run_command, command_exists, is_numeric, format_seconds
 from eneru.shutdown.vms import VMShutdownMixin
 from eneru.shutdown.containers import ContainerShutdownMixin
 from eneru.shutdown.filesystems import FilesystemShutdownMixin
-from eneru.shutdown.remote import RemoteShutdownMixin, loopback_poweroff_sent
+from eneru.shutdown.remote import (
+    RemoteShutdownMixin,
+    loopback_poweroff_sent,
+    select_loopback_results,
+)
 from eneru.health.voltage import VoltageMonitorMixin
 from eneru.health.battery import BatteryMonitorMixin
 # ISS-017: single source of truth for the connection-retry cadence. The poll
@@ -1488,7 +1493,8 @@ class UPSGroupMonitor(
                 # must NOT write SHUTDOWN_SEQUENCE_COMPLETE / the recovery marker
                 # or leave the flag set (which would gate future triggers until
                 # line power returns). Report INCOMPLETE, clear the flag, bail.
-                cmd_parts = str(self.config.local_shutdown.command or "").split()
+                cmd_parts = poweroff_command_parts(
+                    self.config.local_shutdown.command)
                 if not cmd_parts:
                     self._log_message(
                         "❌  local_shutdown.command is empty -- host poweroff "
@@ -1542,16 +1548,9 @@ class UPSGroupMonitor(
             # v5.5: the loopback's shutdown_command (already executed during
             # _shutdown_remote_servers) is what actually powers off the host.
             # The container dies with it. Notify + flush + marker, then exit.
-            loopback_results = [
-                r for r in remote_results
-                if any(
-                    s.enabled
-                    and s.is_host_loopback is True
-                    and (s.name or s.host) == r.server
-                    and s.host == r.host
-                    for s in self.config.remote_servers
-                )
-            ]
+            loopback_results = select_loopback_results(
+                self.config.remote_servers, remote_results,
+            )
             if not loopback_results or not all(
                 loopback_poweroff_sent(r) for r in loopback_results
             ):

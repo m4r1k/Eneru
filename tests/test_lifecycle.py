@@ -35,11 +35,39 @@ from eneru.lifecycle import (
     coalesce_recovered_with_prev_shutdown,
     delete_shutdown_marker,
     delete_upgrade_marker,
+    poweroff_command_parts,
     read_shutdown_marker,
     read_upgrade_marker,
     write_shutdown_marker,
 )
 from eneru.stats import StatsStore
+
+
+class TestPoweroffCommandParts:
+    """ISS-013/ISS-015: the shared validate-before-marker helper. An empty
+    result is the "do NOT write the recovery marker" signal used by both the
+    single-UPS and coordinator shutdown paths."""
+
+    @pytest.mark.unit
+    def test_splits_command_into_argv(self):
+        assert poweroff_command_parts("/sbin/poweroff -f") == [
+            "/sbin/poweroff", "-f"]
+
+    @pytest.mark.unit
+    def test_none_yields_empty_list(self):
+        assert poweroff_command_parts(None) == []
+
+    @pytest.mark.unit
+    def test_empty_and_whitespace_yield_empty_list(self):
+        assert poweroff_command_parts("") == []
+        assert poweroff_command_parts("   ") == []
+
+    @pytest.mark.unit
+    def test_monitor_and_multi_ups_use_the_shared_helper(self):
+        import eneru.monitor as monitor
+        import eneru.multi_ups as multi_ups
+        assert monitor.poweroff_command_parts is poweroff_command_parts
+        assert multi_ups.poweroff_command_parts is poweroff_command_parts
 
 
 # ==============================================================================

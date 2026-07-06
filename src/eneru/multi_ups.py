@@ -33,6 +33,7 @@ from eneru.lifecycle import (
     classify_startup,
     delete_shutdown_marker,
     delete_upgrade_marker,
+    poweroff_command_parts,
     read_shutdown_marker,
     read_upgrade_marker,
     write_shutdown_marker,
@@ -246,10 +247,7 @@ class MultiUPSCoordinator:
         silently skipped.
         """
         for group in self.config.ups_groups:
-            sanitized = (group.ups.name
-                         .replace("@", "-")
-                         .replace(":", "-")
-                         .replace("/", "-"))
+            sanitized = sanitize_name(group.ups.name)
             db_path = stats_dir / f"{sanitized}.db"
             if not db_path.exists():
                 continue
@@ -361,7 +359,7 @@ class MultiUPSCoordinator:
         if not self.config.ups_groups:
             return None
         first = self.config.ups_groups[0]
-        sanitized = first.ups.name.replace("@", "-").replace(":", "-").replace("/", "-")
+        sanitized = sanitize_name(first.ups.name)
         db_path = stats_dir / f"{sanitized}.db"
         try:
             conn = StatsStore.open_readonly(db_path)
@@ -411,7 +409,7 @@ class MultiUPSCoordinator:
             )
 
             # Sanitize UPS name for file paths
-            sanitized = group.ups.name.replace("@", "-").replace(":", "-").replace("/", "-")
+            sanitized = sanitize_name(group.ups.name)
             prefix = f"[{group.ups.label}] "
 
             in_rg = group.ups.name in self._in_redundancy
@@ -744,7 +742,8 @@ class MultiUPSCoordinator:
                     # "Recovered". The single-UPS path (monitor.py) already
                     # validates first; the coordinator copy had drifted. str()+
                     # split guards against None.split() / run_command([]).
-                    cmd_parts = str(self.config.local_shutdown.command or "").split()
+                    cmd_parts = poweroff_command_parts(
+                        self.config.local_shutdown.command)
                     if not cmd_parts:
                         self._log(
                             "❌  local_shutdown.command is empty -- cannot power off "

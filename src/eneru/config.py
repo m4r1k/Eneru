@@ -2345,12 +2345,13 @@ class ConfigLoader:
         # member resolution -- duplicates corrupt or cross-wire all of those.
         # Dedup on the SANITIZED name actually used for filenames, so two names
         # differing only in @/:/ (which sanitize to the same file) still collide.
-        def _sanitize_name(n: str) -> str:
-            return (n or "").replace("@", "-").replace(":", "-").replace("/", "-")
+        # ISS-013: reuse the shared sanitizer (local import avoids adding a
+        # module-level dependency to this foundational module).
+        from eneru.utils import sanitize_name
 
         seen_ups_names: Dict[str, int] = {}
         for group in config.ups_groups:
-            key = _sanitize_name(group.ups.name)
+            key = sanitize_name(group.ups.name)
             seen_ups_names[key] = seen_ups_names.get(key, 0) + 1
         dup_ups = sorted(k for k, c in seen_ups_names.items() if c > 1)
         if dup_ups:
