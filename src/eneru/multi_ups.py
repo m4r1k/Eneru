@@ -942,13 +942,45 @@ class MultiUPSCoordinator:
         Updates the coordinator's shared config and each per-group monitor's
         config in place. Returns a report (also used by the API endpoint).
         """
-        from eneru.reload import perform_reload
-        monitor_configs = [m.config for m in self._monitors]
-        report = perform_reload(self.config, monitor_configs, self.config.config_path)
-        if report.get("reloaded") and report.get("subsystems"):
-            self._apply_subsystem_reload(report["subsystems"])
-        self._log_reload_report(report)
-        return report
+        from eneru.reload import perform_reload, _RELOAD_LOCK
+        # ISS-027: hold the reload lock across the WHOLE operation -- parse +
+        # section swap + executor re-point + worker bounce -- so a concurrent
+        # SIGHUP and API reload can't interleave the non-thread-safe worker
+        # bounce in _apply_subsystem_reload.
+        with _RELOAD_LOCK:
+            monitor_configs = [m.config for m in self._monitors]
+            report = perform_reload(
+                self.config, monitor_configs, self.config.config_path)
+            if report.get("reloaded"):
+                # ISS-004: propagate the swapped section objects to the
+                # redundancy executors' private Configs (_repoint_executor_configs).
+                self._repoint_executor_configs()
+                if report.get("subsystems"):
+                    self._apply_subsystem_reload(report["subsystems"])
+            self._log_reload_report(report)
+            return report
+
+    def _repoint_executor_configs(self) -> None:
+        """ISS-004: re-bind each redundancy executor's shared config sections.
+
+        Each RedundancyGroupExecutor builds a private ``Config`` at startup whose
+        ``behavior``/``notifications``/``local_shutdown``/``logging`` are the SAME
+        objects as the base config. ``apply_reload`` swaps the coordinator's
+        sections to NEW objects, orphaning the executors' references -- so a live
+        ``behavior.dry_run`` toggle never reached the redundancy shutdown path.
+        Re-point the executors at the coordinator's current objects after every
+        applied reload. (Executor configs are deliberately NOT passed into
+        ``apply_reload``: their synthetic single-group topology would trip its
+        ups_groups diff and falsely report a restart-required change.)
+        """
+        executors = getattr(self, "_redundancy_executors", None) or {}
+        for executor in executors.values():
+            cfg = getattr(executor, "config", None)
+            if cfg is None:
+                continue
+            for section in ("behavior", "notifications",
+                            "local_shutdown", "logging"):
+                setattr(cfg, section, getattr(self.config, section))
 
     def _apply_subsystem_reload(self, subsystems: list) -> None:
         """Re-init live subsystems across the coordinator (best-effort)."""

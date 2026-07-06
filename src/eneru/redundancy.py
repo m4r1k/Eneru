@@ -95,6 +95,11 @@ class RedundancyGroupExecutor(
             filesystems=group.filesystems,
             is_local=group.is_local,
         )
+        # These shared sections are bound to base_config's OBJECTS. On a live
+        # reload they would go stale (the coordinator swaps its own to new
+        # objects); MultiUPSCoordinator._repoint_executor_configs re-binds this
+        # Config to the coordinator's current sections after every applied reload
+        # (ISS-004). Do not re-introduce a private copy that skips that step.
         self.config = Config(
             ups_groups=[synthetic_group],
             behavior=base_config.behavior,

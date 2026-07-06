@@ -20,12 +20,26 @@ changes split into two buckets:
   half-applied.
 """
 
+import threading
 from dataclasses import replace
 from typing import Dict, List, Optional, Tuple
 
 import yaml
 
 from eneru.config import Config, ConfigLoader
+
+# ISS-027: SIGHUP (main thread) and the API /config/reload endpoint (a worker
+# thread) can both drive a reload concurrently. Section swaps from two file
+# snapshots could interleave, AND the subsystem worker-bounce hooks
+# (_apply_subsystem_reload: stop -> null -> create -> start) could race and
+# orphan/duplicate a worker. Both callers (MultiUPSCoordinator.reload_config and
+# UPSGroupMonitor.reload_config) hold this lock across their WHOLE body -- parse,
+# section swap, executor re-point, AND the worker bounce -- so nothing in the
+# reload path can overlap. It is an RLock so perform_reload can also take it
+# directly (same thread re-acquire) and stay safe if ever called on its own. The
+# critical section is a file parse + a handful of setattrs + a worker restart, so
+# a signal handler briefly blocking on an API-initiated reload is bounded.
+_RELOAD_LOCK = threading.RLock()
 
 # Top-level sections the running daemon reads live and can swap in place.
 # v6.1: energy, battery_health, self_test, and reports are all read FRESH on
@@ -170,15 +184,22 @@ def apply_reload(primary: Config, monitor_configs: List[Config],
 def perform_reload(primary: Config, monitor_configs: List[Config],
                    path: Optional[str]) -> Dict:
     """Load+validate the file and apply the safe subset. Never raises on a bad
-    config — returns a report the caller can log or serialize."""
-    new, errors = load_and_validate(path)
-    if new is None:
-        return {"reloaded": False, "applied": [], "restartRequired": [],
-                "subsystems": [], "errors": errors}
-    report = apply_reload(primary, monitor_configs, new)
-    report["reloaded"] = True
-    report["errors"] = []
-    return report
+    config — returns a report the caller can log or serialize.
+
+    ISS-027: takes ``_RELOAD_LOCK`` (an RLock) so a direct call is serialized;
+    the reload_config callers also hold the same lock across their full body
+    (including the post-reload worker bounce), so the whole reload path is
+    mutually exclusive. The signal handler may briefly block on an in-flight API
+    reload (bounded by the reload duration)."""
+    with _RELOAD_LOCK:
+        new, errors = load_and_validate(path)
+        if new is None:
+            return {"reloaded": False, "applied": [], "restartRequired": [],
+                    "subsystems": [], "errors": errors}
+        report = apply_reload(primary, monitor_configs, new)
+        report["reloaded"] = True
+        report["errors"] = []
+        return report
 
 
 def format_report(report: Dict) -> List[str]:

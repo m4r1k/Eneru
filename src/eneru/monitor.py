@@ -1645,12 +1645,17 @@ class UPSGroupMonitor(
         Returns a report dict (also used by the API reload endpoint). Never
         raises on a bad config — the daemon keeps running on the old one.
         """
-        from eneru.reload import perform_reload
-        report = perform_reload(self.config, [self.config], self.config.config_path)
-        if report.get("reloaded") and report.get("subsystems"):
-            self._apply_subsystem_reload(report["subsystems"])
-        self._log_reload_report(report)
-        return report
+        from eneru.reload import perform_reload, _RELOAD_LOCK
+        # ISS-027: hold the reload lock across parse + swap + worker bounce so a
+        # SIGHUP and an API reload can't race the non-thread-safe bounce in
+        # _apply_subsystem_reload.
+        with _RELOAD_LOCK:
+            report = perform_reload(
+                self.config, [self.config], self.config.config_path)
+            if report.get("reloaded") and report.get("subsystems"):
+                self._apply_subsystem_reload(report["subsystems"])
+            self._log_reload_report(report)
+            return report
 
     def _apply_subsystem_reload(self, subsystems: list) -> None:
         """Re-init live subsystems whose config changed (best-effort)."""
