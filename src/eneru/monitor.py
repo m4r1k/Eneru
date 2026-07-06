@@ -1764,7 +1764,9 @@ class UPSGroupMonitor(
                 "Install with: uv pip install apprise"
             )
             return
-        worker = NotificationWorker(self.config)
+        # Reload path: pass the shared logger like the startup path (ISS-060)
+        # so warnings keep going through the structured logger after a reload.
+        worker = NotificationWorker(self.config, logger=self.logger)
         if worker.start():
             if self._stats_store is not None and self._stats_store._conn is not None:
                 worker.register_store(self._stats_store)
