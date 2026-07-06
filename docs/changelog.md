@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [6.1.6] - Unreleased
+## [Unreleased]
+
+Small fast-follow fixes from post-merge review of the v6.1.6 audit; to be
+included in a future release.
+
+### Fixed
+
+- **Notification worker keeps the structured logger across a config reload.**
+  The v6.1.6 change routed worker warnings through the daemon's logger
+  (ISS-060) on startup, but the reload/rebuild paths in both the single-UPS
+  monitor and the multi-UPS coordinator still constructed the worker without
+  it, so after a `systemctl reload` / API reload its warnings fell back to
+  `print`. Both reload paths now pass the shared logger.
+
+### Security
+
+- **CI: don't persist the GitHub token on the release workflow's gh-pages
+  checkout.** The deploy step pushes with an explicit `x-access-token` URL, so
+  the persisted credential was unused; `persist-credentials: false` narrows
+  token exposure across the package-repository build steps (zizmor
+  `artipacked`).
+
+---
+
+## [6.1.6] - 2026-07-06
 
 An unusually large "bug-fix" release: a full-repository adversarial audit
 (source, tests, CI, packaging, deployment manifests, config parsing) surfaced

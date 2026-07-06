@@ -243,6 +243,11 @@ jobs:
           ref: gh-pages
           path: gh-pages
           fetch-depth: 0
+          # Don't persist GITHUB_TOKEN into gh-pages/.git/config: the "Deploy to
+          # gh-pages" step pushes with an explicit x-access-token URL, so the
+          # persisted credential is unused and only widens token exposure across
+          # the many steps that run inside gh-pages/ (zizmor artipacked).
+          persist-credentials: false
 
       - name: Initialize gh-pages if missing
         if: steps.ghpages.outputs.exists == 'false'

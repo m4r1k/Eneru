@@ -1017,7 +1017,10 @@ class MultiUPSCoordinator:
                 "Install with: uv pip install apprise"
             )
             return
-        worker = NotificationWorker(self.config)
+        # Pass the coordinator's shared logger on the reload path too, so the
+        # rebuilt worker routes its warnings through the structured logger just
+        # like the startup path (ISS-060) rather than falling back to print.
+        worker = NotificationWorker(self.config, logger=self._logger)
         if not worker.start():
             self._log("⚠️  WARNING: Failed to reload notifications")
             return

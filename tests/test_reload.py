@@ -486,12 +486,13 @@ def test_monitor_reload_notification_worker_restarts_and_registers(monkeypatch):
     mon._stats_store = MagicMock()
     mon._stats_store._conn = object()
     mon._log_message = MagicMock()
+    mon.logger = object()  # shared structured logger
     worker = MagicMock()
     worker.start.return_value = True
     worker.get_service_count.return_value = 2
     monkeypatch.setattr(monitormod, "APPRISE_AVAILABLE", True)
-    monkeypatch.setattr(monitormod, "NotificationWorker",
-                        MagicMock(return_value=worker))
+    worker_cls = MagicMock(return_value=worker)
+    monkeypatch.setattr(monitormod, "NotificationWorker", worker_cls)
 
     old = mon._notification_worker
     mon._reload_notification_worker()
@@ -500,6 +501,8 @@ def test_monitor_reload_notification_worker_restarts_and_registers(monkeypatch):
     worker.start.assert_called_once()
     worker.register_store.assert_called_once_with(mon._stats_store)
     assert mon._notification_worker is worker
+    # Reload must forward the shared logger (else warnings fall back to print).
+    assert worker_cls.call_args.kwargs.get("logger") is mon.logger
 
 
 @pytest.mark.unit
@@ -556,6 +559,7 @@ def test_coordinator_reload_notification_worker_rewires_children(monkeypatch):
     coord.config.notifications.enabled = True
     coord._notification_worker = MagicMock()
     coord._log = MagicMock()
+    coord._logger = object()  # shared structured logger
     monitor = MagicMock()
     monitor._stats_store = MagicMock()
     monitor._stats_store._conn = object()
@@ -566,8 +570,8 @@ def test_coordinator_reload_notification_worker_rewires_children(monkeypatch):
     worker.start.return_value = True
     worker.get_service_count.return_value = 1
     monkeypatch.setattr(multi_mod, "APPRISE_AVAILABLE", True)
-    monkeypatch.setattr(multi_mod, "NotificationWorker",
-                        MagicMock(return_value=worker))
+    worker_cls = MagicMock(return_value=worker)
+    monkeypatch.setattr(multi_mod, "NotificationWorker", worker_cls)
 
     old = coord._notification_worker
     coord._reload_notification_worker()
@@ -577,6 +581,8 @@ def test_coordinator_reload_notification_worker_rewires_children(monkeypatch):
     assert coord._notification_worker is worker
     assert monitor._notification_worker is worker
     assert executor._notification_worker is worker
+    # Reload must forward the shared logger (else warnings fall back to print).
+    assert worker_cls.call_args.kwargs.get("logger") is coord._logger
 
 
 @pytest.mark.unit
