@@ -686,6 +686,16 @@ def test_api_parse_int_param_rejects_below_minimum(minimal_config):
 
 
 @pytest.mark.unit
+def test_api_parse_int_param_default_none_returns_none_when_absent():
+    """ISS-029: default=None with an absent param returns None, not int('None')
+    (which would raise a spurious 400)."""
+    from eneru.api import _parse_int_param
+    assert _parse_int_param({}, "before", None) is None
+    # Present value still parses normally.
+    assert _parse_int_param({"before": ["42"]}, "before", None) == 42
+
+
+@pytest.mark.unit
 def test_api_prometheus_metrics_include_remote_health_per_ups(minimal_config, monitor):
     """When a UPS has a remote-health manager exposing servers, the
     metrics endpoint must emit per-server status + consecutive_failures
@@ -1463,6 +1473,29 @@ def test_api_server_start_notes_auth_off_on_non_loopback_bind(minimal_config):
         assert bind_idx is not None, log
         assert note_idx is not None, log
         assert bind_idx < note_idx, log
+        # ISS-009: a non-loopback bind must warn about cleartext transport.
+        assert any(
+            "PLAIN HTTP" in m and "unencrypted" in m and "TLS reverse proxy" in m
+            for m in log
+        ), log
+    finally:
+        server.stop()
+
+
+@pytest.mark.unit
+def test_api_no_cleartext_warning_on_loopback_bind(minimal_config):
+    """ISS-009: the cleartext-transport warning fires ONLY for non-loopback binds."""
+    from unittest.mock import patch
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    log = []
+    server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
+    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+        server.start()
+    try:
+        assert not any("PLAIN HTTP" in m for m in log), log
     finally:
         server.stop()
 

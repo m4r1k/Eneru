@@ -173,6 +173,23 @@ def block_journal_side_channels(request, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _reset_login_throttle():
+    """ISS-032: the API login throttle is process-global module state; clear it
+    around every test so failed-login tests can't bleed into unrelated ones."""
+    try:
+        import eneru.api as _api
+        _api._login_failures.clear()
+    except Exception:
+        pass
+    yield
+    try:
+        import eneru.api as _api
+        _api._login_failures.clear()
+    except Exception:
+        pass
+
+
 @pytest.fixture
 def default_config() -> Config:
     """Create a default configuration for testing."""
