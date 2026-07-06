@@ -1368,7 +1368,7 @@ class UPSGroupMonitor(
             and not self._is_container_runtime
         )
 
-    def _execute_shutdown_sequence(self):
+    def _execute_shutdown_sequence(self) -> None:
         """Execute the controlled shutdown sequence.
 
         Thin wrapper that marks the sequence in flight for its entire duration
@@ -1383,7 +1383,7 @@ class UPSGroupMonitor(
         finally:
             self._shutdown_sequence_in_flight = False
 
-    def _execute_shutdown_sequence_impl(self):
+    def _execute_shutdown_sequence_impl(self) -> None:
         """Execute the controlled shutdown sequence."""
         self._mark_shutdown_in_progress("starting shutdown sequence")
         sequence_start = time.monotonic()
@@ -1595,10 +1595,23 @@ class UPSGroupMonitor(
             # True for every loopback result), so the sequence is complete even
             # if a Phase-A drain crashed. Surface the partial drain failure as a
             # warning but still record completion + write the marker below.
+            # An ordinary pre-shutdown command that exits non-zero increments
+            # pre_commands.failed WITHOUT setting crashed/error, so it leaves
+            # r.success True; include that counter (cubic P2) or the partial-
+            # drain signal would be lost for exactly that case.
+            def _drain_detail(r):
+                if r.error:
+                    return r.error
+                failed = getattr(getattr(r, "pre_commands", None), "failed", 0)
+                if failed:
+                    return f"{failed} pre-shutdown command(s) failed"
+                return "Phase-A drain reported a failure"
+
             drain_failures = "; ".join(
-                r.error or "Phase-A drain reported a failure"
+                _drain_detail(r)
                 for r in loopback_results
                 if not r.success
+                or getattr(getattr(r, "pre_commands", None), "failed", 0)
             )
             if drain_failures:
                 self._log_message(
