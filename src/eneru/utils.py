@@ -94,6 +94,13 @@ def run_command(
         return 124, "", "Command timed out"
     except FileNotFoundError:
         return 127, "", f"Command not found: {cmd[0]}"
+    except (TypeError, ValueError):
+        # ISS-056: these signal a programming error in the CALLER (e.g. a
+        # non-list cmd, or an invalid argument to subprocess.run), not a
+        # runtime failure of the command. Masking them as a generic exit-1
+        # hides real bugs -- let them propagate. OSError / subprocess errors
+        # below stay swallowed (they're legitimate runtime conditions).
+        raise
     except Exception as e:
         return 1, "", str(e)
 

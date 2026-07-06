@@ -7,7 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [6.1.5] - Unreleased
+## [6.1.6] - Unreleased
+
+An unusually large "bug-fix" release: a full-repository adversarial audit
+(source, tests, CI, packaging, deployment manifests, config parsing) surfaced
+64 findings, and rather than spread them across several minors the maintainer
+chose to land the entire remediation in one advertised bug-fix so Eneru runs
+at the best possible level. No new features and no breaking config changes;
+behavioral changes are called out below. See
+[Testing → Pre-release code review (v6.1.6)](testing.md#pre-release-code-review-v616)
+for the audit methodology.
+
+### Fixed
+
+- **Shutdown decision path (Critical).** A `SIGTERM`/`SIGINT` arriving mid
+  sequence no longer aborts an in-flight single-UPS poweroff (ISS-001); the
+  multi-UPS coordinator validates the poweroff command *before* writing the
+  "sequence complete" recovery marker, so an empty command can't make the next
+  boot log a false "Recovered" (ISS-015); and a delegated loopback poweroff
+  that was actually delivered is no longer misclassified as failed when a
+  Phase-A drain hiccups (ISS-005).
+- **Config validation.** Scalar/null section values, non-numeric thresholds,
+  invalid remote/grace timeouts, and unknown keys in the legacy dict-form
+  `ups:` and `notifications:` sections now produce a clean error instead of a
+  raw traceback or a silent default (ISS-002/003/024/025/026). Config reloads
+  are serialized so a SIGHUP and an API reload can't interleave (ISS-027), and
+  reloaded remote-server changes propagate to redundancy executors (ISS-004).
+- **Daemon robustness & visibility.** A missing NUT dependency exits cleanly
+  instead of flapping (ISS-006); the API server bounds slow/stalled client
+  connections (ISS-007); startup connection waits are interruptible (ISS-021);
+  and log throttles/timers now use the monotonic clock with correct
+  first-fire behavior instead of wall-clock modulo or `0.0` seeds that never
+  fired on a fresh boot (ISS-016/018/019/020/022).
+- **API/CLI hardening.** Reload errors return a proper error envelope
+  (ISS-028); a per-IP login throttle returns 429 after repeated failures
+  (ISS-032); session validation uses constant-time comparison (ISS-061);
+  `HEAD` is supported on `/health` and `/ready`, and a chunked request body is
+  rejected with 411 (ISS-061); the auth DB is created owner-only from the first
+  byte (ISS-062); and CSV report cells are protected against spreadsheet
+  formula injection (ISS-063).
+- **Perf & de-duplication.** Notification worker no longer re-scans the full
+  backlog every tick and no longer leaks per-message backoff state (ISS-036);
+  stats aggregation is incremental via a watermark instead of re-rolling every
+  bucket each cycle, with no schema change (ISS-037); and the triplicated
+  shutdown-path helpers were consolidated into single shared definitions
+  (ISS-013).
+- **CI / tests / packaging.** One dependency source of truth across CI
+  (ISS-043/044/048), a `pip` Dependabot ecosystem, systemd hardening
+  (ISS-047), a corrected fresh-install banner command (ISS-046), the embedded
+  Kubernetes ConfigMap is now validated in CI and its images are version-pinned
+  (ISS-053), and several real-time thread tests were de-flaked (ISS-054).
+
+### Changed
+
+- **`notifications.enabled` is now honored.** A config with
+  `notifications: {enabled: false, urls: [...]}` no longer keeps notifying;
+  the explicit `enabled` flag wins over the derived "has URLs" behavior
+  (ISS-024). Configs that relied on the old ignore-the-flag behavior to keep
+  notifications on despite `enabled: false` must remove the flag.
+- **UPS status dispatch is token-set based.** `OFF`, `BYPASS`, and bare
+  `DISCHRG` statuses are handled explicitly and `CHRG`/`DISCHRG` no longer
+  substring-alias each other (ISS-019).
+
+### Notes
+
+- Enforcement that was previously only documented is now real: per-file
+  coverage must stay ≥95% (ISS-012), the ghost `integration` pytest marker was
+  removed (ISS-050), and a required E2E notification check fails loudly instead
+  of silently skipping when its secret is missing on a non-fork run (ISS-051).
+- The base Docker image is intentionally left as a mutable tag (not
+  digest-pinned): for a base OS, `apt-get upgrade -y` on a moving tag keeps
+  security patches current, which beats a frozen digest that drifts stale
+  (ISS-045).
+
+---
+
+## [6.1.5] - 2026-07-05
 
 Bug-fix release for APC self-test completion and the browser dashboard's
 power-quality display, plus clearer APC self-test configuration guidance from

@@ -477,6 +477,78 @@ def test_api_do_get_uses_whitelisted_content_type():
 
 
 @pytest.mark.unit
+def test_api_do_head_probe_sends_headers_only():
+    """ISS-061: HEAD on /health and /ready returns the same headers (incl.
+    Content-Length) but no body."""
+    for path in ("/health", "/ready"):
+        handler = object.__new__(EneruAPIHandler)
+        handler.path = path
+        handler._route = lambda: (200, "application/json", {"status": "ok"})
+        headers = []
+        handler.send_response = lambda status: headers.append(("status", status))
+        handler.send_header = lambda key, value: headers.append((key, value))
+        handler.end_headers = lambda: None
+        handler.wfile = BytesIO()
+
+        handler.do_HEAD()
+
+        assert ("status", 200) in headers
+        assert any(k == "Content-Length" for k, _ in headers)
+        assert handler.wfile.getvalue() == b""  # HEAD carries no body
+
+
+@pytest.mark.unit
+def test_api_do_head_non_probe_path_405():
+    """ISS-061: HEAD on a payload route is 405 (we don't ship a body-less 200)."""
+    handler = object.__new__(EneruAPIHandler)
+    handler.path = "/api/v1/ups"
+    headers = []
+    handler.send_response = lambda status: headers.append(("status", status))
+    handler.send_header = lambda key, value: headers.append((key, value))
+    handler.end_headers = lambda: None
+    handler.wfile = BytesIO()
+
+    handler.do_HEAD()
+
+    assert ("status", 405) in headers
+    assert handler.wfile.getvalue() == b""  # HEAD: still no body, even on 405
+
+
+@pytest.mark.unit
+def test_api_read_json_body_rejects_chunked():
+    """ISS-061: a chunked Transfer-Encoding (no Content-Length) is rejected
+    rather than mis-read as an empty body."""
+    from eneru.api import APILengthRequired
+    handler = object.__new__(EneruAPIHandler)
+    handler.headers = {"Transfer-Encoding": "chunked"}
+    handler.rfile = BytesIO(b"")
+    with pytest.raises(APILengthRequired):
+        handler._read_json_body()
+
+
+@pytest.mark.unit
+def test_api_dispatch_maps_length_required_to_411():
+    """ISS-061: APILengthRequired surfaces as a 411 error envelope."""
+    from eneru.api import APILengthRequired
+    handler = object.__new__(EneruAPIHandler)
+
+    def _boom():
+        raise APILengthRequired("chunked not supported")
+
+    headers = []
+    handler.send_response = lambda status: headers.append(("status", status))
+    handler.send_header = lambda key, value: None
+    handler.end_headers = lambda: None
+    handler.wfile = BytesIO()
+
+    handler._dispatch(_boom)
+
+    assert ("status", 411) in headers
+    body = json.loads(handler.wfile.getvalue())
+    assert body["error"]["code"] == "LENGTH_REQUIRED"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "path,message",
     [
@@ -738,6 +810,22 @@ def test_json_formatter_adds_group_and_redacts_secrets():
     assert payload["message"].startswith("MQTT broker")
     assert "secret" not in json.dumps(payload)
     assert "abc123" not in json.dumps(payload)
+
+
+@pytest.mark.unit
+def test_timezone_formatter_also_redacts_secrets():
+    """ISS-063: the plain-text formatter (journal/stdout/file) must redact
+    credentials too, not just the JSON one."""
+    from eneru.logger import TimezoneFormatter
+    formatter = TimezoneFormatter("%(message)s")
+    record = logging.LogRecord(
+        "ups-monitor", logging.INFO, __file__, 1,
+        "MQTT broker mqtt://user:secret@example:1883 token=abc123",
+        (), None,
+    )
+    out = formatter.format(record)
+    assert "secret" not in out
+    assert "abc123" not in out
 
 
 @pytest.mark.unit

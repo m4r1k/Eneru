@@ -188,6 +188,12 @@ class UPSGroupMonitor(
         self._last_name_diagnostic_mono = None
         self._last_unknown_status_log_mono = None
         self._last_unknown_status_logged = ""
+        # ISS-055: last distinct state-file persist error, so a recurring disk
+        # failure is logged once per cause instead of silently swallowed.
+        self._last_state_save_error: Optional[str] = None
+        # ISS-059: throttle the "re-trigger ignored" warning to once per 60 s
+        # (None sentinel so it fires on first use regardless of uptime).
+        self._last_retrigger_warn_mono: Optional[float] = None
         self._battery_history_path = Path(config.logging.battery_history_file + sfx)
         self._state_file_path = Path(config.logging.state_file + sfx)
         self._remote_health_path = remote_health_sidecar_path(self._state_file_path)
@@ -537,7 +543,8 @@ class UPSGroupMonitor(
             self.config.notifications.enabled = False
             return
 
-        self._notification_worker = NotificationWorker(self.config)
+        self._notification_worker = NotificationWorker(
+            self.config, logger=self.logger)
         if self._notification_worker.start():
             if self._stats_store._conn is not None:
                 self._notification_worker.register_store(self._stats_store)
@@ -1305,8 +1312,16 @@ class UPSGroupMonitor(
             )
             temp_file.write_text(state_content)
             temp_file.replace(self._state_file_path)
-        except Exception:
-            pass
+            self._last_state_save_error = None
+        except Exception as exc:
+            # Persisting the state file is best-effort — the stats DB and the
+            # in-memory state are the sources of truth. Log once per distinct
+            # error (ISS-055) so a persistent disk problem is visible without
+            # spamming a line on every poll.
+            msg = str(exc)
+            if msg != getattr(self, "_last_state_save_error", None):
+                self._last_state_save_error = msg
+                self._log_message(f"⚠️  State file persist failed: {exc}")
 
         # Hot-path: append one sample to the in-memory deque (zero I/O).
         # The StatsWriter flushes the deque to SQLite every 10 s.
@@ -1640,12 +1655,18 @@ class UPSGroupMonitor(
             # Surface gated re-triggers (bug #4). The early return used
             # to be silent, which made correlating "trigger conditions
             # met but nothing fired" with the stuck flag much harder
-            # than it should have been.
-            self._log_message(
-                f"⚠️  Shutdown trigger fired ({reason}) but a previous "
-                f"shutdown sequence is already in progress "
-                f"({self._shutdown_flag_path}). Ignoring re-trigger."
-            )
+            # than it should have been. ISS-059: throttle to once per 60 s --
+            # during a sustained outage this fires on every poll, and one
+            # line per poll drowns the journal.
+            now_mono = time.monotonic()
+            last = self._last_retrigger_warn_mono
+            if last is None or now_mono - last >= 60:
+                self._last_retrigger_warn_mono = now_mono
+                self._log_message(
+                    f"⚠️  Shutdown trigger fired ({reason}) but a previous "
+                    f"shutdown sequence is already in progress "
+                    f"({self._shutdown_flag_path}). Ignoring re-trigger."
+                )
             return
 
         self._mark_shutdown_in_progress("triggering immediate shutdown")

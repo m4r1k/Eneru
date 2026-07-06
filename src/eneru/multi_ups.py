@@ -163,7 +163,8 @@ class MultiUPSCoordinator:
 
         # Initialize shared notification worker
         if self.config.notifications.enabled and APPRISE_AVAILABLE:
-            self._notification_worker = NotificationWorker(self.config)
+            self._notification_worker = NotificationWorker(
+                self.config, logger=self._logger)
             if self._notification_worker.start():
                 count = self._notification_worker.get_service_count()
                 self._log(f"📢  Notifications: enabled ({count} service(s))")

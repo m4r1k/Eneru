@@ -102,6 +102,11 @@ USER eneru
 
 EXPOSE 9191
 
+# ISS-064: this HEALTHCHECK probes the API's /ready endpoint, which only
+# exists because the default CMD below runs with `--api`. If you OVERRIDE the
+# CMD to run without `--api` (or on a different --api-port), also override or
+# disable the HEALTHCHECK (`--health-cmd`/`--no-healthcheck` / compose
+# `healthcheck.disable`), or the container will report unhealthy forever.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9191/ready', timeout=3).read()"
 

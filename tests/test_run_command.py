@@ -134,6 +134,16 @@ class TestRunCommand:
             assert stdout == ""
             assert "Generic error" in stderr
 
+    @pytest.mark.unit
+    def test_programming_errors_propagate(self):
+        """ISS-056: TypeError/ValueError signal a caller bug, not a command
+        runtime failure, so they must propagate instead of being masked as
+        exit 1."""
+        for exc in (TypeError("bad cmd"), ValueError("bad arg")):
+            with patch("subprocess.run", side_effect=exc):
+                with pytest.raises(type(exc)):
+                    run_command(["any", "command"])
+
 
 class TestCommandExists:
     """Test the command_exists helper function."""

@@ -243,9 +243,9 @@ yet?". It is **pure + threadless**: `Schedule.due(now, last_run, tz)` does
 interval / daily / weekly / monthly due-time math (calendar kinds take an
 injectable `tz` so tests pin UTC). Each owner reads/writes that job's last-run
 in the stats `meta` table itself — there is no long-lived registry object;
-`Schedule` is rebuilt from config on every check. (`scheduler.py` also ships a
-`PeriodicScheduler` register/tick helper, but the daemon does NOT use it today;
-the per-UPS and daemon-wide loops below call `Schedule.due` directly.)
+`Schedule` is rebuilt from config on every check. The per-UPS and daemon-wide
+loops below call `Schedule.due` directly. (An unused `PeriodicScheduler`
+register/tick helper was removed in v6.1.6 — ISS-057 — since nothing drove it.)
 
 ELI5: it's a fridge whiteboard of chores. Each chore has a rule ("every
 hour", "the 1st at 08:00") and a last-done date written on the board (the

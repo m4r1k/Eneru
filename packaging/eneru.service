@@ -1,6 +1,9 @@
 [Unit]
 Description=Eneru - Intelligent UPS Monitoring & Shutdown Orchestration
-# Ensure dependencies are started first
+# Ensure dependencies are started first.
+# ISS-064: docker.service covers the Docker runtime. If you orchestrate Podman
+# containers instead, add `podman.service` (or your rootful `podman.socket`)
+# here so Eneru starts after the container runtime is up.
 After=network-online.target libvirtd.service docker.service
 Wants=network-online.target
 

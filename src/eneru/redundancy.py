@@ -674,9 +674,10 @@ class RedundancyGroupEvaluator(threading.Thread):
         for ups_name in self._group.ups_sources:
             monitor = self._monitors.get(ups_name)
             if monitor is None:
+                # ISS-058: no monitor wired -> UNKNOWN outright. (The former
+                # check_interval/triggers assignments here were dead: they are
+                # only read inside the else branch's assess_health call.)
                 raw = UPSHealth.UNKNOWN
-                check_interval = 1
-                triggers = None
             else:
                 snap = monitor.state.snapshot()
                 # A member that has published at least one successful poll

@@ -173,6 +173,17 @@ class MQTTPublisher:
         """
         backoff = _INITIAL_BACKOFF_SECONDS
         parsed = urlparse(self.config.mqtt.broker)
+        if parsed.scheme not in ("mqtt", "mqtts"):
+            # ISS-063: without a scheme, urlparse can't split host/port (it
+            # treats the whole string as a path), so we fall back to the raw
+            # value and default the port — and TLS silently stays off. Warn so
+            # a misconfigured `broker: host:8883` isn't mistaken for mqtts.
+            logging.getLogger(__name__).warning(
+                "MQTT broker '%s' has no mqtt:// or mqtts:// scheme; "
+                "host/port fall back to the raw string and TLS is disabled. "
+                "Use mqtt://host:1883 or mqtts://host:8883.",
+                self.config.mqtt.broker,
+            )
         use_tls = parsed.scheme == "mqtts"
         host = parsed.hostname or self.config.mqtt.broker
         port = parsed.port or (8883 if use_tls else 1883)

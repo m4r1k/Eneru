@@ -35,7 +35,11 @@ class TimezoneFormatter(logging.Formatter):
 
     def format(self, record):
         record.timezone = time.strftime('%Z')
-        return super().format(record)
+        # ISS-063: the JSON formatter already redacts credentials; the plain
+        # text formatter (journal / stdout / file) must too, or a webhook URL
+        # or password that reaches a log message leaks in the human-readable
+        # sink while being scrubbed in the structured one.
+        return redact_sensitive_text(super().format(record))
 
 
 class JSONFormatter(logging.Formatter):

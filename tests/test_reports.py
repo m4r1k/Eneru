@@ -84,6 +84,23 @@ class TestBuildReport:
         assert "ON_BATTERY" in out["csv"]
 
     @pytest.mark.unit
+    def test_csv_neutralizes_formula_injection(self):
+        """ISS-063: a cell whose first char is = + - @ (or a leading tab/CR)
+        is prefixed with ' so a spreadsheet renders it literally instead of
+        executing it as a formula."""
+        sources = {
+            "ups_name": "=cmd|'/c calc'!A1",
+            "events": [(1000, "=1+1", "@SUM(A1:A9)")],
+        }
+        out = reports.build_report("daily", sources, include=["events"],
+                                   fmt="csv")
+        csv_text = out["csv"]
+        # The dangerous cells are quoted; no raw formula-leading cell remains.
+        assert "'=cmd" in csv_text
+        assert "'=1+1" in csv_text
+        assert "'@SUM(A1:A9)" in csv_text
+
+    @pytest.mark.unit
     def test_include_filters_sections(self):
         sources = {"ups_name": "U", "energy": {"todayKwh": 1.0, "monthKwh": 2.0},
                    "battery_health": {"score": 50, "confidence": 0.5}}

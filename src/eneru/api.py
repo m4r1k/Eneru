@@ -143,6 +143,11 @@ class APIForbidden(Exception):
     """Raised when an action is not permitted in the current mode (403)."""
 
 
+class APILengthRequired(Exception):
+    """Raised when a body request omits Content-Length, e.g. a chunked
+    Transfer-Encoding the fixed-length reader can't bound (411)."""
+
+
 class SessionManager:
     """In-memory bearer-token sessions with a fixed TTL.
 
@@ -177,13 +182,30 @@ class SessionManager:
 
     def validate(self, token: str) -> Optional[Dict[str, Any]]:
         now = time.time()
+        if not isinstance(token, str) or not token:
+            return None
+        # ISS-061: match the presented token against stored session tokens with
+        # secrets.compare_digest so validation time doesn't leak how much of a
+        # guessed token was correct (a plain dict lookup compares byte-by-byte
+        # and short-circuits). Compare on BYTES: compare_digest raises
+        # TypeError on an ASCII-vs-non-ASCII str comparison, and header values
+        # decode to arbitrary latin-1, so a str compare would turn a bad token
+        # into a 500 instead of a clean 401. Session counts are tiny, so the
+        # linear scan is negligible.
+        token_bytes = token.encode("utf-8", "surrogatepass")
         with self._lock:
-            entry = self._sessions.get(token)
-            if entry is None:
+            matched_key = None
+            for stored in self._sessions:
+                if secrets.compare_digest(
+                    stored.encode("utf-8", "surrogatepass"), token_bytes
+                ):
+                    matched_key = stored
+                    break
+            if matched_key is None:
                 return None
-            principal, expiry = entry
+            principal, expiry = self._sessions[matched_key]
             if expiry < now:
-                del self._sessions[token]
+                del self._sessions[matched_key]
                 return None
             return principal
 
@@ -418,6 +440,25 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     def do_DELETE(self):  # noqa: N802 - stdlib hook
         self._dispatch(self._route_delete)
 
+    def do_HEAD(self):  # noqa: N802 - stdlib hook
+        # ISS-061: load balancers and uptime checks often probe with HEAD.
+        # Support it headers-only for the liveness/readiness endpoints (which
+        # is where a HEAD probe is meaningful); other paths get 405 so we
+        # don't ship a body-less 200 for routes that imply a payload.
+        path = urlparse(self.path).path
+        self._head_only = True
+        try:
+            if path in ("/health", "/ready"):
+                self._dispatch(self._route)
+            else:
+                # Still HEAD semantics: headers only, no body (RFC 9110).
+                self._finish(
+                    405, "application/json",
+                    self._error("METHOD_NOT_ALLOWED",
+                                "HEAD is only supported for /health and /ready"))
+        finally:
+            self._head_only = False
+
     def log_message(self, fmt, *args):  # noqa: A003 - stdlib hook
         return
 
@@ -437,6 +478,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         except APIForbidden as exc:
             status, content_type, body = (
                 403, "application/json", self._error("FORBIDDEN", str(exc)))
+        except APILengthRequired as exc:
+            status, content_type, body = (
+                411, "application/json",
+                self._error("LENGTH_REQUIRED", str(exc)))
         except Exception:
             status, content_type, body = (
                 500, "application/json",
@@ -470,6 +515,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if status == 401:
             self.send_header("WWW-Authenticate", "Bearer")
         self.end_headers()
+        # ISS-061: a HEAD response carries the same headers (incl. the
+        # would-be Content-Length) but no body, per RFC 9110.
+        if getattr(self, "_head_only", False):
+            return
         self.wfile.write(raw)
 
     def _serve_static(self, path: str) -> Optional[Tuple[str, bytes]]:
@@ -632,6 +681,14 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
     def _read_json_body(self) -> Dict[str, Any]:
         """Read + parse a JSON object body, bounded by ``MAX_BODY_BYTES``."""
+        # ISS-061: the body reader is strictly Content-Length framed. A
+        # chunked Transfer-Encoding has no Content-Length, so it would read as
+        # an empty body and silently mis-parse; reject it with 411 instead.
+        te = (self.headers.get("Transfer-Encoding") or "").lower()
+        if "chunked" in te:
+            raise APILengthRequired(
+                "chunked Transfer-Encoding is not supported; "
+                "send a Content-Length-framed body")
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):

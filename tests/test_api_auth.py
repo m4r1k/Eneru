@@ -72,6 +72,21 @@ def test_session_expiry(monkeypatch):
     assert token not in mgr._sessions  # expired entry is reaped
 
 
+@pytest.mark.unit
+def test_session_validate_rejects_non_string_and_empty():
+    """ISS-061: constant-time validate short-circuits non-str / empty tokens
+    (secrets.compare_digest would otherwise raise TypeError on them)."""
+    mgr = SessionManager(3600)
+    mgr.create({"username": "a", "kind": "user"})
+    assert mgr.validate("") is None
+    assert mgr.validate(None) is None
+    assert mgr.validate(123) is None
+    # ISS-061: a non-ASCII token must return None cleanly, NOT raise TypeError
+    # from compare_digest (header values decode to arbitrary latin-1). A raise
+    # here would turn a bad credential into a 500 on every authed route.
+    assert mgr.validate("Bearer-\x80\xff-garbage") is None
+
+
 # ----- _authorize matrix -----
 
 @pytest.mark.unit
