@@ -173,13 +173,15 @@ class UPSGroupMonitor(
         # sys.exit(0) and abort the host poweroff. _cleanup_and_exit consults
         # this flag to decline exiting while a sequence is in flight.
         self._shutdown_sequence_in_flight = False
-        # ISS-018 / ISS-022: monotonic throttle timestamps (0.0 => fire on first
-        # occurrence). On-battery status log cadence, and the upsc -l name
-        # diagnostic cooldown.
-        self._last_ob_status_log_mono = 0.0
-        self._last_name_diagnostic_mono = 0.0
-        # ISS-019: throttle the neutral/unrecognized-status notice.
-        self._last_unknown_status_log_mono = 0.0
+        # ISS-018 / ISS-022 / ISS-019: monotonic throttle timestamps. None means
+        # "never fired" -> always fire the first time. A 0.0 sentinel would be
+        # WRONG: time.monotonic()'s zero point is arbitrary (~boot time), so on a
+        # host up for less than the cooldown, `monotonic() - 0.0 > cooldown` is
+        # false and the first event is wrongly suppressed (this broke NUT-name
+        # autodiscovery on fresh CI runners). Compare against None instead.
+        self._last_ob_status_log_mono = None
+        self._last_name_diagnostic_mono = None
+        self._last_unknown_status_log_mono = None
         self._last_unknown_status_logged = ""
         self._battery_history_path = Path(config.logging.battery_history_file + sfx)
         self._state_file_path = Path(config.logging.state_file + sfx)
@@ -2086,7 +2088,8 @@ class UPSGroupMonitor(
         # Log on-battery status roughly every 5s. ISS-018: throttle on a
         # monotonic timestamp, not `int(time.time()) % 5 == 0` -- with a 5s poll
         # and an unlucky phase the modulo could never (or double-) fire.
-        if time.monotonic() - self._last_ob_status_log_mono >= 5:
+        if (self._last_ob_status_log_mono is None
+                or time.monotonic() - self._last_ob_status_log_mono >= 5):
             self._last_ob_status_log_mono = time.monotonic()
             self._log_message(
                 f"🔋  On battery: {battery_charge}% ({format_seconds(battery_runtime)}), "
@@ -2577,8 +2580,9 @@ class UPSGroupMonitor(
                     # at most once per cooldown window.
                     if (self.state.connection_error_count == 1
                             and "OB" not in self.state.previous_status
-                            and time.monotonic() - self._last_name_diagnostic_mono
-                            > 600):
+                            and (self._last_name_diagnostic_mono is None
+                                 or time.monotonic()
+                                 - self._last_name_diagnostic_mono > 600)):
                         self._last_name_diagnostic_mono = time.monotonic()
                         self._run_ups_name_diagnostic(error_msg)
                     self.state.stale_data_count = 0
@@ -2789,6 +2793,7 @@ class UPSGroupMonitor(
                 # Note it, throttled, for visibility; environment checks below
                 # still run on the raw status.
                 if (ups_status != self._last_unknown_status_logged
+                        or self._last_unknown_status_log_mono is None
                         or time.monotonic() - self._last_unknown_status_log_mono
                         >= 300):
                     self._last_unknown_status_logged = ups_status

@@ -4481,7 +4481,11 @@ class TestPR6OnBatteryLogic:
         monitor.config.triggers.on_battery_stabilization_delay = 0
         monitor.state.previous_status = "OB"
         monitor.state.on_battery_start_time = int(time.time())
-        monitor.state.on_battery_start_mono = time.monotonic() - 120  # 2 min in
+        # Pin monotonic to a fixed value (its real epoch is ~boot time and can be
+        # < 120 on a fresh CI runner, which would make a `monotonic()-120` anchor
+        # negative). Anchor 120s before "now".
+        monkeypatch.setattr("eneru.monitor.time.monotonic", lambda: 5000.0)
+        monitor.state.on_battery_start_mono = 5000.0 - 120  # 2 min in
         logs = []
         monitor._log_message = logs.append
 
