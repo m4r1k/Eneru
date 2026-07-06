@@ -366,6 +366,23 @@ class TestAssessHealthStaleness:
         assert assess_health(snap, None, 1, now=NOW) == UPSHealth.UNKNOWN
 
     @pytest.mark.unit
+    def test_pre_grace_window_uses_retry_wait_cadence(self):
+        """ISS-017: the window is tolerance-polls * RETRY_WAIT_SECONDS + interval,
+        NOT tolerance * 1s. With tolerance=6, interval=1 the window is 31s, so a
+        30s-stale retry stays DEGRADED — it would have been UNKNOWN under the old
+        (broken) assumption of 1s per retry."""
+        from eneru.health_model import RETRY_WAIT_SECONDS
+        assert RETRY_WAIT_SECONDS == 5
+        inside = _snap(last_update_time=NOW - 30, stale_data_count=1)
+        past = _snap(last_update_time=NOW - 32, stale_data_count=1)
+        assert assess_health(
+            inside, None, 1, now=NOW, max_stale_data_tolerance=6
+        ) == UPSHealth.DEGRADED
+        assert assess_health(
+            past, None, 1, now=NOW, max_stale_data_tolerance=6
+        ) == UPSHealth.UNKNOWN
+
+    @pytest.mark.unit
     def test_no_observations_still_unknown_even_with_stale_count(self):
         snap = _snap(last_update_time=0, stale_data_count=2)
         assert assess_health(snap, None, 1, now=NOW) == UPSHealth.UNKNOWN

@@ -49,6 +49,11 @@ from eneru.shutdown.filesystems import FilesystemShutdownMixin
 from eneru.shutdown.remote import RemoteShutdownMixin, loopback_poweroff_sent
 from eneru.health.voltage import VoltageMonitorMixin
 from eneru.health.battery import BatteryMonitorMixin
+# ISS-017: single source of truth for the connection-retry cadence. The poll
+# loop waits this many seconds between failed attempts, and health_model sizes
+# the pre-grace stale window off the same value — import it so the two can't
+# drift (health_model is a leaf module: no import cycle).
+from eneru.health_model import RETRY_WAIT_SECONDS as CONNECTION_RETRY_WAIT_SECONDS
 
 SLOW_NUT_LOG_THRESHOLD_SECONDS = 2.0
 SLOW_NUT_LOG_RATE_LIMIT_SECONDS = 300.0
@@ -168,6 +173,14 @@ class UPSGroupMonitor(
         # sys.exit(0) and abort the host poweroff. _cleanup_and_exit consults
         # this flag to decline exiting while a sequence is in flight.
         self._shutdown_sequence_in_flight = False
+        # ISS-018 / ISS-022: monotonic throttle timestamps (0.0 => fire on first
+        # occurrence). On-battery status log cadence, and the upsc -l name
+        # diagnostic cooldown.
+        self._last_ob_status_log_mono = 0.0
+        self._last_name_diagnostic_mono = 0.0
+        # ISS-019: throttle the neutral/unrecognized-status notice.
+        self._last_unknown_status_log_mono = 0.0
+        self._last_unknown_status_logged = ""
         self._battery_history_path = Path(config.logging.battery_history_file + sfx)
         self._state_file_path = Path(config.logging.state_file + sfx)
         self._remote_health_path = remote_health_sidecar_path(self._state_file_path)
@@ -1935,6 +1948,7 @@ class UPSGroupMonitor(
 
         if "OB" not in self.state.previous_status and "FSD" not in self.state.previous_status:
             self.state.on_battery_start_time = int(time.time())
+            self.state.on_battery_start_mono = time.monotonic()  # ISS-020
             self.state.extended_time_logged = False
             self.state.battery_history.clear()
 
@@ -1950,7 +1964,15 @@ class UPSGroupMonitor(
                 ])
 
         current_time = int(time.time())
-        time_on_battery = current_time - self.state.on_battery_start_time
+        # ISS-020: derive the trigger-relevant duration from the monotonic clock
+        # so an NTP step mid-outage can't skew T3-grace / T4 timing. Fall back to
+        # the wall delta only if the monotonic anchor is somehow unset.
+        if self.state.on_battery_start_mono > 0:
+            time_on_battery = int(
+                time.monotonic() - self.state.on_battery_start_mono
+            )
+        else:
+            time_on_battery = current_time - self.state.on_battery_start_time
         depletion_rate = self._calculate_depletion_rate(battery_charge)
         stabilization_delay = max(
             0, int(self.config.triggers.on_battery_stabilization_delay)
@@ -2048,9 +2070,24 @@ class UPSGroupMonitor(
                 self._record_advisory_trigger(shutdown_reason)
             else:
                 self._trigger_immediate_shutdown(shutdown_reason)
+        elif (self._in_redundancy_group and not stabilizing
+                and self.state.trigger_active):
+            # ISS-016: a clean on-battery reading (no trigger reason) while an
+            # advisory trigger is latched means conditions recovered (charge/
+            # runtime back above threshold). Clear the latch so one transient
+            # sub-threshold reading doesn't keep this member CRITICAL for the
+            # whole outage and bias quorum toward group shutdown. Only clear on a
+            # fully-clean reading, and never during stabilization.
+            # NOTE: an FSD-originated advisory (latched in _main_loop) would also
+            # clear here on a subsequent clean OB poll; in practice upsd keeps FSD
+            # latched, and the group evaluator re-latches on the next FSD poll.
+            self._clear_advisory_trigger()
 
-        # Log status every 5 seconds
-        if int(time.time()) % 5 == 0:
+        # Log on-battery status roughly every 5s. ISS-018: throttle on a
+        # monotonic timestamp, not `int(time.time()) % 5 == 0` -- with a 5s poll
+        # and an unlucky phase the modulo could never (or double-) fire.
+        if time.monotonic() - self._last_ob_status_log_mono >= 5:
+            self._last_ob_status_log_mono = time.monotonic()
             self._log_message(
                 f"🔋  On battery: {battery_charge}% ({format_seconds(battery_runtime)}), "
                 f"Load: {ups_load}%, Depletion: {depletion_rate}%/min, "
@@ -2081,6 +2118,7 @@ class UPSGroupMonitor(
                 ])
 
             self.state.on_battery_start_time = 0
+            self.state.on_battery_start_mono = 0.0  # ISS-020
             self.state.extended_time_logged = False
             self.state.battery_history.clear()
 
@@ -2531,8 +2569,17 @@ class UPSGroupMonitor(
                     # must never sit in front of an FSB emergency shutdown, and a
                     # wrong ups.name could not have produced an "OB" status in the
                     # first place, so there is nothing to discover on that path.
+                    # ISS-022: the counter resets on every successful poll, so a
+                    # once-a-minute flap would pay the ~10s upsc -l probe on each
+                    # episode, stalling the poll thread (delays state publishing;
+                    # interacts with the health-model stale window). Gate it on a
+                    # 10-minute monotonic cooldown so a flapping server is probed
+                    # at most once per cooldown window.
                     if (self.state.connection_error_count == 1
-                            and "OB" not in self.state.previous_status):
+                            and "OB" not in self.state.previous_status
+                            and time.monotonic() - self._last_name_diagnostic_mono
+                            > 600):
+                        self._last_name_diagnostic_mono = time.monotonic()
                         self._run_ups_name_diagnostic(error_msg)
                     self.state.stale_data_count = 0
                     # Off-battery: first hard error feeds the grace period as
@@ -2608,7 +2655,7 @@ class UPSGroupMonitor(
                 elif is_failsafe_trigger:
                     self._handle_connection_failure(error_msg)
 
-                self._stop_event.wait(5)
+                self._stop_event.wait(CONNECTION_RETRY_WAIT_SECONDS)
                 continue
 
             # ==================================================================
@@ -2677,12 +2724,19 @@ class UPSGroupMonitor(
 
             ups_status = ups_data.get('ups.status', '')
 
+            # ISS-019: match on whitespace-separated status TOKENS, not
+            # substrings. NUT statuses are space-separated flags, so `"CHRG" in
+            # ups_status` also matched `DISCHRG` (shielded here only by elif
+            # order); token membership fixes that aliasing structurally and lets
+            # neutral statuses (OFF, BYPASS, bare DISCHRG) fall through cleanly.
+            status_tokens = set(ups_status.split())
+
             # Re-arm the FAILSAFE latch only when the outage is over: we have a
             # VALID status AND it shows line power. A missing/empty status is an
             # unresolved state, not "on line", so it must NOT re-arm the latch
             # mid-outage (cubic). On battery a reconnection alone doesn't end the
             # outage either, so the latch is per-outage, not per-reconnect.
-            if ups_status and "OB" not in ups_status and "FSD" not in ups_status:
+            if ups_status and "OB" not in status_tokens and "FSD" not in status_tokens:
                 self._failsafe_initiated = False
 
             if not ups_status:
@@ -2690,7 +2744,7 @@ class UPSGroupMonitor(
                     "❌  ERROR: Received data from UPS but 'ups.status' is missing. "
                     "Check NUT configuration."
                 )
-                self._stop_event.wait(5)
+                self._stop_event.wait(CONNECTION_RETRY_WAIT_SECONDS)
                 continue
 
             self._save_state(ups_data)
@@ -2710,7 +2764,7 @@ class UPSGroupMonitor(
             # POWER STATE ANALYSIS AND SHUTDOWN TRIGGERS
             # ==================================================================
 
-            if "FSD" in ups_status:
+            if "FSD" in status_tokens:
                 if self._in_redundancy_group:
                     self._record_advisory_trigger(
                         "UPS signaled FSD (Forced Shutdown) flag."
@@ -2720,11 +2774,29 @@ class UPSGroupMonitor(
                         "UPS signaled FSD (Forced Shutdown) flag."
                     )
 
-            elif "OB" in ups_status:
+            elif "OB" in status_tokens:
                 self._handle_on_battery(ups_data)
 
-            elif "OL" in ups_status or "CHRG" in ups_status:
+            elif "OL" in status_tokens or "CHRG" in status_tokens:
                 self._handle_on_line(ups_data)
+
+            else:
+                # ISS-019: neutral/unrecognized status (OFF, BYPASS, bare
+                # DISCHRG, ...). Neither on-line nor on-battery: take no power-
+                # state action and do not reset on_battery timing here. (The
+                # per-outage failsafe latch is handled separately above at its
+                # own re-arm check, which clears on any non-OB/non-FSD status.)
+                # Note it, throttled, for visibility; environment checks below
+                # still run on the raw status.
+                if (ups_status != self._last_unknown_status_logged
+                        or time.monotonic() - self._last_unknown_status_log_mono
+                        >= 300):
+                    self._last_unknown_status_logged = ups_status
+                    self._last_unknown_status_log_mono = time.monotonic()
+                    self._log_message(
+                        f"ℹ️  UPS status '{ups_status}' is neither on-line nor "
+                        "on-battery; no power-state action taken."
+                    )
 
             # Battery anomaly detection (runs on every cycle with valid data)
             self._check_battery_anomaly(ups_data)
@@ -2755,10 +2827,22 @@ class UPSGroupMonitor(
                 self.state.latest_ups_temperature = ups_data.get('ups.temperature', '')
                 self.state.latest_input_frequency = ups_data.get('input.frequency', '')
                 self.state.latest_output_frequency = ups_data.get('output.frequency', '')
-                self.state.latest_time_on_battery = (
-                    int(time.time()) - self.state.on_battery_start_time
-                    if self.state.on_battery_start_time > 0 else 0
-                )
+                # ISS-020: publish the MONOTONIC on-battery duration. This field
+                # becomes snapshot.time_on_battery, which the redundancy
+                # evaluator's assess_health() feeds into DECISION logic
+                # (stabilization gate, depletion grace, extended-time), not just
+                # display — so an NTP step mid-outage must not skew it either.
+                # Wall fallback only if the monotonic anchor is unset.
+                if self.state.on_battery_start_mono > 0:
+                    self.state.latest_time_on_battery = int(
+                        time.monotonic() - self.state.on_battery_start_mono
+                    )
+                elif self.state.on_battery_start_time > 0:
+                    self.state.latest_time_on_battery = (
+                        int(time.time()) - self.state.on_battery_start_time
+                    )
+                else:
+                    self.state.latest_time_on_battery = 0
                 self.state.latest_update_time = time.time()
                 self.state.previous_status = ups_status
 

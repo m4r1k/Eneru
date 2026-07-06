@@ -58,6 +58,12 @@ class MonitorState:
     """Tracks the current state of the UPS monitor."""
     previous_status: str = ""
     on_battery_start_time: int = 0
+    # ISS-020: monotonic companion to on_battery_start_time. The wall-clock field
+    # above is kept only for the state-file export (a human-readable start time);
+    # ALL duration math that feeds decisions — the local T3-grace/T4 triggers AND
+    # the redundancy evaluator's snapshot.time_on_battery — is computed from this
+    # monotonic anchor so an NTP step mid-outage can't skew trigger timing.
+    on_battery_start_mono: float = 0.0
     extended_time_logged: bool = False
     voltage_state: str = "NORMAL"
     avr_state: str = "INACTIVE"
