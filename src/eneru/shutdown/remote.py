@@ -88,7 +88,10 @@ def loopback_poweroff_sent(result: "RemoteShutdownResult") -> bool:
     )
 
 
-def select_loopback_results(remote_servers, results):
+def select_loopback_results(
+    remote_servers: List[RemoteServerConfig],
+    results: List["RemoteShutdownResult"],
+) -> List["RemoteShutdownResult"]:
     """Return the subset of remote-shutdown ``results`` that belong to an
     enabled ``is_host_loopback`` server.
 

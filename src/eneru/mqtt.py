@@ -178,11 +178,13 @@ class MQTTPublisher:
             # treats the whole string as a path), so we fall back to the raw
             # value and default the port — and TLS silently stays off. Warn so
             # a misconfigured `broker: host:8883` isn't mistaken for mqtts.
-            logging.getLogger(__name__).warning(
-                "MQTT broker '%s' has no mqtt:// or mqtts:// scheme; "
-                "host/port fall back to the raw string and TLS is disabled. "
-                "Use mqtt://host:1883 or mqtts://host:8883.",
-                self.config.mqtt.broker,
+            # Route through self.log_fn (the operator-facing sink every other
+            # warning in this class uses); the module logger here is reserved
+            # for internal exception tracebacks.
+            self.log_fn(
+                f"⚠️  MQTT broker '{self.config.mqtt.broker}' has no mqtt:// or "
+                "mqtts:// scheme; host/port fall back to the raw string and TLS "
+                "is disabled. Use mqtt://host:1883 or mqtts://host:8883."
             )
         use_tls = parsed.scheme == "mqtts"
         host = parsed.hostname or self.config.mqtt.broker
