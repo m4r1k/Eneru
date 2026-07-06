@@ -625,6 +625,35 @@ class TestCoordinatorReportSender:
         coord._maybe_send_reports()
         assert called == [True]
 
+    @pytest.mark.unit
+    def test_maybe_send_reports_failure_is_isolated(self, monkeypatch):
+        """A reports failure must be logged and swallowed, never propagated."""
+        from eneru import reports as reports_mod
+        coord = self._coord_reports_enabled()
+        coord._notification_worker = MagicMock()
+        logs = []
+        coord._log = logs.append
+
+        def boom(*a, **k):
+            raise RuntimeError("report-boom")
+        monkeypatch.setattr(reports_mod, "maybe_send_due_reports_multi", boom)
+        coord._maybe_send_reports()  # must not raise
+        assert any("reports task failed" in m for m in logs)
+
+    @pytest.mark.unit
+    def test_repoint_executor_configs_skips_configless_executor(self, tmp_path):
+        """ISS-004 defensive path: an executor without a .config attribute is
+        skipped rather than crashing the reload."""
+        config = _coord_config(tmp_path)
+        coord = MultiUPSCoordinator(config)
+
+        class _NoConfig:
+            pass  # no `.config` attribute
+
+        coord._redundancy_executors = {"x": _NoConfig()}
+        # Must not raise even though the executor has no config.
+        coord._repoint_executor_configs()
+
 
 # ==============================================================================
 # UPS MONITOR COORDINATOR MODE

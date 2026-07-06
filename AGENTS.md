@@ -346,7 +346,7 @@ The current pinned set (as of 2026-06-29):
 | `actions/upload-artifact` | `v7` | `043fb46d…` |
 | `actions/download-artifact` | `v8` | `3e5f45b2…` |
 | `codecov/codecov-action` | `v6` | `fb8b3582…` |
-| `github/codeql-action` | `v4` | `8aad20d1…` |
+| `github/codeql-action` | `v4` | `54f647b7…` |
 | `pypa/gh-action-pypi-publish` | `release/v1` | `cef22109…` |
 | `softprops/action-gh-release` | `v3` | `718ea10b…` |
 | `docker/setup-buildx-action` | `v3` | `8d2750c6…` |

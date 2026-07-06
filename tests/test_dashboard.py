@@ -361,8 +361,10 @@ def test_dashboard_tier1_events_and_dropdown_and_icons(minimal_config):
     # Tabs carry inline-SVG icons injected by initTabs (no emoji font / tofu).
     assert "TAB_ICONS" in js and "function initTabs" in js
     html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
-    # Brand lightning bolt in the header + inline ⚡ SVG favicon (no packaged
-    # asset, no emoji font dependency).
+    # Brand lightning bolt in the header + a same-origin /favicon.svg link
+    # (ISS-011: it's a PACKAGED asset served by the daemon, since the CSP blocks
+    # data: URLs — shipped in wheels via the eneru.web *.svg glob and in deb/rpm
+    # via nfpm).
     assert 'class="ic brand-bolt"' in html
     assert "image/svg+xml" in html
     css = _handler(minimal_config, path="/style.css")._serve_static(

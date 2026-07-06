@@ -83,7 +83,10 @@ where = ["src"]
 # regardless of install method (pip vs deb/rpm).
 "eneru.completion" = ["*.bash", "*.zsh", "*.fish"]
 # Ship the dashboard assets so importlib.resources can serve them (pip path).
-"eneru.web" = ["*.html", "*.css", "*.js"]
+# ISS-011: *.svg is required for favicon.svg (added v6.1.4, referenced by
+# index.html) — without it every wheel/pip install and the official OCI image
+# 404s the favicon while deb/rpm (nfpm) ship it.
+"eneru.web" = ["*.html", "*.css", "*.js", "*.svg"]
 
 [tool.setuptools.dynamic]
 # Resolve directly from src/eneru/version.py — pointing at

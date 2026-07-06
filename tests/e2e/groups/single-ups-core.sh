@@ -839,6 +839,11 @@ case "$DASH_HTML" in
 esac
 curl -fsS http://127.0.0.1:19191/app.js >/dev/null 2>&1 \
   || { echo "FAIL: dashboard app.js not served by OCI image"; exit 1; }
+# ISS-011: favicon.svg is a packaged wheel asset (the OCI image installs from the
+# wheelhouse). Exercise it where the wheel is actually installed so a missing
+# *.svg package-data glob is caught here, not just by unit tests.
+curl -fsS http://127.0.0.1:19191/favicon.svg >/dev/null 2>&1 \
+  || { echo "FAIL: favicon.svg not served by OCI image (wheel package-data drift?)"; exit 1; }
 
 cleanup_container
 trap - EXIT

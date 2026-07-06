@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ main ]
 
+# ISS-042: least-privilege token. This workflow only reads the repo and runs
+# tests; the Codecov upload uses its own CODECOV_TOKEN, not GITHUB_TOKEN.
+permissions:
+  contents: read
+
 # All third-party action invocations are SHA-pinned (with the
 # corresponding tag in a comment) so a moved tag in the upstream
 # action repo cannot silently change what runs in CI. Refresh
@@ -17,6 +22,8 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    # ISS-042: a hung test run should fail fast, not sit on the 6h default.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -52,7 +59,35 @@ jobs:
 
     - name: Run tests
       run: |
-        pytest -n auto --cov=src/eneru --cov-report=xml --cov-report=term
+        pytest -n auto --cov=src/eneru \
+          --cov-report=xml --cov-report=json --cov-report=term
+
+    - name: Enforce per-file coverage bar (>=95%)
+      # ISS-012: AGENTS.md mandates >=95% line+branch per file, but nothing
+      # enforced it (no --cov-fail-under; Codecov informational). Gate it on the
+      # 3.12 lane (the one that also uploads coverage) so a regression cannot
+      # merge green. One enforcing lane avoids duplicate noise across the matrix.
+      if: matrix.python-version == '3.12'
+      run: |
+        python - <<'PY'
+        import json, sys
+        bar = 95.0
+        data = json.load(open("coverage.json"))
+        offenders = [
+            (m["summary"]["percent_covered"], path)
+            for path, m in sorted(data["files"].items())
+            if m["summary"]["percent_covered"] < bar
+        ]
+        total = data["totals"]["percent_covered"]
+        if total < bar:
+            offenders.append((total, "TOTAL"))
+        if offenders:
+            print(f"::error::coverage below {bar}% (line+branch):")
+            for pct, path in offenders:
+                print(f"  {pct:6.2f}%  {path}")
+            sys.exit(1)
+        print(f"All files >= {bar}% per file (total {total:.2f}%).")
+        PY
 
     - name: Upload coverage to Codecov
       # 3.12 is in both the reduced PR matrix and the full push matrix, so

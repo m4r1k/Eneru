@@ -31,6 +31,13 @@ class TestIsNumeric:
         assert is_numeric(-2.5) is True
 
     @pytest.mark.unit
+    def test_bool_is_not_numeric(self):
+        """bool is an int subtype, but NUT/UPS data should never be a bool;
+        treating True as 1 would silently conceal an upstream bug."""
+        assert is_numeric(True) is False
+        assert is_numeric(False) is False
+
+    @pytest.mark.unit
     def test_numeric_strings(self):
         """Test that numeric strings are recognized."""
         assert is_numeric("42") is True

@@ -94,6 +94,7 @@ class TestNfpmModuleListing:
             "src/eneru/web/index.html",
             "src/eneru/web/app.js",
             "src/eneru/web/style.css",
+            "src/eneru/web/favicon.svg",
             "src/eneru/completion/__init__.py",
             "src/eneru/completion/eneru.bash",
             "src/eneru/completion/eneru.zsh",
@@ -107,5 +108,30 @@ class TestNfpmModuleListing:
         )
 
         pyproject = (REPO_ROOT / "pyproject.toml").read_text()
-        assert '"eneru.web" = ["*.html", "*.css", "*.js"]' in pyproject
+        assert '"eneru.web" = ["*.html", "*.css", "*.js", "*.svg"]' in pyproject
         assert '"eneru.completion" = ["*.bash", "*.zsh", "*.fish"]' in pyproject
+
+    @pytest.mark.unit
+    def test_every_web_asset_extension_has_a_wheel_glob(self):
+        """ISS-011: generalize the guard so the next non-py web asset can't drift.
+
+        Every on-disk extension under src/eneru/web/ (except .py, shipped by the
+        package itself) must be covered by an ``eneru.web`` package-data glob, so
+        a wheel/pip install serves it exactly as deb/rpm does."""
+        import re
+        web_dir = REPO_ROOT / "src" / "eneru" / "web"
+        exts = {
+            p.suffix.lstrip(".").lower()
+            for p in web_dir.iterdir()
+            if p.is_file() and p.suffix and p.suffix != ".py"
+        }
+        pyproject = (REPO_ROOT / "pyproject.toml").read_text()
+        m = re.search(r'"eneru\.web"\s*=\s*\[([^\]]*)\]', pyproject)
+        assert m, "eneru.web package-data glob list not found in pyproject.toml"
+        globs = set(re.findall(r"\*\.([A-Za-z0-9]+)", m.group(1)))
+        uncovered = sorted(exts - {g.lower() for g in globs})
+        assert not uncovered, (
+            "src/eneru/web/ has asset extension(s) not covered by an "
+            f"eneru.web package-data glob (wheel installs would 404 them): "
+            f"{uncovered}"
+        )
