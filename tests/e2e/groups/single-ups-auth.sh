@@ -342,7 +342,9 @@ echo "ups: [broken" > "$CFG"
 BAD_HTTP=$(curl -sS -o /tmp/test54-bad.json -w '%{http_code}' \
   -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9100/api/v1/config/reload)
 [ "$BAD_HTTP" = "400" ] || { echo "FAIL: bad reload HTTP $BAD_HTTP, expected 400"; cat /tmp/test54-bad.json; exit 1; }
-python3 -c "import json;r=json.load(open('/tmp/test54-bad.json'));assert r['reloaded'] is False and r['errors']" \
+# ISS-028: a rejected reload now returns the standard error envelope
+# {"error":{code,message},"details":<report>} rather than the raw report dict.
+python3 -c "import json;r=json.load(open('/tmp/test54-bad.json'));assert r['error']['code']=='RELOAD_REJECTED' and r['details']['reloaded'] is False and r['details']['errors'], r" \
   || { echo "FAIL: bad reload report not rejected"; cat /tmp/test54-bad.json; exit 1; }
 # Daemon stays up on a bad reload.
 curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 \
