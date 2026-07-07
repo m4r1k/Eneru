@@ -86,6 +86,7 @@ jobs:
   # Test pip installation across Python versions
   test-pip-install:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -118,6 +119,7 @@ jobs:
   test-deb:
     needs: build-packages
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -186,6 +188,7 @@ jobs:
   test-rpm:
     needs: build-packages
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -292,6 +295,7 @@ jobs:
   # Test pip installation inside containers (ensures pyproject.toml works on real distros)
   test-pip-in-container:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -355,6 +359,7 @@ jobs:
   # not depend on a GHCR tag that may not exist before the first 5.4 release.
   test-oci-image:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0

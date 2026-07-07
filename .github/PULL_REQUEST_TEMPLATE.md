@@ -10,7 +10,7 @@ Brief description of changes.
 
 ## Testing
 Describe how you tested your changes:
-- [ ] Tested with `--validate-config`
+- [ ] Tested with `eneru validate`
 - [ ] Tested with `--dry-run` mode
 - [ ] Tested actual shutdown sequence (if applicable)
 - [ ] Tested on: [OS/Python version]

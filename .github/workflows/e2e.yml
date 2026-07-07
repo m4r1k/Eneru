@@ -91,7 +91,10 @@ jobs:
           # E2E_NOTIFICATION_URL is a hard FAIL rather than a silent SKIP, so
           # a rotated/unset secret can't leave Test 7 permanently un-run. Fork
           # PRs have no secret access and legitimately keep the SKIP.
-          E2E_EXPECT_NOTIFICATION_SECRET: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.fork == false) && '1' || '' }}
+          # Dependabot-triggered runs receive Dependabot secrets, not Actions
+          # secrets, so the URL is legitimately empty there too — treat them
+          # like forks (SKIP, not FAIL).
+          E2E_EXPECT_NOTIFICATION_SECRET: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.fork == false) && github.actor != 'dependabot[bot]' && '1' || '' }}
           # Bypass the v5.4 "is_local requires root" startup check so
           # eneru runs as the runner user. Sudo-elevating eneru would
           # leave its SQLite DB and state files root-owned, which then

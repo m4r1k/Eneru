@@ -413,6 +413,67 @@ def test_login_throttled_after_burst(minimal_config, tmp_path):
 
 
 @pytest.mark.unit
+def test_login_failure_audits_event_row(minimal_config, tmp_path):
+    """ISS-032 follow-up: a failed login must reach the events table via
+    record_control_event with the dedicated LOGIN_FAILURE type (not the
+    generic CONTROL fallback), an empty ups column (the target is a client
+    IP, not ups:command), and the FULL client address in the detail --
+    including IPv6 addresses, which the ups:command colon-split used to
+    truncate."""
+    _enable_auth(minimal_config)
+    store = AuthStore(tmp_path / "auth.db")
+    store.create_user("alice", "s3cret")
+    source = MagicMock()
+    body = json.dumps({"username": "alice", "password": "wrong"}).encode()
+    h = _handler(minimal_config, source=source, auth_store=store,
+                 sessions=SessionManager(3600),
+                 path="/api/v1/auth/login", body=body)
+    h.client_address = ("2001:db8::1", 54321)
+
+    with pytest.raises(APIUnauthorized):
+        h._route_post()
+
+    source.record_control_event.assert_called_once()
+    ups, event_type, detail = source.record_control_event.call_args[0]
+    assert ups == ""
+    assert event_type == "LOGIN_FAILURE"
+    assert "2001:db8::1" in detail
+    assert detail.endswith("-> failed")
+
+
+@pytest.mark.unit
+def test_login_throttled_audits_event_row(minimal_config, tmp_path):
+    """The 429 short-circuit path audits too, with result 'throttled'."""
+    import eneru.api as api_mod
+    _enable_auth(minimal_config)
+    store = AuthStore(tmp_path / "auth.db")
+    store.create_user("alice", "s3cret")
+    source = MagicMock()
+
+    def _bad():
+        body = json.dumps({"username": "alice", "password": "wrong"}).encode()
+        h = _handler(minimal_config, source=source, auth_store=store,
+                     sessions=SessionManager(3600),
+                     path="/api/v1/auth/login", body=body)
+        h.client_address = ("203.0.113.9", 54321)
+        return h
+
+    for _ in range(api_mod.LOGIN_FAIL_MAX):
+        with pytest.raises(APIUnauthorized):
+            _bad()._route_post()
+    status, _, _ = _bad()._route_post()
+    assert status == 429
+
+    calls = source.record_control_event.call_args_list
+    assert len(calls) == api_mod.LOGIN_FAIL_MAX + 1
+    ups, event_type, detail = calls[-1][0]
+    assert ups == ""
+    assert event_type == "LOGIN_FAILURE"
+    assert "203.0.113.9" in detail
+    assert detail.endswith("-> throttled")
+
+
+@pytest.mark.unit
 def test_ready_minimal_for_anonymous_under_require_for_reads(
     minimal_config, monkeypatch,
 ):
