@@ -48,7 +48,7 @@ runs:
         cp /tmp/e2e-ssh-key.pub ${{ inputs.e2e-dir }}/ssh-target/authorized_keys
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
 
     # Pre-build the two E2E image contexts once, with the GitHub Actions
     # cache backend, then bring the stack up with --no-build. Before
