@@ -1014,11 +1014,7 @@ def _cmd_validate(args):
         if APPRISE_AVAILABLE:
             print(f"    Enabled: {len(config.notifications.urls)} service(s)")
             for url in config.notifications.urls:
-                if '://' in url:
-                    scheme = url.split('://')[0]
-                    print(f"      - {scheme}://***")
-                else:
-                    print(f"      - {url[:20]}...")
+                print(f"      - {redact_apprise_url(url)}")
             if config.notifications.title:
                 print(f"    Title: {config.notifications.title}")
             else:

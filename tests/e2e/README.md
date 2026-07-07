@@ -39,7 +39,7 @@ sleep 10
 upsc TestUPS@localhost:3493
 
 # Run Eneru against the test environment
-eneru --validate-config --config config-e2e-dry-run.yaml
+eneru validate --config config-e2e-dry-run.yaml
 ```
 
 ### Simulating scenarios

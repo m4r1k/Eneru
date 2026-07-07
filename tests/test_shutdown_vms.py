@@ -228,3 +228,34 @@ def test_shutdown_vms_reports_failed_rc(tmp_path):
 
     assert any("virsh shutdown vm1 returned rc=1" in m for m in logs), logs
     assert any("virsh destroy vm1 returned rc=1" in m for m in logs), logs
+    # ISS-040 follow-up: the phase summary must not claim ✅ when a
+    # force-destroy failed -- that VM may still be running.
+    assert not any("All VMs shutdown complete" in m for m in logs), logs
+    assert any("1 VM(s) possibly still running" in m for m in logs), logs
+
+
+@pytest.mark.unit
+def test_shutdown_vms_summary_success_when_destroy_succeeds(tmp_path):
+    """A destroy that succeeds after a failed graceful shutdown still ends
+    with the ✅ summary (graceful-path rc failures are covered by the
+    destroy pass)."""
+    monitor = _make_vm_monitor(tmp_path, max_wait=5)
+    logs = []
+    monitor._log_message = logs.append
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["virsh", "list", "--name"]:
+            return (0, "vm1\n", "")
+        if cmd[:2] == ["virsh", "shutdown"]:
+            return (1, "", "shutdown refused")
+        if cmd[:2] == ["virsh", "destroy"]:
+            return (0, "", "")
+        return (0, "", "")
+
+    with patch("eneru.shutdown.vms.command_exists", return_value=True), \
+         patch("eneru.shutdown.vms.run_command", side_effect=fake_run), \
+         patch("eneru.shutdown.vms.time.sleep"):
+        monitor._shutdown_vms()
+
+    assert any("All VMs shutdown complete" in m for m in logs), logs
+    assert not any("possibly still running" in m for m in logs), logs

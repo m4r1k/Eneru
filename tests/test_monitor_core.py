@@ -4113,6 +4113,39 @@ class TestMainLoopBranchCoverage:
         monitor._handle_on_line.assert_not_called()
 
     @pytest.mark.unit
+    def test_neutral_status_log_throttled_across_alternating_statuses(
+        self, tmp_path,
+    ):
+        """ISS-019 follow-up: the neutral-status info line is purely
+        time-throttled. Alternating neutral statuses (OFF <-> BYPASS every
+        poll) must NOT re-log it each time the status changes -- the
+        transition itself is already surfaced by the "Status changed" line."""
+        monitor = make_monitor(tmp_path)
+        monitor._handle_on_battery = MagicMock()
+        monitor._handle_on_line = MagicMock()
+        monitor.state.previous_status = "OL"
+        monitor.state.connection_state = "OK"
+        logs = []
+        # BYPASS also fires _log_power_event, which passes level= kwargs.
+        monitor._log_message = lambda msg, **kw: logs.append(msg)
+
+        for status in ("OFF", "BYPASS", "OFF"):
+            # _run_one_iteration sets the stop event to bound the loop to a
+            # single pass; clear it so the next pass runs too.
+            monitor._stop_event.clear()
+            _run_one_iteration(monitor, (True, {
+                "ups.status": status, "battery.charge": "80",
+                "battery.runtime": "1200", "ups.load": "30",
+            }, ""))
+
+        neutral_lines = [
+            m for m in logs if "neither on-line nor on-battery" in m
+        ]
+        assert len(neutral_lines) == 1, logs
+        # The alternation is still visible via the status-change line.
+        assert any("Status changed: OFF -> BYPASS" in m for m in logs), logs
+
+    @pytest.mark.unit
     def test_ol_chrg_routes_to_on_line(self, tmp_path):
         """ISS-019: `OL CHRG` still routes to the on-line handler under tokens."""
         monitor = make_monitor(tmp_path)

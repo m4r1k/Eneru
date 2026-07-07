@@ -20,6 +20,24 @@ included in a future release.
   monitor and the multi-UPS coordinator still constructed the worker without
   it, so after a `systemctl reload` / API reload its warnings fell back to
   `print`. Both reload paths now pass the shared logger.
+- **Failed logins audit as `LOGIN_FAILURE` with intact IPv6 addresses.** Audit
+  rows for failed/throttled logins previously fell back to the generic
+  `CONTROL` event type, and IPv6 client addresses were truncated at the last
+  colon (ISS-032 follow-up).
+- **Container/VM shutdown summaries no longer claim ✅ after failures.** The
+  rootless-Podman and libvirt phase summaries now report a ⚠️ with the failure
+  count when any stop/destroy command failed (ISS-040 follow-up).
+- **Neutral-status log throttle holds under alternating statuses.** A UPS
+  flipping between two neutral statuses (e.g. `OFF` ↔ `BYPASS`) every poll no
+  longer re-logs the "neither on-line nor on-battery" info line each time; the
+  transition itself is still logged (ISS-019 follow-up).
+- **Docs/templates referenced a nonexistent `--validate-config` flag.**
+  Remaining guidance in `AGENTS.md`, the PR template, and the E2E README now
+  shows the real `validate` subcommand (ISS-046 follow-up).
+- **E2E notification check no longer hard-fails Dependabot PRs.** Dependabot
+  runs receive Dependabot secrets, not Actions secrets, so
+  `E2E_NOTIFICATION_URL` is legitimately empty there; those runs now SKIP
+  Test 7 like fork PRs instead of failing (ISS-051 follow-up).
 
 ### Security
 
@@ -28,6 +46,21 @@ included in a future release.
   the persisted credential was unused; `persist-credentials: false` narrows
   token exposure across the package-repository build steps (zizmor
   `artipacked`).
+- **CI: don't persist the GitHub token on the release workflow's main checkout
+  either (ISS-010, minimal form).** The build job installs the full dependency
+  tree and runs the test suite before publishing; every credentialed publish
+  step already passes the token explicitly, so the persisted copy in
+  `.git/config` was pure ambient exposure.
+- **`eneru validate` redacts notification URLs with the shared helper.** The
+  config summary previously fell back to printing the first 20 characters of a
+  scheme-less Apprise URL, which could leak webhook path fragments; it now
+  always prints `scheme://***`.
+
+### Changed
+
+- **CI hygiene (ISS-042/022 follow-ups).** All `integration.yml` jobs now carry
+  `timeout-minutes`; the `upsc -l` diagnostic cooldown and the neutral-status
+  log interval are named module constants in `monitor.py`.
 
 ---
 

@@ -1196,6 +1196,38 @@ notifications:
         assert "Title: UPS Alert" in captured.out
 
     @pytest.mark.unit
+    def test_validate_config_redacts_schemeless_notification_url(
+            self, tmp_path, capsys):
+        """A scheme-less URL must not leak any of its characters.
+
+        The old display fell back to ``url[:20]...`` for URLs without
+        ``://``, printing up to 20 raw characters of what may be a
+        malformed-but-secret webhook reference. It now goes through
+        redact_apprise_url like every other notification URL surface.
+        """
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+ups:
+  name: "TestUPS@localhost"
+
+notifications:
+  urls:
+    - "hooks.example.com/services/SECRETTOKENPART"
+""")
+
+        with patch.object(sys, "argv", [
+            "eneru", "validate", "-c", str(config_file)
+        ]):
+            with patch("eneru.cli.APPRISE_AVAILABLE", True):
+                with pytest.raises(SystemExit):
+                    main()
+
+        captured = capsys.readouterr()
+        assert "unknown://***" in captured.out
+        assert "SECRETTOKENPART" not in captured.out
+        assert "hooks.example.com" not in captured.out
+
+    @pytest.mark.unit
     def test_validate_config_nonexistent_file(self, tmp_path, capsys):
         """Validate against a non-existent path: ConfigLoader.load
         prints a warning and falls back to defaults; the resulting
@@ -3596,31 +3628,10 @@ class TestShutdownRemoteAppliesRuntimePrep:
 
 
 class TestValidateNotificationFormatting:
-    """Cover lines 913, 917, 919 — URL-without-scheme truncation,
-    Title:(none), and avatar_url branch."""
-
-    @pytest.mark.unit
-    def test_validate_truncates_url_without_scheme(self, tmp_path, capsys):
-        # ConfigLoader normalizes notification URLs; we patch APPRISE_AVAILABLE
-        # and inject a no-scheme URL via the loaded Config object directly
-        # by writing a YAML with a no-scheme entry.
-        config_file = tmp_path / "config.yaml"
-        config_file.write_text(
-            "ups:\n"
-            "  name: 'TestUPS@localhost'\n"
-            "notifications:\n"
-            "  urls:\n"
-            "    - 'no-scheme-here-just-bare-text-1234567890abcdef'\n"
-        )
-        with patch.object(sys, "argv", [
-            "eneru", "validate", "-c", str(config_file)
-        ]), patch("eneru.cli.APPRISE_AVAILABLE", True):
-            with pytest.raises(SystemExit):
-                main()
-        out = capsys.readouterr().out
-        # Line 913: no `://` → first 20 chars + ellipsis.
-        assert "no-scheme-here-just-" in out
-        assert "..." in out
+    """Cover the notification display branches — Title:(none) and
+    avatar_url. The URL-without-scheme case now redacts via
+    redact_apprise_url; see
+    test_validate_config_redacts_schemeless_notification_url."""
 
     @pytest.mark.unit
     def test_validate_no_title_prints_none(self, tmp_path, capsys):

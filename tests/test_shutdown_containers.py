@@ -722,6 +722,37 @@ def test_rootless_podman_stops_user_containers(tmp_path):
     assert "def456" in stop_calls[0]
     assert "15" in stop_calls[0]  # stop_timeout
     assert any("user 'alice'" in m for m in log), log
+    assert any("✅  Rootless Podman containers stopped" in m for m in log), log
+
+
+@pytest.mark.unit
+def test_rootless_podman_stop_failure_summary_not_success(tmp_path):
+    """ISS-040 follow-up: a failed per-user stop must flip the phase summary
+    to ⚠️ instead of the unconditional ✅."""
+    monitor = _make_container_monitor(
+        tmp_path, runtime="podman", container_runtime="podman",
+        include_user_containers=True, stop_timeout=15,
+    )
+    log = []
+    monitor._log_message = log.append
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "loginctl":
+            return (0, "1000 alice\n", "")
+        if "ps" in cmd:
+            return (0, "abc123\n", "")
+        if "stop" in cmd:
+            return (125, "", "cannot connect to user socket")
+        return (1, "", "")
+
+    with patch("eneru.shutdown.containers.run_command", side_effect=fake_run):
+        monitor._shutdown_podman_user_containers()
+
+    assert any("rootless podman stop for 'alice' returned rc=125" in m
+               for m in log), log
+    assert not any("✅  Rootless Podman containers stopped" in m
+                   for m in log), log
+    assert any("finished with 1 failure(s)" in m for m in log), log
 
 
 @pytest.mark.unit

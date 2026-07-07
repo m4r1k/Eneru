@@ -94,15 +94,26 @@ class VMShutdownMixin:
             # Sleep only up to the remaining budget so we don't overshoot.
             time.sleep(max(0, min(wait_interval, deadline - time.monotonic())))
 
+        destroy_failures = 0
         if remaining_vms:
             self._log_message("  ⚠️  Timeout reached. Force destroying remaining VMs.")
             for vm in remaining_vms:
                 self._log_message(f"  ⚡  Force destroying VM: {vm}")
                 rc, _, err = run_command(["virsh", "destroy", vm])
                 if rc != 0:
+                    destroy_failures += 1
                     detail = f": {err.strip()[:200]}" if err and err.strip() else ""
                     self._log_message(
                         f"  ⚠️  virsh destroy {vm} returned rc={rc}{detail}"
                     )
 
-        self._log_message("  ✅  All VMs shutdown complete")
+        # ISS-040 follow-up: don't claim ✅ when a force-destroy failed --
+        # those VMs may still be running (graceful-path rc failures are
+        # covered by the destroy pass, so only destroy failures count here).
+        if destroy_failures:
+            self._log_message(
+                f"  ⚠️  VM shutdown finished with {destroy_failures} VM(s) "
+                f"possibly still running"
+            )
+        else:
+            self._log_message("  ✅  All VMs shutdown complete")

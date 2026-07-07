@@ -49,6 +49,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
+          # ISS-010 (minimal hardening): this job pip-installs the full
+          # dependency tree and runs pytest before any publish step, so don't
+          # leave the contents:write+packages:write GITHUB_TOKEN sitting in
+          # .git/config while untrusted dep code runs. Every credentialed
+          # operation below (docker login, gh release, gh-pages push) passes
+          # the token explicitly via env/URL and is unaffected.
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6

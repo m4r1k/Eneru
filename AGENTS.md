@@ -409,9 +409,9 @@ When writing documentation, use the correct invocation style for the context:
 
 | Context | Command Style | Example |
 |---------|---------------|---------|
-| Package users (README, troubleshooting) | `/opt/ups-monitor/eneru.py` | `sudo python3 /opt/ups-monitor/eneru.py --validate-config` |
+| Package users (README, troubleshooting) | `/opt/ups-monitor/eneru.py` | `sudo python3 /opt/ups-monitor/eneru.py validate --config /etc/ups-monitor/config.yaml` |
 | Developers (CONTRIBUTING, testing) | `python -m eneru` or `eneru` | `python -m eneru run --dry-run --config examples/config-reference.yaml` |
-| PyPI users | `eneru` | `eneru --validate-config` |
+| PyPI users | `eneru` | `eneru validate` |
 
 ## Key Dependencies
 

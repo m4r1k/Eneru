@@ -68,6 +68,13 @@ SLOW_NUT_NOTIFY_CONSECUTIVE_POLLS = 3
 # persistently-broken config doesn't re-attempt (and spawn an upscmd subprocess)
 # on every poll tick.
 SELF_TEST_ISSUE_RETRY_SECONDS = 300.0
+# ISS-022: minimum interval between `upsc -l` ups.name diagnostics -- the
+# probe blocks the poll thread for up to ~10s, so a flapping NUT server is
+# probed at most once per window.
+NAME_DIAGNOSTIC_COOLDOWN_SECONDS = 600.0
+# ISS-019: rate limit for the "status is neither on-line nor on-battery"
+# info line while the UPS sits in a neutral state (OFF, BYPASS, ...).
+NEUTRAL_STATUS_LOG_INTERVAL_SECONDS = 300.0
 
 # Re-export for backwards compatibility (tests may mock these)
 try:
@@ -187,7 +194,6 @@ class UPSGroupMonitor(
         self._last_ob_status_log_mono = None
         self._last_name_diagnostic_mono = None
         self._last_unknown_status_log_mono = None
-        self._last_unknown_status_logged = ""
         # ISS-055: last distinct state-file persist error, so a recurring disk
         # failure is logged once per cause instead of silently swallowed.
         self._last_state_save_error: Optional[str] = None
@@ -2623,7 +2629,8 @@ class UPSGroupMonitor(
                             and "OB" not in self.state.previous_status
                             and (self._last_name_diagnostic_mono is None
                                  or time.monotonic()
-                                 - self._last_name_diagnostic_mono > 600)):
+                                 - self._last_name_diagnostic_mono
+                                 > NAME_DIAGNOSTIC_COOLDOWN_SECONDS)):
                         self._last_name_diagnostic_mono = time.monotonic()
                         self._run_ups_name_diagnostic(error_msg)
                     self.state.stale_data_count = 0
@@ -2836,12 +2843,14 @@ class UPSGroupMonitor(
                 # per-outage failsafe latch is handled separately above at its
                 # own re-arm check, which clears on any non-OB/non-FSD status.)
                 # Note it, throttled, for visibility; environment checks below
-                # still run on the raw status.
-                if (ups_status != self._last_unknown_status_logged
-                        or self._last_unknown_status_log_mono is None
+                # still run on the raw status. Purely time-based: a changed
+                # neutral status is already surfaced immediately by the
+                # "🔄  Status changed" line above, and keying on the last
+                # logged status here would defeat the throttle when two
+                # neutral statuses alternate (OFF <-> BYPASS every poll).
+                if (self._last_unknown_status_log_mono is None
                         or time.monotonic() - self._last_unknown_status_log_mono
-                        >= 300):
-                    self._last_unknown_status_logged = ups_status
+                        >= NEUTRAL_STATUS_LOG_INTERVAL_SECONDS):
                     self._last_unknown_status_log_mono = time.monotonic()
                     self._log_message(
                         f"ℹ️  UPS status '{ups_status}' is neither on-line nor "

@@ -1442,6 +1442,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         "config": "CONFIG_RELOAD",
         "events": "EVENTS_DELETED",
         "self-test": "CONTROL_SELF_TEST",
+        "login": "LOGIN_FAILURE",
     }
 
     @staticmethod
@@ -1465,7 +1466,13 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if hasattr(source, "record_control_event"):
             # target is "{ups}:{command_or_var}"; the UPS NUT name itself can
             # contain a colon (e.g. UPS@host:3493), so split on the LAST one.
-            ups = target.rsplit(":", 1)[0] if ":" in target else ""
+            # Login audits carry a client IP as the target, not ups:command --
+            # never split those (an IPv6 address would be truncated); the full
+            # address stays in the detail string and the ups column is empty.
+            if kind == "login":
+                ups = ""
+            else:
+                ups = target.rsplit(":", 1)[0] if ":" in target else ""
             event_type = self._AUDIT_EVENT_TYPES.get(kind, "CONTROL")
             try:
                 source.record_control_event(ups, event_type,

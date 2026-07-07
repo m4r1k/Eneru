@@ -283,6 +283,7 @@ class ContainerShutdownMixin:
             self._log_message("  ⚠️  Failed to list users for rootless container check")
             return
 
+        stop_failures = 0
         for line in stdout.strip().split('\n'):
             if not line.strip():
                 continue
@@ -320,13 +321,22 @@ class ContainerShutdownMixin:
                             stop_cmd,
                             timeout=self.config.containers.stop_timeout + 30)
                         if rc != 0:
+                            stop_failures += 1
                             detail = f": {err.strip()[:200]}" if err and err.strip() else ""
                             self._log_message(
                                 f"  ⚠️  rootless podman stop for '{username}' "
                                 f"returned rc={rc}{detail}"
                             )
 
-        self._log_message("  ✅  Rootless Podman containers stopped")
+        # ISS-040 follow-up: the phase summary must not claim ✅ when a
+        # per-user stop failed above (best-effort semantics unchanged).
+        if stop_failures:
+            self._log_message(
+                f"  ⚠️  Rootless Podman container stop finished with "
+                f"{stop_failures} failure(s)"
+            )
+        else:
+            self._log_message("  ✅  Rootless Podman containers stopped")
 
 
 def _looks_like_container_id(value: str) -> bool:
