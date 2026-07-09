@@ -158,3 +158,42 @@ def test_valid_v6_config_has_no_errors():
         "nut_control:\n  enabled: true\n  timeout: 5\n"
         "  allowed_commands: [beeper.toggle]\n  allowed_variables: []\n")
     assert [e for e in errs if "ERROR" in e] == []
+
+
+# ----- F-016: api.allowed_hosts plumbing -----
+
+@pytest.mark.unit
+def test_api_allowed_hosts_list_parses():
+    cfg, errs = _validate(
+        "ups:\n  name: U@h\napi:\n  allowed_hosts:\n    - eneru.lan\n"
+        "    - ups.example.com\n")
+    assert cfg.api.allowed_hosts == ["eneru.lan", "ups.example.com"]
+    assert [e for e in errs if "ERROR" in e] == []
+
+
+@pytest.mark.unit
+def test_api_allowed_hosts_scalar_is_error_and_parses_safely():
+    # A scalar would char-split; the schema gate rejects it as a list...
+    cfg, errs = _validate(
+        "ups:\n  name: U@h\napi:\n  allowed_hosts: myhost\n")
+    assert any("api.allowed_hosts' must be a list" in e for e in errs)
+    # ...and parsing degraded to the empty default instead of char-splitting.
+    assert cfg.api.allowed_hosts == []
+
+
+@pytest.mark.unit
+def test_api_allowed_hosts_unknown_key_not_reported():
+    # allowed_hosts is a KNOWN api key, so it must not surface as unknown.
+    _, errs = _validate(
+        "ups:\n  name: U@h\napi:\n  allowed_hosts: [eneru.lan]\n")
+    assert not any("allowed_hosts" in e and "unknown" in e.lower() for e in errs)
+
+
+# ----- F-032: NUT control credentials stay out of repr() -----
+
+@pytest.mark.unit
+def test_nut_control_repr_hides_credentials():
+    from eneru.config import NutControlConfig
+    text = repr(NutControlConfig(username="operator", password="s3cret"))
+    assert "s3cret" not in text
+    assert "operator" not in text

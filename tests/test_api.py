@@ -463,6 +463,7 @@ def test_api_remote_health_route_uses_live_managers(minimal_config):
 @pytest.mark.unit
 def test_api_do_get_uses_whitelisted_content_type():
     handler = object.__new__(EneruAPIHandler)
+    handler.headers = {"Host": "localhost"}  # F-016 dispatch host guard
     headers = []
     handler._route = lambda: (200, "text/plain\r\nX-Bad: injected", "ok")
     handler.send_response = lambda status: headers.append(("status", status))
@@ -483,6 +484,7 @@ def test_api_do_head_probe_sends_headers_only():
     for path in ("/health", "/ready"):
         handler = object.__new__(EneruAPIHandler)
         handler.path = path
+        handler.headers = {"Host": "localhost"}  # F-016 dispatch host guard
         handler._route = lambda: (200, "application/json", {"status": "ok"})
         headers = []
         handler.send_response = lambda status: headers.append(("status", status))
@@ -531,6 +533,7 @@ def test_api_dispatch_maps_length_required_to_411():
     """ISS-061: APILengthRequired surfaces as a 411 error envelope."""
     from eneru.api import APILengthRequired
     handler = object.__new__(EneruAPIHandler)
+    handler.headers = {"Host": "localhost"}  # F-016 dispatch host guard
 
     def _boom():
         raise APILengthRequired("chunked not supported")
@@ -626,6 +629,7 @@ def test_api_do_get_returns_400_on_api_bad_request(minimal_config):
     handler = object.__new__(EneruAPIHandler)
     handler.api_config = minimal_config
     handler.api_source = MagicMock()
+    handler.headers = {"Host": "localhost"}  # F-016 dispatch host guard
     handler.path = "/api/v1/events?limit=abc"  # triggers APIBadRequest
 
     headers = []
@@ -647,6 +651,7 @@ def test_api_do_get_returns_500_on_unexpected_exception(minimal_config):
     handler = object.__new__(EneruAPIHandler)
     handler.api_config = minimal_config
     handler.api_source = MagicMock()
+    handler.headers = {"Host": "localhost"}  # F-016 dispatch host guard
     handler.path = "/api/v1/ups"
 
     def boom():
@@ -672,6 +677,7 @@ def test_api_do_get_uses_text_plain_header_for_text_route(minimal_config, monito
     handler = object.__new__(EneruAPIHandler)
     handler.api_config = minimal_config
     handler.api_source = monitor
+    handler.headers = {"Host": "localhost"}  # F-016 dispatch host guard
     handler._route = lambda: (200, "text/plain", "eneru_up 1\n")
     headers = []
     handler.send_response = lambda status: headers.append(("status", status))
@@ -1088,6 +1094,67 @@ def test_mqtt_does_not_enable_tls_for_plain_mqtt_scheme(monkeypatch):
     MQTTPublisher(object(), config, FakeStopEvent())._run()
 
     assert calls["tls_set"] is False
+
+
+@pytest.mark.unit
+def test_redact_broker_strips_userinfo():
+    """F-017: the redactor covers user:pass@ regardless of scheme presence."""
+    from eneru.mqtt import _redact_broker
+    assert _redact_broker("alice:s3cret@host:8883") == "***@host:8883"
+    assert _redact_broker("mqtt://alice:s3cret@host:1883") == "mqtt://***@host:1883"
+    assert _redact_broker("host:1883") == "host:1883"          # nothing to redact
+    assert _redact_broker("") == ""
+
+
+@pytest.mark.unit
+def test_mqtt_schemeless_broker_warning_redacts_userinfo(monkeypatch):
+    """F-017: the scheme-less warning must not echo the broker password."""
+    logs = []
+
+    class StopNow:
+        def is_set(self):
+            return True
+
+        def wait(self, timeout):
+            return True
+
+    config = Config()
+    config.mqtt.enabled = True
+    config.mqtt.broker = "alice:s3cret@broker.example:8883"  # no mqtt:// scheme
+    monkeypatch.setattr("eneru.mqtt.MQTT_AVAILABLE", True)
+    pub = MQTTPublisher(object(), config, StopNow(), log_fn=logs.append)
+
+    assert pub._connect_with_backoff() is None  # stopped, never connects
+    warn = [m for m in logs if "no mqtt://" in m]
+    assert warn, logs
+    assert "s3cret" not in warn[0]
+    assert "***@broker.example:8883" in warn[0]
+
+
+@pytest.mark.unit
+def test_mqtt_cleartext_username_warns_once(monkeypatch):
+    """F-017: a username on a non-TLS broker warns exactly once, not per
+    reconnect attempt."""
+    logs = []
+
+    class StopNow:
+        def is_set(self):
+            return True
+
+        def wait(self, timeout):
+            return True
+
+    config = Config()
+    config.mqtt.enabled = True
+    config.mqtt.broker = "mqtt://user:pass@host:1883"  # creds, no TLS
+    monkeypatch.setattr("eneru.mqtt.MQTT_AVAILABLE", True)
+    pub = MQTTPublisher(object(), config, StopNow(), log_fn=logs.append)
+
+    pub._connect_with_backoff()
+    pub._connect_with_backoff()  # a "reconnect": must not warn again
+
+    warns = [m for m in logs if "cleartext" in m]
+    assert len(warns) == 1, logs
 
 
 @pytest.mark.unit
@@ -1664,6 +1731,7 @@ def test_api_server_stop_swallows_shutdown_exceptions(minimal_config):
 def test_api_handler_returns_500_on_unexpected_exception():
     """do_GET must catch generic exceptions and return a 500 JSON envelope."""
     handler = object.__new__(EneruAPIHandler)
+    handler.headers = {"Host": "localhost"}  # F-016 dispatch host guard
     handler._route = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
     headers = []
     handler.send_response = lambda status: headers.append(("status", status))

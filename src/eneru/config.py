@@ -135,6 +135,11 @@ class APIConfig:
     enabled: bool = False
     bind: str = "127.0.0.1"
     port: int = 9191
+    # F-016: DNS-rebinding guard. Hostnames (case-insensitive) the API will
+    # answer to when the request's Host header carries a DNS *name* rather than
+    # an IP literal. IP-literal and ``localhost`` Hosts are always accepted, so
+    # this only matters for operators who front the API with a hostname.
+    allowed_hosts: List[str] = field(default_factory=list)
     auth: AuthConfig = field(default_factory=AuthConfig)
 
 
@@ -175,8 +180,11 @@ class NutControlConfig:
     allowlist defaults empty because upsrw can change risky settings.
     """
     enabled: bool = False
-    username: str = ""
-    password: str = ""
+    # F-032: keep NUT control creds out of repr() — a NutControlConfig can land
+    # in a log line or traceback, and repr() would otherwise print the password
+    # verbatim (AuthConfig already hides its fields the same way).
+    username: str = field(default="", repr=False)
+    password: str = field(default="", repr=False)
     allowed_commands: List[str] = field(default_factory=list)
     allowed_variables: List[str] = field(default_factory=list)
     timeout: int = 10
@@ -817,6 +825,9 @@ _ROOT_SCHEMA = _sch_map(fatal=True, sweep=True, allowed=_TOP_LEVEL_KEYS, keys={
             keys={})}),                                    # F-008 + F-059
     "api": _sch_map(fatal=False, sweep_shape=True, keys={
         "enabled": _SCH_BOOL,                              # F-002
+        # F-016: a scalar `allowed_hosts: myhost` would char-split into
+        # per-character hostnames, so reject a non-list up front (fatal).
+        "allowed_hosts": _sch_list(item=None, fatal=True),
         "auth": _sch_map(fatal=False, sweep_shape=True, keys={
             "enabled": _SCH_BOOL,                          # F-002
             "require_for_reads": _SCH_BOOL,                # F-002
@@ -1542,10 +1553,20 @@ class ConfigLoader:
             api_data = raw_api if isinstance(raw_api, dict) else {}
             raw_auth = api_data.get('auth')
             auth_data = raw_auth if isinstance(raw_auth, dict) else {}
+            raw_allowed_hosts = api_data.get('allowed_hosts',
+                                             config.api.allowed_hosts)
+            # F-016: coerce to a list of strings. The schema gate already
+            # rejects a scalar as fatal, but stay defensive here so a stray
+            # non-list can't crash the loader before validation reports it.
+            if isinstance(raw_allowed_hosts, list):
+                allowed_hosts = [str(h) for h in raw_allowed_hosts]
+            else:
+                allowed_hosts = list(config.api.allowed_hosts)
             config.api = APIConfig(
                 enabled=api_data.get('enabled', config.api.enabled),
                 bind=api_data.get('bind', config.api.bind),
                 port=api_data.get('port', config.api.port),
+                allowed_hosts=allowed_hosts,
                 auth=AuthConfig(
                     enabled=auth_data.get('enabled', config.api.auth.enabled),
                     require_for_reads=auth_data.get(
@@ -1986,7 +2007,7 @@ class ConfigLoader:
                 )
             messages.extend(cls._unknown_key_errors(
                 "api", raw_data.get("api", {}),
-                {"enabled", "bind", "port", "auth"},
+                {"enabled", "bind", "port", "allowed_hosts", "auth"},
             ))
             raw_api_section = raw_data.get("api", {})
             if isinstance(raw_api_section, dict):

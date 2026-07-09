@@ -325,6 +325,7 @@ The API is opt-in and binds to localhost by default when enabled. With `api.auth
 | `api.enabled` | `false` | Start the embedded HTTP API with `eneru run` |
 | `api.bind` | `127.0.0.1` | Listen address |
 | `api.port` | `9191` | Listen port |
+| `api.allowed_hosts` | `[]` | DNS-rebinding guard: hostnames (case-insensitive) the API answers to when the request's `Host` header carries a DNS name. IP-literal and `localhost` Hosts are always accepted, so browsing by IP is unaffected; any other or missing Host name gets `421 Misdirected Request`. Only needed if you front the API with a hostname |
 | `api.auth.enabled` | unset (`false` until an auth DB user exists) | Opt-in API authentication. When off, the API is read-only and all write surfaces are hard disabled (v5.3 behavior). If omitted, auth auto-activates once the auth DB contains a user |
 | `api.auth.require_for_reads` | `false` | When off, read endpoints (incl. `/metrics`) stay open even with auth on; writes always require a credential. Set on to also gate reads. `/health`, `/ready`, dashboard static files, and `/api/v1/auth/state` stay open for probes/login bootstrap |
 | `api.auth.session_ttl` | `3600` | Dashboard session token lifetime, seconds |

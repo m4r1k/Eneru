@@ -2,6 +2,7 @@
 
 import collections
 import importlib.resources
+import ipaddress
 import json
 import math
 import os
@@ -52,6 +53,38 @@ _login_failures: "collections.OrderedDict[str, collections.deque]" = (
     collections.OrderedDict()
 )
 _login_failures_lock = threading.Lock()
+
+# F-040: the per-IP throttle above is defeated by an attacker rotating source
+# IPs (an IPv6 /64 hands out billions), which evicts the targeted buckets and
+# never accumulates per-IP failures. A GLOBAL sliding-window ceiling backstops
+# it: once total failed logins across ALL sources exceed the threshold within
+# the window, every login attempt is throttled until the window drains. The
+# window is deliberately wider and the count higher than the per-IP knobs so a
+# handful of fat-fingered operators can't trip it, but a distributed brute
+# force (which the per-IP guard can't see) does.
+GLOBAL_LOGIN_FAIL_WINDOW_SECONDS = 300
+GLOBAL_LOGIN_FAIL_MAX = 100
+_global_login_failures: "collections.deque" = collections.deque()
+_global_login_lock = threading.Lock()
+
+
+def _global_login_is_blocked() -> bool:
+    """True if global failed logins in the window exceed the ceiling."""
+    now = time.monotonic()
+    cutoff = now - GLOBAL_LOGIN_FAIL_WINDOW_SECONDS
+    with _global_login_lock:
+        while _global_login_failures and _global_login_failures[0] < cutoff:
+            _global_login_failures.popleft()
+        return len(_global_login_failures) >= GLOBAL_LOGIN_FAIL_MAX
+
+
+def _global_login_record_failure() -> None:
+    now = time.monotonic()
+    cutoff = now - GLOBAL_LOGIN_FAIL_WINDOW_SECONDS
+    with _global_login_lock:
+        while _global_login_failures and _global_login_failures[0] < cutoff:
+            _global_login_failures.popleft()
+        _global_login_failures.append(now)
 
 
 def _login_is_blocked(ip: str) -> bool:
@@ -462,8 +495,63 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # noqa: A003 - stdlib hook
         return
 
+    def _host_allowed(self) -> bool:
+        """F-016 DNS-rebinding guard: only route trusted Host headers.
+
+        ELI5: a web page in someone's browser is like a stranger phoning your
+        house — your phone trusts whatever *name* they dialed. A DNS-rebinding
+        attacker tricks the victim's browser into dialing a name the attacker
+        owns that now resolves to your LAN IP, so the tab happily reads your
+        private API. The defense: only pick up the phone if the caller dialed a
+        bare *number* (an IP literal — a rebind attack always arrives as a DNS
+        name, never a raw address), or ``localhost``, or a name you put on the
+        guest list (``api.allowed_hosts``). Anything else — including no Host at
+        all — hangs up (the dispatcher answers 421).
+        """
+        host = self.headers.get("Host")
+        if not host:
+            return False
+        host = host.strip()
+        if not host:
+            return False
+        # Strip the ":port". IPv6 literals are bracketed ("[::1]:9191"); a bare
+        # IPv6 ("::1") has several colons and no brackets — leave those intact
+        # for ip_address() to parse. Only a single trailing ":port" is stripped.
+        if host.startswith("["):
+            end = host.find("]")
+            if end == -1:
+                return False
+            hostname = host[1:end]
+        elif host.count(":") == 1:
+            hostname = host.rsplit(":", 1)[0]
+        else:
+            hostname = host
+        hostname = hostname.strip()
+        if not hostname:
+            return False
+        # An IP-literal Host is always safe: a DNS-rebind necessarily carries a
+        # DNS *name*, so a raw address can't be the rebinding vector.
+        try:
+            ipaddress.ip_address(hostname)
+            return True
+        except ValueError:
+            pass
+        lowered = hostname.lower()
+        if lowered == "localhost":
+            return True
+        allowed = getattr(self.api_config.api, "allowed_hosts", None) or []
+        return lowered in {str(h).strip().lower() for h in allowed}
+
     def _dispatch(self, router: Callable[[], Tuple[int, str, Any]]) -> None:
         """Run a router, map exceptions to responses, and write the result."""
+        # F-016: reject an untrusted Host before touching any route — a
+        # DNS-rebinding page must never reach the read-open API. 421 Misdirected
+        # Request is the precise "you reached the wrong server name" signal.
+        if not self._host_allowed():
+            self._finish(
+                421, "application/json",
+                self._error("MISDIRECTED_REQUEST", "Host header not allowed"))
+            return
         try:
             status, content_type, body = router()
         except APIBadRequest as exc:
@@ -1195,8 +1283,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             return 404, "application/json", self._not_found("Authentication is disabled")
         client_addr = getattr(self, "client_address", None)
         client_ip = client_addr[0] if client_addr else "?"
-        # ISS-032: reject brute-force bursts before touching the auth backend.
-        if _login_is_blocked(client_ip):
+        # ISS-032 / F-040: reject brute-force bursts before touching the auth
+        # backend — per-IP first, then the global ceiling that catches an
+        # attacker rotating source IPs past the per-IP guard.
+        if _login_is_blocked(client_ip) or _global_login_is_blocked():
             self._audit(None, "login", client_ip, "throttled")
             return 429, "application/json", self._error(
                 "TOO_MANY_ATTEMPTS",
@@ -1219,6 +1309,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             # the attempted username -- a user who fat-fingers a password into
             # the username field would otherwise have it persisted verbatim.
             _login_record_failure(client_ip)
+            _global_login_record_failure()  # F-040: also feed the global ceiling
             self._audit(None, "login", client_ip, "failed")
             raise APIUnauthorized("invalid credentials")
         _login_clear(client_ip)  # ISS-032: reset the counter on success

@@ -30,7 +30,14 @@ def _handler(config, *, source=None, auth_store=None, sessions=None,
     h.api_source = source if source is not None else MagicMock()
     h.api_auth = auth_store
     h.api_sessions = sessions
-    hdrs = dict(headers or {})
+    # F-016: default to a loopback Host so tests that drive do_*()/_dispatch
+    # pass the DNS-rebinding guard. A caller that passes an explicit `headers`
+    # dict (e.g. the Host-guard tests) keeps full control, including omitting
+    # Host to exercise the reject path.
+    if headers is None:
+        hdrs = {"Host": "localhost"}
+    else:
+        hdrs = dict(headers)
     if body and "Content-Length" not in hdrs:
         hdrs["Content-Length"] = str(len(body))
     h.headers = hdrs
@@ -580,6 +587,116 @@ def test_login_success_clears_throttle(minimal_config, tmp_path):
         h._route_post()
 
 
+# ----- F-040: global login-rate ceiling (IP-rotation backstop) -----
+
+@pytest.mark.unit
+def test_global_login_ceiling_trips_across_distinct_ips(minimal_config, tmp_path):
+    """F-040: an attacker rotating source IPs never hits the per-IP cap, but the
+    global sliding-window ceiling still throttles once total failures exceed
+    GLOBAL_LOGIN_FAIL_MAX — even for a fresh IP that has never failed."""
+    import eneru.api as api_mod
+    _enable_auth(minimal_config)
+    store = AuthStore(tmp_path / "auth.db")
+    store.create_user("alice", "s3cret")
+
+    def _bad(ip):
+        body = json.dumps({"username": "alice", "password": "wrong"}).encode()
+        h = _handler(minimal_config, auth_store=store,
+                     sessions=SessionManager(3600),
+                     path="/api/v1/auth/login", body=body)
+        h.client_address = (ip, 5555)
+        return h
+
+    # One failure per distinct IP: none reaches the per-IP cap (LOGIN_FAIL_MAX),
+    # but together they fill the global window.
+    for i in range(api_mod.GLOBAL_LOGIN_FAIL_MAX):
+        with pytest.raises(APIUnauthorized):
+            _bad(f"10.0.0.{i}")._route_post()
+
+    # A brand-new IP with zero personal failures is now throttled by the global
+    # ceiling alone.
+    status, _, payload = _bad("10.9.9.9")._route_post()
+    assert status == 429
+    assert payload["error"]["code"] == "TOO_MANY_ATTEMPTS"
+    # Prove it was the GLOBAL ceiling, not the per-IP throttle (which never saw
+    # this IP): the per-IP tracker has no bucket for it.
+    assert not api_mod._login_is_blocked("10.9.9.9")
+
+
+@pytest.mark.unit
+def test_global_login_ceiling_drains_after_window(monkeypatch):
+    """F-040: the global ceiling clears once the failures age out of the
+    sliding window."""
+    import eneru.api as api_mod
+    clock = [1000.0]
+    monkeypatch.setattr(api_mod.time, "monotonic", lambda: clock[0])
+    for _ in range(api_mod.GLOBAL_LOGIN_FAIL_MAX):
+        api_mod._global_login_record_failure()
+    assert api_mod._global_login_is_blocked() is True
+    # Advance past the window: every recorded failure rolls off and the ceiling
+    # drops back open.
+    clock[0] += api_mod.GLOBAL_LOGIN_FAIL_WINDOW_SECONDS + 1
+    assert api_mod._global_login_is_blocked() is False
+
+
+# ----- F-016: DNS-rebinding Host-header guard -----
+
+@pytest.mark.unit
+@pytest.mark.parametrize("host", [
+    "192.168.1.5:9191",   # IPv4 literal + port
+    "192.168.1.5",        # IPv4 literal, no port
+    "10.0.0.1:80",
+    "[::1]:9191",         # bracketed IPv6 + port
+    "[fe80::1]",          # bracketed IPv6, no port
+    "::1",                # bare IPv6 literal
+    "localhost",
+    "localhost:9191",
+    "LOCALHOST",          # case-insensitive
+])
+def test_host_allowed_accepts_ip_literals_and_localhost(minimal_config, host):
+    h = _handler(minimal_config, headers={"Host": host})
+    assert h._host_allowed() is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("host", ["Eneru.LAN", "eneru.lan:9191", "ups.example.com"])
+def test_host_allowed_accepts_configured_hosts(minimal_config, host):
+    minimal_config.api.allowed_hosts = ["eneru.lan", "ups.example.com"]
+    h = _handler(minimal_config, headers={"Host": host})
+    assert h._host_allowed() is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("headers", [
+    {"Host": "evil.example.com"},     # unlisted DNS name
+    {"Host": "evil.example.com:9191"},
+    {"Host": ""},                     # empty Host
+    {"Host": "   "},                  # whitespace-only Host
+    {"Host": "[::1"},                 # malformed bracketed literal (no ']')
+    {"Host": ":9191"},                # port only, empty hostname
+    {},                               # missing Host entirely
+])
+def test_host_allowed_rejects_untrusted_and_missing(minimal_config, headers):
+    h = _handler(minimal_config, headers=headers)
+    assert h._host_allowed() is False
+
+
+@pytest.mark.unit
+def test_dispatch_rejects_untrusted_host_with_421(minimal_config):
+    """A DNS-rebinding request (unknown Host name) is answered 421 and never
+    reaches the router."""
+    h = _handler(minimal_config, headers={"Host": "attacker.example.com"})
+    captured = []
+    h.send_response = lambda s: captured.append(s)
+    h.send_header = lambda k, v: None
+    h.end_headers = lambda: None
+    h.wfile = BytesIO()
+    routed = []
+    h._dispatch(lambda: (routed.append(1), (200, "application/json", {}))[1])
+    assert captured == [421]
+    assert routed == []   # the route body never ran
+
+
 # ----- logout -----
 
 @pytest.mark.unit
@@ -821,7 +938,9 @@ def test_available_endpoints_hidden_until_features_enabled(minimal_config):
     (RuntimeError("x"), 500),
 ])
 def test_dispatch_maps_exceptions(minimal_config, exc, code):
-    h = _handler(minimal_config)
+    # F-016: _dispatch now gates on a trusted Host header before routing, so
+    # supply a loopback Host or every case would map to 421 instead.
+    h = _handler(minimal_config, headers={"Host": "localhost"})
     captured = []
     h.send_response = lambda s: captured.append(s)
     h.send_header = lambda k, v: None

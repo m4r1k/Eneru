@@ -742,3 +742,76 @@ def test_run_auth_command_generic_exception_returns_output(monkeypatch):
     assert code == 1
     assert out == ""
     assert "pty gone" in err
+
+
+# ----- F-034: the credential PTY must disable echo so the password isn't
+# reflected back into the captured output buffer -----
+
+@pytest.mark.unit
+def test_auth_command_pty_does_not_echo_password(monkeypatch):
+    """F-034: with echo disabled on the slave PTY, the password we write to
+    answer the prompt is NOT echoed back and never lands in the output."""
+    import subprocess
+    import sys
+
+    secret = "sup3rs3cretpw"  # noqa: S105
+    # A fake NUT client: prints a password prompt, reads the answer, and does
+    # NOT print it. The only way the secret could reach the master is terminal
+    # echo — which the fix turns off.
+    script = (
+        "import sys\n"
+        "sys.stdout.write('Password: ')\n"
+        "sys.stdout.flush()\n"
+        "sys.stdin.readline()\n"
+        "sys.stdout.write('OK\\n')\n"
+        "sys.stdout.flush()\n"
+    )
+
+    def fake_popen(safe_cmd, slave_fd):
+        return subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, close_fds=True)
+
+    monkeypatch.setattr(nc, "_popen_validated_auth_command", fake_popen)
+
+    code, out, err = nc._run_auth_command(
+        ["upscmd", "-u", "user", "-l", "UPS@h"], secret, timeout=10)
+
+    assert code == 0
+    assert "OK" in out
+    assert secret not in out       # echo disabled -> secret absent from buffer
+
+
+@pytest.mark.unit
+def test_auth_command_pty_survives_missing_termios(monkeypatch):
+    """F-034: the echo-disable is best-effort — if termios is unavailable the
+    command still runs (guarded try/except)."""
+    import subprocess
+    import sys
+
+    def boom(_fd):
+        raise OSError("no termios here")
+
+    monkeypatch.setattr(nc.termios, "tcgetattr", boom)
+
+    script = (
+        "import sys\n"
+        "sys.stdout.write('Password: ')\n"
+        "sys.stdout.flush()\n"
+        "sys.stdin.readline()\n"
+        "sys.stdout.write('OK\\n')\n"
+        "sys.stdout.flush()\n"
+    )
+
+    def fake_popen(safe_cmd, slave_fd):
+        return subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, close_fds=True)
+
+    monkeypatch.setattr(nc, "_popen_validated_auth_command", fake_popen)
+
+    code, out, err = nc._run_auth_command(
+        ["upscmd", "-u", "user", "-l", "UPS@h"], "pw", timeout=10)
+
+    assert code == 0
+    assert "OK" in out

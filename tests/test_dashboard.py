@@ -18,7 +18,9 @@ def _handler(config, *, path):
     h.api_source = MagicMock()
     h.api_auth = None
     h.api_sessions = None
-    h.headers = {}
+    # F-016: a loopback Host satisfies the DNS-rebinding dispatch guard so tests
+    # that drive do_GET() route normally instead of getting a 421.
+    h.headers = {"Host": "localhost"}
     h.rfile = BytesIO(b"")
     return h
 
@@ -167,6 +169,18 @@ def test_dashboard_has_wide_history_surfaces(minimal_config):
     # still honor the range if older rows are already cached client-side.
     assert 'if (from !== null) q += "&from=" + from' in js
     assert "return (from === null || e.ts >= from)" in js
+
+
+@pytest.mark.unit
+def test_dashboard_login_clears_password_field(minimal_config):
+    """F-041: the plaintext password must not persist in the DOM — the login
+    field is cleared on submit (success AND failure) and around open/close.
+    No browser in CI, so assert the source scrubs the field."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    # The doLogin handler wipes the field unconditionally after submit, and
+    # both openLogin and closeLogin scrub it too.
+    assert js.count('document.getElementById("login-pass").value = ""') >= 3
 
 
 @pytest.mark.unit

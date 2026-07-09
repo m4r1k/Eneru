@@ -266,6 +266,7 @@ def test_do_delete_unknown_path_returns_404(minimal_config):
     h = object.__new__(EneruAPIHandler)
     h.api_config = minimal_config
     h.api_source = MagicMock()
+    h.headers = {"Host": "localhost"}  # F-016 dispatch host guard
     h.path = "/api/v1/nope"
     headers = []
     h.send_response = lambda s: headers.append(("status", s))

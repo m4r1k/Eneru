@@ -184,8 +184,10 @@ def _reset_login_throttle():
     isolation from every test), matching the other autouse fixtures above."""
     import eneru.api as _api
     _api._login_failures.clear()
+    _api._global_login_failures.clear()  # F-040: reset the global ceiling too
     yield
     _api._login_failures.clear()
+    _api._global_login_failures.clear()
 
 
 @pytest.fixture

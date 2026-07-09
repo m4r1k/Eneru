@@ -39,6 +39,15 @@ Endpoints:
 
 The API is disabled by default. When enabled, the default bind address is localhost. If you set `api.bind` to a non-loopback address (e.g. `0.0.0.0`) **without** enabling authentication, Eneru warns at startup: `/api/v1/config` returns configured server hostnames and presence flags, so anyone who can reach the socket can read that. Keep the API behind SSH, a local reverse proxy, a trusted network boundary, or enable `api.auth`.
 
+**DNS-rebinding protection.** Because read endpoints are open by default, a hostile web page loaded in an operator's browser could otherwise use DNS rebinding to point a name it controls at the daemon's LAN IP and read the API (topology, SSH usernames, events) from inside the browser. Eneru validates the request `Host` header: an IP-literal Host (`192.168.1.10:9191`, `[::1]:9191`) or `localhost` is always accepted — so browsing the dashboard by IP is unaffected — while a request carrying any other DNS name is answered `421 Misdirected Request` and never routed. If you front the API with a hostname (e.g. behind a reverse proxy or a friendly LAN name), list the names you serve it under in `api.allowed_hosts` (case-insensitive):
+
+```yaml
+api:
+  allowed_hosts:
+    - eneru.lan
+    - ups.example.com
+```
+
 ### Authentication (v6.0)
 
 Authentication is opt-in via `api.auth.enabled` and is **tiered**. The login body

@@ -20,6 +20,25 @@ permissions:
 # `gh api repos/<owner>/<repo>/branches/<branch>`) and updating both
 # the SHA and the comment in lockstep across every workflow.
 jobs:
+  # F-042: cheap regression guard against XSS sinks in the dashboard. The
+  # dashboard deliberately builds DOM via el()/txt() helpers behind a strict
+  # CSP and has ZERO innerHTML / insertAdjacentHTML / eval( today. This grep
+  # fails the moment one is (re)introduced, so a future edit can't quietly open
+  # an injection sink. Runs as its own tiny job (checkout + grep, no Python) so
+  # it finishes in seconds and doesn't slow the test matrix.
+  xss-sink-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+    - name: Forbid innerHTML / insertAdjacentHTML / eval( under src/eneru/web
+      run: |
+        if grep -rnE 'innerHTML|insertAdjacentHTML|eval\(' src/eneru/web/; then
+          echo "::error::XSS sink found under src/eneru/web/ (innerHTML / insertAdjacentHTML / eval). Build DOM via el()/txt() instead."
+          exit 1
+        fi
+        echo "No XSS sinks under src/eneru/web/."
+
   validate:
     runs-on: ubuntu-latest
     # ISS-042: a hung test run should fail fast, not sit on the 6h default.

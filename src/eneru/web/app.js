@@ -3209,10 +3209,16 @@ async function loadAuthState() {
 
 function openLogin() {
   document.getElementById("login-error").hidden = true;
+  // F-041: never let a plaintext password linger in the DOM. Clear it on open
+  // (in case a previous attempt left it) as well as after every submit.
+  document.getElementById("login-pass").value = "";
   document.getElementById("login-modal").hidden = false;
   document.getElementById("login-user").focus();
 }
-function closeLogin() { document.getElementById("login-modal").hidden = true; }
+function closeLogin() {
+  document.getElementById("login-modal").hidden = true;
+  document.getElementById("login-pass").value = "";  // F-041: scrub the field
+}
 
 async function doLogin(ev) {
   ev.preventDefault();
@@ -3220,6 +3226,10 @@ async function doLogin(ev) {
   const password = document.getElementById("login-pass").value;
   const res = await api("/api/v1/auth/login",
     { method: "POST", body: JSON.stringify({ username, password }) });
+  // F-041: wipe the plaintext password from the DOM immediately after submit,
+  // on BOTH success and failure — otherwise it persists in the input for the
+  // whole session and is readable by any later script or via devtools.
+  document.getElementById("login-pass").value = "";
   if (res.ok && res.data && res.data.token) {
     setToken(res.data.token); closeLogin(); refreshAuthUI(); refresh();
   } else {
