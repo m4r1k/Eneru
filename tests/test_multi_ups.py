@@ -1,6 +1,7 @@
 """Tests for multi-UPS support: config parsing, coordinator routing, and logic."""
 
 import pytest
+import signal
 import threading
 import tempfile
 import os
@@ -3318,3 +3319,69 @@ class TestCoordinatorShutdownJoinAndAudit:
         coord._monitors = [mon]
         coord.record_control_event("", "CONFIG_RELOAD", "reloaded")
         store.log_event.assert_called_once_with("CONFIG_RELOAD", "reloaded")
+
+
+class TestHandleLocalShutdownRace:
+    """Behavioural-gap 5: two groups tripping at the same instant must not
+    both power the host off. The in-memory lock + in-flight flag admit exactly
+    one thread into the poweroff body; the loser returns at the guard."""
+
+    @pytest.mark.unit
+    def test_two_thread_race_admits_exactly_one_poweroff(self, tmp_path):
+        config = _coord_config(
+            tmp_path,
+            behavior=BehaviorConfig(dry_run=False),
+            local_shutdown=LocalShutdownConfig(
+                enabled=True, command="systemctl poweroff"),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+        coord._notification_worker = MagicMock()
+
+        barrier = threading.Barrier(2)
+
+        def worker(label):
+            # Both threads block here, then are released together so they
+            # genuinely contend for the guard rather than running in series.
+            barrier.wait()
+            coord._handle_local_shutdown(label)
+
+        with patch("eneru.multi_ups.run_command",
+                   return_value=(0, "", "")) as run_cmd, \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.delete_shutdown_marker"):
+            t1 = threading.Thread(target=worker, args=("UPS1",))
+            t2 = threading.Thread(target=worker, args=("UPS2",))
+            t1.start()
+            t2.start()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
+
+        assert not t1.is_alive() and not t2.is_alive()
+        # Exactly one poweroff argv was executed despite the race.
+        run_cmd.assert_called_once()
+
+
+class TestCoordinatorHandleSighup:
+    """Behavioural-gap 9: the coordinator's SIGHUP handler reloads config and
+    never lets a reload error escape into the signal machinery."""
+
+    @pytest.mark.unit
+    def test_sighup_triggers_config_reload(self, tmp_path):
+        coord = MultiUPSCoordinator(_coord_config(tmp_path))
+        coord._log = MagicMock()
+        with patch.object(coord, "reload_config") as mock_reload:
+            coord._handle_sighup(signal.SIGHUP, None)
+        mock_reload.assert_called_once()
+        logs = " ".join(str(c) for c in coord._log.call_args_list)
+        assert "SIGHUP" in logs
+
+    @pytest.mark.unit
+    def test_sighup_swallows_reload_errors(self, tmp_path):
+        coord = MultiUPSCoordinator(_coord_config(tmp_path))
+        logs = []
+        coord._log = logs.append
+        with patch.object(coord, "reload_config",
+                          side_effect=RuntimeError("bad yaml")):
+            coord._handle_sighup(signal.SIGHUP, None)  # must not raise
+        assert any("reload error" in m.lower() for m in logs), logs

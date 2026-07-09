@@ -108,6 +108,21 @@ def test_sync_filesystems_error_proceeds(tmp_path):
 
 
 @pytest.mark.unit
+def test_sync_filesystems_popen_oserror_logs_and_proceeds(tmp_path):
+    """Behavioural-gap 7: when the `sync` Popen launch itself raises OSError
+    (binary missing, fork/ENOMEM), the phase must log and RETURN -- it may not
+    raise and abort the shutdown sequence before the host poweroff."""
+    monitor = _make_fs_monitor(tmp_path)
+    with patch("eneru.shutdown.filesystems.subprocess.Popen",
+               side_effect=OSError("cannot fork")) as mock_popen, \
+         patch("eneru.shutdown.filesystems.time.sleep"):
+        monitor._sync_filesystems()  # must not raise
+    mock_popen.assert_called_once()
+    log_text = " ".join(str(c) for c in monitor.logger.log.call_args_list)
+    assert "could not start" in log_text
+
+
+@pytest.mark.unit
 def test_unmount_filesystems_disabled_no_op(tmp_path):
     """unmount.enabled=False returns immediately."""
     monitor = _make_fs_monitor(tmp_path, unmount_enabled=False)

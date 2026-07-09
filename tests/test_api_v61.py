@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
+from conftest import make_api_handler
 from eneru.api import EneruAPIHandler, render_prometheus_metrics
 from eneru.config import ConfigLoader
 
@@ -372,17 +373,15 @@ class TestBatteryHealthHistoryEndpoint:
         assert h._route()[0] == 404
 
     def _handler(self, store, cfg_yaml="ups:\n  name: U@h\n"):
+        # F-063: shared EneruAPIHandler builder lives in conftest.py.
+        # headers={} preserves the original (no default Host injected);
+        # callers set h.path themselves after construction.
         from types import SimpleNamespace
-        from eneru.api import EneruAPIHandler
         cfg = _parse_cfg(cfg_yaml)
         mon = SimpleNamespace(config=cfg, _stats_store=store)
-        h = object.__new__(EneruAPIHandler)
-        h.api_config = cfg
-        h.api_source = SimpleNamespace(_monitors=[mon])
-        h.api_auth = None
-        h.api_sessions = None
-        h.headers = {}
-        return h
+        return make_api_handler(
+            cfg, source=SimpleNamespace(_monitors=[mon]), headers={},
+        )
 
     @pytest.mark.unit
     def test_downsamples_to_daily_mean(self):

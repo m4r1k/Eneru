@@ -1,6 +1,7 @@
 """Unit tests for the v6.0 dashboard static serving (api.py + eneru.web)."""
 
 import json
+import shutil
 import subprocess
 import textwrap
 from io import BytesIO
@@ -8,21 +9,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from conftest import make_api_handler
 from eneru.api import EneruAPIHandler, SessionManager
 
 
 def _handler(config, *, path):
-    h = object.__new__(EneruAPIHandler)
-    h.path = path
-    h.api_config = config
-    h.api_source = MagicMock()
-    h.api_auth = None
-    h.api_sessions = None
-    # F-016: a loopback Host satisfies the DNS-rebinding dispatch guard so tests
-    # that drive do_GET() route normally instead of getting a 421.
-    h.headers = {"Host": "localhost"}
-    h.rfile = BytesIO(b"")
-    return h
+    # F-063: shared EneruAPIHandler builder lives in conftest.py. It
+    # defaults Host: localhost so do_GET() clears the F-016 dispatch guard.
+    return make_api_handler(config, path=path)
 
 
 @pytest.mark.unit
@@ -522,6 +516,7 @@ def test_dashboard_line_quality_card(minimal_config):
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
 def test_dashboard_line_quality_state_behavior(minimal_config):
     js = _handler(minimal_config, path="/app.js")._serve_static(
         "/app.js")[1].decode("utf-8")
@@ -657,3 +652,45 @@ def test_stylesheet_makes_hidden_attribute_win(minimal_config):
         "/style.css")[1].decode("utf-8")
     norm = css.replace(" ", "").replace("\n", "").lower()
     assert "[hidden]{display:none!important;}" in norm
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_dashboard_merge_events_dedup_sort_cap(minimal_config):
+    """F-062: exercise app.js `mergeEvents` (+ its `eventKey`) in a node shim.
+    Verifies the merge de-duplicates by (source,id), sorts by timestamp, and
+    caps the accumulated list to the newest `eventsCap` rows. Skips cleanly
+    where node is unavailable."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    event_key = js[js.index("function eventKey"):js.index("// F-029: the accumulated")]
+    merge = js[js.index("function mergeEvents"):js.index("function eventRangeFrom")]
+    script = textwrap.dedent("""
+        let lastEvents = [];
+        let eventsCap = 3;
+        function updateEventTypeFilter() {}
+        function preserveWindowScroll(fn) { if (fn) fn(); }
+        function applyEventFilters() {}
+    """) + event_key + merge + textwrap.dedent("""
+        mergeEvents([{source:"A", id:1, ts:10, eventType:"ON_BATTERY"}]);
+        mergeEvents([{source:"A", id:1, ts:10, eventType:"ON_LINE"}]); // same key -> replace
+        mergeEvents([{source:"A", id:2, ts:5}]);                        // earlier ts sorts first
+        const afterDedup = lastEvents.map(e => e.source + ":" + e.id + ":" + e.eventType);
+        mergeEvents([{source:"A", id:3, ts:20}, {source:"A", id:4, ts:30}]); // overflow cap
+        process.stdout.write(JSON.stringify({
+          afterDedup: afterDedup,
+          count: lastEvents.length,
+          oldest: lastEvents[0].id,
+          newest: lastEvents[lastEvents.length - 1].id,
+        }));
+    """)
+    result = subprocess.run(["node", "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    data = json.loads(result.stdout)
+    # De-dup by (source,id): the second merge REPLACED id 1's row, not appended.
+    assert len(data["afterDedup"]) == 2
+    assert "A:1:ON_LINE" in data["afterDedup"]
+    # Cap keeps the newest 3 by timestamp (id 2 @ ts5 drops off).
+    assert data["count"] == 3
+    assert data["oldest"] == 1
+    assert data["newest"] == 4

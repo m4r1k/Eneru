@@ -8,6 +8,7 @@ from eneru import reload as reloadmod
 from eneru.config import Config, ConfigLoader
 from eneru.monitor import UPSGroupMonitor
 from eneru.multi_ups import MultiUPSCoordinator
+from eneru.state import MonitorState
 
 
 def _write(path, text):
@@ -670,3 +671,42 @@ def test_reload_buckets_are_mutually_exclusive_and_no_unknown_names():
     real_fields = {f.name for f in dataclasses.fields(Config)}
     for name in safe | sub | restart:
         assert name in real_fields, f"reload bucket references unknown field {name!r}"
+
+
+@pytest.mark.unit
+def test_reload_during_on_battery_preserves_outage_state(tmp_path):
+    """Behavioural-gap 6: a config hot-reload that lands DURING an outage must
+    swap only config -- it must not reset the on-battery clock or clear a
+    latched advisory trigger held in MonitorState. Outage state lives on the
+    monitor's ``state`` object, which the safe-swap path never touches."""
+    live = _load(_write(
+        tmp_path / "live.yaml",
+        "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 20\n"))
+    live.logging.state_file = str(tmp_path / "state")
+    live.logging.battery_history_file = str(tmp_path / "history")
+    live.logging.shutdown_flag_file = str(tmp_path / "flag")
+    live.logging.file = None
+
+    monitor = UPSGroupMonitor(live)
+    monitor.state = MonitorState()
+    # Simulate an in-progress outage with a latched advisory trigger.
+    monitor.state.on_battery_start_time = 1_700_000_000
+    monitor.state.on_battery_start_mono = 123.456
+    monitor.state.trigger_active = True
+    monitor.state.trigger_reason = "critical runtime"
+
+    new = _load(_write(
+        tmp_path / "new.yaml",
+        "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 35\n"))
+
+    report = reloadmod.apply_reload(monitor.config, [monitor.config], new)
+
+    # Positive control: the reload genuinely took effect (triggers swapped live).
+    assert "triggers:U@h" in report["applied"]
+    assert monitor.config.triggers.low_battery_threshold == 35
+
+    # The outage / latch state SURVIVES the config swap.
+    assert monitor.state.on_battery_start_time == 1_700_000_000
+    assert monitor.state.on_battery_start_mono == 123.456
+    assert monitor.state.trigger_active is True
+    assert monitor.state.trigger_reason == "critical runtime"

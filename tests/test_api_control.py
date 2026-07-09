@@ -6,26 +6,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from conftest import make_api_handler
 from eneru import api as apimod
 from eneru.api import APIBadRequest, APIForbidden, EneruAPIHandler, SessionManager
 
 
 def _control_handler(config, *, path, method_body=b"", token=None, logs=None):
-    h = object.__new__(EneruAPIHandler)
-    h.path = path
-    h.api_config = config
-    h.api_source = MagicMock()
-    h.api_auth = None
-    h.api_sessions = SessionManager(3600)
-    h.api_log = (logs.append if logs is not None else (lambda m: None))
-    headers = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    if method_body:
-        headers["Content-Length"] = str(len(method_body))
-    h.headers = headers
-    h.rfile = BytesIO(method_body)
-    return h
+    # F-063: shared EneruAPIHandler builder lives in conftest.py.
+    return make_api_handler(
+        config, path=path, body=method_body, token=token, logs=logs,
+        sessions=SessionManager(3600),
+    )
 
 
 def _enable(config):

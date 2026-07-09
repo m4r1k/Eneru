@@ -21,28 +21,18 @@ from eneru.api import (
 )
 from eneru.auth import AuthStore
 
+from conftest import make_api_handler
+
 
 def _handler(config, *, source=None, auth_store=None, sessions=None,
              path="/", headers=None, body=b""):
-    h = object.__new__(EneruAPIHandler)
-    h.path = path
-    h.api_config = config
-    h.api_source = source if source is not None else MagicMock()
-    h.api_auth = auth_store
-    h.api_sessions = sessions
-    # F-016: default to a loopback Host so tests that drive do_*()/_dispatch
-    # pass the DNS-rebinding guard. A caller that passes an explicit `headers`
-    # dict (e.g. the Host-guard tests) keeps full control, including omitting
-    # Host to exercise the reject path.
-    if headers is None:
-        hdrs = {"Host": "localhost"}
-    else:
-        hdrs = dict(headers)
-    if body and "Content-Length" not in hdrs:
-        hdrs["Content-Length"] = str(len(body))
-    h.headers = hdrs
-    h.rfile = BytesIO(body)
-    return h
+    # F-063: shared EneruAPIHandler builder lives in conftest.py. It keeps
+    # the F-016 contract: unset headers -> default Host: localhost; explicit
+    # headers (incl. omitting Host) take full control for the reject path.
+    return make_api_handler(
+        config, source=source, auth_store=auth_store, sessions=sessions,
+        path=path, headers=headers, body=body,
+    )
 
 
 def _enable_auth(config, *, require_for_reads=False, ttl=3600):

@@ -1320,3 +1320,29 @@ def test_module_records_apprise_available_flag_matches_import_state():
         assert notif_mod.APPRISE_AVAILABLE is False
     else:
         assert notif_mod.APPRISE_AVAILABLE is True
+
+
+@pytest.mark.unit
+def test_worker_loop_survives_iteration_crash():
+    """Behavioural-gap 8: an exception thrown during a single worker-loop
+    iteration is swallowed and the loop keeps running. Losing the worker would
+    silently disable ALL future notifications, so a crash must never escape."""
+    worker = NotificationWorker(Config())
+    # Make the per-iteration wait return instantly so the loop spins fast.
+    worker._wakeup_event = MagicMock()
+    worker._wakeup_event.wait.return_value = True
+
+    calls = []
+
+    def drain():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("iteration boom")   # first pass crashes
+        worker._stop_event.set()                   # second pass ends the loop
+
+    with patch.object(worker, "_drain_once", side_effect=drain), \
+         patch.object(worker, "_maybe_prune"):
+        worker._worker_loop()   # returns cleanly despite the first-pass crash
+
+    # It ran again after the crash -> the worker did NOT die on the exception.
+    assert len(calls) >= 2

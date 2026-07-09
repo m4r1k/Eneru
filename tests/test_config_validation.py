@@ -338,6 +338,18 @@ class TestUnknownKeyValidation:
             if m.startswith("ERROR:")
         ]
         assert not any("unknown config key" in e for e in errors)
+        # F-064 positive control: the negative assertion above is only
+        # meaningful if the sweep is actually alive. A genuinely-unknown safety
+        # key inside a WELL-FORMED mapping IS reported, and a clean config still
+        # parses -- so the assertion isn't passing against a dead validator.
+        live = [
+            m for m in ConfigLoader.validate_config(
+                default_config,
+                {"ups": {"name": "UPS-A", "check_intervall": 5}})
+            if m.startswith("ERROR:")
+        ]
+        assert any("unknown config key 'ups.check_intervall'" in e for e in live)
+        assert ConfigLoader._parse_config({"ups": {"name": "UPS-A"}}) is not None
 
     @pytest.mark.unit
     def test_legacy_docker_and_discord_configs_are_not_unknown_key_errors(self):
@@ -351,6 +363,15 @@ class TestUnknownKeyValidation:
         }
         errors = self._errors(raw_data)
         assert not any("unknown config key" in e for e in errors)
+        # F-064 positive control: a real typo in the same shape IS caught, and
+        # the legacy-alias config parses -- proving the clean result above is a
+        # live pass, not a silently-dead sweep.
+        typo = self._errors({
+            "ups": {"name": "UPS@localhost"},
+            "notifications": {"titel": "oops"},
+        })
+        assert any("unknown config key 'notifications.titel'" in e for e in typo)
+        assert ConfigLoader._parse_config(raw_data) is not None
 
     @pytest.mark.unit
     def test_top_level_remote_server_typo_is_error(self):
@@ -586,6 +607,16 @@ mqtt: 42
         # No remote_servers-related unknown-key errors at all.
         assert not any("remote_servers['nas']" in e and "unknown" in e.lower()
                        for e in errors), errors
+        # F-064 positive control: a typo'd remote_server key on the SAME shape
+        # IS still flagged, so the clean result above proves the keys are
+        # accepted -- not that the remote_servers sweep quietly died.
+        typo = self._errors({
+            "ups": {"name": "UPS@localhost"},
+            "remote_servers": [{
+                "name": "nas", "host": "nas.lan", "ssh_keypath": "/typo"}],
+        })
+        assert any("remote_servers['nas']" in e and "unknown" in e.lower()
+                   for e in typo), typo
 
     @pytest.mark.unit
     def test_remote_ssh_options_entries_must_be_strings(self):
@@ -1946,3 +1977,66 @@ class TestExampleConfigsValidateClean:
         errors = [m for m in ConfigLoader.validate_config(config, raw_data=raw)
                   if m.startswith("ERROR:")]
         assert errors == [], f"{path} produced ERROR lines: {errors}"
+
+
+class TestV61SectionRejectBranches:
+    """Behavioural-gap 10 (config.py): the v6.1 raw-data shape/allowlist
+    validators reject malformed sections up front instead of silently
+    reverting them to defaults. Each case asserts the SPECIFIC error message,
+    and a positive control confirms the clean shape validates."""
+
+    def _errors(self, raw_data):
+        config = ConfigLoader._parse_config(raw_data)
+        return [m for m in ConfigLoader.validate_config(config, raw_data)
+                if m.startswith("ERROR:")]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("raw,needle", [
+        # A scalar for a v6.1 section is parsed as {} and would look configured
+        # while silently disabled -> rejected as "must be a mapping".
+        ({"ups": {"name": "U"}, "self_test": True},
+         "self_test must be a mapping"),
+        # battery_health.replacement must be a nested mapping, not a scalar.
+        ({"ups": {"name": "U"}, "battery_health": {"replacement": 5}},
+         "battery_health.replacement must be a mapping"),
+        # nut_control allowlist entries must be dotted NUT names.
+        ({"ups": {"name": "U"}, "nut_control": {"allowed_commands": ["bad cmd!"]}},
+         "is not a valid NUT name"),
+        # ...and the allowlist itself must be a list.
+        ({"ups": {"name": "U"}, "nut_control": {"allowed_commands": "x"}},
+         "nut_control.allowed_commands must be a list"),
+        # nut_control.timeout must be an int >= 1.
+        ({"ups": {"name": "U"}, "nut_control": {"timeout": 0}},
+         "nut_control.timeout must be an integer >= 1"),
+        # A per-UPS v6.1 override scalar is rejected the same way.
+        ({"ups": [{"name": "U", "battery_health": 5}]},
+         "ups 'U' battery_health must be a mapping"),
+        # reports.include must be a list...
+        ({"ups": {"name": "U"}, "reports": {"include": "events"}},
+         "reports.include must be a list"),
+        # ...of KNOWN section names.
+        ({"ups": {"name": "U"}, "reports": {"include": ["bogus"]}},
+         "reports.include entry 'bogus' is not one of"),
+        # A per-group nut_control may not set 'enabled' (gated globally).
+        ({"ups": [{"name": "U", "nut_control": {"enabled": True}}]},
+         "must not set 'enabled'"),
+        # A per-group nut_control must be a mapping.
+        ({"ups": [{"name": "U", "nut_control": 5}]},
+         "nut_control for UPS 'U' must be a mapping"),
+    ])
+    def test_reject_branch_fires_with_message(self, raw, needle):
+        errors = self._errors(raw)
+        assert any(needle in e for e in errors), errors
+
+    @pytest.mark.unit
+    def test_wellformed_v61_sections_validate_clean(self):
+        """Positive control: the same sections, correctly shaped, produce no
+        ERROR lines -- so the reject cases above aren't a dead validator."""
+        errors = self._errors({
+            "ups": {"name": "U"},
+            "self_test": {"enabled": False},
+            "battery_health": {"replacement": {"threshold_score": 50}},
+            "reports": {"include": ["events", "energy"]},
+            "energy": {"enabled": True, "cost_per_kwh": 0.3},
+        })
+        assert errors == [], errors

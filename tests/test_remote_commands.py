@@ -1,5 +1,7 @@
 """Tests for remote pre-shutdown command templating and execution."""
 
+import threading
+
 import pytest
 from unittest.mock import patch, MagicMock, call
 
@@ -1614,3 +1616,85 @@ class TestRunRemoteCommand:
         assert success is False
         assert "capped by phase deadline" in error
         assert mock_run.call_args.kwargs["timeout"] == 1
+
+
+class TestParallelShutdownResilience:
+    """Deadline-based parallel join + worker-crash accounting."""
+
+    @pytest.fixture
+    def remote_monitor(self, minimal_config, tmp_path):
+        minimal_config.logging.state_file = str(tmp_path / "state")
+        minimal_config.logging.battery_history_file = str(tmp_path / "history")
+        minimal_config.logging.shutdown_flag_file = str(tmp_path / "flag")
+        minimal_config.logging.file = None
+        minimal_config.behavior.dry_run = False
+
+        monitor = UPSGroupMonitor(minimal_config)
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+        monitor._notification_worker = MagicMock()
+        return monitor
+
+    @pytest.mark.unit
+    def test_parallel_join_does_not_hang_on_stuck_worker(self, remote_monitor):
+        """Behavioural-gap 1: a worker that blocks past the phase deadline is
+        NOT waited on forever -- the deadline-based join caps the total wait,
+        synthesises a timed-out result for the missing thread, and logs the
+        'still in progress' warning. Zeroing the SSH overhead buffer + the
+        per-server timeouts makes ``max_timeout`` (hence the join deadline) ~0,
+        so the stuck worker is observed still-alive immediately."""
+        release = threading.Event()
+
+        server = RemoteServerConfig(
+            name="hang", enabled=True, host="10.0.0.9", user="root",
+            command_timeout=0, connect_timeout=0, shutdown_safety_margin=0,
+        )
+
+        def blocking_worker(server, *, deadline=None):
+            # Block until the test releases us (5s safety net so a stray
+            # daemon thread can't wedge the run if something regresses).
+            release.wait(timeout=5)
+            return RemoteShutdownResult(
+                server=server.name, host=server.host, shutdown_sent=True)
+
+        with patch("eneru.shutdown.remote._SSH_OVERHEAD_BUFFER", 0), \
+             patch.object(remote_monitor, "_shutdown_remote_server",
+                          side_effect=blocking_worker):
+            try:
+                results = remote_monitor._shutdown_servers_parallel([server])
+            finally:
+                release.set()  # let the daemon worker exit cleanly
+
+        assert len(results) == 1
+        stuck = results[0]
+        assert stuck.timed_out is True
+        assert stuck.completed is False
+        assert "timed out" in stuck.error
+
+        log_text = "\n".join(
+            str(c) for c in remote_monitor.logger.log.call_args_list)
+        assert "still in progress" in log_text
+
+    @pytest.mark.unit
+    def test_worker_crash_flags_result_and_counts_in_summary(self, remote_monitor):
+        """Behavioural-gap 4: a worker that RAISES (not an SSH failure the callee
+        catches, but a bubbling exception) is caught in the thread wrapper, its
+        result is flagged ``crashed=True``, and the phase summary counts it."""
+        server = RemoteServerConfig(
+            name="boom", enabled=True, host="10.0.0.4", user="root")
+        remote_monitor.config.ups_groups[0].remote_servers = [server]
+
+        def crashing_worker(server, *, deadline=None):
+            raise RuntimeError("kaboom")
+
+        with patch.object(remote_monitor, "_shutdown_remote_server",
+                          side_effect=crashing_worker):
+            results = remote_monitor._shutdown_remote_servers()
+
+        assert len(results) == 1
+        assert results[0].crashed is True
+
+        log_text = "\n".join(
+            str(c) for c in remote_monitor.logger.log.call_args_list)
+        assert "1 crashed" in log_text          # phase summary line
+        assert "kaboom" in log_text             # the thread-crash trace line

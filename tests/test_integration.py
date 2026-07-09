@@ -229,3 +229,82 @@ class TestShutdownSequence:
         log_output = " ".join(log_calls)
 
         assert "DRY-RUN" in log_output
+
+
+class TestShutdownSequenceHostPoweroff:
+    """Behavioural gaps around the local host-poweroff branch of
+    ``_execute_shutdown_sequence_impl`` (non-dry-run)."""
+
+    @pytest.fixture
+    def real_monitor(self, minimal_config, tmp_path):
+        minimal_config.logging.state_file = str(tmp_path / "state")
+        minimal_config.logging.battery_history_file = str(tmp_path / "history")
+        minimal_config.logging.shutdown_flag_file = str(tmp_path / "flag")
+        minimal_config.logging.file = None
+        minimal_config.behavior.dry_run = False
+        # Keep the drain phases inert so the sequence walks straight to the
+        # host-poweroff branch under test.
+        minimal_config.virtual_machines.enabled = False
+        minimal_config.containers.enabled = False
+        minimal_config.filesystems.unmount.enabled = False
+        minimal_config.filesystems.sync_enabled = False
+        minimal_config.local_shutdown.enabled = True
+
+        monitor = UPSGroupMonitor(minimal_config)
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+        monitor._notification_worker = MagicMock()
+        return monitor
+
+    @pytest.mark.unit
+    def test_empty_local_command_reports_incomplete_and_clears_flag(self, real_monitor):
+        """Behavioural-gap 2: a runtime-empty ``local_shutdown.command`` reaches
+        the native-poweroff branch, whose ``if not cmd_parts:`` guard must fire
+        an INCOMPLETE notification, clear the shutdown flag, and RETURN without
+        powering off (never writing the SEQUENCE COMPLETE marker)."""
+        m = real_monitor
+        m.config.local_shutdown.command = ""   # empty at runtime
+
+        notes = []
+        with patch.object(m, "_send_notification",
+                          side_effect=lambda *a, **k: notes.append((a, k))), \
+             patch("eneru.monitor.run_command", return_value=(0, "", "")) as mock_run, \
+             patch("os.sync"):
+            m._execute_shutdown_sequence()
+
+        # Flag cleared (future triggers not gated until line power returns).
+        assert not m._shutdown_flag_path.exists()
+        # An INCOMPLETE failure notification went out.
+        joined = " ".join(str(n) for n in notes)
+        assert "Incomplete" in joined
+        # It bailed BEFORE the success path -- no completion log.
+        logs = " ".join(str(c) for c in m.logger.log.call_args_list)
+        assert "INCOMPLETE" in logs
+        assert "SHUTDOWN SEQUENCE COMPLETE" not in logs
+        # No poweroff argv was ever run.
+        poweroff = [c for c in mock_run.call_args_list
+                    if c.args and "poweroff" in " ".join(map(str, c.args[0]))]
+        assert poweroff == []
+
+    @pytest.mark.unit
+    def test_remote_phase_exception_still_powers_off(self, real_monitor):
+        """Behavioural-gap 3: if ``_shutdown_remote_servers`` raises during setup,
+        the sequence must NOT abort -- the host poweroff below is still reached
+        (the H4 structural guarantee)."""
+        m = real_monitor
+        m.config.local_shutdown.command = "systemctl poweroff"
+
+        with patch.object(m, "_shutdown_remote_servers",
+                          side_effect=RuntimeError("setup boom")), \
+             patch.object(m, "_send_notification"), \
+             patch("eneru.monitor.run_command", return_value=(0, "", "")) as mock_run, \
+             patch("eneru.monitor.write_shutdown_marker"), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("os.sync"):
+            m._execute_shutdown_sequence()
+
+        poweroff = [c for c in mock_run.call_args_list
+                    if c.args and "poweroff" in " ".join(map(str, c.args[0]))]
+        assert poweroff, "host poweroff must still be attempted after the remote phase raised"
+        logs = " ".join(str(c) for c in m.logger.log.call_args_list)
+        assert "remote shutdown phase failed" in logs

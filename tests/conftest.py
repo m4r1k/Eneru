@@ -3,6 +3,7 @@
 import pytest
 import sys
 import tempfile
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from dataclasses import dataclass, field
@@ -204,6 +205,80 @@ def _reset_runtime_context_cache():
     _detect_runtime_context.cache_clear()
     yield
     _detect_runtime_context.cache_clear()
+
+
+def make_api_handler(
+    config,
+    *,
+    source=None,
+    path="/",
+    method=None,
+    body=b"",
+    token=None,
+    headers=None,
+    auth_store=None,
+    sessions=None,
+    logs=None,
+):
+    """Construct a bare ``EneruAPIHandler`` for unit tests (F-063).
+
+    ELI5: five different test files each hand-rolled the same "fake HTTP
+    handler" — same object, five slightly-different recipes. When one
+    recipe needed a tweak (e.g. Commit 4's ``Host: localhost`` default),
+    the others silently drifted. This is the one shared kitchen: every
+    caller orders from the same menu, so a change lands everywhere at
+    once.
+
+    The handler is built with ``object.__new__`` (bypassing the real
+    ``BaseHTTPRequestHandler.__init__``, which wants a live socket) and
+    seeded with just the attributes the routing/auth code reads.
+
+    Parameters mirror the union of the old builders:
+
+    - ``source``     -> ``api_source`` (defaults to a ``MagicMock``)
+    - ``path``       -> ``h.path`` (request path)
+    - ``method``     -> ``h.command`` (HTTP verb), only if provided
+    - ``body``       -> request body bytes (also the ``rfile`` stream)
+    - ``token``      -> adds ``Authorization: Bearer <token>``
+    - ``headers``    -> explicit header dict (see F-016 note below)
+    - ``auth_store`` -> ``api_auth``
+    - ``sessions``   -> ``api_sessions``
+    - ``logs``       -> ``api_log`` appends here when a list is passed
+
+    F-016: when ``headers`` is left unset we default ``Host: localhost``
+    so tests that drive ``do_*()`` / ``_dispatch`` / ``_route`` clear the
+    DNS-rebinding guard. Passing an explicit ``headers`` dict takes full
+    control — including omitting ``Host`` on purpose to exercise the 421
+    reject path.
+    """
+    from eneru.api import EneruAPIHandler
+
+    h = object.__new__(EneruAPIHandler)
+    h.path = path
+    h.api_config = config
+    h.api_source = source if source is not None else MagicMock()
+    h.api_auth = auth_store
+    h.api_sessions = sessions
+    h.api_log = logs.append if logs is not None else (lambda m: None)
+    if method is not None:
+        h.command = method
+    if headers is None:
+        hdrs = {"Host": "localhost"}
+    else:
+        hdrs = dict(headers)
+    if token:
+        hdrs["Authorization"] = f"Bearer {token}"
+    if body and "Content-Length" not in hdrs:
+        hdrs["Content-Length"] = str(len(body))
+    h.headers = hdrs
+    h.rfile = BytesIO(body)
+    return h
+
+
+@pytest.fixture
+def api_handler_factory():
+    """Fixture wrapper around :func:`make_api_handler` (F-063)."""
+    return make_api_handler
 
 
 @pytest.fixture

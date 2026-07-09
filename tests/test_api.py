@@ -2880,3 +2880,12 @@ def test_remote_health_event_fn_failure_logs_only_first_time(minimal_config, tmp
     ]
     assert len(failure_logs) == 1
     assert "further failures will be silent" in failure_logs[0]
+
+
+@pytest.mark.unit
+def test_redact_broker_at_before_scheme_returns_raw():
+    """Behavioural-gap 10 (mqtt edge): an '@' that is NOT userinfo -- it sits
+    before the '://' separator -- leaves the broker string untouched, because
+    the post-scheme remainder has no '@' to redact."""
+    from eneru.mqtt import _redact_broker
+    assert _redact_broker("weird@host://path") == "weird@host://path"
