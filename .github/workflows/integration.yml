@@ -74,6 +74,25 @@ jobs:
       - name: Build .rpm package
         run: VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager rpm --target .
 
+      - name: Build el8 .rpm package
+        run: |
+          # F-013: el8's system python3 is 3.6 but Eneru needs 3.9+, so ship a
+          # SEPARATE el8 RPM whose deps require the python39 module. Generate its
+          # nfpm config from nfpm.yaml (single source of truth for contents:),
+          # overriding only rpm.depends + a distinct .el8 release marker.
+          python -m pip install --quiet pyyaml
+          python - <<'PY'
+          import yaml
+          with open("nfpm.yaml") as f:
+              cfg = yaml.safe_load(f)
+          rpm = cfg.setdefault("overrides", {}).setdefault("rpm", {})
+          rpm["depends"] = ["python39", "python39-pyyaml", "nut-client"]
+          cfg["release"] = "1.el8"
+          with open("nfpm-el8.yaml", "w") as f:
+              yaml.safe_dump(cfg, f, sort_keys=False)
+          PY
+          VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager rpm --target . -f nfpm-el8.yaml
+
       - name: Upload packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
@@ -196,7 +215,9 @@ jobs:
           - version: '8'
             image: registry.access.redhat.com/ubi8/ubi
             name: RHEL 8 (Ootpa)
-            python_pkg: python39 python39-pyyaml
+            # F-013: no python_pkg pre-install for el8 on purpose — the el8 RPM's
+            # own declared deps must pull python39, which is exactly the gap the
+            # old hand pre-install used to mask.
           - version: '9'
             image: registry.access.redhat.com/ubi9/ubi
             name: RHEL 9 (Plow)
@@ -219,61 +240,71 @@ jobs:
       - name: Install dependencies and package
         run: |
           dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-${{ matrix.version }}.noarch.rpm
-          dnf install -y ${{ matrix.python_pkg }}
-          # paho-mqtt is a SOFT dep on RPM (see nfpm.yaml). Install it
-          # per-RHEL-version because the distro story is uneven:
-          #   * RHEL 9 + EPEL ships python3-paho-mqtt for the system
-          #     python3 — works as a normal dnf install.
-          #   * RHEL 8's EPEL build is for system python3 (3.6); this
-          #     CI matrix uses python3.9 via the `python39` package, so
-          #     the dnf-installed paho would land in the wrong site-
-          #     packages. Use pip into python3 (== 3.9 here) instead.
-          #   * RHEL 10 has no python3-paho-mqtt in BaseOS / AppStream /
-          #     CRB / EPEL 10 at all. pip-install it; --break-system-
-          #     packages is required by PEP 668 since EL 10 marks the
-          #     site-packages as externally managed (acceptable in a
-          #     throw-away CI container).
-          case "${{ matrix.version }}" in
-            9)
-              dnf install -y python3-paho-mqtt
-              ;;
-            8)
-              # IMPORTANT: install python39-pip, NOT python3-pip.
-              # On ubi8 `python3-pip` targets the SYSTEM python3 (3.6)
-              # and installing it drags python3 (3.6) into the image,
-              # which then wins the `python3` alternative slot away
-              # from python3.9 — and Eneru needs dataclasses (Python
-              # 3.7+) so the next `python3 /opt/ups-monitor/eneru.py
-              # version` blows up with `ModuleNotFoundError: No module
-              # named 'dataclasses'`. python39-pip is the pip package
-              # for the 3.9 stack, mirroring python39-pyyaml above.
-              dnf install -y python39-pip
-              python3 -m pip install --no-deps paho-mqtt
-              ;;
-            10)
-              # ubi10 ships python3 without pip; install it explicitly
-              # before the pip-install fallback. python3-pip lives in
-              # the AppStream repo on RHEL 10.
-              dnf install -y python3-pip
-              python3 -m pip install --no-deps --break-system-packages paho-mqtt
-              ;;
-          esac
-          # Lock in the new packaging contract: python3-paho-mqtt MUST
-          # NOT be a hard dep on the rpm — otherwise `dnf install` of
-          # eneru would fail on RHEL 10 (where the package doesn't
-          # exist). It may still appear under `Recommends:`, which dnf
-          # resolves opportunistically. `rpm -qpR` lists hard deps only.
-          if rpm -qpR eneru-*.rpm | grep -q "^python3-paho-mqtt"; then
+
+          # F-013: pick the RPM built for this RHEL major. el8 ships a DEDICATED
+          # RPM whose deps require the python39 module (el8's system python3 is
+          # 3.6 — too old for Eneru, which needs 3.9+). el9/el10 use the DEFAULT
+          # RPM (their python3 is already 3.9+). The default glob would also
+          # match the el8 artifact, so exclude it explicitly for el9/el10.
+          if [ "${{ matrix.version }}" = "8" ]; then
+            RPM=$(ls eneru-*.el8.*.rpm)
+          else
+            RPM=$(ls eneru-*.rpm | grep -v '\.el8\.')
+          fi
+          echo "Selected RPM: $RPM"
+
+          # Contract guard (both variants): python3-paho-mqtt MUST NOT be a hard
+          # dep — otherwise `dnf install eneru` would fail on RHEL 10 (package
+          # doesn't exist there). It may still appear under Recommends:, which
+          # dnf resolves opportunistically. `rpm -qpR` lists hard deps only.
+          if rpm -qpR "$RPM" | grep -q "^python3-paho-mqtt"; then
             echo "ERROR: python3-paho-mqtt regressed to a hard rpm dep."
             echo "       Move it back to recommends: in nfpm.yaml."
             exit 1
           fi
-          # Try rpm first (fast, with --nodeps for the missing nut-
-          # client). --nodeps is kept only because nut-client is absent
-          # in the minimal UBI test images. If that fails for non-dep
-          # reasons, fall back to dnf with --skip-broken. Real install
-          # failures still propagate.
-          rpm -ivh --nodeps eneru-*.rpm || dnf install -y ./eneru-*.rpm --skip-broken
+
+          if [ "${{ matrix.version }}" = "8" ]; then
+            # F-013: do NOT hand-install python39 here. A full `dnf install` of
+            # the el8 RPM must pull python39 + python39-pyyaml (and nut-client
+            # from EPEL) on its own — that is exactly the crash-loop gap the old
+            # `dnf install python39 python39-pyyaml` pre-install used to mask.
+            # First assert the packaging contract, then prove it end-to-end.
+            if ! rpm -qpR "$RPM" | grep -qx "python39"; then
+              echo "ERROR: el8 RPM must require the python39 module, not python3."
+              exit 1
+            fi
+            dnf install -y "./$RPM"
+            # paho-mqtt SOFT dep: pip into the python3.9 the RPM just pulled.
+            # python39-pip is the pip for the 3.9 stack (NOT python3-pip, which
+            # on ubi8 would drag in the system python3 == 3.6).
+            dnf install -y python39-pip
+            python3 -m pip install --no-deps paho-mqtt
+          else
+            # RHEL 9/10 (unchanged): default RPM, system python3 == 3.9+.
+            dnf install -y ${{ matrix.python_pkg }}
+            # paho-mqtt SOFT dep, installed per-version because the distro story
+            # is uneven (see nfpm.yaml):
+            #   * RHEL 9 + EPEL ships python3-paho-mqtt for the system python3.
+            #   * RHEL 10 has no python3-paho-mqtt in BaseOS/AppStream/CRB/EPEL
+            #     10 at all. pip-install it; --break-system-packages is required
+            #     by PEP 668 since EL 10 marks site-packages externally managed
+            #     (acceptable in a throw-away CI container). ubi10 ships python3
+            #     without pip, so install python3-pip (AppStream) first.
+            case "${{ matrix.version }}" in
+              9)
+                dnf install -y python3-paho-mqtt
+                ;;
+              10)
+                dnf install -y python3-pip
+                python3 -m pip install --no-deps --break-system-packages paho-mqtt
+                ;;
+            esac
+            # Try rpm first (fast, with --nodeps for the missing nut-client).
+            # --nodeps is kept only because nut-client is absent in the minimal
+            # UBI test images. If that fails for non-dep reasons, fall back to
+            # dnf with --skip-broken. Real install failures still propagate.
+            rpm -ivh --nodeps "$RPM" || dnf install -y "./$RPM" --skip-broken
+          fi
 
       - name: Verify installation
         run: |
