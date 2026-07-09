@@ -2117,7 +2117,9 @@ function outageLabel(head, s) {
   if (s.cut) label += " · on battery " + new Date(s.cut.ts * 1000).toLocaleString();
   label += s.restore
     ? " · restored " + new Date(s.restore.ts * 1000).toLocaleString()
-    : " · ongoing or restore outside range";
+    : s.endedAtBoundary
+      ? " · ended at shutdown " + new Date(s.end * 1000).toLocaleString()
+      : " · ongoing or restore outside range";
   return label;
 }
 
@@ -2132,7 +2134,9 @@ function outageTipNode(head, s) {
   kids.push(el("div", { class: s.restore ? "tip-body" : "tip-sub",
     text: s.restore
       ? "Restored: " + new Date(s.restore.ts * 1000).toLocaleString()
-      : "Ongoing / restore outside range" }));
+      : s.endedAtBoundary
+        ? "Ended at shutdown: " + new Date(s.end * 1000).toLocaleString()
+        : "Ongoing / restore outside range" }));
   return kids;
 }
 
@@ -2144,30 +2148,76 @@ function outageTipNode(head, s) {
 // still open at the right edge, or a restore whose cut predates the window)
 // extend to the chart edge so partial outages still read correctly.
 const MIN_OUTAGE_PX = 3;
-function appendOutageBands(svg, events, x, t0, t1, yTop, yBot) {
+
+// Boundary events (besides POWER_RESTORED) that also CLOSE an open outage
+// band. ELI5: an outage is a red bar we draw from "power died" to "power
+// back". Normally the daemon draws the end itself when it sees OB→OL
+// (POWER_RESTORED). But a bad outage kills the host: the daemon fires a
+// shutdown (EMERGENCY/DELEGATED_SHUTDOWN_INITIATED), the box powers off, and
+// on the next boot it starts FRESH (DAEMON_START) already on line — it never
+// witnesses OB→OL, so no POWER_RESTORED is ever emitted. Without a fallback
+// the red bar would run to "now" forever (perma-red dashboard). The truth is:
+// once the daemon shut down or restarted it could no longer observe the
+// outage, so the VISIBLE band must end at that boundary, not at "now".
+// (v6.1.7 also makes the server stamp a real POWER_RESTORED on power-loss
+// recovery; this client guard covers pre-fix history and the general case.)
+const OUTAGE_CLOSE_BOUNDARIES = [
+  "POWER_RESTORED",
+  "DAEMON_RECOVERED",
+  "EMERGENCY_SHUTDOWN_INITIATED",
+  "DELEGATED_SHUTDOWN_INITIATED",
+  "DAEMON_START",
+];
+
+// Pure span math (no DOM) so it's unit-testable in a node shim. Turns the raw
+// event stream into outage spans: each ON_BATTERY opens a span that closes on
+// the first following boundary event. A clean POWER_RESTORED marks the span
+// restored; a shutdown/restart boundary closes it as "ended at shutdown"
+// (cut set, restore null, but bounded — NOT run to t1). Only a genuinely
+// ongoing outage (ON_BATTERY with NO boundary after it) extends to t1.
+function computeOutageSpans(events, t0, t1) {
   const evs = (events || [])
     .filter((e) => {
       const t = (e.eventType || e.event || "").toUpperCase();
-      return t.includes("ON_BATTERY") || t.includes("POWER_RESTORED");
+      return t.includes("ON_BATTERY")
+        || OUTAGE_CLOSE_BOUNDARIES.some((b) => t.includes(b));
     })
     .slice()
     .sort((a, b) => a.ts - b.ts);
-  if (!evs.length) return;
   const spans = [];
   let openCut = null;
   for (const e of evs) {
     const t = (e.eventType || e.event || "").toUpperCase();
     if (t.includes("ON_BATTERY")) {
       if (openCut === null) openCut = e;          // ignore repeats while open
-    } else {                                       // POWER_RESTORED
-      spans.push({ start: openCut ? openCut.ts : t0, end: e.ts,
-                   cut: openCut, restore: e });
+    } else if (openCut !== null) {                 // a boundary closes the span
+      const restored = t.includes("POWER_RESTORED");
+      spans.push({ start: openCut.ts, end: e.ts,
+                   cut: openCut, restore: restored ? e : null,
+                   endedAtBoundary: !restored });
       openCut = null;
+    } else if (t.includes("POWER_RESTORED")) {
+      // A restore whose opening ON_BATTERY predates the window: draw the
+      // band from the chart's left edge so the partial outage still reads.
+      // (Only a real restore does this — a bare shutdown/restart boundary
+      // with no open cut is not an outage and draws nothing.)
+      spans.push({ start: t0, end: e.ts, cut: null, restore: e,
+                   endedAtBoundary: false });
     }
+    // a shutdown/restart boundary with no open cut is not an outage span
   }
   if (openCut !== null) {
-    spans.push({ start: openCut.ts, end: t1, cut: openCut, restore: null });
+    // No boundary followed — the daemon is still alive and the outage is
+    // genuinely ongoing, so run the band to "now".
+    spans.push({ start: openCut.ts, end: t1, cut: openCut, restore: null,
+                 endedAtBoundary: false });
   }
+  return spans;
+}
+
+function appendOutageBands(svg, events, x, t0, t1, yTop, yBot) {
+  const spans = computeOutageSpans(events, t0, t1);
+  if (!spans.length) return;
   const top = parseFloat(yTop), bot = parseFloat(yBot);
   for (const s of spans) {
     if (s.end < t0 || s.start > t1) continue;     // outage entirely off-chart
@@ -2185,7 +2235,9 @@ function appendOutageBands(svg, events, x, t0, t1, yTop, yBot) {
     rect.setAttribute("role", "img");
     const head = (s.cut && s.restore)
       ? "Outage · " + fmtOutageDur(s.end - s.start)
-      : "Outage (ongoing or partial)";
+      : s.endedAtBoundary
+        ? "Outage · ended at shutdown · " + fmtOutageDur(s.end - s.start)
+        : "Outage (ongoing or partial)";
     rect.setAttribute("aria-label", outageLabel(head, s));
     bindTip(rect, () => outageTipNode(head, s), "ev-crit");
     svg.appendChild(rect);

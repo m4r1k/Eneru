@@ -651,6 +651,27 @@ class UPSGroupMonitor(
             except (TypeError, ValueError):
                 marker_shutdown_at = 0
             downtime = max(0, int(_time.time()) - marker_shutdown_at)
+            # Close the outage band the pre-shutdown ON_BATTERY opened.
+            # ELI5: when the power died we drew a red "outage" line on the
+            # wall calendar and started it, then the house lost power and
+            # everyone went home. Nobody was here to draw the "power's back"
+            # end of the line — the daemon rebooted fresh into OL and never
+            # saw the OB→OL flip, so it never fired POWER_RESTORED. Result:
+            # the red line runs to "forever" and the dashboard shows the
+            # outage as still ongoing. Since THIS start only happens because
+            # power came back (the marker says the shutdown was a clean
+            # power-loss sequence), stamp the closing POWER_RESTORED now so
+            # the outage is correctly bracketed. Guarded by the enclosing
+            # reason == SEQUENCE_COMPLETE check, so a plain restart/upgrade
+            # (different reason, or no marker) never forges this event.
+            try:
+                self._stats_store.log_event(
+                    "POWER_RESTORED",
+                    f"Power restored after outage-triggered shutdown "
+                    f"(downtime {downtime}s)",
+                )
+            except Exception:
+                pass  # never mask a startup notification on a stats hiccup
             coalesced_body = coalesce_recovered_with_prev_shutdown(
                 self._stats_store,
                 downtime_secs=downtime,

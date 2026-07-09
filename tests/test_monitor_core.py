@@ -3823,6 +3823,132 @@ class TestEmitLifecycleStartupExceptionalPaths:
         assert sent_body == "🪄  coalesced summary"
 
 
+class TestEmitLifecycleStartupPowerRestored:
+    """v6.1.7: a power-loss recovery start (shutdown marker reason ==
+    SEQUENCE_COMPLETE) must ALSO stamp a closing ``POWER_RESTORED`` event.
+
+    ELI5: the outage the pre-shutdown ON_BATTERY opened never got its
+    "power's back" bookend, because the host powered off and rebooted
+    fresh straight into OL — nobody was home to see the OB→OL flip. The
+    recovery start is the one moment we KNOW power came back, so we close
+    the band here. A plain restart/upgrade (no marker / different reason)
+    must NOT forge the event."""
+
+    @pytest.mark.unit
+    def test_power_loss_recovery_emits_power_restored(self, tmp_path):
+        from eneru.lifecycle import REASON_SEQUENCE_COMPLETE
+        from eneru.version import __version__
+
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = object()
+        store.get_meta.return_value = __version__
+        store.find_pending_by_category.return_value = []
+        monitor._stats_store = store
+        monitor._send_notification = MagicMock()
+
+        marker = {"shutdown_at": 1000, "version": __version__,
+                  "reason": REASON_SEQUENCE_COMPLETE}
+        with patch("eneru.monitor.read_shutdown_marker", return_value=marker), \
+             patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("eneru.monitor.delete_upgrade_marker"), \
+             patch("eneru.monitor.coalesce_recovered_with_prev_shutdown",
+                   return_value=None):
+            monitor._emit_lifecycle_startup_notification()
+
+        restored_calls = [
+            c for c in store.log_event.call_args_list
+            if c.args and c.args[0] == "POWER_RESTORED"
+        ]
+        assert len(restored_calls) == 1, store.log_event.call_args_list
+        # Detail carries the downtime so the operator/dashboard can read it.
+        assert "downtime" in restored_calls[0].args[1]
+
+    @pytest.mark.unit
+    def test_normal_restart_no_marker_does_not_emit_power_restored(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = object()
+        store.get_meta.return_value = None
+        store.find_pending_by_category.return_value = []
+        monitor._stats_store = store
+        monitor._send_notification = MagicMock()
+
+        with patch("eneru.monitor.read_shutdown_marker", return_value=None), \
+             patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("eneru.monitor.delete_upgrade_marker"):
+            monitor._emit_lifecycle_startup_notification()
+
+        assert not any(
+            c.args and c.args[0] == "POWER_RESTORED"
+            for c in store.log_event.call_args_list
+        ), store.log_event.call_args_list
+
+    @pytest.mark.unit
+    def test_non_sequence_complete_marker_does_not_emit_power_restored(self, tmp_path):
+        """A marker present but with a non-power-loss reason (e.g. a
+        deliberate signal-driven restart) must NOT forge POWER_RESTORED."""
+        from eneru.lifecycle import REASON_SIGNAL
+        from eneru.version import __version__
+
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = object()
+        store.get_meta.return_value = __version__
+        store.find_pending_by_category.return_value = []
+        monitor._stats_store = store
+        monitor._send_notification = MagicMock()
+
+        marker = {"shutdown_at": 1000, "version": __version__,
+                  "reason": REASON_SIGNAL}
+        with patch("eneru.monitor.read_shutdown_marker", return_value=marker), \
+             patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("eneru.monitor.delete_upgrade_marker"):
+            monitor._emit_lifecycle_startup_notification()
+
+        assert not any(
+            c.args and c.args[0] == "POWER_RESTORED"
+            for c in store.log_event.call_args_list
+        ), store.log_event.call_args_list
+
+    @pytest.mark.unit
+    def test_power_restored_log_failure_is_swallowed(self, tmp_path):
+        """A stats hiccup while stamping POWER_RESTORED must never mask the
+        startup notification (the emission is wrapped in try/except)."""
+        from eneru.lifecycle import REASON_SEQUENCE_COMPLETE
+        from eneru.version import __version__
+
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = object()
+        store.get_meta.return_value = __version__
+        store.find_pending_by_category.return_value = []
+
+        def _boom(event_type, *a, **k):
+            if event_type == "POWER_RESTORED":
+                raise RuntimeError("stats down")
+
+        store.log_event.side_effect = _boom
+        monitor._stats_store = store
+        monitor._send_notification = MagicMock()
+
+        marker = {"shutdown_at": 1000, "version": __version__,
+                  "reason": REASON_SEQUENCE_COMPLETE}
+        with patch("eneru.monitor.read_shutdown_marker", return_value=marker), \
+             patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("eneru.monitor.delete_upgrade_marker"), \
+             patch("eneru.monitor.coalesce_recovered_with_prev_shutdown",
+                   return_value=None):
+            # Must not raise.
+            monitor._emit_lifecycle_startup_notification()
+
+        monitor._send_notification.assert_called_once()
+
+
 class TestLogEnabledFeaturesExplicitRuntime:
     """`_log_enabled_features` formats the runtime/compose string
     differently for runtime="auto" vs an explicit runtime; cover the

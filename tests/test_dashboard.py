@@ -694,3 +694,81 @@ def test_dashboard_merge_events_dedup_sort_cap(minimal_config):
     assert data["count"] == 3
     assert data["oldest"] == 1
     assert data["newest"] == 4
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_dashboard_outage_spans_close_at_shutdown_boundary(minimal_config):
+    """v6.1.7: exercise app.js `computeOutageSpans` in a node shim.
+
+    The prod bug: after two real power outages the chart tabs stayed
+    perma-RED. The power died, the daemon shut the host down, and on reboot
+    it started FRESH already on line — it never witnessed the OB→OL flip, so
+    it never emitted POWER_RESTORED, and the outage band ran to "now" forever.
+
+    Asserts the fixed span math:
+      (a) ON_BATTERY → EMERGENCY_SHUTDOWN_INITIATED → DAEMON_START with NO
+          POWER_RESTORED closes the band AT the shutdown boundary, not at t1.
+      (b) ON_BATTERY → POWER_RESTORED still closes cleanly (restored).
+      (c) ON_BATTERY with nothing after genuinely extends to t1 (ongoing).
+
+    Skips cleanly where node is unavailable."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    spans_src = js[js.index("const OUTAGE_CLOSE_BOUNDARIES"):
+                   js.index("function appendOutageBands")]
+    script = spans_src + textwrap.dedent("""
+        const T0 = 0, T1 = 1000;
+        // (a) outage closed by a shutdown/restart boundary (no restore).
+        const a = computeOutageSpans([
+          {ts: 100, eventType: "ON_BATTERY"},
+          {ts: 150, eventType: "EMERGENCY_SHUTDOWN_INITIATED"},
+          {ts: 400, eventType: "DAEMON_START"},
+        ], T0, T1);
+        // (b) clean restore.
+        const b = computeOutageSpans([
+          {ts: 100, eventType: "ON_BATTERY"},
+          {ts: 200, eventType: "POWER_RESTORED"},
+        ], T0, T1);
+        // (c) genuinely ongoing outage, nothing after.
+        const c = computeOutageSpans([
+          {ts: 100, eventType: "ON_BATTERY"},
+        ], T0, T1);
+        process.stdout.write(JSON.stringify({
+          a: a.map(s => ({start: s.start, end: s.end,
+                          restore: s.restore ? s.restore.ts : null,
+                          boundary: !!s.endedAtBoundary})),
+          b: b.map(s => ({start: s.start, end: s.end,
+                          restore: s.restore ? s.restore.ts : null,
+                          boundary: !!s.endedAtBoundary})),
+          c: c.map(s => ({start: s.start, end: s.end,
+                          restore: s.restore ? s.restore.ts : null,
+                          boundary: !!s.endedAtBoundary})),
+        }));
+    """)
+    result = subprocess.run(["node", "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    data = json.loads(result.stdout)
+
+    # (a) One span, ending AT the shutdown boundary (ts150), NOT at t1(1000),
+    #     with no restore and flagged as ended-at-boundary.
+    assert len(data["a"]) == 1
+    assert data["a"][0]["start"] == 100
+    assert data["a"][0]["end"] == 150
+    assert data["a"][0]["end"] != 1000
+    assert data["a"][0]["restore"] is None
+    assert data["a"][0]["boundary"] is True
+
+    # (b) Clean restore: span closes at the POWER_RESTORED ts, restore set.
+    assert len(data["b"]) == 1
+    assert data["b"][0]["start"] == 100
+    assert data["b"][0]["end"] == 200
+    assert data["b"][0]["restore"] == 200
+    assert data["b"][0]["boundary"] is False
+
+    # (c) Genuinely ongoing: extends to t1, no restore, not a boundary close.
+    assert len(data["c"]) == 1
+    assert data["c"][0]["start"] == 100
+    assert data["c"][0]["end"] == 1000
+    assert data["c"][0]["restore"] is None
+    assert data["c"][0]["boundary"] is False
