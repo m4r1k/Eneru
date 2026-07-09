@@ -59,6 +59,21 @@ config. They share one root cause and are fixed as a unit.
   run the poweroff binary inside the container after the host was already told
   to power off over SSH; the coordinator now skips the in-container poweroff on
   the delegated path, mirroring the single-UPS path.
+- **Remote shutdown resolves bare command names over SSH again.** After a real
+  power outage, shutting down a Synology NAS failed with
+  `sudo: synoshutdown: command not found`, because the daemon's non-interactive
+  SSH session has a minimal `PATH` that lacks `/usr/syno/sbin` (Synology adds it
+  via login-profile scripts an `ssh host "cmd"` never runs). Eneru now augments
+  `PATH` on every remote command — standard sbin dirs plus `/usr/syno/sbin` —
+  so bare binaries resolve as they do in an interactive login. Absolute paths
+  remain a valid escape hatch.
+- **Dashboard outage bands clear after a power-loss recovery.** When an outage
+  triggered a shutdown, the host powered off and the restarted daemon booted
+  straight into on-line without ever emitting `POWER_RESTORED`, so the
+  Power/Battery/Energy charts shaded red to "now" forever. The daemon now emits
+  `POWER_RESTORED` on a power-loss recovery start, and the dashboard closes an
+  open outage band at the shutdown/restart boundary (so historical outages
+  clear too).
 - **Assorted correctness fixes:** quoted poweroff commands parse with `shlex`;
   corrupt shutdown/upgrade markers that parse to non-dicts are treated as
   absent instead of crashing startup; VM force-destroy re-polls so a VM that
