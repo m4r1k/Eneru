@@ -1229,18 +1229,15 @@ notifications:
 
     @pytest.mark.unit
     def test_validate_config_nonexistent_file(self, tmp_path, capsys):
-        """Validate against a non-existent path: ConfigLoader.load
-        prints a warning and falls back to defaults; the resulting
-        defaults are valid, so exit is 0.
+        """F-003: `validate -c <missing>` must fail loud, non-zero.
 
-        The original test asserted only `exit 0` and "Configuration
-        is valid", which would have passed even if the typo'd path
-        was silently ignored. This now also asserts the fallback
-        warning containing the typo'd path appears in stdout, so a
-        future regression that swallowed the warning would fail loud.
-        Uses tmp_path so the assertion is deterministic across
-        environments (the previous hard-coded /nonexistent/path could
-        in theory exist on a developer machine).
+        The old behavior warned and validated the all-default
+        (shutdown-armed) config, exiting 0 — so a fat-fingered `--config`
+        path looked "valid" while the daemon would boot on a config the
+        operator never wrote. An explicit path that doesn't exist is now a
+        hard error: non-zero exit and a "config file not found" message that
+        names the typo'd path. Uses tmp_path so the path is deterministically
+        absent across environments.
         """
         typo_path = str(tmp_path / "missing-config.yaml")
         # Sanity: ensure we're not racing a pre-existing file in tmp_path.
@@ -1251,12 +1248,27 @@ notifications:
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
-            assert exc_info.value.code == 0
+            assert exc_info.value.code != 0
 
-        captured = capsys.readouterr()
-        assert "Configuration is valid" in captured.out
-        assert "Config file not found" in captured.out
-        assert typo_path in captured.out
+        # The message is carried on the SystemExit (ConfigLoader.load raises it);
+        # capsys may or may not have flushed it depending on the exit path, so
+        # assert on the exception which is always present.
+        combined = str(exc_info.value.code) + capsys.readouterr().out
+        assert "config file not found" in combined.lower()
+        assert typo_path in combined
+
+    @pytest.mark.unit
+    def test_run_nonexistent_config_exits_nonzero(self, capsys):
+        """F-003: `run -c <missing>` also exits non-zero rather than arming
+        poweroff on the all-default config."""
+        with patch.object(sys, "argv", [
+            "eneru", "run", "-c", "/no/such/eneru-config.yaml",
+        ]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code != 0
+        combined = str(exc_info.value.code) + capsys.readouterr().out
+        assert "config file not found" in combined.lower()
 
     @pytest.mark.unit
     def test_validate_config_without_apprise(self, tmp_path, capsys):

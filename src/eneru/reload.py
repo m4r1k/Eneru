@@ -84,6 +84,12 @@ def load_and_validate(path: Optional[str]) -> Tuple[Optional[Config], List[str]]
     # validate_config raise instead of returning a clean error. Catch it so a
     # bad reload is reported, never propagated into the signal handler / API.
     try:
+        # F-001/F-008: reject a char-split / mis-shaped config on hot reload with
+        # a clean message BEFORE _parse_config can crash on it, so a bad SIGHUP
+        # keeps the daemon on its old config instead of applying garbage.
+        struct_errors = ConfigLoader._schema_structural_errors(raw)
+        if struct_errors:
+            return None, struct_errors
         cfg = ConfigLoader._parse_config(raw)
         cfg.config_path = path
         errors = [m for m in ConfigLoader.validate_config(cfg, raw)

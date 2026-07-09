@@ -1756,3 +1756,193 @@ redundancy_groups:
 """)
         warnings = _warnings(ConfigLoader.validate_config(config, raw))
         assert not any("redundancy-group member" in m for m in warnings)
+
+
+# ============================================================================
+# Ship-review Fix Group A: declarative schema shape/type/unknown-key guards.
+# ============================================================================
+
+def _load_errors_from_yaml(text: str):
+    """Parse YAML, build the Config, run validate_config, return ERROR lines.
+
+    Bypasses ConfigLoader.load so the reporting sweep (F-002/F-007/F-012/F-059)
+    can be exercised on configs that parse cleanly but carry wrong-typed values.
+    """
+    raw = yaml.safe_load(text)
+    cfg = ConfigLoader._parse_config(raw)
+    return [m for m in ConfigLoader.validate_config(cfg, raw_data=raw)
+            if m.startswith("ERROR:")]
+
+
+class TestSchemaStructuralGate:
+    """F-001/F-008: the load-time fatal gate rejects scalars where a mapping or
+    list is required with a clean SystemExit, never a raw AttributeError or a
+    silently char-split scalar."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("body,needle", [
+        # F-008: nested scalars that previously crashed _parse_config with a raw
+        # AttributeError before validation ever ran.
+        ("triggers:\n  depletion: 5\n", "triggers.depletion"),
+        ("triggers:\n  extended_time: 5\n", "triggers.extended_time"),
+        ('ups: "foo"\n', "ups"),
+        ("notifications:\n  discord: true\n", "notifications.discord"),
+        ("statistics:\n  retention: 3\n", "statistics.retention"),
+        ("statistics: 3\n", "statistics"),
+    ])
+    def test_scalar_where_mapping_required_exits(
+        self, temp_config_file, body, needle,
+    ):
+        temp_config_file.write_text(body)
+        with pytest.raises(SystemExit) as exc_info:
+            ConfigLoader.load(str(temp_config_file))
+        msg = str(exc_info.value)
+        assert "must be a mapping" in msg
+        assert needle in msg
+
+    @pytest.mark.unit
+    def test_api_auth_scalar_reported_by_validate(self):
+        """F-008: `api.auth: true` is defensively swallowed by the parser (no
+        crash), so the reporting sweep — not the fatal gate — flags it."""
+        errors = _load_errors_from_yaml(
+            "ups:\n  name: U@h\napi:\n  auth: true\n")
+        assert any("api.auth" in e and "must be a mapping" in e for e in errors)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("section", ["prometheus", "mqtt", "remote_health"])
+    def test_swallowed_scalar_section_reported_by_validate(self, section):
+        """F-008: sections the parser swallows to defaults still error at
+        validate time (previously they looked configured while silently off)."""
+        errors = _load_errors_from_yaml(f"ups:\n  name: U@h\n{section}: 5\n")
+        assert any(section in e and "must be a mapping" in e for e in errors)
+
+
+class TestSchemaBooleanGuards:
+    """F-002: safety-critical booleans reject non-bool values — a YAML string
+    like "false" is truthy and would otherwise flip an intended disable on."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("body,needle", [
+        ('behavior:\n  dry_run: "false"\n', "behavior.dry_run"),
+        ("behavior:\n  dry_run: 1\n", "behavior.dry_run"),
+        ('local_shutdown:\n  enabled: "false"\n', "local_shutdown.enabled"),
+        ('local_shutdown:\n  wall: "false"\n', "local_shutdown.wall"),
+        ('local_shutdown:\n  drain_on_local_shutdown: "false"\n',
+         "local_shutdown.drain_on_local_shutdown"),
+        ('api:\n  enabled: "false"\n', "api.enabled"),
+        ('api:\n  auth:\n    enabled: "false"\n', "api.auth.enabled"),
+        ('prometheus:\n  enabled: "false"\n', "prometheus.enabled"),
+        ('mqtt:\n  enabled: "false"\n', "mqtt.enabled"),
+        ('remote_health:\n  enabled: "false"\n', "remote_health.enabled"),
+        ('reports:\n  daily: "false"\n', "reports.daily"),
+        ('energy:\n  enabled: "false"\n', "energy.enabled"),
+        ('battery_health:\n  enabled: "false"\n', "battery_health.enabled"),
+        ('self_test:\n  enabled: "false"\n', "self_test.enabled"),
+        ('logging:\n  syslog:\n    enabled: "false"\n', "logging.syslog.enabled"),
+        ('virtual_machines:\n  enabled: "false"\n', "virtual_machines.enabled"),
+        ('containers:\n  enabled: "false"\n', "containers.enabled"),
+        ('containers:\n  include_user_containers: "false"\n',
+         "containers.include_user_containers"),
+        ('filesystems:\n  sync_enabled: "false"\n', "filesystems.sync_enabled"),
+        ('filesystems:\n  unmount:\n    enabled: "false"\n',
+         "filesystems.unmount.enabled"),
+        ('triggers:\n  extended_time:\n    enabled: "false"\n',
+         "triggers.extended_time.enabled"),
+    ])
+    def test_non_bool_boolean_rejected(self, body, needle):
+        errors = _load_errors_from_yaml("ups:\n  name: U@h\n" + body)
+        assert any(needle in e and "must be a boolean" in e for e in errors), \
+            f"expected a boolean error for {needle}, got {errors}"
+
+    @pytest.mark.unit
+    def test_remote_server_enabled_non_bool_rejected(self):
+        errors = _load_errors_from_yaml(
+            "ups:\n  name: U@h\n"
+            "remote_servers:\n  - name: nas\n    host: nas.lan\n"
+            '    user: root\n    enabled: "false"\n')
+        assert any("enabled" in e and "must be a boolean" in e for e in errors)
+
+
+class TestSchemaNumericGuards:
+    """F-007/F-012: numerics the parser passed through untyped are validated."""
+
+    @pytest.mark.unit
+    def test_compose_file_stop_timeout_quoted_rejected(self):
+        errors = _load_errors_from_yaml(
+            "ups:\n  name: U@h\n"
+            "containers:\n  enabled: true\n  compose_files:\n"
+            '    - path: /a/docker-compose.yml\n      stop_timeout: "60"\n')
+        assert any("stop_timeout" in e and "integer" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_compose_file_stop_timeout_none_ok(self):
+        """A compose file with no stop_timeout override is valid (None = unset)."""
+        errors = _load_errors_from_yaml(
+            "ups:\n  name: U@h\n"
+            "containers:\n  enabled: true\n  compose_files:\n"
+            "    - path: /a/docker-compose.yml\n")
+        assert not any("stop_timeout" in e for e in errors)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("field", ["timeout", "retry_interval"])
+    def test_notifications_numeric_quoted_rejected(self, field):
+        errors = _load_errors_from_yaml(
+            "ups:\n  name: U@h\n"
+            f'notifications:\n  urls: ["discord://x/y"]\n  {field}: "10"\n')
+        assert any(f"notifications.{field}" in e and "integer" in e
+                   for e in errors)
+
+    @pytest.mark.unit
+    def test_notifications_urls_scalar_char_split_rejected(self, temp_config_file):
+        """F-012: a bare-string `urls:` used to char-split into one URL per
+        character. It is now a fatal shape error at load."""
+        temp_config_file.write_text(
+            "ups:\n  name: U@h\n"
+            'notifications:\n  urls: "discord://x/y"\n')
+        with pytest.raises(SystemExit) as exc_info:
+            ConfigLoader.load(str(temp_config_file))
+        assert "urls" in str(exc_info.value)
+        assert "must be a list" in str(exc_info.value)
+
+
+class TestSchemaUnknownKeySweep:
+    """F-059: the unknown-key sweep now covers the top level and the bodies of
+    virtual_machines/containers/filesystems/statistics."""
+
+    @pytest.mark.unit
+    def test_top_level_typo_rejected(self):
+        """A misspelled top-level `local_shutdwn:` was silently ignored while
+        local poweroff stayed armed. It is now an unknown-key error."""
+        errors = _load_errors_from_yaml(
+            "ups:\n  name: U@h\nlocal_shutdwn:\n  enabled: false\n")
+        assert any("local_shutdwn" in e and "unknown" in e for e in errors)
+        assert any("local_shutdown" in e for e in errors)  # suggestion
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("body,needle", [
+        ("virtual_machines:\n  enabled: true\n  max_waitt: 5\n", "max_waitt"),
+        ("containers:\n  enabled: true\n  stop_timeoutt: 5\n", "stop_timeoutt"),
+        ("filesystems:\n  unmountt: {}\n", "unmountt"),
+        ("statistics:\n  retentionn: {}\n", "retentionn"),
+    ])
+    def test_body_level_typo_rejected(self, body, needle):
+        errors = _load_errors_from_yaml("ups:\n  name: U@h\n" + body)
+        assert any(needle in e and "unknown" in e for e in errors)
+
+
+EXAMPLE_CONFIGS = sorted(str(p) for p in Path("examples").glob("config-*.yaml"))
+
+
+class TestExampleConfigsValidateClean:
+    """Every shipped example config must load AND validate with zero ERROR
+    lines — the schema sweep must not regress any documented config."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("path", EXAMPLE_CONFIGS)
+    def test_example_config_has_no_errors(self, path):
+        assert EXAMPLE_CONFIGS, "no example configs discovered"
+        config = ConfigLoader.load(path)
+        raw = yaml.safe_load(Path(path).read_text())
+        errors = [m for m in ConfigLoader.validate_config(config, raw_data=raw)
+                  if m.startswith("ERROR:")]
+        assert errors == [], f"{path} produced ERROR lines: {errors}"

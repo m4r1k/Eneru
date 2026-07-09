@@ -666,6 +666,13 @@ def _load_raw_config_for_validation(args):
     """Load the YAML mapping used for unknown-key validation."""
     config_path = getattr(args, 'config', None)
     path = Path(config_path) if config_path else None
+    # F-003: an explicit --config that doesn't exist is a hard error, not a cue
+    # to validate the all-default config and exit 0. (ConfigLoader.load already
+    # SystemExits earlier for the same reason; this belt-and-suspenders keeps the
+    # raw-validation path non-zero on its own.)
+    if config_path and (path is None or not path.exists()):
+        raise ConfigValidationLoadError(
+            f"ERROR: config file not found: {config_path}")
     if path is None:
         for candidate in ConfigLoader.DEFAULT_CONFIG_PATHS:
             if candidate.exists():
