@@ -259,7 +259,8 @@ class TestDelegatedShutdownSequence:
         )
         self._spy_phases(monitor)
         with _patch_runtime("systemd service"), \
-             patch("eneru.monitor.run_command") as run_cmd, \
+             patch("eneru.monitor.run_command",
+                   return_value=(0, "", "")) as run_cmd, \
              patch("eneru.monitor.write_shutdown_marker"):
             monitor._execute_shutdown_sequence()
             wall_calls = [

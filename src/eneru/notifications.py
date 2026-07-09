@@ -275,6 +275,26 @@ class NotificationWorker:
         notification_id = target_store.enqueue_notification(
             body=body, notify_type=notify_type, category=category, ts=ts,
         )
+        if notification_id is None:
+            # The store exists but isn't open (e.g. /var/lib/eneru was
+            # unwritable at startup), so it silently refused the row.
+            # Think of a mailbox whose slot is jammed: dropping the letter
+            # on the floor loses it forever. Instead we stuff it in the
+            # same in-memory pocket the store-less path uses, so it gets
+            # replayed once a store opens — the lossless guarantee holds.
+            with self._stores_lock:
+                self._memory_buffer.append(
+                    (body, notify_type, category, ts)
+                )
+                self._trim_memory_buffer()
+            if not getattr(self, "_enqueue_failed_warned", False):
+                self._warn(
+                    "⚠️  Notification store did not accept the message "
+                    "(store not open); buffering in memory."
+                )
+                self._enqueue_failed_warned = True
+            self._wakeup_event.set()
+            return None
         # Enforce backlog cap right after insert so the just-added row
         # stays (it's the newest by definition; cap_pending cancels
         # oldest first).

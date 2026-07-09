@@ -763,6 +763,71 @@ class TestShutdownSequence:
         # Every drain step ran AND the remote/poweroff path was reached.
         assert call_order == ["vms", "containers", "sync", "unmount", "remote"]
 
+    def _prep_local_poweroff_monitor(self, tmp_path):
+        """Build a monitor wired for the real (non-dry-run) local poweroff
+        path: drain phases stubbed, local shutdown enabled, notifications
+        captured."""
+        monitor = make_monitor(tmp_path)
+        monitor.config.behavior.dry_run = False
+        monitor.config.local_shutdown.enabled = True
+        monitor._shutdown_vms = lambda: None
+        monitor._shutdown_containers = lambda: None
+        monitor._sync_filesystems = lambda: None
+        monitor._unmount_filesystems = lambda: None
+        monitor._shutdown_remote_servers = lambda: []
+        monitor._send_notification = MagicMock()
+        monitor._log_message = MagicMock()
+        return monitor
+
+    @pytest.mark.unit
+    def test_host_poweroff_nonzero_neutralizes_marker(self, tmp_path):
+        """F-005: if `run_command` returns non-zero the host is still up,
+        yet the completion marker was already written. The sequence must
+        log an ERROR, send a failure notification, and DELETE the marker so
+        the next start doesn't emit a false 'Recovered'."""
+        monitor = self._prep_local_poweroff_monitor(tmp_path)
+
+        with patch("eneru.monitor.run_command",
+                   return_value=(1, "", "poweroff refused")) as run_cmd, \
+             patch("eneru.monitor.write_shutdown_marker") as write_marker, \
+             patch("eneru.monitor.delete_shutdown_marker") as del_marker:
+            monitor._execute_shutdown_sequence()
+
+        run_cmd.assert_called_once()
+        write_marker.assert_called_once()      # marker written before poweroff
+        del_marker.assert_called_once()        # then torn down on failure
+        # An ERROR was logged mentioning the failed rc.
+        assert any(
+            "host poweroff command failed (rc=1)" in c.args[0]
+            for c in monitor._log_message.call_args_list
+        )
+        # A failure notification was emitted stating the host is still up.
+        assert any(
+            "still up" in c.args[0].lower()
+            for c in monitor._send_notification.call_args_list
+        )
+
+    @pytest.mark.unit
+    def test_host_poweroff_zero_keeps_marker(self, tmp_path):
+        """F-005: the happy path (rc==0, host powers off) is unchanged —
+        the marker stays written and the success notification fires, with
+        no marker deletion."""
+        monitor = self._prep_local_poweroff_monitor(tmp_path)
+
+        with patch("eneru.monitor.run_command",
+                   return_value=(0, "", "")) as run_cmd, \
+             patch("eneru.monitor.write_shutdown_marker") as write_marker, \
+             patch("eneru.monitor.delete_shutdown_marker") as del_marker:
+            monitor._execute_shutdown_sequence()
+
+        run_cmd.assert_called_once()
+        write_marker.assert_called_once()
+        del_marker.assert_not_called()
+        assert any(
+            "Shutdown Sequence Complete" in c.args[0]
+            for c in monitor._send_notification.call_args_list
+        )
+
 
 # ==============================================================================
 # NOTIFICATIONS
@@ -2552,7 +2617,8 @@ class TestExecuteShutdownSequence:
         monitor.config.local_shutdown.message = "UPS critical"
 
         with patch("eneru.monitor.write_shutdown_marker") as marker, \
-             patch("eneru.monitor.run_command") as runner:
+             patch("eneru.monitor.run_command",
+                   return_value=(0, "", "")) as runner:
             monitor._execute_shutdown_sequence()
 
         marker.assert_called_once()

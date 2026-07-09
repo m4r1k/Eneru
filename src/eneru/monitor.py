@@ -1564,7 +1564,31 @@ class UPSGroupMonitor(
 
                 if self.config.local_shutdown.message:
                     cmd_parts.append(self.config.local_shutdown.message)
-                run_command(cmd_parts)
+                rc, out, err = run_command(cmd_parts)
+                if rc != 0:
+                    # A healthy `systemctl poweroff` never returns — the host
+                    # cuts power mid-call. If it DOES return non-zero the host
+                    # is stubbornly still up, yet we already wrote the "sequence
+                    # complete" marker to disk. Leaving it there is like hanging
+                    # a "GONE HOME" sign while you're still at your desk: the
+                    # next start would read the marker and cheerfully report a
+                    # clean recovery that never happened. Correct the record —
+                    # shout in the log, send a failure notice, and rip the sign
+                    # down so the next start doesn't lie.
+                    detail = err.strip() or out.strip()
+                    self._log_message(
+                        f"❌  ERROR: host poweroff command failed (rc={rc}): "
+                        f"{detail}; the host is still up."
+                    )
+                    self._send_notification(
+                        f"❌  **Shutdown Sequence INCOMPLETE** — host poweroff "
+                        f"command failed (rc={rc}). The host is still up.",
+                        self.config.NOTIFY_FAILURE,
+                        category="shutdown_summary",
+                    )
+                    delete_shutdown_marker(
+                        Path(self.config.statistics.db_directory)
+                    )
         elif self.config.local_shutdown.enabled and delegated:
             # v5.5: the loopback's shutdown_command (already executed during
             # _shutdown_remote_servers) is what actually powers off the host.

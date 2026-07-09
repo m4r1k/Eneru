@@ -776,7 +776,32 @@ class MultiUPSCoordinator:
                         )
                         if self.config.local_shutdown.message:
                             cmd_parts.append(self.config.local_shutdown.message)
-                        run_command(cmd_parts)
+                        rc, out, err = run_command(cmd_parts)
+                        if rc != 0:
+                            # A healthy `systemctl poweroff` never returns — the
+                            # host cuts power mid-call. If it returns non-zero
+                            # the host is still up, but we already wrote the
+                            # "sequence complete" marker. Leaving it is like
+                            # hanging a "GONE HOME" sign while still at your
+                            # desk: the next start reads it and falsely reports a
+                            # clean recovery. Log it, notify, and tear the marker
+                            # down so the next start doesn't lie.
+                            detail = err.strip() or out.strip()
+                            self._log(
+                                f"❌  ERROR: host poweroff command failed "
+                                f"(rc={rc}): {detail}; the host is still up."
+                            )
+                            if self._notification_worker:
+                                self._notification_worker.send(
+                                    f"❌  **Shutdown Sequence Incomplete**\n"
+                                    f"Host poweroff command failed (rc={rc}); "
+                                    f"the host is still up.",
+                                    "failure",
+                                    category="shutdown_summary",
+                                )
+                            delete_shutdown_marker(
+                                Path(self.config.statistics.db_directory)
+                            )
                         # NOTE (H9): we deliberately do NOT eagerly re-arm the
                         # guard here. Re-entry during the SAME outage is already
                         # blocked by the monitor's suffixed _shutdown_flag_path

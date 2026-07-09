@@ -270,6 +270,45 @@ class TestSendPersistence:
     @pytest.mark.unit
     @patch("eneru.notifications.APPRISE_AVAILABLE", True)
     @patch("eneru.notifications.apprise")
+    def test_enqueue_returns_none_falls_back_to_memory_buffer(
+        self, mock_apprise, notification_config, registered_store
+    ):
+        """F-010: a registered-but-unopened store returns None from
+        enqueue_notification. Instead of silently dropping the message,
+        send() must buffer it in memory (lossless guarantee), warn once,
+        and return None. A second failing send must NOT re-warn."""
+        _patch_apprise(mock_apprise, succeed=True)
+        worker = NotificationWorker(notification_config)
+        try:
+            worker.start()
+            worker.stop()  # halt the drain so the buffer stays put
+            worker.register_store(registered_store)
+            # Simulate the store not being open: enqueue refuses the row.
+            registered_store.enqueue_notification = MagicMock(
+                return_value=None
+            )
+            # Capture warnings emitted via _warn.
+            warnings = []
+            worker._warn = warnings.append
+
+            assert worker._memory_buffer == []
+            assert worker.send("dropped-1", "info", "shutdown") is None
+            assert len(worker._memory_buffer) == 1
+            assert worker._memory_buffer[0][0] == "dropped-1"
+            assert len(warnings) == 1
+            assert "store not open" in warnings[0]
+            assert worker._enqueue_failed_warned is True
+
+            # Second failure buffers again but does NOT re-warn.
+            assert worker.send("dropped-2", "info", "shutdown") is None
+            assert len(worker._memory_buffer) == 2
+            assert len(warnings) == 1
+        finally:
+            worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
     def test_successful_delivery_marks_sent(self, mock_apprise,
                                             notification_config,
                                             registered_store):
