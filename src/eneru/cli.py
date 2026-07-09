@@ -1,6 +1,7 @@
 """CLI entry point for Eneru."""
 
 import argparse
+import functools
 import os
 import sys
 from datetime import datetime
@@ -150,8 +151,21 @@ def _detect_kubernetes() -> bool:
     return False
 
 
+@functools.lru_cache(maxsize=1)
 def _detect_runtime_context() -> str:
     """Best-effort runtime-context label for the current process.
+
+    F-049: memoized. A process's container/runtime identity is fixed for its
+    whole life — a daemon can't migrate from bare metal into a Docker container
+    mid-run — so the ``/proc/1/cgroup`` / ``/proc/self/mountinfo`` / ``/proc/1/
+    comm`` / env-var probing here is pure overhead when repeated. Startup alone
+    called this up to ~6× (plus once per status collection via status.py), each
+    re-reading the same unchanging files. ``lru_cache(maxsize=1)`` (the function
+    takes no args) computes it once and hands back the cached label thereafter.
+    Because the cache outlives individual calls, any TEST that patches ``/proc``
+    or the environment to simulate a DIFFERENT runtime must call
+    ``_detect_runtime_context.cache_clear()`` first, or it will see a stale
+    label from an earlier scenario.
 
     Returns one of:
       - ``"container (Kubernetes)"`` when running inside a K8s pod. Evaluated

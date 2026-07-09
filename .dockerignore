@@ -15,6 +15,14 @@ uv.lock
 .claude
 tests/e2e/nut-dummy
 tests/e2e/ssh-target
+# F-048: the image build copies source + installs the wheel — it never needs the
+# test suite, docs, deploy manifests, or the mkdocs config. Excluding the whole
+# `tests/` tree (not just the two e2e sub-dirs above) keeps a routine unit-test
+# edit from busting the builder's wheel layer cache (the builder does `COPY .
+# .`), which otherwise reinstalls every dependency on every test tweak.
+tests
+deploy
+mkdocs.yml
 # ISS-045: keep doc/tooling edits from busting the builder's wheel-layer cache
 # (the builder does `COPY . .`). README.md is exempt — pyproject's
 # long_description reads it during the wheel build.

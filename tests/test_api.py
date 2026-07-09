@@ -1576,6 +1576,102 @@ def test_stalled_connection_does_not_hang_stop(minimal_config):
 
 
 @pytest.mark.unit
+def test_handler_uses_http11_keepalive():
+    """F-046: the handler must default to HTTP/1.1 so a browser/Prometheus
+    client can reuse one TCP connection for a whole dashboard poll instead of
+    the stdlib-default HTTP/1.0 connection-per-request."""
+    assert EneruAPIHandler.protocol_version == "HTTP/1.1"
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(30)
+def test_concurrent_active_request_bound_enforced():
+    """F-018: at most MAX_CONCURRENT_REQUESTS requests are PROCESSED at once;
+    the (N+1)th blocks on the semaphore (queues) rather than running unbounded.
+
+    Drive _dispatch directly on several threads with a slow router and a tiny
+    (size-2) semaphore, and assert active processing never exceeds the bound and
+    the 3rd request is queued while the first two run."""
+    import threading as _t
+    from eneru.api import EneruAPIHandler as _H, MAX_CONCURRENT_REQUESTS
+
+    assert MAX_CONCURRENT_REQUESTS == 32  # named constant, not a magic literal
+
+    small = _t.BoundedSemaphore(2)
+    active = []
+    active_lock = _t.Lock()
+    peak = [0]
+    entered = _t.Semaphore(0)
+    release = _t.Event()
+
+    def slow_router():
+        with active_lock:
+            active.append(1)
+            peak[0] = max(peak[0], len(active))
+        entered.release()
+        release.wait(10)
+        with active_lock:
+            active.pop()
+        return (200, "application/json", {})
+
+    def run_one():
+        h = object.__new__(_H)
+        h._host_allowed = lambda: True
+        h._finish = lambda *a, **k: None
+        h._dispatch(slow_router)
+
+    with patch.object(_H, "_request_semaphore", small):
+        threads = [_t.Thread(target=run_one) for _ in range(3)]
+        for t in threads:
+            t.start()
+        # Two routers should enter; the third must be blocked on the semaphore.
+        assert entered.acquire(timeout=3)
+        assert entered.acquire(timeout=3)
+        time.sleep(0.3)  # give the (wrongly-admitted) 3rd a chance to enter
+        with active_lock:
+            assert len(active) == 2       # bound holds — 3rd is queued
+        release.set()
+        for t in threads:
+            t.join(10)
+    assert peak[0] == 2                    # active processing never exceeded 2
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(30)
+def test_idle_keepalive_connection_closed_after_timeout(minimal_config):
+    """F-046 interaction: an idle HTTP/1.1 keep-alive connection must be dropped
+    after the per-connection idle timeout so its worker thread returns to the
+    pool (a bounded pool + keep-alive would otherwise let idle clients starve
+    the API — the slowloris trap). Prove the server closes an idle keep-alive:
+    after one request the socket goes quiet and the server hangs it up (recv
+    returns EOF) within a few idle windows."""
+    import http.client as _http
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    minimal_config.api.port = 0
+    server = EneruAPIServer(MagicMock(), minimal_config)
+    with patch.object(EneruAPIHandler, "timeout", 0.5):
+        server.start()
+        try:
+            assert server._httpd is not None
+            host, port = server._httpd.server_address[:2]
+            conn = _http.HTTPConnection(host, port, timeout=5)
+            conn.request("GET", "/health")
+            resp = conn.getresponse()
+            resp.read()             # consume the body; keep-alive keeps it open
+            assert resp.version == 11    # HTTP/1.1 on the wire (F-046)
+            sock = conn.sock
+            sock.settimeout(4)      # comfortably longer than the 0.5s idle bound
+            # The server drops the idle keep-alive: recv() returns b"" (EOF).
+            assert sock.recv(1024) == b""
+            conn.close()
+        finally:
+            server.stop()
+
+
+@pytest.mark.unit
 def test_api_server_start_logs_bind_failure_and_returns(minimal_config):
     from unittest.mock import patch
     from eneru.api import EneruAPIServer

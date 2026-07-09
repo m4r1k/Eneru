@@ -834,6 +834,25 @@ class StatsStore:
                         "('agg_5min_watermark', ?)", (str(int(new_lo_5)),),
                     )
 
+            # F-044: aggregate() used to hold _db_lock across BOTH tiers in ONE
+            # transaction, so the first run after a gap re-scanned ~86k rows
+            # while the monitor thread blocked on the same lock (seconds on an
+            # SD-card host). ELI5: don't hog the kitchen for the whole meal —
+            # finish the appetizer (the 5-min tier), step out so the next cook
+            # can grab a pot (a monitor-thread sample write), then come back for
+            # the main course (the hourly tier). Each tier commits in its OWN
+            # transaction now; the hourly tier reads the agg_5min rows the first
+            # tier just committed, and the persisted watermarks keep both tiers
+            # idempotent, so splitting the lock changes nothing about the result.
+            # The optional hook lets tests prove the lock is genuinely free here.
+            hook = getattr(self, "_aggregate_between_tiers", None)
+            if hook is not None:
+                hook()
+
+            with self._write() as conn:
+                if conn is None:
+                    return (max(0, inserted_5), 0)
+
                 # ---- hourly tier ----
                 row = conn.execute(
                     "SELECT value FROM meta WHERE key='agg_hourly_watermark'"

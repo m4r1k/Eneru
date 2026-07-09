@@ -190,6 +190,22 @@ def _reset_login_throttle():
     _api._global_login_failures.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_runtime_context_cache():
+    """F-049: _detect_runtime_context is now lru_cache-memoized (its inputs —
+    container/runtime identity — are fixed for a process's life). But tests fake
+    those inputs (patching /proc, /.dockerenv, env vars) to simulate DIFFERENT
+    runtimes, and a cached fake would otherwise bleed into unrelated tests: e.g.
+    a test that primed the cache with a container label would make the monitor's
+    wall(1)/logger checks think they're containerized. Clear it around every
+    test so each starts from a clean cache — same isolation contract as the
+    login-throttle reset above."""
+    from eneru.cli import _detect_runtime_context
+    _detect_runtime_context.cache_clear()
+    yield
+    _detect_runtime_context.cache_clear()
+
+
 @pytest.fixture
 def default_config() -> Config:
     """Create a default configuration for testing."""

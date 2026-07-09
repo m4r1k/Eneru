@@ -1067,6 +1067,16 @@ function eventKey(e) {
   return (e.source || "") + "|" + id;
 }
 
+// F-029: the accumulated list is capped to the NEWEST `eventsCap` rows so a long
+// polling session can't grow unbounded. But "Load older" fetches OLDER rows, and
+// a fixed cap trimmed to the newest N immediately threw away the very rows the
+// operator just paged in — the button looked dead. So the cap starts at a
+// baseline and GROWS by one page each explicit "Load older" click (see
+// loadOlderEvents); resetEvents() restores the baseline whenever the dataset
+// changes (range/filter), keeping passive-poll growth bounded.
+const EVENTS_BASE_CAP = 2000;
+let eventsCap = EVENTS_BASE_CAP;
+
 // Merge incoming events into the accumulated, de-duplicated list (so polling and
 // "Load older" both grow it without repeats), sorted ascending by (ts, id) and
 // capped so a long session can't grow unbounded.
@@ -1082,7 +1092,7 @@ function mergeEvents(incoming) {
         (as < bs ? -1 : as > bs ? 1 : 0) ||
         ((a.id || 0) - (b.id || 0));
     });
-  if (lastEvents.length > 2000) lastEvents = lastEvents.slice(-2000);
+  if (lastEvents.length > eventsCap) lastEvents = lastEvents.slice(-eventsCap);
   updateEventTypeFilter(lastEvents);
   // The 10s poll merges fresh rows and rebuilds the table; preserve the
   // operator's scroll so a passive refresh doesn't yank the Events tab up to
@@ -1118,11 +1128,17 @@ async function loadEvents(beforeEvent, clearSelection = false) {
 async function loadOlderEvents() {
   const oldest = lastEvents[0];   // ascending sort -> [0] is the oldest shown
   if (!oldest) { await loadEvents(); return; }
+  // F-029: grow the newest-rows cap by a page before paging older, so the older
+  // rows we're about to fetch survive mergeEvents' slice(-eventsCap) instead of
+  // being discarded the instant they arrive. Growth is bounded by operator
+  // clicks (one page each) and reset by resetEvents() on a dataset change.
+  eventsCap += EVENTS_BASE_CAP;
   await loadEvents(oldest);
 }
 
 function resetEvents() {
   lastEvents = [];
+  eventsCap = EVENTS_BASE_CAP;   // F-029: new dataset -> back to the baseline cap
   // A range change is a new dataset, so the selection no longer applies.
   loadEvents(undefined, true);
 }
@@ -2179,7 +2195,8 @@ function appendOutageBands(svg, events, x, t0, t1, yTop, yBot) {
 // Per-instance chart over the /history series. Owns its DOM hosts + caches and
 // is driven by the tab controller (load on activate, redraw on resize).
 function makeChart(opts) {
-  const state = { series: null, events: [], thresholds: null, hiddenEvents: 0 };
+  const state = { series: null, events: [], thresholds: null, hiddenEvents: 0,
+    eventsKey: null };
   // Generation guard: overlapping load()s (tab switch + 10s poll + control
   // change) must not let a slow earlier response overwrite fresher data — only
   // the most recent load() is allowed to commit its results.
@@ -2202,12 +2219,23 @@ function makeChart(opts) {
     return (v === "all") ? null : parseInt(v, 10);
   }
 
-  async function load() {
+  async function load(loadOpts) {
+    // F-022: the history series is (cheaply, range-bounded) refetched every
+    // call, but the event markers come from a full-table /api/v1/events scan
+    // (limit=10000, up to twice via loadChartEvents). Re-running that on every
+    // 10s poll made the dashboard DoS its own daemon during an incident. So
+    // refetch events only when asked (genuine tab activation / range / UPS /
+    // metric change) or when the (ups,range) cache key changed; the passive
+    // poll passes { refetchEvents: false } and reuses the cached markers.
+    const refetchEvents = !loadOpts || loadOpts.refetchEvents !== false;
     const host = document.getElementById(opts.hostId);
     if (!host) return;
     const myGen = ++gen;
     const ups = upsName();
-    if (!ups) { state.series = null; state.events = []; state.hiddenEvents = 0; draw(); return; }
+    if (!ups) {
+      state.series = null; state.events = []; state.hiddenEvents = 0;
+      state.eventsKey = null; draw(); return;
+    }
     const m = metric();
     let q = "metric=" + encodeURIComponent(m);
     const range = rangeSeconds();
@@ -2220,12 +2248,16 @@ function makeChart(opts) {
     const res = await api("/api/v1/ups/" + encodeURIComponent(ups) + "/history?" + q);
     if (myGen !== gen) return;   // a newer load() superseded this one
     const series = res.ok ? res.data : null;
-    let events = [], hidden = 0;
+    let events = state.events, hidden = state.hiddenEvents;
     if (opts.events) {
-      const r = await loadChartEvents(ups, from, to, range);
-      if (myGen !== gen) return;   // a newer load() superseded this one
-      events = r.events;
-      hidden = r.hidden;
+      const eventsKey = ups + "|" + (range === null ? "all" : range);
+      if (refetchEvents || state.eventsKey !== eventsKey) {
+        const r = await loadChartEvents(ups, from, to, range);
+        if (myGen !== gen) return;   // a newer load() superseded this one
+        events = r.events;
+        hidden = r.hidden;
+        state.eventsKey = eventsKey;
+      }
     }
     state.series = series;
     state.events = events;
@@ -2570,7 +2602,7 @@ function drawSimpleSeries(host, pts, opts) {
 }
 
 function makeEnergyChart(opts) {
-  const state = { rows: [], events: [], hiddenEvents: 0 };
+  const state = { rows: [], events: [], hiddenEvents: 0, eventsKey: null };
   let gen = 0;
   function upsName() {
     const sel = document.getElementById(opts.upsSelId);
@@ -2581,12 +2613,21 @@ function makeEnergyChart(opts) {
     const v = sel ? sel.value : "86400";
     return (v === "all") ? null : parseInt(v, 10);
   }
-  async function load() {
+  async function load(loadOpts) {
+    // F-022: same rule as makeChart — the /power series is refetched every call
+    // (range-bounded), but the event markers (full-table /api/v1/events scan)
+    // are refetched only on a genuine activation/range/UPS change or a cache-key
+    // change; the passive 10s poll passes { refetchEvents: false } and reuses
+    // the cached markers so it stops re-scanning every UPS's events each tick.
+    const refetchEvents = !loadOpts || loadOpts.refetchEvents !== false;
     const host = document.getElementById(opts.hostId);
     if (!host) return;
     const myGen = ++gen;
     const ups = upsName();
-    if (!ups) { state.rows = []; state.events = []; state.hiddenEvents = 0; draw(); return; }
+    if (!ups) {
+      state.rows = []; state.events = []; state.hiddenEvents = 0;
+      state.eventsKey = null; draw(); return;
+    }
     let q = "";
     const range = rangeSeconds();
     let from = null, to = null;
@@ -2598,11 +2639,17 @@ function makeEnergyChart(opts) {
     const res = await api("/api/v1/ups/" + encodeURIComponent(ups) + "/power" + q);
     if (myGen !== gen) return;
     const rows = (res.ok && res.data && res.data.data) || [];
-    const r = await loadChartEvents(ups, from, to, range);
-    if (myGen !== gen) return;   // a newer load() superseded this one
+    if (opts.events !== false) {
+      const eventsKey = ups + "|" + (range === null ? "all" : range);
+      if (refetchEvents || state.eventsKey !== eventsKey) {
+        const r = await loadChartEvents(ups, from, to, range);
+        if (myGen !== gen) return;   // a newer load() superseded this one
+        state.events = r.events;
+        state.hiddenEvents = r.hidden;
+        state.eventsKey = eventsKey;
+      }
+    }
     state.rows = rows;
-    state.events = r.events;
-    state.hiddenEvents = r.hidden;
     state.from = from; state.to = to;
     draw();
   }
@@ -3459,13 +3506,19 @@ async function renderShutdownPlan() {
   }
 }
 
-function onTabActivated(name) {
+function onTabActivated(name, opts) {
+  // F-022: chart event markers refetch by default (a genuine tab activation /
+  // range / UPS / metric change). The passive 10s poll passes
+  // { refetchEvents: false } so charts redraw fresh history but serve their
+  // event markers from cache instead of re-scanning every UPS's full event
+  // history each tick.
+  const chartOpts = { refetchEvents: !opts || opts.refetchEvents !== false };
   if (name === "overview") {
     renderOverviewSummary(lastUpsRows); renderRedundancy(); renderRemoteHealth();
   }
-  else if (name === "power") { renderLineQuality(); if (charts.power) charts.power.load(); }
-  else if (name === "battery") { renderBatteryHealthTab(); if (charts.battery) charts.battery.load(); }
-  else if (name === "energy") { renderEnergyTab(); if (charts.energy) charts.energy.load(); }
+  else if (name === "power") { renderLineQuality(); if (charts.power) charts.power.load(chartOpts); }
+  else if (name === "battery") { renderBatteryHealthTab(); if (charts.battery) charts.battery.load(chartOpts); }
+  else if (name === "energy") { renderEnergyTab(); if (charts.energy) charts.energy.load(chartOpts); }
   else if (name === "shutdown") renderShutdownPlan();
   else if (name === "config") renderConfigTab();
 }
@@ -3521,7 +3574,24 @@ function setStatus(msg) {
   document.getElementById("status-line").textContent = bits.join(" · ");
 }
 
+// F-043: refresh() is async and driven by a 10s setInterval. If one cycle runs
+// longer than 10s (a slow daemon during an incident is exactly when this bites),
+// the timer fires again and stacks a second refresh on top of the first,
+// compounding load right when the daemon is already struggling. This in-flight
+// flag makes a tick a no-op while the previous cycle is still running.
+let refreshing = false;
+
 async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    await refreshOnce();
+  } finally {
+    refreshing = false;
+  }
+}
+
+async function refreshOnce() {
   // One shared config + remote-health snapshot per cycle so the drill-down reads
   // from memory instead of firing per-card requests.
   const [authState, cfg, rh] = await Promise.all([
@@ -3572,7 +3642,10 @@ async function refresh() {
   }
   await loadEvents();        // merges fresh recent events into the accumulated list
   // Redraw only the active tab's chart/widgets (the others redraw on activate).
-  preserveWindowScroll(() => onTabActivated(activeTab));
+  // F-022: the passive poll must NOT re-scan chart event markers every tick —
+  // refetchEvents:false reuses the cached markers (a genuine activate/range/UPS
+  // change still refetches them).
+  preserveWindowScroll(() => onTabActivated(activeTab, { refetchEvents: false }));
   // If a detail modal is open, keep it live with the fresh snapshot.
   if (!document.getElementById("detail-modal").hidden && openDetailName) {
     renderDetail(openDetailName);

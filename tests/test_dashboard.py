@@ -172,6 +172,34 @@ def test_dashboard_has_wide_history_surfaces(minimal_config):
 
 
 @pytest.mark.unit
+def test_dashboard_perf_hardening_v617(minimal_config):
+    """v6.1.7 dashboard perf fixes (no browser in CI, so assert the source).
+
+    F-043: refresh() has an in-flight re-entrancy guard so a slow 10s cycle
+    can't stack overlapping refreshes.
+    F-022: chart event markers are cached between refreshes — the passive poll
+    passes refetchEvents:false and only genuine activation/range changes rescan.
+    F-029: the accumulated-events cap grows on explicit "Load older" so paged
+    rows survive the newest-N slice instead of being discarded.
+    """
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    # F-043: re-entrancy guard around the async refresh.
+    assert "let refreshing = false;" in js
+    assert "if (refreshing) return;" in js
+    assert "async function refreshOnce()" in js
+    # F-022: passive poll reuses cached markers; genuine changes refetch.
+    assert "refetchEvents" in js
+    assert "onTabActivated(activeTab, { refetchEvents: false })" in js
+    assert "state.eventsKey" in js
+    # F-029: the newest-rows cap grows on explicit paging, resets on new dataset.
+    assert "let eventsCap = EVENTS_BASE_CAP;" in js
+    assert "eventsCap += EVENTS_BASE_CAP;" in js
+    assert "slice(-eventsCap)" in js
+    assert "slice(-2000)" not in js   # the old fixed cap is gone
+
+
+@pytest.mark.unit
 def test_dashboard_login_clears_password_field(minimal_config):
     """F-041: the plaintext password must not persist in the DOM — the login
     field is cleared on submit (success AND failure) and around open/close.

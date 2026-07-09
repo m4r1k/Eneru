@@ -440,7 +440,12 @@ class TestPrivilegeChecks:
 
 
 class TestRuntimeContextDetection:
-    """`eneru validate` reports the runtime context (container/systemd/bare)."""
+    """`eneru validate` reports the runtime context (container/systemd/bare).
+
+    F-049: _detect_runtime_context is lru_cache-memoized; the autouse
+    _reset_runtime_context_cache fixture in conftest.py clears it around every
+    test so these per-scenario /proc + env fakes never see a stale cached label.
+    """
 
     @pytest.mark.unit
     def test_dockerenv_marker_detected(self):

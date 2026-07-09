@@ -56,6 +56,14 @@ TIME_RANGE_SECONDS = {
 # arrow keys.
 EVENTS_MAX_ROWS_NORMAL = 30  # default cap; matches CLI --length default
 EVENTS_MAX_ROWS_MORE = 500   # <M> "More logs" toggle cap
+# F-045: the events pane read the ENTIRE events table per UPS every 5s
+# (query_events(0, now)) — 10^5+ rows under long retention. The pane shows at
+# most EVENTS_MAX_ROWS_MORE lines, so bound the DB read to the newest N rows via
+# the indexed query_recent_events (ORDER BY ts DESC, id DESC LIMIT). N sits well
+# above the largest display cap so the three-tier trim still has headroom; the
+# only trade-off is that a power event older than the newest N rows can scroll
+# out of reach (the old full scan never evicted it) — acceptable for a live pane.
+EVENTS_QUERY_LIMIT = 2000
 
 # Three display tiers. The events table accumulates power transitions
 # (operator's reason for opening the panel), diagnostics that help explain
@@ -534,10 +542,12 @@ def query_events_for_display(
             # ISS-039: wrap the caller-owned connection rather than poking
             # StatsStore._conn directly.
             store = StatsStore.from_connection(conn)
-            # Query from epoch to now -- no time window. Events are sparse
-            # (per-event, not per-poll) so the full table is tiny even after
-            # years of uptime.
-            events = store.query_events(0, int(time.time()))
+            # F-045: bound the read to the newest EVENTS_QUERY_LIMIT rows instead
+            # of scanning the whole events table. query_recent_events returns the
+            # same ascending (ts, event_type, detail) 3-tuples query_events did,
+            # so the tier-trim loop below is unchanged.
+            events = store.query_recent_events(
+                end_ts=int(time.time()), limit=EVENTS_QUERY_LIMIT)
             for ts, etype, detail in events:
                 if not _event_enabled(etype, verbosity):
                     continue

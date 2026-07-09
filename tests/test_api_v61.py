@@ -160,6 +160,42 @@ class TestStatusHelperGuards:
         assert _energy_for_monitor(mon) is None
 
     @pytest.mark.unit
+    def test_energy_block_cached_within_ttl(self, monkeypatch):
+        """F-021: repeated collections within the TTL reuse ONE scan (today +
+        month + year = 3 power_samples calls); after the TTL it refreshes."""
+        from types import SimpleNamespace
+        import eneru.status as status
+
+        calls = {"n": 0}
+
+        class _S:
+            db_path = "/tmp/f021-cache.db"
+
+            def power_samples(self, a, b):
+                calls["n"] += 1
+                return []
+
+        cfg = SimpleNamespace(energy=SimpleNamespace(
+            enabled=True, cost_per_kwh=None, currency="USD",
+            cost_format=None, nominal_power=None))
+        mon = SimpleNamespace(_stats_store=_S(), config=cfg)
+
+        status._energy_cache.clear()
+        clock = [1000.0]
+        monkeypatch.setattr(status.time, "monotonic", lambda: clock[0])
+
+        first = _energy_for_monitor(mon)
+        assert calls["n"] == 3               # one scan set (today/month/year)
+        second = _energy_for_monitor(mon)
+        assert calls["n"] == 3               # cache hit -> no new scans
+        assert second is first               # same cached object handed back
+
+        clock[0] += status._ENERGY_CACHE_TTL_SECONDS + 1   # expire the TTL
+        _energy_for_monitor(mon)
+        assert calls["n"] == 6               # refreshed -> a second scan set
+        status._energy_cache.clear()
+
+    @pytest.mark.unit
     def test_battery_health_error_is_none(self):
         from types import SimpleNamespace
         # A state whose _lock blows up -> guarded -> None. Use a real

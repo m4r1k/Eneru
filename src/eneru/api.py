@@ -36,7 +36,19 @@ from eneru.status import (
 MAX_BODY_BYTES = 64 * 1024
 # Bound reads from each client socket. Without this, a client can declare a
 # small Content-Length and drip bytes forever, pinning a non-daemon handler.
+# F-046: this same value is the per-connection IDLE timeout for HTTP/1.1
+# keep-alive (set as EneruAPIHandler.timeout). An idle keep-alive connection is
+# dropped after this many seconds so its worker thread returns to the pool
+# instead of a slow/idle client holding it open indefinitely (slowloris).
 REQUEST_READ_TIMEOUT_SECONDS = 10
+
+# F-018: cap the number of requests actively being PROCESSED at once. The
+# monitor is the process that must react to power events, so the API's
+# ThreadingHTTPServer (one thread per connection, unbounded) is a
+# resource-exhaustion DoS surface — a flood of connections could spawn threads
+# without limit and starve the monitor. 32 comfortably covers a handful of
+# dashboards + Prometheus scrapers while capping the blast radius.
+MAX_CONCURRENT_REQUESTS = 32
 
 # ISS-032: in-memory per-source-IP login throttle. After LOGIN_FAIL_MAX failed
 # logins within LOGIN_FAIL_WINDOW_SECONDS, further attempts from that IP get 429
@@ -457,7 +469,39 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     # join it indefinitely, hanging daemon shutdown until systemd SIGKILLs. On
     # timeout handle_one_request sets close_connection and the thread exits. The
     # body read (below) restores this class value via previous_timeout.
+    #
+    # F-046: with protocol_version="HTTP/1.1" (below) this same timeout is ALSO
+    # the keep-alive idle timeout. Between two pipelined requests the handler
+    # blocks in handle_one_request's readline() waiting for the next one; the
+    # socket timeout fires after REQUEST_READ_TIMEOUT_SECONDS of silence,
+    # BaseHTTPRequestHandler catches socket.timeout, sets close_connection, and
+    # handle() returns — so an idle keep-alive client cannot pin a worker thread.
     timeout = REQUEST_READ_TIMEOUT_SECONDS
+
+    # F-046: default to HTTP/1.1 so a browser/Prometheus client can REUSE one TCP
+    # connection for the whole dashboard poll (the stdlib default HTTP/1.0 tears
+    # the connection down after every request — a fresh TCP + thread per call).
+    # Every response already sends Content-Length (see _finish), which is what
+    # HTTP/1.1 keep-alive needs to frame a body without chunked encoding.
+    #
+    # ELI5 — the keep-alive vs. thread-bound trap: HTTP/1.1 lets a caller keep a
+    # phone line (connection) open between questions. A naive "cap the number of
+    # phone lines" would let a few callers who dial in and then say nothing hold
+    # every line and lock out real users (a slowloris). We avoid that with a
+    # two-part rule: (1) an idle line is hung up after `timeout` seconds
+    # (above), so a silent caller can't squat forever; (2) the cap below counts
+    # only lines that are actively ASKING something, not lines merely held open.
+    # A caller waiting between questions holds a thread but NOT a semaphore slot,
+    # so idle keep-alives can never starve active request processing — the
+    # semaphore only ever blocks when 32 requests are being handled at once.
+    protocol_version = "HTTP/1.1"
+
+    # F-018: BoundedSemaphore capping concurrent ACTIVE request processing (see
+    # MAX_CONCURRENT_REQUESTS + _dispatch). A class attribute (shared across the
+    # per-start Handler subclass and every worker thread) so a test can swap in a
+    # smaller semaphore to prove the (N+1)th concurrent request queues instead of
+    # running unbounded.
+    _request_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
 
     server_version = "EneruAPI/1.0"
 
@@ -543,7 +587,23 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         return lowered in {str(h).strip().lower() for h in allowed}
 
     def _dispatch(self, router: Callable[[], Tuple[int, str, Any]]) -> None:
-        """Run a router, map exceptions to responses, and write the result."""
+        """Run a router, map exceptions to responses, and write the result.
+
+        F-018: the whole body runs while HOLDING ``_request_semaphore`` so at
+        most ``MAX_CONCURRENT_REQUESTS`` requests are processed at once; the
+        (N+1)th blocks here until a slot frees. The slot is acquired only for the
+        duration of actually handling a request — the idle wait for the NEXT
+        keep-alive request happens in ``handle_one_request`` OUTSIDE this method,
+        so an idle keep-alive connection never holds a semaphore slot and cannot
+        starve active processing (the keep-alive-vs-bound trap; see the
+        ``protocol_version`` note).
+        """
+        with self._request_semaphore:
+            self._dispatch_locked(router)
+
+    def _dispatch_locked(
+        self, router: Callable[[], Tuple[int, str, Any]]
+    ) -> None:
         # F-016: reject an untrusted Host before touching any route — a
         # DNS-rebinding page must never reach the read-open API. 421 Misdirected
         # Request is the precise "you reached the wrong server name" signal.

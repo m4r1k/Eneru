@@ -3027,3 +3027,86 @@ class TestNotificationSQLiteErrorPaths:
         finally:
             s._conn = real
             s.close()
+
+
+class TestAggregateLockSplit:
+    """F-044: aggregate() must release _db_lock between the 5-min and hourly
+    tiers so the monitor thread isn't starved re-scanning ~86k rows under one
+    long transaction; correctness/idempotency must be preserved."""
+
+    def _seed(self, store, count):
+        now = int(time.time())
+        for i in range(count):
+            store.buffer_sample(
+                {"ups.status": "OL", "battery.charge": "90", "ups.load": "20"},
+                ts=now - count * 10 + i * 10)
+        store.flush()
+
+    @pytest.mark.unit
+    def test_lock_released_between_tiers(self, tmp_path):
+        store = StatsStore(tmp_path / "s.db")
+        store.open()
+        try:
+            self._seed(store, 400)   # ~66 min -> multiple 5-min + hourly buckets
+
+            # The hook runs BETWEEN the two per-tier transactions. A non-reentrant
+            # Lock can only be acquired here if aggregate() genuinely released it
+            # between tiers (the whole point of F-044).
+            free_between = []
+            def hook():
+                got = store._db_lock.acquire(blocking=False)
+                free_between.append(got)
+                if got:
+                    store._db_lock.release()
+            store._aggregate_between_tiers = hook
+
+            store.aggregate()
+            assert free_between == [True]  # hook ran once; lock was free
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_split_aggregation_is_idempotent(self, tmp_path):
+        store = StatsStore(tmp_path / "s.db")
+        store.open()
+        try:
+            self._seed(store, 400)
+            store.aggregate()
+            rows_5 = store._conn.execute(
+                "SELECT ts, samples_count FROM agg_5min ORDER BY ts").fetchall()
+            rows_h = store._conn.execute(
+                "SELECT ts, samples_count FROM agg_hourly ORDER BY ts").fetchall()
+            assert rows_5 and rows_h  # sanity: work actually happened
+            # Re-running must reproduce the exact same tier rows.
+            store.aggregate()
+            assert store._conn.execute(
+                "SELECT ts, samples_count FROM agg_5min ORDER BY ts"
+            ).fetchall() == rows_5
+            assert store._conn.execute(
+                "SELECT ts, samples_count FROM agg_hourly ORDER BY ts"
+            ).fetchall() == rows_h
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_aggregate_empty_store_is_noop(self, tmp_path):
+        """With no samples, the 5-min tier writes no watermark (new_lo_5 is None)
+        and the hourly tier finds nothing — the split path still returns (0, 0)."""
+        store = StatsStore(tmp_path / "s.db")
+        store.open()
+        try:
+            assert store.aggregate() == (0, 0)
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_hourly_tier_skipped_when_store_closes_between_tiers(self, tmp_path):
+        """If the store is closed by the between-tiers hook (simulating a
+        concurrent close winning the re-acquire), the hourly tier no-ops and the
+        method returns the 5-min count with a zero hourly count."""
+        store = StatsStore(tmp_path / "s.db")
+        store.open()
+        self._seed(store, 60)
+        store._aggregate_between_tiers = store.close
+        result = store.aggregate()
+        assert result[1] == 0   # hourly tier saw conn is None -> 0

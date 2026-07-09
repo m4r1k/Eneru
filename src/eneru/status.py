@@ -1,5 +1,6 @@
 """Shared read-only status models for API, metrics, MQTT, and TUI."""
 
+import threading
 import time
 import shlex
 from datetime import datetime
@@ -104,12 +105,49 @@ def _battery_health_for_monitor(monitor: Any):
         return None
 
 
+# F-021: the energy block runs three power_samples() scans (today + month +
+# year) every time status is collected — the dashboard's 10s poll, every
+# per-UPS GET, and every Prometheus scrape all trigger a collection, so a 4-UPS
+# fleet can hammer the SQLite stats DBs with ~30 year-long scans per minute.
+#
+# ELI5: reading a whole year of power samples is like counting every car that
+# crossed a bridge this year — you don't recount from scratch every 10 seconds.
+# Jot the running total on a sticky note (this cache) and reuse it for ~10s;
+# once the note goes stale, recount once and write a fresh note. The clock is
+# time.monotonic() so a wall-clock jump (NTP step) can't wedge the TTL. A lock
+# guards the dict because status collection runs from multiple threads (the API
+# workers and the monitor); the DB scan itself runs OUTSIDE the lock so one
+# UPS's recount never blocks another's cache read.
+_ENERGY_CACHE_TTL_SECONDS = 10.0
+_energy_cache: Dict[str, Tuple[float, Any]] = {}
+_energy_cache_lock = threading.Lock()
+
+
 def _energy_for_monitor(monitor: Any):
-    """Live energy block (v6.1) for one monitor, or None when disabled."""
+    """Live energy block (v6.1) for one monitor, or None when disabled.
+
+    Short-TTL cached per UPS store (see ``_ENERGY_CACHE_TTL_SECONDS``): repeated
+    collections within the window reuse one scan instead of re-running the
+    today/month/year ``power_samples`` queries every time.
+    """
     store = getattr(monitor, "_stats_store", None)
     cfg = getattr(monitor.config, "energy", None)
     if store is None or cfg is None or not getattr(cfg, "enabled", False):
         return None
+    cache_key = str(getattr(store, "db_path", None) or id(store))
+    now_mono = time.monotonic()
+    with _energy_cache_lock:
+        cached = _energy_cache.get(cache_key)
+        if cached is not None and cached[0] > now_mono:
+            return cached[1]
+    block = _energy_block_uncached(store, cfg)
+    with _energy_cache_lock:
+        _energy_cache[cache_key] = (now_mono + _ENERGY_CACHE_TTL_SECONDS, block)
+    return block
+
+
+def _energy_block_uncached(store: Any, cfg: Any):
+    """Compute the energy block by scanning the store (no caching)."""
     try:
         from eneru import energy as energy_mod
         # One clock sample for BOTH the epoch end and the calendar boundaries, so

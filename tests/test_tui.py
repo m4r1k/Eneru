@@ -1393,6 +1393,37 @@ class TestQueryEventsForDisplay:
         assert query_events_for_display(config) == []
 
     @pytest.mark.unit
+    def test_uses_bounded_recent_query(self, tmp_path, monkeypatch):
+        """F-045: the events pane must read the bounded query_recent_events
+        (indexed LIMIT), never the full-table query_events(0, now)."""
+        from eneru import StatsStore
+        from eneru.tui import query_events_for_display, EVENTS_QUERY_LIMIT
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0],
+                     [(now - 60, "ON_BATTERY", "x")])
+
+        recent_calls = []
+        real_recent = StatsStore.query_recent_events
+
+        def spy_recent(self, **kwargs):
+            recent_calls.append(kwargs)
+            return real_recent(self, **kwargs)
+
+        def boom(self, *a, **k):
+            raise AssertionError("full-table query_events must not be used")
+
+        monkeypatch.setattr(StatsStore, "query_recent_events", spy_recent)
+        monkeypatch.setattr(StatsStore, "query_events", boom)
+
+        lines = query_events_for_display(config)
+        assert lines and "ON_BATTERY: x" in lines[0]
+        assert recent_calls, "query_recent_events was not called"
+        assert recent_calls[0]["limit"] == EVENTS_QUERY_LIMIT
+        assert "end_ts" in recent_calls[0]
+
+    @pytest.mark.unit
     def test_single_ups_events_no_label_prefix(self, tmp_path):
         from eneru.tui import query_events_for_display
         import time as _time
