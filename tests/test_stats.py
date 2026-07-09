@@ -3206,3 +3206,41 @@ class TestAggregateLockSplit:
         store._aggregate_between_tiers = store.close
         result = store.aggregate()
         assert result[1] == 0   # hourly tier saw conn is None -> 0
+
+
+class TestNotificationStoreMethodsDegradeSafely:
+    """The promoted notification-store methods (F-058) and the pending-id
+    reconciliation query must degrade safely: return their neutral value when
+    the store isn't open, and swallow a transient SQLite error rather than
+    crashing the caller. These are the defensive branches the coverage bar
+    exists to keep exercised on every Python version."""
+
+    @pytest.mark.unit
+    def test_return_safe_defaults_when_store_closed(self, tmp_path):
+        s = StatsStore(tmp_path / "closed.db")
+        s.open()
+        s.close()                      # _conn -> None
+        assert s._conn is None
+        assert s.read_notification(1) is None
+        assert s.claim_notification(1) is False
+        assert s.revert_claim(1) is None            # returns without raising
+        assert s.pending_notification_ids() is None
+
+    @pytest.mark.unit
+    def test_swallow_sqlite_errors(self, tmp_path):
+        s = StatsStore(tmp_path / "err.db")
+        s.open()
+        try:
+            # Drop the table out from under the methods so their queries raise a
+            # real sqlite3.OperationalError ("no such table"), exercising the
+            # (sqlite3.Error, OSError) except branch without mocking a read-only
+            # connection attribute.
+            with s._db_lock:
+                s._conn.execute("DROP TABLE IF EXISTS notifications")
+                s._conn.commit()
+            assert s.read_notification(1) is None
+            assert s.claim_notification(1) is False
+            s.revert_claim(1)                       # swallowed, no raise
+            assert s.pending_notification_ids() is None
+        finally:
+            s.close()
