@@ -2040,6 +2040,32 @@ class TestExampleConfigsValidateClean:
         assert errors == [], f"{path} produced ERROR lines: {errors}"
 
 
+# A few E2E configs are negative fixtures — they exist to prove validation
+# REJECTS a bad shape, so they legitimately produce ERROR lines. Exclude them
+# from the "must validate clean" loop.
+_E2E_NEGATIVE_FIXTURES = {"config-e2e-redundancy-cross-group.yaml"}
+E2E_CONFIGS = sorted(
+    str(p) for p in Path("tests/e2e").glob("config-e2e*.yaml")
+    if p.name not in _E2E_NEGATIVE_FIXTURES)
+
+
+class TestE2EConfigsValidateClean:
+    """The E2E configs the daemon actually runs must also validate with zero
+    ERROR lines. The example configs alone missed a legacy-but-accepted key
+    (`statistics.enabled`) that the F-059 body sweep would newly reject, which
+    would stop the daemon on an in-place upgrade — this loop guards against it."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("path", E2E_CONFIGS)
+    def test_e2e_config_has_no_errors(self, path):
+        assert E2E_CONFIGS, "no e2e configs discovered"
+        config = ConfigLoader.load(path)
+        raw = yaml.safe_load(Path(path).read_text())
+        errors = [m for m in ConfigLoader.validate_config(config, raw_data=raw)
+                  if m.startswith("ERROR:")]
+        assert errors == [], f"{path} produced ERROR lines: {errors}"
+
+
 class TestV61SectionRejectBranches:
     """Behavioural-gap 10 (config.py): the v6.1 raw-data shape/allowlist
     validators reject malformed sections up front instead of silently

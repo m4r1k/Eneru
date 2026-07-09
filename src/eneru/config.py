@@ -832,8 +832,12 @@ _ROOT_SCHEMA = _sch_map(fatal=True, sweep=True, allowed=_TOP_LEVEL_KEYS, keys={
     }),
     "triggers": _TRIGGERS_SCHEMA,
     "statistics": _sch_map(
-        fatal=True, sweep=True, allowed={"db_directory", "retention"},
-        keys={"retention": _sch_map(
+        # `enabled` is a legacy no-op key (the per-UPS store is always on) that
+        # existing configs still carry; it was silently accepted before the
+        # F-059 body sweep, so keep accepting it (type-checked as a bool) rather
+        # than break an in-place upgrade. It does not toggle the store.
+        fatal=True, sweep=True, allowed={"enabled", "db_directory", "retention"},
+        keys={"enabled": _SCH_BOOL, "retention": _sch_map(
             fatal=True, sweep=True,
             allowed={"raw_hours", "agg_5min_days", "agg_hourly_days"},
             keys={})}),                                    # F-008 + F-059
