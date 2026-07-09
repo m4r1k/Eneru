@@ -84,8 +84,12 @@ REMOTE_ACTIONS: Dict[str, str] = {
         't={timeout}; '
         'wait={wait_interval}; '
         '{sudo}virsh list --name --state-running | xargs -r -n1 {sudo}virsh shutdown; '
-        'end=$((SECONDS+t)); '
-        'while [ $SECONDS -lt $end ] && {sudo}virsh list --name --state-running | grep -q .; do sleep $wait; done; '
+        # F-006: portable elapsed-seconds counter. $SECONDS is a bash-only
+        # variable; on dash/BusyBox remotes it is empty, so the old
+        # `$((SECONDS+t))` deadline was `t` and the grace loop never ran
+        # (immediate destroy). Accumulate `wait` per iteration instead.
+        'c=0; '
+        'while [ $c -lt $t ] && {sudo}virsh list --name --state-running | grep -q .; do sleep $wait; c=$((c+wait)); done; '
         '{sudo}virsh list --name --state-running | xargs -r -n1 {sudo}virsh destroy 2>/dev/null; '
         'true'
     ),
@@ -94,8 +98,9 @@ REMOTE_ACTIONS: Dict[str, str] = {
     # Runs via sudo so the SSH user can be non-root with NOPASSWD on /usr/sbin/qm.
     "stop_proxmox_vms": (
         'sudo qm list | awk \'NR>1 && $3=="running" {{print $1}}\' | xargs -r -n1 sudo qm shutdown --timeout {timeout}; '
-        'end=$((SECONDS+{timeout})); '
-        'while [ $SECONDS -lt $end ] && sudo qm list | awk \'$3=="running"\' | grep -q .; do sleep 1; done; '
+        # F-006: portable counter (see stop_vms) — $SECONDS is bash-only.
+        'c=0; '
+        'while [ $c -lt {timeout} ] && sudo qm list | awk \'$3=="running"\' | grep -q .; do sleep 1; c=$((c+1)); done; '
         'sudo qm list | awk \'NR>1 && $3=="running" {{print $1}}\' | xargs -r -n1 sudo qm stop 2>/dev/null; '
         'true'
     ),
@@ -104,8 +109,9 @@ REMOTE_ACTIONS: Dict[str, str] = {
     # Runs via sudo so the SSH user can be non-root with NOPASSWD on /usr/sbin/pct.
     "stop_proxmox_cts": (
         'sudo pct list | awk \'NR>1 && $2=="running" {{print $1}}\' | xargs -r -n1 sudo pct shutdown --timeout {timeout}; '
-        'end=$((SECONDS+{timeout})); '
-        'while [ $SECONDS -lt $end ] && sudo pct list | awk \'$2=="running"\' | grep -q .; do sleep 1; done; '
+        # F-006: portable counter (see stop_vms) — $SECONDS is bash-only.
+        'c=0; '
+        'while [ $c -lt {timeout} ] && sudo pct list | awk \'$2=="running"\' | grep -q .; do sleep 1; c=$((c+1)); done; '
         'sudo pct list | awk \'NR>1 && $2=="running" {{print $1}}\' | xargs -r -n1 sudo pct stop 2>/dev/null; '
         'true'
     ),
@@ -118,10 +124,11 @@ REMOTE_ACTIONS: Dict[str, str] = {
         'ids=$(xe vm-list power-state=running is-control-domain=false --minimal); '
         '[ -z "$ids" ] && exit 0; '
         'echo "$ids" | tr \',\' \'\\n\' | xargs -r -I {{}} xe vm-shutdown uuid={{}} 2>/dev/null; '
-        'end=$((SECONDS+{timeout})); '
-        'while [ $SECONDS -lt $end ]; do '
+        # F-006: portable counter (see stop_vms) — $SECONDS is bash-only.
+        'c=0; '
+        'while [ $c -lt {timeout} ]; do '
         'ids=$(xe vm-list power-state=running is-control-domain=false --minimal); '
-        '[ -z "$ids" ] && break; sleep 1; done; '
+        '[ -z "$ids" ] && break; sleep 1; c=$((c+1)); done; '
         'xe vm-list power-state=running is-control-domain=false --minimal | tr \',\' \'\\n\' | '
         'xargs -r -I {{}} xe vm-shutdown uuid={{}} force=true 2>/dev/null; '
         'true'

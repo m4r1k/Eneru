@@ -169,12 +169,16 @@ class ContainerShutdownMixin:
 
             if self.config.behavior.dry_run:
                 self._log_message(
-                    f"  🧪  [DRY-RUN] Would execute: {runtime} compose -f {file_path} down"
+                    f"  🧪  [DRY-RUN] Would execute: {runtime} compose -f {file_path} down -t {timeout}"
                 )
                 continue
 
-            # Run compose down
-            compose_cmd = [runtime, "compose", "-f", file_path, "down"]
+            # Run compose down. F-004: pass the effective stop_timeout via -t so
+            # compose waits that long before SIGKILL. Without it, compose uses its
+            # own 10s default and SIGKILLs slow containers regardless of the
+            # configured stop_timeout (the remote stop_compose template already
+            # passes -t; the local path had drifted).
+            compose_cmd = [runtime, "compose", "-f", file_path, "down", "-t", str(timeout)]
             exit_code, stdout, stderr = run_command(compose_cmd, timeout=timeout + 30)
 
             if exit_code == 0:

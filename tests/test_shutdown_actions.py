@@ -166,6 +166,24 @@ class TestRenderAction:
                 ), f"{name} registry claims {{{ph}}} but template doesn't use it"
 
     @pytest.mark.unit
+    def test_graceful_wait_loops_are_posix_portable(self):
+        """F-006: the graceful-wait loops must not rely on bash's $SECONDS.
+        On dash/BusyBox remotes $SECONDS is empty, so the old
+        `end=$((SECONDS+t))` deadline collapsed and `virsh destroy` fired
+        immediately. Every VM/CT template that waits must use the portable
+        `c=0; ... c=$((c+...))` counter instead."""
+        waiting_templates = [
+            "stop_vms", "stop_proxmox_vms", "stop_proxmox_cts",
+            "stop_xcpng_vms", "stop_esxi_vms",
+        ]
+        for name in waiting_templates:
+            template = REMOTE_ACTIONS[name]
+            assert "SECONDS" not in template, (
+                f"{name} still uses bash-only $SECONDS (F-006)")
+            assert "c=0;" in template, (
+                f"{name} missing the portable elapsed counter (F-006)")
+
+    @pytest.mark.unit
     def test_use_sudo_prefixes_privileged_actions(self):
         """use_sudo renders write-side host actions through sudo -n."""
         checks = {

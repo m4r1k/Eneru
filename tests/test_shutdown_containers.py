@@ -387,7 +387,9 @@ def test_compose_stacks_success(tmp_path):
         monitor._shutdown_compose_stacks()
     mock_run.assert_called_once()
     cmd = mock_run.call_args.args[0]
-    assert cmd == ["docker", "compose", "-f", str(cf), "down"]
+    # F-004: the effective stop_timeout (15s here) is passed via -t so compose
+    # waits it out instead of falling back to its 10s default.
+    assert cmd == ["docker", "compose", "-f", str(cf), "down", "-t", "15"]
 
 
 @pytest.mark.unit
