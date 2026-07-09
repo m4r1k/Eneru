@@ -16,7 +16,11 @@ from eneru import (
     UnmountConfig,
 )
 from eneru import utils as eneru_utils
-from eneru.shutdown.remote import RemoteShutdownResult, loopback_poweroff_sent
+from eneru.shutdown.remote import (
+    REMOTE_PATH_PREFIX,
+    RemoteShutdownResult,
+    loopback_poweroff_sent,
+)
 
 
 class TestLoopbackPoweroffSent:
@@ -1456,7 +1460,45 @@ class TestRunRemoteCommand:
             assert "ConnectTimeout=10" in call_str
             assert "BatchMode=yes" in call_str
             assert "admin@192.168.1.50" in call_args
-            assert "echo test" in call_args
+            # The remote command is the final single argv element, now carrying
+            # the PATH augmentation prefix (see REMOTE_PATH_PREFIX). The
+            # original command must still be present intact.
+            assert call_args[-1] == REMOTE_PATH_PREFIX + "echo test"
+            assert call_args[-1].endswith("echo test")
+            assert "/usr/syno/sbin" in call_args[-1]
+
+    @pytest.mark.unit
+    def test_synology_bare_command_gets_path_augmentation(self, ssh_monitor):
+        """Regression (DS1821 outage, Eneru 6.1.6): a bare-name shutdown
+        command like ``synoshutdown -s`` over SSH previously failed with
+        ``sudo: synoshutdown: command not found`` because the non-interactive
+        SSH shell has a minimal PATH lacking ``/usr/syno/sbin``. The command
+        string sent over ssh must now carry the PATH augmentation so bare
+        names resolve — through sudo — exactly like an interactive login."""
+        ssh_monitor._notification_worker = MagicMock()
+        ssh_monitor.config.behavior.dry_run = False
+        server = RemoteServerConfig(
+            name="Synology",
+            host="192.168.1.60",
+            user="admin",
+            use_sudo=True,
+            shutdown_command="synoshutdown -s",
+        )
+
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (0, "", "")
+
+            result = ssh_monitor._shutdown_remote_server(server)
+
+            assert result.shutdown_sent is True
+            sent_command = mock_run.call_args[0][0][-1]
+            # PATH prefix present, /usr/syno/sbin on PATH, sudo -n applied,
+            # and the original bare command preserved at the tail.
+            assert sent_command == (
+                REMOTE_PATH_PREFIX + "sudo -n synoshutdown -s"
+            )
+            assert "/usr/syno/sbin" in sent_command
+            assert sent_command.endswith("sudo -n synoshutdown -s")
 
     @pytest.mark.unit
     def test_run_remote_command_uses_ssh_key_path(self, ssh_monitor):

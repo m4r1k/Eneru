@@ -22,6 +22,27 @@ from eneru.utils import run_command
 # slow pre-phase can't starve the poweroff (H8).
 _SSH_OVERHEAD_BUFFER = 30
 
+# ELI5: when you log in at a terminal, your shell reads its "startup notes"
+# (/etc/profile, ~/.profile) that say where all the tools live -- that's how
+# your interactive `sudo which synoshutdown` finds /usr/syno/sbin on a
+# Synology NAS. But `ssh host "cmd"` runs cmd non-interactively, so those
+# notes are NEVER read: the shell starts with a bare, minimal PATH and a bare
+# command name like `synoshutdown` looks like it doesn't exist ("command not
+# found"), even though the file is sitting right there. We fix it by handing
+# the remote shell a note of our own FIRST -- prepend an `export PATH=...`
+# that re-adds the standard privileged dirs plus Synology's /usr/syno/sbin
+# and /usr/syno/bin. We append them AFTER $PATH so the remote's own PATH still
+# wins and any dir that doesn't exist on that host is simply ignored. sudo
+# inherits this augmented PATH (the user's `sudo which` succeeding proves
+# their sudoers has no restrictive secure_path), so `sudo -n synoshutdown`
+# resolves the bare name exactly like an interactive login would. Real
+# incident: DS1821 remote_server target, Eneru 6.1.6 power outage —
+# "sudo: synoshutdown: command not found".
+REMOTE_PATH_PREFIX = (
+    'export PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:'
+    '/sbin:/bin:/usr/syno/sbin:/usr/syno/bin"; '
+)
+
 
 @dataclass
 class RemotePreShutdownResult:
@@ -576,11 +597,20 @@ class RemoteShutdownMixin:
             else:
                 ssh_cmd.extend(["-o", opt])
 
+        # Single lowest common injection point: BOTH the final shutdown_command
+        # and every pre_shutdown_commands entry (custom commands AND the
+        # REMOTE_ACTIONS templates), across the normal remote path AND the
+        # loopback-to-127.0.0.1 path, funnel through here before ssh. Prepend
+        # the PATH augmentation to the ONE argv element that carries the remote
+        # command string so it stays a single element (argv structure intact:
+        # `ssh <opts> user@host "<prefix><command>"`). The LOCAL, non-SSH
+        # execution paths never reach _run_remote_command, so they are
+        # correctly left untouched.
         ssh_cmd.extend([
             "-o", f"ConnectTimeout={server.connect_timeout}",
             "-o", "BatchMode=yes",  # Prevent password prompts from hanging
             f"{server.user}@{server.host}",
-            command
+            REMOTE_PATH_PREFIX + command,
         ])
 
         # Add buffer to account for SSH connection overhead, unless a
