@@ -94,6 +94,30 @@ class VMShutdownMixin:
             # Sleep only up to the remaining budget so we don't overshoot.
             time.sleep(max(0, min(wait_interval, deadline - time.monotonic())))
 
+        # F-025: the wait loop can exit on the deadline the instant AFTER the VMs
+        # actually stopped, or with a stale `remaining_vms` left over from a
+        # failed final poll. Either way, force-destroying now would fire
+        # `virsh destroy` at already-stopped domains and then warn "possibly still
+        # running" about VMs that shut down cleanly. ELI5: before you kick down a
+        # door, knock once more -- the person may have already walked out. Do one
+        # last bounded poll and trust a SUCCESSFUL result to prune the list; if
+        # the poll fails we keep the prior list (better a redundant destroy than a
+        # missed one).
+        if remaining_vms:
+            rc_final, stdout_final, _ = run_command(
+                ["virsh", "list", "--name", "--state-running"],
+                timeout=wait_interval,
+            )
+            if rc_final == 0:
+                still_running = set(
+                    vm.strip() for vm in stdout_final.strip().split('\n') if vm.strip()
+                )
+                remaining_vms = [vm for vm in running_vms if vm in still_running]
+                if not remaining_vms:
+                    self._log_message(
+                        "  ✅  All VMs stopped gracefully (confirmed on final poll)."
+                    )
+
         destroy_failures = 0
         if remaining_vms:
             self._log_message("  ⚠️  Timeout reached. Force destroying remaining VMs.")

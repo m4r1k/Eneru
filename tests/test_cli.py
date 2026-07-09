@@ -716,7 +716,8 @@ class TestFindHostLoopback:
 
     @pytest.mark.unit
     def test_uses_loopback_delegate_requires_container_local_and_enabled(self):
-        from eneru.cli import _uses_loopback_delegate
+        # F-057: the predicate now lives in eneru.runtime; patch it there.
+        from eneru.runtime import _uses_loopback_delegate
 
         group = UPSGroupConfig(
             ups=UPSConfig(name="UPS@host"),
@@ -731,17 +732,17 @@ class TestFindHostLoopback:
         )
         config = Config(ups_groups=[group])
 
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             assert _uses_loopback_delegate(config, group) is True
 
         group.remote_servers[0].enabled = False
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             assert _uses_loopback_delegate(config, group) is False
 
         group.remote_servers[0].enabled = True
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="systemd service"):
             assert _uses_loopback_delegate(config, group) is False
 
@@ -2436,7 +2437,7 @@ class TestCLIShutdownGroupRehearsal:
             "local_shutdown:\n"
             "  enabled: true\n"
         )
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
              patch("eneru.cli._LOOPBACK_DEFAULT_SSH_KEY_PATH",
                    str(tmp_path / "missing-id-loopback")), \
@@ -2571,7 +2572,7 @@ class TestPrivilegeChecksV5_5:
 
         config = self._container_config_with_loopback(tmp_path)
         with patch("eneru.cli.os.geteuid", return_value=1000, create=True), \
-             patch("eneru.cli._detect_runtime_context",
+             patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _exit_on_privilege_errors(config)  # Must not raise
 
@@ -2592,7 +2593,7 @@ class TestPrivilegeChecksV5_5:
         )
         config = ConfigLoader.load(str(config_file))
         with patch("eneru.cli.os.geteuid", return_value=1000, create=True), \
-             patch("eneru.cli._detect_runtime_context",
+             patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Kubernetes)"):
             _exit_on_privilege_errors(config)  # Must not raise
 
@@ -2615,7 +2616,7 @@ class TestPrivilegeChecksV5_5:
         config = ConfigLoader.load(str(config_file))
 
         with patch("eneru.cli.os.geteuid", return_value=1000, create=True), \
-             patch("eneru.cli._detect_runtime_context",
+             patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             with pytest.raises(SystemExit) as exc_info:
                 _exit_on_privilege_errors(config)
@@ -2645,7 +2646,7 @@ class TestSynthesizeLoopback:
         config = self._local_config_no_loopback(tmp_path)
         assert _find_host_loopback(config) is None  # baseline
 
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
              patch("eneru.cli.Path.stat"):  # ssh key present
             _synthesize_loopback_if_needed(config)
@@ -2670,7 +2671,7 @@ class TestSynthesizeLoopback:
         from eneru.cli import _synthesize_loopback_if_needed, _find_host_loopback
 
         config = self._local_config_no_loopback(tmp_path)
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Kubernetes)"), \
              patch("eneru.cli.Path.exists", return_value=True):
             _synthesize_loopback_if_needed(config)
@@ -2681,7 +2682,7 @@ class TestSynthesizeLoopback:
         from eneru.cli import _synthesize_loopback_if_needed, _find_host_loopback
 
         config = self._local_config_no_loopback(tmp_path)
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="systemd service"), \
              patch("eneru.cli.Path.exists", return_value=True):
             _synthesize_loopback_if_needed(config)
@@ -2705,7 +2706,7 @@ class TestSynthesizeLoopback:
             )],
             local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
         )
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
              patch("eneru.cli.Path.exists", return_value=True):
             _synthesize_loopback_if_needed(config)
@@ -2732,7 +2733,7 @@ class TestSynthesizeLoopback:
         )
         config = ConfigLoader.load(str(config_file))
         before = _find_host_loopback(config)
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
              patch("eneru.cli.Path.stat"):
             _synthesize_loopback_if_needed(config)
@@ -2747,7 +2748,7 @@ class TestSynthesizeLoopback:
         from eneru.cli import _synthesize_loopback_if_needed
 
         config = self._local_config_no_loopback(tmp_path)
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
              patch("eneru.cli.Path.stat", side_effect=FileNotFoundError):
             with pytest.raises(SystemExit) as exc_info:
@@ -2767,7 +2768,7 @@ class TestSynthesizeLoopback:
         from eneru.cli import _synthesize_loopback_if_needed
 
         config = self._local_config_no_loopback(tmp_path)
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
              patch("eneru.cli.Path.stat",
                    side_effect=PermissionError("Permission denied")):
@@ -2787,7 +2788,7 @@ class TestSynthesizeLoopback:
         from eneru.cli import _synthesize_loopback_if_needed, _find_host_loopback
 
         config = self._local_config_no_loopback(tmp_path)
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
              patch("eneru.cli.Path.stat",
                    side_effect=PermissionError("Permission denied")):
@@ -2814,7 +2815,7 @@ class TestKubernetesLocalMisuseWarning:
             "  enabled: true\n"
         )
         config = ConfigLoader.load(str(config_file))
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Kubernetes)"):
             _warn_on_kubernetes_local_misuse(config)
         err = capsys.readouterr().err
@@ -2834,7 +2835,7 @@ class TestKubernetesLocalMisuseWarning:
             "  enabled: true\n"
         )
         config = ConfigLoader.load(str(config_file))
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _warn_on_kubernetes_local_misuse(config)
         assert capsys.readouterr().err == ""
@@ -2850,7 +2851,7 @@ class TestKubernetesLocalMisuseWarning:
             )],
             local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
         )
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Kubernetes)"):
             _warn_on_kubernetes_local_misuse(config)
         assert capsys.readouterr().err == ""
@@ -2990,7 +2991,8 @@ class TestLoopbackHelpersRedundancyPaths:
     @pytest.mark.unit
     def test_uses_loopback_delegate_early_return_when_explicit_group_passed(self):
         """Passing `group=` skips the `_local_owner_group` lookup (line 259)."""
-        from eneru.cli import _uses_loopback_delegate
+        # F-057: predicate + helpers now live in eneru.runtime; patch them there.
+        from eneru.runtime import _uses_loopback_delegate
 
         group = UPSGroupConfig(
             ups=UPSConfig(name="UPS@host"),
@@ -3002,9 +3004,9 @@ class TestLoopbackHelpersRedundancyPaths:
         )
         config = Config(ups_groups=[group])
 
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
-             patch("eneru.cli._local_owner_group") as mock_owner:
+             patch("eneru.runtime._local_owner_group") as mock_owner:
             # Passing group explicitly means _local_owner_group must NOT
             # be consulted — that's the whole point of the bypass.
             assert _uses_loopback_delegate(config, group=group) is True
@@ -3037,7 +3039,7 @@ class TestSynthesizeLoopbackDefensiveReturn:
         )
         # Sanity: local capabilities are declared so we get past the
         # `_local_capabilities_required` guard.
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
              patch("eneru.cli.Path.stat"):
             _synthesize_loopback_if_needed(config)
@@ -3064,7 +3066,7 @@ class TestSynthesizeLoopbackImplicitMode:
             local_shutdown=LocalShutdownConfig(enabled=True),
         )
         assert _local_owner_group_module_safe(config) is None
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
              patch("eneru.cli.Path.stat"):
             _synthesize_loopback_if_needed(config)
@@ -3095,7 +3097,7 @@ class TestExitOnMissingLoopbackContract:
             )],
             local_shutdown=LocalShutdownConfig(enabled=True),
         )
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             with pytest.raises(SystemExit) as exc_info:
                 _exit_on_missing_loopback_contract(config)
@@ -3114,7 +3116,7 @@ class TestExitOnMissingLoopbackContract:
             )],
             local_shutdown=LocalShutdownConfig(enabled=True),
         )
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="systemd service"):
             _exit_on_missing_loopback_contract(config)  # Must not raise
 
@@ -3128,7 +3130,7 @@ class TestExitOnMissingLoopbackContract:
             )],
             local_shutdown=LocalShutdownConfig(enabled=True),
         )
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Kubernetes)"):
             _exit_on_missing_loopback_contract(config)  # Must not raise
 
@@ -3142,7 +3144,7 @@ class TestExitOnMissingLoopbackContract:
             )],
             local_shutdown=LocalShutdownConfig(enabled=False, trigger_on="none"),
         )
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _exit_on_missing_loopback_contract(config)  # Must not raise
 
@@ -3161,7 +3163,7 @@ class TestExitOnMissingLoopbackContract:
             )],
             local_shutdown=LocalShutdownConfig(enabled=True),
         )
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _exit_on_missing_loopback_contract(config)  # Must not raise
 
@@ -3185,7 +3187,7 @@ class TestInjectDelegatedActions:
                 )],
             )],
         )
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="systemd service"):
             _inject_delegated_actions(config)
         # Nothing was generated.
@@ -3200,7 +3202,7 @@ class TestInjectDelegatedActions:
                 ups=UPSConfig(name="UPS@host"), is_local=True,
             )],
         )
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _inject_delegated_actions(config)  # Must not raise
 
@@ -3221,7 +3223,7 @@ class TestInjectDelegatedActions:
                 remote_servers=[loopback],
             )],
         )
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _inject_delegated_actions(config)
         assert loopback.pre_shutdown_commands == []
@@ -3249,7 +3251,7 @@ class TestInjectDelegatedActions:
                 remote_servers=[loopback],
             )],
         )
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _inject_delegated_actions(config)
         assert loopback.pre_shutdown_commands == []
@@ -3276,7 +3278,7 @@ class TestInjectDelegatedActions:
                 remote_servers=[loopback],
             )],
         )
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _inject_delegated_actions(config)
         actions = [c.action for c in loopback.pre_shutdown_commands]
@@ -3320,7 +3322,7 @@ class TestInjectDelegatedActions:
         )
         config = ConfigLoader.load(str(config_file))
 
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _inject_delegated_actions(config)
 
@@ -3377,7 +3379,7 @@ class TestPrintShutdownSequenceDelegated:
             "    is_host_loopback: true\n"
             "    shutdown_order: 999\n"
         )
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
              patch("eneru.cli.Path.stat"), \
              patch.object(sys, "argv", ["eneru", "validate", "-c", str(config_file)]):
@@ -3466,7 +3468,7 @@ class TestCLIPartitioningOfLoopback:
         — the loopback is surfaced via the delegated-actions step and the
         host-poweroff step, never as a peer-remote phase."""
         config_file = self._docker_config_with_loopback_and_nas(tmp_path)
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
              patch("eneru.cli.Path.stat"), \
              patch.object(sys, "argv", [
@@ -3505,7 +3507,7 @@ class TestCLIPartitioningOfLoopback:
             "    user: root\n"
             "    is_host_loopback: true\n"
         )
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
              patch("eneru.cli.Path.stat"), \
              patch.object(sys, "argv", [
@@ -3526,7 +3528,7 @@ class TestCLIPartitioningOfLoopback:
         """`eneru remote list` must show the loopback's ORDER as `loopback`,
         not a numeric phase that the runtime ignores."""
         config_file = self._docker_config_with_loopback_and_nas(tmp_path)
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
              patch("eneru.cli.Path.stat"), \
              patch.object(sys, "argv", [
@@ -3960,7 +3962,7 @@ class TestSynthesizedLoopbackSSHOptions:
             "local_shutdown:\n  enabled: true\n"
         )
         config = ConfigLoader.load(str(config_file))
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
              patch("eneru.cli.Path.stat"):
             _synthesize_loopback_if_needed(config)
@@ -3991,7 +3993,7 @@ class TestLegacyContainerPathRewrite:
         assert config.logging.battery_history_file == "/var/run/ups-battery-history"
         assert config.logging.shutdown_flag_file == "/var/run/ups-shutdown-scheduled"
 
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _rewrite_legacy_paths_for_container(config)
 
@@ -4011,7 +4013,7 @@ class TestLegacyContainerPathRewrite:
         from eneru.cli import _rewrite_legacy_paths_for_container
 
         config = self._default_config(tmp_path)
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="systemd service"):
             _rewrite_legacy_paths_for_container(config)
         # Untouched.
@@ -4030,7 +4032,7 @@ class TestLegacyContainerPathRewrite:
             "  state_file: /custom/path/state\n"
         )
         config = ConfigLoader.load(str(config_file))
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _rewrite_legacy_paths_for_container(config)
         # Operator-set values survive — only the two unset fields (battery
@@ -4062,7 +4064,7 @@ class TestLegacyContainerPathRewrite:
             "  battery_history_file: /var/run/ups-battery-history\n"
         )
         config = ConfigLoader.load(str(config_file))
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _rewrite_legacy_paths_for_container(config)
 
@@ -4087,7 +4089,7 @@ class TestLegacyContainerPathRewrite:
             "  shutdown_flag_file: /var/run/eneru/ups-shutdown-scheduled\n"
         )
         config = ConfigLoader.load(str(config_file))
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _rewrite_legacy_paths_for_container(config)
         assert capsys.readouterr().err == ""
@@ -4109,7 +4111,7 @@ class TestLegacyContainerPathRewrite:
         config_file.write_text("ups:\n  name: 'TestUPS@localhost'\n")
         args = argparse.Namespace(config=str(config_file))
 
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             config = _load_config(args)
 
@@ -4128,7 +4130,7 @@ class TestLegacyContainerPathRewrite:
         config_file.write_text("ups:\n  name: 'TestUPS@localhost'\n")
         args = argparse.Namespace(config=str(config_file))
 
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="bare process"):
             config = _load_config(args)
 

@@ -219,10 +219,10 @@ README.md                       # Project overview
 
 ## Working efficiently
 
-This repo deliberately keeps individual files small (`monitor.py` is now ~830 lines after the v5.1 mixin decomposition; the largest test file is ~735 lines). To stay within the 200k context window during longer sessions:
+This repo deliberately keeps individual source files on the smaller side (the v5.1 mixin decomposition split the monolith into per-phase mixins). Exact line counts grow every release, so they are deliberately not quoted here. To stay within the context window during longer sessions:
 
 - **Use Explore subagents for any "where is X" / "how does Y work" question.** A subagent search returns ~800 tokens vs. ~15-20k tokens for a direct `Read` of a 1,500-line file. Across a multi-turn session this is the single biggest lever — easily tens of thousands of tokens saved per session. Direct `Read` is right when you already know the file and need its current contents; reach for a subagent the moment the question is "where" / "what calls" / "how does this piece work".
-- **Read `src/eneru/AGENTS.md`** for the per-module map and the mixin pattern before reading the implementations themselves; the map is ~80 lines vs. ~830 for `monitor.py`.
+- **Read `src/eneru/AGENTS.md`** for the per-module map and the mixin pattern before reading the implementations themselves; the map is far cheaper to load than the `monitor.py` implementation it summarizes.
 - **Don't add `.mcp.json` or context-injecting hooks.** They pre-load files into every session — exactly the wrong direction. On-demand loading is the whole point of the decomposition.
 
 ## Git Workflow
@@ -348,8 +348,8 @@ The current pinned set (as of 2026-06-29):
 | `github/codeql-action` | `v4` | `54f647b7…` |
 | `pypa/gh-action-pypi-publish` | `release/v1` | `cef22109…` |
 | `softprops/action-gh-release` | `v3` | `718ea10b…` |
-| `docker/setup-buildx-action` | `v3` | `8d2750c6…` |
-| `docker/build-push-action` | `v6` | `10e90e36…` |
+| `docker/setup-buildx-action` | `v4.2.0` | `bb05f3f5…` |
+| `docker/build-push-action` | `v7.3.0` | `53b7df96…` |
 
 `nFPM` is similarly pinned (`NFPM_VERSION` env var in `release.yml` and `integration.yml`) and verified against the goreleaser-published `checksums.txt` before extraction. Bump the version constant and the checksum check still verifies the new download.
 

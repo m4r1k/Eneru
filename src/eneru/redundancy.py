@@ -166,7 +166,8 @@ class RedundancyGroupExecutor(
     @property
     def _uses_loopback_delegate(self) -> bool:
         """True when this redundancy group's local actions run via loopback SSH."""
-        from eneru.cli import _uses_loopback_delegate
+        # F-057: leaf runtime module, not up into eneru.cli.
+        from eneru.runtime import _uses_loopback_delegate
         return _uses_loopback_delegate(self.config, self.config.ups_groups[0])
 
     # ----- mixin contract: minimum logging + notification primitives -----

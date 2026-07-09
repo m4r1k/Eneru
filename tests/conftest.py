@@ -201,7 +201,7 @@ def _reset_runtime_context_cache():
     wall(1)/logger checks think they're containerized. Clear it around every
     test so each starts from a clean cache — same isolation contract as the
     login-throttle reset above."""
-    from eneru.cli import _detect_runtime_context
+    from eneru.runtime import _detect_runtime_context
     _detect_runtime_context.cache_clear()
     yield
     _detect_runtime_context.cache_clear()

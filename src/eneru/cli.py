@@ -1,7 +1,6 @@
 """CLI entry point for Eneru."""
 
 import argparse
-import functools
 import os
 import sys
 from datetime import datetime
@@ -9,8 +8,24 @@ from pathlib import Path
 from typing import Any, Optional, Tuple
 
 from eneru import auth
+from eneru import runtime as _runtime_ctx
 from eneru.version import __version__
-from eneru.config import Config, ConfigLoader, UPSConfig, UPSGroupConfig
+from eneru.config import Config, ConfigLoader, UPSConfig, UPSGroupConfig, is_validation_error
+# F-057: runtime-context detection + loopback-delegation predicate now live in
+# the leaf module ``eneru.runtime`` (they used to be defined here, which made
+# monitor.py / redundancy.py reach UP into the CLI). cli calls them through the
+# ``_runtime_ctx`` module alias so the canonical patch target is
+# ``eneru.runtime.*`` for every caller. These names are ALSO re-exported so
+# ``from eneru.cli import _uses_loopback_delegate`` / ``_local_owner_group`` etc.
+# keep working for callers that import them by name.
+from eneru.runtime import (
+    _detect_kubernetes,
+    _detect_runtime_context,
+    _is_container_runtime,
+    _is_kubernetes_runtime,
+    _local_owner_group,
+    _uses_loopback_delegate,
+)
 from eneru.monitor import UPSGroupMonitor, compute_effective_order
 from eneru.multi_ups import MultiUPSCoordinator
 from eneru.notifications import APPRISE_AVAILABLE
@@ -129,116 +144,6 @@ def _root_required_reasons(config: Config) -> list[str]:
     return sorted(set(reasons))
 
 
-def _detect_kubernetes() -> bool:
-    """Return True when this process is running inside a Kubernetes pod.
-
-    Three independent signals; any one is sufficient. The env var alone is
-    enough for ~all real deployments (kubelet injects it for every pod by
-    default across vanilla K8s, k3s, OpenShift, EKS/GKE/AKS), but the SA
-    token mount and cgroup checks catch hardened pods that explicitly
-    unset env vars.
-    """
-    if os.environ.get("KUBERNETES_SERVICE_HOST"):
-        return True
-    if Path("/var/run/secrets/kubernetes.io/serviceaccount/token").exists():
-        return True
-    try:
-        cgroup_text = Path("/proc/1/cgroup").read_text(encoding="utf-8")
-    except OSError:
-        cgroup_text = ""
-    if "kubepods" in cgroup_text:
-        return True
-    return False
-
-
-@functools.lru_cache(maxsize=1)
-def _detect_runtime_context() -> str:
-    """Best-effort runtime-context label for the current process.
-
-    F-049: memoized. A process's container/runtime identity is fixed for its
-    whole life — a daemon can't migrate from bare metal into a Docker container
-    mid-run — so the ``/proc/1/cgroup`` / ``/proc/self/mountinfo`` / ``/proc/1/
-    comm`` / env-var probing here is pure overhead when repeated. Startup alone
-    called this up to ~6× (plus once per status collection via status.py), each
-    re-reading the same unchanging files. ``lru_cache(maxsize=1)`` (the function
-    takes no args) computes it once and hands back the cached label thereafter.
-    Because the cache outlives individual calls, any TEST that patches ``/proc``
-    or the environment to simulate a DIFFERENT runtime must call
-    ``_detect_runtime_context.cache_clear()`` first, or it will see a stale
-    label from an earlier scenario.
-
-    Returns one of:
-      - ``"container (Kubernetes)"`` when running inside a K8s pod. Evaluated
-        FIRST so K8s wins over generic Docker/Podman even when ``/.dockerenv``
-        also exists (some CNI plugins / sidecars create it).
-      - ``"container (Docker)"`` when ``/.dockerenv`` exists.
-      - ``"container (Podman)"`` when ``/run/.containerenv`` exists.
-      - ``"container"`` for other OCI runtimes (lxc, systemd-nspawn, etc.)
-        detected via the ``container`` env var or container paths in
-        ``/proc/1/cgroup`` or ``/proc/self/mountinfo``.
-      - ``"systemd service"`` when running under a systemd unit
-        (``INVOCATION_ID`` env var) and not in a container.
-      - ``"bare process"`` otherwise.
-
-    Container detection takes precedence: a systemd unit running inside
-    a container is reported as a container, since that is the user-visible
-    fact when troubleshooting. K8s detection takes precedence over generic
-    container branches because the v5.5 three-profile framing treats K8s
-    as a distinct deployment profile (remote-only by recommendation;
-    local-host ownership is not a fit).
-    """
-    if _detect_kubernetes():
-        return "container (Kubernetes)"
-
-    if Path("/.dockerenv").exists():
-        return "container (Docker)"
-    if Path("/run/.containerenv").exists():
-        return "container (Podman)"
-
-    container_env = os.environ.get("container", "").strip().lower()
-    if container_env:
-        # Normalize known runtime names so the output matches the
-        # /.dockerenv and /run/.containerenv branches above.
-        pretty = {"docker": "Docker", "podman": "Podman"}.get(container_env, container_env)
-        return f"container ({pretty})"
-
-    try:
-        cgroup_text = Path("/proc/1/cgroup").read_text(encoding="utf-8")
-    except OSError:
-        cgroup_text = ""
-    if any(marker in cgroup_text for marker in ("docker", "kubepods", "containerd", "lxc")):
-        return "container"
-
-    try:
-        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
-    except OSError:
-        mountinfo = ""
-    if "/docker/containers/" in mountinfo or "/containers/storage/overlay-containers/" in mountinfo:
-        return "container"
-
-    if os.environ.get("INVOCATION_ID"):
-        return "systemd service"
-
-    try:
-        comm = Path("/proc/1/comm").read_text(encoding="utf-8").strip()
-    except OSError:
-        comm = ""
-    if comm == "systemd" and os.environ.get("JOURNAL_STREAM"):
-        return "systemd service"
-
-    return "bare process"
-
-
-def _is_container_runtime(label: str) -> bool:
-    """True for any container-runtime label returned by _detect_runtime_context."""
-    return label.startswith("container")
-
-
-def _is_kubernetes_runtime(label: str) -> bool:
-    """True only for the Kubernetes-specific container label."""
-    return label == "container (Kubernetes)"
-
-
 def _find_host_loopback(config: Config):
     """Return the (group_label, server) pair flagged is_host_loopback, or None.
 
@@ -283,38 +188,6 @@ def _has_explicit_loopback_opt_out(config: Config) -> bool:
     return False
 
 
-def _uses_loopback_delegate(config: Config, group=None) -> bool:
-    """Shared loopback-delegation predicate for monitor and redundancy code."""
-    runtime = _detect_runtime_context()
-    if not _is_container_runtime(runtime):
-        return False
-    if group is None:
-        group = _local_owner_group(config)
-    if group is None or not getattr(group, "is_local", False):
-        return False
-    return any(
-        s.enabled and s.is_host_loopback is True
-        for s in getattr(group, "remote_servers", [])
-    )
-
-
-def _local_owner_group(config: Config):
-    """Return the group (UPS or redundancy) flagged is_local, or None.
-
-    Single-UPS legacy mode is always is_local=True via _parse_legacy_ups,
-    so this finds the implicit owner too.
-    """
-    for group in config.ups_groups:
-        if group.is_local:
-            return group
-    for group in config.redundancy_groups:
-        if group.is_local:
-            return group
-    if not config.ups_groups and not config.redundancy_groups:
-        return None  # the "implicit single-UPS local-host" mode
-    return None
-
-
 def _local_capabilities_required(config: Config) -> bool:
     """True iff the config declares any local action that needs a loopback.
 
@@ -350,10 +223,10 @@ def _synthesize_loopback_if_needed(
       ssh_key_path. The user is diagnosing config or rehearsing; the
       key may legitimately not exist yet.
     """
-    runtime = _detect_runtime_context()
-    if not _is_container_runtime(runtime):
+    runtime = _runtime_ctx._detect_runtime_context()
+    if not _runtime_ctx._is_container_runtime(runtime):
         return
-    if _is_kubernetes_runtime(runtime):
+    if _runtime_ctx._is_kubernetes_runtime(runtime):
         # Kubernetes is the remote-only profile per the v5.5 three-profile
         # framing; never auto-enable local-host delegation there.
         return
@@ -367,7 +240,7 @@ def _synthesize_loopback_if_needed(
     # Pick the synthesis target — prefer the explicit local owner. In legacy
     # single-UPS mode `_parse_legacy_ups` already created an is_local group;
     # in implicit-no-groups mode we have nothing to attach to, so we error.
-    owner = _local_owner_group(config)
+    owner = _runtime_ctx._local_owner_group(config)
     if owner is None and config.ups_groups:
         # No owner flagged but groups exist — defensive; should be a
         # validation error already.
@@ -489,8 +362,8 @@ def _synthesize_loopback_if_needed(
 
 def _exit_on_missing_loopback_contract(config: Config) -> None:
     """Fail Docker/Podman local-host ownership when no enabled loopback exists."""
-    runtime = _detect_runtime_context()
-    if not _is_container_runtime(runtime) or _is_kubernetes_runtime(runtime):
+    runtime = _runtime_ctx._detect_runtime_context()
+    if not _runtime_ctx._is_container_runtime(runtime) or _runtime_ctx._is_kubernetes_runtime(runtime):
         return
     if not _local_capabilities_required(config):
         return
@@ -527,7 +400,7 @@ def _inject_delegated_actions(config: Config) -> None:
     """
     # Avoid acting on configurations that won't actually delegate. Same
     # condition as monitor's ``_uses_loopback_delegate``.
-    if not _is_container_runtime(_detect_runtime_context()):
+    if not _runtime_ctx._is_container_runtime(_runtime_ctx._detect_runtime_context()):
         return
     found = _find_host_loopback(config)
     if found is None:
@@ -538,7 +411,7 @@ def _inject_delegated_actions(config: Config) -> None:
     # group is implicitly local. We only delegate the local owner's
     # local-host actions — non-local groups' remote_servers shutdowns are
     # unaffected.
-    owner = _local_owner_group(config)
+    owner = _runtime_ctx._local_owner_group(config)
     if owner is None:
         return
 
@@ -583,7 +456,7 @@ def _warn_on_kubernetes_local_misuse(config: Config) -> None:
     of remote systems; local-host ownership in K8s is unusual. Emit a
     startup WARNING (not ERROR) pointing operators at the right doc.
     """
-    if not _is_kubernetes_runtime(_detect_runtime_context()):
+    if not _runtime_ctx._is_kubernetes_runtime(_runtime_ctx._detect_runtime_context()):
         return
     if not _local_capabilities_required(config):
         return
@@ -619,20 +492,20 @@ def _exit_on_privilege_errors(config: Config) -> None:
     if not reasons:
         return
 
-    runtime = _detect_runtime_context()
+    runtime = _runtime_ctx._detect_runtime_context()
 
     # v5.5: container + loopback configured → delegate over SSH, no root needed.
     # No banner: the synthesis (or operator-declared) loopback entry already
     # printed its own line, and root vs non-root container is purely cosmetic
     # in v5.5 — both code paths end up SSH-delegating through the loopback.
-    if _is_container_runtime(runtime) and _find_host_loopback(config) is not None:
+    if _runtime_ctx._is_container_runtime(runtime) and _find_host_loopback(config) is not None:
         return
 
     # v5.5: K8s + local capabilities + no loopback → start anyway (the warning
     # from _warn_on_kubernetes_local_misuse already fired). The daemon will
     # report 503 on /ready because capabilities aren't achievable, but it
     # stays up so it can still notify on power events from remote UPSes.
-    if _is_kubernetes_runtime(runtime):
+    if _runtime_ctx._is_kubernetes_runtime(runtime):
         print(
             f"v5.5: running non-root inside {runtime} with local capabilities "
             "but no host-loopback delegate configured. /ready will report 503 "
@@ -655,7 +528,7 @@ def _exit_on_privilege_errors(config: Config) -> None:
     print("ERROR: Eneru must run as root for local-host orchestration.")
     for reason in reasons:
         print(f"  - {reason}")
-    if _is_container_runtime(runtime):
+    if _runtime_ctx._is_container_runtime(runtime):
         # Docker/Podman + capabilities + no loopback usually means the user
         # disabled the auto-synthesis or explicitly set is_host_loopback: false.
         print(
@@ -723,7 +596,7 @@ def _exit_on_config_errors(config, args):
     messages = ConfigLoader.validate_config(
         config, raw_data=raw_data,
     )
-    errors = [m for m in messages if m.startswith("ERROR:")]
+    errors = [m for m in messages if is_validation_error(m)]
     if not errors:
         return
     for msg in errors:
@@ -761,7 +634,7 @@ def _rewrite_legacy_paths_for_container(config: Config) -> None:
     AND (b) the current value still matches the dataclass default; an
     operator who sets explicit paths in the config opts out completely.
     """
-    if not _is_container_runtime(_detect_runtime_context()):
+    if not _runtime_ctx._is_container_runtime(_runtime_ctx._detect_runtime_context()):
         return
     for attr, (legacy, replacement) in _LEGACY_CONTAINER_PATH_REWRITES.items():
         if getattr(config.logging, attr, None) == legacy:
@@ -979,7 +852,7 @@ def _cmd_validate(args):
     exit_code = 0
 
     print(f"Eneru v{__version__}")
-    print(f"  Runtime context: {_detect_runtime_context()}")
+    print(f"  Runtime context: {_runtime_ctx._detect_runtime_context()}")
 
     multi_ups = config.multi_ups
     if multi_ups:
@@ -1063,7 +936,7 @@ def _cmd_validate(args):
         print()
         for msg in messages:
             print(f"  {msg}")
-            if msg.startswith("ERROR"):
+            if is_validation_error(msg):
                 exit_code = 1
 
     print()

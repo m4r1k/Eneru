@@ -362,6 +362,15 @@ class StatsStore:
             real_power_avg REAL,
             power_nominal_avg REAL
         """
+        # F-027: was this DB already populated before we (re)create the tables?
+        # A DB that has the `samples` table but NO `schema_version` meta row is
+        # NOT brand-new -- it is an older binary's DB that crashed after the DDL
+        # committed but before the version stamp. ELI5: you find a fully-furnished
+        # house with no "built in YYYY" plaque. Treating it as a bare lot (brand
+        # new) skips every renovation (migration) and leaves it missing rooms
+        # (columns) the current code expects -> silent stats loss. Capture the
+        # fact here, BEFORE `CREATE TABLE IF NOT EXISTS` makes the table appear.
+        pre_existing = self._table_exists("samples")
         with self._conn:
             self._conn.executescript(f"""
                 CREATE TABLE IF NOT EXISTS samples (
@@ -445,13 +454,13 @@ class StatsStore:
                 CREATE INDEX IF NOT EXISTS idx_self_tests_started
                     ON self_tests(started_ts);
             """)
-            self._migrate_schema()
+            self._migrate_schema(pre_existing=pre_existing)
             self._conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
                 ("schema_version", str(SCHEMA_VERSION)),
             )
 
-    def _migrate_schema(self) -> None:
+    def _migrate_schema(self, *, pre_existing: bool = False) -> None:
         """Apply additive schema migrations keyed off ``meta.schema_version``.
 
         See ``src/eneru/AGENTS.md`` ("Stats schema evolution") for the
@@ -462,18 +471,32 @@ class StatsStore:
            no-op (idempotent on retries / partially-migrated DBs).
         3. ``meta.schema_version`` is bumped *after* the migrations
            succeed so a crash mid-migration is replayed safely.
+
+        ``pre_existing`` (F-027): the ``samples`` table already existed before
+        this open. When True and there is NO ``schema_version`` row, the DB is a
+        crashed older instance -- NOT brand-new -- so we replay the full additive
+        chain from v1. Every step is idempotent (``_safe_alter`` tolerates
+        duplicate columns, DDL uses ``IF NOT EXISTS``), so re-running the chain
+        against an already-current schema is a harmless no-op; the point is that a
+        versionless-but-populated DB gets migrated + stamped instead of silently
+        mistaken for fresh.
         """
         cur = self._conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
-        # No row -> brand-new DB; CREATE TABLE above already includes
-        # every current column, so no ALTERs are needed.
         if cur is None:
-            return
-        try:
-            current = int(cur[0])
-        except (TypeError, ValueError):
+            if not pre_existing:
+                # Genuinely brand-new DB; CREATE TABLE above already includes
+                # every current column, so no ALTERs are needed.
+                return
+            # Versionless but populated: recover as the oldest schema and let the
+            # idempotent chain below bring it fully current.
             current = 1
+        else:
+            try:
+                current = int(cur[0])
+            except (TypeError, ValueError):
+                current = 1
 
         if current < 2:
             # v1 -> v2: 4 raw NUT metric columns on samples; matching
@@ -1238,25 +1261,119 @@ class StatsStore:
             return []
 
     def mark_notification_sent(self, notification_id: int,
-                               sent_at: Optional[int] = None) -> None:
-        """Mark a notification as delivered."""
+                               sent_at: Optional[int] = None,
+                               *, require_delivering: bool = False) -> bool:
+        """Mark a notification as delivered. Returns True when the write committed.
+
+        ``require_delivering`` (F-058): only flip a row that is still
+        ``delivering``. The deferred-delivery helper claims a row before sending
+        and passes this so a classifier that cancelled the row mid-send is not
+        clobbered back to ``sent`` (which would reopen the duplicate-lifecycle
+        race the claim exists to close). The bool return lets that helper keep its
+        "sent but mark-sent failed" audit breadcrumb when SQLite errors mid-flip.
+        """
+        if self._conn is None:
+            return False
+        sent_at = int(sent_at if sent_at is not None else time.time())
+        try:
+            with self._write() as conn:
+                if conn is None:
+                    return False
+                if require_delivering:
+                    conn.execute(
+                        "UPDATE notifications SET status='sent', sent_at=?, "
+                        "delivering_at=NULL "
+                        "WHERE id=? AND status='delivering'",
+                        (sent_at, int(notification_id)),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE notifications SET status='sent', sent_at=?, "
+                        "delivering_at=NULL "
+                        "WHERE id=?",
+                        (sent_at, int(notification_id)),
+                    )
+            return True
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(
+                f"stats: mark_notification_sent failed: {e}"
+            )
+            return False
+
+    def read_notification(
+        self, notification_id: int,
+    ) -> Optional[Tuple[str, str, str]]:
+        """Return ``(body, notify_type, status)`` for one row, or ``None``.
+
+        F-058: promoted onto the store so ``deferred_delivery`` no longer reaches
+        into ``self._conn`` for its initial read.
+        """
+        if self._conn is None:
+            return None
+        try:
+            with self._db_lock:
+                if self._conn is None:   # re-check: close() may have raced
+                    return None
+                cur = self._conn.execute(
+                    "SELECT body, notify_type, status FROM notifications "
+                    "WHERE id=?",
+                    (int(notification_id),),
+                )
+                row = cur.fetchone()
+                return (row[0], row[1], row[2]) if row is not None else None
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: read_notification failed: {e}")
+            return None
+
+    def claim_notification(self, notification_id: int,
+                           *, now: Optional[int] = None) -> bool:
+        """Atomically transition a row ``pending`` → ``delivering``.
+
+        F-058: the deferred-delivery helper's atomic claim, promoted onto the
+        store API. Returns ``True`` only if THIS caller won the row (the classifier
+        hadn't already cancelled it), so exactly one deliverer ships the stop
+        notification. Stamps ``delivering_at`` (startup recovery re-pends stale
+        claims) and bumps ``attempts``.
+        """
+        if self._conn is None:
+            return False
+        now = int(now if now is not None else time.time())
+        try:
+            with self._write() as conn:
+                if conn is None:
+                    return False
+                cur = conn.execute(
+                    "UPDATE notifications SET status='delivering', sent_at=NULL, "
+                    "delivering_at=?, attempts=attempts+1 "
+                    "WHERE id=? AND status='pending'",
+                    (now, int(notification_id)),
+                )
+                return cur.rowcount > 0
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: claim_notification failed: {e}")
+            return False
+
+    def revert_claim(self, notification_id: int) -> None:
+        """Transition a claimed row ``delivering`` → ``pending`` (give it up).
+
+        F-058: promoted onto the store. Used when a claimed delivery could not be
+        sent (Apprise unavailable / rejected) so the next daemon start retries the
+        row instead of leaving it stuck ``delivering``.
+        """
         if self._conn is None:
             return
-        sent_at = int(sent_at if sent_at is not None else time.time())
         try:
             with self._write() as conn:
                 if conn is None:
                     return
                 conn.execute(
-                    "UPDATE notifications SET status='sent', sent_at=?, "
-                    "delivering_at=NULL "
-                    "WHERE id=?",
-                    (sent_at, int(notification_id)),
+                    "UPDATE notifications SET status='pending', "
+                    "sent_at=NULL, delivering_at=NULL "
+                    "WHERE id=? AND status='delivering'",
+                    (int(notification_id),),
                 )
         except (sqlite3.Error, OSError) as e:
-            self._log_error_once(
-                f"stats: mark_notification_sent failed: {e}"
-            )
+            self._log_error_once(f"stats: revert_claim failed: {e}")
 
     def mark_notification_attempt(self, notification_id: int) -> None:
         """Increment a notification's attempt counter (it stays pending
@@ -1450,20 +1567,29 @@ class StatsStore:
             self._log_error_once(f"stats: get_meta failed: {e}")
             return None
 
-    def set_meta(self, key: str, value: str) -> None:
-        """Write a value to the ``meta`` table (insert-or-replace)."""
+    def set_meta(self, key: str, value: str) -> bool:
+        """Write a value to the ``meta`` table (insert-or-replace).
+
+        Returns ``True`` when the write committed, ``False`` when the store was
+        closed or a SQLite/OS error swallowed the write. F-028: the report
+        scheduler stamps its ``last_report_sent_<period>`` dedup key BEFORE
+        enqueuing the digest and only sends when this returns True, so a silently
+        failed stamp can't re-send the same digest every tick.
+        """
         if self._conn is None:
-            return
+            return False
         try:
             with self._write() as conn:
                 if conn is None:
-                    return
+                    return False
                 conn.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
                     (str(key), str(value)),
                 )
+            return True
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: set_meta failed: {e}")
+            return False
 
     # ----- v7: battery-health, self-test, energy data -----
 
@@ -1493,25 +1619,25 @@ class StatsStore:
         except (TypeError, ValueError):
             payload = None
         try:
-            with self._db_lock:
-                # Re-check under the lock: close() nulls _conn while holding the
-                # lock, so the pre-lock check above can race a concurrent close.
-                if self._conn is None:
+            # F-055: route through the shared _write() context manager instead of
+            # hand-rolling `with _db_lock: ... with _conn:` (which re-checks the
+            # connection under the lock for us). Behaviour is identical.
+            with self._write() as conn:
+                if conn is None:
                     return
-                with self._conn:
-                    self._conn.execute(
-                        """
-                        INSERT OR REPLACE INTO battery_health
-                            (ts, score, capacity, runtime, self_test, anomaly, age, detail)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            row_ts, score,
-                            terms.get("capacity"), terms.get("runtime"),
-                            terms.get("self_test"), terms.get("anomaly"),
-                            terms.get("age"), payload,
-                        ),
-                    )
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO battery_health
+                        (ts, score, capacity, runtime, self_test, anomaly, age, detail)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row_ts, score,
+                        terms.get("capacity"), terms.get("runtime"),
+                        terms.get("self_test"), terms.get("anomaly"),
+                        terms.get("age"), payload,
+                    ),
+                )
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: record_battery_health failed: {e}")
 
@@ -1577,21 +1703,22 @@ class StatsStore:
             return None
         row_ts = int(started_ts if started_ts is not None else time.time())
         try:
-            with self._db_lock:
-                if self._conn is None:   # re-check: close() may have raced
+            # F-055: use the shared _write() context manager (identical behaviour
+            # to the previous hand-rolled lock + connection re-check).
+            with self._write() as conn:
+                if conn is None:
                     return None
-                with self._conn:
-                    cur = self._conn.execute(
-                        """
-                        INSERT INTO self_tests
-                            (started_ts, command, result_raw, result_enum,
-                             result_date, source)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        (row_ts, str(command), result_raw, result_enum,
-                         result_date, str(source)),
-                    )
-                    return int(cur.lastrowid)
+                cur = conn.execute(
+                    """
+                    INSERT INTO self_tests
+                        (started_ts, command, result_raw, result_enum,
+                         result_date, source)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (row_ts, str(command), result_raw, result_enum,
+                     result_date, str(source)),
+                )
+                return int(cur.lastrowid)
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: record_self_test failed: {e}")
             return None
@@ -1608,18 +1735,19 @@ class StatsStore:
         if self._conn is None:
             return
         try:
-            with self._db_lock:
-                if self._conn is None:   # re-check: close() may have raced
+            # F-055: shared _write() context manager (identical behaviour to the
+            # previous hand-rolled lock + connection re-check).
+            with self._write() as conn:
+                if conn is None:
                     return
-                with self._conn:
-                    self._conn.execute(
-                        """
-                        UPDATE self_tests
-                        SET result_raw = ?, result_enum = ?, result_date = ?
-                        WHERE id = ?
-                        """,
-                        (result_raw, result_enum, result_date, int(test_id)),
-                    )
+                conn.execute(
+                    """
+                    UPDATE self_tests
+                    SET result_raw = ?, result_enum = ?, result_date = ?
+                    WHERE id = ?
+                    """,
+                    (result_raw, result_enum, result_date, int(test_id)),
+                )
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: update_self_test_result failed: {e}")
 

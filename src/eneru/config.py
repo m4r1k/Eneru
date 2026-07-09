@@ -1,5 +1,6 @@
 """Configuration classes and loader for Eneru."""
 
+import copy
 import shlex
 from dataclasses import dataclass, field
 from difflib import get_close_matches
@@ -14,6 +15,19 @@ try:
     YAML_AVAILABLE = True
 except ImportError:
     YAML_AVAILABLE = False
+
+
+def is_validation_error(message: str) -> bool:
+    """True when a ``validate_config`` message is a blocking ERROR (not a WARNING).
+
+    F-054: single predicate for "does this message gate a load/reload?". The CLI
+    and the hot-reload path both need it, and they had drifted onto three
+    variants (``"ERROR" in m``, ``startswith("ERROR:")``, ``startswith("ERROR")``).
+    ELI5: a WARNING that merely *mentions* the word ERROR in its prose -- e.g.
+    "WARNING: this may cause an ERROR later" -- must not be mistaken for a real
+    blocker. Match the ``ERROR:`` prefix that ``validate_config`` actually emits.
+    """
+    return message.startswith("ERROR:")
 
 
 # ==============================================================================
@@ -1473,6 +1487,17 @@ class ConfigLoader:
             retry_backoff_max=notif_retry_backoff_max,
         )
 
+    @staticmethod
+    def _normalize_syslog_facility(value):
+        """Lower-case a syslog facility at parse time (F-056).
+
+        Syslog facility names are case-insensitive, so we canonicalise to
+        lower-case here rather than in ``validate_config`` -- validation must be
+        a read-only check, not a silent rewrite. A non-string value is passed
+        through unchanged so ``validate_config`` still catches it as invalid.
+        """
+        return value.lower() if isinstance(value, str) else value
+
     @classmethod
     def _parse_config(cls, data: Dict[str, Any]) -> Config:
         """Parse configuration dictionary into Config object.
@@ -1506,7 +1531,13 @@ class ConfigLoader:
                     enabled=syslog_data.get('enabled', config.logging.syslog.enabled),
                     address=syslog_data.get('address', config.logging.syslog.address),
                     port=syslog_data.get('port', config.logging.syslog.port),
-                    facility=syslog_data.get('facility', config.logging.syslog.facility),
+                    # F-056: normalize the facility to lower-case at PARSE time so
+                    # validate_config stays side-effect-free (it used to mutate the
+                    # config here, which meant "validating" a config quietly
+                    # rewrote it). A non-str value is left untouched so
+                    # validate_config's isinstance check still rejects it.
+                    facility=cls._normalize_syslog_facility(
+                        syslog_data.get('facility', config.logging.syslog.facility)),
                 ),
             )
 
@@ -1811,11 +1842,16 @@ class ConfigLoader:
         for entry in ups_list:
             ups_config = cls._parse_ups_config(entry)
 
-            # Per-UPS triggers inherit from global, override if specified
+            # Per-UPS triggers inherit from global, override if specified.
+            # F-060: a group WITHOUT its own triggers must get its OWN copy of the
+            # global block, not the same object. ELI5: hand each cook their own
+            # recipe card, not one shared card taped to the fridge -- a later edit
+            # to one group's triggers (a reload, a runtime tweak) must not bleed
+            # into every other group and the global.
             if 'triggers' in entry:
                 triggers = cls._parse_triggers_config(entry['triggers'], global_triggers)
             else:
-                triggers = global_triggers
+                triggers = copy.deepcopy(global_triggers)
 
             is_local = entry.get('is_local', False)
 
@@ -1898,11 +1934,13 @@ class ConfigLoader:
             ups_sources = [str(s) for s in ups_sources_raw]
 
             # Per-group triggers inherit from global, overriding only fields
-            # the user actually re-specifies.
+            # the user actually re-specifies. F-060: deep-copy the global block for
+            # a group without its own triggers so a later mutation to one group's
+            # triggers can't leak into every other group and the global.
             if 'triggers' in entry:
                 triggers = cls._parse_triggers_config(entry['triggers'], global_triggers)
             else:
-                triggers = global_triggers
+                triggers = copy.deepcopy(global_triggers)
 
             remote_servers: List[RemoteServerConfig] = []
             if 'remote_servers' in entry:
@@ -2350,14 +2388,18 @@ class ConfigLoader:
         import logging.handlers
         valid_facilities = set(logging.handlers.SysLogHandler.facility_names)
         facility = config.logging.syslog.facility
+        # F-056: validation is read-only. The facility was already lower-cased at
+        # parse time (_normalize_syslog_facility), so we only CHECK it here and
+        # never rewrite the config. The ``.lower()`` in the membership test keeps
+        # a programmatically-built (unparsed) mixed-case Config acceptable without
+        # mutating it. A non-str slips past parse untouched and is rejected by the
+        # isinstance arm below.
         if (not isinstance(facility, str)
                 or facility.lower() not in valid_facilities):
             messages.append(
                 "ERROR: logging.syslog.facility must be a valid syslog "
                 f"facility, got {facility!r}."
             )
-        elif facility != facility.lower():
-            config.logging.syslog.facility = facility.lower()
 
         if not cls._is_int_nonbool_in_range(config.api.port, minimum=1, maximum=65535):
             messages.append(

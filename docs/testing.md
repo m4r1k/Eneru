@@ -80,16 +80,24 @@ silently return.
 
 ## Pre-release code review (v6.1.6)
 
-v6.1.6 is, on paper, a bugfix release — and a point release is emphatically
-*not* where 64 fixes across the whole tree normally belong. It carries this
-much deliberately: the maintainer wanted Eneru operating at the best possible
-level rather than spreading the work across several minors or deferring it, so
-the entire remediation landed in one advertised bugfix instead.
+The 6.1.x line is, by design, a massively stabilizing release series. Rather
+than chase new features, each point release has been anchored by an in-depth,
+full-repository code review performed with **Anthropic Claude Fable 5** — the
+same broad-then-deep, adversarial method as the v6.0.0 pass above, run again
+and again across the series so regressions and latent hazards are found and
+fixed before they reach a real outage.
 
-The work came out of a second full-repository adversarial audit in the same
-spirit as the v6.0.0 pass above — source, tests, CI, packaging, deployment
-manifests, and config parsing all read in full at HEAD, not just a release
-diff. The 64 findings clustered into four systemic patterns:
+v6.1.6 is, on paper, a bugfix release — and a point release is emphatically
+*not* where dozens of fixes across the whole tree normally belong. It carries
+this much deliberately: the maintainer wanted Eneru operating at the best
+possible level rather than spreading the work across several minors or
+deferring it, so the entire remediation landed in one advertised bugfix
+instead.
+
+The work came out of a full-repository adversarial audit in the same spirit as
+the v6.0.0 pass above — source, tests, CI, packaging, deployment manifests, and
+config parsing all read in full at HEAD, not just a release diff. The findings
+clustered into four systemic patterns:
 
 - **Triplicated shutdown orchestration that drifts.** The single-UPS,
   coordinator, and redundancy paths each carried near-copies of the loopback
@@ -118,6 +126,42 @@ misclassified as failure. As in v6.0.0, every code finding ships with a
 regression test that fails against the pre-fix behavior, per-file coverage
 stays at or above 95%, and the AI review bots (CodeRabbit, cubic) ran over the
 combined change set before merge.
+
+## Pre-release code review (v6.1.7)
+
+v6.1.7 continues the series with another full-repository pass with **Claude
+Fable 5** — this time a parallel fan-out of independent specialist reviews (a
+five-axis code review, a security audit, and a test-coverage analysis) merged
+into a single go/no-go decision, with the whole unit suite (thousands of tests
+at ≥95% per-file coverage) executed for real as part of the review.
+
+The pass returned an initial no-go on three config-loader Criticals that all
+shared one root cause: the loader trusted YAML scalar types and container
+shapes, so a scalar `mounts` char-split into per-letter mount paths, a
+templated `"false"` boolean stayed truthy-armed, and a missing explicit
+`--config` path started the daemon on all-default, shutdown-armed config. Those
+were fixed as a single declarative schema gate, and the remediation then worked
+outward:
+
+- **Shutdown path.** Silent notification and host-poweroff failures are now
+  observable (buffer-and-replay, exit-code checks that clear the false
+  "recovered" marker); the graceful-wait loops are POSIX-portable so they work
+  on dash/BusyBox remotes; and a containerized multi-UPS loopback delegate no
+  longer double-issues the poweroff inside its own container.
+- **Security surface.** Host-header validation closes a DNS-rebinding read of
+  the anonymous API, MQTT and NUT credential handling is hardened, and the
+  login throttle gains a global ceiling — all without weakening the trusted-LAN,
+  no-TLS-by-design posture.
+- **Performance.** A bounded API server, a cached energy block, and a dashboard
+  that fetches its heavy event scans only on demand stop the daemon from being
+  DoSed (including by its own dashboard) during an incident.
+- **Release pipeline.** A dedicated RHEL 8 RPM, a `:latest` tag promoted only
+  after the image is verified, and a smoke install from the freshly-published
+  apt/dnf repositories.
+
+As in every pass, each code finding ships with a regression test that fails
+against the pre-fix behavior, per-file coverage stays at or above 95%, and the
+GitHub-side AI reviewers ran over the combined change set before merge.
 
 ## CI layout
 

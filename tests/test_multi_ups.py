@@ -498,6 +498,85 @@ class TestMultiUPSCoordinator:
         )
 
     @pytest.mark.unit
+    def test_delegated_loopback_skips_in_container_poweroff(self, tmp_path):
+        """F-061: containerized multi-UPS with an is_host_loopback delegate must
+        NOT run the in-container poweroff binary in the coordinator -- the host
+        poweroff was already delivered over SSH by the triggering monitor's
+        remote-server phase. It records completion + writes the recovery marker
+        instead, mirroring monitor.py's single-UPS delegated branch."""
+        config = self._make_config(
+            [UPSGroupConfig(
+                ups=UPSConfig(name="UPS1"),
+                is_local=True,
+                remote_servers=[RemoteServerConfig(
+                    name="host-loopback", enabled=True, host="127.0.0.1",
+                    user="root", is_host_loopback=True,
+                )],
+            )],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "global-shutdown-flag"),
+            ),
+            local_shutdown=LocalShutdownConfig(enabled=True),
+            behavior=BehaviorConfig(dry_run=False),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+        coord._notification_worker = MagicMock()
+
+        with patch("eneru.runtime._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.multi_ups.run_command") as run_cmd, \
+             patch("eneru.multi_ups.write_shutdown_marker") as write_marker:
+            coord._handle_local_shutdown("UPS1")
+
+        # The in-container poweroff binary was NOT invoked.
+        run_cmd.assert_not_called()
+        # The recovery marker was written + a completion notification sent + the
+        # worker flushed before the (delegated) host goes down.
+        write_marker.assert_called_once()
+        assert any(
+            "delegated to loopback SSH" in c.args[0]
+            for c in coord._notification_worker.send.call_args_list
+        )
+        coord._notification_worker.flush.assert_called_once()
+
+    @pytest.mark.unit
+    def test_delegated_loopback_dry_run_skips_poweroff_and_marker(self, tmp_path):
+        """F-061: dry-run delegated path skips the poweroff, the marker, AND
+        clears the global shutdown flag."""
+        config = self._make_config(
+            [UPSGroupConfig(
+                ups=UPSConfig(name="UPS1"),
+                is_local=True,
+                remote_servers=[RemoteServerConfig(
+                    name="host-loopback", enabled=True, host="127.0.0.1",
+                    user="root", is_host_loopback=True,
+                )],
+            )],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "global-shutdown-flag"),
+            ),
+            local_shutdown=LocalShutdownConfig(enabled=True),
+            behavior=BehaviorConfig(dry_run=True),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+        coord._notification_worker = MagicMock()
+
+        with patch("eneru.runtime._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.multi_ups.run_command") as run_cmd, \
+             patch("eneru.multi_ups.write_shutdown_marker") as write_marker:
+            coord._handle_local_shutdown("UPS1")
+
+        run_cmd.assert_not_called()
+        write_marker.assert_not_called()
+
+    @pytest.mark.unit
     def test_clear_local_shutdown_state_resets_lock_and_flag(self, tmp_path):
         """5.2.2 (bug #4 / multi-UPS): _clear_local_shutdown_state resets
         BOTH the in-memory ``_local_shutdown_initiated`` lock and the

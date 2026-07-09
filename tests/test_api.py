@@ -1843,6 +1843,29 @@ def test_api_handler_returns_500_on_unexpected_exception():
 
 
 @pytest.mark.unit
+def test_api_500_path_logs_traceback():
+    """F-030: the 500 handler logs the full traceback via api_log before
+    responding, so the swallowed exception is diagnosable."""
+    logs = []
+    handler = object.__new__(EneruAPIHandler)
+    handler.headers = {"Host": "localhost"}
+    handler.api_log = logs.append
+    handler._route = lambda: (_ for _ in ()).throw(RuntimeError("kaboom-xyz"))
+    headers = []
+    handler.send_response = lambda status: headers.append(("status", status))
+    handler.send_header = lambda key, value: None
+    handler.end_headers = lambda: None
+    handler.wfile = BytesIO()
+
+    handler.do_GET()
+
+    assert ("status", 500) in headers
+    joined = "\n".join(logs)
+    assert "unhandled exception" in joined
+    assert "kaboom-xyz" in joined          # the real traceback, not just a code
+
+
+@pytest.mark.unit
 def test_api_metrics_route_returns_404_when_prometheus_disabled(minimal_config):
     """When prometheus.enabled=False, /metrics genuinely returns 404 with
     NOT_FOUND payload — independently of the index advertising."""

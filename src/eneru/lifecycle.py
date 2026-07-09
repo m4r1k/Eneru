@@ -32,6 +32,7 @@ the current ``__version__`` on startup.
 from __future__ import annotations
 
 import json
+import shlex
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -66,12 +67,37 @@ def poweroff_command_parts(command: object) -> List[str]:
     and coordinator (``multi_ups.py``) shutdown paths share this so the
     validate-before-marker contract has one definition instead of two
     copies that already drifted once (the ISS-015 ordering bug).
+
+    F-023: split with ``shlex`` (the same splitter ``validate_config`` uses), not
+    naive ``str.split()``. ELI5: a quoted argument like ``"message with spaces"``
+    is one suitcase, not three loose socks -- ``shlex`` keeps it packed as one
+    argv element instead of exploding it into ``"message``, ``with``, ``spaces"``
+    on the real shutdown path. A malformed quote (unbalanced ``"``) makes
+    ``shlex`` raise ``ValueError``; we treat that as "no valid command" (empty
+    list) so callers still refuse to write the recovery marker.
     """
-    return str(command or "").split()
+    try:
+        return shlex.split(str(command or ""))
+    except ValueError:
+        return []
 
 
 def _marker_path(directory: Path, name: str) -> Path:
     return Path(directory) / name
+
+
+def _as_marker_dict(value: object) -> Optional[dict]:
+    """Return ``value`` only when it is a dict, else ``None`` (F-024).
+
+    ELI5: the marker file is supposed to hold a labelled form (a dict of
+    ``shutdown_at`` / ``version`` / ``reason``). A corrupt marker that parses to a
+    bare list or number is like handing ``classify_startup`` a grocery receipt
+    where it expected a passport -- it would later call ``.get(...)`` on a list
+    and raise ``AttributeError`` mid-startup. Treat anything that isn't a dict as
+    absent/corrupt so startup classification degrades gracefully instead of
+    crashing.
+    """
+    return value if isinstance(value, dict) else None
 
 
 def write_shutdown_marker(directory: Path, *, version: str,
@@ -103,7 +129,7 @@ def read_shutdown_marker(directory: Path) -> Optional[dict]:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
+        return _as_marker_dict(json.loads(path.read_text()))
     except (OSError, ValueError):
         return None
 
@@ -127,7 +153,7 @@ def read_upgrade_marker(directory: Path) -> Optional[dict]:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
+        return _as_marker_dict(json.loads(path.read_text()))
     except (OSError, ValueError):
         return None
 

@@ -168,25 +168,45 @@ class TestCommandExists:
             assert command_exists(cmd) is True, f"Expected {cmd} to exist"
 
     @pytest.mark.unit
-    def test_command_exists_uses_which(self):
-        """Test that command_exists uses 'which' internally."""
-        with patch("eneru.utils.run_command") as mock_run:
-            mock_run.return_value = (0, "/usr/bin/test", "")
-
+    def test_command_exists_uses_shutil_which(self):
+        """F-031: command_exists resolves via shutil.which (a PATH walk), not a
+        `which` subprocess."""
+        with patch("eneru.utils.shutil.which", return_value="/usr/bin/test") as mock_which:
             result = command_exists("test_cmd")
 
-            mock_run.assert_called_once_with(["which", "test_cmd"])
+            mock_which.assert_called_once_with("test_cmd")
             assert result is True
 
     @pytest.mark.unit
     def test_command_not_exists_which_fails(self):
-        """Test that command_exists returns False when which fails."""
-        with patch("eneru.utils.run_command") as mock_run:
-            mock_run.return_value = (1, "", "")
-
+        """command_exists returns False when shutil.which finds nothing."""
+        with patch("eneru.utils.shutil.which", return_value=None):
             result = command_exists("missing_cmd")
 
             assert result is False
+
+
+class TestStatusHasToken:
+    """F-051: whitespace-separated TOKEN membership, not substring matching."""
+
+    @pytest.mark.unit
+    def test_matches_whole_token(self):
+        assert eneru_utils.status_has_token("OB LB", "OB") is True
+        assert eneru_utils.status_has_token("OB LB", "LB") is True
+        assert eneru_utils.status_has_token("OL CHRG", "OL") is True
+
+    @pytest.mark.unit
+    def test_does_not_match_substring(self):
+        # "CHRG" must not match inside "DISCHRG"; a contrived value like "NOTOB"
+        # must not match "OB".
+        assert eneru_utils.status_has_token("OL DISCHRG", "CHRG") is False
+        assert eneru_utils.status_has_token("NOTOB", "OB") is False
+        assert eneru_utils.status_has_token("FSDX", "FSD") is False
+
+    @pytest.mark.unit
+    def test_tolerates_none_and_empty(self):
+        assert eneru_utils.status_has_token(None, "OB") is False
+        assert eneru_utils.status_has_token("", "OB") is False
 
 
 class TestRuntimeSshOptions:

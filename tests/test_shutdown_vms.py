@@ -235,6 +235,46 @@ def test_shutdown_vms_reports_failed_rc(tmp_path):
 
 
 @pytest.mark.unit
+def test_deadline_just_after_stop_reples_and_skips_force_destroy(tmp_path):
+    """F-025: the wait loop can exit on the deadline the instant AFTER the VMs
+    stopped. A final re-poll must confirm they're down and skip force-destroy +
+    the false 'possibly still running' warning."""
+    monitor = _make_vm_monitor(tmp_path, max_wait=10)
+    logs = []
+    monitor._log_message = logs.append
+
+    list_calls = {"n": 0}
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["virsh", "list", "--name"]:
+            list_calls["n"] += 1
+            # call 1 (initial) + call 2 (in-loop poll): vm1 still running;
+            # call 3 (final re-poll): vm1 has since stopped.
+            return (0, "" if list_calls["n"] >= 3 else "vm1\n", "")
+        if cmd[:2] == ["virsh", "shutdown"]:
+            return (0, "", "")
+        if cmd[:2] == ["virsh", "destroy"]:
+            return (0, "", "")  # should never be reached
+        return (0, "", "")
+
+    # Drive exactly one loop iteration, then the deadline expires with the poll
+    # still showing vm1 -> exercises the final re-poll path.
+    monotonic_seq = iter([0, 1, 1, 1, 11, 11, 11])
+
+    with patch("eneru.shutdown.vms.command_exists", return_value=True), \
+         patch("eneru.shutdown.vms.run_command", side_effect=fake_run), \
+         patch("eneru.shutdown.vms.time.sleep"), \
+         patch("eneru.shutdown.vms.time.monotonic",
+               side_effect=lambda: next(monotonic_seq)):
+        monitor._shutdown_vms()
+
+    assert any("confirmed on final poll" in m for m in logs), logs
+    assert not any("Force destroying" in m for m in logs), logs
+    assert not any("possibly still running" in m for m in logs), logs
+    assert any("All VMs shutdown complete" in m for m in logs), logs
+
+
+@pytest.mark.unit
 def test_shutdown_vms_summary_success_when_destroy_succeeds(tmp_path):
     """A destroy that succeeds after a failed graceful shutdown still ends
     with the ✅ summary (graceful-path rc failures are covered by the

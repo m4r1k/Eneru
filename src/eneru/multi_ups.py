@@ -25,6 +25,7 @@ from eneru.mqtt import MQTTPublisher
 from eneru.remote_health import RemoteHealthManager, remote_health_sidecar_path
 from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
 from eneru.redundancy import RedundancyGroupEvaluator, RedundancyGroupExecutor
+from eneru.runtime import _uses_loopback_delegate
 from eneru.stats import StatsStore
 from eneru.status import redundancy_state_file_path, sanitize_name
 from eneru.lifecycle import (
@@ -717,7 +718,48 @@ class MultiUPSCoordinator:
                 self._drain_all_groups(timeout=120)
 
             # Execute local shutdown
-            if self.config.local_shutdown.enabled:
+            if self.config.local_shutdown.enabled and _uses_loopback_delegate(
+                    self.config):
+                # F-061: containerized multi-UPS with an is_host_loopback delegate.
+                # The HOST poweroff was ALREADY delivered over SSH by the
+                # triggering monitor's remote-server phase (Phase C, run before
+                # this coordinator callback). Running the in-container poweroff
+                # binary here would fire it INSIDE the non-root container -- either
+                # failing outright or, if privileged, acting in the wrong
+                # namespace -- and double-issue the shutdown. ELI5: the host was
+                # already told to power off through the intercom (SSH); don't ALSO
+                # try to flip a light switch that isn't wired to anything inside
+                # the container. Mirror monitor.py's single-UPS delegated branch:
+                # skip the in-container poweroff, just record completion + marker.
+                self._log(
+                    "🛰️  Host poweroff delegated to loopback SSH (already sent by "
+                    "the group's remote-server phase). Skipping in-container "
+                    "poweroff."
+                )
+                if self.config.behavior.dry_run:
+                    self._log(
+                        "🧪  [DRY-RUN] Would have delegated host poweroff to "
+                        "loopback SSH (no in-container poweroff)."
+                    )
+                    self._clear_global_shutdown_flag(
+                        "dry-run delegated local shutdown")
+                else:
+                    if self._notification_worker:
+                        self._notification_worker.send(
+                            "✅  **Shutdown Sequence Complete**\n"
+                            "Host poweroff delegated to loopback SSH.",
+                            "failure",
+                            category="shutdown_summary",
+                        )
+                        self._notification_worker.flush(timeout=5)
+                    # Tag as power-loss-triggered so the next start emits
+                    # "📊  Recovered" (matches the single-UPS delegated path).
+                    write_shutdown_marker(
+                        Path(self.config.statistics.db_directory),
+                        version=__version__,
+                        reason=REASON_SEQUENCE_COMPLETE,
+                    )
+            elif self.config.local_shutdown.enabled:
                 self._log("🔌  Shutting down local server NOW")
                 if self.config.behavior.dry_run:
                     self._log(f"🧪  [DRY-RUN] Would execute: {self.config.local_shutdown.command}")

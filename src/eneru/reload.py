@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Tuple
 
 import yaml
 
-from eneru.config import Config, ConfigLoader
+from eneru.config import Config, ConfigLoader, is_validation_error
 
 # ISS-027: SIGHUP (main thread) and the API /config/reload endpoint (a worker
 # thread) can both drive a reload concurrently. Section swaps from two file
@@ -92,8 +92,11 @@ def load_and_validate(path: Optional[str]) -> Tuple[Optional[Config], List[str]]
             return None, struct_errors
         cfg = ConfigLoader._parse_config(raw)
         cfg.config_path = path
+        # F-054: gate on the shared ERROR-prefix predicate. The old `"ERROR" in m`
+        # substring test would let a WARNING that merely contained the word ERROR
+        # block a reload.
         errors = [m for m in ConfigLoader.validate_config(cfg, raw)
-                  if "ERROR" in m]
+                  if is_validation_error(m)]
     except Exception as exc:  # defensive: malformed structure
         return None, [f"invalid config: {exc}"]
     if errors:

@@ -3201,12 +3201,14 @@ class TestConnectionRecoveryGracePeriod:
 
 
 class TestEmptyStatusHandling:
-    """When ups_data is fetched OK but `ups.status` is missing, log
-    an error and skip the rest of the iteration — never proceed
-    with an empty status to the trigger logic."""
+    """F-052: a successful poll ALWAYS carries ups.status (_get_all_ups_data
+    rejects empty-status polls before they reach the trigger logic), so the old
+    defensive `if not ups_status:` branch was dead code. It is now an ``assert``
+    documenting the invariant; a synthetic success-with-empty-status poll must
+    trip that tripwire rather than silently proceeding."""
 
     @pytest.mark.unit
-    def test_empty_status_logs_error_and_skips_iteration(self, tmp_path):
+    def test_empty_status_trips_invariant_assertion(self, tmp_path):
         monitor = make_monitor(tmp_path)
         log = []
         monitor._log_message = log.append
@@ -3214,14 +3216,14 @@ class TestEmptyStatusHandling:
         monitor.state.connection_state = "OK"
         monitor.state.previous_status = "OL"
 
-        # Successful fetch but no ups.status field
-        _run_one_iteration(monitor, (True, {
-            "battery.charge": "85",
-            "battery.runtime": "1200",
-            # NOTE: no ups.status
-        }, ""))
-
-        assert any("'ups.status' is missing" in m for m in log), log
+        # Successful fetch but no ups.status field — impossible from the real
+        # _get_all_ups_data, so the invariant assertion must fire.
+        with pytest.raises(AssertionError):
+            _run_one_iteration(monitor, (True, {
+                "battery.charge": "85",
+                "battery.runtime": "1200",
+                # NOTE: no ups.status
+            }, ""))
 
 
 class TestPowerRestoredCallback:
@@ -3988,7 +3990,7 @@ class TestExecuteShutdownSequenceDelegatedStatsEvent:
             )
         ])
 
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             # Must not raise.
             monitor._execute_shutdown_sequence()

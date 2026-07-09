@@ -10,7 +10,7 @@ import statistics
 import time
 
 from eneru.config import VOLTAGE_SENSITIVITY_PRESETS
-from eneru.utils import is_numeric
+from eneru.utils import is_numeric, status_has_token
 
 
 # Standard grid voltages, sorted ascending. ``input.voltage.nominal``
@@ -351,11 +351,16 @@ class VoltageMonitorMixin:
         # grid that just sagged/failed, not the steady nominal; feeding it to
         # auto-detect during a startup brownout would latch a depressed nominal
         # for the daemon's lifetime. Runs only until enough samples accumulate.
-        if "OB" not in ups_status and "FSD" not in ups_status:
+        # F-051: match whitespace-separated status TOKENS, not substrings, via the
+        # shared helper (same rule the monitor's main loop uses) so e.g. "FSD"
+        # can't accidentally match inside some other flag.
+        if (not status_has_token(ups_status, "OB")
+                and not status_has_token(ups_status, "FSD")):
             self._check_voltage_autodetect(input_voltage)
 
-        if "OL" not in ups_status:
-            if "OB" in ups_status or "FSD" in ups_status:
+        if not status_has_token(ups_status, "OL"):
+            if (status_has_token(ups_status, "OB")
+                    or status_has_token(ups_status, "FSD")):
                 self.state.voltage_state = "NORMAL"
                 self._clear_voltage_pending()
             return

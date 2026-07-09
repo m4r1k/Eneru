@@ -11,6 +11,7 @@ import secrets
 import socket
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
@@ -631,6 +632,16 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 411, "application/json",
                 self._error("LENGTH_REQUIRED", str(exc)))
         except Exception:
+            # F-030: the client gets a deliberately opaque 500 (no internals
+            # leaked), but an unhandled handler exception must NOT vanish -- log
+            # the full traceback via the handler's log fn (the same channel the
+            # control-audit path uses) so operators can actually diagnose it.
+            if self.api_log is not None:
+                self.api_log(
+                    "⚠️  API request handler raised an unhandled exception "
+                    "(returning 500 INTERNAL_ERROR):\n"
+                    + traceback.format_exc().rstrip()
+                )
             status, content_type, body = (
                 500, "application/json",
                 {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}})

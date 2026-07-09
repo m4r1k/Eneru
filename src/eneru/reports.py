@@ -284,19 +284,20 @@ def maybe_send_due_reports(config, store, ups_name: str,
             if last is None:
                 store.set_meta(key, str(int(now)))  # seed baseline, don't send
             continue
+        # F-028: stamp the dedup key BEFORE enqueuing, and only send if the stamp
+        # committed. ELI5: cross the chore off the whiteboard first, THEN do it --
+        # if the marker is dry (the meta write fails, silently swallowed by the
+        # store) you notice before sending, so you never send the same digest
+        # every tick until the DB recovers. The enqueue below hands the message to
+        # the PERSISTENT notification queue (durable, retries on its own), so
+        # committing the stamp first does not risk losing the report.
+        if not store.set_meta(key, str(int(now))):
+            continue  # stamp failed -> retry next tick, nothing sent (no dupe)
         sources = gather_report_sources(
             store, ups_name, config.energy, period=period, now=now)
         content = build_report(period, sources, include=reports.include,
                                fmt=reports.format)
         enqueue(_compose_message(content), "info", "report")
-        # Stamp AFTER enqueue returns. The wired enqueue (the monitor's
-        # _send_notification) hands the message to the PERSISTENT notification
-        # queue and returns without waiting on delivery — it does not raise on a
-        # transient delivery failure, so durability past this point is the
-        # notification worker's job (it retries from the queued row). If enqueue
-        # itself raises (e.g. the queue insert fails), the period is left
-        # unstamped so the next tick retries the whole report.
-        store.set_meta(key, str(int(now)))
         sent.append(period)
     return sent
 
@@ -346,6 +347,12 @@ def maybe_send_due_reports_multi(config, units, meta_store,
             if last is None:
                 meta_store.set_meta(key, str(int(now)))  # seed baseline
             continue
+        # F-028: stamp the dedup key first and only send if it committed (see
+        # maybe_send_due_reports). A silently-failed meta write must not let the
+        # daemon re-send the same digest every tick; the enqueue persists to the
+        # durable notification queue, so stamping first can't lose the report.
+        if not meta_store.set_meta(key, str(int(now))):
+            continue  # stamp failed -> retry next tick, nothing sent (no dupe)
         per_ups = [
             gather_report_sources(store, ups_name, energy_cfg,
                                   period=period, now=now)
@@ -355,9 +362,5 @@ def maybe_send_due_reports_multi(config, units, meta_store,
                                          include=reports.include,
                                          fmt=reports.format)
         enqueue(_compose_message(content), "info", "report")
-        # Stamp after enqueue RETURNS (see maybe_send_due_reports): the enqueue
-        # only persists to the notification queue, it does not block on or raise
-        # for delivery failure — the worker owns delivery durability from here.
-        meta_store.set_meta(key, str(int(now)))
         sent.append(period)
     return sent

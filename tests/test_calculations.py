@@ -129,7 +129,8 @@ class TestDepletionRateCalculation:
     def test_no_depletion_with_few_samples(self, monitor_with_history):
         """Test that depletion is 0 with insufficient samples."""
         # Add only 10 samples (need 30)
-        current_time = int(time.time())
+        # F-026: history is keyed on time.monotonic() now, so seed from it too.
+        current_time = time.monotonic()
         for i in range(10):
             monitor_with_history.state.battery_history.append(
                 (current_time - (10 - i), 100 - i)
@@ -141,7 +142,7 @@ class TestDepletionRateCalculation:
     @pytest.mark.unit
     def test_depletion_calculation_with_enough_samples(self, monitor_with_history):
         """Test depletion calculation with sufficient samples."""
-        current_time = int(time.time())
+        current_time = time.monotonic()  # F-026: monotonic-keyed history
 
         # Add 60 samples over 60 seconds, battery dropping from 100 to 94
         # That's 6% over 60 seconds = 6%/minute
@@ -159,7 +160,7 @@ class TestDepletionRateCalculation:
     @pytest.mark.unit
     def test_depletion_with_stable_battery(self, monitor_with_history):
         """Test depletion is near zero with stable battery."""
-        current_time = int(time.time())
+        current_time = time.monotonic()  # F-026: monotonic-keyed history
 
         # Add 60 samples with constant battery
         for i in range(60):
@@ -179,7 +180,7 @@ class TestDepletionRateCalculation:
     @pytest.mark.unit
     def test_old_samples_are_pruned(self, monitor_with_history):
         """Test that samples outside the window are removed."""
-        current_time = int(time.time())
+        current_time = time.monotonic()  # F-026: monotonic-keyed history
         window = monitor_with_history.config.triggers.depletion.window
 
         # Add old samples (outside window)
@@ -223,28 +224,53 @@ class TestDepletionRateCalculation:
         assert any("Battery history persist failed" in msg for msg in logs)
 
     @pytest.mark.unit
+    def test_wall_clock_jump_does_not_distort_rate(self, monitor_with_history):
+        """F-026: an NTP step to the WALL clock mid-outage must not skew the
+        depletion rate, because the history + denominator are monotonic now."""
+        import eneru.health.battery as battery_mod
+
+        base = time.monotonic()
+        # 60 samples over 60 monotonic seconds, 100 -> 94 = ~6%/min.
+        for i in range(60):
+            monitor_with_history.state.battery_history.append(
+                (base - (60 - i), 100 - (i * 0.1))
+            )
+
+        # Simulate a huge wall-clock jump by moving time.time() forward an hour
+        # WHILE the monotonic clock advances normally. If the rate were keyed on
+        # wall time this would wildly distort it; on monotonic it stays ~6%/min.
+        real_time = time.time
+        try:
+            battery_mod.time.time = lambda: real_time() + 3600
+            rate = monitor_with_history._calculate_depletion_rate("94")
+        finally:
+            battery_mod.time.time = real_time
+
+        assert 5.0 <= rate <= 7.0, rate
+
+    @pytest.mark.unit
     def test_depletion_zero_when_all_samples_at_same_timestamp(
         self, monitor_with_history
     ):
-        """time_diff==0 path returns 0.0 (battery.py line 66)."""
+        """time_diff==0 path returns 0.0 (battery.py)."""
         # Inject >=30 samples that all share the *current* timestamp so that
         # after the function appends one more sample, oldest_time ==
         # current_time and time_diff == 0.
-        # We rely on the function computing current_time = int(time.time())
-        # and use a far-future timestamp that pruning will keep.
-        future = int(time.time()) + 10_000
+        # F-026: the function keys on time.monotonic() now, so pin that (not
+        # time.time()) to a far-future value that pruning will keep.
+        future = time.monotonic() + 10_000
         for _ in range(50):
             monitor_with_history.state.battery_history.append((future, 100.0))
 
-        # Patch time.time so int(time.time()) inside the function matches the
+        # Patch time.monotonic so current_time inside the function matches the
         # injected timestamp exactly.
         import eneru.health.battery as battery_mod
-        original_time = battery_mod.time.time
+        original_monotonic = battery_mod.time.monotonic
         try:
-            battery_mod.time.time = lambda: float(future)
+            battery_mod.time.monotonic = lambda: float(future)
             rate = monitor_with_history._calculate_depletion_rate("100")
         finally:
-            battery_mod.time.time = original_time
+            battery_mod.time.monotonic = original_monotonic
 
         assert rate == 0.0
 

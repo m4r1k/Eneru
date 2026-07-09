@@ -533,7 +533,7 @@ def _capability_achievable(
     ``reason`` is the empty string when achievable; otherwise a short
     operator-actionable explanation.
     """
-    from eneru.cli import _is_container_runtime  # local import to avoid cycle
+    from eneru.runtime import _is_container_runtime  # F-057: leaf module
 
     if cap == "nut_polling":
         return (nut_ready, "" if nut_ready else "NUT monitoring not connected")
@@ -616,8 +616,8 @@ def _capability_achievable(
 
 
 def _runtime_context_label() -> str:
-    """Detect runtime context — local import keeps the cycle quiet."""
-    from eneru.cli import _detect_runtime_context
+    """Detect runtime context — F-057: from the leaf runtime module."""
+    from eneru.runtime import _detect_runtime_context
     return _detect_runtime_context()
 
 
@@ -685,8 +685,8 @@ def readiness(source: Any) -> Dict[str, Any]:
 
     nut_ready = nut_visible_any and not nut_failed_any
     runtime_label = _runtime_context_label()
-    # Local import (same cycle reason as _capability_achievable above).
-    from eneru.cli import _is_container_runtime
+    # F-057: leaf runtime module (was eneru.cli).
+    from eneru.runtime import _is_container_runtime
 
     capabilities: List[Dict[str, Any]] = []
     reasons: List[str] = []

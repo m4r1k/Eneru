@@ -256,6 +256,56 @@ class TestSchemaMigration:
             s.close()
 
     @pytest.mark.unit
+    def test_versionless_populated_db_is_recovered_not_treated_as_fresh(
+        self, tmp_path
+    ):
+        # F-027: an older binary created the tables (v1 shape) but crashed before
+        # stamping meta.schema_version. A newer binary opening this versionless-
+        # but-populated DB must run the full migration chain and stamp the current
+        # version -- NOT mistake it for brand-new (which would skip migrations and
+        # leave the newer columns missing = silent stats loss).
+        path = tmp_path / "crashed.db"
+        self._build_v1_db(path)
+        # Simulate crash-before-stamp: drop the schema_version row.
+        c = sqlite3.connect(str(path), isolation_level=None)
+        c.execute("DELETE FROM meta WHERE key='schema_version'")
+        c.close()
+
+        s = StatsStore(path)
+        s.open()
+        try:
+            # Version stamped to current.
+            row = s._conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            assert int(row[0]) == SCHEMA_VERSION
+            # Migrations actually ran: a v7 column exists on samples.
+            cols = {r[1] for r in s._conn.execute("PRAGMA table_info(samples)")}
+            assert {"battery_voltage", "real_power", "power_nominal"} <= cols
+            # Existing v1 row preserved (not wiped as if fresh).
+            n = s._conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+            assert n == 1
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_created_then_reopened_reports_current_version(self, tmp_path):
+        # F-027: a normally-created DB reopened reports the correct version.
+        path = tmp_path / "roundtrip.db"
+        s1 = StatsStore(path)
+        s1.open()
+        s1.close()
+        s2 = StatsStore(path)
+        s2.open()
+        try:
+            row = s2._conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            assert int(row[0]) == SCHEMA_VERSION
+        finally:
+            s2.close()
+
+    @pytest.mark.unit
     def test_v1_db_migrates_agg_tables_to_v2(self, tmp_path):
         path = tmp_path / "legacy.db"
         self._build_v1_db(path)
@@ -1029,6 +1079,52 @@ class TestNotificationQueue:
             rows = s.next_pending_notifications(limit=10)
             assert [r[0] for r in rows] == [1000, 2000]
             assert rows[0][2] == "older"
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_claim_read_revert_and_marksent_delivering(self, tmp_path):
+        # F-058: deferred-delivery's SQL is now on the store API. Exercise the
+        # claim -> read -> mark-sent(require_delivering) and claim -> revert paths.
+        s = self._open(tmp_path)
+        try:
+            nid = s.enqueue_notification("body!", "failure", "lifecycle")
+            assert s.read_notification(nid) == ("body!", "failure", "pending")
+
+            # First claim wins; second (row now 'delivering') loses.
+            assert s.claim_notification(nid, now=999) is True
+            assert s.claim_notification(nid, now=1000) is False
+            row = s._conn.execute(
+                "SELECT status, delivering_at, attempts FROM notifications "
+                "WHERE id=?", (nid,)).fetchone()
+            assert row[0] == "delivering" and row[1] == 999 and row[2] == 1
+
+            # mark-sent requires the row to still be 'delivering'.
+            assert s.mark_notification_sent(nid, require_delivering=True) is True
+            assert s.read_notification(nid)[2] == "sent"
+
+            # revert_claim takes a delivering row back to pending.
+            nid2 = s.enqueue_notification("b2", "info", "lifecycle")
+            assert s.claim_notification(nid2) is True
+            s.revert_claim(nid2)
+            assert s.read_notification(nid2)[2] == "pending"
+
+            # read_notification on a missing id is None.
+            assert s.read_notification(999999) is None
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_marksent_require_delivering_no_op_when_cancelled(self, tmp_path):
+        # F-058: a classifier that cancels the row mid-send must not be clobbered
+        # back to 'sent' by require_delivering=True.
+        s = self._open(tmp_path)
+        try:
+            nid = s.enqueue_notification("x", "info", "lifecycle")
+            s.claim_notification(nid)
+            s.cancel_notification(nid, "superseded")   # classifier wins
+            s.mark_notification_sent(nid, require_delivering=True)
+            assert s.read_notification(nid)[2] == "cancelled"
         finally:
             s.close()
 

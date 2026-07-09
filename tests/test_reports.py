@@ -204,6 +204,26 @@ class TestMaybeSend:
         assert periods == [] and sent == []
 
     @pytest.mark.unit
+    def test_meta_write_failure_does_not_send_and_no_resend(self, store):
+        # F-028: if the dedup-key meta write fails (silently swallowed), the
+        # digest must NOT be sent -- and it must not be re-sent every tick either.
+        # We stamp meta FIRST and gate the send on its success, so a failing
+        # set_meta yields zero sends across repeated ticks.
+        cfg = self._cfg()
+        now = DUE_TS
+        store.set_meta("last_report_sent_daily", str(int(now - 2 * DAY)))
+        sent = []
+        from unittest.mock import patch
+        with patch.object(store, "set_meta", return_value=False):
+            for tick in range(3):
+                periods = reports.maybe_send_due_reports(
+                    cfg, store, "U@h",
+                    lambda b, t, c: sent.append(c),
+                    now=now + tick, tz=timezone.utc)
+                assert periods == []          # nothing "sent"
+        assert sent == []                     # never enqueued -> no duplicate spam
+
+    @pytest.mark.unit
     def test_csv_format_delivers_csv_block(self, store):
         # reports.format: csv must actually deliver the CSV (the channel is
         # text-only, so it rides under the summary) — not silently send text.

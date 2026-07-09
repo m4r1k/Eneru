@@ -504,6 +504,16 @@ config — don't write them manually there).
 | `sync` | `sync; sync; sleep 2` — flushes filesystem caches |
 | `stop_containers` | Stops all running Docker and Podman containers. v5.5: honors mandatory self-skip for the Eneru container when delegated |
 | `stop_containers_rootless` | **v5.5 (new).** Same as `stop_containers` but iterates rootless Podman per non-system user via `loginctl` + `sudo -u` |
+
+> **`stop_containers_rootless` always uses `sudo -u <user>`**, regardless of the
+> server's `use_sudo` setting. Stopping another user's rootless Podman requires
+> switching to that user's session, and `sudo -u` is the reliable way to enter
+> it with the right `XDG_RUNTIME_DIR`/DBus environment during a shutdown. The
+> SSH user therefore needs sudo rights to run `podman` as those users (a
+> NOPASSWD rule is typical). This one action intentionally does not honor
+> `use_sudo`: dropping the `sudo -u` there would break the drain in exactly the
+> moment it matters, and an extra `sudo` is safer than a rootless container that
+> never stops.
 | `stop_compose` | Compose `down` for the given `path`. v5.5: skips stacks that include the Eneru container when delegated |
 | `stop_vms` | Graceful `virsh shutdown` of all running libvirt VMs, then force-destroy after the configured timeout |
 | `unmount_filesystems` | **v5.5 (new).** Iterates per-mount `umount` with configurable options. Regular remotes provide `pre_shutdown_commands[].mounts`; loopback derives mounts from the local filesystem config |

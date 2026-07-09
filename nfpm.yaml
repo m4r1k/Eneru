@@ -207,6 +207,13 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/runtime.py
+    dst: /opt/ups-monitor/eneru/runtime.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   - src: src/eneru/scheduler.py
     dst: /opt/ups-monitor/eneru/scheduler.py
     file_info:

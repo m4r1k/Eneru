@@ -43,7 +43,13 @@ from eneru.lifecycle import (
     read_upgrade_marker,
     write_shutdown_marker,
 )
-from eneru.utils import run_command, command_exists, is_numeric, format_seconds
+from eneru.utils import (
+    run_command,
+    command_exists,
+    is_numeric,
+    format_seconds,
+    status_has_token,
+)
 from eneru.shutdown.vms import VMShutdownMixin
 from eneru.shutdown.containers import ContainerShutdownMixin
 from eneru.shutdown.filesystems import FilesystemShutdownMixin
@@ -918,7 +924,10 @@ class UPSGroupMonitor(
             and self.config.local_shutdown.enabled
             and not self._uses_loopback_delegate
         ):
-            shutdown_cmd = str(self.config.local_shutdown.command).split()
+            # F-023: parse the poweroff command with the SAME shlex-based splitter
+            # the real shutdown path uses (poweroff_command_parts), not naive
+            # str.split(), so a quoted argv[0] is resolved correctly here too.
+            shutdown_cmd = poweroff_command_parts(self.config.local_shutdown.command)
             if shutdown_cmd:
                 required_cmds.append(shutdown_cmd[0])
         if self._uses_loopback_delegate:
@@ -1356,14 +1365,17 @@ class UPSGroupMonitor(
         skipped — the loopback's pre_shutdown_commands and shutdown_command
         own those host-side effects.
         """
-        from eneru.cli import _uses_loopback_delegate
+        # F-057: import from the leaf runtime module, not up into eneru.cli
+        # (that domain-core -> CLI import was the layering inversion).
+        from eneru.runtime import _uses_loopback_delegate
         group = self.config.ups_groups[0] if self.config.ups_groups else None
         return _uses_loopback_delegate(self.config, group)
 
     @property
     def _is_container_runtime(self) -> bool:
         """Return True when this daemon is running inside any container runtime."""
-        from eneru.cli import _detect_runtime_context, _is_container_runtime
+        # F-057: from the leaf runtime module (was eneru.cli).
+        from eneru.runtime import _detect_runtime_context, _is_container_runtime
         return _is_container_runtime(_detect_runtime_context())
 
     def _should_fire_wall(self) -> bool:
@@ -2174,7 +2186,8 @@ class UPSGroupMonitor(
         battery_charge = ups_data.get('battery.charge', '')
         input_voltage = ups_data.get('input.voltage', '')
 
-        if "OB" in self.state.previous_status or "FSD" in self.state.previous_status:
+        if (status_has_token(self.state.previous_status, "OB")
+                or status_has_token(self.state.previous_status, "FSD")):
             time_on_battery = 0
             if self.state.on_battery_start_time > 0:
                 time_on_battery = int(time.time()) - self.state.on_battery_start_time
@@ -2671,7 +2684,8 @@ class UPSGroupMonitor(
 
                 # FAILSAFE: If connection lost while on battery, shut down.
                 # This is NEVER affected by the grace period.
-                if onbattery_failsafe and "OB" in self.state.previous_status:
+                if onbattery_failsafe and status_has_token(
+                        self.state.previous_status, "OB"):
                     with self.state._lock:
                         self.state.connection_state = "FAILED"
                         self.state.connection_lost_time = 0.0
@@ -2728,7 +2742,7 @@ class UPSGroupMonitor(
                 # grace machinery and do NOT shut down -- just let the counter
                 # accumulate. (Stale-data-below-tolerance lands here too, exactly
                 # as before, since neither flag is set yet.)
-                elif "OB" in self.state.previous_status:
+                elif status_has_token(self.state.previous_status, "OB"):
                     pass
 
                 # Grace period logic (only when NOT on battery)
@@ -2819,13 +2833,19 @@ class UPSGroupMonitor(
             if ups_status and "OB" not in status_tokens and "FSD" not in status_tokens:
                 self._failsafe_initiated = False
 
-            if not ups_status:
-                self._log_message(
-                    "❌  ERROR: Received data from UPS but 'ups.status' is missing. "
-                    "Check NUT configuration."
-                )
-                self._stop_event.wait(CONNECTION_RETRY_WAIT_SECONDS)
-                continue
+            # F-052: a successful poll ALWAYS carries a non-empty ups.status --
+            # _get_all_ups_data returns (False, {}, "Missing ups.status") for an
+            # empty-status poll, so that failure is handled up in the connection
+            # branch above and never falls through here. ELI5: the bouncer at the
+            # door already turned away anyone without an ID, so re-checking IDs
+            # inside the club is dead code. Assert the invariant instead of a live
+            # `if` branch, so a future refactor that weakens _get_all_ups_data
+            # trips this tripwire in tests rather than silently feeding an empty
+            # status into the trigger logic below.
+            assert ups_status, (
+                "reached power-state analysis with empty ups.status; "
+                "_get_all_ups_data must reject empty-status polls"
+            )
 
             self._save_state(ups_data)
 

@@ -69,6 +69,20 @@ class TestPoweroffCommandParts:
         assert monitor.poweroff_command_parts is poweroff_command_parts
         assert multi_ups.poweroff_command_parts is poweroff_command_parts
 
+    @pytest.mark.unit
+    def test_quoted_argument_survives_as_one_argv_element(self):
+        # F-023: shlex splitting keeps a quoted message as ONE argv element on the
+        # real shutdown path, instead of exploding it into three (naive split()).
+        assert poweroff_command_parts(
+            'shutdown -h now "message with spaces"'
+        ) == ["shutdown", "-h", "now", "message with spaces"]
+
+    @pytest.mark.unit
+    def test_unbalanced_quote_yields_empty_list(self):
+        # F-023: a malformed quote makes shlex raise; treat it as "no valid
+        # command" so callers still refuse to write the recovery marker.
+        assert poweroff_command_parts('shutdown -h "oops') == []
+
 
 # ==============================================================================
 # Marker file CRUD
@@ -97,6 +111,18 @@ class TestShutdownMarker:
     def test_read_returns_none_on_invalid_json(self, tmp_path):
         (tmp_path / SHUTDOWN_MARKER_NAME).write_text("{not valid json")
         assert read_shutdown_marker(tmp_path) is None
+
+    @pytest.mark.unit
+    def test_read_returns_none_for_non_dict_json(self, tmp_path):
+        # F-024: a corrupt marker that parses to a list/scalar must read as
+        # absent, not be handed back -- classify_startup calls .get(...) on it and
+        # would otherwise raise AttributeError mid-startup.
+        (tmp_path / SHUTDOWN_MARKER_NAME).write_text('["not", "a", "dict"]')
+        assert read_shutdown_marker(tmp_path) is None
+        (tmp_path / SHUTDOWN_MARKER_NAME).write_text('42')
+        assert read_shutdown_marker(tmp_path) is None
+        (tmp_path / UPGRADE_MARKER_NAME).write_text('"scalar string"')
+        assert read_upgrade_marker(tmp_path) is None
 
     @pytest.mark.unit
     def test_delete_idempotent_when_absent(self, tmp_path):

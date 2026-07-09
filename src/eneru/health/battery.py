@@ -27,7 +27,15 @@ class BatteryMonitorMixin:
 
     def _calculate_depletion_rate(self, current_battery: str) -> float:
         """Calculate battery depletion rate based on history."""
-        current_time = int(time.time())
+        # F-026: key the rolling history on the MONOTONIC clock, not wall-clock
+        # time.time(). ELI5: time an outage with a stopwatch, not the clock on the
+        # wall -- if NTP steps the wall clock mid-outage, a wall-clock denominator
+        # divides a real charge drop by a fictitious time delta and reports a bogus
+        # %/min rate straight into the T3 depletion shutdown trigger. time.monotonic()
+        # only ticks forward at a steady rate, immune to NTP corrections. The
+        # persisted history file is forensic-only (never read back at startup), so
+        # this needs no on-disk migration.
+        current_time = time.monotonic()
 
         if not is_numeric(current_battery):
             return 0.0

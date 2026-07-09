@@ -7,13 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [6.1.7] - 2026-07-09
 
-Small fast-follow fixes from post-merge review of the v6.1.6 audit; to be
-included in a future release.
+A stabilizing bug-fix release built on a full-repository pre-release code
+review — the latest in the series of in-depth reviews that shaped the 6.1.x
+line, performed with Anthropic Claude Fable 5. As with 6.1.6 the whole
+remediation lands in one advertised bug-fix rather than being spread across
+several minors, so Eneru runs at the best possible level. No new features and
+no breaking config changes; behavioral changes are called out below. See
+[Testing → Pre-release code review (v6.1.7)](testing.md#pre-release-code-review-v617).
+
+Three config-loader Criticals headline the release: a scalar
+`filesystems.unmount.mounts` was iterated character-by-character into per-letter
+mount paths, safety-critical booleans accepted any type (a templated
+`local_shutdown.enabled: "false"` stayed truthy-armed), and an explicit but
+missing `--config` path started the daemon on all-default, shutdown-armed
+config. They share one root cause and are fixed as a unit.
 
 ### Fixed
 
+- **The config loader validates types and shapes before use (Fix Group A).** A
+  declarative schema gate runs before dataclass construction and inside
+  `validate_config`: lists reject scalars (no more char-split
+  `mounts`/`urls`/`compose_files`), every safety-critical boolean rejects
+  non-bool values, numeric fields (`notifications.timeout`/`retry_interval`,
+  per-compose-file `stop_timeout`) are type-checked, scalar-where-mapping
+  sections yield a pointed error instead of a raw traceback, and unknown keys
+  are swept at every level — including the top level, so a misspelled
+  `local_shutdwn:` is caught instead of silently ignored while poweroff stays
+  armed.
+- **A missing explicit `--config` path is now fatal.** `run -c missing.yaml`
+  exits non-zero and `validate -c missing.yaml` fails, instead of quietly
+  falling back to an all-default, shutdown-armed config. Default-path fallback
+  is unchanged.
+- **Notification store failures no longer drop messages silently.** When the
+  stats store isn't open (e.g. `/var/lib/eneru` unwritable at startup),
+  `send()` buffers to the in-memory queue and replays once a store opens,
+  preserving the lossless guarantee instead of discarding every notification.
+- **A failed host poweroff is now observable.** Both the single-UPS and
+  coordinator paths check the poweroff command's exit code; on failure they log
+  an error, send a failure notification, and remove the completion marker so
+  the next start no longer reports a false "Recovered".
+- **Graceful VM shutdown waits work on dash/BusyBox remotes.** The libvirt /
+  Proxmox / XCP-ng stop templates used bash-only `$SECONDS`, which is empty on
+  POSIX-sh remotes, so the grace loop was skipped and `virsh destroy` fired
+  immediately; replaced with a portable elapsed counter. Local
+  `docker/podman compose down` now passes `-t <stop_timeout>` instead of
+  SIGKILLing after compose's own 10s default.
+- **Coordinator loopback delegation no longer double-issues poweroff.** A
+  containerized multi-UPS deployment with an `is_host_loopback` delegate would
+  run the poweroff binary inside the container after the host was already told
+  to power off over SSH; the coordinator now skips the in-container poweroff on
+  the delegated path, mirroring the single-UPS path.
+- **Assorted correctness fixes:** quoted poweroff commands parse with `shlex`;
+  corrupt shutdown/upgrade markers that parse to non-dicts are treated as
+  absent instead of crashing startup; VM force-destroy re-polls so a VM that
+  stopped at the deadline isn't force-killed; battery depletion rate keys on a
+  monotonic clock so an NTP step mid-outage can't skew it; the stats schema
+  version is stamped in the same transaction as the DDL so a crash can't leave
+  a versionless DB; a duplicate report digest can't re-send when the dedup-key
+  write fails; the API 500 handler logs the traceback; `command_exists` uses
+  `shutil.which`.
 - **Notification worker keeps the structured logger across a config reload.**
   The v6.1.6 change routed worker warnings through the daemon's logger
   (ISS-060) on startup, but the reload/rebuild paths in both the single-UPS
@@ -41,6 +95,28 @@ included in a future release.
 
 ### Security
 
+- **Host-header validation closes a DNS-rebinding read of the API.** A hostile
+  web page could rebind DNS and read the anonymous API (topology, SSH
+  usernames, events) from an operator's browser. Requests must now carry an
+  IP-literal Host, `localhost`, or a name in the new `api.allowed_hosts` list;
+  others get 421. IP-literal and localhost Hosts are always accepted, so LAN
+  browsing is unaffected. Eneru remains trusted-LAN-only by design — there is
+  no TLS; front it with a reverse proxy to expose it off-host.
+- **MQTT credentials no longer leak.** The scheme-less-broker warning redacts
+  `user:pass@` userinfo before logging, and a username on a non-TLS broker
+  triggers a one-time cleartext-credentials warning.
+- **NUT credentials hardened.** `NutControlConfig` username/password are kept
+  out of `repr()`, and PTY echo is disabled before the NUT password is written
+  so it can't be echoed into captured output.
+- **Login throttle gains a global ceiling** alongside the per-IP limit, closing
+  a source-IP-rotation bypass; the dashboard clears the login password field
+  after submit; a CI guard forbids `innerHTML`/`insertAdjacentHTML`/`eval`
+  under the dashboard tree.
+- **Release workflow passes secrets via `env:`** rather than interpolating them
+  into shell text (template-injection pattern); the systemd unit adds
+  `ProtectKernelLogs`, `ProtectControlGroups`, `ProtectClock`,
+  `LockPersonality`, and `ProtectHostname`; and the remote Kubernetes manifests
+  set `automountServiceAccountToken: false`.
 - **CI: don't persist the GitHub token on the release workflow's gh-pages
   checkout.** The deploy step pushes with an explicit `x-access-token` URL, so
   the persisted credential was unused; `persist-credentials: false` narrows
@@ -56,11 +132,36 @@ included in a future release.
   scheme-less Apprise URL, which could leak webhook path fragments; it now
   always prints `scheme://***`.
 
+### Performance
+
+- **The daemon stays responsive under dashboard load.** The API gained HTTP/1.1
+  keep-alive with a bounded request-processing pool (idle connections reaped by
+  a short timeout, so keep-alive can't starve it); the per-UPS energy block is
+  cached for ~10s instead of re-scanning today+month+year on every poll; the
+  dashboard fetches the large chart-event scan only on tab/range change and
+  guards against overlapping refreshes; `aggregate()` releases its DB lock
+  between tiers; the TUI reads recent events with a `LIMIT`; and
+  runtime-context detection is memoized.
+
+### Packaging & CI
+
+- **RHEL 8 gets a dedicated RPM** that requires `python39`/`python39-pyyaml`,
+  so it installs Python 3.9 automatically instead of crash-looping on 3.6;
+  RHEL 9/10 keep the default RPM. The `:latest` container tag is now promoted
+  only after the pushed image is verified, and a smoke job installs Eneru from
+  the freshly-published apt/dnf repositories.
+
 ### Changed
 
 - **CI hygiene (ISS-042/022 follow-ups).** All `integration.yml` jobs now carry
   `timeout-minutes`; the `upsc -l` diagnostic cooldown and the neutral-status
   log interval are named module constants in `monitor.py`.
+- **Internal:** runtime-context and delegation helpers moved to a leaf
+  `runtime` module (removing a domain-core→CLI import inversion);
+  deferred-delivery SQL promoted onto the stats-store API; per-group `triggers`
+  are deep-copied to avoid shared mutable state; status-token matching and
+  reload error-filtering unified behind single helpers. The standalone
+  `CLAUDE.md` bridge files are now symlinks to their `AGENTS.md`.
 
 ---
 

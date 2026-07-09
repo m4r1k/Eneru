@@ -219,10 +219,31 @@ class TestConfigValidation:
 
     @pytest.mark.unit
     def test_validate_normalizes_syslog_facility_case(self, minimal_config):
+        # F-056: normalization now happens at PARSE time; validate_config is
+        # read-only. A config LOADED with a mixed-case facility comes out
+        # lower-cased, and validate_config never mutates it afterwards.
+        cfg = ConfigLoader._parse_config(
+            {"logging": {"syslog": {"facility": "LOCAL0"}}})
+        assert cfg.logging.syslog.facility == "local0"  # normalized at parse
+        messages = ConfigLoader.validate_config(cfg)
+        assert not any("logging.syslog.facility" in m for m in messages)
+        assert cfg.logging.syslog.facility == "local0"  # validate did not touch it
+
+        # A programmatically-built (unparsed) mixed-case facility is still
+        # ACCEPTED by validate_config, and — crucially — left UNMUTATED.
         minimal_config.logging.syslog.facility = "LOCAL0"
         messages = ConfigLoader.validate_config(minimal_config)
         assert not any("logging.syslog.facility" in m for m in messages)
-        assert minimal_config.logging.syslog.facility == "local0"
+        assert minimal_config.logging.syslog.facility == "LOCAL0"
+
+    @pytest.mark.unit
+    def test_is_validation_error_prefix_predicate(self):
+        # F-054: the shared predicate matches the "ERROR:" prefix, so a WARNING
+        # that merely contains the word ERROR never counts as a blocker.
+        from eneru.config import is_validation_error
+        assert is_validation_error("ERROR: bad value") is True
+        assert is_validation_error("WARNING: may cause an ERROR later") is False
+        assert is_validation_error("INFO: all good") is False
 
     @pytest.mark.unit
     @pytest.mark.parametrize("port", [0, -1, 65536, 100000, "abc", None, True])
@@ -840,6 +861,46 @@ class TestVoltageSensitivityValidation:
 
 class TestConfigParsingEdgeCases:
     """Test edge cases in configuration parsing."""
+
+    @pytest.mark.unit
+    def test_group_triggers_deep_copied_no_cross_leak(self):
+        # F-060: multi-UPS groups WITHOUT their own `triggers:` must each get a
+        # distinct deep copy of the global block, so mutating one group's triggers
+        # can't leak into another group (or the global via ups_groups[0]).
+        cfg = ConfigLoader._parse_config({
+            "triggers": {"low_battery_threshold": 20,
+                         "depletion": {"window": 300}},
+            "ups": [
+                {"name": "a@h", "is_local": True},
+                {"name": "b@h"},
+            ],
+        })
+        g0, g1 = cfg.ups_groups
+        assert g0.triggers is not g1.triggers
+        assert g0.triggers.depletion is not g1.triggers.depletion  # nested too
+
+        g0.triggers.low_battery_threshold = 99
+        g0.triggers.depletion.window = 5
+        assert g1.triggers.low_battery_threshold == 20   # unaffected
+        assert g1.triggers.depletion.window == 300       # unaffected
+
+    @pytest.mark.unit
+    def test_redundancy_group_triggers_deep_copied_no_cross_leak(self):
+        # F-060: same guarantee for redundancy groups without their own triggers.
+        cfg = ConfigLoader._parse_config({
+            "triggers": {"low_battery_threshold": 20},
+            "ups": [
+                {"name": "a@h", "is_local": True},
+                {"name": "b@h"},
+            ],
+            "redundancy_groups": [
+                {"name": "rg1", "ups_sources": ["a@h", "b@h"]},
+            ],
+        })
+        rg = cfg.redundancy_groups[0]
+        assert rg.triggers is not cfg.ups_groups[0].triggers
+        rg.triggers.low_battery_threshold = 77
+        assert cfg.ups_groups[0].triggers.low_battery_threshold == 20
 
     @pytest.mark.unit
     def test_partial_ups_config_preserves_defaults(self, temp_config_file):
