@@ -754,7 +754,14 @@ jobs:
   # the release instead of shipping green. Minimal by design: add the just-
   # deployed repo in a clean container, `install eneru`, run `eneru version`.
   # `needs: build-packages` gates this on the gh-pages deploy step succeeding.
-  # The apt and dnf smokes run in PARALLEL (matrix) so wall-clock barely moves.
+  # All matrix smokes run in PARALLEL so wall-clock barely moves.
+  # cubic round 1: (a) the readiness probe waits until the repo ADVERTISES the
+  # just-built version — KEY.gpg is a long-lived file that survives from prior
+  # releases, so its mere reachability proved nothing about THIS deploy; (b)
+  # the INSTALLED binary's version is asserted against the built version, so a
+  # stale-metadata install can't pass the gate; (c) el8 gets its own matrix
+  # leg — its repo (rpm/el8) has separate createrepo/signing/.repo plumbing
+  # that the default-path smoke never exercised.
   smoke-install:
     name: Smoke install from published repo (${{ matrix.pkg }})
     needs: build-packages
@@ -770,12 +777,21 @@ jobs:
             image: debian:13
           - pkg: dnf
             image: registry.access.redhat.com/ubi9/ubi
+            el: '9'
+            repo_stable: rpm/eneru.repo
+            repo_testing: rpm/testing/eneru-testing.repo
+          - pkg: dnf-el8
+            image: registry.access.redhat.com/ubi8/ubi
+            el: '8'
+            repo_stable: rpm/el8/eneru-el8.repo
+            repo_testing: rpm/testing/el8/eneru-testing-el8.repo
     container:
       image: ${{ matrix.image }}
     steps:
       - name: Install from published repo and verify
         env:
           CHANNEL: ${{ needs.build-packages.outputs.channel }}
+          VERSION: ${{ needs.build-packages.outputs.version }}
           OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
@@ -783,9 +799,14 @@ jobs:
           # GitHub Pages serves gh-pages at https://<owner-lower>.github.io/<repo>.
           HOST="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]').github.io"
           BASE="https://${HOST}/${REPO_NAME}"
+          # Package ecosystems spell pre-release versions with ~ where the git
+          # tag uses - (6.1.7-rc1 -> 6.1.7~rc1 in both deb and rpm).
+          PKG_VERSION="$(printf '%s' "$VERSION" | tr '-' '~')"
 
-          # gh-pages redeploys asynchronously after the push, so poll the freshly
-          # written KEY.gpg for a few minutes before installing (propagation).
+          # gh-pages redeploys asynchronously after the push. KEY.gpg only
+          # proves the SITE is serving (it survives from prior releases), so
+          # this gates reachability; deploy FRESHNESS is gated separately by
+          # the advertised-version poll below.
           wait_for_pages() {
             for i in $(seq 1 30); do
               if curl -fsSL "${BASE}/KEY.gpg" -o /tmp/eneru-key.gpg; then
@@ -806,19 +827,47 @@ jobs:
             [ "$CHANNEL" = "testing" ] && SUITE=testing
             echo "deb [arch=all signed-by=/usr/share/keyrings/eneru.gpg] ${BASE}/deb ${SUITE} main" \
               > /etc/apt/sources.list.d/eneru.list
-            apt-get update
+            # Freshness gate: wait until the repo advertises the version THIS
+            # run built, not whatever Pages still caches from the last release.
+            for i in $(seq 1 30); do
+              apt-get update >/dev/null 2>&1 || true
+              if apt-cache policy eneru | grep -qF "$PKG_VERSION"; then
+                echo "Repo advertises ${PKG_VERSION} after attempt ${i}."; break
+              fi
+              if [ "$i" = "30" ]; then
+                echo "::error::Repo never advertised ${PKG_VERSION}."; exit 1
+              fi
+              echo "Attempt ${i}: repo metadata still stale; sleeping 10s..."; sleep 10
+            done
             apt-get install -y eneru
           else
-            # dnf smoke on ubi9 (python3 == 3.9): exercises the DEFAULT rpm/ repo.
+            # dnf smoke. ubi9 (python3 == 3.9) exercises the DEFAULT rpm/ repo;
+            # ubi8 exercises the DEDICATED el8 repo, whose RPM must pull the
+            # python39 module through its own declared deps (F-013).
             # EPEL provides nut-client (a hard dep of the RPM).
-            dnf install -y "https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm"
+            dnf install -y "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${{ matrix.el }}.noarch.rpm"
             wait_for_pages
             if [ "$CHANNEL" = "testing" ]; then
-              curl -fsSL "${BASE}/rpm/testing/eneru-testing.repo" -o /etc/yum.repos.d/eneru.repo
+              curl -fsSL "${BASE}/${{ matrix.repo_testing }}" -o /etc/yum.repos.d/eneru.repo
             else
-              curl -fsSL "${BASE}/rpm/eneru.repo" -o /etc/yum.repos.d/eneru.repo
+              curl -fsSL "${BASE}/${{ matrix.repo_stable }}" -o /etc/yum.repos.d/eneru.repo
             fi
+            # Freshness gate (same reasoning as the apt leg).
+            for i in $(seq 1 30); do
+              if dnf --refresh -q info eneru 2>/dev/null | grep -qF "$PKG_VERSION"; then
+                echo "Repo advertises ${PKG_VERSION} after attempt ${i}."; break
+              fi
+              if [ "$i" = "30" ]; then
+                echo "::error::Repo never advertised ${PKG_VERSION}."; exit 1
+              fi
+              echo "Attempt ${i}: repo metadata still stale; sleeping 10s..."; sleep 10
+            done
             dnf install -y eneru
           fi
 
+          # The real gate: the INSTALLED binary must be the version this run
+          # built. Match on the numeric core — pre-release suffixes are spelled
+          # differently per ecosystem (-rc1 vs ~rc1 vs rc1).
+          CORE="${VERSION%%-*}"
           eneru version
+          eneru version | grep -qF "v${CORE}"
