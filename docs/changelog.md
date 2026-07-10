@@ -90,9 +90,10 @@ config. They share one root cause and are fixed as a unit.
   it, so after a `systemctl reload` / API reload its warnings fell back to
   `print`. Both reload paths now pass the shared logger.
 - **Failed logins audit as `LOGIN_FAILURE` with intact IPv6 addresses.** Audit
-  rows for failed/throttled logins previously fell back to the generic
+  rows for failed logins and the transition into throttling previously fell back to the generic
   `CONTROL` event type, and IPv6 client addresses were truncated at the last
-  colon (ISS-032 follow-up).
+  colon (ISS-032 follow-up). Already-blocked retries no longer write one SQLite
+  event per attacker request.
 - **Container/VM shutdown summaries no longer claim ✅ after failures.** The
   rootless-Podman and libvirt phase summaries now report a ⚠️ with the failure
   count when any stop/destroy command failed (ISS-040 follow-up).
@@ -116,7 +117,9 @@ config. They share one root cause and are fixed as a unit.
   IP-literal Host, `localhost`, or a name in the new `api.allowed_hosts` list;
   others get 421. IP-literal and localhost Hosts are always accepted, so LAN
   browsing is unaffected. Eneru remains trusted-LAN-only by design — there is
-  no TLS; front it with a reverse proxy to expose it off-host.
+  no TLS; front it with a reverse proxy to expose it off-host. **Upgrade note:**
+  hostname, mDNS, and reverse-proxy access needs an `api.allowed_hosts` entry;
+  the first rejected Host is logged with that hint.
 - **MQTT credentials no longer leak.** The scheme-less-broker warning redacts
   `user:pass@` userinfo before logging, and a username on a non-TLS broker
   triggers a one-time cleartext-credentials warning.

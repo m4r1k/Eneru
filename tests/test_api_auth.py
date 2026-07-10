@@ -440,7 +440,7 @@ def test_login_failure_audits_event_row(minimal_config, tmp_path):
 
 @pytest.mark.unit
 def test_login_throttled_audits_event_row(minimal_config, tmp_path):
-    """The 429 short-circuit path audits too, with result 'throttled'."""
+    """F-078: audit the transition into throttling, not every blocked retry."""
     import eneru.api as api_mod
     _enable_auth(minimal_config)
     store = AuthStore(tmp_path / "auth.db")
@@ -460,9 +460,11 @@ def test_login_throttled_audits_event_row(minimal_config, tmp_path):
             _bad()._route_post()
     status, _, _ = _bad()._route_post()
     assert status == 429
+    status, _, _ = _bad()._route_post()
+    assert status == 429
 
     calls = source.record_control_event.call_args_list
-    assert len(calls) == api_mod.LOGIN_FAIL_MAX + 1
+    assert len(calls) == api_mod.LOGIN_FAIL_MAX
     ups, event_type, detail = calls[-1][0]
     assert ups == ""
     assert event_type == "LOGIN_FAILURE"
@@ -691,6 +693,101 @@ def test_dispatch_rejects_untrusted_host_with_421(minimal_config):
     h._dispatch(lambda: (routed.append(1), (200, "application/json", {}))[1])
     assert captured == [421]
     assert routed == []   # the route body never ran
+
+
+@pytest.mark.unit
+def test_dispatch_warns_once_for_rejected_host(
+    minimal_config, monkeypatch,
+):
+    """F-072: a hostname upgrade break has one actionable server log."""
+    logs = []
+    handlers = [
+        _handler(minimal_config, headers={"Host": "nas.local"}),
+        _handler(minimal_config, headers={"Host": "other.local"}),
+    ]
+    monkeypatch.setattr(type(handlers[0]), "_host_rejection_warned", False)
+    for handler in handlers:
+        handler.api_log = logs.append
+        handler.send_response = lambda status: None
+        handler.send_header = lambda key, value: None
+        handler.end_headers = lambda: None
+        handler.wfile = BytesIO()
+        handler._dispatch(lambda: (200, "application/json", {}))
+
+    assert len(logs) == 1
+    assert "nas.local" in logs[0]
+    assert "api.allowed_hosts" in logs[0]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Host": "localhost", "Content-Length": "2"},
+        {"Host": "localhost", "Content-Length": "invalid"},
+        {"Host": "localhost", "Transfer-Encoding": "chunked"},
+    ],
+)
+def test_early_response_closes_connection_with_unread_body(
+    minimal_config, headers,
+):
+    """F-074: leftover body bytes cannot poison the next keep-alive request."""
+    h = _handler(minimal_config, headers=headers, body=b"{}")
+    response_headers = []
+    h.send_response = lambda status: None
+    h.send_header = lambda key, value: response_headers.append((key, value))
+    h.end_headers = lambda: None
+    h.wfile = BytesIO()
+
+    h._dispatch(lambda: (401, "application/json", {"error": "early"}))
+
+    assert h.close_connection is True
+    assert ("Connection", "close") in response_headers
+
+
+@pytest.mark.unit
+def test_rejected_host_with_body_closes_connection(minimal_config, monkeypatch):
+    """The pre-router 421 path follows the same unread-body rule."""
+    h = _handler(
+        minimal_config,
+        headers={"Host": "attacker.example", "Content-Length": "2"},
+        body=b"{}",
+    )
+    monkeypatch.setattr(type(h), "_host_rejection_warned", False)
+    response_headers = []
+    h.send_response = lambda status: None
+    h.send_header = lambda key, value: response_headers.append((key, value))
+    h.end_headers = lambda: None
+    h.wfile = BytesIO()
+
+    h._dispatch(lambda: (200, "application/json", {}))
+
+    assert h.close_connection is True
+    assert ("Connection", "close") in response_headers
+
+
+@pytest.mark.unit
+def test_consumed_json_body_keeps_connection_reusable(minimal_config):
+    """A normal framed POST remains eligible for HTTP/1.1 reuse."""
+    h = _handler(
+        minimal_config,
+        headers={"Host": "localhost", "Content-Length": "2"},
+        body=b"{}",
+    )
+    response_headers = []
+    h.send_response = lambda status: None
+    h.send_header = lambda key, value: response_headers.append((key, value))
+    h.end_headers = lambda: None
+    h.wfile = BytesIO()
+
+    def router():
+        assert h._read_json_body() == {}
+        return 200, "application/json", {"ok": True}
+
+    h._dispatch(router)
+
+    assert getattr(h, "close_connection", False) is False
+    assert ("Connection", "close") not in response_headers
 
 
 # ----- logout -----

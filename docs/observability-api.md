@@ -13,6 +13,12 @@ api:
   port: 9191
 ```
 
+**v6.1.7 upgrade note:** hostname access that was previously accepted (for
+example `nas.local` or a reverse proxy preserving its public Host) now needs an
+`api.allowed_hosts` entry. A rejected request returns 421 and Eneru logs the
+first rejected Host with this configuration hint, so a suddenly blank
+dashboard has a searchable server-side explanation.
+
 For container healthchecks, the same settings can be enabled at runtime:
 
 ```bash
@@ -158,6 +164,10 @@ Then set `api.bind: 127.0.0.1` and point clients at the proxy.
 > spoofable). When you front Eneru with a proxy, rely on the **proxy's** own
 > per-client rate limiting for login endpoints and treat the daemon throttle as
 > a coarse backstop.
+
+There is also a separate process-wide ceiling of 100 failed logins in 300
+seconds across all source addresses. It is a distributed-attack backstop: once
+tripped, every operator receives 429 until the sliding window drains.
 
 ## Health and readiness
 

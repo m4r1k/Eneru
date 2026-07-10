@@ -100,13 +100,15 @@ def _global_login_is_blocked() -> bool:
         return len(_global_login_failures) >= GLOBAL_LOGIN_FAIL_MAX
 
 
-def _global_login_record_failure() -> None:
+def _global_login_record_failure() -> bool:
+    """Record one global failure and report entry into throttled state."""
     now = time.monotonic()
     cutoff = now - GLOBAL_LOGIN_FAIL_WINDOW_SECONDS
     with _global_login_lock:
         while _global_login_failures and _global_login_failures[0] < cutoff:
             _global_login_failures.popleft()
         _global_login_failures.append(now)
+        return len(_global_login_failures) == GLOBAL_LOGIN_FAIL_MAX
 
 
 def _login_is_blocked(ip: str) -> bool:
@@ -125,7 +127,8 @@ def _login_is_blocked(ip: str) -> bool:
         return len(dq) >= LOGIN_FAIL_MAX
 
 
-def _login_record_failure(ip: str) -> None:
+def _login_record_failure(ip: str) -> bool:
+    """Record one source failure and report entry into throttled state."""
     now = time.monotonic()
     cutoff = now - LOGIN_FAIL_WINDOW_SECONDS
     with _login_failures_lock:
@@ -142,6 +145,7 @@ def _login_record_failure(ip: str) -> None:
         while dq and dq[0] < cutoff:
             dq.popleft()
         dq.append(now)
+        return len(dq) == LOGIN_FAIL_MAX
 
 
 def _login_clear(ip: str) -> None:
@@ -564,6 +568,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     # smaller semaphore to prove the (N+1)th concurrent request queues instead of
     # running unbounded.
     _request_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+    # F-072: one warning per server lifetime is enough to make a newly rejected
+    # hostname discoverable without giving an attacker an unbounded log stream.
+    _host_rejection_warned = False
+    _host_rejection_lock = threading.Lock()
 
     server_version = "EneruAPI/1.0"
 
@@ -673,10 +681,15 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     def _dispatch_locked(
         self, router: Callable[[], Tuple[int, str, Any]]
     ) -> None:
+        # One handler instance can serve many HTTP/1.1 requests. Track body
+        # consumption per request so an early response never leaves bytes that
+        # the next keep-alive request would misparse as its request line.
+        self._request_body_consumed = False
         # F-016: reject an untrusted Host before touching any route — a
         # DNS-rebinding page must never reach the read-open API. 421 Misdirected
         # Request is the precise "you reached the wrong server name" signal.
         if not self._host_allowed():
+            self._warn_host_rejected_once()
             self._finish(
                 421, "application/json",
                 self._error("MISDIRECTED_REQUEST", "Host header not allowed"))
@@ -715,6 +728,36 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}})
         self._finish(status, content_type, body)
 
+    def _warn_host_rejected_once(self) -> None:
+        """Log the first rejected Host with an actionable allowlist hint."""
+        cls = type(self)
+        with cls._host_rejection_lock:
+            if cls._host_rejection_warned:
+                return
+            cls._host_rejection_warned = True
+        if self.api_log is not None:
+            raw_host = self.headers.get("Host")
+            shown = repr(raw_host) if raw_host is not None else "<missing>"
+            self.api_log(
+                f"⚠️  API rejected Host {shown} with HTTP 421; add the "
+                "hostname to api.allowed_hosts if this is expected."
+            )
+
+    def _unread_request_body(self) -> bool:
+        """Return whether this response leaves framed request bytes unread."""
+        if getattr(self, "_request_body_consumed", False):
+            return False
+        headers = getattr(self, "headers", {})
+        if headers.get("Transfer-Encoding"):
+            return True
+        raw_length = headers.get("Content-Length")
+        if raw_length is None:
+            return False
+        try:
+            return int(raw_length) != 0
+        except (TypeError, ValueError):
+            return True
+
     def _finish(self, status: int, content_type: str, body: Any) -> None:
         if content_type == "application/json":
             raw = json.dumps(body, sort_keys=True).encode("utf-8")
@@ -729,6 +772,12 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                                       "application/json; charset=utf-8"))
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
+        if self._unread_request_body():
+            # Closing is safer than draining here: a slow or partial body must
+            # not hold the response hostage. The next request gets a clean new
+            # connection instead of a phantom 400 from leftover bytes.
+            self.close_connection = True
+            self.send_header("Connection", "close")
         # N2: nosniff on EVERY response (JSON/JS/CSS/HTML), not just HTML -- the
         # dashboard's static assets are served with specific content types and
         # must not be MIME-sniffed.
@@ -972,6 +1021,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     pass
         if length and len(raw) != length:
             raise APIBadRequest("incomplete request body")
+        self._request_body_consumed = True
         if not raw:
             return {}
         try:
@@ -1426,7 +1476,6 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         # backend — per-IP first, then the global ceiling that catches an
         # attacker rotating source IPs past the per-IP guard.
         if _login_is_blocked(client_ip) or _global_login_is_blocked():
-            self._audit(None, "login", client_ip, "throttled")
             return 429, "application/json", self._error(
                 "TOO_MANY_ATTEMPTS",
                 "too many failed login attempts; try again shortly")
@@ -1447,9 +1496,12 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             # stuffing is both throttled and visible. Audit the SOURCE IP, not
             # the attempted username -- a user who fat-fingers a password into
             # the username field would otherwise have it persisted verbatim.
-            _login_record_failure(client_ip)
-            _global_login_record_failure()  # F-040: also feed the global ceiling
-            self._audit(None, "login", client_ip, "failed")
+            source_throttled = _login_record_failure(client_ip)
+            global_throttled = _global_login_record_failure()
+            self._audit(
+                None, "login", client_ip,
+                "throttled" if source_throttled or global_throttled else "failed",
+            )
             raise APIUnauthorized("invalid credentials")
         _login_clear(client_ip)  # ISS-032: reset the counter on success
         token = self.api_sessions.create(principal)
