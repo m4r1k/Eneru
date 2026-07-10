@@ -37,7 +37,14 @@ config. They share one root cause and are fixed as a unit.
   sections yield a pointed error instead of a raw traceback, and unknown keys
   are swept at every level — including the top level, so a misspelled
   `local_shutdwn:` is caught instead of silently ignored while poweroff stays
-  armed.
+  armed. **Upgrade note:** configs that 6.1.6 accepted can now refuse to
+  start — an unknown top-level key (previously ignored) is a fatal error, so
+  run `eneru validate` against your config before restarting the daemon after
+  the upgrade. YAML anchor/extension blocks are supported via the
+  docker-compose convention: prefix them with `x-` (e.g. `x-defaults:`),
+  which the sweep exempts at the top level. The notification timing knobs
+  (`notifications.timeout`/`retry_interval`) accept both integers and floats,
+  so a working `retry_interval: 2.5` keeps working.
 - **A missing explicit `--config` path is now fatal.** `run -c missing.yaml`
   exits non-zero and `validate -c missing.yaml` fails, instead of quietly
   falling back to an all-default, shutdown-armed config. Default-path fallback
