@@ -358,7 +358,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 61 numb
 | 56 | UPS Single | Event management: a wide-range `/api/v1/events` query returns source-qualified rows, an authenticated `DELETE` removes a real event (anonymous is 401), and a history `from > to` is 400 |
 | 57 | Loopback | Containerized remote SSH with **no** `ssh_options` relies on the built-in `StrictHostKeyChecking=accept-new` default: it learns the host key on the first probe into `/var/lib/eneru/ssh/known_hosts`, reaches `HEALTHY`, and preserves the first learned trust entries after the container is recreated |
 | 58 | CLI | NUT name autodiscovery (issue #71) lists a single exposed UPS with `upsc -l`, auto-corrects the runtime poll target, and logs the `ups.name` fix hint |
-| 59 | UPS Single | `augment_remote_path: false` delivers a custom SSH command without the POSIX/Synology PATH prefix |
+| 59 | UPS Single | The default remote PATH resolves a Synology-only bare command, while `augment_remote_path: false` preserves a custom command verbatim |
 | 60 | UPS Single | A real local Compose stack is removed through Eneru's `down -t <seconds>` shutdown path |
 | 61 | Loopback | A real coordinator/list-form delegated poweroff reaches the SSH target, skips in-container poweroff, and persists a `sequence_complete` recovery marker |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |

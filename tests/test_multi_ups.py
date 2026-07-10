@@ -859,6 +859,7 @@ class TestCoordinatorReportSender:
         kwargs = coord._notification_worker.send.call_args.kwargs
         assert kwargs["category"] == "report"
         assert kwargs["store"] is primary._stats_store
+        assert kwargs["require_persistent"] is True
         # body carries no "[UPS-A]" prefix; @ is escaped to avoid mentions.
         assert kwargs["body"].startswith("Fleet digest body")
 
@@ -3076,6 +3077,7 @@ class TestCoordinatorReloadNotificationWorker:
         assert mon_closed._notification_worker is worker
         assert executor._notification_worker is worker
         worker.register_store.assert_called_once_with(open_store)
+        # The old worker is absent in this fixture, so no handoff is needed.
         assert any("Notifications reloaded" in line for line in logs)
 
 

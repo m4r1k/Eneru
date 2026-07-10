@@ -496,7 +496,6 @@ def test_monitor_reload_notification_worker_restarts_and_registers(monkeypatch):
     monkeypatch.setattr(monitormod, "NotificationWorker", worker_cls)
 
     old = mon._notification_worker
-    old.drain_memory_buffer.return_value = [("carry", "info", "lifecycle", 1)]
     mon._reload_notification_worker()
 
     old.stop.assert_called_once()
@@ -506,9 +505,7 @@ def test_monitor_reload_notification_worker_restarts_and_registers(monkeypatch):
     # Reload must forward the shared logger (else warnings fall back to print).
     assert worker_cls.call_args.kwargs.get("logger") is mon.logger
     # F-067: the old worker's memory buffer is handed to the replacement.
-    old.drain_memory_buffer.assert_called_once()
-    worker.adopt_memory_buffer.assert_called_once_with(
-        [("carry", "info", "lifecycle", 1)])
+    old.handoff_memory_buffer_to.assert_called_once_with(worker)
 
 
 @pytest.mark.unit
@@ -580,7 +577,6 @@ def test_coordinator_reload_notification_worker_rewires_children(monkeypatch):
     monkeypatch.setattr(multi_mod, "NotificationWorker", worker_cls)
 
     old = coord._notification_worker
-    old.drain_memory_buffer.return_value = [("carry", "info", "lifecycle", 1)]
     coord._reload_notification_worker()
 
     old.stop.assert_called_once()
@@ -591,9 +587,7 @@ def test_coordinator_reload_notification_worker_rewires_children(monkeypatch):
     # Reload must forward the shared logger (else warnings fall back to print).
     assert worker_cls.call_args.kwargs.get("logger") is coord._logger
     # F-067: the old worker's memory buffer is handed to the replacement.
-    old.drain_memory_buffer.assert_called_once()
-    worker.adopt_memory_buffer.assert_called_once_with(
-        [("carry", "info", "lifecycle", 1)])
+    old.handoff_memory_buffer_to.assert_called_once_with(worker)
 
 
 @pytest.mark.unit

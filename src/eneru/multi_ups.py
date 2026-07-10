@@ -1021,7 +1021,7 @@ class MultiUPSCoordinator:
             self._handle_signal(signal.SIGINT, None)
 
     def _send_report_notification(self, body: str, notify_type: str,
-                                  category: str) -> None:
+                                  category: str) -> Optional[int]:
         """Deliver a daemon-wide (fleet) report via the shared worker.
 
         Unlike ``UPSGroupMonitor._send_notification`` this prepends NO per-UPS
@@ -1034,9 +1034,10 @@ class MultiUPSCoordinator:
         if not self._notification_worker or not self._monitors:
             return
         escaped = body.replace("@", "@\u200B")   # zero-width space after @
-        self._notification_worker.send(
+        return self._notification_worker.send(
             body=escaped, notify_type=notify_type, category=category,
             store=getattr(self._monitors[0], "_stats_store", None),
+            require_persistent=True,
         )
 
     def _maybe_send_reports(self) -> None:
@@ -1138,12 +1139,9 @@ class MultiUPSCoordinator:
 
     def _reload_notification_worker(self) -> None:
         """Bounce the shared notification worker after config reload."""
-        # F-067: detach the old worker's memory-buffered rows (no SQLite
-        # backing) so the replacement worker can adopt them.
-        carryover = []
-        if self._notification_worker is not None:
-            self._notification_worker.stop()
-            carryover = self._notification_worker.drain_memory_buffer()
+        old_worker = self._notification_worker
+        if old_worker is not None:
+            old_worker.stop()
             self._notification_worker = None
         for mon in self._monitors:
             mon._notification_worker = None
@@ -1170,8 +1168,8 @@ class MultiUPSCoordinator:
             store = getattr(mon, "_stats_store", None)
             if store is not None and store._conn is not None:
                 worker.register_store(store)
-        # F-067: hand over the old worker's undelivered memory buffer.
-        worker.adopt_memory_buffer(carryover)
+        if old_worker is not None:
+            old_worker.handoff_memory_buffer_to(worker)
         for executor in self._redundancy_executors.values():
             executor._notification_worker = worker
         self._notification_worker = worker

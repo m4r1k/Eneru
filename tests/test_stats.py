@@ -1160,6 +1160,17 @@ class TestNotificationQueue:
             s.close()
 
     @pytest.mark.unit
+    def test_claimed_notification_still_counts_as_outstanding(self, tmp_path):
+        """F-079: flush cannot declare an in-flight delivery drained."""
+        s = self._open(tmp_path)
+        try:
+            notification_id = s.enqueue_notification("x", "info", "lifecycle")
+            assert s.claim_notification(notification_id) is True
+            assert s.pending_notification_count() == 1
+        finally:
+            s.close()
+
+    @pytest.mark.unit
     def test_cancel_marks_with_reason(self, tmp_path):
         s = self._open(tmp_path)
         try:

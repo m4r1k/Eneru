@@ -1422,8 +1422,13 @@ class StatsStore:
             )
 
     def pending_notification_count(self) -> int:
-        """Return the number of pending rows in this store. Used by
-        ``flush()`` to know when the queue has drained."""
+        """Return queued or in-flight rows that have not finished delivery.
+
+        The legacy method name predates atomic delivery claims. ``delivering``
+        rows must count too: otherwise a shutdown-time ``flush()`` sees zero as
+        soon as the worker claims its final row and can exit while Apprise is
+        still sending it.
+        """
         if self._conn is None:
             return 0
         try:
@@ -1431,7 +1436,8 @@ class StatsStore:
                 if self._conn is None:   # re-check: close() may have raced
                     return 0
                 cur = self._conn.execute(
-                    "SELECT COUNT(*) FROM notifications WHERE status='pending'"
+                    "SELECT COUNT(*) FROM notifications "
+                    "WHERE status IN ('pending', 'delivering')"
                 )
                 row = cur.fetchone()
                 return int(row[0]) if row else 0

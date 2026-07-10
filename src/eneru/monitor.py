@@ -759,7 +759,8 @@ class UPSGroupMonitor(
 
     def _send_notification(self, body: str, notify_type: str = "info",
                            blocking: bool = False,
-                           category: str = "general"):
+                           category: str = "general",
+                           require_persistent: bool = False) -> Optional[int]:
         """Queue a notification via the persistent notification worker.
 
         v5.2 change: notifications are inserted as ``pending`` rows in
@@ -778,6 +779,9 @@ class UPSGroupMonitor(
                 and per-category queries. Common values: ``lifecycle``,
                 ``power_event``, ``voltage``, ``shutdown``,
                 ``shutdown_summary``, ``general`` (default).
+            require_persistent: Do not fall back to volatile memory if the
+                SQLite queue refuses the row. Periodic reports need the return
+                value so they can restore their cadence stamp and retry.
         """
         del blocking  # see docstring
         if not self._notification_worker:
@@ -794,6 +798,7 @@ class UPSGroupMonitor(
             notify_type=notify_type,
             category=category,
             store=self._stats_store,
+            require_persistent=require_persistent,
         )
 
     def _log_power_event(self, event: str, details: str,
@@ -1845,13 +1850,12 @@ class UPSGroupMonitor(
 
     def _reload_notification_worker(self) -> None:
         """Bounce the single-UPS notification worker after config reload."""
-        # F-067: memory-buffered rows (store never opened / refused the
-        # insert) have no SQLite backing — detach them from the old worker
-        # so the replacement can adopt them instead of dropping them.
-        carryover = []
-        if self._notification_worker is not None:
-            self._notification_worker.stop()
-            carryover = self._notification_worker.drain_memory_buffer()
+        # Keep the old object until the replacement starts. Its bounded stop
+        # may return while a direct Apprise call is still in flight; the
+        # handoff below transfers only unclaimed rows and routes a late failure.
+        old_worker = self._notification_worker
+        if old_worker is not None:
+            old_worker.stop()
             self._notification_worker = None
         if not self.config.notifications.enabled:
             self._log_message("📢  Notifications: disabled")
@@ -1868,8 +1872,8 @@ class UPSGroupMonitor(
         if worker.start():
             if self._stats_store is not None and self._stats_store._conn is not None:
                 worker.register_store(self._stats_store)
-            # F-067: hand over the old worker's undelivered memory buffer.
-            worker.adopt_memory_buffer(carryover)
+            if old_worker is not None:
+                old_worker.handoff_memory_buffer_to(worker)
             self._notification_worker = worker
             count = worker.get_service_count()
             self._log_message(f"📢  Notifications reloaded ({count} service(s))")
@@ -2444,9 +2448,12 @@ class UPSGroupMonitor(
         except Exception as exc:
             self._log_message(f"⚠️  reports task failed: {exc}")
 
-    def _enqueue_report(self, body: str, notify_type: str, category: str) -> None:
+    def _enqueue_report(self, body: str, notify_type: str,
+                        category: str) -> Optional[int]:
         """Adapter so reports.py can deliver via the notification queue."""
-        self._send_notification(body, notify_type, category=category)
+        return self._send_notification(
+            body, notify_type, category=category, require_persistent=True,
+        )
 
     def _resolve_self_test_config(self):
         """Per-UPS self_test override if present, else the global config."""

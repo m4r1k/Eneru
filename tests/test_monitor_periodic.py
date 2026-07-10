@@ -48,8 +48,8 @@ def _make_monitor(cfg, store=None, *, coordinator_mode=False):
     mon.notifications = []
     mon._log_message = lambda m: mon.logs.append(m)
     mon._send_notification = (
-        lambda body, ntype, category="general":
-        mon.notifications.append((body, ntype, category)))
+        lambda body, ntype, category="general", **kwargs:
+        mon.notifications.append((body, ntype, category, kwargs)) or 1)
     mon._get_ups_var = lambda var: None
     return mon
 
@@ -163,8 +163,10 @@ class TestEnqueueReport:
     @pytest.mark.unit
     def test_routes_to_send_notification(self):
         mon = _make_monitor(_cfg("ups:\n  name: U@h\n"))
-        mon._enqueue_report("body", "info", "report")
-        assert mon.notifications == [("body", "info", "report")]
+        assert mon._enqueue_report("body", "info", "report") == 1
+        assert mon.notifications == [(
+            "body", "info", "report", {"require_persistent": True},
+        )]
 
 
 # --------------------------------------------------------------------------

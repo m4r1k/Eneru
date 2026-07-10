@@ -313,13 +313,21 @@ def maybe_send_due_reports(config, store, ups_name: str,
         if not store.set_meta(key, str(int(now))):
             continue  # stamp failed -> retry next tick, nothing sent (no dupe)
         try:
-            enqueue(_compose_message(content), "info", "report")
+            notification_id = enqueue(
+                _compose_message(content), "info", "report",
+            )
         except Exception:
             # The queue rejected the handoff: restore the previous cadence so
             # the caller's isolation guard can retry on the next tick.
             if raw is not None:
                 store.set_meta(key, str(raw))
             raise
+        if notification_id is None:
+            # The worker could not persist the row. Put the cadence back so
+            # the next scheduler tick retries instead of losing this digest.
+            if raw is not None:
+                store.set_meta(key, str(raw))
+            continue
         sent.append(period)
     return sent
 
@@ -386,10 +394,16 @@ def maybe_send_due_reports_multi(config, units, meta_store,
         if not meta_store.set_meta(key, str(int(now))):
             continue  # stamp failed -> retry next tick, nothing sent (no dupe)
         try:
-            enqueue(_compose_message(content), "info", "report")
+            notification_id = enqueue(
+                _compose_message(content), "info", "report",
+            )
         except Exception:
             if raw is not None:
                 meta_store.set_meta(key, str(raw))
             raise
+        if notification_id is None:
+            if raw is not None:
+                meta_store.set_meta(key, str(raw))
+            continue
         sent.append(period)
     return sent

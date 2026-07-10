@@ -48,6 +48,13 @@ RUN echo '#!/bin/sh' > /usr/local/bin/verify-unaugmented-path && \
     echo 'touch /tmp/eneru-path-verbatim' >> /usr/local/bin/verify-unaugmented-path && \
     chmod +x /usr/local/bin/verify-unaugmented-path
 
+# Default-path probe: its bare command name resolves only if Eneru prepends the
+# shipped Synology/POSIX directories to the non-interactive SSH command.
+RUN mkdir -p /usr/syno/sbin && \
+    echo '#!/bin/sh' > /usr/syno/sbin/eneru-path-probe && \
+    echo 'touch /tmp/eneru-path-augmented' >> /usr/syno/sbin/eneru-path-probe && \
+    chmod +x /usr/syno/sbin/eneru-path-probe
+
 # Alias shutdown to our fake version
 RUN ln -sf /usr/local/bin/fake-shutdown /usr/local/bin/shutdown
 

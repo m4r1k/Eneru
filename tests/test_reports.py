@@ -213,7 +213,8 @@ class TestMaybeSend:
         store.set_meta("last_report_sent_daily", str(int(now - 2 * DAY)))
         periods = reports.maybe_send_due_reports(
             cfg, store, "U@h",
-            lambda b, t, c: sent.append((t, c)), now=now, tz=timezone.utc)
+            lambda b, t, c: sent.append((t, c)) or 1,
+            now=now, tz=timezone.utc)
         assert periods == ["daily"]
         assert sent == [("info", "report")]
         # immediate second call: last is now -> not due -> no resend
@@ -282,6 +283,22 @@ class TestMaybeSend:
         assert store.get_meta("last_report_sent_daily") == old
 
     @pytest.mark.unit
+    def test_enqueue_refusal_restores_previous_stamp(self, store):
+        """A silent ``None`` from the persistent queue remains retryable."""
+        cfg = self._cfg()
+        now = DUE_TS
+        old = str(int(now - 2 * DAY))
+        store.set_meta("last_report_sent_daily", old)
+
+        periods = reports.maybe_send_due_reports(
+            cfg, store, "U@h", lambda *_args: None,
+            now=now, tz=timezone.utc,
+        )
+
+        assert periods == []
+        assert store.get_meta("last_report_sent_daily") == old
+
+    @pytest.mark.unit
     def test_csv_format_delivers_csv_block(self, store):
         # reports.format: csv must actually deliver the CSV (the channel is
         # text-only, so it rides under the summary) — not silently send text.
@@ -292,7 +309,7 @@ class TestMaybeSend:
         now = DUE_TS
         store.set_meta("last_report_sent_daily", str(int(now - 2 * DAY)))
         reports.maybe_send_due_reports(
-            cfg, store, "U@h", lambda b, t, c: bodies.append(b),
+            cfg, store, "U@h", lambda b, t, c: bodies.append(b) or 1,
             now=now, tz=timezone.utc)
         assert bodies and "--- CSV ---" in bodies[0]
         assert "timestamp,event_type,detail" in bodies[0]
@@ -359,7 +376,7 @@ class TestMaybeSend:
         store.set_meta("last_report_sent_weekly", str(int(now - 30 * DAY)))
         store.set_meta("last_report_sent_monthly", str(int(now - 90 * DAY)))
         periods = reports.maybe_send_due_reports(
-            cfg, store, "U@h", lambda b, t, c: sent.append(c),
+            cfg, store, "U@h", lambda b, t, c: sent.append(c) or 1,
             now=now, tz=timezone.utc)
         assert set(periods) == {"weekly", "monthly"}
         assert sent == ["report", "report"]
@@ -396,7 +413,7 @@ class TestAggregate:
             bodies = []
             units = [("A@h", s1, cfg.energy), ("B@h", s2, cfg.energy)]
             sent = reports.maybe_send_due_reports_multi(
-                cfg, units, s1, lambda b, t, c: bodies.append(b),
+                cfg, units, s1, lambda b, t, c: bodies.append(b) or 1,
                 now=now, tz=timezone.utc)
             assert sent == ["daily"]
             assert len(bodies) == 1
@@ -453,6 +470,26 @@ class TestAggregate:
                     now=DUE_TS, tz=timezone.utc,
                 )
 
+            assert store.get_meta("last_report_sent_daily") == old
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_multi_enqueue_refusal_restores_previous_stamp(self, tmp_path):
+        cfg = _config("ups:\n  - name: A@h\nreports:\n  enabled: true\n"
+                      "  daily: true\n  time: '08:00'\n")
+        store = StatsStore(tmp_path / "multi-enqueue-refusal.db")
+        store.open()
+        try:
+            old = str(int(DUE_TS - 2 * DAY))
+            store.set_meta("last_report_sent_daily", old)
+
+            periods = reports.maybe_send_due_reports_multi(
+                cfg, [("A@h", store, cfg.energy)], store,
+                lambda *_args: None, now=DUE_TS, tz=timezone.utc,
+            )
+
+            assert periods == []
             assert store.get_meta("last_report_sent_daily") == old
         finally:
             store.close()

@@ -309,6 +309,34 @@ class TestSendPersistence:
     @pytest.mark.unit
     @patch("eneru.notifications.APPRISE_AVAILABLE", True)
     @patch("eneru.notifications.apprise")
+    def test_require_persistent_refusal_does_not_memory_buffer(
+        self, mock_apprise, notification_config, registered_store,
+    ):
+        """Reports can distinguish a durable enqueue from volatile fallback."""
+        _patch_apprise(mock_apprise, succeed=True)
+        worker = NotificationWorker(notification_config)
+        try:
+            worker.start()
+            worker.stop()
+
+            assert worker.send(
+                "no-store", "info", "report", require_persistent=True,
+            ) is None
+            assert worker._memory_buffer == []
+
+            worker.register_store(registered_store)
+            registered_store.enqueue_notification = MagicMock(return_value=None)
+            assert worker.send(
+                "refused", "info", "report",
+                require_persistent=True,
+            ) is None
+            assert worker._memory_buffer == []
+        finally:
+            worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
     def test_worker_replays_memory_buffer_when_store_recovers(
         self, mock_apprise, notification_config, registered_store
     ):
@@ -666,6 +694,41 @@ class TestMemoryBufferDirectDelivery:
         assert [e[0] for e in worker._memory_buffer] == ["b", "c"]
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("succeeds", [True, False])
+    def test_reload_handoff_does_not_copy_inflight_memory_row(
+        self, notification_config, succeeds,
+    ):
+        """A blocked direct send is delivered once or retried, never copied."""
+        old = NotificationWorker(notification_config)
+        new = NotificationWorker(notification_config)
+        entry = ("inflight", "info", "lifecycle", 1)
+        old._memory_buffer = [entry]
+        old._stores = [MagicMock()]
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked_send(*_args):
+            entered.set()
+            assert release.wait(timeout=2)
+            return succeeds
+
+        old._send_via_apprise = blocked_send
+        thread = threading.Thread(target=old._deliver_memory_buffer_direct)
+        thread.start()
+        assert entered.wait(timeout=2)
+        assert old._memory_buffer == []  # claimed before the blocking send
+
+        old.handoff_memory_buffer_to(new)
+        assert new._memory_buffer == []  # in-flight is not copied
+        release.set()
+        thread.join(timeout=2)
+
+        assert not thread.is_alive()
+        assert old._memory_buffer == []
+        expected = [] if succeeds else [entry]
+        assert new._memory_buffer == expected
+
+    @pytest.mark.unit
     @patch("eneru.notifications.APPRISE_AVAILABLE", True)
     @patch("eneru.notifications.apprise")
     def test_stop_warns_about_buffered_rows(
@@ -724,6 +787,9 @@ class TestRetryAndBackoff:
         )
         thread.start()
         assert entered.wait(timeout=2)
+        old_worker._stores = [registered_store]
+        # A claimed row is in-flight, not drained. Shutdown flush must wait.
+        assert old_worker.flush(timeout=0.05) is False
 
         new_worker._process_one(
             store=registered_store, row_id=row_id,
@@ -740,6 +806,7 @@ class TestRetryAndBackoff:
             "SELECT status, attempts FROM notifications WHERE id=?",
             (row_id,),
         ) == ("sent", 1)
+        assert old_worker.flush(timeout=0.05) is True
 
     @pytest.mark.unit
     def test_failed_claim_returns_pending_without_double_attempt(

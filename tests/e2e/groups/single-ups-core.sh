@@ -1060,15 +1060,15 @@ echo "PASS: MQTT status payload arrived with power-quality metrics"
 )
 
 # ======================================================================
-# Test 59: Remote PATH augmentation opt-out sends custom command verbatim
+# Test 59: Remote PATH augmentation default and opt-out both work
 # ======================================================================
 (
 echo ""
-echo ">>> Running: Test 59: Remote PATH augmentation opt-out sends custom command verbatim"
+echo ">>> Running: Test 59: Remote PATH augmentation default and opt-out both work"
 
 config=/tmp/config-e2e-path-opt-out.yaml
 docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
-  rm -f /tmp/eneru-path-verbatim
+  rm -f /tmp/eneru-path-verbatim /tmp/eneru-path-augmented
 cat >"$config" <<'YAML'
 ups:
   name: "TestUPS@localhost:3493"
@@ -1087,6 +1087,16 @@ logging:
 statistics:
   db_directory: "/tmp/eneru-e2e-path-stats"
 remote_servers:
+  - name: "default-path-target"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    shutdown_command: "eneru-path-probe"
+    ssh_options:
+      - "-o Port=2222"
+      - "-o StrictHostKeyChecking=no"
+      - "-o UserKnownHostsFile=/dev/null"
+      - "-o IdentityFile=/tmp/e2e-ssh-key"
   - name: "verbatim-path-target"
     enabled: true
     host: "localhost"
@@ -1112,7 +1122,13 @@ if ! docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
   cat /tmp/test59.log
   exit 1
 fi
-echo "PASS: custom remote command ran with its original PATH"
+if ! docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
+    test -f /tmp/eneru-path-augmented; then
+  echo "FAIL: default PATH augmentation did not resolve the Synology probe"
+  cat /tmp/test59.log
+  exit 1
+fi
+echo "PASS: default PATH augmentation and the explicit opt-out both worked"
 )
 
 # ======================================================================
