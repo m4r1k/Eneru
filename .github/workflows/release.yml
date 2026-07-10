@@ -866,12 +866,14 @@ jobs:
               > /etc/apt/sources.list.d/eneru.list
             # Freshness gate: wait until the repo advertises the version THIS
             # run built, not whatever Pages still caches from the last release.
-            for i in $(seq 1 30); do
+            # 10-min window (matches the dnf leg): Pages CDN propagation can
+            # straggle past 5 minutes.
+            for i in $(seq 1 60); do
               apt-get update >/dev/null 2>&1 || true
               if apt-cache policy eneru | grep -qF "$PKG_VERSION"; then
                 echo "Repo advertises ${PKG_VERSION} after attempt ${i}."; break
               fi
-              if [ "$i" = "30" ]; then
+              if [ "$i" = "60" ]; then
                 echo "::error::Repo never advertised ${PKG_VERSION}."; exit 1
               fi
               echo "Attempt ${i}: repo metadata still stale; sleeping 10s..."; sleep 10
@@ -889,12 +891,19 @@ jobs:
             else
               curl -fsSL "${BASE}/${{ matrix.repo_stable }}" -o /etc/yum.repos.d/eneru.repo
             fi
-            # Freshness gate (same reasoning as the apt leg).
-            for i in $(seq 1 30); do
-              if dnf --refresh -q info eneru 2>/dev/null | grep -qF "$PKG_VERSION"; then
+            # Freshness gate (same reasoning as the apt leg). -y is LOAD-BEARING:
+            # eneru.repo sets repo_gpgcheck=1, so the first metadata fetch must
+            # import the signing key, and dnf PROMPTS for that import. Without
+            # -y the non-interactive prompt is refused, dnf fails with "Bad GPG
+            # signature", and 2>/dev/null makes every attempt look like stale
+            # metadata — the gate can never pass (v6.1.7 release run failed
+            # twice this way while the repo was demonstrably fine). The window
+            # is also 10 min, not 5: Pages CDN propagation can straggle.
+            for i in $(seq 1 60); do
+              if dnf -y --refresh -q info eneru 2>/dev/null | grep -qF "$PKG_VERSION"; then
                 echo "Repo advertises ${PKG_VERSION} after attempt ${i}."; break
               fi
-              if [ "$i" = "30" ]; then
+              if [ "$i" = "60" ]; then
                 echo "::error::Repo never advertised ${PKG_VERSION}."; exit 1
               fi
               echo "Attempt ${i}: repo metadata still stale; sleeping 10s..."; sleep 10
