@@ -817,3 +817,61 @@ def test_dashboard_outage_spans_close_at_shutdown_boundary(minimal_config):
     assert data["c"][0]["end"] == 1000
     assert data["c"][0]["restore"] is None
     assert data["c"][0]["boundary"] is False
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_chart_feed_keeps_boundary_events(minimal_config):
+    """F-094: compose the REAL chart-feed filter with the span math.
+
+    The span math above accepts DAEMON_START as a close boundary, but the
+    chart feed (`fetchTierEvents`) used to strip lifecycle events before
+    `computeOutageSpans` ever saw them — so an ON_BATTERY whose only closing
+    event was a daemon restart (the actual 2026-07-09 production history:
+    power died, host shut down, fresh boot already on line) still ran the
+    red band to "now". The prior test could not catch that because it fed
+    `computeOutageSpans` directly, skipping the filter.
+
+    This test runs the same predicate the feed uses (`isChartFeedEvent`)
+    plus the draw-time tier-1 marker re-filter, end to end."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    tier_src = js[js.index("const TIER1_EVENT_PATTERNS"):
+                  js.index("// Which display tier")]
+    spans_src = js[js.index("const OUTAGE_CLOSE_BOUNDARIES"):
+                   js.index("function appendOutageBands")]
+    script = tier_src + spans_src + textwrap.dedent("""
+        // The exact prod shape: two outages whose ONLY closing events are
+        // daemon restarts — no POWER_RESTORED, no *_SHUTDOWN_* rows.
+        const rows = [
+          {ts: 100, eventType: "ON_BATTERY"},
+          {ts: 150, eventType: "DAEMON_START"},
+          {ts: 300, eventType: "ON_BATTERY"},
+          {ts: 350, eventType: "DAEMON_START"},
+          {ts: 380, eventType: "DAEMON_UPGRADED"},
+          {ts: 390, eventType: "SLOW_NUT_RESPONSE"},
+        ];
+        // Same predicate fetchTierEvents applies (source matching aside).
+        const feed = rows.filter((e) => isChartFeedEvent(e.eventType));
+        const spans = computeOutageSpans(feed, 0, 1000);
+        // Same tier-1 re-filter the marker draw sites apply.
+        const markers = feed.filter((e) => isTier1Event(e.eventType));
+        process.stdout.write(JSON.stringify({
+          feedTypes: feed.map((e) => e.eventType),
+          spans: spans.map((s) => ({start: s.start, end: s.end})),
+          markerTypes: markers.map((e) => e.eventType),
+        }));
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    data = json.loads(result.stdout)
+
+    # The feed keeps the boundary rows (and drops diag-tier noise)...
+    assert data["feedTypes"] == [
+        "ON_BATTERY", "DAEMON_START", "ON_BATTERY", "DAEMON_START"]
+    # ...so BOTH orphaned outages close at their restart boundary — two
+    # bounded bands, not one running to t1 (the perma-red regression).
+    assert data["spans"] == [
+        {"start": 100, "end": 150}, {"start": 300, "end": 350}]
+    # And the boundary rows never render as chart marker dots.
+    assert data["markerTypes"] == ["ON_BATTERY", "ON_BATTERY"]

@@ -84,7 +84,10 @@ config. They share one root cause and are fixed as a unit.
   Power/Battery/Energy charts shaded red to "now" forever. The daemon now emits
   `POWER_RESTORED` on a power-loss recovery start, and the dashboard closes an
   open outage band at the shutdown/restart boundary (so historical outages
-  clear too).
+  clear too). Follow-up (F-094): the chart event feed now keeps those boundary
+  rows — its tier-1 filter used to strip `DAEMON_*` events before the band
+  math ever saw them, so an outage whose only closing event was a daemon
+  restart still shaded to "now"; markers stay tier-1-only at draw time.
 - **Assorted correctness fixes:** quoted poweroff commands parse with `shlex`;
   corrupt shutdown/upgrade markers that parse to non-dicts are treated as
   absent instead of crashing startup; VM force-destroy re-polls so a VM that

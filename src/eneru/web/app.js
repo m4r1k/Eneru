@@ -2001,9 +2001,12 @@ function drawChart(hostId, series, options) {
 
   // Event overlays: vertical guides at each event timestamp inside the range,
   // colored by type. Cap markers so a dense window doesn't drown the SVG.
+  // Markers are tier-1 only — the feed also carries boundary (DAEMON_*) rows
+  // for the outage-band math above, which must not render as dots (F-094).
   const events = options.events || [];
   if (events.length) {
-    const inRange = events.filter((e) => e.ts >= t0 && e.ts <= t1);
+    const inRange = events.filter(
+      (e) => e.ts >= t0 && e.ts <= t1 && isTier1Event(e.eventType || e.event));
     const MAX = 100;
     const shown = inRange.length > MAX
       ? inRange.filter((_e, i) => i % Math.ceil(inRange.length / MAX) === 0)
@@ -2097,7 +2100,7 @@ async function fetchTierEvents(ups, from, to) {
   const ev = await api("/api/v1/events?" + eq);
   const rows = (ev.ok && ev.data && ev.data.events) || [];
   return rows.filter(
-    (e) => eventMatchesSource(e, ups) && isTier1Event(e.eventType || e.event));
+    (e) => eventMatchesSource(e, ups) && isChartFeedEvent(e.eventType || e.event));
 }
 
 // Markers + outage bands come from the SELECTED window only (low cap pressure).
@@ -2110,7 +2113,9 @@ async function loadChartEvents(ups, from, to, range) {
   let hidden = 0;
   if (range !== null && range < CHART_EVENT_HORIZON) {
     const older = await fetchTierEvents(ups, to - CHART_EVENT_HORIZON, from - 1);
-    hidden = older.length;
+    // The nudge says "earlier POWER events" — count tier-1 rows only, not the
+    // boundary (DAEMON_*) rows the feed also carries for the band math.
+    hidden = older.filter((e) => isTier1Event(e.eventType || e.event)).length;
   }
   return { events, hidden };
 }
@@ -2195,6 +2200,22 @@ const OUTAGE_CLOSE_BOUNDARIES = [
   "DELEGATED_SHUTDOWN_INITIATED",
   "DAEMON_START",
 ];
+function isOutageBoundaryEvent(type) {
+  const u = (type || "").toUpperCase();
+  return OUTAGE_CLOSE_BOUNDARIES.some((b) => u.includes(b));
+}
+// What the chart event feed keeps: power (tier-1) events PLUS outage close
+// boundaries. The boundaries MUST survive the feed filter or the band math
+// below never sees them: an ON_BATTERY whose only closing event is a daemon
+// restart (power died → host shut down → fresh boot, the real 2026-07-09
+// history) would run the red band to "now" forever (F-094). DAEMON_* rows are
+// lifecycle-tier, so a tier-1-only feed strips exactly those boundaries —
+// the door that closes the red curtain was installed behind a bouncer that
+// turned away the very events meant to close it. Markers re-filter to tier-1
+// at draw time, so daemon-start rows never clutter the charts as dots.
+function isChartFeedEvent(type) {
+  return isTier1Event(type) || isOutageBoundaryEvent(type);
+}
 
 // Pure span math (no DOM) so it's unit-testable in a node shim. Turns the raw
 // event stream into outage spans: each ON_BATTERY opens a span that closes on
@@ -2206,8 +2227,7 @@ function computeOutageSpans(events, t0, t1) {
   const evs = (events || [])
     .filter((e) => {
       const t = (e.eventType || e.event || "").toUpperCase();
-      return t.includes("ON_BATTERY")
-        || OUTAGE_CLOSE_BOUNDARIES.some((b) => t.includes(b));
+      return t.includes("ON_BATTERY") || isOutageBoundaryEvent(t);
     })
     .slice()
     .sort((a, b) => a.ts - b.ts);
@@ -2517,8 +2537,12 @@ function drawEnergyChart(hostId, rows, options) {
 
   // Outage spans behind the markers (see appendOutageBands).
   appendOutageBands(svg, options.events || [], x, t0, t1, 5, H - pad);
-  // tier-1 event markers (already filtered upstream).
-  (options.events || []).filter((e) => e.ts >= t0 && e.ts <= t1).slice(0, 100)
+  // tier-1 event markers only — the feed also carries boundary (DAEMON_*)
+  // rows for the outage bands above; they must not render as dots (F-094).
+  (options.events || [])
+    .filter((e) => e.ts >= t0 && e.ts <= t1
+                   && isTier1Event(e.eventType || e.event))
+    .slice(0, 100)
     .forEach((e) => {
       appendEventMarker(svg, e, x(e.ts).toFixed(1), 5, (H - pad).toFixed(1));
     });
