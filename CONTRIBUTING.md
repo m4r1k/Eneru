@@ -103,6 +103,66 @@ Before submitting a PR, check:
 - [ ] Existing features still work
 - [ ] New configuration options are documented
 
+## Log message emoji conventions
+
+The codebase uses emojis for visual clarity in log messages and
+notifications — they're scanner hints during incident review, not decoration.
+Each emoji has a specific semantic meaning; use them consistently:
+
+**System state:**
+
+- 🚀 Service startup
+- 🛑 Service stop, exiting
+
+**Modes:**
+
+- 🧪 Dry-run mode indicators
+
+**Configuration & info:**
+
+- 📢 Notification status
+- 📋 Feature lists, pre-shutdown command lists
+- 📊 Voltage monitoring statistics
+- ℹ️ Informational messages (indented)
+
+**Status messages:**
+
+- ⚠️ Warnings
+- ❌ Errors, failures
+- ✅ Success, completion
+- 🚨 Critical alerts, emergency shutdown
+
+**Power & UPS:**
+
+- ⚡ Power events, AVR activity, force actions (e.g., force destroy VM)
+- 🔋 Battery status (periodic updates)
+- 🔄 UPS status changes
+
+**Shutdown components:**
+
+- 🖥️ Virtual machines (section header)
+- ⏹️ Stopping individual VM
+- 🐳 Containers — Docker/Podman (section header)
+- 🌐 Remote servers (section header and per-server)
+- 💾 Filesystem sync
+- 📤 Unmounting filesystems (section header)
+- 🔌 Shutdown commands (local and remote)
+- 🛰️ Container loopback delegation (v5.5+: local host actions delegated to
+  the host's sshd over 127.0.0.1; distinct from the 🌐 used for ordinary
+  remote_servers so the loopback path is visually unambiguous in logs and
+  notifications)
+
+**Actions & progress:**
+
+- ⏳ Starting a wait / initial wait state
+- 🕒 Still waiting / progress during wait
+- ➡️ Actions in progress (stopping compose, unmounting, pre-shutdown commands)
+- 🔍 Checking/searching (e.g., rootless containers)
+
+**Users:**
+
+- 👤 User-specific containers
+
 ## Questions?
 
 Open an issue if you have questions about contributing.
