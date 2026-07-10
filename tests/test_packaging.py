@@ -10,7 +10,9 @@ These tests catch that class of mistake before it ships.
 """
 
 import re
+import importlib.util
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -18,6 +20,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 NFPM_YAML = REPO_ROOT / "nfpm.yaml"
 PKG_ROOT = REPO_ROOT / "src" / "eneru"
+WRAPPER = REPO_ROOT / "packaging" / "eneru-wrapper.py"
 
 
 def _all_eneru_modules() -> set:
@@ -135,3 +138,115 @@ class TestNfpmModuleListing:
             f"eneru.web package-data glob (wheel installs would 404 them): "
             f"{uncovered}"
         )
+
+
+class TestPackageWrapper:
+    """The EL8 entry point must find future Python 3.x interpreters safely."""
+
+    @staticmethod
+    def _load_wrapper():
+        spec = importlib.util.spec_from_file_location("eneru_pkg_wrapper", WRAPPER)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @pytest.mark.unit
+    def test_dynamic_interpreter_discovery_prefers_el8_python39(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        wrapper = self._load_wrapper()
+        for name in ("python3.9", "python3.14", "python3.15", "python3.8"):
+            candidate = tmp_path / name
+            candidate.touch(mode=0o755)
+        versions = {
+            "python3.15": "3.8\n",   # misleading executable: reject it
+            "python3.14": "3.14\n",
+            "python3.9": "3.9\n",
+        }
+        check = MagicMock(
+            side_effect=lambda argv, **_kw: versions[Path(argv[0]).name],
+        )
+        monkeypatch.setattr(wrapper.subprocess, "check_output", check)
+
+        selected = wrapper._compatible_python_on_path(str(tmp_path))
+
+        assert selected == str(tmp_path / "python3.9")
+        assert [Path(call.args[0][0]).name for call in check.call_args_list] == [
+            "python3.9",
+        ]
+
+    @pytest.mark.unit
+    def test_dynamic_interpreter_discovery_falls_back_to_future_python(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        wrapper = self._load_wrapper()
+        for name in ("python3.14", "python3.15"):
+            (tmp_path / name).touch(mode=0o755)
+        check = MagicMock(side_effect=["3.8\n", "3.14\n"])
+        monkeypatch.setattr(wrapper.subprocess, "check_output", check)
+
+        assert wrapper._compatible_python_on_path(str(tmp_path)) == str(
+            tmp_path / "python3.14"
+        )
+
+    @pytest.mark.unit
+    def test_same_version_candidate_without_runtime_deps_is_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        wrapper = self._load_wrapper()
+        custom = tmp_path / "custom"
+        packaged = tmp_path / "packaged"
+        custom.mkdir()
+        packaged.mkdir()
+        (custom / "python3.9").touch(mode=0o755)
+        (packaged / "python3.9").touch(mode=0o755)
+        check = MagicMock(side_effect=[
+            wrapper.subprocess.CalledProcessError(1, "python3.9"),
+            "3.9\n",
+        ])
+        monkeypatch.setattr(wrapper.subprocess, "check_output", check)
+
+        selected = wrapper._compatible_python_on_path(
+            f"{custom}{wrapper.os.pathsep}{packaged}"
+        )
+
+        assert selected == str(packaged / "python3.9")
+        assert "import sys, yaml" in check.call_args_list[0].args[0][2]
+
+    @pytest.mark.unit
+    def test_wrapper_reexec_argv_preserves_script_and_user_args(self) -> None:
+        source = WRAPPER.read_text()
+        assert "python3.13\", \"python3.12" not in source
+        assert "[_interp, os.path.realpath(__file__)] + sys.argv[1:]" in source
+
+
+class TestReleaseWorkflowContracts:
+    """Static guards for distro routing and published-package smoke checks."""
+
+    @pytest.mark.unit
+    def test_el8_uses_python39_for_dependencies_and_validation(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/integration.yml").read_text()
+        assert "python3.9 -m pip install --no-deps paho-mqtt" in workflow
+        assert '[ "${{ matrix.version }}" = "8" ] && PYTHON_BIN=python3.9' in workflow
+
+    @pytest.mark.unit
+    def test_release_routes_el8_docs_and_requires_exact_code_version(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text()
+        for path in (
+            "rpm/eneru.repo",
+            "rpm/el8/eneru-el8.repo",
+            "rpm/testing/eneru-testing.repo",
+            "rpm/testing/el8/eneru-testing-el8.repo",
+        ):
+            assert path in workflow
+        assert 'test "$ACTUAL" = "Eneru v${VERSION_FULL}"' in workflow
+        assert 'CORE="${VERSION%%-*}"' not in workflow
+
+    @pytest.mark.unit
+    def test_release_artifact_selection_is_counted_and_nullglob_safe(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text()
+        assert "shopt -s nullglob" in workflow
+        assert 'debs=(../*.deb)' in workflow
+        assert 'rpms=(../*.rpm)' in workflow
+        assert 'for r in "${rpms[@]}"' in workflow

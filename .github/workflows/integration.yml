@@ -278,7 +278,7 @@ jobs:
             # python39-pip is the pip for the 3.9 stack (NOT python3-pip, which
             # on ubi8 would drag in the system python3 == 3.6).
             dnf install -y python39-pip
-            python3 -m pip install --no-deps paho-mqtt
+            python3.9 -m pip install --no-deps paho-mqtt
           else
             # RHEL 9/10 (unchanged): default RPM, system python3 == 3.9+.
             dnf install -y ${{ matrix.python_pkg }}
@@ -311,16 +311,24 @@ jobs:
           # Check the script is installed
           test -f /opt/ups-monitor/eneru.py
           test -f /etc/ups-monitor/config.yaml
-          # Run validation
-          python3 /opt/ups-monitor/eneru.py version
-          python3 -c "import paho.mqtt.client; print('paho-mqtt import OK')"
-          python3 /opt/ups-monitor/eneru.py validate --config /etc/ups-monitor/config.yaml
+          # EL8's unversioned python3 is 3.6; the package wrapper must re-exec
+          # into 3.9, while dependency imports/validation use that same 3.9.
+          PYTHON_BIN=python3
+          if [ "${{ matrix.version }}" = "8" ]; then
+            python3 /opt/ups-monitor/eneru.py version
+            PYTHON_BIN=python3.9
+          fi
+          "$PYTHON_BIN" /opt/ups-monitor/eneru.py version
+          "$PYTHON_BIN" -c "import paho.mqtt.client; print('paho-mqtt import OK')"
+          "$PYTHON_BIN" /opt/ups-monitor/eneru.py validate --config /etc/ups-monitor/config.yaml
 
       - name: Validate example configs
         run: |
+          PYTHON_BIN=python3
+          [ "${{ matrix.version }}" = "8" ] && PYTHON_BIN=python3.9
           for config in examples/*.yaml; do
             echo "Validating $config..."
-            python3 /opt/ups-monitor/eneru.py validate --config "$config"
+            "$PYTHON_BIN" /opt/ups-monitor/eneru.py validate --config "$config"
           done
 
   # Test pip installation inside containers (ensures pyproject.toml works on real distros)

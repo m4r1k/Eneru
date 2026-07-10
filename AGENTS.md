@@ -50,7 +50,7 @@ mkdocs serve                        # Local docs preview
 
 ## Project Structure
 
-```
+```text
 src/eneru/            # Main package — see src/eneru/AGENTS.md for the per-module
                       # map, mixin pattern, loopback ordering, stats schema, scheduler
   shutdown/           # Per-phase shutdown mixins (vms, containers, filesystems, remote)
@@ -109,7 +109,7 @@ This repo deliberately keeps individual source files on the smaller side (the v5
 **Branch protection on `main`:** required checks = `validate` (reduced PR matrix `3.9`, `3.12`, `3.15-dev`; only `3.9` + `3.12` required) + **8** parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single Core`, `E2E UPS Single Auth`, `E2E UPS Multi`, `E2E Redundancy Quorum`, `E2E Redundancy Regression`, `E2E Stats`, `E2E Loopback`). Strict mode (branch up-to-date with main), enforce admins, no force pushes, 0 required reviewers (CI-gated), branches auto-delete after merge.
 
 **Workflow:**
-```
+```text
 1. Pull latest main:   git checkout main && git pull --ff-only origin main
    (branching from stale main forces a rebase later)
 2. Create feature branch from the up-to-date main
@@ -123,7 +123,7 @@ This repo deliberately keeps individual source files on the smaller side (the v5
 ```
 
 **Releasing a new version:**
-```
+```text
 1. For X.Y.0 / X.0.0 ONLY — run the release-review skill first (see below)
 2. Merge all feature work into main via PRs
 3. Update docs/changelog.md and version.py on main

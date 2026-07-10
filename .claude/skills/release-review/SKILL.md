@@ -31,17 +31,23 @@ core toward the periphery. See "Pre-release code review" in `docs/testing.md`.
 ## Round 1 — fan-out review (before any fixes)
 
 1. **Spawn three specialist subagents IN PARALLEL** (one message, three
-   Agent calls — sequential spawning defeats the purpose):
-   - `code-reviewer` — five-axis review (correctness, readability,
+   Agent calls — sequential spawning defeats the purpose). These are task
+   roles, not assumed installed agent types: use `general-purpose` agents for
+   the security and test roles. For the first role, use
+   `agent-skills:code-reviewer` when that skill is installed; otherwise give a
+   general-purpose agent the same fresh-context review prompt. In Codex, use
+   ordinary spawned agents with descriptive task names such as
+   `code_review`, `security_audit`, and `test_quality`:
+   - **Code review** — five-axis review (correctness, readability,
      architecture, security, performance) of the whole tree. Priority:
      production-readiness of the shutdown orchestration, state machine,
      signal handling, subprocess/SSH execution, config validation, error
      paths. Remind it of the uv-venv rule from `AGENTS.md`.
-   - `security-auditor` — threat model + vulnerability pass: OWASP for the
+   - **Security audit** — threat model + vulnerability pass: OWASP for the
      dashboard/API, command/argument injection, secrets in logs, YAML
      safety, dependency CVEs, systemd/packaging hardening. Ask for an
      explicit list of surfaces examined and found clean.
-   - `test-engineer` — coverage AND quality: run the unit suite in a uv venv
+   - **Test quality** — coverage AND quality: run the unit suite in a uv venv
      for ground truth; find behavioral gaps (simulated-but-never-exercised
      paths, races), not just uncovered lines.
 2. **Orchestrator direct checks** (main session, while agents run): docs

@@ -49,6 +49,7 @@ jobs:
     outputs:
       channel: ${{ steps.channel.outputs.CHANNEL }}
       version: ${{ steps.version.outputs.VERSION }}
+      version_full: ${{ steps.version.outputs.VERSION_FULL }}
     steps:
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -156,12 +157,12 @@ jobs:
       - name: Build .deb package
         run: |
           VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager deb --target .
-          ls -la *.deb
+          ls -la -- ./*.deb
 
       - name: Build .rpm package
         run: |
           VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager rpm --target .
-          ls -la *.rpm
+          ls -la -- ./*.rpm
 
       - name: Build el8 .rpm package
         env:
@@ -187,7 +188,7 @@ jobs:
               yaml.safe_dump(cfg, f, sort_keys=False)
           PY
           nfpm package --packager rpm --target . -f nfpm-el8.yaml
-          ls -la *.el8.*.rpm
+          ls -la -- ./*.el8.*.rpm
 
       - name: Build OCI image
         env:
@@ -368,22 +369,31 @@ jobs:
           # RPM serving RHEL 9/10 unchanged while el8 users point at rpm/el8.
           mkdir -p rpm rpm/testing rpm/el8 rpm/testing/el8
 
+          shopt -s nullglob
+          debs=(../*.deb)
+          rpms=(../*.rpm)
+          if [ "${#debs[@]}" -ne 1 ] || [ "${#rpms[@]}" -ne 2 ]; then
+            echo "Expected exactly one deb and two RPM artifacts; found " \
+              "${#debs[@]} deb and ${#rpms[@]} RPM." >&2
+            exit 1
+          fi
+
           # Export public GPG key
           gpg --armor --export > KEY.gpg
 
           # Copy new packages to the correct channel. Route the el8 RPM (named
           # ...el8...rpm) to the el8 sub-repo; everything else to the default.
           if [ "$CHANNEL" = "stable" ]; then
-            cp ../*.deb deb/pool/main/
-            for r in ../*.rpm; do
+            cp -- "${debs[@]}" deb/pool/main/
+            for r in "${rpms[@]}"; do
               case "$r" in
                 *.el8.*) cp "$r" rpm/el8/ ;;
                 *) cp "$r" rpm/ ;;
               esac
             done
           else
-            cp ../*.deb deb/pool/testing/
-            for r in ../*.rpm; do
+            cp -- "${debs[@]}" deb/pool/testing/
+            for r in "${rpms[@]}"; do
               case "$r" in
                 *.el8.*) cp "$r" rpm/testing/el8/ ;;
                 *) cp "$r" rpm/testing/ ;;
@@ -580,7 +590,7 @@ jobs:
           sudo apt update
           sudo apt install eneru</pre>
 
-              <h3>RHEL / Fedora</h3>
+              <h3>RHEL 9/10 / Fedora</h3>
               <pre>
           # RHEL 8/9: Enable EPEL first (required for apprise dependency)
           sudo dnf install -y epel-release
@@ -589,6 +599,12 @@ jobs:
           sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
 
           # Install
+          sudo dnf install eneru</pre>
+
+              <h3>RHEL 8</h3>
+              <pre>
+          sudo dnf install -y epel-release
+          sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/el8/eneru-el8.repo
           sudo dnf install eneru</pre>
             </div>
 
@@ -611,12 +627,17 @@ jobs:
           sudo apt update
           sudo apt install eneru</pre>
 
-              <h3>RHEL / Fedora</h3>
+              <h3>RHEL 9/10 / Fedora</h3>
               <pre>
           # Add testing repository
           sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/eneru-testing.repo
 
           # Install pre-release version
+          sudo dnf install eneru</pre>
+
+              <h3>RHEL 8</h3>
+              <pre>
+          sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/el8/eneru-testing-el8.repo
           sudo dnf install eneru</pre>
             </div>
 
@@ -657,7 +678,7 @@ jobs:
           sudo apt install eneru
           ```
 
-          ### RHEL / Fedora
+          ### RHEL 9/10 / Fedora
 
           ```bash
           # RHEL 8/9: Enable EPEL first (required for apprise dependency)
@@ -667,6 +688,14 @@ jobs:
           sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
 
           # Install
+          sudo dnf install eneru
+          ```
+
+          ### RHEL 8
+
+          ```bash
+          sudo dnf install -y epel-release
+          sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/el8/eneru-el8.repo
           sudo dnf install eneru
           ```
 
@@ -685,11 +714,18 @@ jobs:
           sudo apt install eneru
           ```
 
-          ### RHEL / Fedora
+          ### RHEL 9/10 / Fedora
 
           ```bash
           sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/eneru-testing.repo
 
+          sudo dnf install eneru
+          ```
+
+          ### RHEL 8
+
+          ```bash
+          sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/el8/eneru-testing-el8.repo
           sudo dnf install eneru
           ```
 
@@ -725,7 +761,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Packages Built" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          ls -la *.deb *.rpm >> $GITHUB_STEP_SUMMARY
+          ls -la -- ./*.deb ./*.rpm >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Stable Packages" >> $GITHUB_STEP_SUMMARY
@@ -792,6 +828,7 @@ jobs:
         env:
           CHANNEL: ${{ needs.build-packages.outputs.channel }}
           VERSION: ${{ needs.build-packages.outputs.version }}
+          VERSION_FULL: ${{ needs.build-packages.outputs.version_full }}
           OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
@@ -865,9 +902,9 @@ jobs:
             dnf install -y eneru
           fi
 
-          # The real gate: the INSTALLED binary must be the version this run
-          # built. Match on the numeric core — pre-release suffixes are spelled
-          # differently per ecosystem (-rc1 vs ~rc1 vs rc1).
-          CORE="${VERSION%%-*}"
-          eneru version
-          eneru version | grep -qF "v${CORE}"
+          # The real gate: source stamping includes the git hash, so require the
+          # exact code version from this run. A stale stable package must not
+          # satisfy a release-candidate smoke by sharing its numeric core.
+          ACTUAL="$(eneru version)"
+          printf '%s\n' "$ACTUAL"
+          test "$ACTUAL" = "Eneru v${VERSION_FULL}"
