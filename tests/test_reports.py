@@ -1,7 +1,7 @@
 """Unit tests for periodic reports (src/eneru/reports.py)."""
 
 import time
-from datetime import timezone
+from datetime import datetime, timezone
 
 import pytest
 import yaml
@@ -152,7 +152,7 @@ class TestGather:
         store.record_battery_health(75.0, {"runtime": 80.0}, ts=int(now))
         cfg = _config("ups:\n  name: U@h\nenergy:\n  enabled: true\n")
         sources = reports.gather_report_sources(
-            store, "U@h", cfg.energy, period="daily", now=now)
+            store, "U@h", cfg.energy, period="weekly", now=now)
         assert sources["ups_name"] == "U@h"
         assert sources["uptime"]["daemon_starts"] == 1
         assert sources["battery_health"]["score"] == 75.0
@@ -173,6 +173,26 @@ class TestGather:
             "daily", sources, include=["battery_health"])["body"]
         assert "confidence 70%" in body
         assert "confidence 0%" not in body
+
+    @pytest.mark.unit
+    def test_daily_events_and_uptime_cover_previous_full_day(self, store):
+        """F-082: yesterday evening appears in this morning's digest."""
+        previous_evening = datetime(2026, 6, 28, 19, 0).timestamp()
+        previous_boot = datetime(2026, 6, 28, 7, 0).timestamp()
+        current_morning = datetime(2026, 6, 29, 7, 0).timestamp()
+        send_time = datetime(2026, 6, 29, 8, 0).timestamp()
+        store.log_event("DAEMON_START", "yesterday boot", ts=int(previous_boot))
+        store.log_event("ON_BATTERY", "evening outage", ts=int(previous_evening))
+        store.log_event("DAEMON_START", "today boot", ts=int(current_morning))
+        store.log_event("ON_BATTERY", "today outage", ts=int(current_morning))
+        cfg = _config("ups:\n  name: U@h\n")
+
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="daily", now=send_time,
+        )
+
+        assert [event[2] for event in sources["events"]] == ["evening outage"]
+        assert sources["uptime"]["daemon_starts"] == 1
 
 
 # --------------------------------------------------------------------------
@@ -222,6 +242,44 @@ class TestMaybeSend:
                     now=now + tick, tz=timezone.utc)
                 assert periods == []          # nothing "sent"
         assert sent == []                     # never enqueued -> no duplicate spam
+
+    @pytest.mark.unit
+    def test_build_failure_preserves_previous_stamp(self, store, monkeypatch):
+        """F-081: a render failure retries instead of burning the cadence."""
+        cfg = self._cfg()
+        now = DUE_TS
+        old = str(int(now - 2 * DAY))
+        store.set_meta("last_report_sent_daily", old)
+        monkeypatch.setattr(
+            reports, "build_report",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("render")),
+        )
+
+        with pytest.raises(RuntimeError, match="render"):
+            reports.maybe_send_due_reports(
+                cfg, store, "U@h", lambda *args: None,
+                now=now, tz=timezone.utc,
+            )
+
+        assert store.get_meta("last_report_sent_daily") == old
+
+    @pytest.mark.unit
+    def test_enqueue_failure_restores_previous_stamp(self, store):
+        """F-081: a rejected queue handoff remains due next tick."""
+        cfg = self._cfg()
+        now = DUE_TS
+        old = str(int(now - 2 * DAY))
+        store.set_meta("last_report_sent_daily", old)
+
+        def reject(*_args):
+            raise RuntimeError("queue down")
+
+        with pytest.raises(RuntimeError, match="queue down"):
+            reports.maybe_send_due_reports(
+                cfg, store, "U@h", reject, now=now, tz=timezone.utc,
+            )
+
+        assert store.get_meta("last_report_sent_daily") == old
 
     @pytest.mark.unit
     def test_csv_format_delivers_csv_block(self, store):
@@ -348,6 +406,56 @@ class TestAggregate:
         finally:
             s1.close()
             s2.close()
+
+    @pytest.mark.unit
+    def test_multi_gather_failure_preserves_previous_stamp(
+        self, tmp_path, monkeypatch,
+    ):
+        cfg = _config("ups:\n  - name: A@h\nreports:\n  enabled: true\n"
+                      "  daily: true\n  time: '08:00'\n")
+        store = StatsStore(tmp_path / "multi-failure.db")
+        store.open()
+        try:
+            old = str(int(DUE_TS - 2 * DAY))
+            store.set_meta("last_report_sent_daily", old)
+            monkeypatch.setattr(
+                reports, "gather_report_sources",
+                lambda *args, **kwargs: (_ for _ in ()).throw(
+                    RuntimeError("gather")),
+            )
+
+            with pytest.raises(RuntimeError, match="gather"):
+                reports.maybe_send_due_reports_multi(
+                    cfg, [("A@h", store, cfg.energy)], store,
+                    lambda *args: None, now=DUE_TS, tz=timezone.utc,
+                )
+
+            assert store.get_meta("last_report_sent_daily") == old
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_multi_enqueue_failure_restores_previous_stamp(self, tmp_path):
+        cfg = _config("ups:\n  - name: A@h\nreports:\n  enabled: true\n"
+                      "  daily: true\n  time: '08:00'\n")
+        store = StatsStore(tmp_path / "multi-enqueue-failure.db")
+        store.open()
+        try:
+            old = str(int(DUE_TS - 2 * DAY))
+            store.set_meta("last_report_sent_daily", old)
+
+            def reject(*_args):
+                raise RuntimeError("queue down")
+
+            with pytest.raises(RuntimeError, match="queue down"):
+                reports.maybe_send_due_reports_multi(
+                    cfg, [("A@h", store, cfg.energy)], store, reject,
+                    now=DUE_TS, tz=timezone.utc,
+                )
+
+            assert store.get_meta("last_report_sent_daily") == old
+        finally:
+            store.close()
 
     @pytest.mark.unit
     def test_multi_disabled_or_empty(self, tmp_path):

@@ -693,6 +693,77 @@ class TestMemoryBufferDirectDelivery:
 class TestRetryAndBackoff:
 
     @pytest.mark.unit
+    def test_reload_workers_race_one_claim_one_delivery(
+        self, notification_config, registered_store,
+    ):
+        """F-079: a slow old worker and replacement cannot both send a row."""
+        row_id = registered_store.enqueue_notification(
+            "reload-race", "info", "power_event",
+        )
+        old_worker = NotificationWorker(notification_config)
+        new_worker = NotificationWorker(notification_config)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_send(_body, _notify_type):
+            entered.set()
+            assert release.wait(timeout=2)
+            return True
+
+        old_worker._send_via_apprise = MagicMock(side_effect=slow_send)
+        new_worker._send_via_apprise = MagicMock(return_value=True)
+        thread = threading.Thread(
+            target=old_worker._process_one,
+            kwargs={
+                "store": registered_store,
+                "row_id": row_id,
+                "body": "reload-race",
+                "notify_type": "info",
+                "attempts": 0,
+            },
+        )
+        thread.start()
+        assert entered.wait(timeout=2)
+
+        new_worker._process_one(
+            store=registered_store, row_id=row_id,
+            body="reload-race", notify_type="info", attempts=0,
+        )
+        new_worker._send_via_apprise.assert_not_called()
+
+        release.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert old_worker._send_via_apprise.call_count == 1
+        assert _peek(
+            registered_store,
+            "SELECT status, attempts FROM notifications WHERE id=?",
+            (row_id,),
+        ) == ("sent", 1)
+
+    @pytest.mark.unit
+    def test_failed_claim_returns_pending_without_double_attempt(
+        self, notification_config, registered_store,
+    ):
+        """The atomic claim owns the one attempt increment on failure."""
+        row_id = registered_store.enqueue_notification(
+            "retry-claimed", "info", "general",
+        )
+        worker = NotificationWorker(notification_config)
+        worker._send_via_apprise = MagicMock(return_value=False)
+
+        worker._process_one(
+            store=registered_store, row_id=row_id,
+            body="retry-claimed", notify_type="info", attempts=0,
+        )
+
+        assert _peek(
+            registered_store,
+            "SELECT status, attempts FROM notifications WHERE id=?",
+            (row_id,),
+        ) == ("pending", 1)
+
+    @pytest.mark.unit
     @patch("eneru.notifications.APPRISE_AVAILABLE", True)
     @patch("eneru.notifications.apprise")
     def test_failure_increments_attempts_keeps_pending(

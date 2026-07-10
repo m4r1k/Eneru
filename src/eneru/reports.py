@@ -16,7 +16,7 @@ coordinator call once per loop.
 import csv as _csv
 import io
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Optional
 
 from eneru import energy as energy_mod
@@ -202,7 +202,20 @@ def gather_report_sources(store, ups_name: str, energy_config, *,
     start = _period_start(period, now)
     sources: Dict = {"ups_name": ups_name}
 
-    events = store.query_events(start, int(now)) if store else []
+    event_start = start
+    event_end = int(now)
+    if period == "daily":
+        # A digest sent at 08:00 should summarize yesterday's complete day,
+        # not midnight->08:00 and then permanently lose the other 16 hours.
+        # Subtract a calendar day before converting to epoch so 23/25-hour DST
+        # days retain the correct local-midnight boundaries.
+        now_dt = datetime.fromtimestamp(now)
+        current_midnight = datetime(now_dt.year, now_dt.month, now_dt.day)
+        previous_midnight = current_midnight - timedelta(days=1)
+        event_start = int(previous_midnight.timestamp())
+        event_end = int(current_midnight.timestamp()) - 1
+
+    events = store.query_events(event_start, event_end) if store else []
     # The rendered section is labelled "Power events", so keep it to the real
     # power-event set — lifecycle/diagnostic rows (DAEMON_START, etc.) would
     # otherwise be miscounted under that heading and skew the digest. The full
@@ -284,6 +297,12 @@ def maybe_send_due_reports(config, store, ups_name: str,
             if last is None:
                 store.set_meta(key, str(int(now)))  # seed baseline, don't send
             continue
+        # F-081: build before stamping so gather/render failures retry next tick
+        # instead of silently burning the whole report period.
+        sources = gather_report_sources(
+            store, ups_name, config.energy, period=period, now=now)
+        content = build_report(period, sources, include=reports.include,
+                               fmt=reports.format)
         # F-028: stamp the dedup key BEFORE enqueuing, and only send if the stamp
         # committed. ELI5: cross the chore off the whiteboard first, THEN do it --
         # if the marker is dry (the meta write fails, silently swallowed by the
@@ -293,11 +312,14 @@ def maybe_send_due_reports(config, store, ups_name: str,
         # committing the stamp first does not risk losing the report.
         if not store.set_meta(key, str(int(now))):
             continue  # stamp failed -> retry next tick, nothing sent (no dupe)
-        sources = gather_report_sources(
-            store, ups_name, config.energy, period=period, now=now)
-        content = build_report(period, sources, include=reports.include,
-                               fmt=reports.format)
-        enqueue(_compose_message(content), "info", "report")
+        try:
+            enqueue(_compose_message(content), "info", "report")
+        except Exception:
+            # The queue rejected the handoff: restore the previous cadence so
+            # the caller's isolation guard can retry on the next tick.
+            if raw is not None:
+                store.set_meta(key, str(raw))
+            raise
         sent.append(period)
     return sent
 
@@ -347,12 +369,8 @@ def maybe_send_due_reports_multi(config, units, meta_store,
             if last is None:
                 meta_store.set_meta(key, str(int(now)))  # seed baseline
             continue
-        # F-028: stamp the dedup key first and only send if it committed (see
-        # maybe_send_due_reports). A silently-failed meta write must not let the
-        # daemon re-send the same digest every tick; the enqueue persists to the
-        # durable notification queue, so stamping first can't lose the report.
-        if not meta_store.set_meta(key, str(int(now))):
-            continue  # stamp failed -> retry next tick, nothing sent (no dupe)
+        # F-081: gather/render first so a transient source failure does not burn
+        # the report period before there is a message ready to enqueue.
         per_ups = [
             gather_report_sources(store, ups_name, energy_cfg,
                                   period=period, now=now)
@@ -361,6 +379,17 @@ def maybe_send_due_reports_multi(config, units, meta_store,
         content = build_aggregate_report(period, per_ups,
                                          include=reports.include,
                                          fmt=reports.format)
-        enqueue(_compose_message(content), "info", "report")
+        # F-028: stamp the dedup key first and only send if it committed (see
+        # maybe_send_due_reports). A silently-failed meta write must not let the
+        # daemon re-send the same digest every tick; the enqueue persists to the
+        # durable notification queue, so stamping first can't lose the report.
+        if not meta_store.set_meta(key, str(int(now))):
+            continue  # stamp failed -> retry next tick, nothing sent (no dupe)
+        try:
+            enqueue(_compose_message(content), "info", "report")
+        except Exception:
+            if raw is not None:
+                meta_store.set_meta(key, str(raw))
+            raise
         sent.append(period)
     return sent

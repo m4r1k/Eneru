@@ -688,6 +688,11 @@ class NotificationWorker:
         """Attempt delivery of a single row. Marks sent on success;
         increments attempts and applies exponential backoff on failure.
         Cancels on max_attempts overrun (when configured)."""
+        # F-079: claim before calling Apprise. During a reload the old worker
+        # can still be inside a slow send when its replacement starts; only the
+        # worker that wins pending -> delivering may ship this row.
+        if not store.claim_notification(row_id):
+            return
         success = self._send_via_apprise(body, notify_type)
         key = (str(store.db_path), row_id)
 
@@ -696,7 +701,7 @@ class NotificationWorker:
             self._backoff.pop(key, None)
             return
 
-        store.mark_notification_attempt(row_id)
+        # claim_notification already incremented attempts atomically.
         new_attempts = attempts + 1
 
         max_attempts = self.config.notifications.max_attempts
@@ -704,6 +709,8 @@ class NotificationWorker:
             store.cancel_notification(row_id, "max_attempts")
             self._backoff.pop(key, None)
             return
+
+        store.revert_claim(row_id)
 
         # Exponential backoff: retry_interval * 2^(attempts-1), capped.
         # Treat retry_interval=0 as "every tick" (the 1 s poll loop).

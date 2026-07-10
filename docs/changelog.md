@@ -88,7 +88,14 @@ config. They share one root cause and are fixed as a unit.
   (ISS-060) on startup, but the reload/rebuild paths in both the single-UPS
   monitor and the multi-UPS coordinator still constructed the worker without
   it, so after a `systemctl reload` / API reload its warnings fell back to
-  `print`. Both reload paths now pass the shared logger.
+  `print`. Both reload paths now pass the shared logger. Queue rows are also
+  claimed before delivery, so a slow old worker and its reload replacement
+  cannot both send the same message.
+- **Periodic reports retry failed builds and cover the full previous day.**
+  Gathering or rendering errors no longer consume an entire daily, weekly, or
+  monthly cadence. Daily power-event and uptime sections now summarize the
+  previous local calendar day, so events after the morning send time are not
+  omitted forever; current-day energy accounting is unchanged.
 - **Failed logins audit as `LOGIN_FAILURE` with intact IPv6 addresses.** Audit
   rows for failed logins and the transition into throttling previously fell back to the generic
   `CONTROL` event type, and IPv6 client addresses were truncated at the last
