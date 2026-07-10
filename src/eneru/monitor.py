@@ -191,6 +191,13 @@ class UPSGroupMonitor(
         # sys.exit(0) and abort the host poweroff. _cleanup_and_exit consults
         # this flag to decline exiting while a sequence is in flight.
         self._shutdown_sequence_in_flight = False
+        # F-066: results of the last remote-shutdown phase, stashed just before
+        # the coordinator callback so MultiUPSCoordinator._handle_local_shutdown
+        # can verify the loopback host-poweroff was actually DELIVERED before it
+        # writes the "sequence complete" marker (the single-UPS path checks the
+        # same results inline; the coordinator path previously trusted config
+        # shape alone).
+        self._last_remote_results: list = []
         # ISS-018 / ISS-022 / ISS-019: monotonic throttle timestamps. None means
         # "never fired" -> always fire the first time. A 0.0 sentinel would be
         # WRONG: time.monotonic()'s zero point is arbitrary (~boot time), so on a
@@ -1513,6 +1520,9 @@ class UPSGroupMonitor(
         # In coordinator mode, notify the coordinator instead of doing local shutdown
         if self._coordinator_mode:
             self._log_message("✅  GROUP SHUTDOWN SEQUENCE COMPLETE")
+            # F-066: publish the remote results BEFORE the callback so the
+            # coordinator can check whether the loopback poweroff went out.
+            self._last_remote_results = remote_results
             if self._shutdown_callback:
                 group = self.config.ups_groups[0] if self.config.ups_groups else None
                 self._shutdown_callback(group)
@@ -1598,7 +1608,23 @@ class UPSGroupMonitor(
                 if self.config.local_shutdown.message:
                     cmd_parts.append(self.config.local_shutdown.message)
                 rc, out, err = run_command(cmd_parts)
-                if rc != 0:
+                if rc == 124:
+                    # F-068: rc=124 is run_command's own 30s TIMEOUT, not the
+                    # poweroff refusing. Some inits (sysvinit `shutdown`,
+                    # systemd on an I/O-starved SD card) block the caller while
+                    # the halt genuinely proceeds — like hanging up on hold:
+                    # you don't know if the order went through, but it very
+                    # likely did. Tearing the marker down here would resurrect
+                    # the false-INCOMPLETE alert + perma-open outage band on
+                    # hosts that DO power off. Ambiguous → warn, keep the
+                    # marker, skip the INCOMPLETE notification. Only a prompt
+                    # non-zero exit (below) proves the host is still up.
+                    self._log_message(
+                        "⚠️  Host poweroff command timed out after 30s "
+                        "(rc=124) — the shutdown may still be proceeding. "
+                        "Keeping the completion marker."
+                    )
+                elif rc != 0:
                     # A healthy `systemctl poweroff` never returns — the host
                     # cuts power mid-call. If it DOES return non-zero the host
                     # is stubbornly still up, yet we already wrote the "sequence

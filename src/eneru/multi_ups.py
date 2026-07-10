@@ -26,6 +26,7 @@ from eneru.remote_health import RemoteHealthManager, remote_health_sidecar_path
 from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
 from eneru.redundancy import RedundancyGroupEvaluator, RedundancyGroupExecutor
 from eneru.runtime import _uses_loopback_delegate
+from eneru.shutdown.remote import loopback_poweroff_sent, select_loopback_results
 from eneru.stats import StatsStore
 from eneru.status import redundancy_state_file_path, sanitize_name
 from eneru.lifecycle import (
@@ -637,7 +638,22 @@ class MultiUPSCoordinator:
                 should_local_shutdown = True
 
         if should_local_shutdown:
-            self._handle_local_shutdown(label)
+            # F-066: fish the triggering monitor's loopback shutdown results
+            # out so _handle_local_shutdown can verify the delegated host
+            # poweroff actually went out before declaring the sequence
+            # complete. The monitor stashed them just before this callback.
+            loopback_results = None
+            monitor = next(
+                (m for m in self._monitors
+                 if m.config.ups_groups and m.config.ups_groups[0] is group),
+                None,
+            )
+            if monitor is not None:
+                loopback_results = select_loopback_results(
+                    monitor.config.remote_servers,
+                    getattr(monitor, "_last_remote_results", []) or [],
+                )
+            self._handle_local_shutdown(label, loopback_results=loopback_results)
         elif self._exit_after_shutdown:
             # Non-local group shutdown completed, exit if requested
             self._log(f"🛑  Group {label} shutdown complete. Exiting (--exit-after-shutdown).")
@@ -682,8 +698,16 @@ class MultiUPSCoordinator:
             self._local_shutdown_initiated = False
             self._clear_global_shutdown_flag("power recovery")
 
-    def _handle_local_shutdown(self, triggered_by: str):
-        """Execute local shutdown with defense-in-depth protection."""
+    def _handle_local_shutdown(self, triggered_by: str,
+                               loopback_results: Optional[list] = None):
+        """Execute local shutdown with defense-in-depth protection.
+
+        ``loopback_results`` (F-066): the triggering monitor's loopback
+        :class:`RemoteShutdownResult` rows, passed by ``_on_group_shutdown``
+        so the delegated branch below can verify the host poweroff was
+        actually DELIVERED over SSH before writing the completion marker.
+        ``None``/empty means "no evidence the poweroff went out".
+        """
         # Defense layer 1: in-memory lock. Set BOTH the "initiated" guard and the
         # "in flight" flag atomically: in_flight tells _clear_local_shutdown_state
         # not to re-arm the guard mid-sequence (M1), which would otherwise let an
@@ -732,8 +756,8 @@ class MultiUPSCoordinator:
                 # the container. Mirror monitor.py's single-UPS delegated branch:
                 # skip the in-container poweroff, just record completion + marker.
                 self._log(
-                    "🛰️  Host poweroff delegated to loopback SSH (already sent by "
-                    "the group's remote-server phase). Skipping in-container "
+                    "🛰️  Host poweroff delegated to loopback SSH (run by the "
+                    "group's remote-server phase). Skipping in-container "
                     "poweroff."
                 )
                 if self.config.behavior.dry_run:
@@ -743,6 +767,41 @@ class MultiUPSCoordinator:
                     )
                     self._clear_global_shutdown_flag(
                         "dry-run delegated local shutdown")
+                elif not loopback_results or not all(
+                    loopback_poweroff_sent(r) for r in loopback_results
+                ):
+                    # F-066: the config SHAPE says "delegated", but the
+                    # triggering monitor's results say the loopback poweroff
+                    # was NOT delivered (sshd restarting, key perms, missing
+                    # results). Declaring victory here would hang a "GONE
+                    # HOME" sign while the host is still at its desk: no
+                    # marker gets written, the ❌ tells the operator the host
+                    # is still up, and the in-flight guard is cleared so a
+                    # later trigger can retry the delegation. Mirrors the
+                    # single-UPS incomplete branch in monitor.py.
+                    details = "; ".join(
+                        r.error or "shutdown command was not sent"
+                        for r in (loopback_results or [])
+                        if not loopback_poweroff_sent(r)
+                    ) or "loopback shutdown result missing"
+                    self._log(
+                        "❌  Delegated host poweroff failed; shutdown "
+                        f"sequence is incomplete: {details}"
+                    )
+                    if self._notification_worker:
+                        self._notification_worker.send(
+                            "❌  **Shutdown Sequence Incomplete**\n"
+                            f"Host poweroff delegation failed: {details}",
+                            "failure",
+                            category="shutdown_summary",
+                        )
+                    # Clear the re-entry guard so a future trigger can retry
+                    # the delegated shutdown (the host is still up, so the
+                    # coordinator must stay armed).
+                    with self._local_shutdown_lock:
+                        self._local_shutdown_initiated = False
+                    self._clear_global_shutdown_flag(
+                        "failed delegated local shutdown")
                 else:
                     if self._notification_worker:
                         self._notification_worker.send(
@@ -819,7 +878,18 @@ class MultiUPSCoordinator:
                         if self.config.local_shutdown.message:
                             cmd_parts.append(self.config.local_shutdown.message)
                         rc, out, err = run_command(cmd_parts)
-                        if rc != 0:
+                        if rc == 124:
+                            # F-068: rc=124 is run_command's own 30s timeout,
+                            # not the poweroff refusing — the halt may well be
+                            # proceeding while the caller is left on hold.
+                            # Ambiguous → warn, keep the marker, skip the
+                            # INCOMPLETE notification (mirrors monitor.py).
+                            self._log(
+                                "⚠️  Host poweroff command timed out after 30s "
+                                "(rc=124) — the shutdown may still be "
+                                "proceeding. Keeping the completion marker."
+                            )
+                        elif rc != 0:
                             # A healthy `systemctl poweroff` never returns — the
                             # host cuts power mid-call. If it returns non-zero
                             # the host is still up, but we already wrote the

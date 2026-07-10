@@ -828,6 +828,32 @@ class TestShutdownSequence:
             for c in monitor._send_notification.call_args_list
         )
 
+    @pytest.mark.unit
+    def test_host_poweroff_timeout_keeps_marker(self, tmp_path):
+        """F-068: rc=124 is run_command's OWN 30s timeout, not the poweroff
+        refusing — some inits block the caller while the halt genuinely
+        proceeds. Ambiguous: keep the marker, log a warning, and send NO
+        INCOMPLETE notification (only a prompt non-zero exit tears down)."""
+        monitor = self._prep_local_poweroff_monitor(tmp_path)
+
+        with patch("eneru.monitor.run_command",
+                   return_value=(124, "", "Command timed out")) as run_cmd, \
+             patch("eneru.monitor.write_shutdown_marker") as write_marker, \
+             patch("eneru.monitor.delete_shutdown_marker") as del_marker:
+            monitor._execute_shutdown_sequence()
+
+        run_cmd.assert_called_once()
+        write_marker.assert_called_once()
+        del_marker.assert_not_called()          # marker survives the timeout
+        assert any(
+            "timed out" in c.args[0]
+            for c in monitor._log_message.call_args_list
+        )
+        assert not any(
+            "INCOMPLETE" in c.args[0]
+            for c in monitor._send_notification.call_args_list
+        )
+
 
 # ==============================================================================
 # NOTIFICATIONS
