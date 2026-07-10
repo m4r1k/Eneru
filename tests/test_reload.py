@@ -673,6 +673,113 @@ def test_reload_buckets_are_mutually_exclusive_and_no_unknown_names():
         assert name in real_fields, f"reload bucket references unknown field {name!r}"
 
 
+# ----- F-009: startup runtime synthesis mirrored onto the fresh parse -----
+
+@pytest.mark.unit
+def test_reload_preserves_cli_dry_run(tmp_path):
+    """F-009: --dry-run is a CLI override recorded on the running config; a
+    SIGHUP reload of a file that says dry_run: false must NOT disarm the
+    rehearsal daemon (live-safety reversal)."""
+    import argparse
+    from eneru.cli import _apply_run_overrides
+
+    p = tmp_path / "a.yaml"
+    live = _load(_write(p, "ups:\n  name: U@h\nbehavior:\n  dry_run: false\n"))
+    _apply_run_overrides(live, argparse.Namespace(dry_run=True))
+    assert live.behavior.dry_run is True
+
+    report = reloadmod.perform_reload(live, [live], str(p))
+
+    assert report["reloaded"]
+    assert live.behavior.dry_run is True        # still a rehearsal daemon
+    assert "behavior" not in report["applied"]  # and no false diff either
+
+
+@pytest.mark.unit
+def test_reload_preserves_cli_api_overrides(tmp_path):
+    """F-009: --api/--api-bind/--api-port overrides must be re-applied to the
+    fresh parse, or every reload falsely reports 'api' restart-required."""
+    import argparse
+    from eneru.cli import _apply_run_overrides
+
+    p = tmp_path / "a.yaml"
+    live = _load(_write(p, "ups:\n  name: U@h\n"))
+    _apply_run_overrides(live, argparse.Namespace(
+        dry_run=False, api=True, api_bind="0.0.0.0", api_port=9999))
+    assert live.api.enabled is True and live.api.port == 9999
+
+    report = reloadmod.perform_reload(live, [live], str(p))
+
+    assert report["reloaded"]
+    assert "api" not in report["restartRequired"]
+    assert live.api.enabled is True and live.api.port == 9999
+
+
+@pytest.mark.unit
+def test_reload_loopback_config_no_false_restart(tmp_path, monkeypatch):
+    """F-009: a containerized loopback-delegate config must reload clean.
+    The RUNNING config carries a synthesized is_host_loopback entry plus
+    generated pre-shutdown commands that are not in the YAML; the fresh
+    parse must receive the same synthesis, or every reload falsely flags
+    ups_groups restart-required."""
+    monkeypatch.setattr("eneru.runtime._detect_runtime_context",
+                        lambda: "container (Docker)")
+    from eneru.cli import _prepare_runtime_config
+
+    body = ("ups:\n  name: U@h\n"
+            "containers:\n  enabled: true\n"
+            "local_shutdown:\n  enabled: true\n")
+    p = tmp_path / "a.yaml"
+    live = _load(_write(p, body))
+    _prepare_runtime_config(live, strict_key_check=False)
+    # Sanity: the loopback delegate WAS synthesized onto the running config.
+    assert any(s.is_host_loopback for s in live.remote_servers)
+
+    report = reloadmod.perform_reload(live, [live], str(p))
+
+    assert report["reloaded"]
+    assert not any(r.startswith("ups_groups")
+                   for r in report["restartRequired"]), report
+
+
+@pytest.mark.unit
+def test_reload_container_logging_rewrite_no_false_restart(tmp_path,
+                                                           monkeypatch):
+    """F-009: inside a container the legacy logging.* defaults are rewritten
+    to /var/{log,run}/eneru/ at startup; the fresh parse must get the same
+    rewrite, or every reload falsely reports 'logging' restart-required."""
+    monkeypatch.setattr("eneru.runtime._detect_runtime_context",
+                        lambda: "container (Docker)")
+    from eneru.cli import _rewrite_legacy_paths_for_container
+
+    p = tmp_path / "a.yaml"
+    live = _load(_write(p, "ups:\n  name: U@h\n"))  # logging keeps defaults
+    _rewrite_legacy_paths_for_container(live)
+    assert live.logging.file == "/var/log/eneru/ups-monitor.log"
+
+    report = reloadmod.perform_reload(live, [live], str(p))
+
+    assert report["reloaded"]
+    assert "logging" not in report["restartRequired"]
+
+
+@pytest.mark.unit
+def test_reload_synthesis_error_reported_not_raised(tmp_path, monkeypatch):
+    """F-009 defensive branch: an exception inside the synthesis mirror is
+    reported as a reload error (daemon keeps its old config), never raised
+    into the signal handler."""
+    p = tmp_path / "a.yaml"
+    live = _load(_write(p, "ups:\n  name: U@h\n"))
+
+    def boom(cfg, primary):
+        raise RuntimeError("synthesis exploded")
+
+    monkeypatch.setattr(reloadmod, "_mirror_startup_synthesis", boom)
+    report = reloadmod.perform_reload(live, [live], str(p))
+    assert report["reloaded"] is False
+    assert any("synthesis exploded" in e for e in report["errors"])
+
+
 @pytest.mark.unit
 def test_reload_during_on_battery_preserves_outage_state(tmp_path):
     """Behavioural-gap 6: a config hot-reload that lands DURING an outage must

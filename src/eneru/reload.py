@@ -63,11 +63,51 @@ RESTART_TOP_SECTIONS = (
 )
 
 
-def load_and_validate(path: Optional[str]) -> Tuple[Optional[Config], List[str]]:
+def _mirror_startup_synthesis(cfg: Config, primary: Optional[Config]) -> None:
+    """F-009: re-apply the startup-time runtime mutations to a fresh parse.
+
+    ELI5: at startup the raw YAML gets "dressed" before going on duty — the
+    container legacy-path rewrite, a synthesized host-loopback delegate plus
+    its generated pre-shutdown commands, and CLI overrides such as
+    ``--dry-run``. Diffing that dressed RUNNING config against an UNDRESSED
+    fresh parse made every reload cry wolf ("ups_groups/logging need a
+    restart") — and, far worse, ``apply_reload`` swapped the file's
+    ``dry_run: false`` over the CLI's ``--dry-run``, silently arming a
+    rehearsal daemon on ``systemctl reload``. Dress the fresh parse the same
+    way first, so the diff compares like with like.
+    """
+    # Lazy import: eneru.cli imports monitor/multi_ups at module level, and
+    # those import this module from inside their reload methods — a top-level
+    # import here would be a cycle. At call time cli is already loaded.
+    from eneru.cli import (
+        _apply_stored_run_overrides,
+        _inject_delegated_actions,
+        _rewrite_legacy_paths_for_container,
+        _synthesize_loopback_if_needed,
+    )
+    _rewrite_legacy_paths_for_container(cfg)
+    if primary is not None:
+        _apply_stored_run_overrides(
+            cfg, getattr(primary, "_cli_run_overrides", None))
+    # strict_key_check=False: a reload must never sys.exit the daemon. The
+    # running daemon already proved the loopback key at startup; on reload a
+    # missing key degrades to a stderr WARNING. The startup-only K8s-misuse
+    # banner is deliberately not repeated here.
+    _synthesize_loopback_if_needed(cfg, strict_key_check=False)
+    _inject_delegated_actions(cfg)
+
+
+def load_and_validate(path: Optional[str],
+                      primary: Optional[Config] = None,
+                      ) -> Tuple[Optional[Config], List[str]]:
     """Strictly load + validate a config file for reload.
 
     Unlike ``ConfigLoader.load`` (which falls back to defaults on a bad file),
     this returns ``(None, errors)`` so a broken file is reported, never applied.
+
+    ``primary`` is the RUNNING config; when given, the fresh parse receives
+    the same runtime synthesis the running config got at startup (F-009) so
+    ``apply_reload`` diffs like with like.
     """
     if not path:
         return None, ["no config file path is known; cannot reload"]
@@ -92,6 +132,9 @@ def load_and_validate(path: Optional[str]) -> Tuple[Optional[Config], List[str]]
             return None, struct_errors
         cfg = ConfigLoader._parse_config(raw)
         cfg.config_path = path
+        # F-009: dress the fresh parse exactly like the running config was
+        # dressed at startup, BEFORE validating and diffing.
+        _mirror_startup_synthesis(cfg, primary)
         # F-054: gate on the shared ERROR-prefix predicate. The old `"ERROR" in m`
         # substring test would let a WARNING that merely contained the word ERROR
         # block a reload.
@@ -201,7 +244,7 @@ def perform_reload(primary: Config, monitor_configs: List[Config],
     mutually exclusive. The signal handler may briefly block on an in-flight API
     reload (bounded by the reload duration)."""
     with _RELOAD_LOCK:
-        new, errors = load_and_validate(path)
+        new, errors = load_and_validate(path, primary)
         if new is None:
             return {"reloaded": False, "applied": [], "restartRequired": [],
                     "subsystems": [], "errors": errors}

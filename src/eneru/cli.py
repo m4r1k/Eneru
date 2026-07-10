@@ -92,17 +92,41 @@ def _load_config(args):
 
 def _apply_run_overrides(config: Config, args: argparse.Namespace) -> None:
     """Apply `eneru run` CLI overrides after YAML load, before validation."""
-    if args.dry_run:
+    overrides = {
+        "dry_run": bool(getattr(args, "dry_run", False)),
+        "api": bool(getattr(args, "api", False)),
+        "api_bind": getattr(args, "api_bind", None),
+        "api_port": getattr(args, "api_port", None),
+    }
+    _apply_stored_run_overrides(config, overrides)
+    # F-009: remember the overrides on the config object so a hot reload can
+    # re-apply them to each freshly parsed file (crucially --dry-run: a SIGHUP
+    # must never disarm a rehearsal daemon just because the YAML says
+    # dry_run: false). Underscore attribute → invisible to the dataclass
+    # __eq__ that the reload diff relies on.
+    config._cli_run_overrides = overrides
+
+
+def _apply_stored_run_overrides(config: Config, overrides) -> None:
+    """Apply recorded `eneru run` CLI overrides to a Config.
+
+    Shared by startup (``_apply_run_overrides``) and the hot-reload path
+    (``eneru.reload``), so the running config and every fresh reload parse
+    receive the exact same CLI-side mutations (F-009).
+    """
+    if not overrides:
+        return
+    if overrides.get("dry_run"):
         config.behavior.dry_run = True
 
-    if getattr(args, "api", False):
+    if overrides.get("api"):
         config.api.enabled = True
-    if getattr(args, "api_bind", None) is not None:
+    if overrides.get("api_bind") is not None:
         config.api.enabled = True
-        config.api.bind = args.api_bind
-    if getattr(args, "api_port", None) is not None:
+        config.api.bind = overrides["api_bind"]
+    if overrides.get("api_port") is not None:
         config.api.enabled = True
-        config.api.port = args.api_port
+        config.api.port = overrides["api_port"]
 
 
 def _root_required_reasons(config: Config) -> list[str]:
