@@ -1557,11 +1557,12 @@ def test_stalled_connection_does_not_hang_stop(minimal_config):
     minimal_config.api.enabled = True
     minimal_config.api.bind = "127.0.0.1"
     minimal_config.api.port = 0  # OS-assigned ephemeral port
-    server = EneruAPIServer(MagicMock(), minimal_config)
+    logs = []
+    server = EneruAPIServer(MagicMock(), minimal_config, log_fn=logs.append)
     elapsed = None
     with patch.object(EneruAPIHandler, "timeout", 0.5):
         server.start()
-        assert server._httpd is not None
+        assert server._httpd is not None, logs
         host, port = server._httpd.server_address[:2]
         sock = _socket.create_connection((host, port), timeout=2)
         try:
@@ -1718,11 +1719,12 @@ def test_idle_keepalive_connection_closed_after_timeout(minimal_config):
     minimal_config.api.enabled = True
     minimal_config.api.bind = "127.0.0.1"
     minimal_config.api.port = 0
-    server = EneruAPIServer(MagicMock(), minimal_config)
+    logs = []
+    server = EneruAPIServer(MagicMock(), minimal_config, log_fn=logs.append)
     with patch.object(EneruAPIHandler, "timeout", 0.5):
         server.start()
         try:
-            assert server._httpd is not None
+            assert server._httpd is not None, logs
             host, port = server._httpd.server_address[:2]
             conn = _http.HTTPConnection(host, port, timeout=5)
             conn.request("GET", "/health")

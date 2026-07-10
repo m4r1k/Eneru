@@ -655,9 +655,9 @@ class RemoteShutdownMixin:
         # "export: Command not found." lines; on a cmd.exe/Windows remote `;`
         # isn't a separator, so the ENTIRE line becomes args to a nonexistent
         # `export` and the real shutdown silently never runs. Per-server
-        # `augment_remote_path` (default true, so the Synology bare-command fix
-        # still applies to every POSIX remote) lets those non-POSIX targets opt
-        # OUT and receive their command verbatim.
+        # `augment_remote_path` is opt-in because Eneru cannot reliably infer a
+        # remote login shell before it sends the command. POSIX targets that
+        # need bare commands can enable it; every other shell stays verbatim.
         remote_command = (
             REMOTE_PATH_PREFIX + command
             if server.augment_remote_path

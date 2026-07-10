@@ -106,6 +106,13 @@ class NotificationWorker:
         # StatsStore object at the same memory address can't bleed
         # backoff state across instances.
         self._backoff: Dict[Tuple[str, int], float] = {}
+        # Apprise may accept a message while the following SQLite status flip
+        # fails. Keep that already-delivered claim separate from pending work:
+        # retry only the DB commit, never the external send (which would create
+        # a duplicate notification).
+        self._delivered_uncommitted: Dict[
+            Tuple[str, int], Tuple[StatsStore, int]
+        ] = {}
         # Track last prune time so we don't run DELETE on every iteration.
         self._last_prune_monotonic = 0.0
         # Used during stop() to surface the pending count to a "messages
@@ -220,14 +227,41 @@ class NotificationWorker:
         return entries
 
     def handoff_memory_buffer_to(self, replacement: "NotificationWorker") -> None:
-        """Move unclaimed rows and route late failures to ``replacement``."""
+        """Move unclaimed work and route late failures to ``replacement``."""
         if replacement is self:
             return
         with self._stores_lock:
             self._memory_handoff_worker = replacement
             entries = self._memory_buffer
             self._memory_buffer = []
+            delivered = self._delivered_uncommitted
+            self._delivered_uncommitted = {}
         replacement.adopt_memory_buffer(entries)
+        replacement._adopt_delivered_claims(delivered)
+
+    def _adopt_delivered_claims(
+        self,
+        claims: Dict[Tuple[str, int], Tuple[StatsStore, int]],
+    ) -> None:
+        """Adopt already-delivered rows whose local commit still needs retry."""
+        if not claims:
+            return
+        # Follow an existing handoff instead of parking work on an already
+        # stopped intermediate worker during two rapid reloads.
+        for key, (store, row_id) in claims.items():
+            self._retain_delivered_claim(key, store, row_id)
+        self._wakeup_event.set()
+
+    def _retain_delivered_claim(
+        self, key: Tuple[str, int], store: StatsStore, row_id: int,
+    ) -> None:
+        """Keep a failed status commit locally or forward it after reload."""
+        with self._stores_lock:
+            replacement = self._memory_handoff_worker
+            if replacement is None:
+                self._delivered_uncommitted[key] = (store, row_id)
+        if replacement is not None:
+            replacement._adopt_delivered_claims({key: (store, row_id)})
 
     def adopt_memory_buffer(
             self, entries: Optional[List[Tuple[str, str, str, int]]]) -> None:
@@ -444,8 +478,8 @@ class NotificationWorker:
 
     def flush(self, timeout: float) -> bool:
         """Block until every registered store's pending count reaches 0
-        AND the in-memory pre-store buffer is empty, or until ``timeout``
-        seconds elapse.
+        AND the in-memory pre-store buffer/status-commit backlog are empty, or
+        until ``timeout`` seconds elapse.
 
         Returns ``True`` if drained cleanly, ``False`` on timeout. Used
         from the shutdown path (Slice 5) to give in-flight notifications
@@ -468,7 +502,8 @@ class NotificationWorker:
                 pending = sum(
                     s.pending_notification_count() for s in self._stores
                 )
-            if pending == 0 and buffered == 0:
+                uncommitted = len(self._delivered_uncommitted)
+            if pending == 0 and buffered == 0 and uncommitted == 0:
                 return True
             if time.monotonic() >= deadline:
                 return False
@@ -485,6 +520,7 @@ class NotificationWorker:
             self._wakeup_event.clear()
 
             try:
+                self._finalize_delivered_claims()
                 # cubic P1 (round 1): give memory-buffered rows a path back
                 # into SQLite even when no further register_store ever fires.
                 self._replay_memory_buffer()
@@ -494,6 +530,27 @@ class NotificationWorker:
                 # Defensive — the worker thread must NEVER crash, since
                 # losing it would silently disable all future notifications.
                 pass
+
+    def _finalize_delivered_claims(self) -> None:
+        """Retry SQLite commits for rows Apprise already accepted.
+
+        A row stays ``delivering`` while its commit is outstanding, so another
+        worker cannot claim and resend it. Cancelled/sent rows are no longer
+        ours to finalize and are simply forgotten.
+        """
+        with self._stores_lock:
+            claims = list(self._delivered_uncommitted.items())
+        for key, (store, row_id) in claims:
+            if store.mark_notification_sent(
+                    row_id, require_delivering=True):
+                with self._stores_lock:
+                    self._delivered_uncommitted.pop(key, None)
+                self._backoff.pop(key, None)
+                continue
+            row = store.read_notification(row_id)
+            if row is not None and row[2] != "delivering":
+                with self._stores_lock:
+                    self._delivered_uncommitted.pop(key, None)
 
     def _drain_once(self) -> None:
         """Drain pending rows: coalesce on every iteration, then deliver
@@ -732,8 +789,18 @@ class NotificationWorker:
         key = (str(store.db_path), row_id)
 
         if success:
-            store.mark_notification_sent(row_id)
-            self._backoff.pop(key, None)
+            if store.mark_notification_sent(
+                    row_id, require_delivering=True):
+                self._backoff.pop(key, None)
+            else:
+                # The network side succeeded. Retrying Apprise would duplicate
+                # the alert, so retain the claim and retry only the DB status
+                # transition on subsequent worker ticks.
+                self._retain_delivered_claim(key, store, row_id)
+                self._warn(
+                    "⚠️  Notification delivered, but its queue status could "
+                    "not be committed; retrying the local status update."
+                )
             return
 
         # claim_notification already incremented attempts atomically.

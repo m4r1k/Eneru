@@ -188,6 +188,21 @@ class TestAssessHealthGroupTriggers:
         assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.DEGRADED
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+    def test_nonfinite_nut_values_are_treated_as_missing(self, value):
+        triggers = TriggersConfig(
+            low_battery_threshold=50,
+            critical_runtime_threshold=1200,
+            on_battery_stabilization_delay=0,
+            extended_time=ExtendedTimeConfig(enabled=False, threshold=900),
+        )
+        snap = _snap(
+            status="OB", battery_charge=value, runtime=value,
+            time_on_battery=300,
+        )
+        assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.DEGRADED
+
+    @pytest.mark.unit
     def test_non_numeric_stabilization_delay_falls_back_to_zero(self):
         """A triggers object exposing a non-int ``on_battery_stabilization_delay``
         must not crash -- the guard coerces it to 0 (health_model.py

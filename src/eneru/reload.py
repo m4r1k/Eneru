@@ -93,7 +93,9 @@ def _mirror_startup_synthesis(cfg: Config, primary: Optional[Config]) -> None:
     # running daemon already proved the loopback key at startup; on reload a
     # missing key degrades to a stderr WARNING. The startup-only K8s-misuse
     # banner is deliberately not repeated here.
-    _synthesize_loopback_if_needed(cfg, strict_key_check=False)
+    _synthesize_loopback_if_needed(
+        cfg, strict_key_check=False, announce=False,
+    )
     _inject_delegated_actions(cfg)
 
 

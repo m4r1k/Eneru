@@ -5,6 +5,7 @@ the machine timezone.
 """
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
@@ -226,9 +227,8 @@ class TestMonthlyDue:
 # ------------------------------------------------------------------
 
 try:
-    from zoneinfo import ZoneInfo
     BERLIN = ZoneInfo("Europe/Berlin")
-except Exception:  # pragma: no cover - tzdata missing on exotic platforms
+except ZoneInfoNotFoundError:  # pragma: no cover - tzdata missing
     BERLIN = None
 
 needs_tz = pytest.mark.skipif(BERLIN is None, reason="zoneinfo tz unavailable")

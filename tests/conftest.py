@@ -208,18 +208,18 @@ def _reset_runtime_context_cache():
 
 
 def make_api_handler(
-    config,
+    config: Any,
     *,
-    source=None,
-    path="/",
-    method=None,
-    body=b"",
-    token=None,
-    headers=None,
-    auth_store=None,
-    sessions=None,
-    logs=None,
-):
+    source: Any = None,
+    path: str = "/",
+    method: Optional[str] = None,
+    body: bytes = b"",
+    token: Optional[str] = None,
+    headers: Optional[Dict[str, str]] = None,
+    auth_store: Any = None,
+    sessions: Any = None,
+    logs: Optional[List[str]] = None,
+) -> Any:
     """Construct a bare ``EneruAPIHandler`` for unit tests (F-063).
 
     ELI5: five different test files each hand-rolled the same "fake HTTP
@@ -276,7 +276,7 @@ def make_api_handler(
 
 
 @pytest.fixture
-def api_handler_factory():
+def api_handler_factory() -> Any:
     """Fixture wrapper around :func:`make_api_handler` (F-063)."""
     return make_api_handler
 

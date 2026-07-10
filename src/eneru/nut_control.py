@@ -255,14 +255,19 @@ def _run_auth_command(
         # master to answer the prompt gets echoed straight back and captured
         # into `output` — leaking the secret into the returned buffer (and any
         # log of it). Turn echo off on the terminal before the child inherits
-        # it. Guard: pipe-backed or exotic fds may lack termios, so degrade to
-        # the previous behavior rather than failing the whole command.
+        # it. Fail closed if the terminal cannot disable echo: sending the
+        # secret anyway could put it in captured output and later logs.
         try:
             attrs = termios.tcgetattr(slave_fd)
             attrs[3] &= ~termios.ECHO   # index 3 == lflags
             termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
-        except Exception:
-            pass
+        except (OSError, termios.error) as exc:
+            return (
+                1,
+                "",
+                "Could not disable PTY echo; refusing to send the NUT "
+                f"control password: {exc}",
+            )
         proc = _popen_validated_auth_command(safe_cmd, slave_fd)
         os.close(slave_fd)
         slave_fd = None

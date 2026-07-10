@@ -318,8 +318,8 @@ with a minimal `PATH`. On Synology in particular that means `/usr/syno/sbin`
 with `sudo: synoshutdown: command not found` even though `which synoshutdown`
 works fine when you SSH in by hand.
 
-Eneru fixes this by augmenting `PATH` for every remote command it sends: it
-prepends the standard privileged directories (`/usr/local/sbin`,
+When `augment_remote_path: true` is enabled, Eneru appends the standard
+privileged directories (`/usr/local/sbin`,
 `/usr/local/bin`, `/usr/sbin`, `/usr/bin`, `/sbin`, `/bin`) plus Synology's
 `/usr/syno/sbin` and `/usr/syno/bin`, so bare binary names resolve in the
 daemon's SSH session exactly like they would in an interactive login. The
@@ -340,7 +340,7 @@ Two consequences worth knowing:
   `sudo /usr/syno/sbin/synoshutdown -s`). Absolute paths bypass `PATH`
   resolution entirely and always work.
 
-!!! warning "The prefix assumes a POSIX login shell — non-POSIX remotes must opt out"
+!!! warning "The prefix assumes a POSIX login shell — enable it only there"
     The `PATH` augmentation is a POSIX-sh `export PATH=...` statement. It works
     on any remote whose SSH login shell is `sh`/`bash`/`dash`/`zsh` (the vast
     majority, including Synology). It does **not** work on non-POSIX shells:
@@ -352,10 +352,9 @@ Two consequences worth knowing:
       line — prefix and your `shutdown_command` together — is handed to a
       nonexistent `export`. Your shutdown command **silently never runs**.
 
-    For those targets set `augment_remote_path: false` on that
-    `remote_servers` entry. Eneru then sends your command verbatim (no prefix),
-    and you supply absolute paths yourself where needed. The default is `true`
-    so every ordinary POSIX remote keeps the bare-command fix above.
+    Eneru therefore defaults `augment_remote_path` to `false` and sends commands
+    verbatim. On a POSIX remote that needs extra bare-command directories, set
+    it to `true`; otherwise supply absolute paths where needed.
 
 ## Safe test checklist
 

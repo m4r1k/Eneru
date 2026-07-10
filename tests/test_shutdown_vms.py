@@ -167,13 +167,13 @@ def test_shutdown_vms_retry_poll_failure_keeps_prior_remaining(
             return (1, "", "libvirt down")
         return (0, "", "")
 
+    monotonic_values = iter([0.0, 0.0, 0.0, 1.1, 1.1])
     with patch("eneru.shutdown.vms.command_exists", return_value=True), \
          patch("eneru.shutdown.vms.run_command", side_effect=fake_run) as mock_run, \
          patch("eneru.shutdown.vms.time.monotonic",
                # next() default: any extra post-deadline reads (the final
                # poll's budget-capped timeout, cubic P2 round 1) see 1.1.
-               side_effect=lambda seq=iter([0.0, 0.0, 0.0, 1.1, 1.1]):
-               next(seq, 1.1)), \
+               side_effect=lambda: next(monotonic_values, 1.1)), \
          patch("eneru.shutdown.vms.time.sleep"):
         monitor._shutdown_vms()
 

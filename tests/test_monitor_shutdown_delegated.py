@@ -384,7 +384,8 @@ class TestDelegatedShutdownSequence:
         self._spy_phases(monitor)
         monitor._cleanup_and_exit = MagicMock()
 
-        with _patch_runtime("container (Docker)"):
+        with _patch_runtime("container (Docker)"), \
+             patch("eneru.monitor.write_shutdown_marker"):
             monitor._execute_shutdown_sequence()
 
         monitor._cleanup_and_exit.assert_called_once_with(None, None)

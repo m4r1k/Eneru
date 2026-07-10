@@ -605,6 +605,7 @@ class TestMultiUPSCoordinator:
 
         run_cmd.assert_not_called()
         write_marker.assert_not_called()
+        assert not coord._global_shutdown_flag.exists()
         assert any(
             "Shutdown Sequence Incomplete" in c.args[0]
             for c in coord._notification_worker.send.call_args_list
@@ -710,6 +711,7 @@ class TestMultiUPSCoordinator:
         coord = MultiUPSCoordinator(config)
         coord._log = MagicMock()
         coord._notification_worker = MagicMock()
+        coord._global_shutdown_flag.touch()
 
         with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"), \
@@ -719,6 +721,7 @@ class TestMultiUPSCoordinator:
 
         run_cmd.assert_not_called()
         write_marker.assert_not_called()
+        assert not coord._global_shutdown_flag.exists()
 
     @pytest.mark.unit
     def test_clear_local_shutdown_state_resets_lock_and_flag(self, tmp_path):
@@ -3020,15 +3023,17 @@ class TestCoordinatorReloadNotificationWorker:
         assert any("apprise not installed" in line for line in logs)
 
     @pytest.mark.unit
-    def test_reload_notification_worker_start_failure_clears_refs(
+    def test_reload_notification_worker_start_failure_keeps_existing_refs(
         self, tmp_path: Path,
     ) -> None:
         coord = MultiUPSCoordinator(_coord_config(
             tmp_path,
             notifications=NotificationsConfig(enabled=True, urls=["json://x"]),
         ))
-        mon = MagicMock()
-        executor = MagicMock()
+        old_worker = MagicMock()
+        coord._notification_worker = old_worker
+        mon = MagicMock(_notification_worker=old_worker)
+        executor = MagicMock(_notification_worker=old_worker)
         coord._monitors = [mon]
         coord._redundancy_executors = {"rg": executor}
         worker = MagicMock()
@@ -3040,10 +3045,30 @@ class TestCoordinatorReloadNotificationWorker:
              patch("eneru.multi_ups.NotificationWorker", return_value=worker):
             coord._reload_notification_worker()
 
-        assert coord._notification_worker is None
-        assert mon._notification_worker is None
-        assert executor._notification_worker is None
+        assert coord._notification_worker is old_worker
+        assert mon._notification_worker is old_worker
+        assert executor._notification_worker is old_worker
+        old_worker.stop.assert_not_called()
         assert any("Failed to reload notifications" in line for line in logs)
+
+    @pytest.mark.unit
+    def test_coordinator_startup_event_is_written_to_each_store(
+        self, tmp_path: Path,
+    ) -> None:
+        """One coordinator notification still leaves per-UPS recovery events."""
+        monitor = object.__new__(UPSGroupMonitor)
+        monitor._coordinator_mode = True
+        monitor._coordinator_startup_event = (
+            "POWER_RESTORED", "Recovered after a completed shutdown",
+        )
+        monitor._stats_store = MagicMock()
+        monitor._stats_store._conn = object()
+
+        monitor._emit_lifecycle_startup_notification()
+
+        monitor._stats_store.log_event.assert_called_once_with(
+            "POWER_RESTORED", "Recovered after a completed shutdown",
+        )
 
     @pytest.mark.unit
     def test_reload_notification_worker_registers_open_stores(

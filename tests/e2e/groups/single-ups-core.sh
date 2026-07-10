@@ -1060,11 +1060,11 @@ echo "PASS: MQTT status payload arrived with power-quality metrics"
 )
 
 # ======================================================================
-# Test 59: Remote PATH augmentation default and opt-out both work
+# Test 59: Remote PATH augmentation opt-in and safe default both work
 # ======================================================================
 (
 echo ""
-echo ">>> Running: Test 59: Remote PATH augmentation default and opt-out both work"
+echo ">>> Running: Test 59: Remote PATH augmentation opt-in and safe default both work"
 
 config=/tmp/config-e2e-path-opt-out.yaml
 docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
@@ -1091,6 +1091,7 @@ remote_servers:
     enabled: true
     host: "localhost"
     user: "testuser"
+    augment_remote_path: true
     shutdown_command: "eneru-path-probe"
     ssh_options:
       - "-o Port=2222"
@@ -1101,7 +1102,6 @@ remote_servers:
     enabled: true
     host: "localhost"
     user: "testuser"
-    augment_remote_path: false
     shutdown_command: "/usr/local/bin/verify-unaugmented-path"
     ssh_options:
       - "-o Port=2222"
@@ -1118,17 +1118,17 @@ eneru run --config "$config" --exit-after-shutdown \
 
 if ! docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
     test -f /tmp/eneru-path-verbatim; then
-  echo "FAIL: augment_remote_path=false did not deliver the custom command verbatim"
+  echo "FAIL: safe PATH default did not deliver the custom command verbatim"
   cat /tmp/test59.log
   exit 1
 fi
 if ! docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
     test -f /tmp/eneru-path-augmented; then
-  echo "FAIL: default PATH augmentation did not resolve the Synology probe"
+  echo "FAIL: opted-in PATH augmentation did not resolve the Synology probe"
   cat /tmp/test59.log
   exit 1
 fi
-echo "PASS: default PATH augmentation and the explicit opt-out both worked"
+echo "PASS: opted-in PATH augmentation and the safe default both worked"
 )
 
 # ======================================================================

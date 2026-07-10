@@ -257,8 +257,8 @@ class TestSchemaMigration:
 
     @pytest.mark.unit
     def test_versionless_populated_db_is_recovered_not_treated_as_fresh(
-        self, tmp_path
-    ):
+        self, tmp_path: Path,
+    ) -> None:
         # F-027: an older binary created the tables (v1 shape) but crashed before
         # stamping meta.schema_version. A newer binary opening this versionless-
         # but-populated DB must run the full migration chain and stamp the current
@@ -289,7 +289,9 @@ class TestSchemaMigration:
             s.close()
 
     @pytest.mark.unit
-    def test_created_then_reopened_reports_current_version(self, tmp_path):
+    def test_created_then_reopened_reports_current_version(
+        self, tmp_path: Path,
+    ) -> None:
         # F-027: a normally-created DB reopened reports the correct version.
         path = tmp_path / "roundtrip.db"
         s1 = StatsStore(path)
@@ -1083,7 +1085,9 @@ class TestNotificationQueue:
             s.close()
 
     @pytest.mark.unit
-    def test_claim_read_revert_and_marksent_delivering(self, tmp_path):
+    def test_claim_read_revert_and_marksent_delivering(
+        self, tmp_path: Path,
+    ) -> None:
         # F-058: deferred-delivery's SQL is now on the store API. Exercise the
         # claim -> read -> mark-sent(require_delivering) and claim -> revert paths.
         s = self._open(tmp_path)
@@ -1115,7 +1119,9 @@ class TestNotificationQueue:
             s.close()
 
     @pytest.mark.unit
-    def test_marksent_require_delivering_no_op_when_cancelled(self, tmp_path):
+    def test_marksent_require_delivering_no_op_when_cancelled(
+        self, tmp_path: Path,
+    ) -> None:
         # F-058: a classifier that cancels the row mid-send must not be clobbered
         # back to 'sent' by require_delivering=True.
         s = self._open(tmp_path)
@@ -1160,7 +1166,9 @@ class TestNotificationQueue:
             s.close()
 
     @pytest.mark.unit
-    def test_claimed_notification_still_counts_as_outstanding(self, tmp_path):
+    def test_claimed_notification_still_counts_as_outstanding(
+        self, tmp_path: Path,
+    ) -> None:
         """F-079: flush cannot declare an in-flight delivery drained."""
         s = self._open(tmp_path)
         try:
@@ -3141,7 +3149,7 @@ class TestAggregateLockSplit:
     tiers so the monitor thread isn't starved re-scanning ~86k rows under one
     long transaction; correctness/idempotency must be preserved."""
 
-    def _seed(self, store, count):
+    def _seed(self, store: StatsStore, count: int) -> None:
         now = int(time.time())
         for i in range(count):
             store.buffer_sample(
@@ -3150,7 +3158,7 @@ class TestAggregateLockSplit:
         store.flush()
 
     @pytest.mark.unit
-    def test_lock_released_between_tiers(self, tmp_path):
+    def test_lock_released_between_tiers(self, tmp_path: Path) -> None:
         store = StatsStore(tmp_path / "s.db")
         store.open()
         try:
@@ -3160,7 +3168,7 @@ class TestAggregateLockSplit:
             # Lock can only be acquired here if aggregate() genuinely released it
             # between tiers (the whole point of F-044).
             free_between = []
-            def hook():
+            def hook() -> None:
                 got = store._db_lock.acquire(blocking=False)
                 free_between.append(got)
                 if got:
@@ -3173,7 +3181,7 @@ class TestAggregateLockSplit:
             store.close()
 
     @pytest.mark.unit
-    def test_split_aggregation_is_idempotent(self, tmp_path):
+    def test_split_aggregation_is_idempotent(self, tmp_path: Path) -> None:
         store = StatsStore(tmp_path / "s.db")
         store.open()
         try:
@@ -3196,7 +3204,7 @@ class TestAggregateLockSplit:
             store.close()
 
     @pytest.mark.unit
-    def test_aggregate_empty_store_is_noop(self, tmp_path):
+    def test_aggregate_empty_store_is_noop(self, tmp_path: Path) -> None:
         """With no samples, the 5-min tier writes no watermark (new_lo_5 is None)
         and the hourly tier finds nothing — the split path still returns (0, 0)."""
         store = StatsStore(tmp_path / "s.db")
@@ -3207,7 +3215,9 @@ class TestAggregateLockSplit:
             store.close()
 
     @pytest.mark.unit
-    def test_hourly_tier_skipped_when_store_closes_between_tiers(self, tmp_path):
+    def test_hourly_tier_skipped_when_store_closes_between_tiers(
+        self, tmp_path: Path,
+    ) -> None:
         """If the store is closed by the between-tiers hook (simulating a
         concurrent close winning the re-acquire), the hourly tier no-ops and the
         method returns the 5-min count with a zero hourly count."""
@@ -3227,7 +3237,9 @@ class TestNotificationStoreMethodsDegradeSafely:
     exists to keep exercised on every Python version."""
 
     @pytest.mark.unit
-    def test_return_safe_defaults_when_store_closed(self, tmp_path):
+    def test_return_safe_defaults_when_store_closed(
+        self, tmp_path: Path,
+    ) -> None:
         s = StatsStore(tmp_path / "closed.db")
         s.open()
         s.close()                      # _conn -> None
@@ -3238,7 +3250,7 @@ class TestNotificationStoreMethodsDegradeSafely:
         assert s.pending_notification_ids() is None
 
     @pytest.mark.unit
-    def test_swallow_sqlite_errors(self, tmp_path):
+    def test_swallow_sqlite_errors(self, tmp_path: Path) -> None:
         s = StatsStore(tmp_path / "err.db")
         s.open()
         try:

@@ -1,6 +1,7 @@
 """Unit tests for the v6.0 NUT control wrappers (src/eneru/nut_control.py)."""
 
 import pytest
+from unittest.mock import MagicMock
 
 from eneru import nut_control as nc
 
@@ -426,9 +427,18 @@ def test_run_auth_command_rejects_empty_and_nul_args(bad):
     assert err
 
 
+def _allow_fake_termios(monkeypatch):
+    """Make integer-only fake PTYs behave like echo-capable terminals."""
+    monkeypatch.setattr(
+        nc.termios, "tcgetattr", lambda _fd: [0, 0, 0, nc.termios.ECHO],
+    )
+    monkeypatch.setattr(nc.termios, "tcsetattr", lambda *_args: None)
+
+
 @pytest.mark.unit
 def test_run_auth_command_with_password_drives_pty_prompt(monkeypatch):
     from types import SimpleNamespace
+    _allow_fake_termios(monkeypatch)
 
     captured = {}
     closed = []
@@ -486,6 +496,7 @@ def test_run_auth_command_with_password_drives_pty_prompt(monkeypatch):
 @pytest.mark.unit
 def test_run_auth_command_does_not_answer_non_prompt_password_text(monkeypatch):
     from types import SimpleNamespace
+    _allow_fake_termios(monkeypatch)
 
     writes = []
 
@@ -538,6 +549,7 @@ def test_run_auth_command_with_password_spawns_each_fixed_shape(
     monkeypatch, cmd, expected,
 ):
     from types import SimpleNamespace
+    _allow_fake_termios(monkeypatch)
 
     captured = {}
 
@@ -577,6 +589,7 @@ def test_run_auth_command_with_password_spawns_each_fixed_shape(
 @pytest.mark.unit
 def test_run_auth_command_timeout_kills_process_and_closes_fds(monkeypatch):
     from types import SimpleNamespace
+    _allow_fake_termios(monkeypatch)
 
     closed = []
 
@@ -618,6 +631,7 @@ def test_run_auth_command_timeout_kills_process_and_closes_fds(monkeypatch):
 @pytest.mark.unit
 def test_run_auth_command_timeout_swallows_kill_errors(monkeypatch):
     from types import SimpleNamespace
+    _allow_fake_termios(monkeypatch)
 
     class FakeProc:
         def poll(self):
@@ -646,6 +660,7 @@ def test_run_auth_command_timeout_swallows_kill_errors(monkeypatch):
 @pytest.mark.unit
 def test_run_auth_command_read_error_and_close_error_are_swallowed(monkeypatch):
     from types import SimpleNamespace
+    _allow_fake_termios(monkeypatch)
 
     class FakeProc:
         def __init__(self):
@@ -688,6 +703,7 @@ def test_run_auth_command_read_error_and_close_error_are_swallowed(monkeypatch):
 @pytest.mark.unit
 def test_run_auth_command_no_readable_fd_still_drains_final_output(monkeypatch):
     from types import SimpleNamespace
+    _allow_fake_termios(monkeypatch)
 
     class FakeProc:
         def poll(self):
@@ -713,6 +729,7 @@ def test_run_auth_command_no_readable_fd_still_drains_final_output(monkeypatch):
 
 @pytest.mark.unit
 def test_run_auth_command_file_not_found_closes_fds(monkeypatch):
+    _allow_fake_termios(monkeypatch)
     closed = []
 
     def missing(*args, **kwargs):
@@ -783,35 +800,20 @@ def test_auth_command_pty_does_not_echo_password(monkeypatch):
 
 
 @pytest.mark.unit
-def test_auth_command_pty_survives_missing_termios(monkeypatch):
-    """F-034: the echo-disable is best-effort — if termios is unavailable the
-    command still runs (guarded try/except)."""
-    import subprocess
-    import sys
+def test_auth_command_pty_refuses_password_when_termios_fails(monkeypatch):
+    """A password is never sent when terminal echo cannot be disabled."""
 
     def boom(_fd):
         raise OSError("no termios here")
 
     monkeypatch.setattr(nc.termios, "tcgetattr", boom)
 
-    script = (
-        "import sys\n"
-        "sys.stdout.write('Password: ')\n"
-        "sys.stdout.flush()\n"
-        "sys.stdin.readline()\n"
-        "sys.stdout.write('OK\\n')\n"
-        "sys.stdout.flush()\n"
-    )
-
-    def fake_popen(safe_cmd, slave_fd):
-        return subprocess.Popen(
-            [sys.executable, "-c", script],
-            stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, close_fds=True)
-
-    monkeypatch.setattr(nc, "_popen_validated_auth_command", fake_popen)
+    popen = MagicMock()
+    monkeypatch.setattr(nc, "_popen_validated_auth_command", popen)
 
     code, out, err = nc._run_auth_command(
         ["upscmd", "-u", "user", "-l", "UPS@h"], "pw", timeout=10)
 
-    assert code == 0
-    assert "OK" in out
+    assert (code, out) == (1, "")
+    assert "refusing to send" in err
+    popen.assert_not_called()

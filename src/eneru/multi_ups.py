@@ -30,8 +30,10 @@ from eneru.shutdown.remote import loopback_poweroff_sent, select_loopback_result
 from eneru.stats import StatsStore
 from eneru.status import redundancy_state_file_path, sanitize_name
 from eneru.lifecycle import (
+    EVENT_TYPE_DAEMON_START,
     REASON_SEQUENCE_COMPLETE,
     REASON_SIGNAL,
+    classify_event_type,
     classify_startup,
     delete_shutdown_marker,
     delete_upgrade_marker,
@@ -78,6 +80,7 @@ class MultiUPSCoordinator:
         self._api_server: Optional[EneruAPIServer] = None
         self._mqtt_publisher: Optional[MQTTPublisher] = None
         self._redundancy_remote_health_managers: List[RemoteHealthManager] = []
+        self._coordinator_startup_event = (EVENT_TYPE_DAEMON_START, "")
 
         # Redundancy-group runtime (Phase 2). Populated after monitors start.
         self._redundancy_executors: dict = {}
@@ -207,6 +210,13 @@ class MultiUPSCoordinator:
             upgrade_marker=upgrade_marker,
             last_seen_version=last_seen,
         )
+        startup_event_type = classify_event_type(
+            current_version=__version__,
+            shutdown_marker=shutdown_marker,
+            upgrade_marker=upgrade_marker,
+            last_seen_version=last_seen,
+        )
+        self._coordinator_startup_event = (startup_event_type, body)
         # v5.2.1: sweep each per-UPS store for any pending lifecycle row
         # left over from the previous instance (the deferred 'Service
         # Stopped' from _handle_signal) and cancel it BEFORE the new
@@ -429,6 +439,7 @@ class MultiUPSCoordinator:
                 logger=self._logger,
                 state_file_suffix=sanitized,
                 in_redundancy_group=in_rg,
+                coordinator_startup_event=self._coordinator_startup_event,
             )
             self._monitors.append(monitor)
 
@@ -799,7 +810,9 @@ class MultiUPSCoordinator:
                     # the delegated shutdown (the host is still up, so the
                     # coordinator must stay armed).
                     with self._local_shutdown_lock:
-                        self._local_shutdown_initiated = False
+                        # Keep the admission guard closed until the outer
+                        # finally block clears the in-flight state atomically.
+                        self._rearm_after_inflight = True
                     self._clear_global_shutdown_flag(
                         "failed delegated local shutdown")
                 else:
@@ -1140,20 +1153,21 @@ class MultiUPSCoordinator:
     def _reload_notification_worker(self) -> None:
         """Bounce the shared notification worker after config reload."""
         old_worker = self._notification_worker
-        if old_worker is not None:
-            old_worker.stop()
-            self._notification_worker = None
-        for mon in self._monitors:
-            mon._notification_worker = None
-        for executor in self._redundancy_executors.values():
-            executor._notification_worker = None
         if not self.config.notifications.enabled:
+            if old_worker is not None:
+                old_worker.stop()
+            self._notification_worker = None
+            for mon in self._monitors:
+                mon._notification_worker = None
+            for executor in self._redundancy_executors.values():
+                executor._notification_worker = None
             self._log("📢  Notifications: disabled")
             return
         if not APPRISE_AVAILABLE:
             self._log(
                 "⚠️  WARNING: Notifications enabled but apprise not installed. "
-                "Install with: uv pip install apprise"
+                "Install with: uv pip install apprise. Existing worker kept "
+                "active when available."
             )
             return
         # Pass the coordinator's shared logger on the reload path too, so the
@@ -1161,15 +1175,22 @@ class MultiUPSCoordinator:
         # like the startup path (ISS-060) rather than falling back to print.
         worker = NotificationWorker(self.config, logger=self._logger)
         if not worker.start():
-            self._log("⚠️  WARNING: Failed to reload notifications")
+            self._log(
+                "⚠️  WARNING: Failed to reload notifications; keeping the "
+                "existing worker active"
+            )
             return
+        # Register stores before stopping the old sender so the replacement is
+        # fully usable first. Atomic claims make the short overlap safe.
         for mon in self._monitors:
-            mon._notification_worker = worker
             store = getattr(mon, "_stats_store", None)
             if store is not None and store._conn is not None:
                 worker.register_store(store)
         if old_worker is not None:
             old_worker.handoff_memory_buffer_to(worker)
+            old_worker.stop()
+        for mon in self._monitors:
+            mon._notification_worker = worker
         for executor in self._redundancy_executors.values():
             executor._notification_worker = worker
         self._notification_worker = worker

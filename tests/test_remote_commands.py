@@ -1442,6 +1442,7 @@ class TestRunRemoteCommand:
             host="192.168.1.50",
             user="admin",
             connect_timeout=10,
+            augment_remote_path=True,
             ssh_options=["-o StrictHostKeyChecking=no"],
         )
 
@@ -1482,6 +1483,7 @@ class TestRunRemoteCommand:
             host="192.168.1.60",
             user="admin",
             use_sudo=True,
+            augment_remote_path=True,
             shutdown_command="synoshutdown -s",
         )
 
@@ -1517,11 +1519,16 @@ class TestRunRemoteCommand:
             assert "export PATH" not in sent
 
     @pytest.mark.unit
-    def test_augment_remote_path_true_is_default(self, ssh_monitor):
-        """F-080: the augmentation stays ON by default, so every ordinary POSIX
-        remote keeps the bare-command (Synology) fix."""
+    def test_augment_remote_path_is_opt_in(self, ssh_monitor):
+        """Non-POSIX remotes stay compatible unless PATH expansion is opted in."""
         server = RemoteServerConfig(host="192.168.1.50", user="root")
-        assert server.augment_remote_path is True
+        assert server.augment_remote_path is False
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (0, "", "")
+            ssh_monitor._run_remote_command(server, "echo hi", 30, "test")
+            assert mock_run.call_args[0][0][-1] == "echo hi"
+
+        server.augment_remote_path = True
         with patch("eneru.shutdown.remote.run_command") as mock_run:
             mock_run.return_value = (0, "", "")
             ssh_monitor._run_remote_command(server, "echo hi", 30, "test")

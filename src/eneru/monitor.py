@@ -156,11 +156,16 @@ class UPSGroupMonitor(
                  notification_worker: Optional[NotificationWorker] = None,
                  logger: Optional[UPSLogger] = None,
                  state_file_suffix: str = "",
-                 in_redundancy_group: bool = False):
+                 in_redundancy_group: bool = False,
+                 coordinator_startup_event: Optional[Tuple[str, str]] = None):
         self.config = config
         self.state = MonitorState()
         self.logger: Optional[UPSLogger] = logger
         self._coordinator_mode = coordinator_mode
+        # The coordinator classifies startup once (to avoid N user-facing
+        # messages) and passes the resulting event to each monitor so every
+        # per-UPS stats DB still receives the recovery/upgrade breadcrumb.
+        self._coordinator_startup_event = coordinator_startup_event
         self._shutdown_callback = shutdown_callback
         # Coordinator-supplied hook fired on the OB/FSD->OL transition so
         # the coordinator can re-arm its own _local_shutdown_initiated
@@ -602,6 +607,13 @@ class UPSGroupMonitor(
             self._stats_store.set_meta("last_seen_version", __version__)
 
         if self._coordinator_mode:
+            event = self._coordinator_startup_event
+            if (event is not None and event[0] != EVENT_TYPE_DAEMON_START
+                    and self._stats_store._conn is not None):
+                try:
+                    self._stats_store.log_event(event[0], event[1])
+                except Exception:
+                    pass  # lifecycle notification must survive a stats hiccup
             return
 
         from pathlib import Path
@@ -1855,20 +1867,18 @@ class UPSGroupMonitor(
 
     def _reload_notification_worker(self) -> None:
         """Bounce the single-UPS notification worker after config reload."""
-        # Keep the old object until the replacement starts. Its bounded stop
-        # may return while a direct Apprise call is still in flight; the
-        # handoff below transfers only unclaimed rows and routes a late failure.
         old_worker = self._notification_worker
-        if old_worker is not None:
-            old_worker.stop()
-            self._notification_worker = None
         if not self.config.notifications.enabled:
+            if old_worker is not None:
+                old_worker.stop()
+            self._notification_worker = None
             self._log_message("📢  Notifications: disabled")
             return
         if not APPRISE_AVAILABLE:
             self._log_message(
                 "⚠️  WARNING: Notifications enabled but apprise not installed. "
-                "Install with: uv pip install apprise"
+                "Install with: uv pip install apprise. Existing worker kept "
+                "active when available."
             )
             return
         # Reload path: pass the shared logger like the startup path (ISS-060)
@@ -1878,12 +1888,19 @@ class UPSGroupMonitor(
             if self._stats_store is not None and self._stats_store._conn is not None:
                 worker.register_store(self._stats_store)
             if old_worker is not None:
+                # Prove the replacement can run before taking the working sender
+                # down. Atomic SQLite claims prevent duplicates during this
+                # intentionally brief overlap.
                 old_worker.handoff_memory_buffer_to(worker)
+                old_worker.stop()
             self._notification_worker = worker
             count = worker.get_service_count()
             self._log_message(f"📢  Notifications reloaded ({count} service(s))")
         else:
-            self._log_message("⚠️  WARNING: Failed to reload notifications")
+            self._log_message(
+                "⚠️  WARNING: Failed to reload notifications; keeping the "
+                "existing worker active"
+            )
 
     def _reload_remote_health(self) -> None:
         """Bounce remote-health with the new interval/probe/thresholds."""

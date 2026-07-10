@@ -12,6 +12,8 @@ import pytest
 from conftest import make_api_handler
 from eneru.api import EneruAPIHandler, SessionManager
 
+NODE = shutil.which("node")
+
 
 def _handler(config, *, path):
     # F-063: shared EneruAPIHandler builder lives in conftest.py. It
@@ -517,7 +519,7 @@ def test_dashboard_line_quality_card(minimal_config):
 
 
 @pytest.mark.unit
-@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+@pytest.mark.skipif(NODE is None, reason="needs node")
 def test_dashboard_line_quality_state_behavior(minimal_config):
     js = _handler(minimal_config, path="/app.js")._serve_static(
         "/app.js")[1].decode("utf-8")
@@ -568,7 +570,7 @@ def test_dashboard_line_quality_state_behavior(minimal_config):
         }};
         process.stdout.write(JSON.stringify(rows));
     """)
-    result = subprocess.run(["node", "-"], input=script, text=True,
+    result = subprocess.run([NODE, "-"], input=script, text=True,
                             capture_output=True, check=True)
     rows = json.loads(result.stdout)
     assert rows["avrBoost"] == "badge warn"
@@ -656,7 +658,7 @@ def test_stylesheet_makes_hidden_attribute_win(minimal_config):
 
 
 @pytest.mark.unit
-@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+@pytest.mark.skipif(NODE is None, reason="needs node")
 def test_dashboard_merge_events_dedup_sort_cap(minimal_config):
     """Execute event merge, power-transition, and auth-state helpers in Node."""
     js = _handler(minimal_config, path="/app.js")._serve_static(
@@ -713,7 +715,7 @@ def test_dashboard_merge_events_dedup_sort_cap(minimal_config):
           auth,
         }));
     """)
-    result = subprocess.run(["node", "-"], input=script, text=True,
+    result = subprocess.run([NODE, "-"], input=script, text=True,
                             capture_output=True, check=True)
     data = json.loads(result.stdout)
     # De-dup by (source,id): the second merge REPLACED id 1's row, not appended.
@@ -740,7 +742,7 @@ def test_dashboard_merge_events_dedup_sort_cap(minimal_config):
 
 
 @pytest.mark.unit
-@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+@pytest.mark.skipif(NODE is None, reason="needs node")
 def test_dashboard_outage_spans_close_at_shutdown_boundary(minimal_config):
     """v6.1.7: exercise app.js `computeOutageSpans` in a node shim.
 
@@ -789,7 +791,7 @@ def test_dashboard_outage_spans_close_at_shutdown_boundary(minimal_config):
                           boundary: !!s.endedAtBoundary})),
         }));
     """)
-    result = subprocess.run(["node", "-"], input=script, text=True,
+    result = subprocess.run([NODE, "-"], input=script, text=True,
                             capture_output=True, check=True)
     data = json.loads(result.stdout)
 

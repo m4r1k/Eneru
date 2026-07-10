@@ -2008,6 +2008,26 @@ class TestSchemaNumericGuards:
                    for e in errors)
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("value", [".nan", ".inf", "-.inf"])
+    def test_notifications_nonfinite_number_rejected(self, value):
+        errors = _load_errors_from_yaml(
+            "ups:\n  name: U@h\n"
+            f'notifications:\n  urls: ["discord://x/y"]\n  timeout: {value}\n'
+        )
+        assert any("notifications.timeout" in e and "number" in e
+                   for e in errors)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("value", [".nan", ".inf", "-.inf"])
+    def test_battery_health_nonfinite_number_rejected(self, value):
+        errors = _load_errors_from_yaml(
+            "ups:\n  name: U@h\n"
+            f"battery_health:\n  expected_life_years: {value}\n"
+        )
+        assert any("battery_health.expected_life_years" in e
+                   and "must be a number" in e for e in errors)
+
+    @pytest.mark.unit
     def test_notifications_urls_scalar_char_split_rejected(self, temp_config_file):
         """F-012: a bare-string `urls:` used to char-split into one URL per
         character. It is now a fatal shape error at load."""

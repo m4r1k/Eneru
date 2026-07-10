@@ -69,6 +69,11 @@ VOLTAGE_SEVERE_DEVIATION_PCT = 0.15  # >±15% from nominal = severe
 MIN_PLAUSIBLE_NOMINAL_V = 50.0
 
 
+def _is_plausible_voltage(value: float) -> bool:
+    """Return whether a live input-voltage sample is physically plausible."""
+    return 0 < value <= 600
+
+
 def _snap_to_standard_grid(value: float) -> float:
     """Return the nearest STANDARD_GRIDS entry within tolerance, else value."""
     if value <= 0:
@@ -304,7 +309,7 @@ class VoltageMonitorMixin:
             return
         v = float(input_voltage)
         # Reject impossible readings (some NUT drivers emit 0 while OB).
-        if v <= 0 or v > 600:
+        if not _is_plausible_voltage(v):
             return
         self.state.voltage_observed.append(v)
         if len(self.state.voltage_observed) < AUTODETECT_OBSERVATION_COUNT:
@@ -372,7 +377,7 @@ class VoltageMonitorMixin:
         # NUT drivers occasionally expose sentinel/glitch readings such as
         # 0 V or 65535 V for one poll.  They are not grid events and must not
         # take the severe-deviation shortcut around hysteresis.
-        if voltage <= 0 or voltage > 600:
+        if not _is_plausible_voltage(voltage):
             return
         nominal = self.state.nominal_voltage
         deviation_pct = (

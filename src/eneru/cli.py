@@ -229,6 +229,7 @@ _LOOPBACK_DEFAULT_SSH_KEY_PATH = "/var/lib/eneru/ssh/id_loopback"
 
 def _synthesize_loopback_if_needed(
     config: Config, *, strict_key_check: bool = True,
+    announce: bool = True,
 ) -> None:
     """Inject a default is_host_loopback entry for the zero-config homelab case.
 
@@ -246,6 +247,10 @@ def _synthesize_loopback_if_needed(
       becomes a WARNING and synthesis proceeds with the default
       ssh_key_path. The user is diagnosing config or rehearsing; the
       key may legitimately not exist yet.
+
+    ``announce`` suppresses only the successful auto-enable banner. Reload
+    uses ``False`` so a SIGHUP does not repeat startup information; missing-key
+    warnings remain visible.
     """
     runtime = _runtime_ctx._detect_runtime_context()
     if not _runtime_ctx._is_container_runtime(runtime):
@@ -376,12 +381,14 @@ def _synthesize_loopback_if_needed(
         # anyway -- left as-is rather than fabricating a synthetic group.
         config.remote_servers.append(synthesized)
 
-    print(
-        f"v5.5: auto-enabled host-loopback delegate (127.0.0.1, root, "
-        f"key={_LOOPBACK_DEFAULT_SSH_KEY_PATH}) for {runtime} with local "
-        "capabilities. Configure a remote_servers entry explicitly to override.",
-        file=sys.stderr,
-    )
+    if announce:
+        print(
+            f"v5.5: auto-enabled host-loopback delegate (127.0.0.1, root, "
+            f"key={_LOOPBACK_DEFAULT_SSH_KEY_PATH}) for {runtime} with local "
+            "capabilities. Configure a remote_servers entry explicitly to "
+            "override.",
+            file=sys.stderr,
+        )
 
 
 def _exit_on_missing_loopback_contract(config: Config) -> None:

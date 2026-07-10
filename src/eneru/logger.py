@@ -157,7 +157,7 @@ class UPSLogger:
                     address = (address, int(config.logging.syslog.port))
                 syslog_handler = logging.handlers.SysLogHandler(
                     address=address,
-                    facility=config.logging.syslog.facility,
+                    facility=str(config.logging.syslog.facility).lower(),
                 )
                 syslog_handler.setFormatter(formatter)
                 self.logger.addHandler(syslog_handler)

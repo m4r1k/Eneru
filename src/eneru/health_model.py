@@ -12,6 +12,7 @@ This module is deliberately pure: no I/O, no threading, no file system.
 The same function backs unit tests, the live evaluator, and the TUI.
 """
 
+import math
 import time
 from enum import Enum
 from typing import Optional
@@ -182,12 +183,20 @@ def assess_health(
             return UPSHealth.DEGRADED
         try:
             battery_value = float(snapshot.battery_charge)
-            battery = int(battery_value) if battery_value >= 0 else None
+            battery = (
+                int(battery_value)
+                if math.isfinite(battery_value) and battery_value >= 0
+                else None
+            )
         except (TypeError, ValueError):
             battery = None
         try:
             runtime_value = float(snapshot.runtime)
-            runtime = int(runtime_value) if runtime_value >= 0 else None
+            runtime = (
+                int(runtime_value)
+                if math.isfinite(runtime_value) and runtime_value >= 0
+                else None
+            )
         except (TypeError, ValueError):
             runtime = None
         if (

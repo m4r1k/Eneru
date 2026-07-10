@@ -831,6 +831,47 @@ class TestRetryAndBackoff:
         ) == ("pending", 1)
 
     @pytest.mark.unit
+    def test_successful_delivery_retries_only_failed_status_commit(
+        self, notification_config, registered_store,
+    ):
+        """A transient mark-sent failure must not resend an accepted alert."""
+        row_id = registered_store.enqueue_notification(
+            "accepted-once", "info", "general",
+        )
+        worker = NotificationWorker(notification_config)
+        worker._send_via_apprise = MagicMock(return_value=True)
+        real_mark = registered_store.mark_notification_sent
+        registered_store.mark_notification_sent = MagicMock(
+            side_effect=[False, True],
+        )
+
+        worker._process_one(
+            store=registered_store, row_id=row_id,
+            body="accepted-once", notify_type="info", attempts=0,
+        )
+        assert worker._send_via_apprise.call_count == 1
+        assert worker._delivered_uncommitted
+
+        replacement = NotificationWorker(notification_config)
+        final_worker = NotificationWorker(notification_config)
+        worker.handoff_memory_buffer_to(replacement)
+        assert worker._delivered_uncommitted == {}
+        assert replacement._delivered_uncommitted
+        replacement.handoff_memory_buffer_to(final_worker)
+        # A late completion arriving at the stopped intermediate worker must
+        # follow its handoff pointer to the current replacement.
+        replacement._adopt_delivered_claims({
+            (str(registered_store.db_path), row_id):
+                (registered_store, row_id),
+        })
+        assert replacement._delivered_uncommitted == {}
+        assert final_worker._delivered_uncommitted
+        final_worker._finalize_delivered_claims()
+        assert worker._send_via_apprise.call_count == 1
+        assert final_worker._delivered_uncommitted == {}
+        registered_store.mark_notification_sent = real_mark
+
+    @pytest.mark.unit
     @patch("eneru.notifications.APPRISE_AVAILABLE", True)
     @patch("eneru.notifications.apprise")
     def test_failure_increments_attempts_keeps_pending(

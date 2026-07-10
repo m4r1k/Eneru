@@ -526,11 +526,36 @@ def test_monitor_reload_notification_worker_warns_when_apprise_missing(monkeypat
     old = mon._notification_worker
     mon._reload_notification_worker()
 
-    old.stop.assert_called_once()
-    assert mon._notification_worker is None
+    old.stop.assert_not_called()
+    assert mon._notification_worker is old
     logged = " ".join(str(c.args[0]) for c in mon._log_message.call_args_list)
     assert "apprise not installed" in logged
     assert "uv pip install apprise" in logged
+
+
+@pytest.mark.unit
+def test_monitor_reload_start_failure_keeps_old_worker(monkeypatch):
+    import eneru.monitor as monitormod
+
+    mon = object.__new__(UPSGroupMonitor)
+    mon.config = Config()
+    mon.config.notifications.enabled = True
+    old = MagicMock()
+    mon._notification_worker = old
+    mon._stats_store = MagicMock()
+    mon._log_message = MagicMock()
+    mon.logger = object()
+    replacement = MagicMock()
+    replacement.start.return_value = False
+    monkeypatch.setattr(monitormod, "APPRISE_AVAILABLE", True)
+    monkeypatch.setattr(
+        monitormod, "NotificationWorker", MagicMock(return_value=replacement),
+    )
+
+    mon._reload_notification_worker()
+
+    assert mon._notification_worker is old
+    old.stop.assert_not_called()
 
 
 @pytest.mark.unit
@@ -720,7 +745,7 @@ def test_reload_preserves_cli_api_overrides(tmp_path):
 
 
 @pytest.mark.unit
-def test_reload_loopback_config_no_false_restart(tmp_path, monkeypatch):
+def test_reload_loopback_config_no_false_restart(tmp_path, monkeypatch, capsys):
     """F-009: a containerized loopback-delegate config must reload clean.
     The RUNNING config carries a synthesized is_host_loopback entry plus
     generated pre-shutdown commands that are not in the YAML; the fresh
@@ -736,12 +761,14 @@ def test_reload_loopback_config_no_false_restart(tmp_path, monkeypatch):
     p = tmp_path / "a.yaml"
     live = _load(_write(p, body))
     _prepare_runtime_config(live, strict_key_check=False)
+    capsys.readouterr()  # discard the legitimate startup banner/warning
     # Sanity: the loopback delegate WAS synthesized onto the running config.
     assert any(s.is_host_loopback for s in live.remote_servers)
 
     report = reloadmod.perform_reload(live, [live], str(p))
 
     assert report["reloaded"]
+    assert "auto-enabled host-loopback delegate" not in capsys.readouterr().err
     assert not any(r.startswith("ups_groups")
                    for r in report["restartRequired"]), report
 

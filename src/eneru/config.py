@@ -1,6 +1,7 @@
 """Configuration classes and loader for Eneru."""
 
 import copy
+import math
 import shlex
 from dataclasses import dataclass, field
 from difflib import get_close_matches
@@ -427,12 +428,9 @@ class RemoteServerConfig:
     use_sudo: bool = False
     # Prepend a POSIX-sh `export PATH=...` to every command sent over SSH so a
     # bare command name (e.g. Synology's `synoshutdown`) resolves in the minimal
-    # non-interactive PATH (see RemoteShutdownMixin.REMOTE_PATH_PREFIX). Default
-    # on because most remotes run a POSIX login shell. Set false for non-POSIX
-    # targets — csh/tcsh (FreeBSD/TrueNAS CORE root) reject `export` with
-    # "Command not found." noise, and cmd.exe/Windows treats `;` as literal
-    # args so the whole command silently never runs (F-080).
-    augment_remote_path: bool = True
+    # non-interactive PATH (see RemoteShutdownMixin.REMOTE_PATH_PREFIX). Opt in:
+    # prepending POSIX syntax by default would break csh and Windows remotes.
+    augment_remote_path: bool = False
     ssh_key_path: Optional[str] = None
     ssh_options: List[str] = field(default_factory=list)
     pre_shutdown_commands: List[RemoteCommandConfig] = field(default_factory=list)
@@ -922,6 +920,8 @@ class ConfigLoader:
         """Return True for int/float, excluding bool, inside optional bounds."""
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             return False
+        if not math.isfinite(value):
+            return False
         if minimum is not None and value < minimum:
             return False
         if maximum is not None and value > maximum:
@@ -1338,7 +1338,7 @@ class ConfigLoader:
                 command_timeout=server_data.get('command_timeout', 30),
                 shutdown_command=server_data.get('shutdown_command', 'sudo shutdown -h now'),
                 use_sudo=server_data.get('use_sudo', False),
-                augment_remote_path=server_data.get('augment_remote_path', True),
+                augment_remote_path=server_data.get('augment_remote_path', False),
                 ssh_key_path=server_data.get('ssh_key_path'),
                 ssh_options=server_data.get('ssh_options', []),
                 pre_shutdown_commands=pre_cmds,
@@ -3396,7 +3396,9 @@ class ConfigLoader:
                 if not allow_none:
                     messages.append(f"ERROR: {label} must be set to a number")
                 return
-            if isinstance(val, bool) or not isinstance(val, (int, float)):
+            if (isinstance(val, bool)
+                    or not isinstance(val, (int, float))
+                    or not math.isfinite(val)):
                 messages.append(f"ERROR: {label} must be a number, got {val!r}")
             elif minimum is not None and val < minimum:
                 messages.append(f"ERROR: {label} must be >= {minimum}, got {val!r}")
@@ -3453,13 +3455,17 @@ class ConfigLoader:
         # None/unset is valid and disables cost tracking entirely (B3).
         cpk = config.energy.cost_per_kwh
         if cpk is not None:
-            if isinstance(cpk, bool) or not isinstance(cpk, (int, float)) or cpk < 0:
+            if (isinstance(cpk, bool)
+                    or not isinstance(cpk, (int, float))
+                    or not math.isfinite(cpk) or cpk < 0):
                 messages.append(
                     f"ERROR: energy.cost_per_kwh must be a non-negative number "
                     f"or unset, got {cpk!r}")
         npw = config.energy.nominal_power
         if npw is not None:
-            if isinstance(npw, bool) or not isinstance(npw, (int, float)) or npw <= 0:
+            if (isinstance(npw, bool)
+                    or not isinstance(npw, (int, float))
+                    or not math.isfinite(npw) or npw <= 0):
                 messages.append(
                     f"ERROR: energy.nominal_power must be a positive number "
                     f"or unset, got {npw!r}")

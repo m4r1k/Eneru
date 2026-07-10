@@ -161,7 +161,7 @@ class TestStatusHelperGuards:
         assert _energy_for_monitor(mon) is None
 
     @pytest.mark.unit
-    def test_energy_block_cached_within_ttl(self, monkeypatch):
+    def test_energy_block_cached_within_ttl(self, monkeypatch, tmp_path):
         """F-021: repeated collections within the TTL reuse ONE scan (today +
         month + year = 3 power_samples calls); after the TTL it refreshes."""
         from types import SimpleNamespace
@@ -170,8 +170,6 @@ class TestStatusHelperGuards:
         calls = {"n": 0}
 
         class _S:
-            db_path = "/tmp/f021-cache.db"
-
             def power_samples(self, a, b):
                 calls["n"] += 1
                 return []
@@ -179,7 +177,9 @@ class TestStatusHelperGuards:
         cfg = SimpleNamespace(energy=SimpleNamespace(
             enabled=True, cost_per_kwh=None, currency="USD",
             cost_format=None, nominal_power=None))
-        mon = SimpleNamespace(_stats_store=_S(), config=cfg)
+        store = _S()
+        store.db_path = str(tmp_path / "f021-cache.db")
+        mon = SimpleNamespace(_stats_store=store, config=cfg)
 
         status._energy_cache.clear()
         clock = [1000.0]

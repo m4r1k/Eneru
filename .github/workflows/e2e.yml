@@ -163,10 +163,11 @@ jobs:
         if: matrix.group == 'single-ups-core' || matrix.group == 'loopback'
         run: |
           if [ "${{ matrix.group }}" = "single-ups-core" ]; then
-            grep -q "Test 59: Remote PATH augmentation default and opt-out both work" tests/e2e/groups/single-ups-core.sh
+            grep -q "Test 59: Remote PATH augmentation opt-in and safe default both work" tests/e2e/groups/single-ups-core.sh
             grep -q "Test 60: Local Compose shutdown honors the configured timeout form" tests/e2e/groups/single-ups-core.sh
             grep -q 'shutdown_command: "eneru-path-probe"' tests/e2e/groups/single-ups-core.sh
-            grep -q "augment_remote_path: false" tests/e2e/groups/single-ups-core.sh
+            grep -q "augment_remote_path: true" tests/e2e/groups/single-ups-core.sh
+            grep -q 'shutdown_command: "/usr/local/bin/verify-unaugmented-path"' tests/e2e/groups/single-ups-core.sh
           else
             grep -q "Test 61: E2E delegated poweroff delivery writes completion marker" tests/e2e/groups/loopback.sh
             grep -Eq "^[[:space:]]*delegated_completion_marker_case[[:space:]]*$" tests/e2e/groups/loopback.sh
