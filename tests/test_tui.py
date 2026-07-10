@@ -1424,6 +1424,63 @@ class TestQueryEventsForDisplay:
         assert "end_ts" in recent_calls[0]
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("no_cap", [None, 0])
+    def test_no_cap_uses_full_scan(self, tmp_path, monkeypatch, no_cap):
+        """cubic P1 (round 1): ``max_events`` in (None, 0) is documented as
+        "no cap" (CLI --length 0). The F-045 bound must NOT apply there —
+        the no-cap path keeps the full ascending scan instead of silently
+        topping out at EVENTS_QUERY_LIMIT rows per UPS."""
+        from eneru import StatsStore
+        from eneru.tui import query_events_for_display
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0],
+                     [(now - 60, "ON_BATTERY", "x")])
+
+        full_calls = []
+        real_full = StatsStore.query_events
+
+        def spy_full(self, start_ts, end_ts):
+            full_calls.append((start_ts, end_ts))
+            return real_full(self, start_ts, end_ts)
+
+        def boom(self, **kwargs):
+            raise AssertionError(
+                "bounded query_recent_events must not gate the no-cap path")
+
+        monkeypatch.setattr(StatsStore, "query_events", spy_full)
+        monkeypatch.setattr(StatsStore, "query_recent_events", boom)
+
+        lines = query_events_for_display(config, max_events=no_cap)
+        assert lines and "ON_BATTERY: x" in lines[0]
+        assert full_calls and full_calls[0][0] == 0
+
+    @pytest.mark.unit
+    def test_cap_above_default_bound_widens_read(self, tmp_path, monkeypatch):
+        """A display cap larger than EVENTS_QUERY_LIMIT widens the bounded
+        read to the cap, so the three-tier trim keeps headroom."""
+        from eneru import StatsStore
+        from eneru.tui import query_events_for_display, EVENTS_QUERY_LIMIT
+        import time as _time
+        config = _events_config(tmp_path)
+        now = int(_time.time())
+        _seed_events(config, config.ups_groups[0],
+                     [(now - 60, "ON_BATTERY", "x")])
+
+        recent_calls = []
+        real_recent = StatsStore.query_recent_events
+
+        def spy_recent(self, **kwargs):
+            recent_calls.append(kwargs)
+            return real_recent(self, **kwargs)
+
+        monkeypatch.setattr(StatsStore, "query_recent_events", spy_recent)
+        query_events_for_display(config, max_events=EVENTS_QUERY_LIMIT + 500)
+        assert recent_calls
+        assert recent_calls[0]["limit"] == EVENTS_QUERY_LIMIT + 500
+
+    @pytest.mark.unit
     def test_single_ups_events_no_label_prefix(self, tmp_path):
         from eneru.tui import query_events_for_display
         import time as _time

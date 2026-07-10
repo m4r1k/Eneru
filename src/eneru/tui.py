@@ -546,8 +546,18 @@ def query_events_for_display(
             # of scanning the whole events table. query_recent_events returns the
             # same ascending (ts, event_type, detail) 3-tuples query_events did,
             # so the tier-trim loop below is unchanged.
-            events = store.query_recent_events(
-                end_ts=int(time.time()), limit=EVENTS_QUERY_LIMIT)
+            # cubic P1 (round 1): the bound only applies when a display cap
+            # exists. ``max_events`` in (None, 0) is documented as "no cap"
+            # (CLI --length 0), so that path keeps the full ascending scan —
+            # otherwise "give me everything" silently topped out at 2000 rows
+            # per UPS. A cap above the default bound widens the read so the
+            # tier-trim below still has headroom.
+            if max_events:
+                events = store.query_recent_events(
+                    end_ts=int(time.time()),
+                    limit=max(EVENTS_QUERY_LIMIT, int(max_events)))
+            else:
+                events = store.query_events(0, int(time.time()))
             for ts, etype, detail in events:
                 if not _event_enabled(etype, verbosity):
                     continue

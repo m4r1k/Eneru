@@ -1525,7 +1525,7 @@ def test_api_server_start_is_idempotent_when_already_running(minimal_config):
     minimal_config.api.enabled = True
     server = EneruAPIServer(MagicMock(), minimal_config)
 
-    with patch("eneru.api.ThreadingHTTPServer") as fake_server:
+    with patch("eneru.api._BoundedThreadingHTTPServer") as fake_server:
         fake_server.return_value = MagicMock()
         server.start()
         first_thread = server._thread
@@ -1637,6 +1637,73 @@ def test_concurrent_active_request_bound_enforced():
 
 
 @pytest.mark.unit
+def test_bounded_server_refuses_connection_when_saturated():
+    """cubic P1 (round 1): the request semaphore bounds PROCESSING, but the
+    stock ThreadingHTTPServer spawned one thread per accepted CONNECTION before
+    that gate — a flood piled up blocked threads without limit. Saturated, the
+    bounded server must close the socket at accept time WITHOUT spawning a
+    thread."""
+    import threading as _t
+    from http.server import ThreadingHTTPServer as _Base
+    from eneru.api import (
+        _BoundedThreadingHTTPServer, MAX_CONCURRENT_CONNECTIONS,
+    )
+
+    assert _BoundedThreadingHTTPServer.max_connections == \
+        MAX_CONCURRENT_CONNECTIONS
+
+    srv = object.__new__(_BoundedThreadingHTTPServer)
+    srv._connection_slots = _t.BoundedSemaphore(1)
+    assert srv._connection_slots.acquire(blocking=False)  # saturate the cap
+
+    closed = []
+    srv.shutdown_request = closed.append
+    with patch.object(_Base, "process_request",
+                      side_effect=AssertionError("must not spawn a thread")):
+        srv.process_request("sock", ("192.0.2.1", 12345))
+    assert closed == ["sock"]
+
+
+@pytest.mark.unit
+def test_bounded_server_releases_slot_exactly_once():
+    """The connection slot is returned when the worker thread finishes — and
+    on the thread-creation failure path — never twice (BoundedSemaphore would
+    raise on over-release)."""
+    import threading as _t
+    from http.server import ThreadingHTTPServer as _Base
+    from eneru.api import _BoundedThreadingHTTPServer
+
+    srv = object.__new__(_BoundedThreadingHTTPServer)
+    srv._connection_slots = _t.BoundedSemaphore(1)
+
+    # Normal path: slot held during the handler thread, released after.
+    assert srv._connection_slots.acquire(blocking=False)
+    with patch.object(_Base, "process_request_thread", return_value=None):
+        srv.process_request_thread("sock", ("192.0.2.1", 1))
+    assert srv._connection_slots.acquire(blocking=False)  # slot came back
+    srv._connection_slots.release()
+
+    # Thread-creation failure path: process_request re-raises but must not
+    # leak the slot it acquired.
+    with patch.object(_Base, "process_request",
+                      side_effect=RuntimeError("thread spawn failed")):
+        with pytest.raises(RuntimeError):
+            srv.process_request("sock", ("192.0.2.1", 2))
+    assert srv._connection_slots.acquire(blocking=False)  # not leaked
+    srv._connection_slots.release()
+
+
+@pytest.mark.unit
+def test_api_server_uses_bounded_server_class(minimal_config):
+    """The live server construction must go through the bounded subclass —
+    a regression back to plain ThreadingHTTPServer reopens the flood hole."""
+    import inspect
+    from eneru import api as api_mod
+    src = inspect.getsource(api_mod.EneruAPIServer.start)
+    assert "_BoundedThreadingHTTPServer(" in src
+
+
+@pytest.mark.unit
 @pytest.mark.timeout(30)
 def test_idle_keepalive_connection_closed_after_timeout(minimal_config):
     """F-046 interaction: an idle HTTP/1.1 keep-alive connection must be dropped
@@ -1682,7 +1749,7 @@ def test_api_server_start_logs_bind_failure_and_returns(minimal_config):
     log = []
     server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
 
-    with patch("eneru.api.ThreadingHTTPServer", side_effect=OSError("port in use")):
+    with patch("eneru.api._BoundedThreadingHTTPServer", side_effect=OSError("port in use")):
         server.start()
 
     assert server._httpd is None
@@ -1700,7 +1767,7 @@ def test_api_server_start_notes_auth_off_on_non_loopback_bind(minimal_config):
     log = []
     server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
 
-    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+    with patch("eneru.api._BoundedThreadingHTTPServer", return_value=MagicMock()):
         server.start()
 
     try:
@@ -1743,7 +1810,7 @@ def test_api_no_cleartext_warning_on_loopback_bind(minimal_config):
     minimal_config.api.bind = "127.0.0.1"
     log = []
     server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
-    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+    with patch("eneru.api._BoundedThreadingHTTPServer", return_value=MagicMock()):
         server.start()
     try:
         assert not any("PLAIN HTTP" in m for m in log), log
@@ -1764,7 +1831,7 @@ def test_api_server_start_notes_auth_off_on_loopback(minimal_config):
     log = []
     server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
 
-    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+    with patch("eneru.api._BoundedThreadingHTTPServer", return_value=MagicMock()):
         server.start()
 
     try:
@@ -1792,7 +1859,7 @@ def test_api_server_start_no_auth_note_when_auth_enabled(minimal_config):
     log = []
     server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
 
-    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+    with patch("eneru.api._BoundedThreadingHTTPServer", return_value=MagicMock()):
         server.start()
 
     try:

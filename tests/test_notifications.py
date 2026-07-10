@@ -309,6 +309,71 @@ class TestSendPersistence:
     @pytest.mark.unit
     @patch("eneru.notifications.APPRISE_AVAILABLE", True)
     @patch("eneru.notifications.apprise")
+    def test_worker_replays_memory_buffer_when_store_recovers(
+        self, mock_apprise, notification_config, registered_store
+    ):
+        """cubic P1 (round 1): rows buffered because the store refused the
+        insert must be replayed by the WORKER once the store recovers —
+        register_store never fires again after startup, so without a worker
+        replay path the buffer would sit in memory until process exit."""
+        _patch_apprise(mock_apprise, succeed=True)
+        worker = NotificationWorker(notification_config)
+        try:
+            worker.start()
+            worker.stop()  # halt the drain thread; we drive replay directly
+            worker.register_store(registered_store)
+            real_enqueue = registered_store.enqueue_notification
+            # Store "not open": sends land in the memory buffer.
+            registered_store.enqueue_notification = MagicMock(
+                return_value=None)
+            worker._warn = lambda *_: None
+            worker.send("buffered-1", "info", "shutdown")
+            worker.send("buffered-2", "warning", "shutdown")
+            assert len(worker._memory_buffer) == 2
+
+            # Store still broken: replay attempts and re-buffers everything,
+            # preserving age order.
+            assert worker._replay_memory_buffer() == 2
+            assert [row[0] for row in worker._memory_buffer] == [
+                "buffered-1", "buffered-2"]
+
+            # Store recovers: the worker-loop replay persists the backlog.
+            registered_store.enqueue_notification = real_enqueue
+            assert worker._replay_memory_buffer() == 2
+            assert worker._memory_buffer == []
+            assert registered_store.pending_notification_count() == 2
+        finally:
+            worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_replay_memory_buffer_noop_without_store_or_backlog(
+        self, mock_apprise, notification_config, registered_store
+    ):
+        """Replay is a cheap no-op when there's nothing to do: no store
+        registered (rows must stay buffered) or an empty buffer."""
+        _patch_apprise(mock_apprise, succeed=True)
+        worker = NotificationWorker(notification_config)
+        try:
+            worker.start()
+            worker.stop()
+            # No store yet: pre-store sends stay buffered.
+            worker.send("pre-store", "info", "lifecycle")
+            assert len(worker._memory_buffer) == 1
+            assert worker._replay_memory_buffer() == 0
+            assert len(worker._memory_buffer) == 1
+            # Store registered (drains the buffer), then an empty buffer
+            # replay is a no-op.
+            worker.register_store(registered_store)
+            assert worker._memory_buffer == []
+            assert worker._replay_memory_buffer() == 0
+        finally:
+            worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
     def test_successful_delivery_marks_sent(self, mock_apprise,
                                             notification_config,
                                             registered_store):

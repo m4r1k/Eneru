@@ -104,9 +104,17 @@ class VMShutdownMixin:
         # the poll fails we keep the prior list (better a redundant destroy than a
         # missed one).
         if remaining_vms:
+            # cubic P2 (round 1): cap this poll to the remaining budget like
+            # every poll in the loop above — a fixed 5s here could stretch the
+            # phase past max_wait, the exact overrun the deadline design
+            # prevents. The max(1, ...) floor keeps the knock-once-more useful
+            # when the deadline is already spent (the common case: the loop
+            # exited BY the deadline), while bounding the overshoot to ~1s.
             rc_final, stdout_final, _ = run_command(
                 ["virsh", "list", "--name", "--state-running"],
-                timeout=wait_interval,
+                timeout=min(
+                    wait_interval,
+                    max(1, int(deadline - time.monotonic()))),
             )
             if rc_final == 0:
                 still_running = set(

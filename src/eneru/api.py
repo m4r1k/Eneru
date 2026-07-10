@@ -51,6 +51,15 @@ REQUEST_READ_TIMEOUT_SECONDS = 10
 # dashboards + Prometheus scrapers while capping the blast radius.
 MAX_CONCURRENT_REQUESTS = 32
 
+# cubic P1 (round 1): the request semaphore above bounds PROCESSING, but the
+# stock ThreadingHTTPServer still spawned one thread per accepted CONNECTION
+# before that gate, so a connection flood piled up blocked threads without
+# limit. This caps the connections themselves (see _BoundedThreadingHTTPServer)
+# — above the cap, new sockets are closed on accept without spawning a thread.
+# 2× the processing cap leaves headroom for idle keep-alive connections
+# (dashboards hold ~1-2 each) without letting a flood grow the thread count.
+MAX_CONCURRENT_CONNECTIONS = 64
+
 # ISS-032: in-memory per-source-IP login throttle. After LOGIN_FAIL_MAX failed
 # logins within LOGIN_FAIL_WINDOW_SECONDS, further attempts from that IP get 429
 # until the window rolls off. Process-local (resets on restart) and best-effort
@@ -321,6 +330,57 @@ def _auth_is_active(config: Any) -> bool:
     return auth_is_active(getattr(getattr(config, "api", None), "auth", None))
 
 
+class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a hard cap on concurrent connections.
+
+    cubic P1 (round 1): the F-018 request semaphore bounds PROCESSING, but
+    ``ThreadingMixIn`` still spawned one thread per accepted connection
+    before ever reaching that gate — a plain connection flood would pile up
+    blocked handler threads without limit. ELI5: the kitchen only cooks 32
+    orders at once, but the lobby let an unlimited crowd in to stand and
+    wait; now the lobby has a fire-code capacity too. Past
+    ``MAX_CONCURRENT_CONNECTIONS`` simultaneous connections, a new socket is
+    closed at accept time WITHOUT spawning a thread (a cheap refusal —
+    well-behaved clients retry), so a flood stops costing a thread per
+    socket.
+
+    Class attribute so tests can shrink the cap to prove the refusal path.
+    """
+
+    max_connections = MAX_CONCURRENT_CONNECTIONS
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._connection_slots = threading.BoundedSemaphore(
+            self.max_connections)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._connection_slots.acquire(blocking=False):
+            # Saturated: refuse before a thread exists to leak.
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            # Thread creation failed — the per-thread release below will
+            # never run, so return the slot here. Pinned assumption (CPython
+            # 3.9–3.13): ThreadingMixIn.process_request has no raising code
+            # AFTER t.start(), so this except and the thread's finally can
+            # never both fire; BoundedSemaphore would raise loudly if a
+            # future stdlib change broke that.
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        # ThreadingMixIn runs this ON the spawned worker thread; the slot is
+        # held for the connection's whole lifetime (incl. keep-alive idles)
+        # and released exactly once on the way out.
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
+
+
 class EneruAPIServer:
     """Small stdlib HTTP server for read-only observability endpoints."""
 
@@ -373,7 +433,8 @@ class EneruAPIServer:
             # accept queue and surface as intermittent "connection refused" even
             # though the daemon is healthy and every handler runs on its own
             # worker thread. 128 absorbs realistic bursts.
-            self._httpd = ThreadingHTTPServer(addr, Handler, bind_and_activate=False)
+            self._httpd = _BoundedThreadingHTTPServer(
+                addr, Handler, bind_and_activate=False)
             self._httpd.request_queue_size = 128
             self._httpd.server_bind()
             self._httpd.server_activate()
@@ -565,6 +626,13 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if host.startswith("["):
             end = host.find("]")
             if end == -1:
+                return False
+            # cubic P2 (round 1): reject trailing junk after the bracket.
+            # Without this, "[::1]evil.example" parsed as hostname "::1" and
+            # sailed through the IP-literal allow — the exact bypass this
+            # gate exists to block. Only "" or a numeric ":port" may follow.
+            rest = host[end + 1:]
+            if rest and not (rest.startswith(":") and rest[1:].isdigit()):
                 return False
             hostname = host[1:end]
         elif host.count(":") == 1:

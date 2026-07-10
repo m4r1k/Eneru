@@ -197,27 +197,8 @@ class NotificationWorker:
             if store in self._stores:
                 return
             self._stores.append(store)
-            # Snapshot the buffer; do NOT clear it yet — we only clear
-            # entries that successfully persist below.
-            buffered = list(self._memory_buffer)
-            self._memory_buffer = []
-        if not buffered:
+        if self._replay_memory_buffer(store) == 0:
             return
-        leftovers: List[Tuple[str, str, str, int]] = []
-        for body, notify_type, category, ts in buffered:
-            row_id = store.enqueue_notification(
-                body, notify_type, category, ts=ts,
-            )
-            if row_id is None:
-                # enqueue returned None → store wasn't open or SQLite
-                # raised; keep the row buffered so a future register
-                # gets a chance.
-                leftovers.append((body, notify_type, category, ts))
-        if leftovers:
-            with self._stores_lock:
-                # Prepend so age order is preserved against any new
-                # sends that arrived while we were draining.
-                self._memory_buffer = leftovers + self._memory_buffer
         # Apply backlog cap after the drain (P2 follow-up to the
         # in-memory cap): if the buffer grew large before the store
         # registered, the persisted side now needs the same trim.
@@ -225,6 +206,53 @@ class NotificationWorker:
         if cap > 0:
             store.cap_pending_notifications(cap)
         self._wakeup_event.set()
+
+    def _replay_memory_buffer(self, store: Optional[StatsStore] = None) -> int:
+        """Try to persist buffered rows into ``store`` (default: first
+        registered store). Returns the number of rows attempted.
+
+        cubic P1 (round 1): rows buffered by ``send()`` when the store
+        refused the insert (e.g. ``/var/lib/eneru`` unwritable at startup)
+        were previously replayed ONLY by the next ``register_store`` call —
+        which never comes once every monitor has registered, so the backlog
+        sat in memory until process exit. ELI5: letters that bounced off a
+        jammed mailbox slot went into a pocket, but nobody ever walked back
+        to the mailbox. The worker loop now retries the pocket every tick,
+        so a store that recovers (disk remounted, permissions fixed) gets
+        the backlog. Rows that still fail are re-buffered; age order is
+        preserved.
+        """
+        with self._stores_lock:
+            if store is None and self._stores:
+                store = self._stores[0]
+            if store is None or not self._memory_buffer:
+                return 0
+            # Snapshot; do NOT clear-and-forget — only rows that actually
+            # persist are dropped from the buffer.
+            buffered = list(self._memory_buffer)
+            self._memory_buffer = []
+        leftovers: List[Tuple[str, str, str, int]] = []
+        for body, notify_type, category, ts in buffered:
+            row_id = store.enqueue_notification(
+                body, notify_type, category, ts=ts,
+            )
+            if row_id is None:
+                # enqueue returned None → store wasn't open or SQLite
+                # raised; keep the row buffered for the next attempt.
+                leftovers.append((body, notify_type, category, ts))
+        if leftovers:
+            with self._stores_lock:
+                # Prepend so age order is preserved against any new
+                # sends that arrived while we were draining.
+                self._memory_buffer = leftovers + self._memory_buffer
+        if len(leftovers) < len(buffered):
+            # Rows actually persisted: apply the same backlog cap the
+            # register_store drain and the normal send() path enforce, so a
+            # big recovery replay can't leave pending above max_pending.
+            cap = self.config.notifications.max_pending
+            if cap > 0:
+                store.cap_pending_notifications(cap)
+        return len(buffered)
 
     # ----- producer side -----
 
@@ -369,6 +397,9 @@ class NotificationWorker:
             self._wakeup_event.clear()
 
             try:
+                # cubic P1 (round 1): give memory-buffered rows a path back
+                # into SQLite even when no further register_store ever fires.
+                self._replay_memory_buffer()
                 self._drain_once()
                 self._maybe_prune()
             except Exception:

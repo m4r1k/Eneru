@@ -665,6 +665,12 @@ def test_host_allowed_accepts_configured_hosts(minimal_config, host):
     {"Host": "[::1"},                 # malformed bracketed literal (no ']')
     {"Host": ":9191"},                # port only, empty hostname
     {},                               # missing Host entirely
+    # cubic P2 (round 1): trailing junk after the bracket must not parse as
+    # a trusted IP literal — "[::1]evil.example" previously extracted "::1"
+    # and sailed through the allow.
+    {"Host": "[::1]evil.example"},
+    {"Host": "[::1]:9191x"},          # non-numeric port suffix
+    {"Host": "[::1]:"},               # empty port suffix
 ])
 def test_host_allowed_rejects_untrusted_and_missing(minimal_config, headers):
     h = _handler(minimal_config, headers=headers)
@@ -965,7 +971,8 @@ def test_server_builds_auth_and_warns_when_enabled(minimal_config, tmp_path):
     server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
     assert server._auth_store is not None
     assert server._sessions is not None
-    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+    with patch("eneru.api._BoundedThreadingHTTPServer",
+               return_value=MagicMock()):
         server.start()
     try:
         assert any("auth enabled" in m for m in log), log
