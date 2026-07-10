@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [6.1.7] - 2026-07-09
+## [6.1.7] - 2026-07-10
 
 A stabilizing bug-fix release built on a full-repository pre-release code
 review — the latest in the series of in-depth reviews that shaped the 6.1.x

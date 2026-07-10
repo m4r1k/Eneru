@@ -714,6 +714,13 @@ def _sch_int(minimum=None, maximum=None, *, optional=False):
     return {"t": "int", "min": minimum, "max": maximum, "optional": optional}
 
 
+def _sch_number(minimum=None, maximum=None, *, optional=False):
+    """int OR float leaf (bool still rejected). F-069: timing knobs like
+    notifications.retry_interval accepted floats on 6.1.6 (e.g. 2.5 seconds);
+    the schema gate must not turn them into a startup crash-loop."""
+    return {"t": "number", "min": minimum, "max": maximum, "optional": optional}
+
+
 # --- Reusable sub-schemas (nested by the per-entry bodies, so a multi-UPS or
 # redundancy entry reuses the exact same shape rules as the legacy top level). ---
 
@@ -821,8 +828,8 @@ _ROOT_SCHEMA = _sch_map(fatal=True, sweep=True, allowed=_TOP_LEVEL_KEYS, keys={
     "notifications": _sch_map(fatal=True, keys={
         "discord": _sch_map(fatal=True, keys={}),          # F-008
         "urls": _sch_list(item=None, fatal=True),          # F-012 (char-split)
-        "timeout": _sch_int(minimum=0),                    # F-012
-        "retry_interval": _sch_int(minimum=0),             # F-012
+        "timeout": _sch_number(minimum=0),                 # F-012 + F-069
+        "retry_interval": _sch_number(minimum=0),          # F-012 + F-069
     }),
     "discord": _sch_map(fatal=True, keys={}),              # legacy top-level
     "local_shutdown": _sch_map(fatal=True, keys={
@@ -1039,6 +1046,17 @@ class ConfigLoader:
                 errors.append(
                     f"ERROR: {path} must be {cls._int_range_phrase(node)}, "
                     f"got {value!r}")
+        elif kind == "number":
+            # F-069: int OR float (bool still rejected) for timing knobs that
+            # historically accepted floats (retry_interval: 2.5).
+            if value is None and node["optional"]:
+                return
+            if not cls._is_number_nonbool_in_range(
+                    value, minimum=node["min"], maximum=node["max"]):
+                errors.append(
+                    f"ERROR: {path} must be "
+                    f"{cls._int_range_phrase(node).replace('an integer', 'a number')}, "
+                    f"got {value!r}")
 
     @staticmethod
     def _int_range_phrase(node: dict) -> str:
@@ -1061,6 +1079,13 @@ class ConfigLoader:
         errors = []
         for key in sorted(value):
             if key in allowed:
+                continue
+            # F-069: `x-`-prefixed top-level keys are the YAML extension
+            # convention for anchor/alias blocks (`x-defaults: &d …`) that a
+            # parser is expected to ignore — docker-compose popularized it and
+            # homelab configs use it. 6.1.6 silently ignored them; the F-059
+            # sweep must keep doing so rather than crash-loop on upgrade.
+            if str(key).startswith("x-"):
                 continue
             suggestion = get_close_matches(str(key), sorted(allowed), n=1)
             hint = f" Did you mean '{suggestion[0]}'?" if suggestion else ""

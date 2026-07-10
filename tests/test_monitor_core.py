@@ -3227,29 +3227,34 @@ class TestConnectionRecoveryGracePeriod:
 
 
 class TestEmptyStatusHandling:
-    """F-052: a successful poll ALWAYS carries ups.status (_get_all_ups_data
-    rejects empty-status polls before they reach the trigger logic), so the old
-    defensive `if not ups_status:` branch was dead code. It is now an ``assert``
-    documenting the invariant; a synthetic success-with-empty-status poll must
-    trip that tripwire rather than silently proceeding."""
+    """F-052/F-071: a successful poll ALWAYS carries ups.status
+    (_get_all_ups_data rejects empty-status polls before they reach the
+    trigger logic). If that invariant ever breaks, the loop must SELF-HEAL —
+    log an ERROR and retry — rather than die (the F-052 assert propagated to
+    run()'s fatal handler and killed the monitor thread, and `python -O`
+    stripped it entirely)."""
 
     @pytest.mark.unit
-    def test_empty_status_trips_invariant_assertion(self, tmp_path):
+    def test_empty_status_logs_error_and_retries(self, tmp_path):
         monitor = make_monitor(tmp_path)
         log = []
-        monitor._log_message = log.append
+        monitor._log_message = lambda msg, **kw: log.append(msg)
         # Make sure we're not in any special connection state
         monitor.state.connection_state = "OK"
         monitor.state.previous_status = "OL"
+        monitor._save_state = MagicMock()
 
         # Successful fetch but no ups.status field — impossible from the real
-        # _get_all_ups_data, so the invariant assertion must fire.
-        with pytest.raises(AssertionError):
-            _run_one_iteration(monitor, (True, {
-                "battery.charge": "85",
-                "battery.runtime": "1200",
-                # NOTE: no ups.status
-            }, ""))
+        # _get_all_ups_data. Must NOT raise: log ERROR + retry (continue).
+        _run_one_iteration(monitor, (True, {
+            "battery.charge": "85",
+            "battery.runtime": "1200",
+            # NOTE: no ups.status
+        }, ""))
+
+        assert any("empty" in m and "ups.status" in m for m in log)
+        # The iteration bailed BEFORE state save / trigger analysis.
+        monitor._save_state.assert_not_called()
 
 
 class TestPowerRestoredCallback:

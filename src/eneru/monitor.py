@@ -2887,19 +2887,27 @@ class UPSGroupMonitor(
             if ups_status and "OB" not in status_tokens and "FSD" not in status_tokens:
                 self._failsafe_initiated = False
 
-            # F-052: a successful poll ALWAYS carries a non-empty ups.status --
-            # _get_all_ups_data returns (False, {}, "Missing ups.status") for an
-            # empty-status poll, so that failure is handled up in the connection
-            # branch above and never falls through here. ELI5: the bouncer at the
-            # door already turned away anyone without an ID, so re-checking IDs
-            # inside the club is dead code. Assert the invariant instead of a live
-            # `if` branch, so a future refactor that weakens _get_all_ups_data
-            # trips this tripwire in tests rather than silently feeding an empty
-            # status into the trigger logic below.
-            assert ups_status, (
-                "reached power-state analysis with empty ups.status; "
-                "_get_all_ups_data must reject empty-status polls"
-            )
+            # F-052/F-071: a successful poll ALWAYS carries a non-empty
+            # ups.status -- _get_all_ups_data returns (False, {}, "Missing
+            # ups.status") for an empty-status poll, so that failure is handled
+            # up in the connection branch above and should never fall through
+            # here. ELI5: the bouncer at the door already turns away anyone
+            # without an ID -- but if one ever slips past, the right move is to
+            # walk them back OUT and keep the club open, not to burn the club
+            # down. An `assert` here (the F-052 first cut) did the latter: it
+            # propagated to run()'s fatal handler and killed the monitor thread
+            # (daemon stops protecting that UPS), and under `python -O` it was
+            # stripped entirely, feeding empty status into the trigger logic.
+            # So: log the broken invariant loudly and retry the poll, exactly
+            # like the pre-F-052 self-healing branch.
+            if not ups_status:
+                self._log_message(
+                    "❌  ERROR: reached power-state analysis with empty "
+                    "'ups.status' — _get_all_ups_data should have rejected "
+                    "this poll. Retrying. Check NUT configuration."
+                )
+                self._stop_event.wait(CONNECTION_RETRY_WAIT_SECONDS)
+                continue
 
             self._save_state(ups_data)
 

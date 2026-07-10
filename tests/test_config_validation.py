@@ -1981,7 +1981,30 @@ class TestSchemaNumericGuards:
         errors = _load_errors_from_yaml(
             "ups:\n  name: U@h\n"
             f'notifications:\n  urls: ["discord://x/y"]\n  {field}: "10"\n')
-        assert any(f"notifications.{field}" in e and "integer" in e
+        assert any(f"notifications.{field}" in e and "number" in e
+                   for e in errors)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("field", ["timeout", "retry_interval"])
+    @pytest.mark.parametrize("value", ["2.5", "10", "0"])
+    def test_notifications_numeric_int_or_float_accepted(self, field, value):
+        """F-069: float timing knobs worked on 6.1.6 (retry_interval: 2.5);
+        the schema gate must accept int OR float, not crash-loop an upgrade."""
+        errors = _load_errors_from_yaml(
+            "ups:\n  name: U@h\n"
+            f'notifications:\n  urls: ["discord://x/y"]\n  {field}: {value}\n')
+        assert not any(f"notifications.{field}" in e for e in errors)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("field", ["timeout", "retry_interval"])
+    @pytest.mark.parametrize("value", ["true", "-1"])
+    def test_notifications_numeric_bool_and_negative_rejected(self, field,
+                                                              value):
+        """F-069 guardrails: bool (an int subclass) and negatives still fail."""
+        errors = _load_errors_from_yaml(
+            "ups:\n  name: U@h\n"
+            f'notifications:\n  urls: ["discord://x/y"]\n  {field}: {value}\n')
+        assert any(f"notifications.{field}" in e and "number" in e
                    for e in errors)
 
     @pytest.mark.unit
@@ -2020,6 +2043,26 @@ class TestSchemaUnknownKeySweep:
     def test_body_level_typo_rejected(self, body, needle):
         errors = _load_errors_from_yaml("ups:\n  name: U@h\n" + body)
         assert any(needle in e and "unknown" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_x_prefixed_top_level_keys_allowed(self):
+        """F-069: `x-`-prefixed top-level keys are the YAML anchor convention
+        (`x-defaults: &d …`) that 6.1.6 silently ignored — the sweep must keep
+        accepting them so an unattended upgrade doesn't crash-loop."""
+        errors = _load_errors_from_yaml(
+            "x-defaults: &defaults\n  enabled: true\n"
+            "x-notes: homelab anchors\n"
+            "ups:\n  name: U@h\n")
+        assert not any("unknown top-level" in e for e in errors)
+
+    @pytest.mark.unit
+    def test_x_prefixed_nested_keys_still_rejected(self):
+        """The `x-` exemption is TOP-LEVEL only (the anchor convention lives
+        at the root); a nested `x-` key inside a swept body stays an error."""
+        errors = _load_errors_from_yaml(
+            "ups:\n  name: U@h\n"
+            "containers:\n  enabled: true\n  x-extra: 1\n")
+        assert any("x-extra" in e and "unknown" in e for e in errors)
 
 
 EXAMPLE_CONFIGS = sorted(str(p) for p in Path("examples").glob("config-*.yaml"))
