@@ -47,7 +47,6 @@ import os
 import subprocess
 import sys
 import sqlite3
-import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -399,11 +398,9 @@ def deliver_pending_stop(
     try:
         store.open()
         # Read the body so we know what to ship if we win the claim.
-        row = store._conn.execute(
-            "SELECT body, notify_type, status FROM notifications "
-            "WHERE id = ?",
-            (notification_id,),
-        ).fetchone()
+        # F-058: through the StatsStore API rather than reaching into
+        # store._conn / store._db_lock directly.
+        row = store.read_notification(notification_id)
         if row is None:
             return 0  # row purged
         body, notify_type, status = row
@@ -417,22 +414,12 @@ def deliver_pending_stop(
         # AND mark_notification_sent would overwrite the row's
         # `cancelled` status back to `sent` — reopening the
         # duplicate-lifecycle race the v5.2.1 fix exists to close.
-        # Claim by transitioning pending→delivering in a single statement;
-        # only proceed with delivery if we actually won the row. Do not mark
-        # sent until Apprise returns success — a crash between claim and send is
-        # recovered by the next daemon open moving stale delivering rows to
-        # pending.
-        now = int(time.time())
-        with store._db_lock:
-            cur = store._conn.execute(
-                "UPDATE notifications SET status='delivering', sent_at=NULL, "
-                "delivering_at=?, attempts=attempts+1 "
-                "WHERE id=? AND status='pending'",
-                (now, notification_id),
-            )
-            store._conn.commit()
-            won = cur.rowcount > 0
-        if not won:
+        # claim_notification() transitions pending→delivering in a single
+        # statement; only proceed with delivery if we actually won the row. Do
+        # not mark sent until Apprise returns success — a crash between claim and
+        # send is recovered by the next daemon open moving stale delivering rows
+        # to pending.
+        if not store.claim_notification(notification_id):
             return 0  # raced with the classifier; let it win
 
         worker = NotificationWorker(config)
@@ -444,17 +431,7 @@ def deliver_pending_stop(
             # apprise unavailable / no urls — revert the claim so a
             # future start can retry instead of leaving a row marked
             # `delivering` with no actual delivery.
-            try:
-                with store._db_lock:
-                    store._conn.execute(
-                        "UPDATE notifications SET status='pending', "
-                        "sent_at=NULL, delivering_at=NULL "
-                        "WHERE id=? AND status='delivering'",
-                        (notification_id,),
-                    )
-                    store._conn.commit()
-            except sqlite3.Error:
-                pass
+            store.revert_claim(notification_id)
             return 0
         try:
             try:
@@ -468,17 +445,16 @@ def deliver_pending_stop(
                 )
                 delivered = False
             if delivered:
-                try:
-                    with store._db_lock:
-                        store._conn.execute(
-                            "UPDATE notifications SET status='sent', sent_at=?, "
-                            "delivering_at=NULL "
-                            "WHERE id=? AND status='delivering'",
-                            (int(time.time()), notification_id),
-                        )
-                        store._conn.commit()
-                except sqlite3.Error:
-                    logger.exception(
+                # require_delivering: don't clobber a row the classifier
+                # cancelled mid-send back to 'sent'.
+                if not store.mark_notification_sent(
+                        notification_id, require_delivering=True):
+                    # Delivered over Apprise but the status flip didn't commit
+                    # (SQLite error / store closed). The row stays 'delivering';
+                    # the next daemon start re-pends + retries it (harmless
+                    # possible duplicate). Leave an audit breadcrumb (no live
+                    # exception here -- the store swallowed it -- so error()).
+                    logger.error(
                         "Deferred stop notification sent but mark-sent failed; "
                         "notification_id=%s",
                         notification_id,
@@ -486,17 +462,7 @@ def deliver_pending_stop(
             else:
                 # Apprise rejected — revert claim to give the next
                 # daemon a chance to retry.
-                try:
-                    with store._db_lock:
-                        store._conn.execute(
-                            "UPDATE notifications SET status='pending', "
-                            "sent_at=NULL, delivering_at=NULL "
-                            "WHERE id=? AND status='delivering'",
-                            (notification_id,),
-                        )
-                        store._conn.commit()
-                except sqlite3.Error:
-                    pass
+                store.revert_claim(notification_id)
         finally:
             worker.stop()
     except (sqlite3.Error, OSError):

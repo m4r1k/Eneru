@@ -90,3 +90,48 @@ filesystems:
         assert config.filesystems.unmount.mounts[1]["options"] == "-l"
 
 
+
+
+class TestMountScalarCharSplitGuard:
+    """F-001: a scalar string where a `mounts:` LIST is required used to be
+    iterated character-by-character into per-character mount paths (`/mnt/x`
+    became mounts "/", "m", "n", "t", "/", "x"). It is now a fatal shape error
+    at load, for both the local filesystems block and the remote
+    pre_shutdown_commands copy."""
+
+    @pytest.mark.unit
+    def test_local_mounts_scalar_not_char_split(self, temp_config_file):
+        temp_config_file.write_text(
+            "ups:\n  name: U@h\n"
+            "filesystems:\n  unmount:\n    enabled: true\n"
+            "    mounts: /mnt/data\n")
+        with pytest.raises(SystemExit) as exc_info:
+            ConfigLoader.load(str(temp_config_file))
+        msg = str(exc_info.value)
+        assert "mounts" in msg
+        assert "must be a list" in msg
+
+    @pytest.mark.unit
+    def test_remote_mounts_scalar_not_char_split(self, temp_config_file):
+        temp_config_file.write_text(
+            "ups:\n  name: U@h\n"
+            "remote_servers:\n  - name: nas\n    host: nas.lan\n    user: root\n"
+            "    pre_shutdown_commands:\n"
+            "      - action: unmount_filesystems\n"
+            "        mounts: /mnt/data\n")
+        with pytest.raises(SystemExit) as exc_info:
+            ConfigLoader.load(str(temp_config_file))
+        msg = str(exc_info.value)
+        assert "mounts" in msg
+        assert "must be a list" in msg
+
+    @pytest.mark.unit
+    def test_valid_list_mounts_still_parse(self, temp_config_file):
+        """A proper list of mount paths is unaffected — one mount per entry."""
+        temp_config_file.write_text(
+            "ups:\n  name: U@h\n"
+            "filesystems:\n  unmount:\n    enabled: true\n"
+            "    mounts:\n      - /mnt/data\n      - /mnt/backup\n")
+        config = ConfigLoader.load(str(temp_config_file))
+        paths = [m["path"] for m in config.filesystems.unmount.mounts]
+        assert paths == ["/mnt/data", "/mnt/backup"]

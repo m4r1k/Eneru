@@ -80,16 +80,24 @@ silently return.
 
 ## Pre-release code review (v6.1.6)
 
-v6.1.6 is, on paper, a bugfix release — and a point release is emphatically
-*not* where 64 fixes across the whole tree normally belong. It carries this
-much deliberately: the maintainer wanted Eneru operating at the best possible
-level rather than spreading the work across several minors or deferring it, so
-the entire remediation landed in one advertised bugfix instead.
+The 6.1.x line is, by design, a massively stabilizing release series. Rather
+than chase new features, each point release has been anchored by an in-depth,
+full-repository code review performed with **Anthropic Claude Fable 5** — the
+same broad-then-deep, adversarial method as the v6.0.0 pass above, run again
+and again across the series so regressions and latent hazards are found and
+fixed before they reach a real outage.
 
-The work came out of a second full-repository adversarial audit in the same
-spirit as the v6.0.0 pass above — source, tests, CI, packaging, deployment
-manifests, and config parsing all read in full at HEAD, not just a release
-diff. The 64 findings clustered into four systemic patterns:
+v6.1.6 is, on paper, a bugfix release — and a point release is emphatically
+*not* where dozens of fixes across the whole tree normally belong. It carries
+this much deliberately: the maintainer wanted Eneru operating at the best
+possible level rather than spreading the work across several minors or
+deferring it, so the entire remediation landed in one advertised bugfix
+instead.
+
+The work came out of a full-repository adversarial audit in the same spirit as
+the v6.0.0 pass above — source, tests, CI, packaging, deployment manifests, and
+config parsing all read in full at HEAD, not just a release diff. The findings
+clustered into four systemic patterns:
 
 - **Triplicated shutdown orchestration that drifts.** The single-UPS,
   coordinator, and redundancy paths each carried near-copies of the loopback
@@ -118,6 +126,42 @@ misclassified as failure. As in v6.0.0, every code finding ships with a
 regression test that fails against the pre-fix behavior, per-file coverage
 stays at or above 95%, and the AI review bots (CodeRabbit, cubic) ran over the
 combined change set before merge.
+
+## Pre-release code review (v6.1.7)
+
+v6.1.7 continues the series with another full-repository pass with **Claude
+Fable 5** — this time a parallel fan-out of independent specialist reviews (a
+five-axis code review, a security audit, and a test-coverage analysis) merged
+into a single go/no-go decision, with the whole unit suite (thousands of tests
+at ≥95% per-file coverage) executed for real as part of the review.
+
+The pass returned an initial no-go on three config-loader Criticals that all
+shared one root cause: the loader trusted YAML scalar types and container
+shapes, so a scalar `mounts` char-split into per-letter mount paths, a
+templated `"false"` boolean stayed truthy-armed, and a missing explicit
+`--config` path started the daemon on all-default, shutdown-armed config. Those
+were fixed as a single declarative schema gate, and the remediation then worked
+outward:
+
+- **Shutdown path.** Silent notification and host-poweroff failures are now
+  observable (buffer-and-replay, exit-code checks that clear the false
+  "recovered" marker); the graceful-wait loops are POSIX-portable so they work
+  on dash/BusyBox remotes; and a containerized multi-UPS loopback delegate no
+  longer double-issues the poweroff inside its own container.
+- **Security surface.** Host-header validation closes a DNS-rebinding read of
+  the anonymous API, MQTT and NUT credential handling is hardened, and the
+  login throttle gains a global ceiling — all without weakening the trusted-LAN,
+  no-TLS-by-design posture.
+- **Performance.** A bounded API server, a cached energy block, and a dashboard
+  that fetches its heavy event scans only on demand stop the daemon from being
+  DoSed (including by its own dashboard) during an incident.
+- **Release pipeline.** A dedicated RHEL 8 RPM, a `:latest` tag promoted only
+  after the image is verified, and a smoke install from the freshly-published
+  apt/dnf repositories.
+
+As in every pass, each code finding ships with a regression test that fails
+against the pre-fix behavior, per-file coverage stays at or above 95%, and the
+GitHub-side AI reviewers ran over the combined change set before merge.
 
 ## CI layout
 
@@ -201,16 +245,17 @@ workflow.
 | Multi-UPS coordinator | Group routing, `is_local`, drain policy, local shutdown locking, signal handling |
 | Redundancy runtime | Quorum evaluation, advisory triggers, connection-grace handling, idempotent group execution |
 | Health monitoring | Voltage thresholds, AVR, bypass, overload, battery anomaly filtering |
-| Notifications | Formatting, retry queue, lifecycle classification, coalescing, suppression rules, container restart/upgrade stop-row deferral, deferred stop delivery claim/recovery races and mark-sent failure logging |
+| Notifications | Formatting, retry queue, lifecycle classification, coalescing, suppression rules, container restart/upgrade stop-row deferral, deferred stop delivery claim/recovery races, reload-worker claim races, and mark-sent failure logging |
 | Statistics and TUI | SQLite schema (incl. the v5 `events.id` AUTOINCREMENT table-rebuild migration — column added, rows/version preserved, idempotent, id-not-reused-after-delete — and the v6 `notifications.delivering_at` migration for stale deferred-delivery claim recovery), stale-claim recovery failure propagation, aggregation, event tier filtering, wide-range + composite-cursor event paging across duplicate timestamps, `delete_events` (id+ts+type guard, dedup, per-DB isolation), TUI grouping, graphs, one-shot monitor output |
 | Observability | API routing, readiness, Prometheus escaping, power-quality metrics, remote-health sidecars, MQTT publishing |
 | Authentication | User/API-key SQLite store (bcrypt hashing, salt uniqueness, truncation, CRUD), `eneru user`/`apikey` CLI lifecycle, password-input safety (getpass/generate/stdin), lazy bcrypt import |
-| API auth middleware | Session manager (TTL/expiry), tiered authorization matrix (reads open vs `require_for_reads`, writes fail-closed when auth off), bearer/API-key resolution, session re-validation against user state (deleted user or password reset signs out; DB error preserves the session), login/logout, body-size + JSON validation including total body-read deadlines and read-error mapping, tiered `/config` |
+| API auth middleware | Session manager (TTL/expiry), tiered authorization matrix (reads open vs `require_for_reads`, writes fail-closed when auth off), bearer/API-key resolution, session re-validation against user state (deleted user or password reset signs out; DB error preserves the session), login/logout, transition-only throttle auditing, Host-rejection warn-once, body-size + JSON validation including total body-read deadlines, read-error mapping, and closing keep-alive after an unread body, tiered `/config` |
 | Event management API | `DELETE /api/v1/ups/{name}/events` — authed delete + `EVENTS_DELETED` audit, anonymous 401 / auth-off 403, unknown UPS 404, stats-unavailable 503, malformed-body matrix (400) and oversize (413); monitor/coordinator routing to the live per-UPS store; events `from`/`to`/`before` paging and history `from > to`/`All` validation |
 | UPS control | `upscmd`/`upsrw` wrappers and output parsing (including PTY output on NUT errors), fixed-binary argv validation before subprocess execution, username/password pairing before PTY prompt handling, command/variable allowlist enforcement, per-group credential/allowlist overrides, feature-disabled and unknown-UPS handling, NUT-error mapping, self-test pending-row handoff/recovery for API and scheduler paths, fail-closed config validation (control requires auth), value sanitization, audit logging to the events table |
 | Config hot-reload | Strict load+validate (bad YAML / non-mapping / validation error rejected, running config kept), safe-vs-restart classification, in-place live apply across shared + per-monitor configs, subsystem reload hooks for stats/notifications/MQTT/remote-health, SIGHUP handler and API `/config/reload` endpoint |
+| Periodic reports | Daily/weekly/monthly scheduling and deduplication, retry after gather/render/enqueue failures, previous-full-day event and uptime windows, current-day/month energy windows, aggregate multi-UPS delivery |
 | Web dashboard | Static asset serving via `importlib.resources`, MIME mapping, path-traversal rejection, strict CSP + `nosniff` on HTML, bytes-body responses, dashboard open before the read gate, event filters, sortable Time header, uppercase remote-health status rendering, control variable forms, `nutControl` exposure in the config summary, Power-tab line-quality handling for AVR `BOOST`/`TRIM` versus binary bypass/overload states, and marker guards for the asset-level surfaces with no browser in CI (`[hidden]` reset, resize-safe graph, wide-history range/paging, delete-selected, drill-down, Light/Dark/System theme) |
-| Packaging | nFPM file list, package install paths, wrapper execution, OCI image smoke tests |
+| Packaging | nFPM file list, package install paths, dynamic EL8 interpreter re-exec, EL8 repository routing, exact-version release smoke contracts, safe artifact selection, OCI image smoke tests |
 
 ## End-to-end tests
 
@@ -232,13 +277,13 @@ matrix wall-clock is bounded by a smaller slowest group):
 | Group | Focus |
 |-------|-------|
 | CLI | Validation, bare command safety, one-shot output |
-| UPS Single Core | Single UPS events, shutdown paths, embedded API, MQTT |
+| UPS Single Core | Single UPS events, shutdown paths, embedded API, MQTT, remote PATH opt-out, real Compose timeout shutdown |
 | UPS Single Auth | v6.0 auth, UPS control, hot-reload, dashboard, event management (tests 52–56) |
 | UPS Multi | Independent UPS groups and local-drain policies |
 | Redundancy Quorum | Quorum behavior and advisory triggers (tests 21–27, 37, 38) |
 | Redundancy Regression | Runtime NUT-visibility regressions (R1, R2) |
 | Stats | SQLite, graphs, events, notification coalescing |
-| Loopback | Containerized local-host ownership through root and sudo SSH loopback, including generated local VM/container/sync/unmount actions and strict container SSH trust |
+| Loopback | Containerized local-host ownership through root and sudo SSH loopback, including generated local VM/container/sync/unmount actions, verified delegated-poweroff completion markers, and strict container SSH trust |
 
 In the inventory below the **Group** column shows the original coarse
 focus area; *UPS Single* rows now run in **UPS Single Core** or **UPS
@@ -249,7 +294,7 @@ The scenario files simulate online, on-battery, low-battery, FSD, brownout, over
 
 ### E2E test inventory
 
-The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 58 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
+The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 61 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
 
 | Test | Group | What it proves |
 |------|-------|----------------|
@@ -313,6 +358,9 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 58 numb
 | 56 | UPS Single | Event management: a wide-range `/api/v1/events` query returns source-qualified rows, an authenticated `DELETE` removes a real event (anonymous is 401), and a history `from > to` is 400 |
 | 57 | Loopback | Containerized remote SSH with **no** `ssh_options` relies on the built-in `StrictHostKeyChecking=accept-new` default: it learns the host key on the first probe into `/var/lib/eneru/ssh/known_hosts`, reaches `HEALTHY`, and preserves the first learned trust entries after the container is recreated |
 | 58 | CLI | NUT name autodiscovery (issue #71) lists a single exposed UPS with `upsc -l`, auto-corrects the runtime poll target, and logs the `ups.name` fix hint |
+| 59 | UPS Single | Opted-in remote PATH augmentation resolves a Synology-only bare command, while the safe default preserves a custom command verbatim |
+| 60 | UPS Single | A real local Compose stack is removed through Eneru's `down -t <seconds>` shutdown path |
+| 61 | Loopback | A real coordinator/list-form delegated poweroff reaches the SSH target, skips in-container poweroff, and persists a `sequence_complete` recovery marker |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
 
 Every commit on the protected workflow has to prove the daemon works against real services. That means real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.

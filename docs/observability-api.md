@@ -13,6 +13,12 @@ api:
   port: 9191
 ```
 
+**v6.1.7 upgrade note:** hostname access that was previously accepted (for
+example `nas.local` or a reverse proxy preserving its public Host) now needs an
+`api.allowed_hosts` entry. A rejected request returns 421 and Eneru logs the
+first rejected Host with this configuration hint, so a suddenly blank
+dashboard has a searchable server-side explanation.
+
 For container healthchecks, the same settings can be enabled at runtime:
 
 ```bash
@@ -39,6 +45,17 @@ Endpoints:
 
 The API is disabled by default. When enabled, the default bind address is localhost. If you set `api.bind` to a non-loopback address (e.g. `0.0.0.0`) **without** enabling authentication, Eneru warns at startup: `/api/v1/config` returns configured server hostnames and presence flags, so anyone who can reach the socket can read that. Keep the API behind SSH, a local reverse proxy, a trusted network boundary, or enable `api.auth`.
 
+**No built-in TLS — trusted-LAN by design.** Eneru serves plain HTTP and does not terminate TLS itself; this is a deliberate scope decision for a homelab-scale, trusted-LAN daemon, not an oversight. On the default loopback bind nothing leaves the host. If you must reach the API from another machine, do not expose the plain-HTTP socket directly — put it behind a reverse proxy that terminates TLS (and, ideally, adds auth), and keep the daemon itself on loopback. Bearer tokens and login passwords travel in cleartext on any non-loopback plain-HTTP bind, so treat an unproxied off-host bind as readable by anyone on the wire.
+
+**DNS-rebinding protection.** Because read endpoints are open by default, a hostile web page loaded in an operator's browser could otherwise use DNS rebinding to point a name it controls at the daemon's LAN IP and read the API (topology, SSH usernames, events) from inside the browser. Eneru validates the request `Host` header: an IP-literal Host (`192.168.1.10:9191`, `[::1]:9191`) or `localhost` is always accepted — so browsing the dashboard by IP is unaffected — while a request carrying any other DNS name is answered `421 Misdirected Request` and never routed. If you front the API with a hostname (e.g. behind a reverse proxy or a friendly LAN name), list the names you serve it under in `api.allowed_hosts` (case-insensitive):
+
+```yaml
+api:
+  allowed_hosts:
+    - eneru.lan
+    - ups.example.com
+```
+
 ### Authentication (v6.0)
 
 Authentication is opt-in via `api.auth.enabled` and is **tiered**. The login body
@@ -48,6 +65,12 @@ is a JSON object: `{"username": "<username>", "password": "<password>"}`.
 |---------|----------------------|---------------------|
 | `/health`, `/ready` | open | open (always) |
 | `/metrics`, `/api/v1/ups*`, `/history`, `/events`, `/remote-health` | open | open unless `require_for_reads` |
+
+> **`/metrics` discloses topology.** Prometheus label values include UPS names
+> and other identifying detail. `/metrics` honors `require_for_reads` like the
+> other read endpoints, but if you scrape it through a proxy, put `/metrics`
+> behind the **same** auth boundary as the rest of the read API — don't expose
+> it unauthenticated just because a scraper is easier to wire up that way.
 | `/api/v1/config` | sanitized | sanitized (anonymous) / **extended** (authenticated) |
 | `/api/v1/auth/state` | open | open (always) |
 | write endpoints (UPS control, config reload) | **hard-disabled (403)** | required (401 without a credential) |
@@ -141,6 +164,10 @@ Then set `api.bind: 127.0.0.1` and point clients at the proxy.
 > spoofable). When you front Eneru with a proxy, rely on the **proxy's** own
 > per-client rate limiting for login endpoints and treat the daemon throttle as
 > a coarse backstop.
+
+There is also a separate process-wide ceiling of 100 failed logins in 300
+seconds across all source addresses. It is a distributed-attack backstop: once
+tripped, every operator receives 429 until the sliding window drains.
 
 ## Health and readiness
 

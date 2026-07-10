@@ -463,6 +463,7 @@ def test_api_remote_health_route_uses_live_managers(minimal_config):
 @pytest.mark.unit
 def test_api_do_get_uses_whitelisted_content_type():
     handler = object.__new__(EneruAPIHandler)
+    handler.headers = {"Host": "localhost"}  # F-016 dispatch host guard
     headers = []
     handler._route = lambda: (200, "text/plain\r\nX-Bad: injected", "ok")
     handler.send_response = lambda status: headers.append(("status", status))
@@ -483,6 +484,7 @@ def test_api_do_head_probe_sends_headers_only():
     for path in ("/health", "/ready"):
         handler = object.__new__(EneruAPIHandler)
         handler.path = path
+        handler.headers = {"Host": "localhost"}  # F-016 dispatch host guard
         handler._route = lambda: (200, "application/json", {"status": "ok"})
         headers = []
         handler.send_response = lambda status: headers.append(("status", status))
@@ -531,6 +533,7 @@ def test_api_dispatch_maps_length_required_to_411():
     """ISS-061: APILengthRequired surfaces as a 411 error envelope."""
     from eneru.api import APILengthRequired
     handler = object.__new__(EneruAPIHandler)
+    handler.headers = {"Host": "localhost"}  # F-016 dispatch host guard
 
     def _boom():
         raise APILengthRequired("chunked not supported")
@@ -626,6 +629,7 @@ def test_api_do_get_returns_400_on_api_bad_request(minimal_config):
     handler = object.__new__(EneruAPIHandler)
     handler.api_config = minimal_config
     handler.api_source = MagicMock()
+    handler.headers = {"Host": "localhost"}  # F-016 dispatch host guard
     handler.path = "/api/v1/events?limit=abc"  # triggers APIBadRequest
 
     headers = []
@@ -647,6 +651,7 @@ def test_api_do_get_returns_500_on_unexpected_exception(minimal_config):
     handler = object.__new__(EneruAPIHandler)
     handler.api_config = minimal_config
     handler.api_source = MagicMock()
+    handler.headers = {"Host": "localhost"}  # F-016 dispatch host guard
     handler.path = "/api/v1/ups"
 
     def boom():
@@ -672,6 +677,7 @@ def test_api_do_get_uses_text_plain_header_for_text_route(minimal_config, monito
     handler = object.__new__(EneruAPIHandler)
     handler.api_config = minimal_config
     handler.api_source = monitor
+    handler.headers = {"Host": "localhost"}  # F-016 dispatch host guard
     handler._route = lambda: (200, "text/plain", "eneru_up 1\n")
     headers = []
     handler.send_response = lambda status: headers.append(("status", status))
@@ -1091,6 +1097,67 @@ def test_mqtt_does_not_enable_tls_for_plain_mqtt_scheme(monkeypatch):
 
 
 @pytest.mark.unit
+def test_redact_broker_strips_userinfo():
+    """F-017: the redactor covers user:pass@ regardless of scheme presence."""
+    from eneru.mqtt import _redact_broker
+    assert _redact_broker("alice:s3cret@host:8883") == "***@host:8883"
+    assert _redact_broker("mqtt://alice:s3cret@host:1883") == "mqtt://***@host:1883"
+    assert _redact_broker("host:1883") == "host:1883"          # nothing to redact
+    assert _redact_broker("") == ""
+
+
+@pytest.mark.unit
+def test_mqtt_schemeless_broker_warning_redacts_userinfo(monkeypatch):
+    """F-017: the scheme-less warning must not echo the broker password."""
+    logs = []
+
+    class StopNow:
+        def is_set(self):
+            return True
+
+        def wait(self, timeout):
+            return True
+
+    config = Config()
+    config.mqtt.enabled = True
+    config.mqtt.broker = "alice:s3cret@broker.example:8883"  # no mqtt:// scheme
+    monkeypatch.setattr("eneru.mqtt.MQTT_AVAILABLE", True)
+    pub = MQTTPublisher(object(), config, StopNow(), log_fn=logs.append)
+
+    assert pub._connect_with_backoff() is None  # stopped, never connects
+    warn = [m for m in logs if "no mqtt://" in m]
+    assert warn, logs
+    assert "s3cret" not in warn[0]
+    assert "***@broker.example:8883" in warn[0]
+
+
+@pytest.mark.unit
+def test_mqtt_cleartext_username_warns_once(monkeypatch):
+    """F-017: a username on a non-TLS broker warns exactly once, not per
+    reconnect attempt."""
+    logs = []
+
+    class StopNow:
+        def is_set(self):
+            return True
+
+        def wait(self, timeout):
+            return True
+
+    config = Config()
+    config.mqtt.enabled = True
+    config.mqtt.broker = "mqtt://user:pass@host:1883"  # creds, no TLS
+    monkeypatch.setattr("eneru.mqtt.MQTT_AVAILABLE", True)
+    pub = MQTTPublisher(object(), config, StopNow(), log_fn=logs.append)
+
+    pub._connect_with_backoff()
+    pub._connect_with_backoff()  # a "reconnect": must not warn again
+
+    warns = [m for m in logs if "cleartext" in m]
+    assert len(warns) == 1, logs
+
+
+@pytest.mark.unit
 def test_mqtt_retries_with_backoff_until_connect_succeeds(monkeypatch):
     """A failing connect must retry; stop_event.wait short-circuits backoff."""
     connect_attempts = []
@@ -1458,7 +1525,7 @@ def test_api_server_start_is_idempotent_when_already_running(minimal_config):
     minimal_config.api.enabled = True
     server = EneruAPIServer(MagicMock(), minimal_config)
 
-    with patch("eneru.api.ThreadingHTTPServer") as fake_server:
+    with patch("eneru.api._BoundedThreadingHTTPServer") as fake_server:
         fake_server.return_value = MagicMock()
         server.start()
         first_thread = server._thread
@@ -1490,11 +1557,12 @@ def test_stalled_connection_does_not_hang_stop(minimal_config):
     minimal_config.api.enabled = True
     minimal_config.api.bind = "127.0.0.1"
     minimal_config.api.port = 0  # OS-assigned ephemeral port
-    server = EneruAPIServer(MagicMock(), minimal_config)
+    logs = []
+    server = EneruAPIServer(MagicMock(), minimal_config, log_fn=logs.append)
     elapsed = None
     with patch.object(EneruAPIHandler, "timeout", 0.5):
         server.start()
-        assert server._httpd is not None
+        assert server._httpd is not None, logs
         host, port = server._httpd.server_address[:2]
         sock = _socket.create_connection((host, port), timeout=2)
         try:
@@ -1509,6 +1577,170 @@ def test_stalled_connection_does_not_hang_stop(minimal_config):
 
 
 @pytest.mark.unit
+def test_handler_uses_http11_keepalive():
+    """F-046: the handler must default to HTTP/1.1 so a browser/Prometheus
+    client can reuse one TCP connection for a whole dashboard poll instead of
+    the stdlib-default HTTP/1.0 connection-per-request."""
+    assert EneruAPIHandler.protocol_version == "HTTP/1.1"
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(30)
+def test_concurrent_active_request_bound_enforced():
+    """F-018: at most MAX_CONCURRENT_REQUESTS requests are PROCESSED at once;
+    the (N+1)th blocks on the semaphore (queues) rather than running unbounded.
+
+    Drive _dispatch directly on several threads with a slow router and a tiny
+    (size-2) semaphore, and assert active processing never exceeds the bound and
+    the 3rd request is queued while the first two run."""
+    import threading as _t
+    from eneru.api import EneruAPIHandler as _H, MAX_CONCURRENT_REQUESTS
+
+    assert MAX_CONCURRENT_REQUESTS == 32  # named constant, not a magic literal
+
+    small = _t.BoundedSemaphore(2)
+    active = []
+    active_lock = _t.Lock()
+    peak = [0]
+    entered = _t.Semaphore(0)
+    release = _t.Event()
+
+    def slow_router():
+        with active_lock:
+            active.append(1)
+            peak[0] = max(peak[0], len(active))
+        entered.release()
+        release.wait(10)
+        with active_lock:
+            active.pop()
+        return (200, "application/json", {})
+
+    def run_one():
+        h = object.__new__(_H)
+        h._host_allowed = lambda: True
+        h._finish = lambda *a, **k: None
+        h._dispatch(slow_router)
+
+    with patch.object(_H, "_request_semaphore", small):
+        threads = [_t.Thread(target=run_one) for _ in range(3)]
+        for t in threads:
+            t.start()
+        # Two routers should enter; the third must be blocked on the semaphore.
+        assert entered.acquire(timeout=3)
+        assert entered.acquire(timeout=3)
+        time.sleep(0.3)  # give the (wrongly-admitted) 3rd a chance to enter
+        with active_lock:
+            assert len(active) == 2       # bound holds — 3rd is queued
+        release.set()
+        for t in threads:
+            t.join(10)
+    assert peak[0] == 2                    # active processing never exceeded 2
+
+
+@pytest.mark.unit
+def test_bounded_server_refuses_connection_when_saturated():
+    """cubic P1 (round 1): the request semaphore bounds PROCESSING, but the
+    stock ThreadingHTTPServer spawned one thread per accepted CONNECTION before
+    that gate — a flood piled up blocked threads without limit. Saturated, the
+    bounded server must close the socket at accept time WITHOUT spawning a
+    thread."""
+    import threading as _t
+    from http.server import ThreadingHTTPServer as _Base
+    from eneru.api import (
+        _BoundedThreadingHTTPServer, MAX_CONCURRENT_CONNECTIONS,
+    )
+
+    assert _BoundedThreadingHTTPServer.max_connections == \
+        MAX_CONCURRENT_CONNECTIONS
+
+    srv = object.__new__(_BoundedThreadingHTTPServer)
+    srv._connection_slots = _t.BoundedSemaphore(1)
+    assert srv._connection_slots.acquire(blocking=False)  # saturate the cap
+
+    closed = []
+    srv.shutdown_request = closed.append
+    with patch.object(_Base, "process_request",
+                      side_effect=AssertionError("must not spawn a thread")):
+        srv.process_request("sock", ("192.0.2.1", 12345))
+    assert closed == ["sock"]
+
+
+@pytest.mark.unit
+def test_bounded_server_releases_slot_exactly_once():
+    """The connection slot is returned when the worker thread finishes — and
+    on the thread-creation failure path — never twice (BoundedSemaphore would
+    raise on over-release)."""
+    import threading as _t
+    from http.server import ThreadingHTTPServer as _Base
+    from eneru.api import _BoundedThreadingHTTPServer
+
+    srv = object.__new__(_BoundedThreadingHTTPServer)
+    srv._connection_slots = _t.BoundedSemaphore(1)
+
+    # Normal path: slot held during the handler thread, released after.
+    assert srv._connection_slots.acquire(blocking=False)
+    with patch.object(_Base, "process_request_thread", return_value=None):
+        srv.process_request_thread("sock", ("192.0.2.1", 1))
+    assert srv._connection_slots.acquire(blocking=False)  # slot came back
+    srv._connection_slots.release()
+
+    # Thread-creation failure path: process_request re-raises but must not
+    # leak the slot it acquired.
+    with patch.object(_Base, "process_request",
+                      side_effect=RuntimeError("thread spawn failed")):
+        with pytest.raises(RuntimeError):
+            srv.process_request("sock", ("192.0.2.1", 2))
+    assert srv._connection_slots.acquire(blocking=False)  # not leaked
+    srv._connection_slots.release()
+
+
+@pytest.mark.unit
+def test_api_server_uses_bounded_server_class(minimal_config):
+    """The live server construction must go through the bounded subclass —
+    a regression back to plain ThreadingHTTPServer reopens the flood hole."""
+    import inspect
+    from eneru import api as api_mod
+    src = inspect.getsource(api_mod.EneruAPIServer.start)
+    assert "_BoundedThreadingHTTPServer(" in src
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(30)
+def test_idle_keepalive_connection_closed_after_timeout(minimal_config):
+    """F-046 interaction: an idle HTTP/1.1 keep-alive connection must be dropped
+    after the per-connection idle timeout so its worker thread returns to the
+    pool (a bounded pool + keep-alive would otherwise let idle clients starve
+    the API — the slowloris trap). Prove the server closes an idle keep-alive:
+    after one request the socket goes quiet and the server hangs it up (recv
+    returns EOF) within a few idle windows."""
+    import http.client as _http
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    minimal_config.api.port = 0
+    logs = []
+    server = EneruAPIServer(MagicMock(), minimal_config, log_fn=logs.append)
+    with patch.object(EneruAPIHandler, "timeout", 0.5):
+        server.start()
+        try:
+            assert server._httpd is not None, logs
+            host, port = server._httpd.server_address[:2]
+            conn = _http.HTTPConnection(host, port, timeout=5)
+            conn.request("GET", "/health")
+            resp = conn.getresponse()
+            resp.read()             # consume the body; keep-alive keeps it open
+            assert resp.version == 11    # HTTP/1.1 on the wire (F-046)
+            sock = conn.sock
+            sock.settimeout(4)      # comfortably longer than the 0.5s idle bound
+            # The server drops the idle keep-alive: recv() returns b"" (EOF).
+            assert sock.recv(1024) == b""
+            conn.close()
+        finally:
+            server.stop()
+
+
+@pytest.mark.unit
 def test_api_server_start_logs_bind_failure_and_returns(minimal_config):
     from unittest.mock import patch
     from eneru.api import EneruAPIServer
@@ -1519,7 +1751,7 @@ def test_api_server_start_logs_bind_failure_and_returns(minimal_config):
     log = []
     server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
 
-    with patch("eneru.api.ThreadingHTTPServer", side_effect=OSError("port in use")):
+    with patch("eneru.api._BoundedThreadingHTTPServer", side_effect=OSError("port in use")):
         server.start()
 
     assert server._httpd is None
@@ -1537,7 +1769,7 @@ def test_api_server_start_notes_auth_off_on_non_loopback_bind(minimal_config):
     log = []
     server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
 
-    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+    with patch("eneru.api._BoundedThreadingHTTPServer", return_value=MagicMock()):
         server.start()
 
     try:
@@ -1580,7 +1812,7 @@ def test_api_no_cleartext_warning_on_loopback_bind(minimal_config):
     minimal_config.api.bind = "127.0.0.1"
     log = []
     server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
-    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+    with patch("eneru.api._BoundedThreadingHTTPServer", return_value=MagicMock()):
         server.start()
     try:
         assert not any("PLAIN HTTP" in m for m in log), log
@@ -1601,7 +1833,7 @@ def test_api_server_start_notes_auth_off_on_loopback(minimal_config):
     log = []
     server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
 
-    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+    with patch("eneru.api._BoundedThreadingHTTPServer", return_value=MagicMock()):
         server.start()
 
     try:
@@ -1629,7 +1861,7 @@ def test_api_server_start_no_auth_note_when_auth_enabled(minimal_config):
     log = []
     server = EneruAPIServer(MagicMock(), minimal_config, log_fn=log.append)
 
-    with patch("eneru.api.ThreadingHTTPServer", return_value=MagicMock()):
+    with patch("eneru.api._BoundedThreadingHTTPServer", return_value=MagicMock()):
         server.start()
 
     try:
@@ -1664,6 +1896,7 @@ def test_api_server_stop_swallows_shutdown_exceptions(minimal_config):
 def test_api_handler_returns_500_on_unexpected_exception():
     """do_GET must catch generic exceptions and return a 500 JSON envelope."""
     handler = object.__new__(EneruAPIHandler)
+    handler.headers = {"Host": "localhost"}  # F-016 dispatch host guard
     handler._route = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
     headers = []
     handler.send_response = lambda status: headers.append(("status", status))
@@ -1676,6 +1909,29 @@ def test_api_handler_returns_500_on_unexpected_exception():
     assert ("status", 500) in headers
     body = json.loads(handler.wfile.getvalue())
     assert body["error"]["code"] == "INTERNAL_ERROR"
+
+
+@pytest.mark.unit
+def test_api_500_path_logs_traceback():
+    """F-030: the 500 handler logs the full traceback via api_log before
+    responding, so the swallowed exception is diagnosable."""
+    logs = []
+    handler = object.__new__(EneruAPIHandler)
+    handler.headers = {"Host": "localhost"}
+    handler.api_log = logs.append
+    handler._route = lambda: (_ for _ in ()).throw(RuntimeError("kaboom-xyz"))
+    headers = []
+    handler.send_response = lambda status: headers.append(("status", status))
+    handler.send_header = lambda key, value: None
+    handler.end_headers = lambda: None
+    handler.wfile = BytesIO()
+
+    handler.do_GET()
+
+    assert ("status", 500) in headers
+    joined = "\n".join(logs)
+    assert "unhandled exception" in joined
+    assert "kaboom-xyz" in joined          # the real traceback, not just a code
 
 
 @pytest.mark.unit
@@ -2716,3 +2972,12 @@ def test_remote_health_event_fn_failure_logs_only_first_time(minimal_config, tmp
     ]
     assert len(failure_logs) == 1
     assert "further failures will be silent" in failure_logs[0]
+
+
+@pytest.mark.unit
+def test_redact_broker_at_before_scheme_returns_raw():
+    """Behavioural-gap 10 (mqtt edge): an '@' that is NOT userinfo -- it sits
+    before the '://' separator -- leaves the broker string untouched, because
+    the post-scheme remainder has no '@' to redact."""
+    from eneru.mqtt import _redact_broker
+    assert _redact_broker("weird@host://path") == "weird@host://path"

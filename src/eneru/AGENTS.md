@@ -179,40 +179,14 @@ daemon grows new persistent state.
 - Anything written every poll that's a derivative of existing columns
   (compute it on read instead).
 
-**Migration pattern** (real examples: v1→v2 added 4 raw NUT metrics +
-`output_voltage_avg`; v2→v3 added `events.notification_sent`):
-
-```python
-SCHEMA_VERSION = 3   # bump
-
-def _migrate_schema(self) -> None:
-    cur = self._conn.execute(
-        "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()
-    if cur is None:
-        return  # brand-new DB; CREATE TABLE already includes everything
-    current = int(cur[0]) if cur[0] else 1
-
-    if current < 2:
-        # v1 -> v2 deltas (additive ALTERs only).
-        for col in ("battery_voltage REAL", "ups_temperature REAL", ...):
-            self._safe_alter("samples", col)
-        for table in ("agg_5min", "agg_hourly"):
-            for col in ("output_voltage_avg REAL", ...):
-                self._safe_alter(table, col)
-
-    if current < 3:
-        # v2 -> v3 deltas. Append-only -- never edit the v1->v2 block.
-        self._safe_alter("events",
-                         "notification_sent INTEGER DEFAULT 1")
-
-def _safe_alter(self, table: str, column_def: str) -> None:
-    """Idempotent ALTER TABLE ... ADD COLUMN."""
-    try:
-        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")
-    except sqlite3.OperationalError:
-        pass  # column already exists -- benign on retries
-```
+**Migration pattern:** the live code is the reference — see
+`_migrate_schema` and `_safe_alter` in `src/eneru/stats.py`. Shape: read
+`meta.schema_version`; append a new `if current < N:` block of
+`_safe_alter(table, column_def)` calls (idempotent `ALTER TABLE … ADD
+COLUMN`, duplicate-column errors benign); a brand-new DB skips migration
+entirely because `CREATE TABLE` already includes everything. Real examples:
+v1→v2 added 4 raw NUT metrics + `output_voltage_avg`; v2→v3 added
+`events.notification_sent`.
 
 **Rules:**
 
@@ -292,9 +266,9 @@ available for jobs that *should* run immediately, but the v6.1 jobs don't use it
 
 ## Conventions specific to this package
 
-- Emoji semantics in log messages are documented in the root `AGENTS.md`
-  ("Code Style" section). Use them — they're not decoration; they're scanner
-  hints during incident review.
+- Emoji semantics in log messages are documented in `CONTRIBUTING.md`
+  ("Log message emoji conventions"). Use them — they're not decoration;
+  they're scanner hints during incident review.
 - The single-file `monitor.py` god-object was decomposed in v5.1; if you find
   yourself wanting to add a 200-line method here, it almost certainly belongs
   in (or as) a mixin under `shutdown/` or `health/`.

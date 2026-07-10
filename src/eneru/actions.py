@@ -84,8 +84,11 @@ REMOTE_ACTIONS: Dict[str, str] = {
         't={timeout}; '
         'wait={wait_interval}; '
         '{sudo}virsh list --name --state-running | xargs -r -n1 {sudo}virsh shutdown; '
-        'end=$((SECONDS+t)); '
-        'while [ $SECONDS -lt $end ] && {sudo}virsh list --name --state-running | grep -q .; do sleep $wait; done; '
+        # Bound the whole graceful-wait subprocess, including slow/hung status
+        # probes. coreutils and BusyBox ``timeout`` use elapsed time, so NTP
+        # wall-clock steps cannot shorten or extend the window. If ``timeout``
+        # itself is absent, rc=127 falls through safely to force cleanup.
+        'timeout "$t" sh -c \'while {sudo}virsh list --name --state-running | grep -q .; do sleep "$1"; done\' _ "$wait" 2>/dev/null || true; '
         '{sudo}virsh list --name --state-running | xargs -r -n1 {sudo}virsh destroy 2>/dev/null; '
         'true'
     ),
@@ -94,8 +97,7 @@ REMOTE_ACTIONS: Dict[str, str] = {
     # Runs via sudo so the SSH user can be non-root with NOPASSWD on /usr/sbin/qm.
     "stop_proxmox_vms": (
         'sudo qm list | awk \'NR>1 && $3=="running" {{print $1}}\' | xargs -r -n1 sudo qm shutdown --timeout {timeout}; '
-        'end=$((SECONDS+{timeout})); '
-        'while [ $SECONDS -lt $end ] && sudo qm list | awk \'$3=="running"\' | grep -q .; do sleep 1; done; '
+        'timeout {timeout} sh -c \'while sudo qm list | awk "$1" | grep -q .; do sleep 1; done\' _ \'$3=="running"\' 2>/dev/null || true; '
         'sudo qm list | awk \'NR>1 && $3=="running" {{print $1}}\' | xargs -r -n1 sudo qm stop 2>/dev/null; '
         'true'
     ),
@@ -104,8 +106,7 @@ REMOTE_ACTIONS: Dict[str, str] = {
     # Runs via sudo so the SSH user can be non-root with NOPASSWD on /usr/sbin/pct.
     "stop_proxmox_cts": (
         'sudo pct list | awk \'NR>1 && $2=="running" {{print $1}}\' | xargs -r -n1 sudo pct shutdown --timeout {timeout}; '
-        'end=$((SECONDS+{timeout})); '
-        'while [ $SECONDS -lt $end ] && sudo pct list | awk \'$2=="running"\' | grep -q .; do sleep 1; done; '
+        'timeout {timeout} sh -c \'while sudo pct list | awk "$1" | grep -q .; do sleep 1; done\' _ \'$2=="running"\' 2>/dev/null || true; '
         'sudo pct list | awk \'NR>1 && $2=="running" {{print $1}}\' | xargs -r -n1 sudo pct stop 2>/dev/null; '
         'true'
     ),
@@ -118,10 +119,9 @@ REMOTE_ACTIONS: Dict[str, str] = {
         'ids=$(xe vm-list power-state=running is-control-domain=false --minimal); '
         '[ -z "$ids" ] && exit 0; '
         'echo "$ids" | tr \',\' \'\\n\' | xargs -r -I {{}} xe vm-shutdown uuid={{}} 2>/dev/null; '
-        'end=$((SECONDS+{timeout})); '
-        'while [ $SECONDS -lt $end ]; do '
+        'timeout {timeout} sh -c \'while true; do '
         'ids=$(xe vm-list power-state=running is-control-domain=false --minimal); '
-        '[ -z "$ids" ] && break; sleep 1; done; '
+        '[ -z "$ids" ] && break; sleep 1; done\' 2>/dev/null || true; '
         'xe vm-list power-state=running is-control-domain=false --minimal | tr \',\' \'\\n\' | '
         'xargs -r -I {{}} xe vm-shutdown uuid={{}} force=true 2>/dev/null; '
         'true'
@@ -131,11 +131,9 @@ REMOTE_ACTIONS: Dict[str, str] = {
     "stop_esxi_vms": (
         'for i in $(vim-cmd vmsvc/getallvms 2>/dev/null | awk \'NR>1 {{print $1}}\'); do '
         'vim-cmd vmsvc/power.shutdown $i 2>/dev/null; done; '
-        'c=0; while [ $c -lt {timeout} ]; do '
-        '[ $(vim-cmd vmsvc/getallvms 2>/dev/null | awk \'NR>1\' | wc -l) -eq 0 ] && break; '
-        'pwr=$(vim-cmd vmsvc/getallvms 2>/dev/null | awk \'NR>1 {{print $1}}\' | '
-        'while read i; do vim-cmd vmsvc/power.getstate $i 2>/dev/null; done | grep -c "Powered on"); '
-        '[ "$pwr" -eq 0 ] && break; sleep 1; c=$((c+1)); done; '
+        'timeout {timeout} sh -c \'while vim-cmd vmsvc/getallvms 2>/dev/null | awk "$1" | '
+        'xargs -r -n1 vim-cmd vmsvc/power.getstate 2>/dev/null | grep -q "Powered on"; do sleep 1; done\' '
+        '_ \'NR>1 {{print $1}}\' 2>/dev/null || true; '
         'for i in $(vim-cmd vmsvc/getallvms 2>/dev/null | awk \'NR>1 {{print $1}}\'); do '
         'vim-cmd vmsvc/power.off $i 2>/dev/null; done; '
         'true'
@@ -245,7 +243,7 @@ def render_action(
         path=rendered_path,
         skip_ids=skip_ids,
         umount_targets=shlex.quote(umount_targets),
-        wait_interval=wait_interval,
+        wait_interval=max(1, int(wait_interval)),
         sudo=sudo,
     )
 

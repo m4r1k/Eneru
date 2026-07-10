@@ -10,6 +10,8 @@ from eneru import api as apimod
 from eneru import reload as reloadmod
 from eneru.api import EneruAPIHandler, SessionManager
 from eneru.config import Config, ConfigLoader, NutControlConfig
+from eneru.config import SyslogConfig
+from eneru.logger import UPSLogger
 from eneru.monitor import UPSGroupMonitor
 from eneru.multi_ups import MultiUPSCoordinator
 
@@ -256,6 +258,23 @@ def test_coordinator_apply_subsystem_reload(tmp_path):
     mon._stats_store.apply_reload.assert_called_once()
 
 
+@pytest.mark.unit
+def test_syslog_facility_is_normalized_at_runtime():
+    """Programmatic configs may use uppercase facility names."""
+    config = Config()
+    config.logging.file = None
+    config.logging.syslog = SyslogConfig(enabled=True, facility="LOCAL0")
+    handler = MagicMock()
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        constructor = MagicMock(return_value=handler)
+        monkeypatch.setattr(
+            "eneru.logger.logging.handlers.SysLogHandler", constructor,
+        )
+        UPSLogger(None, config)
+
+    assert constructor.call_args.kwargs["facility"] == "local0"
+
+
 # ----- do_DELETE (#6) -----
 
 @pytest.mark.unit
@@ -266,6 +285,7 @@ def test_do_delete_unknown_path_returns_404(minimal_config):
     h = object.__new__(EneruAPIHandler)
     h.api_config = minimal_config
     h.api_source = MagicMock()
+    h.headers = {"Host": "localhost"}  # F-016 dispatch host guard
     h.path = "/api/v1/nope"
     headers = []
     h.send_response = lambda s: headers.append(("status", s))

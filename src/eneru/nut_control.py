@@ -19,6 +19,7 @@ import pty
 import re
 import select
 import subprocess
+import termios
 import threading
 import time
 from typing import Dict, List, Optional, Tuple
@@ -250,6 +251,23 @@ def _run_auth_command(
 
     try:
         master_fd, slave_fd = pty.openpty()
+        # F-034: a fresh pty has ECHO on, so the password we later write to the
+        # master to answer the prompt gets echoed straight back and captured
+        # into `output` — leaking the secret into the returned buffer (and any
+        # log of it). Turn echo off on the terminal before the child inherits
+        # it. Fail closed if the terminal cannot disable echo: sending the
+        # secret anyway could put it in captured output and later logs.
+        try:
+            attrs = termios.tcgetattr(slave_fd)
+            attrs[3] &= ~termios.ECHO   # index 3 == lflags
+            termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+        except (OSError, termios.error) as exc:
+            return (
+                1,
+                "",
+                "Could not disable PTY echo; refusing to send the NUT "
+                f"control password: {exc}",
+            )
         proc = _popen_validated_auth_command(safe_cmd, slave_fd)
         os.close(slave_fd)
         slave_fd = None

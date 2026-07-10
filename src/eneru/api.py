@@ -2,6 +2,7 @@
 
 import collections
 import importlib.resources
+import ipaddress
 import json
 import math
 import os
@@ -10,6 +11,7 @@ import secrets
 import socket
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
@@ -35,7 +37,28 @@ from eneru.status import (
 MAX_BODY_BYTES = 64 * 1024
 # Bound reads from each client socket. Without this, a client can declare a
 # small Content-Length and drip bytes forever, pinning a non-daemon handler.
+# F-046: this same value is the per-connection IDLE timeout for HTTP/1.1
+# keep-alive (set as EneruAPIHandler.timeout). An idle keep-alive connection is
+# dropped after this many seconds so its worker thread returns to the pool
+# instead of a slow/idle client holding it open indefinitely (slowloris).
 REQUEST_READ_TIMEOUT_SECONDS = 10
+
+# F-018: cap the number of requests actively being PROCESSED at once. The
+# monitor is the process that must react to power events, so the API's
+# ThreadingHTTPServer (one thread per connection, unbounded) is a
+# resource-exhaustion DoS surface — a flood of connections could spawn threads
+# without limit and starve the monitor. 32 comfortably covers a handful of
+# dashboards + Prometheus scrapers while capping the blast radius.
+MAX_CONCURRENT_REQUESTS = 32
+
+# cubic P1 (round 1): the request semaphore above bounds PROCESSING, but the
+# stock ThreadingHTTPServer still spawned one thread per accepted CONNECTION
+# before that gate, so a connection flood piled up blocked threads without
+# limit. This caps the connections themselves (see _BoundedThreadingHTTPServer)
+# — above the cap, new sockets are closed on accept without spawning a thread.
+# 2× the processing cap leaves headroom for idle keep-alive connections
+# (dashboards hold ~1-2 each) without letting a flood grow the thread count.
+MAX_CONCURRENT_CONNECTIONS = 64
 
 # ISS-032: in-memory per-source-IP login throttle. After LOGIN_FAIL_MAX failed
 # logins within LOGIN_FAIL_WINDOW_SECONDS, further attempts from that IP get 429
@@ -52,6 +75,40 @@ _login_failures: "collections.OrderedDict[str, collections.deque]" = (
     collections.OrderedDict()
 )
 _login_failures_lock = threading.Lock()
+
+# F-040: the per-IP throttle above is defeated by an attacker rotating source
+# IPs (an IPv6 /64 hands out billions), which evicts the targeted buckets and
+# never accumulates per-IP failures. A GLOBAL sliding-window ceiling backstops
+# it: once total failed logins across ALL sources exceed the threshold within
+# the window, every login attempt is throttled until the window drains. The
+# window is deliberately wider and the count higher than the per-IP knobs so a
+# handful of fat-fingered operators can't trip it, but a distributed brute
+# force (which the per-IP guard can't see) does.
+GLOBAL_LOGIN_FAIL_WINDOW_SECONDS = 300
+GLOBAL_LOGIN_FAIL_MAX = 100
+_global_login_failures: "collections.deque" = collections.deque()
+_global_login_lock = threading.Lock()
+
+
+def _global_login_is_blocked() -> bool:
+    """True if global failed logins in the window exceed the ceiling."""
+    now = time.monotonic()
+    cutoff = now - GLOBAL_LOGIN_FAIL_WINDOW_SECONDS
+    with _global_login_lock:
+        while _global_login_failures and _global_login_failures[0] < cutoff:
+            _global_login_failures.popleft()
+        return len(_global_login_failures) >= GLOBAL_LOGIN_FAIL_MAX
+
+
+def _global_login_record_failure() -> bool:
+    """Record one global failure and report entry into throttled state."""
+    now = time.monotonic()
+    cutoff = now - GLOBAL_LOGIN_FAIL_WINDOW_SECONDS
+    with _global_login_lock:
+        while _global_login_failures and _global_login_failures[0] < cutoff:
+            _global_login_failures.popleft()
+        _global_login_failures.append(now)
+        return len(_global_login_failures) == GLOBAL_LOGIN_FAIL_MAX
 
 
 def _login_is_blocked(ip: str) -> bool:
@@ -70,7 +127,8 @@ def _login_is_blocked(ip: str) -> bool:
         return len(dq) >= LOGIN_FAIL_MAX
 
 
-def _login_record_failure(ip: str) -> None:
+def _login_record_failure(ip: str) -> bool:
+    """Record one source failure and report entry into throttled state."""
     now = time.monotonic()
     cutoff = now - LOGIN_FAIL_WINDOW_SECONDS
     with _login_failures_lock:
@@ -87,6 +145,7 @@ def _login_record_failure(ip: str) -> None:
         while dq and dq[0] < cutoff:
             dq.popleft()
         dq.append(now)
+        return len(dq) == LOGIN_FAIL_MAX
 
 
 def _login_clear(ip: str) -> None:
@@ -275,6 +334,57 @@ def _auth_is_active(config: Any) -> bool:
     return auth_is_active(getattr(getattr(config, "api", None), "auth", None))
 
 
+class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a hard cap on concurrent connections.
+
+    cubic P1 (round 1): the F-018 request semaphore bounds PROCESSING, but
+    ``ThreadingMixIn`` still spawned one thread per accepted connection
+    before ever reaching that gate — a plain connection flood would pile up
+    blocked handler threads without limit. ELI5: the kitchen only cooks 32
+    orders at once, but the lobby let an unlimited crowd in to stand and
+    wait; now the lobby has a fire-code capacity too. Past
+    ``MAX_CONCURRENT_CONNECTIONS`` simultaneous connections, a new socket is
+    closed at accept time WITHOUT spawning a thread (a cheap refusal —
+    well-behaved clients retry), so a flood stops costing a thread per
+    socket.
+
+    Class attribute so tests can shrink the cap to prove the refusal path.
+    """
+
+    max_connections = MAX_CONCURRENT_CONNECTIONS
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._connection_slots = threading.BoundedSemaphore(
+            self.max_connections)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._connection_slots.acquire(blocking=False):
+            # Saturated: refuse before a thread exists to leak.
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            # Thread creation failed — the per-thread release below will
+            # never run, so return the slot here. Pinned assumption (CPython
+            # 3.9–3.13): ThreadingMixIn.process_request has no raising code
+            # AFTER t.start(), so this except and the thread's finally can
+            # never both fire; BoundedSemaphore would raise loudly if a
+            # future stdlib change broke that.
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        # ThreadingMixIn runs this ON the spawned worker thread; the slot is
+        # held for the connection's whole lifetime (incl. keep-alive idles)
+        # and released exactly once on the way out.
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
+
+
 class EneruAPIServer:
     """Small stdlib HTTP server for read-only observability endpoints."""
 
@@ -327,7 +437,8 @@ class EneruAPIServer:
             # accept queue and surface as intermittent "connection refused" even
             # though the daemon is healthy and every handler runs on its own
             # worker thread. 128 absorbs realistic bursts.
-            self._httpd = ThreadingHTTPServer(addr, Handler, bind_and_activate=False)
+            self._httpd = _BoundedThreadingHTTPServer(
+                addr, Handler, bind_and_activate=False)
             self._httpd.request_queue_size = 128
             self._httpd.server_bind()
             self._httpd.server_activate()
@@ -424,7 +535,43 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     # join it indefinitely, hanging daemon shutdown until systemd SIGKILLs. On
     # timeout handle_one_request sets close_connection and the thread exits. The
     # body read (below) restores this class value via previous_timeout.
+    #
+    # F-046: with protocol_version="HTTP/1.1" (below) this same timeout is ALSO
+    # the keep-alive idle timeout. Between two pipelined requests the handler
+    # blocks in handle_one_request's readline() waiting for the next one; the
+    # socket timeout fires after REQUEST_READ_TIMEOUT_SECONDS of silence,
+    # BaseHTTPRequestHandler catches socket.timeout, sets close_connection, and
+    # handle() returns — so an idle keep-alive client cannot pin a worker thread.
     timeout = REQUEST_READ_TIMEOUT_SECONDS
+
+    # F-046: default to HTTP/1.1 so a browser/Prometheus client can REUSE one TCP
+    # connection for the whole dashboard poll (the stdlib default HTTP/1.0 tears
+    # the connection down after every request — a fresh TCP + thread per call).
+    # Every response already sends Content-Length (see _finish), which is what
+    # HTTP/1.1 keep-alive needs to frame a body without chunked encoding.
+    #
+    # ELI5 — the keep-alive vs. thread-bound trap: HTTP/1.1 lets a caller keep a
+    # phone line (connection) open between questions. A naive "cap the number of
+    # phone lines" would let a few callers who dial in and then say nothing hold
+    # every line and lock out real users (a slowloris). We avoid that with a
+    # two-part rule: (1) an idle line is hung up after `timeout` seconds
+    # (above), so a silent caller can't squat forever; (2) the cap below counts
+    # only lines that are actively ASKING something, not lines merely held open.
+    # A caller waiting between questions holds a thread but NOT a semaphore slot,
+    # so idle keep-alives can never starve active request processing — the
+    # semaphore only ever blocks when 32 requests are being handled at once.
+    protocol_version = "HTTP/1.1"
+
+    # F-018: BoundedSemaphore capping concurrent ACTIVE request processing (see
+    # MAX_CONCURRENT_REQUESTS + _dispatch). A class attribute (shared across the
+    # per-start Handler subclass and every worker thread) so a test can swap in a
+    # smaller semaphore to prove the (N+1)th concurrent request queues instead of
+    # running unbounded.
+    _request_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+    # F-072: one warning per server lifetime is enough to make a newly rejected
+    # hostname discoverable without giving an attacker an unbounded log stream.
+    _host_rejection_warned = False
+    _host_rejection_lock = threading.Lock()
 
     server_version = "EneruAPI/1.0"
 
@@ -462,8 +609,91 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # noqa: A003 - stdlib hook
         return
 
+    def _host_allowed(self) -> bool:
+        """F-016 DNS-rebinding guard: only route trusted Host headers.
+
+        ELI5: a web page in someone's browser is like a stranger phoning your
+        house — your phone trusts whatever *name* they dialed. A DNS-rebinding
+        attacker tricks the victim's browser into dialing a name the attacker
+        owns that now resolves to your LAN IP, so the tab happily reads your
+        private API. The defense: only pick up the phone if the caller dialed a
+        bare *number* (an IP literal — a rebind attack always arrives as a DNS
+        name, never a raw address), or ``localhost``, or a name you put on the
+        guest list (``api.allowed_hosts``). Anything else — including no Host at
+        all — hangs up (the dispatcher answers 421).
+        """
+        host = self.headers.get("Host")
+        if not host:
+            return False
+        host = host.strip()
+        if not host:
+            return False
+        # Strip the ":port". IPv6 literals are bracketed ("[::1]:9191"); a bare
+        # IPv6 ("::1") has several colons and no brackets — leave those intact
+        # for ip_address() to parse. Only a single trailing ":port" is stripped.
+        if host.startswith("["):
+            end = host.find("]")
+            if end == -1:
+                return False
+            # cubic P2 (round 1): reject trailing junk after the bracket.
+            # Without this, "[::1]evil.example" parsed as hostname "::1" and
+            # sailed through the IP-literal allow — the exact bypass this
+            # gate exists to block. Only "" or a numeric ":port" may follow.
+            rest = host[end + 1:]
+            if rest and not (rest.startswith(":") and rest[1:].isdigit()):
+                return False
+            hostname = host[1:end]
+        elif host.count(":") == 1:
+            hostname = host.rsplit(":", 1)[0]
+        else:
+            hostname = host
+        hostname = hostname.strip()
+        if not hostname:
+            return False
+        # An IP-literal Host is always safe: a DNS-rebind necessarily carries a
+        # DNS *name*, so a raw address can't be the rebinding vector.
+        try:
+            ipaddress.ip_address(hostname)
+            return True
+        except ValueError:
+            pass
+        lowered = hostname.lower()
+        if lowered == "localhost":
+            return True
+        allowed = getattr(self.api_config.api, "allowed_hosts", None) or []
+        return lowered in {str(h).strip().lower() for h in allowed}
+
     def _dispatch(self, router: Callable[[], Tuple[int, str, Any]]) -> None:
-        """Run a router, map exceptions to responses, and write the result."""
+        """Run a router, map exceptions to responses, and write the result.
+
+        F-018: the whole body runs while HOLDING ``_request_semaphore`` so at
+        most ``MAX_CONCURRENT_REQUESTS`` requests are processed at once; the
+        (N+1)th blocks here until a slot frees. The slot is acquired only for the
+        duration of actually handling a request — the idle wait for the NEXT
+        keep-alive request happens in ``handle_one_request`` OUTSIDE this method,
+        so an idle keep-alive connection never holds a semaphore slot and cannot
+        starve active processing (the keep-alive-vs-bound trap; see the
+        ``protocol_version`` note).
+        """
+        with self._request_semaphore:
+            self._dispatch_locked(router)
+
+    def _dispatch_locked(
+        self, router: Callable[[], Tuple[int, str, Any]]
+    ) -> None:
+        # One handler instance can serve many HTTP/1.1 requests. Track body
+        # consumption per request so an early response never leaves bytes that
+        # the next keep-alive request would misparse as its request line.
+        self._request_body_consumed = False
+        # F-016: reject an untrusted Host before touching any route — a
+        # DNS-rebinding page must never reach the read-open API. 421 Misdirected
+        # Request is the precise "you reached the wrong server name" signal.
+        if not self._host_allowed():
+            self._warn_host_rejected_once()
+            self._finish(
+                421, "application/json",
+                self._error("MISDIRECTED_REQUEST", "Host header not allowed"))
+            return
         try:
             status, content_type, body = router()
         except APIBadRequest as exc:
@@ -483,10 +713,50 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 411, "application/json",
                 self._error("LENGTH_REQUIRED", str(exc)))
         except Exception:
+            # F-030: the client gets a deliberately opaque 500 (no internals
+            # leaked), but an unhandled handler exception must NOT vanish -- log
+            # the full traceback via the handler's log fn (the same channel the
+            # control-audit path uses) so operators can actually diagnose it.
+            if self.api_log is not None:
+                self.api_log(
+                    "⚠️  API request handler raised an unhandled exception "
+                    "(returning 500 INTERNAL_ERROR):\n"
+                    + traceback.format_exc().rstrip()
+                )
             status, content_type, body = (
                 500, "application/json",
                 {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}})
         self._finish(status, content_type, body)
+
+    def _warn_host_rejected_once(self) -> None:
+        """Log the first rejected Host with an actionable allowlist hint."""
+        cls = type(self)
+        with cls._host_rejection_lock:
+            if cls._host_rejection_warned:
+                return
+            cls._host_rejection_warned = True
+        if self.api_log is not None:
+            raw_host = self.headers.get("Host")
+            shown = repr(raw_host) if raw_host is not None else "<missing>"
+            self.api_log(
+                f"⚠️  API rejected Host {shown} with HTTP 421; add the "
+                "hostname to api.allowed_hosts if this is expected."
+            )
+
+    def _unread_request_body(self) -> bool:
+        """Return whether this response leaves framed request bytes unread."""
+        if getattr(self, "_request_body_consumed", False):
+            return False
+        headers = getattr(self, "headers", {})
+        if headers.get("Transfer-Encoding"):
+            return True
+        raw_length = headers.get("Content-Length")
+        if raw_length is None:
+            return False
+        try:
+            return int(raw_length) != 0
+        except (TypeError, ValueError):
+            return True
 
     def _finish(self, status: int, content_type: str, body: Any) -> None:
         if content_type == "application/json":
@@ -502,6 +772,12 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                                       "application/json; charset=utf-8"))
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
+        if self._unread_request_body():
+            # Closing is safer than draining here: a slow or partial body must
+            # not hold the response hostage. The next request gets a clean new
+            # connection instead of a phantom 400 from leftover bytes.
+            self.close_connection = True
+            self.send_header("Connection", "close")
         # N2: nosniff on EVERY response (JSON/JS/CSS/HTML), not just HTML -- the
         # dashboard's static assets are served with specific content types and
         # must not be MIME-sniffed.
@@ -745,6 +1021,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     pass
         if length and len(raw) != length:
             raise APIBadRequest("incomplete request body")
+        self._request_body_consumed = True
         if not raw:
             return {}
         try:
@@ -1195,9 +1472,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             return 404, "application/json", self._not_found("Authentication is disabled")
         client_addr = getattr(self, "client_address", None)
         client_ip = client_addr[0] if client_addr else "?"
-        # ISS-032: reject brute-force bursts before touching the auth backend.
-        if _login_is_blocked(client_ip):
-            self._audit(None, "login", client_ip, "throttled")
+        # ISS-032 / F-040: reject brute-force bursts before touching the auth
+        # backend — per-IP first, then the global ceiling that catches an
+        # attacker rotating source IPs past the per-IP guard.
+        if _login_is_blocked(client_ip) or _global_login_is_blocked():
             return 429, "application/json", self._error(
                 "TOO_MANY_ATTEMPTS",
                 "too many failed login attempts; try again shortly")
@@ -1218,8 +1496,12 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             # stuffing is both throttled and visible. Audit the SOURCE IP, not
             # the attempted username -- a user who fat-fingers a password into
             # the username field would otherwise have it persisted verbatim.
-            _login_record_failure(client_ip)
-            self._audit(None, "login", client_ip, "failed")
+            source_throttled = _login_record_failure(client_ip)
+            global_throttled = _global_login_record_failure()
+            self._audit(
+                None, "login", client_ip,
+                "throttled" if source_throttled or global_throttled else "failed",
+            )
             raise APIUnauthorized("invalid credentials")
         _login_clear(client_ip)  # ISS-032: reset the counter on success
         token = self.api_sessions.create(principal)

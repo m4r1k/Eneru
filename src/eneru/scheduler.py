@@ -119,21 +119,33 @@ class Schedule:
     # --- occurrence math (calendar kinds only) ---
 
     def last_occurrence(self, now: float, tz: Optional[tzinfo] = None) -> float:
-        """Epoch of the most recent scheduled instant at or before ``now``."""
+        """Epoch of the most recent scheduled instant at or before ``now``.
+
+        F-070: the daily/weekly wrap-around test runs in EPOCH space, not
+        wall space, mirroring the monthly branch. ELI5: on the DST
+        spring-forward night the wall clock is a broken ruler — 02:00-03:00
+        simply doesn't exist — so asking "is 02:30 before now?" with wall
+        times gives the wrong answer, and ``due()`` saw a "most recent"
+        occurrence sitting in the FUTURE, refiring on every tick (verified:
+        361 duplicate fires in 30 min). Epochs never skip, so the comparison
+        is done on ``timestamp()`` values instead.
+        """
         d = _dt(now, tz)
         if self.kind == "daily":
             cand = d.replace(hour=self.hour, minute=self.minute,
                              second=0, microsecond=0)
-            if cand > d:
-                cand -= timedelta(days=1)
-            return cand.timestamp()
+            ts = cand.timestamp()
+            if ts > now:
+                ts = (cand - timedelta(days=1)).timestamp()
+            return ts
         if self.kind == "weekly":
             cand = d.replace(hour=self.hour, minute=self.minute,
                              second=0, microsecond=0)
             cand -= timedelta(days=(d.weekday() - self.weekday) % 7)
-            if cand > d:
-                cand -= timedelta(days=7)
-            return cand.timestamp()
+            ts = cand.timestamp()
+            if ts > now:
+                ts = (cand - timedelta(days=7)).timestamp()
+            return ts
         if self.kind == "monthly":
             cand = self._month_instant(d.year, d.month, d, tz)
             if cand > now:
@@ -176,7 +188,21 @@ class Schedule:
         # calendar kinds
         if last_run is None:
             return self.fire_on_first
-        return last_run < self.last_occurrence(now, tz)
+        occ = self.last_occurrence(now, tz)
+        if last_run >= occ:
+            return False
+        # F-083: DST fall-back replays one wall hour, so the SAME scheduled
+        # occurrence (e.g. daily 02:30) exists at TWO epochs an hour apart.
+        # ELI5: the clock is turned back and 02:30 happens twice; the job
+        # already ran at the first 02:30, so the second one is a rerun of the
+        # same chore, not a new chore. Dedupe by wall identity: the occurrence
+        # covering ``last_run`` and the current occurrence land on the same
+        # local calendar DATE exactly when they are the same scheduled slot
+        # (daily = one per date; weekly/monthly = one per week/month, pinned
+        # to a specific date). A baseline seeded EARLIER the same day still
+        # fires (its covering occurrence is yesterday's/last week's).
+        prev_occ = self.last_occurrence(last_run, tz)
+        return _dt(prev_occ, tz).date() != _dt(occ, tz).date()
 
     def next_run(self, now: float, last_run: Optional[float],
                  tz: Optional[tzinfo] = None) -> float:

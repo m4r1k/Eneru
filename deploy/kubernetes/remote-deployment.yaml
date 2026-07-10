@@ -59,6 +59,9 @@ spec:
       labels:
         app: eneru
     spec:
+      # This network-exposed pod never calls the Kubernetes API, so don't mount
+      # a ServiceAccount token it would only sit on as an unused credential.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001

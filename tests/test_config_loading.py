@@ -169,10 +169,19 @@ local_shutdown:
         assert config.local_shutdown.command == "poweroff"
 
     @pytest.mark.unit
-    def test_load_nonexistent_file(self):
-        """Test loading a non-existent file returns defaults."""
-        config = ConfigLoader.load("/nonexistent/path/config.yaml")
-        assert config.ups.name == "UPS@localhost"
+    def test_load_explicit_nonexistent_file_exits(self):
+        """F-003: an EXPLICIT config path that doesn't exist is a hard error.
+
+        Previously ``load`` warned and booted on the all-default (shutdown-armed)
+        config, which silently ran the wrong config. It now SystemExits so
+        ``run``/``validate`` fail loud and non-zero. The default-path search
+        (``load(None)``) keeps its lenient fallback — see
+        ``test_load_with_no_default_paths_returns_defaults``.
+        """
+        with pytest.raises(SystemExit) as exc_info:
+            ConfigLoader.load("/nonexistent/path/config.yaml")
+        assert "config file not found" in str(exc_info.value)
+        assert "/nonexistent/path/config.yaml" in str(exc_info.value)
 
     @pytest.mark.unit
     def test_load_without_pyyaml_returns_defaults(

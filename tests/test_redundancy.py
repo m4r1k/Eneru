@@ -1174,7 +1174,7 @@ class TestExecutorShutdown:
 
         with pytest.MonkeyPatch.context() as mp:
             calls = []
-            mp.setattr("eneru.cli._detect_runtime_context",
+            mp.setattr("eneru.runtime._detect_runtime_context",
                        lambda: "container (Docker)")
             mp.setattr(ex, "_shutdown_vms", lambda: calls.append("vms"))
             mp.setattr(ex, "_shutdown_containers",
@@ -1220,7 +1220,7 @@ class TestExecutorShutdown:
         ex._notification_worker = MagicMock()
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr("eneru.cli._detect_runtime_context",
+            mp.setattr("eneru.runtime._detect_runtime_context",
                        lambda: "container (Docker)")
             mp.setattr(ex, "_shutdown_remote_servers", lambda: [
                 RemoteShutdownResult(
@@ -1266,7 +1266,7 @@ class TestExecutorShutdown:
 
         with pytest.MonkeyPatch.context() as mp, \
              patch.object(Path, "unlink", side_effect=PermissionError("no unlink")):
-            mp.setattr("eneru.cli._detect_runtime_context",
+            mp.setattr("eneru.runtime._detect_runtime_context",
                        lambda: "container (Docker)")
             mp.setattr(ex, "_shutdown_remote_servers", lambda: [
                 RemoteShutdownResult(

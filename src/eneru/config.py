@@ -1,5 +1,7 @@
 """Configuration classes and loader for Eneru."""
 
+import copy
+import math
 import shlex
 from dataclasses import dataclass, field
 from difflib import get_close_matches
@@ -14,6 +16,19 @@ try:
     YAML_AVAILABLE = True
 except ImportError:
     YAML_AVAILABLE = False
+
+
+def is_validation_error(message: str) -> bool:
+    """True when a ``validate_config`` message is a blocking ERROR (not a WARNING).
+
+    F-054: single predicate for "does this message gate a load/reload?". The CLI
+    and the hot-reload path both need it, and they had drifted onto three
+    variants (``"ERROR" in m``, ``startswith("ERROR:")``, ``startswith("ERROR")``).
+    ELI5: a WARNING that merely *mentions* the word ERROR in its prose -- e.g.
+    "WARNING: this may cause an ERROR later" -- must not be mistaken for a real
+    blocker. Match the ``ERROR:`` prefix that ``validate_config`` actually emits.
+    """
+    return message.startswith("ERROR:")
 
 
 # ==============================================================================
@@ -135,6 +150,11 @@ class APIConfig:
     enabled: bool = False
     bind: str = "127.0.0.1"
     port: int = 9191
+    # F-016: DNS-rebinding guard. Hostnames (case-insensitive) the API will
+    # answer to when the request's Host header carries a DNS *name* rather than
+    # an IP literal. IP-literal and ``localhost`` Hosts are always accepted, so
+    # this only matters for operators who front the API with a hostname.
+    allowed_hosts: List[str] = field(default_factory=list)
     auth: AuthConfig = field(default_factory=AuthConfig)
 
 
@@ -175,8 +195,11 @@ class NutControlConfig:
     allowlist defaults empty because upsrw can change risky settings.
     """
     enabled: bool = False
-    username: str = ""
-    password: str = ""
+    # F-032: keep NUT control creds out of repr() — a NutControlConfig can land
+    # in a log line or traceback, and repr() would otherwise print the password
+    # verbatim (AuthConfig already hides its fields the same way).
+    username: str = field(default="", repr=False)
+    password: str = field(default="", repr=False)
     allowed_commands: List[str] = field(default_factory=list)
     allowed_variables: List[str] = field(default_factory=list)
     timeout: int = 10
@@ -403,6 +426,11 @@ class RemoteServerConfig:
     command_timeout: int = 30
     shutdown_command: str = "sudo shutdown -h now"
     use_sudo: bool = False
+    # Prepend a POSIX-sh `export PATH=...` to every command sent over SSH so a
+    # bare command name (e.g. Synology's `synoshutdown`) resolves in the minimal
+    # non-interactive PATH (see RemoteShutdownMixin.REMOTE_PATH_PREFIX). Opt in:
+    # prepending POSIX syntax by default would break csh and Windows remotes.
+    augment_remote_path: bool = False
     ssh_key_path: Optional[str] = None
     ssh_options: List[str] = field(default_factory=list)
     pre_shutdown_commands: List[RemoteCommandConfig] = field(default_factory=list)
@@ -637,6 +665,232 @@ class Config:
 # CONFIGURATION LOADER
 # ==============================================================================
 
+# ==============================================================================
+# DECLARATIVE CONFIG SCHEMA (ship-review Fix Group A)
+# ==============================================================================
+#
+# ELI5: the YAML loader used to trust whatever shape the file handed it. Hand it
+# a string where a LIST belongs and it spelled the string out one letter per
+# entry (`mounts: /mnt` became four mounts: "/", "m", "n", "t"); hand it the
+# WORD "false" where a real boolean belongs and it counted as true. This table
+# is a paper cut-out of the correct shape of every safety-critical knob. Two
+# passes press the config against the cut-out:
+#   1. a FATAL pass at load time (`_schema_structural_errors`) that stops the
+#      daemon before a mis-shaped section can crash the parser or silently
+#      char-split a scalar (F-001, F-008);
+#   2. a REPORTING pass folded into validate_config (`_schema_errors`) that
+#      flags wrong-typed booleans/numbers and misspelled keys at EVERY level so
+#      startup is refused and `eneru validate` exits non-zero (F-002, F-007,
+#      F-012, F-059).
+# It sits UNDER the hand-written semantic validation, which is unchanged: the
+# table only reproduces/adds the shape+type+unknown-key layer.
+#
+# Node kinds (plain dicts so the table stays declarative and greppable):
+#   {"t": "map",  ...}  mapping with known child keys
+#   {"t": "list", ...}  sequence with one per-item schema
+#   {"t": "ups"}        the polymorphic `ups` node (legacy mapping OR multi list)
+#   {"t": "bool"} / {"t": "int", ...}   leaves
+#
+# Flags:
+#   fatal        a scalar/wrong-container here CRASHES _parse_config (or silently
+#                char-splits), so the load-time gate must reject it.
+#   sweep_shape  the reporting pass ALSO flags a wrong shape here — used for the
+#                sections _parse_config defensively swallows (api/logging/mqtt/
+#                prometheus/remote_health) where a scalar does NOT crash but
+#                should still be a validation error (F-008).
+#   sweep        emit unknown-key errors for this mapping (F-059).
+#   allowed      full allowed key set for a sweep node (superset of `keys`, since
+#                many valid keys are plain scalars with no child schema).
+
+def _sch_map(keys=None, *, fatal=True, sweep_shape=False, sweep=False,
+             allowed=None):
+    return {"t": "map", "fatal": fatal, "sweep_shape": sweep_shape,
+            "sweep": sweep, "keys": keys or {}, "allowed": allowed}
+
+
+def _sch_list(item=None, *, fatal=True, sweep_shape=False):
+    return {"t": "list", "fatal": fatal, "sweep_shape": sweep_shape,
+            "item": item}
+
+
+_SCH_BOOL = {"t": "bool"}
+
+
+def _sch_int(minimum=None, maximum=None, *, optional=False):
+    return {"t": "int", "min": minimum, "max": maximum, "optional": optional}
+
+
+def _sch_number(minimum=None, maximum=None, *, optional=False):
+    """int OR float leaf (bool still rejected). F-069: timing knobs like
+    notifications.retry_interval accepted floats on 6.1.6 (e.g. 2.5 seconds);
+    the schema gate must not turn them into a startup crash-loop."""
+    return {"t": "number", "min": minimum, "max": maximum, "optional": optional}
+
+
+# --- Reusable sub-schemas (nested by the per-entry bodies, so a multi-UPS or
+# redundancy entry reuses the exact same shape rules as the legacy top level). ---
+
+# `triggers` (and its nested `depletion`/`extended_time`) crash _parse_config
+# when scalar: `triggers_data.get('depletion', {})` returns the scalar and the
+# next `.get` blows up. Unknown keys here are still swept by the hand-written
+# `_validate_triggers`, so this node does NOT sweep (avoids double-reporting).
+_TRIGGERS_SCHEMA = _sch_map(fatal=True, keys={
+    "depletion": _sch_map(fatal=True, keys={}),
+    "extended_time": _sch_map(fatal=True, keys={"enabled": _SCH_BOOL}),  # F-002
+})
+
+# One pre_shutdown_commands entry. A non-dict ENTRY is skipped by the parser
+# (not a crash), so the entry map is non-fatal; but `mounts` as a scalar
+# char-splits into per-character mount paths (F-001) — that IS fatal.
+_REMOTE_CMD_SCHEMA = _sch_map(fatal=False, keys={
+    "mounts": _sch_list(item=None, fatal=True),  # F-001 (remote copy)
+})
+
+# A scalar remote-server entry crashes (`server_data.get(...)`), so entries are
+# fatal. `enabled` must be a real bool (F-002); use_sudo/is_host_loopback keep
+# their existing hand-written bool checks and are intentionally omitted here.
+_REMOTE_SERVER_SCHEMA = _sch_map(fatal=True, keys={
+    "enabled": _SCH_BOOL,  # F-002
+    "pre_shutdown_commands": _sch_list(item=_REMOTE_CMD_SCHEMA, fatal=True),
+})
+_REMOTE_SERVERS_LIST = _sch_list(item=_REMOTE_SERVER_SCHEMA, fatal=True)
+
+_VM_SCHEMA = _sch_map(fatal=True, sweep=True, allowed={"enabled", "max_wait"},
+                      keys={"enabled": _SCH_BOOL})  # F-002 + F-059 body sweep
+
+# One compose_files entry may be a bare string (path) OR a mapping; only the
+# mapping form carries stop_timeout, which the parser passes through untyped
+# (quoted "60" -> TypeError mid-drain). F-007: validate it, allow None (=unset).
+_COMPOSE_FILE_SCHEMA = _sch_map(fatal=False, keys={
+    "stop_timeout": _sch_int(minimum=0, optional=True),  # F-007
+})
+_CONTAINERS_SCHEMA = _sch_map(
+    fatal=True, sweep=True,
+    allowed={"enabled", "runtime", "stop_timeout", "compose_files",
+             "shutdown_all_remaining_containers", "include_user_containers"},
+    keys={
+        "enabled": _SCH_BOOL,  # F-002
+        "shutdown_all_remaining_containers": _SCH_BOOL,  # F-002
+        "include_user_containers": _SCH_BOOL,  # F-002
+        "compose_files": _sch_list(item=_COMPOSE_FILE_SCHEMA, fatal=True),  # F-001/F-007
+    })
+
+_UNMOUNT_SCHEMA = _sch_map(
+    fatal=True, sweep=True, allowed={"enabled", "timeout", "mounts"},
+    keys={
+        "enabled": _SCH_BOOL,  # F-002
+        "mounts": _sch_list(item=None, fatal=True),  # F-001 (local copy)
+    })
+_FILESYSTEMS_SCHEMA = _sch_map(
+    fatal=True, sweep=True, allowed={"sync_enabled", "unmount"},
+    keys={"sync_enabled": _SCH_BOOL, "unmount": _UNMOUNT_SCHEMA})  # F-002
+
+# connection_loss_grace_period.enabled keeps its hand-written bool check, so only
+# the (fatal) mapping shape is enforced here.
+_CLGP_SCHEMA = _sch_map(fatal=True, keys={})
+
+# Full per-UPS-entry body (multi-UPS list items). Unknown keys are swept by the
+# hand-written `_sweep_ups_entry`, so this node does NOT sweep.
+_UPS_ENTRY_SCHEMA = _sch_map(fatal=True, keys={
+    "connection_loss_grace_period": _CLGP_SCHEMA,
+    "triggers": _TRIGGERS_SCHEMA,
+    "remote_servers": _REMOTE_SERVERS_LIST,
+    "virtual_machines": _VM_SCHEMA,
+    "containers": _CONTAINERS_SCHEMA,
+    "filesystems": _FILESYSTEMS_SCHEMA,
+    "is_local": _SCH_BOOL,  # F-002
+})
+
+# A scalar redundancy entry is skipped by the parser (non-fatal), but its
+# `ups_sources` char-splits when handed a bare string.
+_REDUNDANCY_ENTRY_SCHEMA = _sch_map(fatal=False, keys={
+    "ups_sources": _sch_list(item=None, fatal=True),
+    "triggers": _TRIGGERS_SCHEMA,
+    "remote_servers": _REMOTE_SERVERS_LIST,
+    "virtual_machines": _VM_SCHEMA,
+    "containers": _CONTAINERS_SCHEMA,
+    "filesystems": _FILESYSTEMS_SCHEMA,
+    "is_local": _SCH_BOOL,  # F-002
+})
+
+# The union of every recognized top-level section name. This set is what finally
+# catches a misspelled top-level key like `local_shutdwn:` (F-059) — before this
+# nothing swept the root, so the typo was silently ignored while local poweroff
+# stayed armed.
+_TOP_LEVEL_KEYS = {
+    "behavior", "logging", "notifications", "discord", "local_shutdown",
+    "triggers", "statistics", "api", "prometheus", "remote_health", "mqtt",
+    "nut_control", "battery_health", "self_test", "reports", "energy", "ups",
+    "docker", "remote_servers", "virtual_machines", "containers",
+    "filesystems", "redundancy_groups",
+}
+
+_ROOT_SCHEMA = _sch_map(fatal=True, sweep=True, allowed=_TOP_LEVEL_KEYS, keys={
+    "behavior": _sch_map(fatal=True, keys={"dry_run": _SCH_BOOL}),  # F-002
+    "logging": _sch_map(fatal=False, sweep_shape=True, keys={
+        "syslog": _sch_map(fatal=False, sweep_shape=True,
+                           keys={"enabled": _SCH_BOOL}),  # F-002
+    }),
+    "notifications": _sch_map(fatal=True, keys={
+        "discord": _sch_map(fatal=True, keys={}),          # F-008
+        "urls": _sch_list(item=None, fatal=True),          # F-012 (char-split)
+        "timeout": _sch_number(minimum=0),                 # F-012 + F-069
+        "retry_interval": _sch_number(minimum=0),          # F-012 + F-069
+    }),
+    "discord": _sch_map(fatal=True, keys={}),              # legacy top-level
+    "local_shutdown": _sch_map(fatal=True, keys={
+        "enabled": _SCH_BOOL,                              # F-002
+        "drain_on_local_shutdown": _SCH_BOOL,              # F-002
+        "wall": _SCH_BOOL,                                 # F-002
+    }),
+    "triggers": _TRIGGERS_SCHEMA,
+    "statistics": _sch_map(
+        # `enabled` is a legacy no-op key (the per-UPS store is always on) that
+        # existing configs still carry; it was silently accepted before the
+        # F-059 body sweep, so keep accepting it (type-checked as a bool) rather
+        # than break an in-place upgrade. It does not toggle the store.
+        fatal=True, sweep=True, allowed={"enabled", "db_directory", "retention"},
+        keys={"enabled": _SCH_BOOL, "retention": _sch_map(
+            fatal=True, sweep=True,
+            allowed={"raw_hours", "agg_5min_days", "agg_hourly_days"},
+            keys={})}),                                    # F-008 + F-059
+    "api": _sch_map(fatal=False, sweep_shape=True, keys={
+        "enabled": _SCH_BOOL,                              # F-002
+        # F-016: a scalar `allowed_hosts: myhost` would char-split into
+        # per-character hostnames, so reject a non-list up front (fatal).
+        "allowed_hosts": _sch_list(item=None, fatal=True),
+        "auth": _sch_map(fatal=False, sweep_shape=True, keys={
+            "enabled": _SCH_BOOL,                          # F-002
+            "require_for_reads": _SCH_BOOL,                # F-002
+        }),                                                # F-008 (api.auth: true)
+    }),
+    "prometheus": _sch_map(fatal=False, sweep_shape=True,
+                           keys={"enabled": _SCH_BOOL}),   # F-002
+    "remote_health": _sch_map(fatal=False, sweep_shape=True, keys={
+        "enabled": _SCH_BOOL, "startup_check": _SCH_BOOL,
+        "notify_on_failure": _SCH_BOOL,
+        "notify_on_recovery": _SCH_BOOL,                   # F-002
+    }),
+    "mqtt": _sch_map(fatal=False, sweep_shape=True,
+                     keys={"enabled": _SCH_BOOL}),         # F-002
+    "nut_control": _sch_map(fatal=False, keys={"enabled": _SCH_BOOL}),  # F-002
+    "battery_health": _sch_map(fatal=False, keys={"enabled": _SCH_BOOL}),  # F-002
+    "self_test": _sch_map(fatal=False, keys={"enabled": _SCH_BOOL}),   # F-002
+    "reports": _sch_map(fatal=False, keys={
+        "enabled": _SCH_BOOL, "daily": _SCH_BOOL,
+        "weekly": _SCH_BOOL, "monthly": _SCH_BOOL,         # F-002
+    }),
+    "energy": _sch_map(fatal=False, keys={"enabled": _SCH_BOOL}),  # F-002
+    "ups": {"t": "ups"},
+    "docker": _CONTAINERS_SCHEMA,                          # legacy alias
+    "remote_servers": _REMOTE_SERVERS_LIST,
+    "virtual_machines": _VM_SCHEMA,
+    "containers": _CONTAINERS_SCHEMA,
+    "filesystems": _FILESYSTEMS_SCHEMA,
+    "redundancy_groups": _sch_list(item=_REDUNDANCY_ENTRY_SCHEMA, fatal=True),
+})
+
+
 class ConfigSectionError(ValueError):
     """A config section has the wrong shape (scalar/list where a mapping is
     required). ISS-026: a dedicated subclass so ``load()`` catches ONLY this
@@ -665,6 +919,8 @@ class ConfigLoader:
                                     maximum: float = None) -> bool:
         """Return True for int/float, excluding bool, inside optional bounds."""
         if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return False
+        if not math.isfinite(value):
             return False
         if minimum is not None and value < minimum:
             return False
@@ -717,6 +973,154 @@ class ConfigLoader:
         return errors
 
     @classmethod
+    def _walk_schema(cls, node: dict, value: Any, path: str,
+                     errors: List[str], *, full: bool) -> None:
+        """Press one raw value against one schema node (see the schema block).
+
+        ``full=False`` is the fatal load-time gate: it reports ONLY wrong
+        mapping/list SHAPES on nodes flagged ``fatal`` (the crash + char-split
+        classes). ``full=True`` is the reporting sweep: shapes on ``sweep_shape``
+        nodes, leaf type/range checks, and unknown-key sweeps on ``sweep`` nodes.
+        Recursion descends only into containers that already have the right
+        shape, so a wrong shape is reported once and never crashes the walk.
+        """
+        kind = node["t"]
+
+        if kind == "ups":
+            # `ups` is polymorphic: a legacy mapping OR a multi-UPS list. A
+            # scalar is neither and crashes _parse_config, so it is always fatal.
+            if value is None:
+                return
+            if isinstance(value, dict):
+                cls._walk_schema(_UPS_ENTRY_SCHEMA, value, "ups", errors,
+                                 full=full)
+            elif isinstance(value, list):
+                for i, item in enumerate(value):
+                    cls._walk_schema(_UPS_ENTRY_SCHEMA, item, f"ups[{i}]",
+                                     errors, full=full)
+            else:
+                errors.append(
+                    "ERROR: 'ups' must be a mapping or a list, got "
+                    f"{type(value).__name__}.")
+            return
+
+        if kind == "map":
+            if value is None:
+                return
+            if not isinstance(value, dict):
+                if node["fatal"] or (full and node["sweep_shape"]):
+                    errors.append(
+                        f"ERROR: '{path}' must be a mapping, got "
+                        f"{type(value).__name__}.")
+                return
+            if full and node["sweep"]:
+                allowed = node["allowed"] or set(node["keys"])
+                errors.extend(cls._sweep_unknown(path, value, allowed))
+            for key, child in node["keys"].items():
+                if child is not None and key in value:
+                    child_path = f"{path}.{key}" if path else key
+                    cls._walk_schema(child, value[key], child_path, errors,
+                                     full=full)
+            return
+
+        if kind == "list":
+            if value is None:
+                return
+            if not isinstance(value, list):
+                if node["fatal"] or (full and node["sweep_shape"]):
+                    errors.append(
+                        f"ERROR: '{path}' must be a list, got "
+                        f"{type(value).__name__}.")
+                return
+            item = node["item"]
+            if item is not None:
+                for i, elem in enumerate(value):
+                    cls._walk_schema(item, elem, f"{path}[{i}]", errors,
+                                     full=full)
+            return
+
+        # Leaves are only checked by the reporting sweep.
+        if not full:
+            return
+        if kind == "bool":
+            if not isinstance(value, bool):
+                errors.append(
+                    f"ERROR: {path} must be a boolean, got {value!r}")
+        elif kind == "int":
+            if value is None and node["optional"]:
+                return
+            if not cls._is_int_nonbool_in_range(
+                    value, minimum=node["min"], maximum=node["max"]):
+                errors.append(
+                    f"ERROR: {path} must be {cls._int_range_phrase(node)}, "
+                    f"got {value!r}")
+        elif kind == "number":
+            # F-069: int OR float (bool still rejected) for timing knobs that
+            # historically accepted floats (retry_interval: 2.5).
+            if value is None and node["optional"]:
+                return
+            if not cls._is_number_nonbool_in_range(
+                    value, minimum=node["min"], maximum=node["max"]):
+                errors.append(
+                    f"ERROR: {path} must be "
+                    f"{cls._int_range_phrase(node).replace('an integer', 'a number')}, "
+                    f"got {value!r}")
+
+    @staticmethod
+    def _int_range_phrase(node: dict) -> str:
+        mn, mx = node["min"], node["max"]
+        if mn is not None and mx is not None:
+            return f"an integer between {mn} and {mx}"
+        if mn is not None:
+            return f"an integer >= {mn}"
+        if mx is not None:
+            return f"an integer <= {mx}"
+        return "an integer"
+
+    @staticmethod
+    def _sweep_unknown(path: str, value: dict, allowed: set) -> List[str]:
+        """Unknown-key sweep that also handles the ROOT (empty path) — the root
+        has no section prefix, so misspelled top-level keys get their own
+        message (F-059)."""
+        if path:
+            return ConfigLoader._unknown_key_errors(path, value, allowed)
+        errors = []
+        for key in sorted(value):
+            if key in allowed:
+                continue
+            # F-069: `x-`-prefixed top-level keys are the YAML extension
+            # convention for anchor/alias blocks (`x-defaults: &d …`) that a
+            # parser is expected to ignore — docker-compose popularized it and
+            # homelab configs use it. 6.1.6 silently ignored them; the F-059
+            # sweep must keep doing so rather than crash-loop on upgrade.
+            if str(key).startswith("x-"):
+                continue
+            suggestion = get_close_matches(str(key), sorted(allowed), n=1)
+            hint = f" Did you mean '{suggestion[0]}'?" if suggestion else ""
+            errors.append(
+                f"ERROR: unknown top-level config key '{key}'.{hint}")
+        return errors
+
+    @classmethod
+    def _schema_structural_errors(cls, data: Any) -> List[str]:
+        """Fatal load-time gate: report ONLY the crash/char-split shape classes
+        (F-001, F-008) so the daemon refuses a mis-shaped config with a clean
+        message instead of a raw AttributeError or a silently char-split scalar.
+        """
+        errors: List[str] = []
+        cls._walk_schema(_ROOT_SCHEMA, data, "", errors, full=False)
+        return errors
+
+    @classmethod
+    def _schema_errors(cls, raw_data: Any) -> List[str]:
+        """Full reporting sweep folded into validate_config: structural shapes
+        for defensively-swallowed sections plus boolean/int types and unknown
+        keys at every level (F-002, F-007, F-012, F-059)."""
+        errors: List[str] = []
+        cls._walk_schema(_ROOT_SCHEMA, raw_data, "", errors, full=True)
+        return errors
+
+    @classmethod
     def load(cls, config_path: Optional[str] = None) -> Config:
         """Load configuration from file or use defaults."""
         config = Config()
@@ -730,9 +1134,12 @@ class ConfigLoader:
         if config_path:
             path = Path(config_path)
             if not path.exists():
-                print(f"Warning: Config file not found: {path}")
-                print("Using default configuration.")
-                return config
+                # F-003: an EXPLICIT `--config` path that doesn't exist is an
+                # operator error, not a cue to silently boot on all-default
+                # (shutdown-armed) config. Fail loud so `run`/`validate` exit
+                # non-zero instead of arming poweroff on a phantom config. The
+                # default-path search below keeps its lenient fallback.
+                raise SystemExit(f"ERROR: config file not found: {path}")
         else:
             path = None
             for default_path in cls.DEFAULT_CONFIG_PATHS:
@@ -767,6 +1174,13 @@ class ConfigLoader:
         # rather than a raw AttributeError traceback. Only cold start reaches
         # here -- the reload path wraps its own parse.
         try:
+            # F-001/F-008: fatal structural gate BEFORE parsing. A scalar where
+            # a mapping/list is required would otherwise crash _parse_config with
+            # a raw AttributeError, or (for lists) char-split a string into
+            # per-character entries. Reject it with a clean, aggregated message.
+            struct_errors = cls._schema_structural_errors(data)
+            if struct_errors:
+                raise ConfigSectionError("\n".join(struct_errors))
             config = cls._parse_config(data)
         except ConfigSectionError as exc:
             raise SystemExit(str(exc))
@@ -924,6 +1338,7 @@ class ConfigLoader:
                 command_timeout=server_data.get('command_timeout', 30),
                 shutdown_command=server_data.get('shutdown_command', 'sudo shutdown -h now'),
                 use_sudo=server_data.get('use_sudo', False),
+                augment_remote_path=server_data.get('augment_remote_path', False),
                 ssh_key_path=server_data.get('ssh_key_path'),
                 ssh_options=server_data.get('ssh_options', []),
                 pre_shutdown_commands=pre_cmds,
@@ -1110,6 +1525,17 @@ class ConfigLoader:
             retry_backoff_max=notif_retry_backoff_max,
         )
 
+    @staticmethod
+    def _normalize_syslog_facility(value):
+        """Lower-case a syslog facility at parse time (F-056).
+
+        Syslog facility names are case-insensitive, so we canonicalise to
+        lower-case here rather than in ``validate_config`` -- validation must be
+        a read-only check, not a silent rewrite. A non-string value is passed
+        through unchanged so ``validate_config`` still catches it as invalid.
+        """
+        return value.lower() if isinstance(value, str) else value
+
     @classmethod
     def _parse_config(cls, data: Dict[str, Any]) -> Config:
         """Parse configuration dictionary into Config object.
@@ -1143,7 +1569,13 @@ class ConfigLoader:
                     enabled=syslog_data.get('enabled', config.logging.syslog.enabled),
                     address=syslog_data.get('address', config.logging.syslog.address),
                     port=syslog_data.get('port', config.logging.syslog.port),
-                    facility=syslog_data.get('facility', config.logging.syslog.facility),
+                    # F-056: normalize the facility to lower-case at PARSE time so
+                    # validate_config stays side-effect-free (it used to mutate the
+                    # config here, which meant "validating" a config quietly
+                    # rewrote it). A non-str value is left untouched so
+                    # validate_config's isinstance check still rejects it.
+                    facility=cls._normalize_syslog_facility(
+                        syslog_data.get('facility', config.logging.syslog.facility)),
                 ),
             )
 
@@ -1190,10 +1622,20 @@ class ConfigLoader:
             api_data = raw_api if isinstance(raw_api, dict) else {}
             raw_auth = api_data.get('auth')
             auth_data = raw_auth if isinstance(raw_auth, dict) else {}
+            raw_allowed_hosts = api_data.get('allowed_hosts',
+                                             config.api.allowed_hosts)
+            # F-016: coerce to a list of strings. The schema gate already
+            # rejects a scalar as fatal, but stay defensive here so a stray
+            # non-list can't crash the loader before validation reports it.
+            if isinstance(raw_allowed_hosts, list):
+                allowed_hosts = [str(h) for h in raw_allowed_hosts]
+            else:
+                allowed_hosts = list(config.api.allowed_hosts)
             config.api = APIConfig(
                 enabled=api_data.get('enabled', config.api.enabled),
                 bind=api_data.get('bind', config.api.bind),
                 port=api_data.get('port', config.api.port),
+                allowed_hosts=allowed_hosts,
                 auth=AuthConfig(
                     enabled=auth_data.get('enabled', config.api.auth.enabled),
                     require_for_reads=auth_data.get(
@@ -1438,11 +1880,16 @@ class ConfigLoader:
         for entry in ups_list:
             ups_config = cls._parse_ups_config(entry)
 
-            # Per-UPS triggers inherit from global, override if specified
+            # Per-UPS triggers inherit from global, override if specified.
+            # F-060: a group WITHOUT its own triggers must get its OWN copy of the
+            # global block, not the same object. ELI5: hand each cook their own
+            # recipe card, not one shared card taped to the fridge -- a later edit
+            # to one group's triggers (a reload, a runtime tweak) must not bleed
+            # into every other group and the global.
             if 'triggers' in entry:
                 triggers = cls._parse_triggers_config(entry['triggers'], global_triggers)
             else:
-                triggers = global_triggers
+                triggers = copy.deepcopy(global_triggers)
 
             is_local = entry.get('is_local', False)
 
@@ -1525,11 +1972,13 @@ class ConfigLoader:
             ups_sources = [str(s) for s in ups_sources_raw]
 
             # Per-group triggers inherit from global, overriding only fields
-            # the user actually re-specifies.
+            # the user actually re-specifies. F-060: deep-copy the global block for
+            # a group without its own triggers so a later mutation to one group's
+            # triggers can't leak into every other group and the global.
             if 'triggers' in entry:
                 triggers = cls._parse_triggers_config(entry['triggers'], global_triggers)
             else:
-                triggers = global_triggers
+                triggers = copy.deepcopy(global_triggers)
 
             remote_servers: List[RemoteServerConfig] = []
             if 'remote_servers' in entry:
@@ -1580,6 +2029,13 @@ class ConfigLoader:
         messages = []
 
         if raw_data:
+            # F-002/F-007/F-012/F-059: declarative schema sweep. Runs UNDER the
+            # hand-written semantic checks below — it adds boolean/int type
+            # rejection, per-compose-file stop_timeout validation, the
+            # notifications numeric/url checks, and unknown-key sweeps at every
+            # level (including the previously-unswept top level). See the schema
+            # block near the top of this module.
+            messages.extend(cls._schema_errors(raw_data))
             trigger_keys = {
                 "low_battery_threshold", "critical_runtime_threshold",
                 "on_battery_stabilization_delay", "depletion",
@@ -1588,7 +2044,8 @@ class ConfigLoader:
             remote_server_keys = {
                 "name", "enabled", "host", "user", "connect_timeout",
                 "command_timeout", "shutdown_command", "ssh_key_path",
-                "use_sudo", "ssh_options", "pre_shutdown_commands", "parallel",
+                "use_sudo", "augment_remote_path", "ssh_options",
+                "pre_shutdown_commands", "parallel",
                 "shutdown_order", "shutdown_safety_margin",
                 "is_host_loopback", "host_identity_command",
                 "expected_host_identity",
@@ -1627,7 +2084,7 @@ class ConfigLoader:
                 )
             messages.extend(cls._unknown_key_errors(
                 "api", raw_data.get("api", {}),
-                {"enabled", "bind", "port", "auth"},
+                {"enabled", "bind", "port", "allowed_hosts", "auth"},
             ))
             raw_api_section = raw_data.get("api", {})
             if isinstance(raw_api_section, dict):
@@ -1970,14 +2427,18 @@ class ConfigLoader:
         import logging.handlers
         valid_facilities = set(logging.handlers.SysLogHandler.facility_names)
         facility = config.logging.syslog.facility
+        # F-056: validation is read-only. The facility was already lower-cased at
+        # parse time (_normalize_syslog_facility), so we only CHECK it here and
+        # never rewrite the config. The ``.lower()`` in the membership test keeps
+        # a programmatically-built (unparsed) mixed-case Config acceptable without
+        # mutating it. A non-str slips past parse untouched and is rejected by the
+        # isinstance arm below.
         if (not isinstance(facility, str)
                 or facility.lower() not in valid_facilities):
             messages.append(
                 "ERROR: logging.syslog.facility must be a valid syslog "
                 f"facility, got {facility!r}."
             )
-        elif facility != facility.lower():
-            config.logging.syslog.facility = facility.lower()
 
         if not cls._is_int_nonbool_in_range(config.api.port, minimum=1, maximum=65535):
             messages.append(
@@ -2684,6 +3145,12 @@ class ConfigLoader:
                         f"a boolean, got {server.use_sudo!r}"
                     )
 
+                if not isinstance(server.augment_remote_path, bool):
+                    messages.append(
+                        f"ERROR: Remote server '{display}': augment_remote_path "
+                        f"must be a boolean, got {server.augment_remote_path!r}"
+                    )
+
                 if not isinstance(server.is_host_loopback, bool):
                     messages.append(
                         f"ERROR: Remote server '{display}': is_host_loopback "
@@ -2929,7 +3396,9 @@ class ConfigLoader:
                 if not allow_none:
                     messages.append(f"ERROR: {label} must be set to a number")
                 return
-            if isinstance(val, bool) or not isinstance(val, (int, float)):
+            if (isinstance(val, bool)
+                    or not isinstance(val, (int, float))
+                    or not math.isfinite(val)):
                 messages.append(f"ERROR: {label} must be a number, got {val!r}")
             elif minimum is not None and val < minimum:
                 messages.append(f"ERROR: {label} must be >= {minimum}, got {val!r}")
@@ -2986,13 +3455,17 @@ class ConfigLoader:
         # None/unset is valid and disables cost tracking entirely (B3).
         cpk = config.energy.cost_per_kwh
         if cpk is not None:
-            if isinstance(cpk, bool) or not isinstance(cpk, (int, float)) or cpk < 0:
+            if (isinstance(cpk, bool)
+                    or not isinstance(cpk, (int, float))
+                    or not math.isfinite(cpk) or cpk < 0):
                 messages.append(
                     f"ERROR: energy.cost_per_kwh must be a non-negative number "
                     f"or unset, got {cpk!r}")
         npw = config.energy.nominal_power
         if npw is not None:
-            if isinstance(npw, bool) or not isinstance(npw, (int, float)) or npw <= 0:
+            if (isinstance(npw, bool)
+                    or not isinstance(npw, (int, float))
+                    or not math.isfinite(npw) or npw <= 0):
                 messages.append(
                     f"ERROR: energy.nominal_power must be a positive number "
                     f"or unset, got {npw!r}")

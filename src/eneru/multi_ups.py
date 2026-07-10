@@ -25,11 +25,15 @@ from eneru.mqtt import MQTTPublisher
 from eneru.remote_health import RemoteHealthManager, remote_health_sidecar_path
 from eneru.deferred_delivery import schedule_deferred_stop_or_eager_send
 from eneru.redundancy import RedundancyGroupEvaluator, RedundancyGroupExecutor
+from eneru.runtime import _uses_loopback_delegate
+from eneru.shutdown.remote import loopback_poweroff_sent, select_loopback_results
 from eneru.stats import StatsStore
 from eneru.status import redundancy_state_file_path, sanitize_name
 from eneru.lifecycle import (
+    EVENT_TYPE_DAEMON_START,
     REASON_SEQUENCE_COMPLETE,
     REASON_SIGNAL,
+    classify_event_type,
     classify_startup,
     delete_shutdown_marker,
     delete_upgrade_marker,
@@ -76,6 +80,7 @@ class MultiUPSCoordinator:
         self._api_server: Optional[EneruAPIServer] = None
         self._mqtt_publisher: Optional[MQTTPublisher] = None
         self._redundancy_remote_health_managers: List[RemoteHealthManager] = []
+        self._coordinator_startup_event = (EVENT_TYPE_DAEMON_START, "")
 
         # Redundancy-group runtime (Phase 2). Populated after monitors start.
         self._redundancy_executors: dict = {}
@@ -205,6 +210,13 @@ class MultiUPSCoordinator:
             upgrade_marker=upgrade_marker,
             last_seen_version=last_seen,
         )
+        startup_event_type = classify_event_type(
+            current_version=__version__,
+            shutdown_marker=shutdown_marker,
+            upgrade_marker=upgrade_marker,
+            last_seen_version=last_seen,
+        )
+        self._coordinator_startup_event = (startup_event_type, body)
         # v5.2.1: sweep each per-UPS store for any pending lifecycle row
         # left over from the previous instance (the deferred 'Service
         # Stopped' from _handle_signal) and cancel it BEFORE the new
@@ -427,6 +439,7 @@ class MultiUPSCoordinator:
                 logger=self._logger,
                 state_file_suffix=sanitized,
                 in_redundancy_group=in_rg,
+                coordinator_startup_event=self._coordinator_startup_event,
             )
             self._monitors.append(monitor)
 
@@ -636,7 +649,22 @@ class MultiUPSCoordinator:
                 should_local_shutdown = True
 
         if should_local_shutdown:
-            self._handle_local_shutdown(label)
+            # F-066: fish the triggering monitor's loopback shutdown results
+            # out so _handle_local_shutdown can verify the delegated host
+            # poweroff actually went out before declaring the sequence
+            # complete. The monitor stashed them just before this callback.
+            loopback_results = None
+            monitor = next(
+                (m for m in self._monitors
+                 if m.config.ups_groups and m.config.ups_groups[0] is group),
+                None,
+            )
+            if monitor is not None:
+                loopback_results = select_loopback_results(
+                    monitor.config.remote_servers,
+                    getattr(monitor, "_last_remote_results", []) or [],
+                )
+            self._handle_local_shutdown(label, loopback_results=loopback_results)
         elif self._exit_after_shutdown:
             # Non-local group shutdown completed, exit if requested
             self._log(f"🛑  Group {label} shutdown complete. Exiting (--exit-after-shutdown).")
@@ -681,8 +709,16 @@ class MultiUPSCoordinator:
             self._local_shutdown_initiated = False
             self._clear_global_shutdown_flag("power recovery")
 
-    def _handle_local_shutdown(self, triggered_by: str):
-        """Execute local shutdown with defense-in-depth protection."""
+    def _handle_local_shutdown(self, triggered_by: str,
+                               loopback_results: Optional[list] = None):
+        """Execute local shutdown with defense-in-depth protection.
+
+        ``loopback_results`` (F-066): the triggering monitor's loopback
+        :class:`RemoteShutdownResult` rows, passed by ``_on_group_shutdown``
+        so the delegated branch below can verify the host poweroff was
+        actually DELIVERED over SSH before writing the completion marker.
+        ``None``/empty means "no evidence the poweroff went out".
+        """
         # Defense layer 1: in-memory lock. Set BOTH the "initiated" guard and the
         # "in flight" flag atomically: in_flight tells _clear_local_shutdown_state
         # not to re-arm the guard mid-sequence (M1), which would otherwise let an
@@ -717,7 +753,85 @@ class MultiUPSCoordinator:
                 self._drain_all_groups(timeout=120)
 
             # Execute local shutdown
-            if self.config.local_shutdown.enabled:
+            if self.config.local_shutdown.enabled and _uses_loopback_delegate(
+                    self.config):
+                # F-061: containerized multi-UPS with an is_host_loopback delegate.
+                # The HOST poweroff was ALREADY delivered over SSH by the
+                # triggering monitor's remote-server phase (Phase C, run before
+                # this coordinator callback). Running the in-container poweroff
+                # binary here would fire it INSIDE the non-root container -- either
+                # failing outright or, if privileged, acting in the wrong
+                # namespace -- and double-issue the shutdown. ELI5: the host was
+                # already told to power off through the intercom (SSH); don't ALSO
+                # try to flip a light switch that isn't wired to anything inside
+                # the container. Mirror monitor.py's single-UPS delegated branch:
+                # skip the in-container poweroff, just record completion + marker.
+                self._log(
+                    "🛰️  Host poweroff delegated to loopback SSH (run by the "
+                    "group's remote-server phase). Skipping in-container "
+                    "poweroff."
+                )
+                if self.config.behavior.dry_run:
+                    self._log(
+                        "🧪  [DRY-RUN] Would have delegated host poweroff to "
+                        "loopback SSH (no in-container poweroff)."
+                    )
+                    self._clear_global_shutdown_flag(
+                        "dry-run delegated local shutdown")
+                elif not loopback_results or not all(
+                    loopback_poweroff_sent(r) for r in loopback_results
+                ):
+                    # F-066: the config SHAPE says "delegated", but the
+                    # triggering monitor's results say the loopback poweroff
+                    # was NOT delivered (sshd restarting, key perms, missing
+                    # results). Declaring victory here would hang a "GONE
+                    # HOME" sign while the host is still at its desk: no
+                    # marker gets written, the ❌ tells the operator the host
+                    # is still up, and the in-flight guard is cleared so a
+                    # later trigger can retry the delegation. Mirrors the
+                    # single-UPS incomplete branch in monitor.py.
+                    details = "; ".join(
+                        r.error or "shutdown command was not sent"
+                        for r in (loopback_results or [])
+                        if not loopback_poweroff_sent(r)
+                    ) or "loopback shutdown result missing"
+                    self._log(
+                        "❌  Delegated host poweroff failed; shutdown "
+                        f"sequence is incomplete: {details}"
+                    )
+                    if self._notification_worker:
+                        self._notification_worker.send(
+                            "❌  **Shutdown Sequence Incomplete**\n"
+                            f"Host poweroff delegation failed: {details}",
+                            "failure",
+                            category="shutdown_summary",
+                        )
+                    # Clear the re-entry guard so a future trigger can retry
+                    # the delegated shutdown (the host is still up, so the
+                    # coordinator must stay armed).
+                    with self._local_shutdown_lock:
+                        # Keep the admission guard closed until the outer
+                        # finally block clears the in-flight state atomically.
+                        self._rearm_after_inflight = True
+                    self._clear_global_shutdown_flag(
+                        "failed delegated local shutdown")
+                else:
+                    if self._notification_worker:
+                        self._notification_worker.send(
+                            "✅  **Shutdown Sequence Complete**\n"
+                            "Host poweroff delegated to loopback SSH.",
+                            "failure",
+                            category="shutdown_summary",
+                        )
+                        self._notification_worker.flush(timeout=5)
+                    # Tag as power-loss-triggered so the next start emits
+                    # "📊  Recovered" (matches the single-UPS delegated path).
+                    write_shutdown_marker(
+                        Path(self.config.statistics.db_directory),
+                        version=__version__,
+                        reason=REASON_SEQUENCE_COMPLETE,
+                    )
+            elif self.config.local_shutdown.enabled:
                 self._log("🔌  Shutting down local server NOW")
                 if self.config.behavior.dry_run:
                     self._log(f"🧪  [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
@@ -776,7 +890,43 @@ class MultiUPSCoordinator:
                         )
                         if self.config.local_shutdown.message:
                             cmd_parts.append(self.config.local_shutdown.message)
-                        run_command(cmd_parts)
+                        rc, out, err = run_command(cmd_parts)
+                        if rc == 124:
+                            # F-068: rc=124 is run_command's own 30s timeout,
+                            # not the poweroff refusing — the halt may well be
+                            # proceeding while the caller is left on hold.
+                            # Ambiguous → warn, keep the marker, skip the
+                            # INCOMPLETE notification (mirrors monitor.py).
+                            self._log(
+                                "⚠️  Host poweroff command timed out after 30s "
+                                "(rc=124) — the shutdown may still be "
+                                "proceeding. Keeping the completion marker."
+                            )
+                        elif rc != 0:
+                            # A healthy `systemctl poweroff` never returns — the
+                            # host cuts power mid-call. If it returns non-zero
+                            # the host is still up, but we already wrote the
+                            # "sequence complete" marker. Leaving it is like
+                            # hanging a "GONE HOME" sign while still at your
+                            # desk: the next start reads it and falsely reports a
+                            # clean recovery. Log it, notify, and tear the marker
+                            # down so the next start doesn't lie.
+                            detail = err.strip() or out.strip()
+                            self._log(
+                                f"❌  ERROR: host poweroff command failed "
+                                f"(rc={rc}): {detail}; the host is still up."
+                            )
+                            if self._notification_worker:
+                                self._notification_worker.send(
+                                    f"❌  **Shutdown Sequence Incomplete**\n"
+                                    f"Host poweroff command failed (rc={rc}); "
+                                    f"the host is still up.",
+                                    "failure",
+                                    category="shutdown_summary",
+                                )
+                            delete_shutdown_marker(
+                                Path(self.config.statistics.db_directory)
+                            )
                         # NOTE (H9): we deliberately do NOT eagerly re-arm the
                         # guard here. Re-entry during the SAME outage is already
                         # blocked by the monitor's suffixed _shutdown_flag_path
@@ -884,7 +1034,7 @@ class MultiUPSCoordinator:
             self._handle_signal(signal.SIGINT, None)
 
     def _send_report_notification(self, body: str, notify_type: str,
-                                  category: str) -> None:
+                                  category: str) -> Optional[int]:
         """Deliver a daemon-wide (fleet) report via the shared worker.
 
         Unlike ``UPSGroupMonitor._send_notification`` this prepends NO per-UPS
@@ -897,9 +1047,10 @@ class MultiUPSCoordinator:
         if not self._notification_worker or not self._monitors:
             return
         escaped = body.replace("@", "@\u200B")   # zero-width space after @
-        self._notification_worker.send(
+        return self._notification_worker.send(
             body=escaped, notify_type=notify_type, category=category,
             store=getattr(self._monitors[0], "_stats_store", None),
+            require_persistent=True,
         )
 
     def _maybe_send_reports(self) -> None:
@@ -1001,20 +1152,22 @@ class MultiUPSCoordinator:
 
     def _reload_notification_worker(self) -> None:
         """Bounce the shared notification worker after config reload."""
-        if self._notification_worker is not None:
-            self._notification_worker.stop()
-            self._notification_worker = None
-        for mon in self._monitors:
-            mon._notification_worker = None
-        for executor in self._redundancy_executors.values():
-            executor._notification_worker = None
+        old_worker = self._notification_worker
         if not self.config.notifications.enabled:
+            if old_worker is not None:
+                old_worker.stop()
+            self._notification_worker = None
+            for mon in self._monitors:
+                mon._notification_worker = None
+            for executor in self._redundancy_executors.values():
+                executor._notification_worker = None
             self._log("📢  Notifications: disabled")
             return
         if not APPRISE_AVAILABLE:
             self._log(
                 "⚠️  WARNING: Notifications enabled but apprise not installed. "
-                "Install with: uv pip install apprise"
+                "Install with: uv pip install apprise. Existing worker kept "
+                "active when available."
             )
             return
         # Pass the coordinator's shared logger on the reload path too, so the
@@ -1022,13 +1175,22 @@ class MultiUPSCoordinator:
         # like the startup path (ISS-060) rather than falling back to print.
         worker = NotificationWorker(self.config, logger=self._logger)
         if not worker.start():
-            self._log("⚠️  WARNING: Failed to reload notifications")
+            self._log(
+                "⚠️  WARNING: Failed to reload notifications; keeping the "
+                "existing worker active"
+            )
             return
+        # Register stores before stopping the old sender so the replacement is
+        # fully usable first. Atomic claims make the short overlap safe.
         for mon in self._monitors:
-            mon._notification_worker = worker
             store = getattr(mon, "_stats_store", None)
             if store is not None and store._conn is not None:
                 worker.register_store(store)
+        if old_worker is not None:
+            old_worker.handoff_memory_buffer_to(worker)
+            old_worker.stop()
+        for mon in self._monitors:
+            mon._notification_worker = worker
         for executor in self._redundancy_executors.values():
             executor._notification_worker = worker
         self._notification_worker = worker

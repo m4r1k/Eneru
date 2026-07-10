@@ -1059,5 +1059,140 @@ PY
 echo "PASS: MQTT status payload arrived with power-quality metrics"
 )
 
+# ======================================================================
+# Test 59: Remote PATH augmentation opt-in and safe default both work
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 59: Remote PATH augmentation opt-in and safe default both work"
+
+config=/tmp/config-e2e-path-opt-out.yaml
+docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
+  rm -f /tmp/eneru-path-verbatim /tmp/eneru-path-augmented
+cat >"$config" <<'YAML'
+ups:
+  name: "TestUPS@localhost:3493"
+  check_interval: 1
+triggers:
+  on_battery_stabilization_delay: 0
+  low_battery_threshold: 95
+  critical_runtime_threshold: 600
+behavior:
+  dry_run: false
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-path-state"
+  battery_history_file: "/tmp/eneru-e2e-path-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-path-flag"
+statistics:
+  db_directory: "/tmp/eneru-e2e-path-stats"
+remote_servers:
+  - name: "default-path-target"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    augment_remote_path: true
+    shutdown_command: "eneru-path-probe"
+    ssh_options:
+      - "-o Port=2222"
+      - "-o StrictHostKeyChecking=no"
+      - "-o UserKnownHostsFile=/dev/null"
+      - "-o IdentityFile=/tmp/e2e-ssh-key"
+  - name: "verbatim-path-target"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    shutdown_command: "/usr/local/bin/verify-unaugmented-path"
+    ssh_options:
+      - "-o Port=2222"
+      - "-o StrictHostKeyChecking=no"
+      - "-o UserKnownHostsFile=/dev/null"
+      - "-o IdentityFile=/tmp/e2e-ssh-key"
+local_shutdown:
+  enabled: false
+YAML
+
+apply_scenario low-battery
+eneru run --config "$config" --exit-after-shutdown \
+  2>&1 | tee /tmp/test59.log
+
+if ! docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
+    test -f /tmp/eneru-path-verbatim; then
+  echo "FAIL: safe PATH default did not deliver the custom command verbatim"
+  cat /tmp/test59.log
+  exit 1
+fi
+if ! docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
+    test -f /tmp/eneru-path-augmented; then
+  echo "FAIL: opted-in PATH augmentation did not resolve the Synology probe"
+  cat /tmp/test59.log
+  exit 1
+fi
+echo "PASS: opted-in PATH augmentation and the safe default both worked"
+)
+
+# ======================================================================
+# Test 60: Local Compose shutdown honors the configured timeout form
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 60: Local Compose shutdown honors the configured timeout form"
+
+compose_file=/tmp/eneru-e2e-compose-timeout.yaml
+config=/tmp/config-e2e-compose-timeout.yaml
+cat >"$compose_file" <<'YAML'
+services:
+  sleeper:
+    image: alpine:3.20
+    container_name: eneru-e2e-compose-timeout
+    command: ["sleep", "infinity"]
+YAML
+trap 'docker compose -f "$compose_file" down -v --remove-orphans >/dev/null 2>&1 || true' EXIT
+docker compose -f "$compose_file" up -d
+
+cat >"$config" <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+  check_interval: 1
+triggers:
+  on_battery_stabilization_delay: 0
+  low_battery_threshold: 95
+  critical_runtime_threshold: 600
+behavior:
+  dry_run: false
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-compose-state"
+  battery_history_file: "/tmp/eneru-e2e-compose-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-compose-flag"
+statistics:
+  db_directory: "/tmp/eneru-e2e-compose-stats"
+containers:
+  enabled: true
+  runtime: docker
+  stop_timeout: 3
+  shutdown_all_remaining_containers: false
+  compose_files:
+    - path: "$compose_file"
+      stop_timeout: 2
+filesystems:
+  sync_enabled: false
+local_shutdown:
+  enabled: false
+YAML
+
+apply_scenario low-battery
+eneru run --config "$config" --exit-after-shutdown \
+  2>&1 | tee /tmp/test60.log
+
+if docker inspect eneru-e2e-compose-timeout >/dev/null 2>&1; then
+  echo "FAIL: compose stack remained after Eneru's down -t shutdown phase"
+  cat /tmp/test60.log
+  exit 1
+fi
+trap - EXIT
+echo "PASS: Eneru removed the Compose stack with the configured timeout"
+)
+
 echo ""
 echo "=== Group 'single-ups-core' completed successfully ==="

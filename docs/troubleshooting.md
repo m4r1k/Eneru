@@ -185,7 +185,7 @@ sudo ssh user@remote-server "sudo -n true && echo sudo OK"
 |-------|---------|
 | `Permission denied (publickey,password)` | The key is missing, wrong, unreadable, or installed for a different user |
 | `sudo: a password is required` | Passwordless sudo is not configured for the command Eneru runs |
-| `command not found` | Use a full path or platform-specific shutdown command |
+| `command not found` | Eneru augments `PATH` for remote commands (standard sbin dirs plus Synology's `/usr/syno/sbin`) so bare names like `synoshutdown` resolve in the daemon's non-interactive SSH session. If it still can't be found, a restrictive sudoers `secure_path` is stripping the dir — use a full path, e.g. `sudo /usr/syno/sbin/synoshutdown -s` |
 | Timeout | Firewall, host down, SSH service down, or too-low `connect_timeout` |
 | Host key changed | Verify the remote host before accepting the new key |
 

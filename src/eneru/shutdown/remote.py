@@ -22,6 +22,53 @@ from eneru.utils import run_command
 # slow pre-phase can't starve the poweroff (H8).
 _SSH_OVERHEAD_BUFFER = 30
 
+# ELI5: when you log in at a terminal, your shell reads its "startup notes"
+# (/etc/profile, ~/.profile) that say where all the tools live -- that's how
+# your interactive `sudo which synoshutdown` finds /usr/syno/sbin on a
+# Synology NAS. But `ssh host "cmd"` runs cmd non-interactively, so those
+# notes are NEVER read: the shell starts with a bare, minimal PATH and a bare
+# command name like `synoshutdown` looks like it doesn't exist ("command not
+# found"), even though the file is sitting right there. We fix it by handing
+# the remote shell a note of our own FIRST -- prepend an `export PATH=...`
+# that re-adds the standard privileged dirs plus Synology's /usr/syno/sbin
+# and /usr/syno/bin. We append them AFTER $PATH so the remote's own PATH still
+# wins and any dir that doesn't exist on that host is simply ignored. sudo
+# inherits this augmented PATH (the user's `sudo which` succeeding proves
+# their sudoers has no restrictive secure_path), so `sudo -n synoshutdown`
+# resolves the bare name exactly like an interactive login would. Real
+# incident: DS1821 remote_server target, Eneru 6.1.6 power outage —
+# "sudo: synoshutdown: command not found".
+REMOTE_PATH_PREFIX = (
+    'export PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:'
+    '/sbin:/bin:/usr/syno/sbin:/usr/syno/bin"; '
+)
+
+# ELI5: you phone a warehouse and shout "SHIP IT!" — mid-sentence the line goes
+# dead. Did they hear you? On a small box (BusyBox/Alpine/dropbear/sysvinit) the
+# `poweroff` you just sent kills sshd BEFORE it can mail you back an exit status,
+# so ssh gives up with code 255 and a "connection dropped" complaint. That is
+# NOT the shutdown command failing — it's the shutdown WORKING so fast it hung up
+# on us. We only trust this reading for the FINAL poweroff (a mid-sequence
+# command that drops the line really did fail) and only when the stderr looks
+# like the transport tore down, never a real "Permission denied" 255.
+_SSH_TRANSPORT_TEARDOWN_SIGNATURES = (
+    "closed by remote host",
+    "broken pipe",
+    "connection reset",
+)
+
+
+def _is_ssh_transport_teardown(stderr: str) -> bool:
+    """True when ssh stderr looks like the session was cut mid-command.
+
+    Covers the fixed BusyBox/dropbear phrasings plus OpenSSH's
+    "Connection to <host> closed." (variable host in the middle).
+    """
+    low = stderr.lower()
+    if any(sig in low for sig in _SSH_TRANSPORT_TEARDOWN_SIGNATURES):
+        return True
+    return "connection to" in low and "closed" in low
+
 
 @dataclass
 class RemotePreShutdownResult:
@@ -392,11 +439,20 @@ class RemoteShutdownMixin:
             shutdown_command,
             server.command_timeout,
             "shutdown",
+            is_final_shutdown=True,
         )
 
         if success:
             result.shutdown_sent = True
-            self._log_message(f"  ✅  {display} shutdown command sent successfully")
+            if error_msg:
+                # F-077: sent but unconfirmed (SSH transport tore down before
+                # the exit status came back). shutdown_sent is still True so
+                # the marker is written and no false-incomplete alert fires.
+                self._log_message(
+                    f"  ✅  {display} shutdown command sent ({error_msg})"
+                )
+            else:
+                self._log_message(f"  ✅  {display} shutdown command sent successfully")
         else:
             result.error = error_msg
             self._log_message(
@@ -546,11 +602,19 @@ class RemoteShutdownMixin:
         description: str,
         *,
         deadline: Optional[float] = None,
+        is_final_shutdown: bool = False,
     ) -> Tuple[bool, str]:
         """Run a single command on a remote server via SSH.
 
+        ``is_final_shutdown`` marks the ONE poweroff command (not
+        pre_shutdown_commands): only then is an exit-255 transport teardown
+        treated as "sent (unconfirmed)" rather than a failure (F-077). On
+        success the second tuple element is normally "" but carries a
+        human-readable note ("SSH transport ended (result unknown)") for that
+        unconfirmed case so callers can log it honestly.
+
         Returns:
-            Tuple of (success, error_message)
+            Tuple of (success, error_or_note)
         """
         display_name = server.name or server.host
 
@@ -576,11 +640,34 @@ class RemoteShutdownMixin:
             else:
                 ssh_cmd.extend(["-o", opt])
 
+        # Single lowest common injection point: BOTH the final shutdown_command
+        # and every pre_shutdown_commands entry (custom commands AND the
+        # REMOTE_ACTIONS templates), across the normal remote path AND the
+        # loopback-to-127.0.0.1 path, funnel through here before ssh. Prepend
+        # the PATH augmentation to the ONE argv element that carries the remote
+        # command string so it stays a single element (argv structure intact:
+        # `ssh <opts> user@host "<prefix><command>"`). The LOCAL, non-SSH
+        # execution paths never reach _run_remote_command, so they are
+        # correctly left untouched.
+        #
+        # F-080: the prefix is a POSIX-sh `export PATH=...` statement. On a
+        # csh/tcsh remote (FreeBSD/TrueNAS CORE root) it emits noisy
+        # "export: Command not found." lines; on a cmd.exe/Windows remote `;`
+        # isn't a separator, so the ENTIRE line becomes args to a nonexistent
+        # `export` and the real shutdown silently never runs. Per-server
+        # `augment_remote_path` is opt-in because Eneru cannot reliably infer a
+        # remote login shell before it sends the command. POSIX targets that
+        # need bare commands can enable it; every other shell stays verbatim.
+        remote_command = (
+            REMOTE_PATH_PREFIX + command
+            if server.augment_remote_path
+            else command
+        )
         ssh_cmd.extend([
             "-o", f"ConnectTimeout={server.connect_timeout}",
             "-o", "BatchMode=yes",  # Prevent password prompts from hanging
             f"{server.user}@{server.host}",
-            command
+            remote_command,
         ])
 
         # Add buffer to account for SSH connection overhead, unless a
@@ -610,6 +697,18 @@ class RemoteShutdownMixin:
                     f"(configured {timeout}s, capped by phase deadline)",
                 )
             return False, f"timed out after {timeout}s"
+        elif (
+            is_final_shutdown
+            and exit_code == 255
+            and _is_ssh_transport_teardown(stderr)
+        ):
+            # F-077: the remote accepted the poweroff and sshd died before
+            # returning status. Report "sent (unconfirmed)" so the
+            # loopback-delegate path writes the completion marker and skips the
+            # false "sequence incomplete" alert. Scoped to the final poweroff
+            # and a transport-teardown stderr — a mid-sequence drop, a non-255
+            # code, or "Permission denied" all stay failures.
+            return True, "SSH transport ended (result unknown)"
         else:
             error_msg = stderr.strip() if stderr.strip() else f"exit code {exit_code}"
             return False, error_msg
@@ -883,11 +982,19 @@ class RemoteShutdownMixin:
             server.command_timeout,
             "shutdown",
             deadline=deadline,
+            is_final_shutdown=True,
         )
 
         if success:
             result.shutdown_sent = True
-            self._log_message(f"  ✅  {display_name} shutdown command sent successfully")
+            if error_msg:
+                # F-077: sent but unconfirmed (SSH transport tore down before
+                # the exit status came back). Treated as sent, not failed.
+                self._log_message(
+                    f"  ✅  {display_name} shutdown command sent ({error_msg})"
+                )
+            else:
+                self._log_message(f"  ✅  {display_name} shutdown command sent successfully")
             # Per-server success used to fire a notification too; dropped in
             # v5.2 — the "Starting" notification is the per-server signal,
             # the aggregate "Sequence Complete" rolls up the result, and

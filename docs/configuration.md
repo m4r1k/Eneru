@@ -325,6 +325,7 @@ The API is opt-in and binds to localhost by default when enabled. With `api.auth
 | `api.enabled` | `false` | Start the embedded HTTP API with `eneru run` |
 | `api.bind` | `127.0.0.1` | Listen address |
 | `api.port` | `9191` | Listen port |
+| `api.allowed_hosts` | `[]` | DNS-rebinding guard: hostnames (case-insensitive) the API answers to when the request's `Host` header carries a DNS name. IP-literal and `localhost` Hosts are always accepted, so browsing by IP is unaffected; any other or missing Host name gets `421 Misdirected Request`. Only needed if you front the API with a hostname |
 | `api.auth.enabled` | unset (`false` until an auth DB user exists) | Opt-in API authentication. When off, the API is read-only and all write surfaces are hard disabled (v5.3 behavior). If omitted, auth auto-activates once the auth DB contains a user |
 | `api.auth.require_for_reads` | `false` | When off, read endpoints (incl. `/metrics`) stay open even with auth on; writes always require a credential. Set on to also gate reads. `/health`, `/ready`, dashboard static files, and `/api/v1/auth/state` stay open for probes/login bootstrap |
 | `api.auth.session_ttl` | `3600` | Dashboard session token lifetime, seconds |
@@ -435,6 +436,13 @@ compose_files:
     stop_timeout: 120
 ```
 
+Eneru runs Compose shutdown as `down -t <seconds>`. Docker Compose v2 and
+Podman's current Compose provider support that form, but older standalone
+`podman-compose` releases may reject `-t` on `down`. Upgrade the provider (or
+use Podman's Docker-compatible Compose provider); keeping
+`shutdown_all_remaining_containers: true` provides a fallback stop pass for
+containers left behind by a failed stack shutdown.
+
 ### Legacy `docker:` compatibility
 
 Older single-UPS configs may use a top-level `docker:` section instead of `containers:`. Eneru still parses it and treats it as Docker-only container config:
@@ -480,6 +488,7 @@ mounts:
 | `command_timeout` | `30` | Default timeout for remote commands |
 | `shutdown_command` | `sudo shutdown -h now` | Final shutdown command |
 | `use_sudo` | `false` | Prefix generated privileged actions and non-sudo final shutdown commands with `sudo -n`. Useful for non-root loopback or remote users with NOPASSWD sudo |
+| `augment_remote_path` | `false` | Opt in to a POSIX-sh `export PATH=...` prefix so bare commands (for example Synology's `synoshutdown`) resolve in a minimal non-interactive `PATH`. Enable only for sh/bash/dash/zsh remotes; csh/tcsh and Windows targets keep receiving commands verbatim. See [Bare command names and PATH](remote-servers.md#bare-command-names-and-path) |
 | `ssh_key_path` | `null` | Optional SSH private-key path, useful for container/Kubernetes volume mounts |
 | `ssh_options` | `[]` | Extra SSH options. Eneru defaults each remote to `StrictHostKeyChecking=accept-new` (learns and pins the host key on first use; bare metal uses the running user's `~/.ssh/known_hosts`, Docker/Podman uses `/var/lib/eneru/ssh/known_hosts`, Kubernetes samples set a PVC-backed path), so no entry is needed for normal use. Set your own `StrictHostKeyChecking` or `UserKnownHostsFile` to override; avoid `StrictHostKeyChecking=no` in production |
 | `pre_shutdown_commands` | `[]` | Pre-shutdown actions or commands. For loopback entries Eneru generates these from the local config — don't duplicate |
@@ -503,6 +512,16 @@ config — don't write them manually there).
 | `sync` | `sync; sync; sleep 2` — flushes filesystem caches |
 | `stop_containers` | Stops all running Docker and Podman containers. v5.5: honors mandatory self-skip for the Eneru container when delegated |
 | `stop_containers_rootless` | **v5.5 (new).** Same as `stop_containers` but iterates rootless Podman per non-system user via `loginctl` + `sudo -u` |
+
+> **`stop_containers_rootless` always uses `sudo -u <user>`**, regardless of the
+> server's `use_sudo` setting. Stopping another user's rootless Podman requires
+> switching to that user's session, and `sudo -u` is the reliable way to enter
+> it with the right `XDG_RUNTIME_DIR`/DBus environment during a shutdown. The
+> SSH user therefore needs sudo rights to run `podman` as those users (a
+> NOPASSWD rule is typical). This one action intentionally does not honor
+> `use_sudo`: dropping the `sudo -u` there would break the drain in exactly the
+> moment it matters, and an extra `sudo` is safer than a rootless container that
+> never stops.
 | `stop_compose` | Compose `down` for the given `path`. v5.5: skips stacks that include the Eneru container when delegated |
 | `stop_vms` | Graceful `virsh shutdown` of all running libvirt VMs, then force-destroy after the configured timeout |
 | `unmount_filesystems` | **v5.5 (new).** Iterates per-mount `umount` with configurable options. Regular remotes provide `pre_shutdown_commands[].mounts`; loopback derives mounts from the local filesystem config |

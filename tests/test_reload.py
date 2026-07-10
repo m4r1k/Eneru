@@ -8,6 +8,7 @@ from eneru import reload as reloadmod
 from eneru.config import Config, ConfigLoader
 from eneru.monitor import UPSGroupMonitor
 from eneru.multi_ups import MultiUPSCoordinator
+from eneru.state import MonitorState
 
 
 def _write(path, text):
@@ -503,6 +504,8 @@ def test_monitor_reload_notification_worker_restarts_and_registers(monkeypatch):
     assert mon._notification_worker is worker
     # Reload must forward the shared logger (else warnings fall back to print).
     assert worker_cls.call_args.kwargs.get("logger") is mon.logger
+    # F-067: the old worker's memory buffer is handed to the replacement.
+    old.handoff_memory_buffer_to.assert_called_once_with(worker)
 
 
 @pytest.mark.unit
@@ -523,11 +526,36 @@ def test_monitor_reload_notification_worker_warns_when_apprise_missing(monkeypat
     old = mon._notification_worker
     mon._reload_notification_worker()
 
-    old.stop.assert_called_once()
-    assert mon._notification_worker is None
+    old.stop.assert_not_called()
+    assert mon._notification_worker is old
     logged = " ".join(str(c.args[0]) for c in mon._log_message.call_args_list)
     assert "apprise not installed" in logged
     assert "uv pip install apprise" in logged
+
+
+@pytest.mark.unit
+def test_monitor_reload_start_failure_keeps_old_worker(monkeypatch):
+    import eneru.monitor as monitormod
+
+    mon = object.__new__(UPSGroupMonitor)
+    mon.config = Config()
+    mon.config.notifications.enabled = True
+    old = MagicMock()
+    mon._notification_worker = old
+    mon._stats_store = MagicMock()
+    mon._log_message = MagicMock()
+    mon.logger = object()
+    replacement = MagicMock()
+    replacement.start.return_value = False
+    monkeypatch.setattr(monitormod, "APPRISE_AVAILABLE", True)
+    monkeypatch.setattr(
+        monitormod, "NotificationWorker", MagicMock(return_value=replacement),
+    )
+
+    mon._reload_notification_worker()
+
+    assert mon._notification_worker is old
+    old.stop.assert_not_called()
 
 
 @pytest.mark.unit
@@ -583,6 +611,8 @@ def test_coordinator_reload_notification_worker_rewires_children(monkeypatch):
     assert executor._notification_worker is worker
     # Reload must forward the shared logger (else warnings fall back to print).
     assert worker_cls.call_args.kwargs.get("logger") is coord._logger
+    # F-067: the old worker's memory buffer is handed to the replacement.
+    old.handoff_memory_buffer_to.assert_called_once_with(worker)
 
 
 @pytest.mark.unit
@@ -670,3 +700,151 @@ def test_reload_buckets_are_mutually_exclusive_and_no_unknown_names():
     real_fields = {f.name for f in dataclasses.fields(Config)}
     for name in safe | sub | restart:
         assert name in real_fields, f"reload bucket references unknown field {name!r}"
+
+
+# ----- F-009: startup runtime synthesis mirrored onto the fresh parse -----
+
+@pytest.mark.unit
+def test_reload_preserves_cli_dry_run(tmp_path):
+    """F-009: --dry-run is a CLI override recorded on the running config; a
+    SIGHUP reload of a file that says dry_run: false must NOT disarm the
+    rehearsal daemon (live-safety reversal)."""
+    import argparse
+    from eneru.cli import _apply_run_overrides
+
+    p = tmp_path / "a.yaml"
+    live = _load(_write(p, "ups:\n  name: U@h\nbehavior:\n  dry_run: false\n"))
+    _apply_run_overrides(live, argparse.Namespace(dry_run=True))
+    assert live.behavior.dry_run is True
+
+    report = reloadmod.perform_reload(live, [live], str(p))
+
+    assert report["reloaded"]
+    assert live.behavior.dry_run is True        # still a rehearsal daemon
+    assert "behavior" not in report["applied"]  # and no false diff either
+
+
+@pytest.mark.unit
+def test_reload_preserves_cli_api_overrides(tmp_path):
+    """F-009: --api/--api-bind/--api-port overrides must be re-applied to the
+    fresh parse, or every reload falsely reports 'api' restart-required."""
+    import argparse
+    from eneru.cli import _apply_run_overrides
+
+    p = tmp_path / "a.yaml"
+    live = _load(_write(p, "ups:\n  name: U@h\n"))
+    _apply_run_overrides(live, argparse.Namespace(
+        dry_run=False, api=True, api_bind="0.0.0.0", api_port=9999))
+    assert live.api.enabled is True and live.api.port == 9999
+
+    report = reloadmod.perform_reload(live, [live], str(p))
+
+    assert report["reloaded"]
+    assert "api" not in report["restartRequired"]
+    assert live.api.enabled is True and live.api.port == 9999
+
+
+@pytest.mark.unit
+def test_reload_loopback_config_no_false_restart(tmp_path, monkeypatch, capsys):
+    """F-009: a containerized loopback-delegate config must reload clean.
+    The RUNNING config carries a synthesized is_host_loopback entry plus
+    generated pre-shutdown commands that are not in the YAML; the fresh
+    parse must receive the same synthesis, or every reload falsely flags
+    ups_groups restart-required."""
+    monkeypatch.setattr("eneru.runtime._detect_runtime_context",
+                        lambda: "container (Docker)")
+    from eneru.cli import _prepare_runtime_config
+
+    body = ("ups:\n  name: U@h\n"
+            "containers:\n  enabled: true\n"
+            "local_shutdown:\n  enabled: true\n")
+    p = tmp_path / "a.yaml"
+    live = _load(_write(p, body))
+    _prepare_runtime_config(live, strict_key_check=False)
+    capsys.readouterr()  # discard the legitimate startup banner/warning
+    # Sanity: the loopback delegate WAS synthesized onto the running config.
+    assert any(s.is_host_loopback for s in live.remote_servers)
+
+    report = reloadmod.perform_reload(live, [live], str(p))
+
+    assert report["reloaded"]
+    assert "auto-enabled host-loopback delegate" not in capsys.readouterr().err
+    assert not any(r.startswith("ups_groups")
+                   for r in report["restartRequired"]), report
+
+
+@pytest.mark.unit
+def test_reload_container_logging_rewrite_no_false_restart(tmp_path,
+                                                           monkeypatch):
+    """F-009: inside a container the legacy logging.* defaults are rewritten
+    to /var/{log,run}/eneru/ at startup; the fresh parse must get the same
+    rewrite, or every reload falsely reports 'logging' restart-required."""
+    monkeypatch.setattr("eneru.runtime._detect_runtime_context",
+                        lambda: "container (Docker)")
+    from eneru.cli import _rewrite_legacy_paths_for_container
+
+    p = tmp_path / "a.yaml"
+    live = _load(_write(p, "ups:\n  name: U@h\n"))  # logging keeps defaults
+    _rewrite_legacy_paths_for_container(live)
+    assert live.logging.file == "/var/log/eneru/ups-monitor.log"
+
+    report = reloadmod.perform_reload(live, [live], str(p))
+
+    assert report["reloaded"]
+    assert "logging" not in report["restartRequired"]
+
+
+@pytest.mark.unit
+def test_reload_synthesis_error_reported_not_raised(tmp_path, monkeypatch):
+    """F-009 defensive branch: an exception inside the synthesis mirror is
+    reported as a reload error (daemon keeps its old config), never raised
+    into the signal handler."""
+    p = tmp_path / "a.yaml"
+    live = _load(_write(p, "ups:\n  name: U@h\n"))
+
+    def boom(cfg, primary):
+        raise RuntimeError("synthesis exploded")
+
+    monkeypatch.setattr(reloadmod, "_mirror_startup_synthesis", boom)
+    report = reloadmod.perform_reload(live, [live], str(p))
+    assert report["reloaded"] is False
+    assert any("synthesis exploded" in e for e in report["errors"])
+
+
+@pytest.mark.unit
+def test_reload_during_on_battery_preserves_outage_state(tmp_path):
+    """Behavioural-gap 6: a config hot-reload that lands DURING an outage must
+    swap only config -- it must not reset the on-battery clock or clear a
+    latched advisory trigger held in MonitorState. Outage state lives on the
+    monitor's ``state`` object, which the safe-swap path never touches."""
+    live = _load(_write(
+        tmp_path / "live.yaml",
+        "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 20\n"))
+    live.logging.state_file = str(tmp_path / "state")
+    live.logging.battery_history_file = str(tmp_path / "history")
+    live.logging.shutdown_flag_file = str(tmp_path / "flag")
+    live.logging.file = None
+
+    monitor = UPSGroupMonitor(live)
+    monitor.state = MonitorState()
+    # Simulate an in-progress outage with a latched advisory trigger.
+    monitor.state.on_battery_start_time = 1_700_000_000
+    monitor.state.on_battery_start_mono = 123.456
+    monitor.state.trigger_active = True
+    monitor.state.trigger_reason = "critical runtime"
+
+    new = _load(_write(
+        tmp_path / "new.yaml",
+        "ups:\n  name: U@h\ntriggers:\n  low_battery_threshold: 35\n"))
+
+    report = reloadmod.apply_reload(monitor.config, [monitor.config], new)
+
+    # Positive control: the reload genuinely took effect (triggers swapped live).
+    assert "triggers:U@h" in report["applied"]
+    assert monitor.config.triggers.low_battery_threshold == 35
+
+    # The outage / latch state SURVIVES the config swap.
+    assert monitor.state.on_battery_start_time == 1_700_000_000
+    assert monitor.state.on_battery_start_mono == 123.456
+    assert monitor.state.trigger_active is True
+    assert monitor.state.trigger_reason == "critical runtime"

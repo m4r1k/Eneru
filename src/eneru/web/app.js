@@ -25,6 +25,33 @@ let lastUpsRows = [];
 let lastGroups = [];
 let eventSortDirection = "asc";
 
+// Pure refresh helpers kept separate from DOM work so the state transitions can
+// be exercised in the no-browser Node harness.
+function nutStatusTokens(status) {
+  return new Set(String(status || "").toUpperCase().trim().split(/\s+/).filter(Boolean));
+}
+
+function powerStateSignature(rows) {
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    const tokens = nutStatusTokens(row && row.status);
+    const state = ["OL", "OB", "LB", "FSD"].filter((t) => tokens.has(t)).join("+");
+    return String((row && row.name) || "") + "=" + state;
+  }).sort().join("|");
+}
+
+function authStateRequiresClear(authState, cfg, hasToken) {
+  if (!hasToken) return false;
+  const explicitlyDisabled = !!(authState && authState.ok && authState.data
+    && authState.data.enabled === false);
+  const treatedAsAnonymous = !!(cfg && cfg.ok && cfg.data
+    && cfg.data.detail === "sanitized");
+  return explicitlyDisabled || treatedAsAnonymous;
+}
+
+function responseInvalidatesAuth(status, path) {
+  return status === 401 && path !== "/api/v1/auth/login";
+}
+
 // ----- theme (light / dark / system) -----
 
 function applyTheme(value) {
@@ -68,7 +95,7 @@ async function api(path, opts) {
     // instead of an unhandled rejection that silently freezes the poll loop.
     return { ok: false, status: 0, data: null };
   }
-  if (res.status === 401 && path !== "/api/v1/auth/login") clearAuthState();
+  if (responseInvalidatesAuth(res.status, path)) clearAuthState();
   let data = null;
   try { data = await res.json(); } catch (_e) { /* non-JSON (static) */ }
   return { ok: res.ok, status: res.status, data };
@@ -1067,6 +1094,16 @@ function eventKey(e) {
   return (e.source || "") + "|" + id;
 }
 
+// F-029: the accumulated list is capped to the NEWEST `eventsCap` rows so a long
+// polling session can't grow unbounded. But "Load older" fetches OLDER rows, and
+// a fixed cap trimmed to the newest N immediately threw away the very rows the
+// operator just paged in — the button looked dead. So the cap starts at a
+// baseline and GROWS by one page each explicit "Load older" click (see
+// loadOlderEvents); resetEvents() restores the baseline whenever the dataset
+// changes (range/filter), keeping passive-poll growth bounded.
+const EVENTS_BASE_CAP = 2000;
+let eventsCap = EVENTS_BASE_CAP;
+
 // Merge incoming events into the accumulated, de-duplicated list (so polling and
 // "Load older" both grow it without repeats), sorted ascending by (ts, id) and
 // capped so a long session can't grow unbounded.
@@ -1082,7 +1119,7 @@ function mergeEvents(incoming) {
         (as < bs ? -1 : as > bs ? 1 : 0) ||
         ((a.id || 0) - (b.id || 0));
     });
-  if (lastEvents.length > 2000) lastEvents = lastEvents.slice(-2000);
+  if (lastEvents.length > eventsCap) lastEvents = lastEvents.slice(-eventsCap);
   updateEventTypeFilter(lastEvents);
   // The 10s poll merges fresh rows and rebuilds the table; preserve the
   // operator's scroll so a passive refresh doesn't yank the Events tab up to
@@ -1118,11 +1155,17 @@ async function loadEvents(beforeEvent, clearSelection = false) {
 async function loadOlderEvents() {
   const oldest = lastEvents[0];   // ascending sort -> [0] is the oldest shown
   if (!oldest) { await loadEvents(); return; }
+  // F-029: grow the newest-rows cap by a page before paging older, so the older
+  // rows we're about to fetch survive mergeEvents' slice(-eventsCap) instead of
+  // being discarded the instant they arrive. Growth is bounded by operator
+  // clicks (one page each) and reset by resetEvents() on a dataset change.
+  eventsCap += EVENTS_BASE_CAP;
   await loadEvents(oldest);
 }
 
 function resetEvents() {
   lastEvents = [];
+  eventsCap = EVENTS_BASE_CAP;   // F-029: new dataset -> back to the baseline cap
   // A range change is a new dataset, so the selection no longer applies.
   loadEvents(undefined, true);
 }
@@ -1958,9 +2001,12 @@ function drawChart(hostId, series, options) {
 
   // Event overlays: vertical guides at each event timestamp inside the range,
   // colored by type. Cap markers so a dense window doesn't drown the SVG.
+  // Markers are tier-1 only — the feed also carries boundary (DAEMON_*) rows
+  // for the outage-band math above, which must not render as dots (F-094).
   const events = options.events || [];
   if (events.length) {
-    const inRange = events.filter((e) => e.ts >= t0 && e.ts <= t1);
+    const inRange = events.filter(
+      (e) => e.ts >= t0 && e.ts <= t1 && isTier1Event(e.eventType || e.event));
     const MAX = 100;
     const shown = inRange.length > MAX
       ? inRange.filter((_e, i) => i % Math.ceil(inRange.length / MAX) === 0)
@@ -2054,7 +2100,7 @@ async function fetchTierEvents(ups, from, to) {
   const ev = await api("/api/v1/events?" + eq);
   const rows = (ev.ok && ev.data && ev.data.events) || [];
   return rows.filter(
-    (e) => eventMatchesSource(e, ups) && isTier1Event(e.eventType || e.event));
+    (e) => eventMatchesSource(e, ups) && isChartFeedEvent(e.eventType || e.event));
 }
 
 // Markers + outage bands come from the SELECTED window only (low cap pressure).
@@ -2067,7 +2113,9 @@ async function loadChartEvents(ups, from, to, range) {
   let hidden = 0;
   if (range !== null && range < CHART_EVENT_HORIZON) {
     const older = await fetchTierEvents(ups, to - CHART_EVENT_HORIZON, from - 1);
-    hidden = older.length;
+    // The nudge says "earlier POWER events" — count tier-1 rows only, not the
+    // boundary (DAEMON_*) rows the feed also carries for the band math.
+    hidden = older.filter((e) => isTier1Event(e.eventType || e.event)).length;
   }
   return { events, hidden };
 }
@@ -2101,7 +2149,9 @@ function outageLabel(head, s) {
   if (s.cut) label += " · on battery " + new Date(s.cut.ts * 1000).toLocaleString();
   label += s.restore
     ? " · restored " + new Date(s.restore.ts * 1000).toLocaleString()
-    : " · ongoing or restore outside range";
+    : s.endedAtBoundary
+      ? " · ended at shutdown " + new Date(s.end * 1000).toLocaleString()
+      : " · ongoing or restore outside range";
   return label;
 }
 
@@ -2116,7 +2166,9 @@ function outageTipNode(head, s) {
   kids.push(el("div", { class: s.restore ? "tip-body" : "tip-sub",
     text: s.restore
       ? "Restored: " + new Date(s.restore.ts * 1000).toLocaleString()
-      : "Ongoing / restore outside range" }));
+      : s.endedAtBoundary
+        ? "Ended at shutdown: " + new Date(s.end * 1000).toLocaleString()
+        : "Ongoing / restore outside range" }));
   return kids;
 }
 
@@ -2128,30 +2180,91 @@ function outageTipNode(head, s) {
 // still open at the right edge, or a restore whose cut predates the window)
 // extend to the chart edge so partial outages still read correctly.
 const MIN_OUTAGE_PX = 3;
-function appendOutageBands(svg, events, x, t0, t1, yTop, yBot) {
+
+// Boundary events (besides POWER_RESTORED) that also CLOSE an open outage
+// band. ELI5: an outage is a red bar we draw from "power died" to "power
+// back". Normally the daemon draws the end itself when it sees OB→OL
+// (POWER_RESTORED). But a bad outage kills the host: the daemon fires a
+// shutdown (EMERGENCY/DELEGATED_SHUTDOWN_INITIATED), the box powers off, and
+// on the next boot it starts FRESH (DAEMON_START) already on line — it never
+// witnesses OB→OL, so no POWER_RESTORED is ever emitted. Without a fallback
+// the red bar would run to "now" forever (perma-red dashboard). The truth is:
+// once the daemon shut down or restarted it could no longer observe the
+// outage, so the VISIBLE band must end at that boundary, not at "now".
+// (v6.1.7 also makes the server stamp a real POWER_RESTORED on power-loss
+// recovery; this client guard covers pre-fix history and the general case.)
+const OUTAGE_CLOSE_BOUNDARIES = [
+  "POWER_RESTORED",
+  "DAEMON_RECOVERED",
+  "EMERGENCY_SHUTDOWN_INITIATED",
+  "DELEGATED_SHUTDOWN_INITIATED",
+  "DAEMON_START",
+];
+function isOutageBoundaryEvent(type) {
+  const u = (type || "").toUpperCase();
+  return OUTAGE_CLOSE_BOUNDARIES.some((b) => u.includes(b));
+}
+// What the chart event feed keeps: power (tier-1) events PLUS outage close
+// boundaries. The boundaries MUST survive the feed filter or the band math
+// below never sees them: an ON_BATTERY whose only closing event is a daemon
+// restart (power died → host shut down → fresh boot, the real 2026-07-09
+// history) would run the red band to "now" forever (F-094). DAEMON_* rows are
+// lifecycle-tier, so a tier-1-only feed strips exactly those boundaries —
+// the door that closes the red curtain was installed behind a bouncer that
+// turned away the very events meant to close it. Markers re-filter to tier-1
+// at draw time, so daemon-start rows never clutter the charts as dots.
+function isChartFeedEvent(type) {
+  return isTier1Event(type) || isOutageBoundaryEvent(type);
+}
+
+// Pure span math (no DOM) so it's unit-testable in a node shim. Turns the raw
+// event stream into outage spans: each ON_BATTERY opens a span that closes on
+// the first following boundary event. A clean POWER_RESTORED marks the span
+// restored; a shutdown/restart boundary closes it as "ended at shutdown"
+// (cut set, restore null, but bounded — NOT run to t1). Only a genuinely
+// ongoing outage (ON_BATTERY with NO boundary after it) extends to t1.
+function computeOutageSpans(events, t0, t1) {
   const evs = (events || [])
     .filter((e) => {
       const t = (e.eventType || e.event || "").toUpperCase();
-      return t.includes("ON_BATTERY") || t.includes("POWER_RESTORED");
+      return t.includes("ON_BATTERY") || isOutageBoundaryEvent(t);
     })
     .slice()
     .sort((a, b) => a.ts - b.ts);
-  if (!evs.length) return;
   const spans = [];
   let openCut = null;
   for (const e of evs) {
     const t = (e.eventType || e.event || "").toUpperCase();
     if (t.includes("ON_BATTERY")) {
       if (openCut === null) openCut = e;          // ignore repeats while open
-    } else {                                       // POWER_RESTORED
-      spans.push({ start: openCut ? openCut.ts : t0, end: e.ts,
-                   cut: openCut, restore: e });
+    } else if (openCut !== null) {                 // a boundary closes the span
+      const restored = t.includes("POWER_RESTORED");
+      spans.push({ start: openCut.ts, end: e.ts,
+                   cut: openCut, restore: restored ? e : null,
+                   endedAtBoundary: !restored });
       openCut = null;
+    } else if (t.includes("POWER_RESTORED")) {
+      // A restore whose opening ON_BATTERY predates the window: draw the
+      // band from the chart's left edge so the partial outage still reads.
+      // (Only a real restore does this — a bare shutdown/restart boundary
+      // with no open cut is not an outage and draws nothing.)
+      spans.push({ start: t0, end: e.ts, cut: null, restore: e,
+                   endedAtBoundary: false });
     }
+    // a shutdown/restart boundary with no open cut is not an outage span
   }
   if (openCut !== null) {
-    spans.push({ start: openCut.ts, end: t1, cut: openCut, restore: null });
+    // No boundary followed — the daemon is still alive and the outage is
+    // genuinely ongoing, so run the band to "now".
+    spans.push({ start: openCut.ts, end: t1, cut: openCut, restore: null,
+                 endedAtBoundary: false });
   }
+  return spans;
+}
+
+function appendOutageBands(svg, events, x, t0, t1, yTop, yBot) {
+  const spans = computeOutageSpans(events, t0, t1);
+  if (!spans.length) return;
   const top = parseFloat(yTop), bot = parseFloat(yBot);
   for (const s of spans) {
     if (s.end < t0 || s.start > t1) continue;     // outage entirely off-chart
@@ -2169,7 +2282,9 @@ function appendOutageBands(svg, events, x, t0, t1, yTop, yBot) {
     rect.setAttribute("role", "img");
     const head = (s.cut && s.restore)
       ? "Outage · " + fmtOutageDur(s.end - s.start)
-      : "Outage (ongoing or partial)";
+      : s.endedAtBoundary
+        ? "Outage · ended at shutdown · " + fmtOutageDur(s.end - s.start)
+        : "Outage (ongoing or partial)";
     rect.setAttribute("aria-label", outageLabel(head, s));
     bindTip(rect, () => outageTipNode(head, s), "ev-crit");
     svg.appendChild(rect);
@@ -2179,7 +2294,8 @@ function appendOutageBands(svg, events, x, t0, t1, yTop, yBot) {
 // Per-instance chart over the /history series. Owns its DOM hosts + caches and
 // is driven by the tab controller (load on activate, redraw on resize).
 function makeChart(opts) {
-  const state = { series: null, events: [], thresholds: null, hiddenEvents: 0 };
+  const state = { series: null, events: [], thresholds: null, hiddenEvents: 0,
+    eventsKey: null };
   // Generation guard: overlapping load()s (tab switch + 10s poll + control
   // change) must not let a slow earlier response overwrite fresher data — only
   // the most recent load() is allowed to commit its results.
@@ -2202,12 +2318,23 @@ function makeChart(opts) {
     return (v === "all") ? null : parseInt(v, 10);
   }
 
-  async function load() {
+  async function load(loadOpts) {
+    // F-022: the history series is (cheaply, range-bounded) refetched every
+    // call, but the event markers come from a full-table /api/v1/events scan
+    // (limit=10000, up to twice via loadChartEvents). Re-running that on every
+    // 10s poll made the dashboard DoS its own daemon during an incident. So
+    // refetch events only when asked (genuine tab activation / range / UPS /
+    // metric change) or when the (ups,range) cache key changed; the passive
+    // poll passes { refetchEvents: false } and reuses the cached markers.
+    const refetchEvents = !loadOpts || loadOpts.refetchEvents !== false;
     const host = document.getElementById(opts.hostId);
     if (!host) return;
     const myGen = ++gen;
     const ups = upsName();
-    if (!ups) { state.series = null; state.events = []; state.hiddenEvents = 0; draw(); return; }
+    if (!ups) {
+      state.series = null; state.events = []; state.hiddenEvents = 0;
+      state.eventsKey = null; draw(); return;
+    }
     const m = metric();
     let q = "metric=" + encodeURIComponent(m);
     const range = rangeSeconds();
@@ -2220,12 +2347,16 @@ function makeChart(opts) {
     const res = await api("/api/v1/ups/" + encodeURIComponent(ups) + "/history?" + q);
     if (myGen !== gen) return;   // a newer load() superseded this one
     const series = res.ok ? res.data : null;
-    let events = [], hidden = 0;
+    let events = state.events, hidden = state.hiddenEvents;
     if (opts.events) {
-      const r = await loadChartEvents(ups, from, to, range);
-      if (myGen !== gen) return;   // a newer load() superseded this one
-      events = r.events;
-      hidden = r.hidden;
+      const eventsKey = ups + "|" + (range === null ? "all" : range);
+      if (refetchEvents || state.eventsKey !== eventsKey) {
+        const r = await loadChartEvents(ups, from, to, range);
+        if (myGen !== gen) return;   // a newer load() superseded this one
+        events = r.events;
+        hidden = r.hidden;
+        state.eventsKey = eventsKey;
+      }
     }
     state.series = series;
     state.events = events;
@@ -2406,8 +2537,12 @@ function drawEnergyChart(hostId, rows, options) {
 
   // Outage spans behind the markers (see appendOutageBands).
   appendOutageBands(svg, options.events || [], x, t0, t1, 5, H - pad);
-  // tier-1 event markers (already filtered upstream).
-  (options.events || []).filter((e) => e.ts >= t0 && e.ts <= t1).slice(0, 100)
+  // tier-1 event markers only — the feed also carries boundary (DAEMON_*)
+  // rows for the outage bands above; they must not render as dots (F-094).
+  (options.events || [])
+    .filter((e) => e.ts >= t0 && e.ts <= t1
+                   && isTier1Event(e.eventType || e.event))
+    .slice(0, 100)
     .forEach((e) => {
       appendEventMarker(svg, e, x(e.ts).toFixed(1), 5, (H - pad).toFixed(1));
     });
@@ -2570,7 +2705,7 @@ function drawSimpleSeries(host, pts, opts) {
 }
 
 function makeEnergyChart(opts) {
-  const state = { rows: [], events: [], hiddenEvents: 0 };
+  const state = { rows: [], events: [], hiddenEvents: 0, eventsKey: null };
   let gen = 0;
   function upsName() {
     const sel = document.getElementById(opts.upsSelId);
@@ -2581,12 +2716,21 @@ function makeEnergyChart(opts) {
     const v = sel ? sel.value : "86400";
     return (v === "all") ? null : parseInt(v, 10);
   }
-  async function load() {
+  async function load(loadOpts) {
+    // F-022: same rule as makeChart — the /power series is refetched every call
+    // (range-bounded), but the event markers (full-table /api/v1/events scan)
+    // are refetched only on a genuine activation/range/UPS change or a cache-key
+    // change; the passive 10s poll passes { refetchEvents: false } and reuses
+    // the cached markers so it stops re-scanning every UPS's events each tick.
+    const refetchEvents = !loadOpts || loadOpts.refetchEvents !== false;
     const host = document.getElementById(opts.hostId);
     if (!host) return;
     const myGen = ++gen;
     const ups = upsName();
-    if (!ups) { state.rows = []; state.events = []; state.hiddenEvents = 0; draw(); return; }
+    if (!ups) {
+      state.rows = []; state.events = []; state.hiddenEvents = 0;
+      state.eventsKey = null; draw(); return;
+    }
     let q = "";
     const range = rangeSeconds();
     let from = null, to = null;
@@ -2598,11 +2742,17 @@ function makeEnergyChart(opts) {
     const res = await api("/api/v1/ups/" + encodeURIComponent(ups) + "/power" + q);
     if (myGen !== gen) return;
     const rows = (res.ok && res.data && res.data.data) || [];
-    const r = await loadChartEvents(ups, from, to, range);
-    if (myGen !== gen) return;   // a newer load() superseded this one
+    if (opts.events !== false) {
+      const eventsKey = ups + "|" + (range === null ? "all" : range);
+      if (refetchEvents || state.eventsKey !== eventsKey) {
+        const r = await loadChartEvents(ups, from, to, range);
+        if (myGen !== gen) return;   // a newer load() superseded this one
+        state.events = r.events;
+        state.hiddenEvents = r.hidden;
+        state.eventsKey = eventsKey;
+      }
+    }
     state.rows = rows;
-    state.events = r.events;
-    state.hiddenEvents = r.hidden;
     state.from = from; state.to = to;
     draw();
   }
@@ -3209,10 +3359,16 @@ async function loadAuthState() {
 
 function openLogin() {
   document.getElementById("login-error").hidden = true;
+  // F-041: never let a plaintext password linger in the DOM. Clear it on open
+  // (in case a previous attempt left it) as well as after every submit.
+  document.getElementById("login-pass").value = "";
   document.getElementById("login-modal").hidden = false;
   document.getElementById("login-user").focus();
 }
-function closeLogin() { document.getElementById("login-modal").hidden = true; }
+function closeLogin() {
+  document.getElementById("login-modal").hidden = true;
+  document.getElementById("login-pass").value = "";  // F-041: scrub the field
+}
 
 async function doLogin(ev) {
   ev.preventDefault();
@@ -3220,6 +3376,10 @@ async function doLogin(ev) {
   const password = document.getElementById("login-pass").value;
   const res = await api("/api/v1/auth/login",
     { method: "POST", body: JSON.stringify({ username, password }) });
+  // F-041: wipe the plaintext password from the DOM immediately after submit,
+  // on BOTH success and failure — otherwise it persists in the input for the
+  // whole session and is readable by any later script or via devtools.
+  document.getElementById("login-pass").value = "";
   if (res.ok && res.data && res.data.token) {
     setToken(res.data.token); closeLogin(); refreshAuthUI(); refresh();
   } else {
@@ -3449,13 +3609,19 @@ async function renderShutdownPlan() {
   }
 }
 
-function onTabActivated(name) {
+function onTabActivated(name, opts) {
+  // F-022: chart event markers refetch by default (a genuine tab activation /
+  // range / UPS / metric change). The passive 10s poll passes
+  // { refetchEvents: false } so charts redraw fresh history but serve their
+  // event markers from cache instead of re-scanning every UPS's full event
+  // history each tick.
+  const chartOpts = { refetchEvents: !opts || opts.refetchEvents !== false };
   if (name === "overview") {
     renderOverviewSummary(lastUpsRows); renderRedundancy(); renderRemoteHealth();
   }
-  else if (name === "power") { renderLineQuality(); if (charts.power) charts.power.load(); }
-  else if (name === "battery") { renderBatteryHealthTab(); if (charts.battery) charts.battery.load(); }
-  else if (name === "energy") { renderEnergyTab(); if (charts.energy) charts.energy.load(); }
+  else if (name === "power") { renderLineQuality(); if (charts.power) charts.power.load(chartOpts); }
+  else if (name === "battery") { renderBatteryHealthTab(); if (charts.battery) charts.battery.load(chartOpts); }
+  else if (name === "energy") { renderEnergyTab(); if (charts.energy) charts.energy.load(chartOpts); }
   else if (name === "shutdown") renderShutdownPlan();
   else if (name === "config") renderConfigTab();
 }
@@ -3511,34 +3677,51 @@ function setStatus(msg) {
   document.getElementById("status-line").textContent = bits.join(" · ");
 }
 
+// F-043: refresh() is async and driven by a 10s setInterval. If one cycle runs
+// longer than 10s (a slow daemon during an incident is exactly when this bites),
+// the timer fires again and stacks a second refresh on top of the first,
+// compounding load right when the daemon is already struggling. This in-flight
+// flag makes a tick a no-op while the previous cycle is still running.
+let refreshing = false;
+
 async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    await refreshOnce();
+  } finally {
+    refreshing = false;
+  }
+}
+
+async function refreshOnce() {
   // One shared config + remote-health snapshot per cycle so the drill-down reads
   // from memory instead of firing per-card requests.
   const [authState, cfg, rh] = await Promise.all([
     api("/api/v1/auth/state"), api("/api/v1/config"), api("/api/v1/remote-health"),
   ]);
-  authEnabled = !!(authState.ok && authState.data && authState.data.enabled);
+  if (authState.ok && authState.data) {
+    authEnabled = !!authState.data.enabled;
+  }
   // Only sign out when the server explicitly reports auth is OFF. A transient
-  // /api/v1/auth/state failure leaves authState.ok false (and authEnabled
-  // false), which must NOT be mistaken for "auth disabled server-side" — that
-  // would log the operator out on every network blip.
-  if (authState.ok && authState.data && authState.data.enabled === false && token()) {
+  // /api/v1/auth/state failure leaves authState.ok false and preserves the
+  // last known authEnabled value. It must NOT be mistaken for "auth disabled
+  // server-side" — that would log the operator out on every network blip.
+  if (authStateRequiresClear(authState, cfg, !!token())) {
     clearAuthState();
   }
   if (cfg.ok && cfg.data) {
     cfgSnapshot = cfg.data;
-    // If we hold a token but the server treats us as anonymous (sanitized
-    // config), the session was invalidated server-side — e.g. the account was
-    // deleted. Reads stay open (no 401 to trip the api() handler), so detect it
-    // here and sign out locally instead of showing a stale "Signed in".
-    if (token() && cfg.data.detail === "sanitized") {
-      clearAuthState();
-    }
     refreshAuthUI();
   }
   if (rh.ok) remoteHealthSnapshot = (rh.data && rh.data.servers) || [];
 
   const ups = await api("/api/v1/ups");
+  const powerStateChanged = !!(
+    ups.ok && ups.data
+    && powerStateSignature(lastUpsRows)
+      !== powerStateSignature(ups.data.ups || [])
+  );
   if (ups.ok && ups.data) {
     if (ups.data.version) daemonVersion = ups.data.version;
     // Prefer the top-level runtimeContext; fall back to the nested runtime block.
@@ -3562,7 +3745,12 @@ async function refresh() {
   }
   await loadEvents();        // merges fresh recent events into the accumulated list
   // Redraw only the active tab's chart/widgets (the others redraw on activate).
-  preserveWindowScroll(() => onTabActivated(activeTab));
+  // F-022: the passive poll must NOT re-scan chart event markers every tick —
+  // Reuse cached markers during steady state, but refetch on an exact NUT power
+  // transition so live outage bands/dots appear without a tab switch (F-088).
+  preserveWindowScroll(() => onTabActivated(
+    activeTab, { refetchEvents: powerStateChanged },
+  ));
   // If a detail modal is open, keep it live with the fresh snapshot.
   if (!document.getElementById("detail-modal").hidden && openDetailName) {
     renderDetail(openDetailName);

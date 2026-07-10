@@ -717,6 +717,21 @@ class TestSeverityBypass:
         assert "(severe," in body
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("reading", ["0", "-1", "601", "65535"])
+    def test_impossible_voltage_reading_is_ignored(self, reading):
+        """F-076: driver sentinels must not become severe grid events."""
+        h = _TestHost(
+            ups_vars={"input.voltage.nominal": "230"}, hysteresis=30,
+        )
+        h._initialize_voltage_thresholds()
+
+        h._check_voltage_issues("OL", reading)
+
+        assert h.state.voltage_state == "NORMAL"
+        assert h.state.voltage_pending_state == ""
+        assert h.notifications == []
+
+    @pytest.mark.unit
     def test_severity_threshold_is_15_percent(self):
         # Exactly +15.0% (264.5V on 230V) is NOT severe -- threshold is `>`.
         # +15.1% (264.73V) IS severe.

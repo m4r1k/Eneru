@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
+from conftest import make_api_handler
 from eneru.api import EneruAPIHandler, render_prometheus_metrics
 from eneru.config import ConfigLoader
 
@@ -158,6 +159,42 @@ class TestStatusHelperGuards:
             enabled=True, cost_per_kwh=None, currency="USD", cost_format=None))
         mon = SimpleNamespace(_stats_store=_S(), config=cfg)
         assert _energy_for_monitor(mon) is None
+
+    @pytest.mark.unit
+    def test_energy_block_cached_within_ttl(self, monkeypatch, tmp_path):
+        """F-021: repeated collections within the TTL reuse ONE scan (today +
+        month + year = 3 power_samples calls); after the TTL it refreshes."""
+        from types import SimpleNamespace
+        import eneru.status as status
+
+        calls = {"n": 0}
+
+        class _S:
+            def power_samples(self, a, b):
+                calls["n"] += 1
+                return []
+
+        cfg = SimpleNamespace(energy=SimpleNamespace(
+            enabled=True, cost_per_kwh=None, currency="USD",
+            cost_format=None, nominal_power=None))
+        store = _S()
+        store.db_path = str(tmp_path / "f021-cache.db")
+        mon = SimpleNamespace(_stats_store=store, config=cfg)
+
+        status._energy_cache.clear()
+        clock = [1000.0]
+        monkeypatch.setattr(status.time, "monotonic", lambda: clock[0])
+
+        first = _energy_for_monitor(mon)
+        assert calls["n"] == 3               # one scan set (today/month/year)
+        second = _energy_for_monitor(mon)
+        assert calls["n"] == 3               # cache hit -> no new scans
+        assert second is first               # same cached object handed back
+
+        clock[0] += status._ENERGY_CACHE_TTL_SECONDS + 1   # expire the TTL
+        _energy_for_monitor(mon)
+        assert calls["n"] == 6               # refreshed -> a second scan set
+        status._energy_cache.clear()
 
     @pytest.mark.unit
     def test_battery_health_error_is_none(self):
@@ -336,17 +373,15 @@ class TestBatteryHealthHistoryEndpoint:
         assert h._route()[0] == 404
 
     def _handler(self, store, cfg_yaml="ups:\n  name: U@h\n"):
+        # F-063: shared EneruAPIHandler builder lives in conftest.py.
+        # headers={} preserves the original (no default Host injected);
+        # callers set h.path themselves after construction.
         from types import SimpleNamespace
-        from eneru.api import EneruAPIHandler
         cfg = _parse_cfg(cfg_yaml)
         mon = SimpleNamespace(config=cfg, _stats_store=store)
-        h = object.__new__(EneruAPIHandler)
-        h.api_config = cfg
-        h.api_source = SimpleNamespace(_monitors=[mon])
-        h.api_auth = None
-        h.api_sessions = None
-        h.headers = {}
-        return h
+        return make_api_handler(
+            cfg, source=SimpleNamespace(_monitors=[mon]), headers={},
+        )
 
     @pytest.mark.unit
     def test_downsamples_to_daily_mean(self):

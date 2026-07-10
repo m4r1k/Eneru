@@ -37,6 +37,14 @@ except ImportError:
 
 _PRUNE_INTERVAL_SECS = 60.0
 
+# F-067: how long the worker keeps memory-buffered rows reserved for the
+# normal register_store → SQLite path before falling back to DIRECT Apprise
+# delivery. Within this window after start() (the startup register window),
+# fresh rows wait for a store; past it — or as soon as a store IS registered
+# but refuses rows (unwritable /var/lib/eneru) — buffered rows ship straight
+# through Apprise so they are never silently lost.
+_BUFFER_DIRECT_GRACE_SECS = 10.0
+
 
 class NotificationWorker:
     """Persistent, lossless notification worker.
@@ -88,17 +96,35 @@ class NotificationWorker:
         # before any store was registered. Drained on the first
         # ``register_store`` call.
         self._memory_buffer: List[Tuple[str, str, str, int]] = []
+        # A bounded stop() can return while Apprise is still sending. During
+        # reload, failed in-flight memory rows are forwarded to this worker;
+        # successful rows are already gone and therefore cannot be duplicated.
+        self._memory_handoff_worker: Optional["NotificationWorker"] = None
         # Per-message backoff state: (str(store.db_path), row_id) →
         # next_attempt_monotonic. Cleared on success / cancellation. We
         # key on the db_path STRING (not id(store)) so re-creation of a
         # StatsStore object at the same memory address can't bleed
         # backoff state across instances.
         self._backoff: Dict[Tuple[str, int], float] = {}
+        # Apprise may accept a message while the following SQLite status flip
+        # fails. Keep that already-delivered claim separate from pending work:
+        # retry only the DB commit, never the external send (which would create
+        # a duplicate notification).
+        self._delivered_uncommitted: Dict[
+            Tuple[str, int], Tuple[StatsStore, int]
+        ] = {}
         # Track last prune time so we don't run DELETE on every iteration.
         self._last_prune_monotonic = 0.0
         # Used during stop() to surface the pending count to a "messages
         # left undelivered" log warning.
         self._final_pending_count = 0
+        # F-067 direct-delivery state: monotonic start stamp (grace window
+        # for the startup register path) + a single backoff for the direct
+        # Apprise fallback so an unreachable endpoint isn't hammered every
+        # 1s tick. Set/reset in start().
+        self._start_mono = 0.0
+        self._buffer_direct_attempts = 0
+        self._buffer_direct_next_mono = 0.0
 
     # ----- lifecycle -----
 
@@ -139,6 +165,9 @@ class NotificationWorker:
 
         self._stop_event.clear()
         self._wakeup_event.clear()
+        self._start_mono = time.monotonic()
+        self._buffer_direct_attempts = 0
+        self._buffer_direct_next_mono = 0.0
         self._worker_thread = threading.Thread(
             target=self._worker_loop, daemon=True, name="notify-worker",
         )
@@ -160,6 +189,7 @@ class NotificationWorker:
                 pending = sum(
                     s.pending_notification_count() for s in self._stores
                 )
+                buffered = len(self._memory_buffer)
             self._final_pending_count = pending
             if pending > 0:
                 # Informational, not an error: the rows aren't lost,
@@ -169,9 +199,94 @@ class NotificationWorker:
                     f"message(s) still pending in the persistent queue "
                     f"— they will deliver on the next start."
                 )
+            if buffered > 0:
+                # F-067: memory-buffered rows have NO disk backing. On a
+                # reload bounce the replacement worker adopts them (see
+                # drain_memory_buffer); on a real process exit they are
+                # gone, so say so instead of staying silent.
+                self._warn(
+                    f"⚠️  Notification worker stopping with {buffered} "
+                    f"memory-buffered message(s) that never reached the "
+                    f"store — lost unless a replacement worker adopts them."
+                )
             self._stop_event.set()
             self._wakeup_event.set()
             self._worker_thread.join(timeout=2)
+
+    # ----- reload handover (F-067) -----
+
+    def drain_memory_buffer(self) -> List[Tuple[str, str, str, int]]:
+        """Detach and return the in-memory buffered rows.
+
+        Called on the OLD worker when a config reload bounces the
+        notification subsystem, so the rows survive the swap instead of
+        dying with the old object (they have no SQLite backing)."""
+        with self._stores_lock:
+            entries = self._memory_buffer
+            self._memory_buffer = []
+        return entries
+
+    def handoff_memory_buffer_to(self, replacement: "NotificationWorker") -> None:
+        """Move unclaimed work and route late failures to ``replacement``."""
+        if replacement is self:
+            return
+        with self._stores_lock:
+            self._memory_handoff_worker = replacement
+            entries = self._memory_buffer
+            self._memory_buffer = []
+            delivered = self._delivered_uncommitted
+            self._delivered_uncommitted = {}
+        replacement.adopt_memory_buffer(entries)
+        replacement._adopt_delivered_claims(delivered)
+
+    def _adopt_delivered_claims(
+        self,
+        claims: Dict[Tuple[str, int], Tuple[StatsStore, int]],
+    ) -> None:
+        """Adopt already-delivered rows whose local commit still needs retry."""
+        if not claims:
+            return
+        # Follow an existing handoff instead of parking work on an already
+        # stopped intermediate worker during two rapid reloads.
+        for key, (store, row_id) in claims.items():
+            self._retain_delivered_claim(key, store, row_id)
+        self._wakeup_event.set()
+
+    def _retain_delivered_claim(
+        self, key: Tuple[str, int], store: StatsStore, row_id: int,
+    ) -> None:
+        """Keep a failed status commit locally or forward it after reload."""
+        with self._stores_lock:
+            replacement = self._memory_handoff_worker
+            if replacement is None:
+                self._delivered_uncommitted[key] = (store, row_id)
+        if replacement is not None:
+            replacement._adopt_delivered_claims({key: (store, row_id)})
+
+    def adopt_memory_buffer(
+            self, entries: Optional[List[Tuple[str, str, str, int]]]) -> None:
+        """Prepend rows drained from a predecessor worker (age order kept)."""
+        if not entries:
+            return
+        self._restore_memory_entries(entries, prepend=True)
+
+    def _restore_memory_entries(
+            self, entries: List[Tuple[str, str, str, int]], *,
+            prepend: bool) -> None:
+        """Put rows back locally, or forward them across a reload handoff."""
+        replacement = None
+        with self._stores_lock:
+            replacement = self._memory_handoff_worker
+            if replacement is None:
+                if prepend:
+                    self._memory_buffer = list(entries) + self._memory_buffer
+                else:
+                    self._memory_buffer.extend(entries)
+                self._trim_memory_buffer()
+        if replacement is not None:
+            replacement._restore_memory_entries(entries, prepend=prepend)
+        else:
+            self._wakeup_event.set()
 
     # ----- store registration -----
 
@@ -197,27 +312,8 @@ class NotificationWorker:
             if store in self._stores:
                 return
             self._stores.append(store)
-            # Snapshot the buffer; do NOT clear it yet — we only clear
-            # entries that successfully persist below.
-            buffered = list(self._memory_buffer)
-            self._memory_buffer = []
-        if not buffered:
+        if self._replay_memory_buffer(store) == 0:
             return
-        leftovers: List[Tuple[str, str, str, int]] = []
-        for body, notify_type, category, ts in buffered:
-            row_id = store.enqueue_notification(
-                body, notify_type, category, ts=ts,
-            )
-            if row_id is None:
-                # enqueue returned None → store wasn't open or SQLite
-                # raised; keep the row buffered so a future register
-                # gets a chance.
-                leftovers.append((body, notify_type, category, ts))
-        if leftovers:
-            with self._stores_lock:
-                # Prepend so age order is preserved against any new
-                # sends that arrived while we were draining.
-                self._memory_buffer = leftovers + self._memory_buffer
         # Apply backlog cap after the drain (P2 follow-up to the
         # in-memory cap): if the buffer grew large before the store
         # registered, the persisted side now needs the same trim.
@@ -226,12 +322,59 @@ class NotificationWorker:
             store.cap_pending_notifications(cap)
         self._wakeup_event.set()
 
+    def _replay_memory_buffer(self, store: Optional[StatsStore] = None) -> int:
+        """Try to persist buffered rows into ``store`` (default: first
+        registered store). Returns the number of rows attempted.
+
+        cubic P1 (round 1): rows buffered by ``send()`` when the store
+        refused the insert (e.g. ``/var/lib/eneru`` unwritable at startup)
+        were previously replayed ONLY by the next ``register_store`` call —
+        which never comes once every monitor has registered, so the backlog
+        sat in memory until process exit. ELI5: letters that bounced off a
+        jammed mailbox slot went into a pocket, but nobody ever walked back
+        to the mailbox. The worker loop now retries the pocket every tick,
+        so a store that recovers (disk remounted, permissions fixed) gets
+        the backlog. Rows that still fail are re-buffered; age order is
+        preserved.
+        """
+        with self._stores_lock:
+            if store is None and self._stores:
+                store = self._stores[0]
+            if store is None or not self._memory_buffer:
+                return 0
+            # Snapshot; do NOT clear-and-forget — only rows that actually
+            # persist are dropped from the buffer.
+            buffered = list(self._memory_buffer)
+            self._memory_buffer = []
+        leftovers: List[Tuple[str, str, str, int]] = []
+        for body, notify_type, category, ts in buffered:
+            row_id = store.enqueue_notification(
+                body, notify_type, category, ts=ts,
+            )
+            if row_id is None:
+                # enqueue returned None → store wasn't open or SQLite
+                # raised; keep the row buffered for the next attempt.
+                leftovers.append((body, notify_type, category, ts))
+        if leftovers:
+            # Prepend so age order is preserved against new sends. If reload
+            # happened during the SQLite calls, forward to the replacement.
+            self._restore_memory_entries(leftovers, prepend=True)
+        if len(leftovers) < len(buffered):
+            # Rows actually persisted: apply the same backlog cap the
+            # register_store drain and the normal send() path enforce, so a
+            # big recovery replay can't leave pending above max_pending.
+            cap = self.config.notifications.max_pending
+            if cap > 0:
+                store.cap_pending_notifications(cap)
+        return len(buffered)
+
     # ----- producer side -----
 
     def send(self, body: str, notify_type: str = "info",
              category: str = "general",
              store: Optional[StatsStore] = None,
-             blocking: bool = False) -> Optional[int]:
+             blocking: bool = False,
+             require_persistent: bool = False) -> Optional[int]:
         """Queue a notification for persistent, retried delivery.
 
         Args:
@@ -249,6 +392,9 @@ class NotificationWorker:
                 delivery asynchronous by design. Kept in the signature for
                 back-compat only. ISS-063: slated for removal in the next
                 MINOR release — callers must stop passing it.
+            require_persistent: Return ``None`` without memory-buffering when
+                SQLite cannot accept the row. Reports use this to roll back
+                their cadence stamp and retry without creating duplicates.
 
         Returns the new notification id, or ``None`` if the send was
         buffered (no store yet) or the worker isn't initialized.
@@ -259,22 +405,46 @@ class NotificationWorker:
 
         ts = int(time.time())
         target_store = store
+        replacement = None
+        entry = (body, notify_type, category, ts)
         with self._stores_lock:
             if target_store is None and self._stores:
                 target_store = self._stores[0]
             if target_store is None:
+                if require_persistent:
+                    return None
                 # Pre-store buffer: replayed verbatim (with original ts)
                 # once register_store fires.
-                self._memory_buffer.append(
-                    (body, notify_type, category, ts)
-                )
-                self._trim_memory_buffer()
-                self._wakeup_event.set()
-                return None
+                replacement = self._memory_handoff_worker
+                if replacement is None:
+                    self._memory_buffer.append(entry)
+                    self._trim_memory_buffer()
+                    self._wakeup_event.set()
+        if target_store is None:
+            if replacement is not None:
+                replacement._restore_memory_entries([entry], prepend=False)
+            return None
 
         notification_id = target_store.enqueue_notification(
             body=body, notify_type=notify_type, category=category, ts=ts,
         )
+        if notification_id is None:
+            # The store exists but isn't open (e.g. /var/lib/eneru was
+            # unwritable at startup), so it silently refused the row.
+            # Think of a mailbox whose slot is jammed: dropping the letter
+            # on the floor loses it forever. Instead we stuff it in the
+            # same in-memory pocket the store-less path uses, so it gets
+            # replayed once a store opens — the lossless guarantee holds.
+            if require_persistent:
+                return None
+            self._restore_memory_entries([entry], prepend=False)
+            if not getattr(self, "_enqueue_failed_warned", False):
+                self._warn(
+                    "⚠️  Notification store did not accept the message "
+                    "(store not open); buffering in memory."
+                )
+                self._enqueue_failed_warned = True
+            return None
         # Enforce backlog cap right after insert so the just-added row
         # stays (it's the newest by definition; cap_pending cancels
         # oldest first).
@@ -308,8 +478,8 @@ class NotificationWorker:
 
     def flush(self, timeout: float) -> bool:
         """Block until every registered store's pending count reaches 0
-        AND the in-memory pre-store buffer is empty, or until ``timeout``
-        seconds elapse.
+        AND the in-memory pre-store buffer/status-commit backlog are empty, or
+        until ``timeout`` seconds elapse.
 
         Returns ``True`` if drained cleanly, ``False`` on timeout. Used
         from the shutdown path (Slice 5) to give in-flight notifications
@@ -332,7 +502,8 @@ class NotificationWorker:
                 pending = sum(
                     s.pending_notification_count() for s in self._stores
                 )
-            if pending == 0 and buffered == 0:
+                uncommitted = len(self._delivered_uncommitted)
+            if pending == 0 and buffered == 0 and uncommitted == 0:
                 return True
             if time.monotonic() >= deadline:
                 return False
@@ -349,12 +520,37 @@ class NotificationWorker:
             self._wakeup_event.clear()
 
             try:
+                self._finalize_delivered_claims()
+                # cubic P1 (round 1): give memory-buffered rows a path back
+                # into SQLite even when no further register_store ever fires.
+                self._replay_memory_buffer()
                 self._drain_once()
                 self._maybe_prune()
             except Exception:
                 # Defensive — the worker thread must NEVER crash, since
                 # losing it would silently disable all future notifications.
                 pass
+
+    def _finalize_delivered_claims(self) -> None:
+        """Retry SQLite commits for rows Apprise already accepted.
+
+        A row stays ``delivering`` while its commit is outstanding, so another
+        worker cannot claim and resend it. Cancelled/sent rows are no longer
+        ours to finalize and are simply forgotten.
+        """
+        with self._stores_lock:
+            claims = list(self._delivered_uncommitted.items())
+        for key, (store, row_id) in claims:
+            if store.mark_notification_sent(
+                    row_id, require_delivering=True):
+                with self._stores_lock:
+                    self._delivered_uncommitted.pop(key, None)
+                self._backoff.pop(key, None)
+                continue
+            row = store.read_notification(row_id)
+            if row is not None and row[2] != "delivering":
+                with self._stores_lock:
+                    self._delivered_uncommitted.pop(key, None)
 
     def _drain_once(self) -> None:
         """Drain pending rows: coalesce on every iteration, then deliver
@@ -385,6 +581,9 @@ class NotificationWorker:
 
             candidate = self._next_due_candidate()
             if candidate is None:
+                # Store-backed rows are drained; last resort for rows the
+                # store refused (F-067) before going back to sleep.
+                self._deliver_memory_buffer_direct()
                 return
 
             store, ts, row_id, body, notify_type, attempts = candidate
@@ -392,6 +591,70 @@ class NotificationWorker:
                 store=store, row_id=row_id, body=body,
                 notify_type=notify_type, attempts=attempts,
             )
+
+    def _deliver_memory_buffer_direct(self) -> None:
+        """F-067 last resort: ship memory-buffered rows straight through
+        Apprise when SQLite cannot take them.
+
+        ELI5: letters that bounce off a jammed mailbox slot go into a pocket
+        (``_memory_buffer``) and every tick someone walks them back to the
+        mailbox (``_replay_memory_buffer``). But if the mailbox NEVER unjams
+        (``/var/lib/eneru`` stays unwritable for the daemon's life), the
+        letters used to sit in the pocket until process exit — silently lost
+        despite the changelog's lossless promise. So when the mailbox keeps
+        refusing, we hand-deliver: call Apprise directly and drop a row from
+        the pocket only once delivery actually succeeded.
+
+        Rules:
+        - A registered-but-refusing store (the F-010 scenario) → deliver now.
+        - No store registered at all → within ``_BUFFER_DIRECT_GRACE_SECS``
+          of start() this is the normal startup register window, so hold the
+          rows for the imminent ``register_store``; past the grace no store
+          is coming, deliver directly.
+        - One shared exponential backoff (same knobs as the per-row path) so
+          an unreachable endpoint isn't hammered on every 1s tick.
+        """
+        with self._stores_lock:
+            if not self._memory_buffer:
+                return
+            have_store = bool(self._stores)
+            entry_count = len(self._memory_buffer)
+        if not have_store and (
+            time.monotonic() - self._start_mono < _BUFFER_DIRECT_GRACE_SECS
+        ):
+            return
+        if time.monotonic() < self._buffer_direct_next_mono:
+            return
+
+        failed = False
+        for _ in range(entry_count):  # oldest-first (buffer keeps age order)
+            if self._stop_event.is_set():
+                break
+            with self._stores_lock:
+                if not self._memory_buffer:
+                    break
+                # Claim before blocking in Apprise. Reload can safely transfer
+                # the rest; this row is restored only if its delivery fails.
+                entry = self._memory_buffer.pop(0)
+            body, notify_type, _category, _ts = entry
+            if self._send_via_apprise(body, notify_type):
+                continue
+            else:
+                # Endpoint down/refusing — stop the sweep and back off
+                # rather than burning one blocking Apprise call per row.
+                self._restore_memory_entries([entry], prepend=True)
+                failed = True
+                break
+        if failed:
+            self._buffer_direct_attempts += 1
+            base = max(0, int(self.config.notifications.retry_interval))
+            cap = max(base, int(self.config.notifications.retry_backoff_max))
+            shift = min(self._buffer_direct_attempts - 1, 20)
+            wait_secs = min(base * (2 ** shift) if base > 0 else 0, cap)
+            self._buffer_direct_next_mono = time.monotonic() + max(0, wait_secs)
+        else:
+            self._buffer_direct_attempts = 0
+            self._buffer_direct_next_mono = 0.0
 
     def _coalesce_pending_outages(self, store) -> int:
         """Pair pending on_battery + on_line rows into a single
@@ -517,15 +780,30 @@ class NotificationWorker:
         """Attempt delivery of a single row. Marks sent on success;
         increments attempts and applies exponential backoff on failure.
         Cancels on max_attempts overrun (when configured)."""
+        # F-079: claim before calling Apprise. During a reload the old worker
+        # can still be inside a slow send when its replacement starts; only the
+        # worker that wins pending -> delivering may ship this row.
+        if not store.claim_notification(row_id):
+            return
         success = self._send_via_apprise(body, notify_type)
         key = (str(store.db_path), row_id)
 
         if success:
-            store.mark_notification_sent(row_id)
-            self._backoff.pop(key, None)
+            if store.mark_notification_sent(
+                    row_id, require_delivering=True):
+                self._backoff.pop(key, None)
+            else:
+                # The network side succeeded. Retrying Apprise would duplicate
+                # the alert, so retain the claim and retry only the DB status
+                # transition on subsequent worker ticks.
+                self._retain_delivered_claim(key, store, row_id)
+                self._warn(
+                    "⚠️  Notification delivered, but its queue status could "
+                    "not be committed; retrying the local status update."
+                )
             return
 
-        store.mark_notification_attempt(row_id)
+        # claim_notification already incremented attempts atomically.
         new_attempts = attempts + 1
 
         max_attempts = self.config.notifications.max_attempts
@@ -533,6 +811,8 @@ class NotificationWorker:
             store.cancel_notification(row_id, "max_attempts")
             self._backoff.pop(key, None)
             return
+
+        store.revert_claim(row_id)
 
         # Exponential backoff: retry_interval * 2^(attempts-1), capped.
         # Treat retry_interval=0 as "every tick" (the 1 s poll loop).

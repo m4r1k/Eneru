@@ -44,6 +44,12 @@ permissions:
 jobs:
   build-packages:
     runs-on: ubuntu-latest
+    # F-015: expose the channel/version so the post-deploy smoke job can install
+    # from the correct (stable vs testing) just-published repo.
+    outputs:
+      channel: ${{ steps.channel.outputs.CHANNEL }}
+      version: ${{ steps.version.outputs.VERSION }}
+      version_full: ${{ steps.version.outputs.VERSION_FULL }}
     steps:
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -151,12 +157,38 @@ jobs:
       - name: Build .deb package
         run: |
           VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager deb --target .
-          ls -la *.deb
+          ls -la -- ./*.deb
 
       - name: Build .rpm package
         run: |
           VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager rpm --target .
-          ls -la *.rpm
+          ls -la -- ./*.rpm
+
+      - name: Build el8 .rpm package
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          # F-013: RHEL 8's system `python3` is 3.6, but Eneru needs 3.9+. The
+          # default RPM's unversioned `python3` dep installs cleanly on el8 and
+          # then crash-loops. Ship a SEPARATE el8 RPM whose deps require the
+          # `python39` module (RHEL 8's 3.9). The el8 config is GENERATED from
+          # nfpm.yaml so `contents:` stay single-sourced (and the drift test in
+          # tests/test_packaging.py keeps validating the one committed config);
+          # only rpm.depends and a distinct `.el8` release marker differ.
+          python - <<'PY'
+          import yaml
+          with open("nfpm.yaml") as f:
+              cfg = yaml.safe_load(f)
+          rpm = cfg.setdefault("overrides", {}).setdefault("rpm", {})
+          rpm["depends"] = ["python39", "python39-pyyaml", "nut-client"]
+          # Distinct release marker -> artifact named eneru-<ver>-1.el8.noarch.rpm
+          # so it never collides with the default RPM in the published repo.
+          cfg["release"] = "1.el8"
+          with open("nfpm-el8.yaml", "w") as f:
+              yaml.safe_dump(cfg, f, sort_keys=False)
+          PY
+          nfpm package --packager rpm --target . -f nfpm-el8.yaml
+          ls -la -- ./*.el8.*.rpm
 
       - name: Build OCI image
         env:
@@ -172,24 +204,23 @@ jobs:
           grep "__version__" src/eneru/version.py
           docker build --build-arg VERSION="$VERSION" -t "${IMAGE_NAME}:${VERSION}" .
 
-      - name: Push OCI image to GHCR
+      # F-014: push ONLY the immutable version tag first, verify it below, and
+      # only then move the `:latest`/`:testing` channel alias onto it. This
+      # keeps a broken build from ever landing on `:latest`/`:testing` while
+      # verification fails. F-037: GITHUB_TOKEN and the actor username are passed
+      # via env (referenced as "$GITHUB_TOKEN"/"$ACTOR") rather than interpolated
+      # into the shell text, so a value containing quotes/backslashes can't break
+      # the step or inject shell.
+      - name: Push versioned OCI image to GHCR
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
-          CHANNEL: ${{ steps.channel.outputs.CHANNEL }}
           IMAGE_NAME: ghcr.io/${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
         run: |
           IMAGE_NAME="${IMAGE_NAME,,}"
-          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          if [ "$CHANNEL" = "stable" ]; then
-            docker tag "${IMAGE_NAME}:${VERSION}" "${IMAGE_NAME}:latest"
-            docker push "${IMAGE_NAME}:${VERSION}"
-            docker push "${IMAGE_NAME}:latest"
-          else
-            docker tag "${IMAGE_NAME}:${VERSION}" "${IMAGE_NAME}:testing"
-            docker push "${IMAGE_NAME}:${VERSION}"
-            docker push "${IMAGE_NAME}:testing"
-          fi
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker push "${IMAGE_NAME}:${VERSION}"
 
       - name: Verify pushed OCI image
         env:
@@ -199,6 +230,25 @@ jobs:
           IMAGE_NAME="${IMAGE_NAME,,}"
           docker pull "${IMAGE_NAME}:${VERSION}"
           docker run --rm "${IMAGE_NAME}:${VERSION}" version
+
+      # F-014: only now — after the versioned image is verified — promote the
+      # channel alias. `docker login` from the push step above persists in the
+      # runner's docker config for this job, so no re-login (and no extra
+      # wall-clock) is needed. Stable -> `:latest`, pre-release -> `:testing`.
+      - name: Promote OCI channel alias
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          CHANNEL: ${{ steps.channel.outputs.CHANNEL }}
+          IMAGE_NAME: ghcr.io/${{ github.repository }}
+        run: |
+          IMAGE_NAME="${IMAGE_NAME,,}"
+          if [ "$CHANNEL" = "stable" ]; then
+            docker tag "${IMAGE_NAME}:${VERSION}" "${IMAGE_NAME}:latest"
+            docker push "${IMAGE_NAME}:latest"
+          else
+            docker tag "${IMAGE_NAME}:${VERSION}" "${IMAGE_NAME}:testing"
+            docker push "${IMAGE_NAME}:testing"
+          fi
 
       - name: Upload packages to GitHub Release
         if: github.event_name == 'release'
@@ -212,8 +262,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Import GPG key
+        # F-037: pass the secret via env and reference it as a shell variable
+        # rather than interpolating it into the run: text, so a key containing
+        # quotes/backslashes can't break the step or inject shell.
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
-          echo "${{ secrets.GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+          echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
 
       # ISS-064: decide up front whether gh-pages exists rather than relying on
       # `continue-on-error` on the checkout. With continue-on-error, a TRANSIENT
@@ -306,18 +361,44 @@ jobs:
           # Create directory structure for both channels
           mkdir -p deb/pool/main deb/pool/testing
           mkdir -p deb/dists/stable/main/binary-all deb/dists/testing/main/binary-all
-          mkdir -p rpm rpm/testing
+          # F-013: el8 RPMs live in their OWN rpm/el8 (and rpm/testing/el8)
+          # sub-repo. Keeping them out of the default rpm/ tree is deliberate:
+          # in a flat repo, `dnf install eneru` compares EVR only and would pick
+          # the higher-release el8 RPM on RHEL 9/10, dragging in the `python39`
+          # module those distros don't ship. Separate baseurls keep the default
+          # RPM serving RHEL 9/10 unchanged while el8 users point at rpm/el8.
+          mkdir -p rpm rpm/testing rpm/el8 rpm/testing/el8
+
+          shopt -s nullglob
+          debs=(../*.deb)
+          rpms=(../*.rpm)
+          if [ "${#debs[@]}" -ne 1 ] || [ "${#rpms[@]}" -ne 2 ]; then
+            echo "Expected exactly one deb and two RPM artifacts; found " \
+              "${#debs[@]} deb and ${#rpms[@]} RPM." >&2
+            exit 1
+          fi
 
           # Export public GPG key
           gpg --armor --export > KEY.gpg
 
-          # Copy new packages to the correct channel
+          # Copy new packages to the correct channel. Route the el8 RPM (named
+          # ...el8...rpm) to the el8 sub-repo; everything else to the default.
           if [ "$CHANNEL" = "stable" ]; then
-            cp ../*.deb deb/pool/main/
-            cp ../*.rpm rpm/
+            cp -- "${debs[@]}" deb/pool/main/
+            for r in "${rpms[@]}"; do
+              case "$r" in
+                *.el8.*) cp "$r" rpm/el8/ ;;
+                *) cp "$r" rpm/ ;;
+              esac
+            done
           else
-            cp ../*.deb deb/pool/testing/
-            cp ../*.rpm rpm/testing/
+            cp -- "${debs[@]}" deb/pool/testing/
+            for r in "${rpms[@]}"; do
+              case "$r" in
+                *.el8.*) cp "$r" rpm/testing/el8/ ;;
+                *) cp "$r" rpm/testing/ ;;
+              esac
+            done
           fi
 
       - name: Build APT repository
@@ -386,10 +467,12 @@ jobs:
           sudo apt-get install -y createrepo-c
 
           # --- Stable RPM repository (rpm/ root — unchanged for backward compat) ---
+          # F-013: exclude the el8/ sub-repo (and testing/) so the default repo
+          # only ever advertises the default RPM to RHEL 9/10.
           cd gh-pages/rpm
           if ls *.rpm 1>/dev/null 2>&1; then
             echo "Building stable RPM metadata..."
-            createrepo_c --excludes='testing/*' .
+            createrepo_c --excludes='testing/*' --excludes='el8/*' .
             gpg --batch --yes --armor --detach-sign -o repodata/repomd.xml.asc repodata/repomd.xml
           fi
 
@@ -407,11 +490,33 @@ jobs:
           REPOFILE
           sed -i 's/^          //' eneru.repo
 
+          # --- Stable el8 RPM repository (rpm/el8/) ---
+          # F-013: RHEL 8 uses this sub-repo; its RPM requires the python39
+          # module (RHEL 8's 3.9) rather than the system python3 (3.6).
+          cd "$GITHUB_WORKSPACE/gh-pages/rpm/el8"
+          if ls *.rpm 1>/dev/null 2>&1; then
+            echo "Building stable el8 RPM metadata..."
+            createrepo_c .
+            gpg --batch --yes --armor --detach-sign -o repodata/repomd.xml.asc repodata/repomd.xml
+          fi
+
+          # el8 repo file (RHEL 8 only)
+          cat > eneru-el8.repo << 'REPOFILE'
+          [eneru-el8]
+          name=Eneru UPS Monitor (RHEL 8)
+          baseurl=https://m4r1k.github.io/Eneru/rpm/el8
+          enabled=1
+          gpgcheck=0
+          repo_gpgcheck=1
+          gpgkey=https://m4r1k.github.io/Eneru/KEY.gpg
+          REPOFILE
+          sed -i 's/^          //' eneru-el8.repo
+
           # --- Testing RPM repository (rpm/testing/) ---
           cd "$GITHUB_WORKSPACE/gh-pages/rpm/testing"
           if ls *.rpm 1>/dev/null 2>&1; then
             echo "Building testing RPM metadata..."
-            createrepo_c .
+            createrepo_c --excludes='el8/*' .
             gpg --batch --yes --armor --detach-sign -o repodata/repomd.xml.asc repodata/repomd.xml
           fi
 
@@ -426,6 +531,26 @@ jobs:
           gpgkey=https://m4r1k.github.io/Eneru/KEY.gpg
           REPOFILE
           sed -i 's/^          //' eneru-testing.repo
+
+          # --- Testing el8 RPM repository (rpm/testing/el8/) ---
+          cd "$GITHUB_WORKSPACE/gh-pages/rpm/testing/el8"
+          if ls *.rpm 1>/dev/null 2>&1; then
+            echo "Building testing el8 RPM metadata..."
+            createrepo_c .
+            gpg --batch --yes --armor --detach-sign -o repodata/repomd.xml.asc repodata/repomd.xml
+          fi
+
+          # Testing el8 repo file
+          cat > eneru-testing-el8.repo << 'REPOFILE'
+          [eneru-testing-el8]
+          name=Eneru UPS Monitor (Testing, RHEL 8)
+          baseurl=https://m4r1k.github.io/Eneru/rpm/testing/el8
+          enabled=1
+          gpgcheck=0
+          repo_gpgcheck=1
+          gpgkey=https://m4r1k.github.io/Eneru/KEY.gpg
+          REPOFILE
+          sed -i 's/^          //' eneru-testing-el8.repo
 
       - name: Create index.html
         run: |
@@ -465,7 +590,7 @@ jobs:
           sudo apt update
           sudo apt install eneru</pre>
 
-              <h3>RHEL / Fedora</h3>
+              <h3>RHEL 9/10 / Fedora</h3>
               <pre>
           # RHEL 8/9: Enable EPEL first (required for apprise dependency)
           sudo dnf install -y epel-release
@@ -474,6 +599,12 @@ jobs:
           sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
 
           # Install
+          sudo dnf install eneru</pre>
+
+              <h3>RHEL 8</h3>
+              <pre>
+          sudo dnf install -y epel-release
+          sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/el8/eneru-el8.repo
           sudo dnf install eneru</pre>
             </div>
 
@@ -496,12 +627,17 @@ jobs:
           sudo apt update
           sudo apt install eneru</pre>
 
-              <h3>RHEL / Fedora</h3>
+              <h3>RHEL 9/10 / Fedora</h3>
               <pre>
           # Add testing repository
           sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/eneru-testing.repo
 
           # Install pre-release version
+          sudo dnf install eneru</pre>
+
+              <h3>RHEL 8</h3>
+              <pre>
+          sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/el8/eneru-testing-el8.repo
           sudo dnf install eneru</pre>
             </div>
 
@@ -542,7 +678,7 @@ jobs:
           sudo apt install eneru
           ```
 
-          ### RHEL / Fedora
+          ### RHEL 9/10 / Fedora
 
           ```bash
           # RHEL 8/9: Enable EPEL first (required for apprise dependency)
@@ -552,6 +688,14 @@ jobs:
           sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
 
           # Install
+          sudo dnf install eneru
+          ```
+
+          ### RHEL 8
+
+          ```bash
+          sudo dnf install -y epel-release
+          sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/el8/eneru-el8.repo
           sudo dnf install eneru
           ```
 
@@ -570,11 +714,18 @@ jobs:
           sudo apt install eneru
           ```
 
-          ### RHEL / Fedora
+          ### RHEL 9/10 / Fedora
 
           ```bash
           sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/eneru-testing.repo
 
+          sudo dnf install eneru
+          ```
+
+          ### RHEL 8
+
+          ```bash
+          sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/el8/eneru-testing-el8.repo
           sudo dnf install eneru
           ```
 
@@ -610,7 +761,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Packages Built" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          ls -la *.deb *.rpm >> $GITHUB_STEP_SUMMARY
+          ls -la -- ./*.deb ./*.rpm >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Stable Packages" >> $GITHUB_STEP_SUMMARY
@@ -621,13 +772,139 @@ jobs:
           # block in the summary whenever a pool is empty.
           { ls -la gh-pages/deb/pool/main/*.deb 2>/dev/null || echo "No stable deb packages"; } >> "$GITHUB_STEP_SUMMARY"
           { ls -la gh-pages/rpm/*.rpm 2>/dev/null || echo "No stable rpm packages"; } >> "$GITHUB_STEP_SUMMARY"
+          { ls -la gh-pages/rpm/el8/*.rpm 2>/dev/null || echo "No stable el8 rpm packages"; } >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Testing Packages" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           { ls -la gh-pages/deb/pool/testing/*.deb 2>/dev/null || echo "No testing deb packages"; } >> "$GITHUB_STEP_SUMMARY"
           { ls -la gh-pages/rpm/testing/*.rpm 2>/dev/null || echo "No testing rpm packages"; } >> "$GITHUB_STEP_SUMMARY"
+          { ls -la gh-pages/rpm/testing/el8/*.rpm 2>/dev/null || echo "No testing el8 rpm packages"; } >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Package Repository" >> $GITHUB_STEP_SUMMARY
           echo "Published to: https://m4r1k.github.io/Eneru/" >> $GITHUB_STEP_SUMMARY
+
+  # F-015: prove the PUBLISHED repo metadata is actually installable-from, so a
+  # metadata regression (Packages/Release/repomd, signing, sources line) fails
+  # the release instead of shipping green. Minimal by design: add the just-
+  # deployed repo in a clean container, `install eneru`, run `eneru version`.
+  # `needs: build-packages` gates this on the gh-pages deploy step succeeding.
+  # All matrix smokes run in PARALLEL so wall-clock barely moves.
+  # cubic round 1: (a) the readiness probe waits until the repo ADVERTISES the
+  # just-built version — KEY.gpg is a long-lived file that survives from prior
+  # releases, so its mere reachability proved nothing about THIS deploy; (b)
+  # the INSTALLED binary's version is asserted against the built version, so a
+  # stale-metadata install can't pass the gate; (c) el8 gets its own matrix
+  # leg — its repo (rpm/el8) has separate createrepo/signing/.repo plumbing
+  # that the default-path smoke never exercised.
+  smoke-install:
+    name: Smoke install from published repo (${{ matrix.pkg }})
+    needs: build-packages
+    # Only meaningful once packages have actually been published to gh-pages.
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pkg: apt
+            image: debian:13
+          - pkg: dnf
+            image: registry.access.redhat.com/ubi9/ubi
+            el: '9'
+            repo_stable: rpm/eneru.repo
+            repo_testing: rpm/testing/eneru-testing.repo
+          - pkg: dnf-el8
+            image: registry.access.redhat.com/ubi8/ubi
+            el: '8'
+            repo_stable: rpm/el8/eneru-el8.repo
+            repo_testing: rpm/testing/el8/eneru-testing-el8.repo
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install from published repo and verify
+        env:
+          CHANNEL: ${{ needs.build-packages.outputs.channel }}
+          VERSION: ${{ needs.build-packages.outputs.version }}
+          VERSION_FULL: ${{ needs.build-packages.outputs.version_full }}
+          OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -eux
+          # GitHub Pages serves gh-pages at https://<owner-lower>.github.io/<repo>.
+          HOST="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]').github.io"
+          BASE="https://${HOST}/${REPO_NAME}"
+          # Package ecosystems spell pre-release versions with ~ where the git
+          # tag uses - (6.1.7-rc1 -> 6.1.7~rc1 in both deb and rpm).
+          PKG_VERSION="$(printf '%s' "$VERSION" | tr '-' '~')"
+
+          # gh-pages redeploys asynchronously after the push. KEY.gpg only
+          # proves the SITE is serving (it survives from prior releases), so
+          # this gates reachability; deploy FRESHNESS is gated separately by
+          # the advertised-version poll below.
+          wait_for_pages() {
+            for i in $(seq 1 30); do
+              if curl -fsSL "${BASE}/KEY.gpg" -o /tmp/eneru-key.gpg; then
+                echo "Repo reachable after attempt ${i}."; return 0
+              fi
+              echo "Attempt ${i}: gh-pages not ready; sleeping 10s..."; sleep 10
+            done
+            echo "::error::Published repo did not become reachable in time."; return 1
+          }
+
+          if [ "${{ matrix.pkg }}" = "apt" ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y ca-certificates curl gnupg
+            wait_for_pages
+            gpg --dearmor < /tmp/eneru-key.gpg > /usr/share/keyrings/eneru.gpg
+            SUITE=stable
+            [ "$CHANNEL" = "testing" ] && SUITE=testing
+            echo "deb [arch=all signed-by=/usr/share/keyrings/eneru.gpg] ${BASE}/deb ${SUITE} main" \
+              > /etc/apt/sources.list.d/eneru.list
+            # Freshness gate: wait until the repo advertises the version THIS
+            # run built, not whatever Pages still caches from the last release.
+            for i in $(seq 1 30); do
+              apt-get update >/dev/null 2>&1 || true
+              if apt-cache policy eneru | grep -qF "$PKG_VERSION"; then
+                echo "Repo advertises ${PKG_VERSION} after attempt ${i}."; break
+              fi
+              if [ "$i" = "30" ]; then
+                echo "::error::Repo never advertised ${PKG_VERSION}."; exit 1
+              fi
+              echo "Attempt ${i}: repo metadata still stale; sleeping 10s..."; sleep 10
+            done
+            apt-get install -y eneru
+          else
+            # dnf smoke. ubi9 (python3 == 3.9) exercises the DEFAULT rpm/ repo;
+            # ubi8 exercises the DEDICATED el8 repo, whose RPM must pull the
+            # python39 module through its own declared deps (F-013).
+            # EPEL provides nut-client (a hard dep of the RPM).
+            dnf install -y "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${{ matrix.el }}.noarch.rpm"
+            wait_for_pages
+            if [ "$CHANNEL" = "testing" ]; then
+              curl -fsSL "${BASE}/${{ matrix.repo_testing }}" -o /etc/yum.repos.d/eneru.repo
+            else
+              curl -fsSL "${BASE}/${{ matrix.repo_stable }}" -o /etc/yum.repos.d/eneru.repo
+            fi
+            # Freshness gate (same reasoning as the apt leg).
+            for i in $(seq 1 30); do
+              if dnf --refresh -q info eneru 2>/dev/null | grep -qF "$PKG_VERSION"; then
+                echo "Repo advertises ${PKG_VERSION} after attempt ${i}."; break
+              fi
+              if [ "$i" = "30" ]; then
+                echo "::error::Repo never advertised ${PKG_VERSION}."; exit 1
+              fi
+              echo "Attempt ${i}: repo metadata still stale; sleeping 10s..."; sleep 10
+            done
+            dnf install -y eneru
+          fi
+
+          # The real gate: source stamping includes the git hash, so require the
+          # exact code version from this run. A stale stable package must not
+          # satisfy a release-candidate smoke by sharing its numeric core.
+          ACTUAL="$(eneru version)"
+          printf '%s\n' "$ACTUAL"
+          test "$ACTUAL" = "Eneru v${VERSION_FULL}"

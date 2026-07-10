@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import subprocess
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,12 @@ def stubbed_env(tmp_path: Path):
     _make_stub(bin_dir, "virsh", textwrap.dedent(f"""
         echo "$@" >> "{log_virsh}"
         if [ "$1" = "list" ] && [ "$2" = "--name" ]; then
+            # Delay only the wait-loop poll (the second list call), leaving the
+            # initial graceful request and final force-cleanup probes fast.
+            if [ -n "$VIRSH_LIST_DELAY" ] && \
+               [ "$(grep -c '^list --name' '{log_virsh}')" -eq 2 ]; then
+                sleep "$VIRSH_LIST_DELAY"
+            fi
             for vm in $VIRSH_VMS; do echo "$vm"; done
             exit 0
         fi
@@ -164,6 +171,29 @@ class TestRenderAction:
                 assert (
                     "{" + ph + "}" in template
                 ), f"{name} registry claims {{{ph}}} but template doesn't use it"
+
+    @pytest.mark.unit
+    def test_graceful_wait_loops_are_posix_portable(self):
+        """F-006: the graceful-wait loops must not rely on bash's $SECONDS.
+        On dash/BusyBox remotes $SECONDS is empty, so the old
+        `end=$((SECONDS+t))` deadline collapsed and `virsh destroy` fired
+        immediately. Every VM/CT template that waits must use the portable
+        a sleep-based watchdog that is independent of wall-clock jumps."""
+        waiting_templates = [
+            "stop_vms", "stop_proxmox_vms", "stop_proxmox_cts",
+            "stop_xcpng_vms", "stop_esxi_vms",
+        ]
+        for name in waiting_templates:
+            template = REMOTE_ACTIONS[name]
+            assert "SECONDS" not in template, (
+                f"{name} still uses bash-only $SECONDS (F-006)")
+            assert "timeout {timeout}" in template or 'timeout "$t"' in template, (
+                f"{name} does not bound the whole graceful-wait subprocess")
+            assert "sh -c" in template
+            assert "c=$((" not in template, (
+                f"{name} still counts sleeps instead of elapsed wall time")
+            assert "date +%s" not in template, (
+                f"{name} still depends on NTP-adjustable wall time")
 
     @pytest.mark.unit
     def test_use_sudo_prefixes_privileged_actions(self):
@@ -415,13 +445,35 @@ class TestStopVmsParameters:
     def test_wait_interval_substituted(self):
         rendered = render_action("stop_vms", timeout=30, wait_interval=5)
         assert "wait=5" in rendered
-        assert "sleep $wait" in rendered
+        assert 'sleep "$1"' in rendered
 
     @pytest.mark.unit
     def test_default_wait_interval_is_one(self):
         rendered = render_action("stop_vms", timeout=30)
         # Default keeps the pre-v5.5 1-second poll cadence.
         assert "wait=1" in rendered
+
+    @pytest.mark.unit
+    def test_nonpositive_wait_interval_is_clamped(self):
+        rendered = render_action("stop_vms", timeout=30, wait_interval=0)
+        assert "wait=1" in rendered
+
+    @pytest.mark.unit
+    def test_watchdog_bounds_slow_poll_interval_and_reaches_force_cleanup(
+        self, stubbed_env,
+    ) -> None:
+        run, log = stubbed_env
+        rendered = render_action("stop_vms", timeout=1, wait_interval=1)
+
+        started = time.monotonic()
+        result = run(rendered, extra_env={
+            "VIRSH_VMS": "vm1", "VIRSH_LIST_DELAY": "10",
+        })
+        elapsed = time.monotonic() - started
+
+        assert result.returncode == 0
+        assert elapsed < 3
+        assert "destroy vm1" in log("virsh")
 
 
 # -----------------------------------------------------------------------------

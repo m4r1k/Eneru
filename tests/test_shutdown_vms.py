@@ -167,10 +167,13 @@ def test_shutdown_vms_retry_poll_failure_keeps_prior_remaining(
             return (1, "", "libvirt down")
         return (0, "", "")
 
+    monotonic_values = iter([0.0, 0.0, 0.0, 1.1, 1.1])
     with patch("eneru.shutdown.vms.command_exists", return_value=True), \
          patch("eneru.shutdown.vms.run_command", side_effect=fake_run) as mock_run, \
          patch("eneru.shutdown.vms.time.monotonic",
-               side_effect=[0.0, 0.0, 0.0, 1.1, 1.1]), \
+               # next() default: any extra post-deadline reads (the final
+               # poll's budget-capped timeout, cubic P2 round 1) see 1.1.
+               side_effect=lambda: next(monotonic_values, 1.1)), \
          patch("eneru.shutdown.vms.time.sleep"):
         monitor._shutdown_vms()
 
@@ -232,6 +235,80 @@ def test_shutdown_vms_reports_failed_rc(tmp_path):
     # force-destroy failed -- that VM may still be running.
     assert not any("All VMs shutdown complete" in m for m in logs), logs
     assert any("1 VM(s) possibly still running" in m for m in logs), logs
+
+
+@pytest.mark.unit
+def test_deadline_just_after_stop_reples_and_skips_force_destroy(tmp_path):
+    """F-025: the wait loop can exit on the deadline the instant AFTER the VMs
+    stopped. A final re-poll must confirm they're down and skip force-destroy +
+    the false 'possibly still running' warning."""
+    monitor = _make_vm_monitor(tmp_path, max_wait=10)
+    logs = []
+    monitor._log_message = logs.append
+
+    list_calls = {"n": 0}
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["virsh", "list", "--name"]:
+            list_calls["n"] += 1
+            # call 1 (initial) + call 2 (in-loop poll): vm1 still running;
+            # call 3 (final re-poll): vm1 has since stopped.
+            return (0, "" if list_calls["n"] >= 3 else "vm1\n", "")
+        if cmd[:2] == ["virsh", "shutdown"]:
+            return (0, "", "")
+        if cmd[:2] == ["virsh", "destroy"]:
+            return (0, "", "")  # should never be reached
+        return (0, "", "")
+
+    # Drive exactly one loop iteration, then the deadline expires with the poll
+    # still showing vm1 -> exercises the final re-poll path. The next() default
+    # keeps returning post-deadline time for any extra monotonic reads (the
+    # final poll's budget-capped timeout added one — cubic P2 round 1).
+    monotonic_seq = iter([0, 1, 1, 1, 11, 11, 11])
+
+    with patch("eneru.shutdown.vms.command_exists", return_value=True), \
+         patch("eneru.shutdown.vms.run_command", side_effect=fake_run), \
+         patch("eneru.shutdown.vms.time.sleep"), \
+         patch("eneru.shutdown.vms.time.monotonic",
+               side_effect=lambda: next(monotonic_seq, 11)):
+        monitor._shutdown_vms()
+
+    assert any("confirmed on final poll" in m for m in logs), logs
+    assert not any("Force destroying" in m for m in logs), logs
+    assert not any("possibly still running" in m for m in logs), logs
+    assert any("All VMs shutdown complete" in m for m in logs), logs
+
+
+@pytest.mark.unit
+def test_final_repoll_timeout_capped_to_remaining_budget(tmp_path):
+    """cubic P2 (round 1): the final knock-once-more poll must not stretch the
+    phase a full wait_interval past max_wait. Once the deadline is spent, its
+    timeout collapses to the 1s floor instead of the fixed 5s."""
+    monitor = _make_vm_monitor(tmp_path, max_wait=10)
+    logs = []
+    monitor._log_message = logs.append
+
+    list_timeouts = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["virsh", "list", "--name"]:
+            list_timeouts.append(kwargs.get("timeout"))
+            return (0, "vm1\n", "")  # vm1 never stops -> final poll + destroy
+        return (0, "", "")
+
+    monotonic_seq = iter([0, 1, 1, 1, 11, 11])
+
+    with patch("eneru.shutdown.vms.command_exists", return_value=True), \
+         patch("eneru.shutdown.vms.run_command", side_effect=fake_run), \
+         patch("eneru.shutdown.vms.time.sleep"), \
+         patch("eneru.shutdown.vms.time.monotonic",
+               side_effect=lambda: next(monotonic_seq, 11)):
+        monitor._shutdown_vms()
+
+    # In-loop poll had budget left (min(5, 10-1) -> 5); the final re-poll ran
+    # with the deadline spent (min(5, max(1, 10-11)) -> 1).
+    assert len(list_timeouts) >= 2, list_timeouts
+    assert list_timeouts[-1] == 1, list_timeouts
 
 
 @pytest.mark.unit

@@ -47,6 +47,15 @@ ProtectKernelModules=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
 SystemCallArchitectures=native
+# ISS-047 (F-038): further low-risk hardening. None of these interfere with the
+# daemon's duties (unmount, libvirt/docker orchestration, host poweroff): the
+# daemon reads no kernel logs, manages no cgroups of its own, never sets the
+# system clock or hostname, and needs no persona/exec-domain switching.
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+LockPersonality=true
+ProtectHostname=true
 
 [Install]
 WantedBy=multi-user.target

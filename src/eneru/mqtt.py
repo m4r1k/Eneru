@@ -31,6 +31,26 @@ _INITIAL_BACKOFF_SECONDS = 1.0
 _MAX_BACKOFF_SECONDS = 60.0
 
 
+def _redact_broker(broker: str) -> str:
+    """Strip ``user:pass@`` userinfo from a broker string before logging.
+
+    ELI5: the broker string can carry a password like a sticky note with the
+    PIN written on it ("alice:s3cret@host"). Before we read it aloud into the
+    journal, cover the note: "***@host". Works whether or not a scheme is
+    present, because the scheme-less warning path logs the raw value.
+    """
+    if not broker or "@" not in broker:
+        return broker
+    scheme, sep, rest = broker.partition("://")
+    if not sep:
+        scheme, rest = "", broker
+    _userinfo, at, hostpart = rest.rpartition("@")
+    if not at:
+        return broker
+    prefix = f"{scheme}://" if sep else ""
+    return f"{prefix}***@{hostpart}"
+
+
 class MQTTPublisher:
     """Publish read-only Eneru status snapshots to MQTT."""
 
@@ -57,6 +77,9 @@ class MQTTPublisher:
         # Set by on_disconnect or by a failed publish. The publish loop
         # checks it each tick and bails out so the outer loop reconnects.
         self._needs_reconnect = threading.Event()
+        # F-017: emit the "credentials go cleartext" warning at most once,
+        # not on every reconnect attempt.
+        self._cleartext_warned = False
 
     def _stopping(self) -> bool:
         """Either the daemon-wide or publisher-local stop was requested."""
@@ -182,13 +205,25 @@ class MQTTPublisher:
             # warning in this class uses); the module logger here is reserved
             # for internal exception tracebacks.
             self.log_fn(
-                f"⚠️  MQTT broker '{self.config.mqtt.broker}' has no mqtt:// or "
-                "mqtts:// scheme; host/port fall back to the raw string and TLS "
-                "is disabled. Use mqtt://host:1883 or mqtts://host:8883."
+                f"⚠️  MQTT broker '{_redact_broker(self.config.mqtt.broker)}' "
+                "has no mqtt:// or mqtts:// scheme; host/port fall back to the "
+                "raw string and TLS is disabled. Use mqtt://host:1883 or "
+                "mqtts://host:8883."
             )
         use_tls = parsed.scheme == "mqtts"
         host = parsed.hostname or self.config.mqtt.broker
         port = parsed.port or (8883 if use_tls else 1883)
+        # F-017: a username over a non-TLS broker sends the credential in
+        # cleartext on the wire. Warn once at connect time (mirrors the API's
+        # plain-HTTP warning) so a `mqtt://` typo that should have been
+        # `mqtts://` doesn't silently ship the password in the clear.
+        if parsed.username and not use_tls and not self._cleartext_warned:
+            self._cleartext_warned = True
+            self.log_fn(
+                "⚠️  MQTT username set on a non-TLS broker — credentials are "
+                "sent in cleartext. Use mqtts://host:8883 to encrypt the "
+                "connection."
+            )
         while not self._stopping():
             client = _create_client()
             if use_tls:

@@ -1,7 +1,7 @@
 """Unit tests for periodic reports (src/eneru/reports.py)."""
 
 import time
-from datetime import timezone
+from datetime import datetime, timezone
 
 import pytest
 import yaml
@@ -152,7 +152,7 @@ class TestGather:
         store.record_battery_health(75.0, {"runtime": 80.0}, ts=int(now))
         cfg = _config("ups:\n  name: U@h\nenergy:\n  enabled: true\n")
         sources = reports.gather_report_sources(
-            store, "U@h", cfg.energy, period="daily", now=now)
+            store, "U@h", cfg.energy, period="weekly", now=now)
         assert sources["ups_name"] == "U@h"
         assert sources["uptime"]["daemon_starts"] == 1
         assert sources["battery_health"]["score"] == 75.0
@@ -174,6 +174,26 @@ class TestGather:
         assert "confidence 70%" in body
         assert "confidence 0%" not in body
 
+    @pytest.mark.unit
+    def test_daily_events_and_uptime_cover_previous_full_day(self, store):
+        """F-082: yesterday evening appears in this morning's digest."""
+        previous_evening = datetime(2026, 6, 28, 19, 0).timestamp()
+        previous_boot = datetime(2026, 6, 28, 7, 0).timestamp()
+        current_morning = datetime(2026, 6, 29, 7, 0).timestamp()
+        send_time = datetime(2026, 6, 29, 8, 0).timestamp()
+        store.log_event("DAEMON_START", "yesterday boot", ts=int(previous_boot))
+        store.log_event("ON_BATTERY", "evening outage", ts=int(previous_evening))
+        store.log_event("DAEMON_START", "today boot", ts=int(current_morning))
+        store.log_event("ON_BATTERY", "today outage", ts=int(current_morning))
+        cfg = _config("ups:\n  name: U@h\n")
+
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="daily", now=send_time,
+        )
+
+        assert [event[2] for event in sources["events"]] == ["evening outage"]
+        assert sources["uptime"]["daemon_starts"] == 1
+
 
 # --------------------------------------------------------------------------
 # maybe_send_due_reports
@@ -193,7 +213,8 @@ class TestMaybeSend:
         store.set_meta("last_report_sent_daily", str(int(now - 2 * DAY)))
         periods = reports.maybe_send_due_reports(
             cfg, store, "U@h",
-            lambda b, t, c: sent.append((t, c)), now=now, tz=timezone.utc)
+            lambda b, t, c: sent.append((t, c)) or 1,
+            now=now, tz=timezone.utc)
         assert periods == ["daily"]
         assert sent == [("info", "report")]
         # immediate second call: last is now -> not due -> no resend
@@ -202,6 +223,80 @@ class TestMaybeSend:
             cfg, store, "U@h", lambda b, t, c: sent.append(c),
             now=now + 60, tz=timezone.utc)
         assert periods == [] and sent == []
+
+    @pytest.mark.unit
+    def test_meta_write_failure_does_not_send_and_no_resend(self, store):
+        # F-028: if the dedup-key meta write fails (silently swallowed), the
+        # digest must NOT be sent -- and it must not be re-sent every tick either.
+        # We stamp meta FIRST and gate the send on its success, so a failing
+        # set_meta yields zero sends across repeated ticks.
+        cfg = self._cfg()
+        now = DUE_TS
+        store.set_meta("last_report_sent_daily", str(int(now - 2 * DAY)))
+        sent = []
+        from unittest.mock import patch
+        with patch.object(store, "set_meta", return_value=False):
+            for tick in range(3):
+                periods = reports.maybe_send_due_reports(
+                    cfg, store, "U@h",
+                    lambda b, t, c: sent.append(c),
+                    now=now + tick, tz=timezone.utc)
+                assert periods == []          # nothing "sent"
+        assert sent == []                     # never enqueued -> no duplicate spam
+
+    @pytest.mark.unit
+    def test_build_failure_preserves_previous_stamp(self, store, monkeypatch):
+        """F-081: a render failure retries instead of burning the cadence."""
+        cfg = self._cfg()
+        now = DUE_TS
+        old = str(int(now - 2 * DAY))
+        store.set_meta("last_report_sent_daily", old)
+        monkeypatch.setattr(
+            reports, "build_report",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("render")),
+        )
+
+        with pytest.raises(RuntimeError, match="render"):
+            reports.maybe_send_due_reports(
+                cfg, store, "U@h", lambda *args: None,
+                now=now, tz=timezone.utc,
+            )
+
+        assert store.get_meta("last_report_sent_daily") == old
+
+    @pytest.mark.unit
+    def test_enqueue_failure_restores_previous_stamp(self, store):
+        """F-081: a rejected queue handoff remains due next tick."""
+        cfg = self._cfg()
+        now = DUE_TS
+        old = str(int(now - 2 * DAY))
+        store.set_meta("last_report_sent_daily", old)
+
+        def reject(*_args):
+            raise RuntimeError("queue down")
+
+        with pytest.raises(RuntimeError, match="queue down"):
+            reports.maybe_send_due_reports(
+                cfg, store, "U@h", reject, now=now, tz=timezone.utc,
+            )
+
+        assert store.get_meta("last_report_sent_daily") == old
+
+    @pytest.mark.unit
+    def test_enqueue_refusal_restores_previous_stamp(self, store):
+        """A silent ``None`` from the persistent queue remains retryable."""
+        cfg = self._cfg()
+        now = DUE_TS
+        old = str(int(now - 2 * DAY))
+        store.set_meta("last_report_sent_daily", old)
+
+        periods = reports.maybe_send_due_reports(
+            cfg, store, "U@h", lambda *_args: None,
+            now=now, tz=timezone.utc,
+        )
+
+        assert periods == []
+        assert store.get_meta("last_report_sent_daily") == old
 
     @pytest.mark.unit
     def test_csv_format_delivers_csv_block(self, store):
@@ -214,7 +309,7 @@ class TestMaybeSend:
         now = DUE_TS
         store.set_meta("last_report_sent_daily", str(int(now - 2 * DAY)))
         reports.maybe_send_due_reports(
-            cfg, store, "U@h", lambda b, t, c: bodies.append(b),
+            cfg, store, "U@h", lambda b, t, c: bodies.append(b) or 1,
             now=now, tz=timezone.utc)
         assert bodies and "--- CSV ---" in bodies[0]
         assert "timestamp,event_type,detail" in bodies[0]
@@ -281,7 +376,7 @@ class TestMaybeSend:
         store.set_meta("last_report_sent_weekly", str(int(now - 30 * DAY)))
         store.set_meta("last_report_sent_monthly", str(int(now - 90 * DAY)))
         periods = reports.maybe_send_due_reports(
-            cfg, store, "U@h", lambda b, t, c: sent.append(c),
+            cfg, store, "U@h", lambda b, t, c: sent.append(c) or 1,
             now=now, tz=timezone.utc)
         assert set(periods) == {"weekly", "monthly"}
         assert sent == ["report", "report"]
@@ -318,7 +413,7 @@ class TestAggregate:
             bodies = []
             units = [("A@h", s1, cfg.energy), ("B@h", s2, cfg.energy)]
             sent = reports.maybe_send_due_reports_multi(
-                cfg, units, s1, lambda b, t, c: bodies.append(b),
+                cfg, units, s1, lambda b, t, c: bodies.append(b) or 1,
                 now=now, tz=timezone.utc)
             assert sent == ["daily"]
             assert len(bodies) == 1
@@ -328,6 +423,76 @@ class TestAggregate:
         finally:
             s1.close()
             s2.close()
+
+    @pytest.mark.unit
+    def test_multi_gather_failure_preserves_previous_stamp(
+        self, tmp_path, monkeypatch,
+    ):
+        cfg = _config("ups:\n  - name: A@h\nreports:\n  enabled: true\n"
+                      "  daily: true\n  time: '08:00'\n")
+        store = StatsStore(tmp_path / "multi-failure.db")
+        store.open()
+        try:
+            old = str(int(DUE_TS - 2 * DAY))
+            store.set_meta("last_report_sent_daily", old)
+            monkeypatch.setattr(
+                reports, "gather_report_sources",
+                lambda *args, **kwargs: (_ for _ in ()).throw(
+                    RuntimeError("gather")),
+            )
+
+            with pytest.raises(RuntimeError, match="gather"):
+                reports.maybe_send_due_reports_multi(
+                    cfg, [("A@h", store, cfg.energy)], store,
+                    lambda *args: None, now=DUE_TS, tz=timezone.utc,
+                )
+
+            assert store.get_meta("last_report_sent_daily") == old
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_multi_enqueue_failure_restores_previous_stamp(self, tmp_path):
+        cfg = _config("ups:\n  - name: A@h\nreports:\n  enabled: true\n"
+                      "  daily: true\n  time: '08:00'\n")
+        store = StatsStore(tmp_path / "multi-enqueue-failure.db")
+        store.open()
+        try:
+            old = str(int(DUE_TS - 2 * DAY))
+            store.set_meta("last_report_sent_daily", old)
+
+            def reject(*_args):
+                raise RuntimeError("queue down")
+
+            with pytest.raises(RuntimeError, match="queue down"):
+                reports.maybe_send_due_reports_multi(
+                    cfg, [("A@h", store, cfg.energy)], store, reject,
+                    now=DUE_TS, tz=timezone.utc,
+                )
+
+            assert store.get_meta("last_report_sent_daily") == old
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_multi_enqueue_refusal_restores_previous_stamp(self, tmp_path):
+        cfg = _config("ups:\n  - name: A@h\nreports:\n  enabled: true\n"
+                      "  daily: true\n  time: '08:00'\n")
+        store = StatsStore(tmp_path / "multi-enqueue-refusal.db")
+        store.open()
+        try:
+            old = str(int(DUE_TS - 2 * DAY))
+            store.set_meta("last_report_sent_daily", old)
+
+            periods = reports.maybe_send_due_reports_multi(
+                cfg, [("A@h", store, cfg.energy)], store,
+                lambda *_args: None, now=DUE_TS, tz=timezone.utc,
+            )
+
+            assert periods == []
+            assert store.get_meta("last_report_sent_daily") == old
+        finally:
+            store.close()
 
     @pytest.mark.unit
     def test_multi_disabled_or_empty(self, tmp_path):

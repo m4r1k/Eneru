@@ -256,6 +256,58 @@ class TestSchemaMigration:
             s.close()
 
     @pytest.mark.unit
+    def test_versionless_populated_db_is_recovered_not_treated_as_fresh(
+        self, tmp_path: Path,
+    ) -> None:
+        # F-027: an older binary created the tables (v1 shape) but crashed before
+        # stamping meta.schema_version. A newer binary opening this versionless-
+        # but-populated DB must run the full migration chain and stamp the current
+        # version -- NOT mistake it for brand-new (which would skip migrations and
+        # leave the newer columns missing = silent stats loss).
+        path = tmp_path / "crashed.db"
+        self._build_v1_db(path)
+        # Simulate crash-before-stamp: drop the schema_version row.
+        c = sqlite3.connect(str(path), isolation_level=None)
+        c.execute("DELETE FROM meta WHERE key='schema_version'")
+        c.close()
+
+        s = StatsStore(path)
+        s.open()
+        try:
+            # Version stamped to current.
+            row = s._conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            assert int(row[0]) == SCHEMA_VERSION
+            # Migrations actually ran: a v7 column exists on samples.
+            cols = {r[1] for r in s._conn.execute("PRAGMA table_info(samples)")}
+            assert {"battery_voltage", "real_power", "power_nominal"} <= cols
+            # Existing v1 row preserved (not wiped as if fresh).
+            n = s._conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+            assert n == 1
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_created_then_reopened_reports_current_version(
+        self, tmp_path: Path,
+    ) -> None:
+        # F-027: a normally-created DB reopened reports the correct version.
+        path = tmp_path / "roundtrip.db"
+        s1 = StatsStore(path)
+        s1.open()
+        s1.close()
+        s2 = StatsStore(path)
+        s2.open()
+        try:
+            row = s2._conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            assert int(row[0]) == SCHEMA_VERSION
+        finally:
+            s2.close()
+
+    @pytest.mark.unit
     def test_v1_db_migrates_agg_tables_to_v2(self, tmp_path):
         path = tmp_path / "legacy.db"
         self._build_v1_db(path)
@@ -1033,6 +1085,56 @@ class TestNotificationQueue:
             s.close()
 
     @pytest.mark.unit
+    def test_claim_read_revert_and_marksent_delivering(
+        self, tmp_path: Path,
+    ) -> None:
+        # F-058: deferred-delivery's SQL is now on the store API. Exercise the
+        # claim -> read -> mark-sent(require_delivering) and claim -> revert paths.
+        s = self._open(tmp_path)
+        try:
+            nid = s.enqueue_notification("body!", "failure", "lifecycle")
+            assert s.read_notification(nid) == ("body!", "failure", "pending")
+
+            # First claim wins; second (row now 'delivering') loses.
+            assert s.claim_notification(nid, now=999) is True
+            assert s.claim_notification(nid, now=1000) is False
+            row = s._conn.execute(
+                "SELECT status, delivering_at, attempts FROM notifications "
+                "WHERE id=?", (nid,)).fetchone()
+            assert row[0] == "delivering" and row[1] == 999 and row[2] == 1
+
+            # mark-sent requires the row to still be 'delivering'.
+            assert s.mark_notification_sent(nid, require_delivering=True) is True
+            assert s.read_notification(nid)[2] == "sent"
+
+            # revert_claim takes a delivering row back to pending.
+            nid2 = s.enqueue_notification("b2", "info", "lifecycle")
+            assert s.claim_notification(nid2) is True
+            s.revert_claim(nid2)
+            assert s.read_notification(nid2)[2] == "pending"
+
+            # read_notification on a missing id is None.
+            assert s.read_notification(999999) is None
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_marksent_require_delivering_no_op_when_cancelled(
+        self, tmp_path: Path,
+    ) -> None:
+        # F-058: a classifier that cancels the row mid-send must not be clobbered
+        # back to 'sent' by require_delivering=True.
+        s = self._open(tmp_path)
+        try:
+            nid = s.enqueue_notification("x", "info", "lifecycle")
+            s.claim_notification(nid)
+            s.cancel_notification(nid, "superseded")   # classifier wins
+            s.mark_notification_sent(nid, require_delivering=True)
+            assert s.read_notification(nid)[2] == "cancelled"
+        finally:
+            s.close()
+
+    @pytest.mark.unit
     def test_mark_sent_removes_row_from_pending(self, tmp_path):
         s = self._open(tmp_path)
         try:
@@ -1059,6 +1161,19 @@ class TestNotificationQueue:
                 (id1,),
             ).fetchone()
             assert row == ("pending", 2)
+            assert s.pending_notification_count() == 1
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_claimed_notification_still_counts_as_outstanding(
+        self, tmp_path: Path,
+    ) -> None:
+        """F-079: flush cannot declare an in-flight delivery drained."""
+        s = self._open(tmp_path)
+        try:
+            notification_id = s.enqueue_notification("x", "info", "lifecycle")
+            assert s.claim_notification(notification_id) is True
             assert s.pending_notification_count() == 1
         finally:
             s.close()
@@ -3026,4 +3141,129 @@ class TestNotificationSQLiteErrorPaths:
             assert any("set_meta failed" in m for m in logged)
         finally:
             s._conn = real
+            s.close()
+
+
+class TestAggregateLockSplit:
+    """F-044: aggregate() must release _db_lock between the 5-min and hourly
+    tiers so the monitor thread isn't starved re-scanning ~86k rows under one
+    long transaction; correctness/idempotency must be preserved."""
+
+    def _seed(self, store: StatsStore, count: int) -> None:
+        now = int(time.time())
+        for i in range(count):
+            store.buffer_sample(
+                {"ups.status": "OL", "battery.charge": "90", "ups.load": "20"},
+                ts=now - count * 10 + i * 10)
+        store.flush()
+
+    @pytest.mark.unit
+    def test_lock_released_between_tiers(self, tmp_path: Path) -> None:
+        store = StatsStore(tmp_path / "s.db")
+        store.open()
+        try:
+            self._seed(store, 400)   # ~66 min -> multiple 5-min + hourly buckets
+
+            # The hook runs BETWEEN the two per-tier transactions. A non-reentrant
+            # Lock can only be acquired here if aggregate() genuinely released it
+            # between tiers (the whole point of F-044).
+            free_between = []
+            def hook() -> None:
+                got = store._db_lock.acquire(blocking=False)
+                free_between.append(got)
+                if got:
+                    store._db_lock.release()
+            store._aggregate_between_tiers = hook
+
+            store.aggregate()
+            assert free_between == [True]  # hook ran once; lock was free
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_split_aggregation_is_idempotent(self, tmp_path: Path) -> None:
+        store = StatsStore(tmp_path / "s.db")
+        store.open()
+        try:
+            self._seed(store, 400)
+            store.aggregate()
+            rows_5 = store._conn.execute(
+                "SELECT ts, samples_count FROM agg_5min ORDER BY ts").fetchall()
+            rows_h = store._conn.execute(
+                "SELECT ts, samples_count FROM agg_hourly ORDER BY ts").fetchall()
+            assert rows_5 and rows_h  # sanity: work actually happened
+            # Re-running must reproduce the exact same tier rows.
+            store.aggregate()
+            assert store._conn.execute(
+                "SELECT ts, samples_count FROM agg_5min ORDER BY ts"
+            ).fetchall() == rows_5
+            assert store._conn.execute(
+                "SELECT ts, samples_count FROM agg_hourly ORDER BY ts"
+            ).fetchall() == rows_h
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_aggregate_empty_store_is_noop(self, tmp_path: Path) -> None:
+        """With no samples, the 5-min tier writes no watermark (new_lo_5 is None)
+        and the hourly tier finds nothing — the split path still returns (0, 0)."""
+        store = StatsStore(tmp_path / "s.db")
+        store.open()
+        try:
+            assert store.aggregate() == (0, 0)
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_hourly_tier_skipped_when_store_closes_between_tiers(
+        self, tmp_path: Path,
+    ) -> None:
+        """If the store is closed by the between-tiers hook (simulating a
+        concurrent close winning the re-acquire), the hourly tier no-ops and the
+        method returns the 5-min count with a zero hourly count."""
+        store = StatsStore(tmp_path / "s.db")
+        store.open()
+        self._seed(store, 60)
+        store._aggregate_between_tiers = store.close
+        result = store.aggregate()
+        assert result[1] == 0   # hourly tier saw conn is None -> 0
+
+
+class TestNotificationStoreMethodsDegradeSafely:
+    """The promoted notification-store methods (F-058) and the pending-id
+    reconciliation query must degrade safely: return their neutral value when
+    the store isn't open, and swallow a transient SQLite error rather than
+    crashing the caller. These are the defensive branches the coverage bar
+    exists to keep exercised on every Python version."""
+
+    @pytest.mark.unit
+    def test_return_safe_defaults_when_store_closed(
+        self, tmp_path: Path,
+    ) -> None:
+        s = StatsStore(tmp_path / "closed.db")
+        s.open()
+        s.close()                      # _conn -> None
+        assert s._conn is None
+        assert s.read_notification(1) is None
+        assert s.claim_notification(1) is False
+        assert s.revert_claim(1) is None            # returns without raising
+        assert s.pending_notification_ids() is None
+
+    @pytest.mark.unit
+    def test_swallow_sqlite_errors(self, tmp_path: Path) -> None:
+        s = StatsStore(tmp_path / "err.db")
+        s.open()
+        try:
+            # Drop the table out from under the methods so their queries raise a
+            # real sqlite3.OperationalError ("no such table"), exercising the
+            # (sqlite3.Error, OSError) except branch without mocking a read-only
+            # connection attribute.
+            with s._db_lock:
+                s._conn.execute("DROP TABLE IF EXISTS notifications")
+                s._conn.commit()
+            assert s.read_notification(1) is None
+            assert s.claim_notification(1) is False
+            s.revert_claim(1)                       # swallowed, no raise
+            assert s.pending_notification_ids() is None
+        finally:
             s.close()

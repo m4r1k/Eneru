@@ -1,6 +1,7 @@
 """Tests for multi-UPS support: config parsing, coordinator routing, and logic."""
 
 import pytest
+import signal
 import threading
 import tempfile
 import os
@@ -15,6 +16,7 @@ from eneru import (
 )
 from eneru.monitor import UPSGroupMonitor
 from eneru.multi_ups import MultiUPSCoordinator
+from eneru.shutdown.remote import RemoteShutdownResult
 
 
 # ==============================================================================
@@ -336,7 +338,8 @@ class TestMultiUPSCoordinator:
         coord._log = lambda msg: None
 
         calls = []
-        coord._handle_local_shutdown = lambda label: calls.append(label)
+        coord._handle_local_shutdown = \
+            lambda label, loopback_results=None: calls.append(label)
 
         coord._on_group_shutdown(config.ups_groups[0])
         assert len(calls) == 1
@@ -353,7 +356,8 @@ class TestMultiUPSCoordinator:
         coord._log = lambda msg: None
 
         calls = []
-        coord._handle_local_shutdown = lambda label: calls.append(label)
+        coord._handle_local_shutdown = \
+            lambda label, loopback_results=None: calls.append(label)
 
         coord._on_group_shutdown(config.ups_groups[1])
         assert len(calls) == 0
@@ -372,7 +376,8 @@ class TestMultiUPSCoordinator:
         coord._log = lambda msg: None
 
         calls = []
-        coord._handle_local_shutdown = lambda label: calls.append(label)
+        coord._handle_local_shutdown = \
+            lambda label, loopback_results=None: calls.append(label)
 
         coord._on_group_shutdown(config.ups_groups[0])
         assert len(calls) == 1
@@ -388,7 +393,8 @@ class TestMultiUPSCoordinator:
         coord._log = lambda msg: None
 
         calls = []
-        coord._handle_local_shutdown = lambda label: calls.append(label)
+        coord._handle_local_shutdown = \
+            lambda label, loopback_results=None: calls.append(label)
 
         coord._on_group_shutdown(config.ups_groups[0])
         assert len(calls) == 0
@@ -419,6 +425,303 @@ class TestMultiUPSCoordinator:
         # guard (proceed=False) and returned before logging anything.
         triggered = [m for m in logs if "Local shutdown triggered by" in m]
         assert triggered == ["🚨  Local shutdown triggered by UPS1"]
+
+    def _make_local_shutdown_coord(self, tmp_path):
+        """Coordinator wired for the real (non-dry-run) host poweroff path."""
+        config = self._make_config(
+            [UPSGroupConfig(ups=UPSConfig(name="UPS1"), is_local=True)],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "global-shutdown-flag"),
+            ),
+            local_shutdown=LocalShutdownConfig(enabled=True),
+            behavior=BehaviorConfig(dry_run=False),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+        coord._notification_worker = MagicMock()
+        return coord
+
+    @pytest.mark.unit
+    def test_local_poweroff_nonzero_neutralizes_marker(self, tmp_path):
+        """F-005 (coordinator): a non-zero poweroff rc means the host is still
+        up while the completion marker was already written. Must log an ERROR,
+        send a failure notification, and DELETE the marker so the next start
+        doesn't emit a false 'Recovered'."""
+        coord = self._make_local_shutdown_coord(tmp_path)
+
+        with patch("eneru.multi_ups.run_command",
+                   return_value=(1, "", "poweroff refused")) as run_cmd, \
+             patch("eneru.multi_ups.write_shutdown_marker") as write_marker, \
+             patch("eneru.multi_ups.delete_shutdown_marker") as del_marker:
+            coord._handle_local_shutdown("UPS1")
+
+        run_cmd.assert_called_once()
+        write_marker.assert_called_once()   # marker written before poweroff
+        del_marker.assert_called_once()     # torn down on failure
+        assert any(
+            "host poweroff command failed (rc=1)" in c.args[0]
+            for c in coord._log.call_args_list
+        )
+        # A failure notification stating the host is still up went out.
+        failure_sends = [
+            c for c in coord._notification_worker.send.call_args_list
+            if "still up" in c.args[0].lower()
+        ]
+        assert failure_sends
+
+        # Defensive branch: with no worker wired, the marker is still torn
+        # down (the failure notification is simply skipped).
+        coord2 = self._make_local_shutdown_coord(tmp_path)
+        coord2._notification_worker = None
+        with patch("eneru.multi_ups.run_command",
+                   return_value=(1, "", "poweroff refused")), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.delete_shutdown_marker") as del_marker2:
+            coord2._handle_local_shutdown("UPS1")
+        del_marker2.assert_called_once()
+
+    @pytest.mark.unit
+    def test_local_poweroff_zero_keeps_marker(self, tmp_path):
+        """F-005 (coordinator): the rc==0 happy path is unchanged — marker
+        stays written, no deletion, no failure notification."""
+        coord = self._make_local_shutdown_coord(tmp_path)
+
+        with patch("eneru.multi_ups.run_command",
+                   return_value=(0, "", "")) as run_cmd, \
+             patch("eneru.multi_ups.write_shutdown_marker") as write_marker, \
+             patch("eneru.multi_ups.delete_shutdown_marker") as del_marker:
+            coord._handle_local_shutdown("UPS1")
+
+        run_cmd.assert_called_once()
+        write_marker.assert_called_once()
+        del_marker.assert_not_called()
+        assert not any(
+            "still up" in c.args[0].lower()
+            for c in coord._notification_worker.send.call_args_list
+        )
+
+    @pytest.mark.unit
+    def test_local_poweroff_timeout_keeps_marker(self, tmp_path):
+        """F-068 (coordinator): rc=124 is run_command's own timeout — the halt
+        may be proceeding while the caller is left on hold. Ambiguous: keep the
+        marker, log a warning, and send NO Incomplete notification."""
+        coord = self._make_local_shutdown_coord(tmp_path)
+
+        with patch("eneru.multi_ups.run_command",
+                   return_value=(124, "", "Command timed out")) as run_cmd, \
+             patch("eneru.multi_ups.write_shutdown_marker") as write_marker, \
+             patch("eneru.multi_ups.delete_shutdown_marker") as del_marker:
+            coord._handle_local_shutdown("UPS1")
+
+        run_cmd.assert_called_once()
+        write_marker.assert_called_once()
+        del_marker.assert_not_called()          # marker survives the timeout
+        assert any(
+            "timed out" in c.args[0]
+            for c in coord._log.call_args_list
+        )
+        assert not any(
+            "Incomplete" in c.args[0]
+            for c in coord._notification_worker.send.call_args_list
+        )
+
+    def _make_delegated_coord(self, tmp_path, dry_run=False):
+        """Coordinator wired for the containerized loopback-delegate path."""
+        config = self._make_config(
+            [UPSGroupConfig(
+                ups=UPSConfig(name="UPS1"),
+                is_local=True,
+                remote_servers=[RemoteServerConfig(
+                    name="host-loopback", enabled=True, host="127.0.0.1",
+                    user="root", is_host_loopback=True,
+                )],
+            )],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "global-shutdown-flag"),
+            ),
+            local_shutdown=LocalShutdownConfig(enabled=True),
+            behavior=BehaviorConfig(dry_run=dry_run),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+        coord._notification_worker = MagicMock()
+        return coord
+
+    @staticmethod
+    def _loopback_result(sent=True, error=""):
+        return RemoteShutdownResult(
+            server="host-loopback", host="127.0.0.1",
+            completed=True, shutdown_sent=sent, error=error,
+        )
+
+    @pytest.mark.unit
+    def test_delegated_loopback_skips_in_container_poweroff(self, tmp_path):
+        """F-061: containerized multi-UPS with an is_host_loopback delegate must
+        NOT run the in-container poweroff binary in the coordinator -- the host
+        poweroff was already delivered over SSH by the triggering monitor's
+        remote-server phase. It records completion + writes the recovery marker
+        instead, mirroring monitor.py's single-UPS delegated branch."""
+        coord = self._make_delegated_coord(tmp_path)
+
+        with patch("eneru.runtime._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.multi_ups.run_command") as run_cmd, \
+             patch("eneru.multi_ups.write_shutdown_marker") as write_marker:
+            coord._handle_local_shutdown(
+                "UPS1", loopback_results=[self._loopback_result(sent=True)])
+
+        # The in-container poweroff binary was NOT invoked.
+        run_cmd.assert_not_called()
+        # The recovery marker was written + a completion notification sent + the
+        # worker flushed before the (delegated) host goes down.
+        write_marker.assert_called_once()
+        assert any(
+            "delegated to loopback SSH" in c.args[0]
+            for c in coord._notification_worker.send.call_args_list
+        )
+        coord._notification_worker.flush.assert_called_once()
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("results", [
+        None,                                                # never provided
+        [],                                                  # no loopback rows
+    ])
+    def test_delegated_loopback_missing_results_incomplete(self, tmp_path,
+                                                           results):
+        """F-066: no evidence the loopback poweroff went out → NO completion
+        marker, an ❌ Incomplete notification, and the in-flight guard cleared
+        so a later trigger can retry the delegation."""
+        coord = self._make_delegated_coord(tmp_path)
+
+        with patch("eneru.runtime._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.multi_ups.run_command") as run_cmd, \
+             patch("eneru.multi_ups.write_shutdown_marker") as write_marker:
+            coord._handle_local_shutdown("UPS1", loopback_results=results)
+
+        run_cmd.assert_not_called()
+        write_marker.assert_not_called()
+        assert not coord._global_shutdown_flag.exists()
+        assert any(
+            "Shutdown Sequence Incomplete" in c.args[0]
+            for c in coord._notification_worker.send.call_args_list
+        )
+        # Guard cleared for retry (host is still up).
+        assert coord._local_shutdown_initiated is False
+        assert not coord._global_shutdown_flag.exists()
+
+    @pytest.mark.unit
+    def test_delegated_loopback_failed_delivery_incomplete(self, tmp_path):
+        """F-066: a loopback result whose Phase-C poweroff was NOT delivered
+        (sshd down, key perms) must take the incomplete branch with the
+        failure detail surfaced, and allow a retry."""
+        coord = self._make_delegated_coord(tmp_path)
+        failed = self._loopback_result(sent=False, error="ssh: connect refused")
+
+        with patch("eneru.runtime._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.multi_ups.write_shutdown_marker") as write_marker:
+            coord._handle_local_shutdown("UPS1", loopback_results=[failed])
+
+        write_marker.assert_not_called()
+        assert any(
+            "ssh: connect refused" in c.args[0]
+            for c in coord._notification_worker.send.call_args_list
+        )
+        assert coord._local_shutdown_initiated is False
+        # A fresh trigger is admitted again (retry allowed).
+        with patch("eneru.runtime._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.multi_ups.write_shutdown_marker") as write_marker2:
+            coord._handle_local_shutdown(
+                "UPS1", loopback_results=[self._loopback_result(sent=True)])
+        write_marker2.assert_called_once()
+
+    @pytest.mark.unit
+    def test_delegated_loopback_no_worker_still_incomplete(self, tmp_path):
+        """F-066 defensive branch: without a notification worker the failure
+        path still refuses the marker and clears the guard."""
+        coord = self._make_delegated_coord(tmp_path)
+        coord._notification_worker = None
+
+        with patch("eneru.runtime._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.multi_ups.write_shutdown_marker") as write_marker:
+            coord._handle_local_shutdown("UPS1", loopback_results=None)
+
+        write_marker.assert_not_called()
+        assert coord._local_shutdown_initiated is False
+
+    @pytest.mark.unit
+    def test_on_group_shutdown_passes_loopback_results(self, tmp_path):
+        """F-066: _on_group_shutdown must hand the triggering monitor's
+        stashed remote results (filtered to the loopback rows) to
+        _handle_local_shutdown."""
+        coord = self._make_delegated_coord(tmp_path)
+        group = coord.config.ups_groups[0]
+
+        # Fake the triggering monitor: same group object, stashed results
+        # containing a loopback row and an unrelated regular remote.
+        monitor = MagicMock()
+        monitor.config.ups_groups = [group]
+        monitor.config.remote_servers = group.remote_servers
+        loopback_row = self._loopback_result(sent=True)
+        regular_row = RemoteShutdownResult(
+            server="nas", host="192.168.1.9", shutdown_sent=True)
+        monitor._last_remote_results = [regular_row, loopback_row]
+        coord._monitors = [monitor]
+
+        captured = {}
+
+        def fake_handle(label, loopback_results=None):
+            captured["label"] = label
+            captured["results"] = loopback_results
+
+        coord._handle_local_shutdown = fake_handle
+        coord._on_group_shutdown(group)
+
+        assert captured["label"] == group.ups.label
+        assert captured["results"] == [loopback_row]
+
+    @pytest.mark.unit
+    def test_delegated_loopback_dry_run_skips_poweroff_and_marker(self, tmp_path):
+        """F-061: dry-run delegated path skips the poweroff, the marker, AND
+        clears the global shutdown flag."""
+        config = self._make_config(
+            [UPSGroupConfig(
+                ups=UPSConfig(name="UPS1"),
+                is_local=True,
+                remote_servers=[RemoteServerConfig(
+                    name="host-loopback", enabled=True, host="127.0.0.1",
+                    user="root", is_host_loopback=True,
+                )],
+            )],
+            logging=LoggingConfig(
+                state_file=str(tmp_path / "state"),
+                battery_history_file=str(tmp_path / "history"),
+                shutdown_flag_file=str(tmp_path / "global-shutdown-flag"),
+            ),
+            local_shutdown=LocalShutdownConfig(enabled=True),
+            behavior=BehaviorConfig(dry_run=True),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+        coord._notification_worker = MagicMock()
+        coord._global_shutdown_flag.touch()
+
+        with patch("eneru.runtime._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.multi_ups.run_command") as run_cmd, \
+             patch("eneru.multi_ups.write_shutdown_marker") as write_marker:
+            coord._handle_local_shutdown("UPS1")
+
+        run_cmd.assert_not_called()
+        write_marker.assert_not_called()
+        assert not coord._global_shutdown_flag.exists()
 
     @pytest.mark.unit
     def test_clear_local_shutdown_state_resets_lock_and_flag(self, tmp_path):
@@ -559,6 +862,7 @@ class TestCoordinatorReportSender:
         kwargs = coord._notification_worker.send.call_args.kwargs
         assert kwargs["category"] == "report"
         assert kwargs["store"] is primary._stats_store
+        assert kwargs["require_persistent"] is True
         # body carries no "[UPS-A]" prefix; @ is escaped to avoid mentions.
         assert kwargs["body"].startswith("Fleet digest body")
 
@@ -1451,7 +1755,8 @@ class TestCoordinatorRealLocalShutdown:
         coord._notification_worker = MagicMock()
 
         with patch("eneru.multi_ups.time.sleep"), \
-             patch("eneru.multi_ups.run_command") as mock_run:
+             patch("eneru.multi_ups.run_command",
+                   return_value=(0, "", "")) as mock_run:
             coord._handle_local_shutdown("UPS1")
 
         mock_run.assert_called_once()
@@ -1480,7 +1785,8 @@ class TestCoordinatorRealLocalShutdown:
             "touch",
             side_effect=OSError("read-only filesystem"),
         ), patch("eneru.multi_ups.time.sleep"), \
-             patch("eneru.multi_ups.run_command") as mock_run:
+             patch("eneru.multi_ups.run_command",
+                   return_value=(0, "", "")) as mock_run:
             coord._handle_local_shutdown("UPS1")
 
         mock_run.assert_called_once()
@@ -1504,7 +1810,8 @@ class TestCoordinatorRealLocalShutdown:
         coord._notification_worker = None
 
         with patch("eneru.multi_ups.time.sleep"), \
-             patch("eneru.multi_ups.run_command") as mock_run:
+             patch("eneru.multi_ups.run_command",
+                   return_value=(0, "", "")) as mock_run:
             coord._handle_local_shutdown("UPS1")
 
         cmd_parts = mock_run.call_args.args[0]
@@ -2716,15 +3023,17 @@ class TestCoordinatorReloadNotificationWorker:
         assert any("apprise not installed" in line for line in logs)
 
     @pytest.mark.unit
-    def test_reload_notification_worker_start_failure_clears_refs(
+    def test_reload_notification_worker_start_failure_keeps_existing_refs(
         self, tmp_path: Path,
     ) -> None:
         coord = MultiUPSCoordinator(_coord_config(
             tmp_path,
             notifications=NotificationsConfig(enabled=True, urls=["json://x"]),
         ))
-        mon = MagicMock()
-        executor = MagicMock()
+        old_worker = MagicMock()
+        coord._notification_worker = old_worker
+        mon = MagicMock(_notification_worker=old_worker)
+        executor = MagicMock(_notification_worker=old_worker)
         coord._monitors = [mon]
         coord._redundancy_executors = {"rg": executor}
         worker = MagicMock()
@@ -2736,10 +3045,30 @@ class TestCoordinatorReloadNotificationWorker:
              patch("eneru.multi_ups.NotificationWorker", return_value=worker):
             coord._reload_notification_worker()
 
-        assert coord._notification_worker is None
-        assert mon._notification_worker is None
-        assert executor._notification_worker is None
+        assert coord._notification_worker is old_worker
+        assert mon._notification_worker is old_worker
+        assert executor._notification_worker is old_worker
+        old_worker.stop.assert_not_called()
         assert any("Failed to reload notifications" in line for line in logs)
+
+    @pytest.mark.unit
+    def test_coordinator_startup_event_is_written_to_each_store(
+        self, tmp_path: Path,
+    ) -> None:
+        """One coordinator notification still leaves per-UPS recovery events."""
+        monitor = object.__new__(UPSGroupMonitor)
+        monitor._coordinator_mode = True
+        monitor._coordinator_startup_event = (
+            "POWER_RESTORED", "Recovered after a completed shutdown",
+        )
+        monitor._stats_store = MagicMock()
+        monitor._stats_store._conn = object()
+
+        monitor._emit_lifecycle_startup_notification()
+
+        monitor._stats_store.log_event.assert_called_once_with(
+            "POWER_RESTORED", "Recovered after a completed shutdown",
+        )
 
     @pytest.mark.unit
     def test_reload_notification_worker_registers_open_stores(
@@ -2773,6 +3102,7 @@ class TestCoordinatorReloadNotificationWorker:
         assert mon_closed._notification_worker is worker
         assert executor._notification_worker is worker
         worker.register_store.assert_called_once_with(open_store)
+        # The old worker is absent in this fixture, so no handoff is needed.
         assert any("Notifications reloaded" in line for line in logs)
 
 
@@ -3239,3 +3569,69 @@ class TestCoordinatorShutdownJoinAndAudit:
         coord._monitors = [mon]
         coord.record_control_event("", "CONFIG_RELOAD", "reloaded")
         store.log_event.assert_called_once_with("CONFIG_RELOAD", "reloaded")
+
+
+class TestHandleLocalShutdownRace:
+    """Behavioural-gap 5: two groups tripping at the same instant must not
+    both power the host off. The in-memory lock + in-flight flag admit exactly
+    one thread into the poweroff body; the loser returns at the guard."""
+
+    @pytest.mark.unit
+    def test_two_thread_race_admits_exactly_one_poweroff(self, tmp_path):
+        config = _coord_config(
+            tmp_path,
+            behavior=BehaviorConfig(dry_run=False),
+            local_shutdown=LocalShutdownConfig(
+                enabled=True, command="systemctl poweroff"),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = MagicMock()
+        coord._notification_worker = MagicMock()
+
+        barrier = threading.Barrier(2)
+
+        def worker(label):
+            # Both threads block here, then are released together so they
+            # genuinely contend for the guard rather than running in series.
+            barrier.wait()
+            coord._handle_local_shutdown(label)
+
+        with patch("eneru.multi_ups.run_command",
+                   return_value=(0, "", "")) as run_cmd, \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.delete_shutdown_marker"):
+            t1 = threading.Thread(target=worker, args=("UPS1",))
+            t2 = threading.Thread(target=worker, args=("UPS2",))
+            t1.start()
+            t2.start()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
+
+        assert not t1.is_alive() and not t2.is_alive()
+        # Exactly one poweroff argv was executed despite the race.
+        run_cmd.assert_called_once()
+
+
+class TestCoordinatorHandleSighup:
+    """Behavioural-gap 9: the coordinator's SIGHUP handler reloads config and
+    never lets a reload error escape into the signal machinery."""
+
+    @pytest.mark.unit
+    def test_sighup_triggers_config_reload(self, tmp_path):
+        coord = MultiUPSCoordinator(_coord_config(tmp_path))
+        coord._log = MagicMock()
+        with patch.object(coord, "reload_config") as mock_reload:
+            coord._handle_sighup(signal.SIGHUP, None)
+        mock_reload.assert_called_once()
+        logs = " ".join(str(c) for c in coord._log.call_args_list)
+        assert "SIGHUP" in logs
+
+    @pytest.mark.unit
+    def test_sighup_swallows_reload_errors(self, tmp_path):
+        coord = MultiUPSCoordinator(_coord_config(tmp_path))
+        logs = []
+        coord._log = logs.append
+        with patch.object(coord, "reload_config",
+                          side_effect=RuntimeError("bad yaml")):
+            coord._handle_sighup(signal.SIGHUP, None)  # must not raise
+        assert any("reload error" in m.lower() for m in logs), logs

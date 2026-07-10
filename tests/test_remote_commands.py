@@ -1,5 +1,7 @@
 """Tests for remote pre-shutdown command templating and execution."""
 
+import threading
+
 import pytest
 from unittest.mock import patch, MagicMock, call
 
@@ -14,7 +16,11 @@ from eneru import (
     UnmountConfig,
 )
 from eneru import utils as eneru_utils
-from eneru.shutdown.remote import RemoteShutdownResult, loopback_poweroff_sent
+from eneru.shutdown.remote import (
+    REMOTE_PATH_PREFIX,
+    RemoteShutdownResult,
+    loopback_poweroff_sent,
+)
 
 
 class TestLoopbackPoweroffSent:
@@ -1436,6 +1442,7 @@ class TestRunRemoteCommand:
             host="192.168.1.50",
             user="admin",
             connect_timeout=10,
+            augment_remote_path=True,
             ssh_options=["-o StrictHostKeyChecking=no"],
         )
 
@@ -1454,7 +1461,143 @@ class TestRunRemoteCommand:
             assert "ConnectTimeout=10" in call_str
             assert "BatchMode=yes" in call_str
             assert "admin@192.168.1.50" in call_args
-            assert "echo test" in call_args
+            # The remote command is the final single argv element, now carrying
+            # the PATH augmentation prefix (see REMOTE_PATH_PREFIX). The
+            # original command must still be present intact.
+            assert call_args[-1] == REMOTE_PATH_PREFIX + "echo test"
+            assert call_args[-1].endswith("echo test")
+            assert "/usr/syno/sbin" in call_args[-1]
+
+    @pytest.mark.unit
+    def test_synology_bare_command_gets_path_augmentation(self, ssh_monitor):
+        """Regression (DS1821 outage, Eneru 6.1.6): a bare-name shutdown
+        command like ``synoshutdown -s`` over SSH previously failed with
+        ``sudo: synoshutdown: command not found`` because the non-interactive
+        SSH shell has a minimal PATH lacking ``/usr/syno/sbin``. The command
+        string sent over ssh must now carry the PATH augmentation so bare
+        names resolve — through sudo — exactly like an interactive login."""
+        ssh_monitor._notification_worker = MagicMock()
+        ssh_monitor.config.behavior.dry_run = False
+        server = RemoteServerConfig(
+            name="Synology",
+            host="192.168.1.60",
+            user="admin",
+            use_sudo=True,
+            augment_remote_path=True,
+            shutdown_command="synoshutdown -s",
+        )
+
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (0, "", "")
+
+            result = ssh_monitor._shutdown_remote_server(server)
+
+            assert result.shutdown_sent is True
+            sent_command = mock_run.call_args[0][0][-1]
+            # PATH prefix present, /usr/syno/sbin on PATH, sudo -n applied,
+            # and the original bare command preserved at the tail.
+            assert sent_command == (
+                REMOTE_PATH_PREFIX + "sudo -n synoshutdown -s"
+            )
+            assert "/usr/syno/sbin" in sent_command
+            assert sent_command.endswith("sudo -n synoshutdown -s")
+
+    @pytest.mark.unit
+    def test_augment_remote_path_false_sends_command_verbatim(self, ssh_monitor):
+        """F-080: a non-POSIX remote (csh/tcsh, cmd.exe) opts out via
+        augment_remote_path=false and receives its command with NO
+        `export PATH=...` prefix, so the POSIX-only statement can't break it."""
+        server = RemoteServerConfig(
+            name="TrueNAS CORE", host="192.168.1.70", user="root",
+            augment_remote_path=False,
+        )
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (0, "", "")
+            ssh_monitor._run_remote_command(server, "shutdown -p now", 30, "test")
+            sent = mock_run.call_args[0][0][-1]
+            assert sent == "shutdown -p now"
+            assert "export PATH" not in sent
+
+    @pytest.mark.unit
+    def test_augment_remote_path_is_opt_in(self, ssh_monitor):
+        """Non-POSIX remotes stay compatible unless PATH expansion is opted in."""
+        server = RemoteServerConfig(host="192.168.1.50", user="root")
+        assert server.augment_remote_path is False
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (0, "", "")
+            ssh_monitor._run_remote_command(server, "echo hi", 30, "test")
+            assert mock_run.call_args[0][0][-1] == "echo hi"
+
+        server.augment_remote_path = True
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (0, "", "")
+            ssh_monitor._run_remote_command(server, "echo hi", 30, "test")
+            assert mock_run.call_args[0][0][-1] == REMOTE_PATH_PREFIX + "echo hi"
+
+    @pytest.mark.unit
+    def test_final_shutdown_ssh_teardown_255_is_sent_unconfirmed(self, ssh_monitor):
+        """F-077: the remote accepted poweroff and sshd died before returning
+        status → ssh exits 255 with a transport-teardown stderr. For the FINAL
+        shutdown command this is "sent (unconfirmed)", not a failure."""
+        server = RemoteServerConfig(host="192.168.1.50", user="root")
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (
+                255, "", "Connection to 192.168.1.50 closed by remote host.")
+            success, note = ssh_monitor._run_remote_command(
+                server, "poweroff", 30, "shutdown", is_final_shutdown=True)
+            assert success is True
+            assert note == "SSH transport ended (result unknown)"
+
+    @pytest.mark.unit
+    def test_final_shutdown_255_permission_denied_stays_failed(self, ssh_monitor):
+        """F-077: a 255 that is NOT a transport teardown (e.g. auth failure)
+        stays a failure even on the final shutdown command."""
+        server = RemoteServerConfig(host="192.168.1.50", user="root")
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (255, "", "Permission denied (publickey).")
+            success, err = ssh_monitor._run_remote_command(
+                server, "poweroff", 30, "shutdown", is_final_shutdown=True)
+            assert success is False
+            assert "Permission denied" in err
+
+    @pytest.mark.unit
+    def test_non_final_255_teardown_stays_failed(self, ssh_monitor):
+        """F-077: a mid-sequence (pre_shutdown) command that drops the SSH
+        transport really did fail — the leniency is scoped to the final
+        poweroff only (is_final_shutdown defaults False)."""
+        server = RemoteServerConfig(host="192.168.1.50", user="root")
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (255, "", "Broken pipe")
+            success, err = ssh_monitor._run_remote_command(
+                server, "stop_vms", 30, "pre")
+            assert success is False
+
+    @pytest.mark.unit
+    def test_final_shutdown_teardown_sets_shutdown_sent(self, ssh_monitor):
+        """F-077 end-to-end: via _shutdown_remote_server, a 255-teardown on the
+        poweroff marks shutdown_sent=True (so the loopback-delegate path writes
+        the completion marker) without firing a false failure."""
+        ssh_monitor._notification_worker = MagicMock()
+        ssh_monitor.config.behavior.dry_run = False
+        server = RemoteServerConfig(host="192.168.1.50", user="root",
+                                    shutdown_command="poweroff")
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (255, "", "Connection reset by peer")
+            result = ssh_monitor._shutdown_remote_server(server)
+            assert result.shutdown_sent is True
+            assert not result.error
+
+    @pytest.mark.unit
+    def test_is_ssh_transport_teardown_signatures(self):
+        """F-077: the teardown detector matches the known transport-drop
+        phrasings (fixed + OpenSSH's variable-host form) and nothing else."""
+        from eneru.shutdown.remote import _is_ssh_transport_teardown
+        assert _is_ssh_transport_teardown("Connection to h closed by remote host")
+        assert _is_ssh_transport_teardown("client_loop: send disconnect: Broken pipe")
+        assert _is_ssh_transport_teardown("Connection reset by peer")
+        assert _is_ssh_transport_teardown("Connection to 10.0.0.1 closed.")
+        assert not _is_ssh_transport_teardown("Permission denied (publickey).")
+        assert not _is_ssh_transport_teardown("")
 
     @pytest.mark.unit
     def test_run_remote_command_uses_ssh_key_path(self, ssh_monitor):
@@ -1614,3 +1757,85 @@ class TestRunRemoteCommand:
         assert success is False
         assert "capped by phase deadline" in error
         assert mock_run.call_args.kwargs["timeout"] == 1
+
+
+class TestParallelShutdownResilience:
+    """Deadline-based parallel join + worker-crash accounting."""
+
+    @pytest.fixture
+    def remote_monitor(self, minimal_config, tmp_path):
+        minimal_config.logging.state_file = str(tmp_path / "state")
+        minimal_config.logging.battery_history_file = str(tmp_path / "history")
+        minimal_config.logging.shutdown_flag_file = str(tmp_path / "flag")
+        minimal_config.logging.file = None
+        minimal_config.behavior.dry_run = False
+
+        monitor = UPSGroupMonitor(minimal_config)
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+        monitor._notification_worker = MagicMock()
+        return monitor
+
+    @pytest.mark.unit
+    def test_parallel_join_does_not_hang_on_stuck_worker(self, remote_monitor):
+        """Behavioural-gap 1: a worker that blocks past the phase deadline is
+        NOT waited on forever -- the deadline-based join caps the total wait,
+        synthesises a timed-out result for the missing thread, and logs the
+        'still in progress' warning. Zeroing the SSH overhead buffer + the
+        per-server timeouts makes ``max_timeout`` (hence the join deadline) ~0,
+        so the stuck worker is observed still-alive immediately."""
+        release = threading.Event()
+
+        server = RemoteServerConfig(
+            name="hang", enabled=True, host="10.0.0.9", user="root",
+            command_timeout=0, connect_timeout=0, shutdown_safety_margin=0,
+        )
+
+        def blocking_worker(server, *, deadline=None):
+            # Block until the test releases us (5s safety net so a stray
+            # daemon thread can't wedge the run if something regresses).
+            release.wait(timeout=5)
+            return RemoteShutdownResult(
+                server=server.name, host=server.host, shutdown_sent=True)
+
+        with patch("eneru.shutdown.remote._SSH_OVERHEAD_BUFFER", 0), \
+             patch.object(remote_monitor, "_shutdown_remote_server",
+                          side_effect=blocking_worker):
+            try:
+                results = remote_monitor._shutdown_servers_parallel([server])
+            finally:
+                release.set()  # let the daemon worker exit cleanly
+
+        assert len(results) == 1
+        stuck = results[0]
+        assert stuck.timed_out is True
+        assert stuck.completed is False
+        assert "timed out" in stuck.error
+
+        log_text = "\n".join(
+            str(c) for c in remote_monitor.logger.log.call_args_list)
+        assert "still in progress" in log_text
+
+    @pytest.mark.unit
+    def test_worker_crash_flags_result_and_counts_in_summary(self, remote_monitor):
+        """Behavioural-gap 4: a worker that RAISES (not an SSH failure the callee
+        catches, but a bubbling exception) is caught in the thread wrapper, its
+        result is flagged ``crashed=True``, and the phase summary counts it."""
+        server = RemoteServerConfig(
+            name="boom", enabled=True, host="10.0.0.4", user="root")
+        remote_monitor.config.ups_groups[0].remote_servers = [server]
+
+        def crashing_worker(server, *, deadline=None):
+            raise RuntimeError("kaboom")
+
+        with patch.object(remote_monitor, "_shutdown_remote_server",
+                          side_effect=crashing_worker):
+            results = remote_monitor._shutdown_remote_servers()
+
+        assert len(results) == 1
+        assert results[0].crashed is True
+
+        log_text = "\n".join(
+            str(c) for c in remote_monitor.logger.log.call_args_list)
+        assert "1 crashed" in log_text          # phase summary line
+        assert "kaboom" in log_text             # the thread-crash trace line

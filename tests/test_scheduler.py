@@ -5,6 +5,7 @@ the machine timezone.
 """
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
@@ -219,3 +220,133 @@ class TestMonthlyDue:
         now = _epoch(2026, 12, 5)
         assert s.next_run(now, _epoch(2026, 12, 1, 1), UTC) == _epoch(2027, 1, 1)
 
+
+
+# ------------------------------------------------------------------
+# DST correctness (F-070 spring-forward, F-083 fall-back)
+# ------------------------------------------------------------------
+
+try:
+    BERLIN = ZoneInfo("Europe/Berlin")
+except ZoneInfoNotFoundError:  # pragma: no cover - tzdata missing
+    BERLIN = None
+
+needs_tz = pytest.mark.skipif(BERLIN is None, reason="zoneinfo tz unavailable")
+
+
+def _berlin(y, mo, d, h, mi, fold=0):
+    return datetime(y, mo, d, h, mi, tzinfo=BERLIN, fold=fold).timestamp()
+
+
+class TestDSTSpringForward:
+    """F-070: Europe/Berlin 2026-03-29 02:00→03:00 skips the 02:xx wall hour.
+    A daily 02:30 schedule used to map (fold=0) to an epoch in the FUTURE,
+    violating 'at or before now' and refiring on every tick (verified 361
+    duplicate fires in 30 min). The epoch-space wrap-around fixes it."""
+
+    @needs_tz
+    @pytest.mark.unit
+    def test_last_occurrence_never_in_future_through_the_gap(self):
+        s = Schedule.daily("02:30")
+        # Sweep 01:55 → 04:00 across the gap in 5s ticks: the invariant
+        # "last_occurrence(now) <= now" must hold on every tick.
+        start = _berlin(2026, 3, 29, 1, 55)
+        for i in range(int((2 * 3600 + 300) / 5)):
+            now = start + i * 5
+            assert s.last_occurrence(now, BERLIN) <= now
+
+    @needs_tz
+    @pytest.mark.unit
+    def test_daily_in_gap_fires_exactly_once(self):
+        """The verified refire storm: tick a daily 02:30 job every 5s across
+        the whole spring-forward night. It must fire exactly once."""
+        s = Schedule.daily("02:30")
+        last_run = _berlin(2026, 3, 28, 2, 30) + 1  # ran normally yesterday
+        fires = 0
+        now = _berlin(2026, 3, 29, 1, 0)
+        end = _berlin(2026, 3, 29, 5, 0)
+        while now < end:
+            if s.due(now, last_run, BERLIN):
+                fires += 1
+                last_run = now  # owner stamps last-run on fire
+            now += 5
+        assert fires == 1
+
+    @needs_tz
+    @pytest.mark.unit
+    def test_weekly_in_gap_fires_exactly_once(self):
+        # 2026-03-29 is a Sunday; weekly Sunday 02:30 hits the gap head-on.
+        s = Schedule.weekly("sunday", "02:30")
+        last_run = _berlin(2026, 3, 22, 2, 31)  # ran last Sunday
+        fires = 0
+        now = _berlin(2026, 3, 29, 1, 0)
+        end = _berlin(2026, 3, 29, 5, 0)
+        while now < end:
+            if s.due(now, last_run, BERLIN):
+                fires += 1
+                last_run = now
+            now += 5
+        assert fires == 1
+
+
+class TestDSTFallBack:
+    """F-083: Europe/Berlin 2026-10-25 03:00→02:00 replays the 02:xx wall
+    hour, so the SAME daily 02:30 slot exists at two epochs an hour apart.
+    The wall-identity dedupe must stop the second fire."""
+
+    @needs_tz
+    @pytest.mark.unit
+    def test_daily_runs_once_across_repeated_hour(self):
+        s = Schedule.daily("02:30")
+        first = _berlin(2026, 10, 25, 2, 30, fold=0)   # CEST 02:30
+        second = _berlin(2026, 10, 25, 2, 30, fold=1)  # CET 02:30, 1h later
+        assert second - first == 3600  # sanity: the hour really repeats
+
+        # Job fired at the first 02:30…
+        assert s.due(first, _berlin(2026, 10, 24, 2, 31), BERLIN) is True
+        last_run = first
+        # …the second 02:30 must NOT refire (same wall slot).
+        assert s.due(second, last_run, BERLIN) is False
+        assert s.due(second + 300, last_run, BERLIN) is False
+        # Next day's occurrence still fires.
+        assert s.due(_berlin(2026, 10, 26, 2, 30), last_run, BERLIN) is True
+
+    @needs_tz
+    @pytest.mark.unit
+    def test_weekly_runs_once_across_repeated_hour(self):
+        # 2026-10-25 is a Sunday.
+        s = Schedule.weekly("sunday", "02:30")
+        first = _berlin(2026, 10, 25, 2, 30, fold=0)
+        second = _berlin(2026, 10, 25, 2, 30, fold=1)
+        last_run = first
+        assert s.due(second, last_run, BERLIN) is False
+        assert s.due(_berlin(2026, 11, 1, 2, 30), last_run, BERLIN) is True
+
+    @needs_tz
+    @pytest.mark.unit
+    def test_monthly_runs_once_across_repeated_hour(self):
+        s = Schedule.monthly(25, "02:30")
+        first = _berlin(2026, 10, 25, 2, 30, fold=0)
+        second = _berlin(2026, 10, 25, 2, 30, fold=1)
+        last_run = first
+        assert s.due(second, last_run, BERLIN) is False
+        assert s.due(_berlin(2026, 11, 25, 2, 30), last_run, BERLIN) is True
+
+
+class TestDedupeKeepsSameDayBaselineFiring:
+    """Regression guard for the F-083 dedupe: a baseline seeded EARLIER the
+    same local day (fire_on_first=False seeds last_run=now at first sight)
+    must NOT suppress that day's occurrence — the covering occurrence of the
+    baseline is yesterday's, so the wall identities differ."""
+
+    @pytest.mark.unit
+    def test_baseline_seeded_before_todays_occurrence_still_fires(self):
+        s = Schedule.daily("08:00")
+        baseline = _epoch(2026, 6, 1, 1, 0)   # daemon started 01:00
+        assert s.due(_epoch(2026, 6, 1, 8, 0), baseline, UTC) is True
+
+    @pytest.mark.unit
+    def test_weekly_baseline_midweek_still_fires(self):
+        s = Schedule.weekly(0, "06:00")  # Monday
+        baseline = _epoch(2026, 6, 5, 12, 0)  # seeded Friday
+        assert s.due(_epoch(2026, 6, 8, 6, 0), baseline, UTC) is True

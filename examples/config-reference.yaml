@@ -156,6 +156,18 @@ api:
   bind: "127.0.0.1"
   port: 9191
 
+  # DNS-rebinding guard (F-016). The API is read-open by default, so a hostile
+  # web page could otherwise DNS-rebind an operator's browser to this LAN IP and
+  # read topology / SSH usernames / events. Requests whose Host header is an IP
+  # literal (e.g. 192.168.1.10:9191) or `localhost` are ALWAYS accepted — a
+  # rebind attack necessarily arrives with a DNS *name*, so browsing by IP is
+  # unaffected. If you front the API with a hostname, list it here (case-
+  # insensitive); any other/missing Host name is answered 421 Misdirected
+  # Request and never routed. Default empty (IP-literal + localhost only).
+  allowed_hosts: []
+  #   - eneru.lan
+  #   - ups.example.com
+
   # API authentication (v6.0). OPT-IN: when disabled, the API behaves exactly
   # as it did in v5.3 (read-only, no credentials) and every write surface is
   # hard disabled — enabling a control feature (e.g. nut_control) while auth is
@@ -539,6 +551,12 @@ remote_servers:
     # Prefix generated privileged actions and final shutdown_command with
     # sudo -n when using a non-root SSH user with NOPASSWD sudo.
     use_sudo: false
+    # Prepend a POSIX-sh `export PATH=...` to every SSH command so bare command
+    # names (e.g. Synology's synoshutdown) resolve in the minimal non-interactive
+    # PATH. Default false so non-POSIX targets (csh/tcsh or Windows) keep
+    # receiving commands verbatim. Enable only for sh/bash/dash/zsh targets
+    # that need bare commands from the expanded path.
+    augment_remote_path: true
     # Optional private key path. Useful when the key is mounted into a
     # Docker/Podman container or Kubernetes pod. If omitted, OpenSSH
     # defaults and ssh_options are used as before.

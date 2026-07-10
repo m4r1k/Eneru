@@ -1,6 +1,7 @@
 """Unit tests for the v6.0 dashboard static serving (api.py + eneru.web)."""
 
 import json
+import shutil
 import subprocess
 import textwrap
 from io import BytesIO
@@ -8,19 +9,16 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from conftest import make_api_handler
 from eneru.api import EneruAPIHandler, SessionManager
+
+NODE = shutil.which("node")
 
 
 def _handler(config, *, path):
-    h = object.__new__(EneruAPIHandler)
-    h.path = path
-    h.api_config = config
-    h.api_source = MagicMock()
-    h.api_auth = None
-    h.api_sessions = None
-    h.headers = {}
-    h.rfile = BytesIO(b"")
-    return h
+    # F-063: shared EneruAPIHandler builder lives in conftest.py. It
+    # defaults Host: localhost so do_GET() clears the F-016 dispatch guard.
+    return make_api_handler(config, path=path)
 
 
 @pytest.mark.unit
@@ -167,6 +165,47 @@ def test_dashboard_has_wide_history_surfaces(minimal_config):
     # still honor the range if older rows are already cached client-side.
     assert 'if (from !== null) q += "&from=" + from' in js
     assert "return (from === null || e.ts >= from)" in js
+
+
+@pytest.mark.unit
+def test_dashboard_perf_hardening_v617(minimal_config):
+    """v6.1.7 dashboard perf fixes (no browser in CI, so assert the source).
+
+    F-043: refresh() has an in-flight re-entrancy guard so a slow 10s cycle
+    can't stack overlapping refreshes.
+    F-022/F-088: chart event markers are cached between steady-state refreshes;
+    genuine activation/range and exact NUT power-state changes rescan.
+    F-029: the accumulated-events cap grows on explicit "Load older" so paged
+    rows survive the newest-N slice instead of being discarded.
+    """
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    # F-043: re-entrancy guard around the async refresh.
+    assert "let refreshing = false;" in js
+    assert "if (refreshing) return;" in js
+    assert "async function refreshOnce()" in js
+    # F-022/F-088: steady-state polls reuse markers; power changes refetch.
+    assert "refetchEvents" in js
+    assert "powerStateSignature(lastUpsRows)" in js
+    assert "refetchEvents: powerStateChanged" in js
+    assert "state.eventsKey" in js
+    # F-029: the newest-rows cap grows on explicit paging, resets on new dataset.
+    assert "let eventsCap = EVENTS_BASE_CAP;" in js
+    assert "eventsCap += EVENTS_BASE_CAP;" in js
+    assert "slice(-eventsCap)" in js
+    assert "slice(-2000)" not in js   # the old fixed cap is gone
+
+
+@pytest.mark.unit
+def test_dashboard_login_clears_password_field(minimal_config):
+    """F-041: the plaintext password must not persist in the DOM — the login
+    field is cleared on submit (success AND failure) and around open/close.
+    No browser in CI, so assert the source scrubs the field."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    # The doLogin handler wipes the field unconditionally after submit, and
+    # both openLogin and closeLogin scrub it too.
+    assert js.count('document.getElementById("login-pass").value = ""') >= 3
 
 
 @pytest.mark.unit
@@ -480,6 +519,7 @@ def test_dashboard_line_quality_card(minimal_config):
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
 def test_dashboard_line_quality_state_behavior(minimal_config):
     js = _handler(minimal_config, path="/app.js")._serve_static(
         "/app.js")[1].decode("utf-8")
@@ -530,7 +570,7 @@ def test_dashboard_line_quality_state_behavior(minimal_config):
         }};
         process.stdout.write(JSON.stringify(rows));
     """)
-    result = subprocess.run(["node", "-"], input=script, text=True,
+    result = subprocess.run([NODE, "-"], input=script, text=True,
                             capture_output=True, check=True)
     rows = json.loads(result.stdout)
     assert rows["avrBoost"] == "badge warn"
@@ -615,3 +655,223 @@ def test_stylesheet_makes_hidden_attribute_win(minimal_config):
         "/style.css")[1].decode("utf-8")
     norm = css.replace(" ", "").replace("\n", "").lower()
     assert "[hidden]{display:none!important;}" in norm
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_merge_events_dedup_sort_cap(minimal_config):
+    """Execute event merge, power-transition, and auth-state helpers in Node."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    event_key = js[js.index("function eventKey"):js.index("// F-029: the accumulated")]
+    merge = js[js.index("function mergeEvents"):js.index("function eventRangeFrom")]
+    refresh_helpers = js[
+        js.index("function nutStatusTokens"):
+        js.index("// ----- theme (light / dark / system)")
+    ]
+    script = textwrap.dedent("""
+        let lastEvents = [];
+        let eventsCap = 3;
+        function updateEventTypeFilter() {}
+        function preserveWindowScroll(fn) { if (fn) fn(); }
+        function applyEventFilters() {}
+    """) + refresh_helpers + event_key + merge + textwrap.dedent("""
+        mergeEvents([{source:"A", id:1, ts:10, eventType:"ON_BATTERY"}]);
+        mergeEvents([{source:"A", id:1, ts:10, eventType:"ON_LINE"}]); // same key -> replace
+        mergeEvents([{source:"A", id:2, ts:5}]);                        // earlier ts sorts first
+        const afterDedup = lastEvents.map(e => e.source + ":" + e.id + ":" + e.eventType);
+        mergeEvents([{source:"A", id:3, ts:20}, {source:"A", id:4, ts:30}]); // overflow cap
+        const power = {
+          olNoiseStable: powerStateSignature([{name:"A", status:"OL CHRG"}])
+            === powerStateSignature([{name:"A", status:"OL"}]),
+          orderStable: powerStateSignature([
+            {name:"B", status:"OB"}, {name:"A", status:"OL"}
+          ]) === powerStateSignature([
+            {name:"A", status:"OL"}, {name:"B", status:"OB"}
+          ]),
+          outageStarts: powerStateSignature([{name:"A", status:"OL"}])
+            !== powerStateSignature([{name:"A", status:"OB DISCHRG"}]),
+          outageEnds: powerStateSignature([{name:"A", status:"OB"}])
+            !== powerStateSignature([{name:"A", status:"OL CHRG"}]),
+        };
+        const auth = {
+          enabledKeeps: authStateRequiresClear(
+            {ok:true, data:{enabled:true}}, {ok:true, data:{detail:"extended"}}, true),
+          transientKeeps: authStateRequiresClear(
+            {ok:false, data:null}, {ok:false, data:null}, true),
+          disabledClears: authStateRequiresClear(
+            {ok:true, data:{enabled:false}}, {ok:true, data:{}}, true),
+          sanitizedClears: authStateRequiresClear(
+            {ok:true, data:{enabled:true}}, {ok:true, data:{detail:"sanitized"}}, true),
+          api401Clears: responseInvalidatesAuth(401, "/api/v1/config"),
+          login401Keeps: responseInvalidatesAuth(401, "/api/v1/auth/login"),
+        };
+        process.stdout.write(JSON.stringify({
+          afterDedup: afterDedup,
+          count: lastEvents.length,
+          oldest: lastEvents[0].id,
+          newest: lastEvents[lastEvents.length - 1].id,
+          power,
+          auth,
+        }));
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    data = json.loads(result.stdout)
+    # De-dup by (source,id): the second merge REPLACED id 1's row, not appended.
+    assert len(data["afterDedup"]) == 2
+    assert "A:1:ON_LINE" in data["afterDedup"]
+    # Cap keeps the newest 3 by timestamp (id 2 @ ts5 drops off).
+    assert data["count"] == 3
+    assert data["oldest"] == 1
+    assert data["newest"] == 4
+    assert data["power"] == {
+        "olNoiseStable": True,
+        "orderStable": True,
+        "outageStarts": True,
+        "outageEnds": True,
+    }
+    assert data["auth"] == {
+        "enabledKeeps": False,
+        "transientKeeps": False,
+        "disabledClears": True,
+        "sanitizedClears": True,
+        "api401Clears": True,
+        "login401Keeps": False,
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_outage_spans_close_at_shutdown_boundary(minimal_config):
+    """v6.1.7: exercise app.js `computeOutageSpans` in a node shim.
+
+    The prod bug: after two real power outages the chart tabs stayed
+    perma-RED. The power died, the daemon shut the host down, and on reboot
+    it started FRESH already on line — it never witnessed the OB→OL flip, so
+    it never emitted POWER_RESTORED, and the outage band ran to "now" forever.
+
+    Asserts the fixed span math:
+      (a) ON_BATTERY → EMERGENCY_SHUTDOWN_INITIATED → DAEMON_START with NO
+          POWER_RESTORED closes the band AT the shutdown boundary, not at t1.
+      (b) ON_BATTERY → POWER_RESTORED still closes cleanly (restored).
+      (c) ON_BATTERY with nothing after genuinely extends to t1 (ongoing).
+
+    Skips cleanly where node is unavailable."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    spans_src = js[js.index("const OUTAGE_CLOSE_BOUNDARIES"):
+                   js.index("function appendOutageBands")]
+    script = spans_src + textwrap.dedent("""
+        const T0 = 0, T1 = 1000;
+        // (a) outage closed by a shutdown/restart boundary (no restore).
+        const a = computeOutageSpans([
+          {ts: 100, eventType: "ON_BATTERY"},
+          {ts: 150, eventType: "EMERGENCY_SHUTDOWN_INITIATED"},
+          {ts: 400, eventType: "DAEMON_START"},
+        ], T0, T1);
+        // (b) clean restore.
+        const b = computeOutageSpans([
+          {ts: 100, eventType: "ON_BATTERY"},
+          {ts: 200, eventType: "POWER_RESTORED"},
+        ], T0, T1);
+        // (c) genuinely ongoing outage, nothing after.
+        const c = computeOutageSpans([
+          {ts: 100, eventType: "ON_BATTERY"},
+        ], T0, T1);
+        process.stdout.write(JSON.stringify({
+          a: a.map(s => ({start: s.start, end: s.end,
+                          restore: s.restore ? s.restore.ts : null,
+                          boundary: !!s.endedAtBoundary})),
+          b: b.map(s => ({start: s.start, end: s.end,
+                          restore: s.restore ? s.restore.ts : null,
+                          boundary: !!s.endedAtBoundary})),
+          c: c.map(s => ({start: s.start, end: s.end,
+                          restore: s.restore ? s.restore.ts : null,
+                          boundary: !!s.endedAtBoundary})),
+        }));
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    data = json.loads(result.stdout)
+
+    # (a) One span, ending AT the shutdown boundary (ts150), NOT at t1(1000),
+    #     with no restore and flagged as ended-at-boundary.
+    assert len(data["a"]) == 1
+    assert data["a"][0]["start"] == 100
+    assert data["a"][0]["end"] == 150
+    assert data["a"][0]["end"] != 1000
+    assert data["a"][0]["restore"] is None
+    assert data["a"][0]["boundary"] is True
+
+    # (b) Clean restore: span closes at the POWER_RESTORED ts, restore set.
+    assert len(data["b"]) == 1
+    assert data["b"][0]["start"] == 100
+    assert data["b"][0]["end"] == 200
+    assert data["b"][0]["restore"] == 200
+    assert data["b"][0]["boundary"] is False
+
+    # (c) Genuinely ongoing: extends to t1, no restore, not a boundary close.
+    assert len(data["c"]) == 1
+    assert data["c"][0]["start"] == 100
+    assert data["c"][0]["end"] == 1000
+    assert data["c"][0]["restore"] is None
+    assert data["c"][0]["boundary"] is False
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_chart_feed_keeps_boundary_events(minimal_config):
+    """F-094: compose the REAL chart-feed filter with the span math.
+
+    The span math above accepts DAEMON_START as a close boundary, but the
+    chart feed (`fetchTierEvents`) used to strip lifecycle events before
+    `computeOutageSpans` ever saw them — so an ON_BATTERY whose only closing
+    event was a daemon restart (the actual 2026-07-09 production history:
+    power died, host shut down, fresh boot already on line) still ran the
+    red band to "now". The prior test could not catch that because it fed
+    `computeOutageSpans` directly, skipping the filter.
+
+    This test runs the same predicate the feed uses (`isChartFeedEvent`)
+    plus the draw-time tier-1 marker re-filter, end to end."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    tier_src = js[js.index("const TIER1_EVENT_PATTERNS"):
+                  js.index("// Which display tier")]
+    spans_src = js[js.index("const OUTAGE_CLOSE_BOUNDARIES"):
+                   js.index("function appendOutageBands")]
+    script = tier_src + spans_src + textwrap.dedent("""
+        // The exact prod shape: two outages whose ONLY closing events are
+        // daemon restarts — no POWER_RESTORED, no *_SHUTDOWN_* rows.
+        const rows = [
+          {ts: 100, eventType: "ON_BATTERY"},
+          {ts: 150, eventType: "DAEMON_START"},
+          {ts: 300, eventType: "ON_BATTERY"},
+          {ts: 350, eventType: "DAEMON_START"},
+          {ts: 380, eventType: "DAEMON_UPGRADED"},
+          {ts: 390, eventType: "SLOW_NUT_RESPONSE"},
+        ];
+        // Same predicate fetchTierEvents applies (source matching aside).
+        const feed = rows.filter((e) => isChartFeedEvent(e.eventType));
+        const spans = computeOutageSpans(feed, 0, 1000);
+        // Same tier-1 re-filter the marker draw sites apply.
+        const markers = feed.filter((e) => isTier1Event(e.eventType));
+        process.stdout.write(JSON.stringify({
+          feedTypes: feed.map((e) => e.eventType),
+          spans: spans.map((s) => ({start: s.start, end: s.end})),
+          markerTypes: markers.map((e) => e.eventType),
+        }));
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    data = json.loads(result.stdout)
+
+    # The feed keeps the boundary rows (and drops diag-tier noise)...
+    assert data["feedTypes"] == [
+        "ON_BATTERY", "DAEMON_START", "ON_BATTERY", "DAEMON_START"]
+    # ...so BOTH orphaned outages close at their restart boundary — two
+    # bounded bands, not one running to t1 (the perma-red regression).
+    assert data["spans"] == [
+        {"start": 100, "end": 150}, {"start": 300, "end": 350}]
+    # And the boundary rows never render as chart marker dots.
+    assert data["markerTypes"] == ["ON_BATTERY", "ON_BATTERY"]

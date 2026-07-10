@@ -84,7 +84,7 @@ def _make_delegated_monitor(
 
 def _patch_runtime(runtime: str):
     """Patch _detect_runtime_context everywhere monitor.py imports it from."""
-    return patch("eneru.cli._detect_runtime_context", return_value=runtime)
+    return patch("eneru.runtime._detect_runtime_context", return_value=runtime)
 
 
 class TestUsesLoopbackDelegate:
@@ -259,7 +259,8 @@ class TestDelegatedShutdownSequence:
         )
         self._spy_phases(monitor)
         with _patch_runtime("systemd service"), \
-             patch("eneru.monitor.run_command") as run_cmd, \
+             patch("eneru.monitor.run_command",
+                   return_value=(0, "", "")) as run_cmd, \
              patch("eneru.monitor.write_shutdown_marker"):
             monitor._execute_shutdown_sequence()
             wall_calls = [
@@ -374,6 +375,20 @@ class TestDelegatedShutdownSequence:
             monitor._execute_shutdown_sequence()
         events_seen = [c.args[0] for c in event_log.call_args_list]
         assert "SHUTDOWN_SEQUENCE_COMPLETE" in events_seen
+
+    @pytest.mark.unit
+    def test_exit_after_shutdown_exits_delegated_success(self, tmp_path):
+        """A successful loopback poweroff honors one-shot daemon mode."""
+        monitor = _make_delegated_monitor(tmp_path, dry_run=False)
+        monitor._exit_after_shutdown = True
+        self._spy_phases(monitor)
+        monitor._cleanup_and_exit = MagicMock()
+
+        with _patch_runtime("container (Docker)"), \
+             patch("eneru.monitor.write_shutdown_marker"):
+            monitor._execute_shutdown_sequence()
+
+        monitor._cleanup_and_exit.assert_called_once_with(None, None)
 
     @pytest.mark.unit
     def test_missing_ssh_is_fatal_when_delegating(self, tmp_path):
@@ -523,7 +538,7 @@ class TestInjectDelegatedActions:
         from eneru.cli import _inject_delegated_actions, _find_host_loopback
 
         config = self._config_with_loopback_and_caps(tmp_path)
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _inject_delegated_actions(config)
 
@@ -562,7 +577,7 @@ class TestInjectDelegatedActions:
             "    is_host_loopback: true\n"
         )
         config = ConfigLoader.load(str(config_file))
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _inject_delegated_actions(config)
 
@@ -595,7 +610,7 @@ class TestInjectDelegatedActions:
             "    is_host_loopback: true\n"
         )
         config = ConfigLoader.load(str(config_file))
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _inject_delegated_actions(config)
 
@@ -627,7 +642,7 @@ class TestInjectDelegatedActions:
         )
         config = ConfigLoader.load(str(config_file))
 
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _inject_delegated_actions(config)
 
@@ -646,7 +661,7 @@ class TestInjectDelegatedActions:
         from eneru.cli import _inject_delegated_actions, _find_host_loopback
 
         config = self._config_with_loopback_and_caps(tmp_path)
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="systemd service"):
             _inject_delegated_actions(config)
 
@@ -668,7 +683,7 @@ class TestInjectDelegatedActions:
         )
         config = ConfigLoader.load(str(config_file))
         # Should not raise; just no-op.
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _inject_delegated_actions(config)
 
@@ -692,7 +707,7 @@ class TestInjectDelegatedActions:
             "    is_host_loopback: true\n"
         )
         config = ConfigLoader.load(str(config_file))
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _inject_delegated_actions(config)
 
@@ -718,7 +733,7 @@ class TestInjectDelegatedActions:
             "    is_host_loopback: false\n"
         )
         config = ConfigLoader.load(str(config_file))
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             _synthesize_loopback_if_needed(config, strict_key_check=False)
 

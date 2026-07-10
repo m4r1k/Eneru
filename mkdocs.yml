@@ -58,6 +58,7 @@ nav:
       - Troubleshooting: troubleshooting.md
   - Project:
       - Testing: testing.md
+      - Maintenance: maintenance.md
       - Roadmap: roadmap.md
       - Changelog: changelog.md
 

@@ -1,6 +1,7 @@
 """Utility functions for Eneru."""
 
 import math
+import shutil
 import subprocess
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -175,8 +176,25 @@ def runtime_default_ssh_options(ssh_options: List[str]) -> List[str]:
 
 def command_exists(cmd: str) -> bool:
     """Check if a command exists in the system PATH."""
-    exit_code, _, _ = run_command(["which", cmd])
-    return exit_code == 0
+    # F-031: resolve via shutil.which -- a pure PATH walk -- instead of shelling
+    # out to `which`. ELI5: to know if a tool is in the toolbox you look in the
+    # toolbox; you don't hire a second person (a subprocess) whose only job is to
+    # look for you. Cheaper, and it doesn't assume a `which` binary exists (many
+    # minimal container images ship without one).
+    return shutil.which(cmd) is not None
+
+
+def status_has_token(status: Any, token: str) -> bool:
+    """True when ``token`` is a whitespace-separated flag in a NUT ``ups.status``.
+
+    ELI5: a UPS status like ``"OB LB"`` is a row of separate passport stamps,
+    not one long word. Checking ``"OB" in status`` reads the passport
+    cross-eyed -- ``"CHRG"`` would match ``"DISCHRG"`` and a contrived value like
+    ``"NOTOB"`` would match ``"OB"``. Splitting on whitespace and matching a whole
+    stamp fixes that aliasing structurally (F-051). Shared by monitor.py's
+    handlers and health/voltage.py so every status check uses the same rule.
+    """
+    return token in str(status or "").split()
 
 
 def format_seconds(seconds: Any) -> str:

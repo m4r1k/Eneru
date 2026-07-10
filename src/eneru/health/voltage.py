@@ -10,7 +10,7 @@ import statistics
 import time
 
 from eneru.config import VOLTAGE_SENSITIVITY_PRESETS
-from eneru.utils import is_numeric
+from eneru.utils import is_numeric, status_has_token
 
 
 # Standard grid voltages, sorted ascending. ``input.voltage.nominal``
@@ -67,6 +67,11 @@ VOLTAGE_SEVERE_DEVIATION_PCT = 0.15  # >±15% from nominal = severe
 # a value as missing so it can't make warning_high=0 and flag every reading as
 # over-voltage (M10).
 MIN_PLAUSIBLE_NOMINAL_V = 50.0
+
+
+def _is_plausible_voltage(value: float) -> bool:
+    """Return whether a live input-voltage sample is physically plausible."""
+    return 0 < value <= 600
 
 
 def _snap_to_standard_grid(value: float) -> float:
@@ -304,7 +309,7 @@ class VoltageMonitorMixin:
             return
         v = float(input_voltage)
         # Reject impossible readings (some NUT drivers emit 0 while OB).
-        if v <= 0 or v > 600:
+        if not _is_plausible_voltage(v):
             return
         self.state.voltage_observed.append(v)
         if len(self.state.voltage_observed) < AUTODETECT_OBSERVATION_COUNT:
@@ -351,11 +356,16 @@ class VoltageMonitorMixin:
         # grid that just sagged/failed, not the steady nominal; feeding it to
         # auto-detect during a startup brownout would latch a depressed nominal
         # for the daemon's lifetime. Runs only until enough samples accumulate.
-        if "OB" not in ups_status and "FSD" not in ups_status:
+        # F-051: match whitespace-separated status TOKENS, not substrings, via the
+        # shared helper (same rule the monitor's main loop uses) so e.g. "FSD"
+        # can't accidentally match inside some other flag.
+        if (not status_has_token(ups_status, "OB")
+                and not status_has_token(ups_status, "FSD")):
             self._check_voltage_autodetect(input_voltage)
 
-        if "OL" not in ups_status:
-            if "OB" in ups_status or "FSD" in ups_status:
+        if not status_has_token(ups_status, "OL"):
+            if (status_has_token(ups_status, "OB")
+                    or status_has_token(ups_status, "FSD")):
                 self.state.voltage_state = "NORMAL"
                 self._clear_voltage_pending()
             return
@@ -364,6 +374,11 @@ class VoltageMonitorMixin:
             return
 
         voltage = float(input_voltage)
+        # NUT drivers occasionally expose sentinel/glitch readings such as
+        # 0 V or 65535 V for one poll.  They are not grid events and must not
+        # take the severe-deviation shortcut around hysteresis.
+        if not _is_plausible_voltage(voltage):
+            return
         nominal = self.state.nominal_voltage
         deviation_pct = (
             abs(voltage - nominal) / nominal if nominal > 0 else 0.0
@@ -603,14 +618,14 @@ class VoltageMonitorMixin:
         """Check for Automatic Voltage Regulation activity."""
         voltage_str = f"{input_voltage}V" if is_numeric(input_voltage) else "N/A"
 
-        if "BOOST" in ups_status:
+        if status_has_token(ups_status, "BOOST"):
             if self.state.avr_state != "BOOST":
                 self._log_power_event(
                     "AVR_BOOST_ACTIVE",
                     f"Input voltage low ({voltage_str}). UPS is boosting output."
                 )
                 self.state.avr_state = "BOOST"
-        elif "TRIM" in ups_status:
+        elif status_has_token(ups_status, "TRIM"):
             if self.state.avr_state != "TRIM":
                 self._log_power_event(
                     "AVR_TRIM_ACTIVE",
@@ -623,7 +638,7 @@ class VoltageMonitorMixin:
 
     def _check_bypass_status(self, ups_status: str):
         """Check for bypass mode."""
-        if "BYPASS" in ups_status:
+        if status_has_token(ups_status, "BYPASS"):
             if self.state.bypass_state != "ACTIVE":
                 self._log_power_event("BYPASS_MODE_ACTIVE", "UPS in bypass mode - no protection active!")
                 self.state.bypass_state = "ACTIVE"
@@ -633,7 +648,7 @@ class VoltageMonitorMixin:
 
     def _check_overload_status(self, ups_status: str, ups_load: str):
         """Check for overload condition."""
-        if "OVER" in ups_status:
+        if status_has_token(ups_status, "OVER"):
             if self.state.overload_state != "ACTIVE":
                 self._log_power_event("OVERLOAD_ACTIVE", f"UPS overload detected! Load: {ups_load}%")
                 self.state.overload_state = "ACTIVE"

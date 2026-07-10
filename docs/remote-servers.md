@@ -306,6 +306,56 @@ These commands match the previously documented, validated shutdown forms. Keep p
 | Proxmox VE | `sudo shutdown -h now` | Stop guests first with `stop_proxmox_vms` and `stop_proxmox_cts` pre-shutdown actions |
 | pfSense / OPNsense | `sudo /sbin/shutdown -p now` | FreeBSD `-p` for ACPI power-off |
 
+### Bare command names and `PATH`
+
+When you log in interactively, your shell reads its startup files
+(`/etc/profile`, `~/.profile`) that set `PATH` — which is how a bare
+`synoshutdown` resolves from your terminal. But the daemon runs each remote
+command as `ssh user@host "<command>"`, which is **non-interactive and
+non-login**: those startup files are not sourced, so the remote shell starts
+with a minimal `PATH`. On Synology in particular that means `/usr/syno/sbin`
+(where `synoshutdown` lives) is missing, and a bare `synoshutdown -s` fails
+with `sudo: synoshutdown: command not found` even though `which synoshutdown`
+works fine when you SSH in by hand.
+
+When `augment_remote_path: true` is enabled, Eneru appends the standard
+privileged directories (`/usr/local/sbin`,
+`/usr/local/bin`, `/usr/sbin`, `/usr/bin`, `/sbin`, `/bin`) plus Synology's
+`/usr/syno/sbin` and `/usr/syno/bin`, so bare binary names resolve in the
+daemon's SSH session exactly like they would in an interactive login. The
+extra directories are appended **after** the remote's own `PATH`, so the
+host's own configuration still wins and directories that don't exist on that
+host are simply ignored.
+
+Two consequences worth knowing:
+
+- The remote user still needs the appropriate sudo rights for the command
+  (see [Passwordless sudo](#passwordless-sudo)). The augmented `PATH` is
+  inherited by `sudo` **only when** your sudoers has no restrictive
+  `secure_path` that strips those directories — the same condition that lets
+  your interactive `sudo which synoshutdown` succeed. If your sudoers pins a
+  `secure_path` that excludes `/usr/syno/sbin`, use an absolute path instead.
+- If a binary lives somewhere exotic that Eneru doesn't add, you can always
+  give an absolute path in `shutdown_command` (e.g.
+  `sudo /usr/syno/sbin/synoshutdown -s`). Absolute paths bypass `PATH`
+  resolution entirely and always work.
+
+!!! warning "The prefix assumes a POSIX login shell — enable it only there"
+    The `PATH` augmentation is a POSIX-sh `export PATH=...` statement. It works
+    on any remote whose SSH login shell is `sh`/`bash`/`dash`/`zsh` (the vast
+    majority, including Synology). It does **not** work on non-POSIX shells:
+
+    - **csh/tcsh** (FreeBSD / TrueNAS CORE root default): `export` isn't a csh
+      builtin, so every command prints a harmless-but-noisy
+      `export: Command not found.` before running your real command.
+    - **cmd.exe / Windows**: `;` is not a command separator, so the whole
+      line — prefix and your `shutdown_command` together — is handed to a
+      nonexistent `export`. Your shutdown command **silently never runs**.
+
+    Eneru therefore defaults `augment_remote_path` to `false` and sends commands
+    verbatim. On a POSIX remote that needs extra bare-command directories, set
+    it to `true`; otherwise supply absolute paths where needed.
+
 ## Safe test checklist
 
 Run these before relying on remote shutdown:

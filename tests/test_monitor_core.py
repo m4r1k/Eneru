@@ -293,6 +293,38 @@ class TestShutdownTriggers:
             assert "Runtime" in mock_shutdown.call_args[0][0]
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("field", "value", "warning_fragment"),
+        [
+            ("battery.charge", "-1", "invalid battery charge"),
+            ("battery.charge", "-0.5", "invalid battery charge"),
+            ("battery.runtime", "-1", "invalid battery runtime"),
+            ("battery.runtime", "-0.5", "invalid battery runtime"),
+        ],
+    )
+    def test_negative_nut_sentinel_does_not_trigger_shutdown(
+        self, tmp_path, field, value, warning_fragment,
+    ):
+        """F-075: -1 means unknown, not an exhausted battery."""
+        monitor = make_monitor(tmp_path)
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.on_battery_start_time = int(time.time()) - 40
+        ups_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "50",
+            "battery.runtime": "1200",
+            "ups.load": "30",
+        }
+        ups_data[field] = value
+
+        with patch.object(monitor, "_trigger_immediate_shutdown") as shutdown:
+            monitor._handle_on_battery(ups_data)
+
+        shutdown.assert_not_called()
+        log_calls = [str(call) for call in monitor.logger.log.call_args_list]
+        assert any(warning_fragment in call for call in log_calls)
+
+    @pytest.mark.unit
     def test_t4_extended_time_triggers_shutdown(self, tmp_path):
         """T4: Extended time on battery triggers shutdown."""
         monitor = make_monitor(tmp_path)
@@ -763,6 +795,97 @@ class TestShutdownSequence:
         # Every drain step ran AND the remote/poweroff path was reached.
         assert call_order == ["vms", "containers", "sync", "unmount", "remote"]
 
+    def _prep_local_poweroff_monitor(self, tmp_path):
+        """Build a monitor wired for the real (non-dry-run) local poweroff
+        path: drain phases stubbed, local shutdown enabled, notifications
+        captured."""
+        monitor = make_monitor(tmp_path)
+        monitor.config.behavior.dry_run = False
+        monitor.config.local_shutdown.enabled = True
+        monitor._shutdown_vms = lambda: None
+        monitor._shutdown_containers = lambda: None
+        monitor._sync_filesystems = lambda: None
+        monitor._unmount_filesystems = lambda: None
+        monitor._shutdown_remote_servers = lambda: []
+        monitor._send_notification = MagicMock()
+        monitor._log_message = MagicMock()
+        return monitor
+
+    @pytest.mark.unit
+    def test_host_poweroff_nonzero_neutralizes_marker(self, tmp_path):
+        """F-005: if `run_command` returns non-zero the host is still up,
+        yet the completion marker was already written. The sequence must
+        log an ERROR, send a failure notification, and DELETE the marker so
+        the next start doesn't emit a false 'Recovered'."""
+        monitor = self._prep_local_poweroff_monitor(tmp_path)
+
+        with patch("eneru.monitor.run_command",
+                   return_value=(1, "", "poweroff refused")) as run_cmd, \
+             patch("eneru.monitor.write_shutdown_marker") as write_marker, \
+             patch("eneru.monitor.delete_shutdown_marker") as del_marker:
+            monitor._execute_shutdown_sequence()
+
+        run_cmd.assert_called_once()
+        write_marker.assert_called_once()      # marker written before poweroff
+        del_marker.assert_called_once()        # then torn down on failure
+        # An ERROR was logged mentioning the failed rc.
+        assert any(
+            "host poweroff command failed (rc=1)" in c.args[0]
+            for c in monitor._log_message.call_args_list
+        )
+        # A failure notification was emitted stating the host is still up.
+        assert any(
+            "still up" in c.args[0].lower()
+            for c in monitor._send_notification.call_args_list
+        )
+
+    @pytest.mark.unit
+    def test_host_poweroff_zero_keeps_marker(self, tmp_path):
+        """F-005: the happy path (rc==0, host powers off) is unchanged —
+        the marker stays written and the success notification fires, with
+        no marker deletion."""
+        monitor = self._prep_local_poweroff_monitor(tmp_path)
+
+        with patch("eneru.monitor.run_command",
+                   return_value=(0, "", "")) as run_cmd, \
+             patch("eneru.monitor.write_shutdown_marker") as write_marker, \
+             patch("eneru.monitor.delete_shutdown_marker") as del_marker:
+            monitor._execute_shutdown_sequence()
+
+        run_cmd.assert_called_once()
+        write_marker.assert_called_once()
+        del_marker.assert_not_called()
+        assert any(
+            "Shutdown Sequence Complete" in c.args[0]
+            for c in monitor._send_notification.call_args_list
+        )
+
+    @pytest.mark.unit
+    def test_host_poweroff_timeout_keeps_marker(self, tmp_path):
+        """F-068: rc=124 is run_command's OWN 30s timeout, not the poweroff
+        refusing — some inits block the caller while the halt genuinely
+        proceeds. Ambiguous: keep the marker, log a warning, and send NO
+        INCOMPLETE notification (only a prompt non-zero exit tears down)."""
+        monitor = self._prep_local_poweroff_monitor(tmp_path)
+
+        with patch("eneru.monitor.run_command",
+                   return_value=(124, "", "Command timed out")) as run_cmd, \
+             patch("eneru.monitor.write_shutdown_marker") as write_marker, \
+             patch("eneru.monitor.delete_shutdown_marker") as del_marker:
+            monitor._execute_shutdown_sequence()
+
+        run_cmd.assert_called_once()
+        write_marker.assert_called_once()
+        del_marker.assert_not_called()          # marker survives the timeout
+        assert any(
+            "timed out" in c.args[0]
+            for c in monitor._log_message.call_args_list
+        )
+        assert not any(
+            "INCOMPLETE" in c.args[0]
+            for c in monitor._send_notification.call_args_list
+        )
+
 
 # ==============================================================================
 # NOTIFICATIONS
@@ -804,6 +927,28 @@ class TestNotifications:
 
         log_calls = [str(c) for c in monitor.logger.log.call_args_list]
         assert any("POWER_RESTORED" in c for c in log_calls)
+
+    @pytest.mark.unit
+    def test_power_restored_duration_uses_monotonic_clock(self, tmp_path):
+        """F-087: an NTP wall-clock jump cannot corrupt outage duration."""
+        monitor = make_monitor(tmp_path)
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.on_battery_start_time = 9_000
+        monitor.state.on_battery_start_mono = 100.0
+        ups_data = {
+            "ups.status": "OL CHRG",
+            "battery.charge": "70",
+            "input.voltage": "230",
+        }
+
+        with (
+            patch("eneru.monitor.time.monotonic", return_value=165.0),
+            patch("eneru.monitor.time.time", return_value=1_000.0),
+            patch.object(monitor, "_log_power_event") as log_event,
+        ):
+            monitor._handle_on_line(ups_data)
+
+        assert "Outage duration: 1m 5s" in log_event.call_args.args[1]
 
     @pytest.mark.unit
     def test_no_recovery_notification_on_ol_to_ol(self, tmp_path):
@@ -2552,7 +2697,8 @@ class TestExecuteShutdownSequence:
         monitor.config.local_shutdown.message = "UPS critical"
 
         with patch("eneru.monitor.write_shutdown_marker") as marker, \
-             patch("eneru.monitor.run_command") as runner:
+             patch("eneru.monitor.run_command",
+                   return_value=(0, "", "")) as runner:
             monitor._execute_shutdown_sequence()
 
         marker.assert_called_once()
@@ -3135,27 +3281,34 @@ class TestConnectionRecoveryGracePeriod:
 
 
 class TestEmptyStatusHandling:
-    """When ups_data is fetched OK but `ups.status` is missing, log
-    an error and skip the rest of the iteration — never proceed
-    with an empty status to the trigger logic."""
+    """F-052/F-071: a successful poll ALWAYS carries ups.status
+    (_get_all_ups_data rejects empty-status polls before they reach the
+    trigger logic). If that invariant ever breaks, the loop must SELF-HEAL —
+    log an ERROR and retry — rather than die (the F-052 assert propagated to
+    run()'s fatal handler and killed the monitor thread, and `python -O`
+    stripped it entirely)."""
 
     @pytest.mark.unit
-    def test_empty_status_logs_error_and_skips_iteration(self, tmp_path):
+    def test_empty_status_logs_error_and_retries(self, tmp_path):
         monitor = make_monitor(tmp_path)
         log = []
-        monitor._log_message = log.append
+        monitor._log_message = lambda msg, **kw: log.append(msg)
         # Make sure we're not in any special connection state
         monitor.state.connection_state = "OK"
         monitor.state.previous_status = "OL"
+        monitor._save_state = MagicMock()
 
-        # Successful fetch but no ups.status field
+        # Successful fetch but no ups.status field — impossible from the real
+        # _get_all_ups_data. Must NOT raise: log ERROR + retry (continue).
         _run_one_iteration(monitor, (True, {
             "battery.charge": "85",
             "battery.runtime": "1200",
             # NOTE: no ups.status
         }, ""))
 
-        assert any("'ups.status' is missing" in m for m in log), log
+        assert any("empty" in m and "ups.status" in m for m in log)
+        # The iteration bailed BEFORE state save / trigger analysis.
+        monitor._save_state.assert_not_called()
 
 
 class TestPowerRestoredCallback:
@@ -3755,6 +3908,132 @@ class TestEmitLifecycleStartupExceptionalPaths:
         assert sent_body == "🪄  coalesced summary"
 
 
+class TestEmitLifecycleStartupPowerRestored:
+    """v6.1.7: a power-loss recovery start (shutdown marker reason ==
+    SEQUENCE_COMPLETE) must ALSO stamp a closing ``POWER_RESTORED`` event.
+
+    ELI5: the outage the pre-shutdown ON_BATTERY opened never got its
+    "power's back" bookend, because the host powered off and rebooted
+    fresh straight into OL — nobody was home to see the OB→OL flip. The
+    recovery start is the one moment we KNOW power came back, so we close
+    the band here. A plain restart/upgrade (no marker / different reason)
+    must NOT forge the event."""
+
+    @pytest.mark.unit
+    def test_power_loss_recovery_emits_power_restored(self, tmp_path):
+        from eneru.lifecycle import REASON_SEQUENCE_COMPLETE
+        from eneru.version import __version__
+
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = object()
+        store.get_meta.return_value = __version__
+        store.find_pending_by_category.return_value = []
+        monitor._stats_store = store
+        monitor._send_notification = MagicMock()
+
+        marker = {"shutdown_at": 1000, "version": __version__,
+                  "reason": REASON_SEQUENCE_COMPLETE}
+        with patch("eneru.monitor.read_shutdown_marker", return_value=marker), \
+             patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("eneru.monitor.delete_upgrade_marker"), \
+             patch("eneru.monitor.coalesce_recovered_with_prev_shutdown",
+                   return_value=None):
+            monitor._emit_lifecycle_startup_notification()
+
+        restored_calls = [
+            c for c in store.log_event.call_args_list
+            if c.args and c.args[0] == "POWER_RESTORED"
+        ]
+        assert len(restored_calls) == 1, store.log_event.call_args_list
+        # Detail carries the downtime so the operator/dashboard can read it.
+        assert "downtime" in restored_calls[0].args[1]
+
+    @pytest.mark.unit
+    def test_normal_restart_no_marker_does_not_emit_power_restored(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = object()
+        store.get_meta.return_value = None
+        store.find_pending_by_category.return_value = []
+        monitor._stats_store = store
+        monitor._send_notification = MagicMock()
+
+        with patch("eneru.monitor.read_shutdown_marker", return_value=None), \
+             patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("eneru.monitor.delete_upgrade_marker"):
+            monitor._emit_lifecycle_startup_notification()
+
+        assert not any(
+            c.args and c.args[0] == "POWER_RESTORED"
+            for c in store.log_event.call_args_list
+        ), store.log_event.call_args_list
+
+    @pytest.mark.unit
+    def test_non_sequence_complete_marker_does_not_emit_power_restored(self, tmp_path):
+        """A marker present but with a non-power-loss reason (e.g. a
+        deliberate signal-driven restart) must NOT forge POWER_RESTORED."""
+        from eneru.lifecycle import REASON_SIGNAL
+        from eneru.version import __version__
+
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = object()
+        store.get_meta.return_value = __version__
+        store.find_pending_by_category.return_value = []
+        monitor._stats_store = store
+        monitor._send_notification = MagicMock()
+
+        marker = {"shutdown_at": 1000, "version": __version__,
+                  "reason": REASON_SIGNAL}
+        with patch("eneru.monitor.read_shutdown_marker", return_value=marker), \
+             patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("eneru.monitor.delete_upgrade_marker"):
+            monitor._emit_lifecycle_startup_notification()
+
+        assert not any(
+            c.args and c.args[0] == "POWER_RESTORED"
+            for c in store.log_event.call_args_list
+        ), store.log_event.call_args_list
+
+    @pytest.mark.unit
+    def test_power_restored_log_failure_is_swallowed(self, tmp_path):
+        """A stats hiccup while stamping POWER_RESTORED must never mask the
+        startup notification (the emission is wrapped in try/except)."""
+        from eneru.lifecycle import REASON_SEQUENCE_COMPLETE
+        from eneru.version import __version__
+
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        store._conn = object()
+        store.get_meta.return_value = __version__
+        store.find_pending_by_category.return_value = []
+
+        def _boom(event_type, *a, **k):
+            if event_type == "POWER_RESTORED":
+                raise RuntimeError("stats down")
+
+        store.log_event.side_effect = _boom
+        monitor._stats_store = store
+        monitor._send_notification = MagicMock()
+
+        marker = {"shutdown_at": 1000, "version": __version__,
+                  "reason": REASON_SEQUENCE_COMPLETE}
+        with patch("eneru.monitor.read_shutdown_marker", return_value=marker), \
+             patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("eneru.monitor.delete_upgrade_marker"), \
+             patch("eneru.monitor.coalesce_recovered_with_prev_shutdown",
+                   return_value=None):
+            # Must not raise.
+            monitor._emit_lifecycle_startup_notification()
+
+        monitor._send_notification.assert_called_once()
+
+
 class TestLogEnabledFeaturesExplicitRuntime:
     """`_log_enabled_features` formats the runtime/compose string
     differently for runtime="auto" vs an explicit runtime; cover the
@@ -3882,6 +4161,24 @@ class TestSaveStateDefensive:
         # The state file was still written even though buffering blew up.
         assert monitor._state_file_path.exists()
 
+    @pytest.mark.unit
+    def test_stats_sample_duration_uses_monotonic_clock(self, tmp_path):
+        """F-086: buffered samples use the outage stopwatch, not wall time."""
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        monitor.state.on_battery_start_time = 9_000
+        monitor.state.on_battery_start_mono = 100.0
+
+        with (
+            patch("eneru.monitor.time.monotonic", return_value=165.0),
+            patch("eneru.monitor.time.time", return_value=1_000.0),
+        ):
+            monitor._save_state({"ups.status": "OB", "battery.charge": "80"})
+
+        assert monitor._stats_store.buffer_sample.call_args.kwargs[
+            "time_on_battery"
+        ] == 65
+
 
 class TestExecuteShutdownSequenceDelegatedStatsEvent:
     """In delegated mode, `_execute_shutdown_sequence` logs a
@@ -3922,7 +4219,7 @@ class TestExecuteShutdownSequenceDelegatedStatsEvent:
             )
         ])
 
-        with patch("eneru.cli._detect_runtime_context",
+        with patch("eneru.runtime._detect_runtime_context",
                    return_value="container (Docker)"):
             # Must not raise.
             monitor._execute_shutdown_sequence()
