@@ -21,6 +21,7 @@ from eneru.graph import BrailleGraph
 from eneru.remote_health import read_remote_health_sidecar, remote_health_sidecar_path
 from eneru.stats import StatsStore
 from eneru.status import sanitize_name
+from eneru.utils import status_has_token
 
 
 # Cycle order for the G key + --graph flag.
@@ -700,19 +701,19 @@ def init_colors():
 def human_status(status: str) -> str:
     """Convert NUT status codes to human-readable labels."""
     s = status.upper().strip()
-    if "FSD" in s:
+    if status_has_token(s, "FSD"):
         return "FORCED SHUTDOWN"
-    if "OB" in s and "LB" in s:
+    if status_has_token(s, "OB") and status_has_token(s, "LB"):
         return "ON BATTERY - LOW"
-    if "OB" in s and "DISCHRG" in s:
+    if status_has_token(s, "OB") and status_has_token(s, "DISCHRG"):
         return "ON BATTERY - DISCHARGING"
-    if "OB" in s:
+    if status_has_token(s, "OB"):
         return "ON BATTERY"
-    if "OL" in s and "CHRG" in s:
+    if status_has_token(s, "OL") and status_has_token(s, "CHRG"):
         return "ONLINE - CHARGING"
-    if "OL" in s:
+    if status_has_token(s, "OL"):
         return "ONLINE"
-    if "CHRG" in s:
+    if status_has_token(s, "CHRG"):
         return "CHARGING"
     if not s:
         return "UNKNOWN"
@@ -722,13 +723,13 @@ def human_status(status: str) -> str:
 def status_color(status: str) -> int:
     """Return color pair ID for a UPS status string."""
     s = status.upper()
-    if "FSD" in s or "LB" in s:
+    if status_has_token(s, "FSD") or status_has_token(s, "LB"):
         return C_STATUS_CRIT
-    if "OB" in s:
-        if "DISCHRG" in s:
+    if status_has_token(s, "OB"):
+        if status_has_token(s, "DISCHRG"):
             return C_STATUS_CRIT
         return C_STATUS_OB
-    if "OL" in s or "CHRG" in s:
+    if status_has_token(s, "OL") or status_has_token(s, "CHRG"):
         return C_STATUS_OK
     return C_STATUS_UNK
 
@@ -738,7 +739,8 @@ def status_attr(status: str) -> int:
     sc = status_color(status)
     attr = curses.color_pair(sc) | curses.A_BOLD
     s = status.upper()
-    if "OB" in s or "FSD" in s or "LB" in s:
+    if (status_has_token(s, "OB") or status_has_token(s, "FSD")
+            or status_has_token(s, "LB")):
         attr |= curses.A_BLINK
     return attr
 

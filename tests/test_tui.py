@@ -753,6 +753,11 @@ class TestHumanStatusPureLogic:
         assert human_status("OL CHRG") == "ONLINE - CHARGING"
 
     @pytest.mark.unit
+    def test_ol_discharging_is_not_mislabeled_charging(self):
+        """F-085: CHRG is not a substring match inside DISCHRG."""
+        assert human_status("OL DISCHRG") == "ONLINE"
+
+    @pytest.mark.unit
     def test_ol(self):
         assert human_status("OL") == "ONLINE"
 

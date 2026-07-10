@@ -369,6 +369,11 @@ class VoltageMonitorMixin:
             return
 
         voltage = float(input_voltage)
+        # NUT drivers occasionally expose sentinel/glitch readings such as
+        # 0 V or 65535 V for one poll.  They are not grid events and must not
+        # take the severe-deviation shortcut around hysteresis.
+        if voltage <= 0 or voltage > 600:
+            return
         nominal = self.state.nominal_voltage
         deviation_pct = (
             abs(voltage - nominal) / nominal if nominal > 0 else 0.0
@@ -608,14 +613,14 @@ class VoltageMonitorMixin:
         """Check for Automatic Voltage Regulation activity."""
         voltage_str = f"{input_voltage}V" if is_numeric(input_voltage) else "N/A"
 
-        if "BOOST" in ups_status:
+        if status_has_token(ups_status, "BOOST"):
             if self.state.avr_state != "BOOST":
                 self._log_power_event(
                     "AVR_BOOST_ACTIVE",
                     f"Input voltage low ({voltage_str}). UPS is boosting output."
                 )
                 self.state.avr_state = "BOOST"
-        elif "TRIM" in ups_status:
+        elif status_has_token(ups_status, "TRIM"):
             if self.state.avr_state != "TRIM":
                 self._log_power_event(
                     "AVR_TRIM_ACTIVE",
@@ -628,7 +633,7 @@ class VoltageMonitorMixin:
 
     def _check_bypass_status(self, ups_status: str):
         """Check for bypass mode."""
-        if "BYPASS" in ups_status:
+        if status_has_token(ups_status, "BYPASS"):
             if self.state.bypass_state != "ACTIVE":
                 self._log_power_event("BYPASS_MODE_ACTIVE", "UPS in bypass mode - no protection active!")
                 self.state.bypass_state = "ACTIVE"
@@ -638,7 +643,7 @@ class VoltageMonitorMixin:
 
     def _check_overload_status(self, ups_status: str, ups_load: str):
         """Check for overload condition."""
-        if "OVER" in ups_status:
+        if status_has_token(ups_status, "OVER"):
             if self.state.overload_state != "ACTIVE":
                 self._log_power_event("OVERLOAD_ACTIVE", f"UPS overload detected! Load: {ups_load}%")
                 self.state.overload_state = "ACTIVE"

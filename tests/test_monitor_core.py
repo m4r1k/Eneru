@@ -293,6 +293,38 @@ class TestShutdownTriggers:
             assert "Runtime" in mock_shutdown.call_args[0][0]
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("field", "value", "warning_fragment"),
+        [
+            ("battery.charge", "-1", "invalid battery charge"),
+            ("battery.charge", "-0.5", "invalid battery charge"),
+            ("battery.runtime", "-1", "invalid battery runtime"),
+            ("battery.runtime", "-0.5", "invalid battery runtime"),
+        ],
+    )
+    def test_negative_nut_sentinel_does_not_trigger_shutdown(
+        self, tmp_path, field, value, warning_fragment,
+    ):
+        """F-075: -1 means unknown, not an exhausted battery."""
+        monitor = make_monitor(tmp_path)
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.on_battery_start_time = int(time.time()) - 40
+        ups_data = {
+            "ups.status": "OB DISCHRG",
+            "battery.charge": "50",
+            "battery.runtime": "1200",
+            "ups.load": "30",
+        }
+        ups_data[field] = value
+
+        with patch.object(monitor, "_trigger_immediate_shutdown") as shutdown:
+            monitor._handle_on_battery(ups_data)
+
+        shutdown.assert_not_called()
+        log_calls = [str(call) for call in monitor.logger.log.call_args_list]
+        assert any(warning_fragment in call for call in log_calls)
+
+    @pytest.mark.unit
     def test_t4_extended_time_triggers_shutdown(self, tmp_path):
         """T4: Extended time on battery triggers shutdown."""
         monitor = make_monitor(tmp_path)
@@ -895,6 +927,28 @@ class TestNotifications:
 
         log_calls = [str(c) for c in monitor.logger.log.call_args_list]
         assert any("POWER_RESTORED" in c for c in log_calls)
+
+    @pytest.mark.unit
+    def test_power_restored_duration_uses_monotonic_clock(self, tmp_path):
+        """F-087: an NTP wall-clock jump cannot corrupt outage duration."""
+        monitor = make_monitor(tmp_path)
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.on_battery_start_time = 9_000
+        monitor.state.on_battery_start_mono = 100.0
+        ups_data = {
+            "ups.status": "OL CHRG",
+            "battery.charge": "70",
+            "input.voltage": "230",
+        }
+
+        with (
+            patch("eneru.monitor.time.monotonic", return_value=165.0),
+            patch("eneru.monitor.time.time", return_value=1_000.0),
+            patch.object(monitor, "_log_power_event") as log_event,
+        ):
+            monitor._handle_on_line(ups_data)
+
+        assert "Outage duration: 1m 5s" in log_event.call_args.args[1]
 
     @pytest.mark.unit
     def test_no_recovery_notification_on_ol_to_ol(self, tmp_path):
@@ -4106,6 +4160,24 @@ class TestSaveStateDefensive:
 
         # The state file was still written even though buffering blew up.
         assert monitor._state_file_path.exists()
+
+    @pytest.mark.unit
+    def test_stats_sample_duration_uses_monotonic_clock(self, tmp_path):
+        """F-086: buffered samples use the outage stopwatch, not wall time."""
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        monitor.state.on_battery_start_time = 9_000
+        monitor.state.on_battery_start_mono = 100.0
+
+        with (
+            patch("eneru.monitor.time.monotonic", return_value=165.0),
+            patch("eneru.monitor.time.time", return_value=1_000.0),
+        ):
+            monitor._save_state({"ups.status": "OB", "battery.charge": "80"})
+
+        assert monitor._stats_store.buffer_sample.call_args.kwargs[
+            "time_on_battery"
+        ] == 65
 
 
 class TestExecuteShutdownSequenceDelegatedStatsEvent:

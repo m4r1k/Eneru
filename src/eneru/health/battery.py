@@ -11,7 +11,7 @@ from collections import deque
 from typing import Dict, Optional
 
 from eneru.health import prediction
-from eneru.utils import is_numeric
+from eneru.utils import is_numeric, status_has_token
 
 # meta keys for cross-restart battery-health bookkeeping.
 _META_NOMINAL_RUNTIME = "battery_nominal_runtime"
@@ -37,13 +37,14 @@ class BatteryMonitorMixin:
         # this needs no on-disk migration.
         current_time = time.monotonic()
 
-        if not is_numeric(current_battery):
+        if (not is_numeric(current_battery)
+                or float(current_battery) < 0):
             return 0.0
 
-        # M12: clamp out-of-range firmware readings. A transient negative or
-        # >100 charge from flaky firmware would otherwise inflate the depletion
-        # rate that feeds the T3 shutdown trigger.
-        current_battery_float = max(0.0, min(100.0, float(current_battery)))
+        # M12: clamp high out-of-range firmware readings. Negative values are
+        # NUT's common "unknown" sentinel and return above rather than being
+        # converted into a false zero-charge sample that can feed T3.
+        current_battery_float = min(100.0, float(current_battery))
         cutoff_time = current_time - self.config.triggers.depletion.window
 
         self.state.battery_history = deque(
@@ -132,7 +133,7 @@ class BatteryMonitorMixin:
         current_time = time.time()
 
         # Only track anomalies while on line power (OL/CHRG)
-        if "OB" in ups_status:
+        if status_has_token(ups_status, "OB"):
             # On battery -- reset tracking, drops are expected
             self.state.last_battery_charge = current_charge
             self.state.last_battery_charge_time = current_time

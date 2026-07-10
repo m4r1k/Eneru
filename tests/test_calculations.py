@@ -178,6 +178,18 @@ class TestDepletionRateCalculation:
         assert rate == 0.0
 
     @pytest.mark.unit
+    def test_negative_sentinel_does_not_enter_depletion_history(
+        self, monitor_with_history,
+    ):
+        """F-075: unknown charge must not look like a real 0% sample."""
+        before = list(monitor_with_history.state.battery_history)
+
+        rate = monitor_with_history._calculate_depletion_rate("-0.5")
+
+        assert rate == 0.0
+        assert list(monitor_with_history.state.battery_history) == before
+
+    @pytest.mark.unit
     def test_old_samples_are_pruned(self, monitor_with_history):
         """Test that samples outside the window are removed."""
         current_time = time.monotonic()  # F-026: monotonic-keyed history

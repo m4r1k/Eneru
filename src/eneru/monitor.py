@@ -1369,10 +1369,14 @@ class UPSGroupMonitor(
         # Hot-path: append one sample to the in-memory deque (zero I/O).
         # The StatsWriter flushes the deque to SQLite every 10 s.
         try:
-            time_on_battery = (
-                int(time.time()) - self.state.on_battery_start_time
-                if self.state.on_battery_start_time > 0 else 0
-            )
+            if self.state.on_battery_start_mono > 0:
+                time_on_battery = int(
+                    time.monotonic() - self.state.on_battery_start_mono
+                )
+            elif self.state.on_battery_start_time > 0:
+                time_on_battery = int(time.time()) - self.state.on_battery_start_time
+            else:
+                time_on_battery = 0
             self._stats_store.buffer_sample(
                 ups_data,
                 depletion_rate=self.state.latest_depletion_rate,
@@ -2085,7 +2089,8 @@ class UPSGroupMonitor(
         battery_runtime = ups_data.get('battery.runtime', '')
         ups_load = ups_data.get('ups.load', '')
 
-        if "OB" not in self.state.previous_status and "FSD" not in self.state.previous_status:
+        if (not status_has_token(self.state.previous_status, "OB")
+                and not status_has_token(self.state.previous_status, "FSD")):
             self.state.on_battery_start_time = int(time.time())
             self.state.on_battery_start_mono = time.monotonic()  # ISS-020
             self.state.extended_time_logged = False
@@ -2112,6 +2117,12 @@ class UPSGroupMonitor(
             )
         else:
             time_on_battery = current_time - self.state.on_battery_start_time
+        battery_charge_valid = (
+            is_numeric(battery_charge) and float(battery_charge) >= 0
+        )
+        battery_runtime_valid = (
+            is_numeric(battery_runtime) and float(battery_runtime) >= 0
+        )
         depletion_rate = self._calculate_depletion_rate(battery_charge)
         stabilization_delay = max(
             0, int(self.config.triggers.on_battery_stabilization_delay)
@@ -2121,7 +2132,7 @@ class UPSGroupMonitor(
         shutdown_reason = ""
 
         # T1. Critical battery level
-        if is_numeric(battery_charge):
+        if battery_charge_valid:
             battery_int = int(float(battery_charge))
             if battery_int < self.config.triggers.low_battery_threshold:
                 if stabilizing:
@@ -2136,11 +2147,19 @@ class UPSGroupMonitor(
                         f"Battery charge {battery_int}% below threshold "
                         f"{self.config.triggers.low_battery_threshold}%"
                     )
+        elif not is_numeric(battery_charge):
+            self._log_message(
+                f"⚠️  WARNING: Received non-numeric battery charge value: "
+                f"'{battery_charge}'"
+            )
         else:
-            self._log_message(f"⚠️  WARNING: Received non-numeric battery charge value: '{battery_charge}'")
+            self._log_message(
+                f"⚠️  WARNING: Received invalid battery charge value: "
+                f"'{battery_charge}'"
+            )
 
         # T2. Critical runtime remaining
-        if not shutdown_reason and is_numeric(battery_runtime):
+        if not shutdown_reason and battery_runtime_valid:
             runtime_int = int(float(battery_runtime))
             if runtime_int < self.config.triggers.critical_runtime_threshold:
                 if stabilizing:
@@ -2156,6 +2175,11 @@ class UPSGroupMonitor(
                         f"Runtime {format_seconds(runtime_int)} below threshold "
                         f"{format_seconds(self.config.triggers.critical_runtime_threshold)}"
                     )
+        elif not shutdown_reason:
+            self._log_message(
+                f"⚠️  WARNING: Received invalid battery runtime value: "
+                f"'{battery_runtime}'"
+            )
 
         # T3. Dangerous depletion rate (with grace period)
         if not shutdown_reason and is_numeric(depletion_rate) and depletion_rate > 0:
@@ -2210,6 +2234,7 @@ class UPSGroupMonitor(
             else:
                 self._trigger_immediate_shutdown(shutdown_reason)
         elif (self._in_redundancy_group and not stabilizing
+                and battery_charge_valid and battery_runtime_valid
                 and self.state.trigger_active):
             # ISS-016: a clean on-battery reading (no trigger reason) while an
             # advisory trigger is latched means conditions recovered (charge/
@@ -2243,7 +2268,11 @@ class UPSGroupMonitor(
         if (status_has_token(self.state.previous_status, "OB")
                 or status_has_token(self.state.previous_status, "FSD")):
             time_on_battery = 0
-            if self.state.on_battery_start_time > 0:
+            if self.state.on_battery_start_mono > 0:
+                time_on_battery = int(
+                    time.monotonic() - self.state.on_battery_start_mono
+                )
+            elif self.state.on_battery_start_time > 0:
                 time_on_battery = int(time.time()) - self.state.on_battery_start_time
 
             self._log_power_event(

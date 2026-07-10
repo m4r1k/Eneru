@@ -52,6 +52,22 @@ class TestAssessHealthBasicTiers:
         assert assess_health(snap, None, 1, now=NOW) == UPSHealth.DEGRADED
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"battery_charge": "-1", "runtime": "1800"},
+            {"battery_charge": "-0.5", "runtime": "1800"},
+            {"battery_charge": "100", "runtime": "-1"},
+            {"battery_charge": "100", "runtime": "-0.5"},
+        ],
+    )
+    def test_negative_nut_sentinel_does_not_exhaust_quorum(self, overrides):
+        """F-075: unknown negative metrics keep an OB member degraded."""
+        triggers = TriggersConfig(on_battery_stabilization_delay=0)
+        snap = _snap(status="OB DISCHRG", **overrides)
+        assert assess_health(snap, triggers, 1, now=NOW) == UPSHealth.DEGRADED
+
+    @pytest.mark.unit
     def test_on_battery_with_trigger_is_critical(self):
         snap = _snap(status="OB DISCHRG", trigger_active=True,
                      trigger_reason="battery 5% < threshold 20%")

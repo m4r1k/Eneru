@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote as urlquote
 
+from eneru.utils import status_has_token
+
 
 # Sample columns: 12 raw NUT metrics from spec 2.12 (battery.charge,
 # battery.runtime, ups.load, input.voltage, output.voltage, battery.voltage,
@@ -105,7 +107,9 @@ def _to_input_voltage(value, *, ups_status: str) -> Optional[float]:
     if f is None:
         return None
     status = ups_status or ""
-    if f <= 0.0 and "OL" in status and "OB" not in status and "FSD" not in status:
+    if (f <= 0.0 and status_has_token(status, "OL")
+            and not status_has_token(status, "OB")
+            and not status_has_token(status, "FSD")):
         return None
     return f
 
@@ -126,7 +130,9 @@ def _to_battery_charge(value, *, ups_status: str) -> Optional[float]:
     if f is None:
         return None
     status = ups_status or ""
-    if f <= 0.0 and "OL" in status and "OB" not in status and "FSD" not in status:
+    if (f <= 0.0 and status_has_token(status, "OL")
+            and not status_has_token(status, "OB")
+            and not status_has_token(status, "FSD")):
         return None
     return f
 
