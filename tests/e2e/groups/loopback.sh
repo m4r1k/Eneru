@@ -476,7 +476,7 @@ delegated_completion_marker_case() {
 
   cat >"$config" <<'YAML'
 ups:
-  - name: "TestUPS@nut-server"
+  - name: "UPS1@nut-server"
     display_name: "Loopback delivery UPS"
     is_local: true
     check_interval: 1
@@ -497,6 +497,10 @@ ups:
         host_identity_command: "echo e2e-loopback-delivery"
         expected_host_identity: "e2e-loopback-delivery"
         shutdown_command: "shutdown -h now"
+  - name: "UPS2@nut-server"
+    display_name: "Loopback healthy peer"
+    is_local: false
+    check_interval: 1
 behavior:
   dry_run: false
 local_shutdown:
@@ -517,7 +521,9 @@ YAML
   docker rm -f "$name" >/dev/null 2>&1 || true
   docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
     rm -f /var/run/shutdown-triggered
-  apply_scenario low-battery
+  apply_scenario online-charging UPS1
+  apply_scenario online-charging UPS2
+  apply_scenario low-battery UPS1
 
   set +e
   timeout 60s docker run --name "$name" \
@@ -560,7 +566,8 @@ YAML
     cat "$log"
     exit 1
   fi
-  apply_scenario online-charging
+  apply_scenario online-charging UPS1
+  apply_scenario online-charging UPS2
   echo "  PASS: delivered loopback poweroff skipped container halt and wrote completion marker"
 }
 

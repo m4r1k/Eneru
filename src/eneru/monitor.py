@@ -1657,6 +1657,9 @@ class UPSGroupMonitor(
                     delete_shutdown_marker(
                         Path(self.config.statistics.db_directory)
                     )
+                    # The one-shot flag means "exit after a completed
+                    # shutdown", not "hide a failed poweroff by exiting".
+                    return
         elif self.config.local_shutdown.enabled and delegated:
             # v5.5: the loopback's shutdown_command (already executed during
             # _shutdown_remote_servers) is what actually powers off the host.
@@ -1755,10 +1758,12 @@ class UPSGroupMonitor(
             )
             self._clear_shutdown_in_progress()
 
-            # Exit if --exit-after-shutdown was specified
-            if self._exit_after_shutdown:
-                self._log_message("🛑  Exiting after shutdown sequence")
-                self._cleanup_and_exit(None, None)
+        # Exit after every successfully completed path, including a delegated
+        # host poweroff. This flag is primarily an E2E/one-shot control; the
+        # real host normally disappears before this line on a bare-metal halt.
+        if self._exit_after_shutdown:
+            self._log_message("🛑  Exiting after shutdown sequence")
+            self._cleanup_and_exit(None, None)
 
     def _trigger_immediate_shutdown(self, reason: str):
         """Trigger an immediate shutdown if not already in progress."""

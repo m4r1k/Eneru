@@ -377,6 +377,19 @@ class TestDelegatedShutdownSequence:
         assert "SHUTDOWN_SEQUENCE_COMPLETE" in events_seen
 
     @pytest.mark.unit
+    def test_exit_after_shutdown_exits_delegated_success(self, tmp_path):
+        """A successful loopback poweroff honors one-shot daemon mode."""
+        monitor = _make_delegated_monitor(tmp_path, dry_run=False)
+        monitor._exit_after_shutdown = True
+        self._spy_phases(monitor)
+        monitor._cleanup_and_exit = MagicMock()
+
+        with _patch_runtime("container (Docker)"):
+            monitor._execute_shutdown_sequence()
+
+        monitor._cleanup_and_exit.assert_called_once_with(None, None)
+
+    @pytest.mark.unit
     def test_missing_ssh_is_fatal_when_delegating(self, tmp_path):
         monitor = _make_delegated_monitor(tmp_path)
 
