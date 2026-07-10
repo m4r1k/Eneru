@@ -551,6 +551,13 @@ remote_servers:
     # Prefix generated privileged actions and final shutdown_command with
     # sudo -n when using a non-root SSH user with NOPASSWD sudo.
     use_sudo: false
+    # Prepend a POSIX-sh `export PATH=...` to every SSH command so bare command
+    # names (e.g. Synology's synoshutdown) resolve in the minimal non-interactive
+    # PATH. Default true (works on any sh/bash/dash/zsh remote). Set false for
+    # NON-POSIX targets: csh/tcsh (FreeBSD/TrueNAS CORE) print
+    # "export: Command not found." noise, and cmd.exe/Windows treats ';' as
+    # literal so the shutdown command silently never runs.
+    augment_remote_path: true
     # Optional private key path. Useful when the key is mounted into a
     # Docker/Podman container or Kubernetes pod. If omitted, OpenSSH
     # defaults and ssh_options are used as before.

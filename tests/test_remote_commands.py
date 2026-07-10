@@ -1501,6 +1501,98 @@ class TestRunRemoteCommand:
             assert sent_command.endswith("sudo -n synoshutdown -s")
 
     @pytest.mark.unit
+    def test_augment_remote_path_false_sends_command_verbatim(self, ssh_monitor):
+        """F-080: a non-POSIX remote (csh/tcsh, cmd.exe) opts out via
+        augment_remote_path=false and receives its command with NO
+        `export PATH=...` prefix, so the POSIX-only statement can't break it."""
+        server = RemoteServerConfig(
+            name="TrueNAS CORE", host="192.168.1.70", user="root",
+            augment_remote_path=False,
+        )
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (0, "", "")
+            ssh_monitor._run_remote_command(server, "shutdown -p now", 30, "test")
+            sent = mock_run.call_args[0][0][-1]
+            assert sent == "shutdown -p now"
+            assert "export PATH" not in sent
+
+    @pytest.mark.unit
+    def test_augment_remote_path_true_is_default(self, ssh_monitor):
+        """F-080: the augmentation stays ON by default, so every ordinary POSIX
+        remote keeps the bare-command (Synology) fix."""
+        server = RemoteServerConfig(host="192.168.1.50", user="root")
+        assert server.augment_remote_path is True
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (0, "", "")
+            ssh_monitor._run_remote_command(server, "echo hi", 30, "test")
+            assert mock_run.call_args[0][0][-1] == REMOTE_PATH_PREFIX + "echo hi"
+
+    @pytest.mark.unit
+    def test_final_shutdown_ssh_teardown_255_is_sent_unconfirmed(self, ssh_monitor):
+        """F-077: the remote accepted poweroff and sshd died before returning
+        status → ssh exits 255 with a transport-teardown stderr. For the FINAL
+        shutdown command this is "sent (unconfirmed)", not a failure."""
+        server = RemoteServerConfig(host="192.168.1.50", user="root")
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (
+                255, "", "Connection to 192.168.1.50 closed by remote host.")
+            success, note = ssh_monitor._run_remote_command(
+                server, "poweroff", 30, "shutdown", is_final_shutdown=True)
+            assert success is True
+            assert note == "SSH transport ended (result unknown)"
+
+    @pytest.mark.unit
+    def test_final_shutdown_255_permission_denied_stays_failed(self, ssh_monitor):
+        """F-077: a 255 that is NOT a transport teardown (e.g. auth failure)
+        stays a failure even on the final shutdown command."""
+        server = RemoteServerConfig(host="192.168.1.50", user="root")
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (255, "", "Permission denied (publickey).")
+            success, err = ssh_monitor._run_remote_command(
+                server, "poweroff", 30, "shutdown", is_final_shutdown=True)
+            assert success is False
+            assert "Permission denied" in err
+
+    @pytest.mark.unit
+    def test_non_final_255_teardown_stays_failed(self, ssh_monitor):
+        """F-077: a mid-sequence (pre_shutdown) command that drops the SSH
+        transport really did fail — the leniency is scoped to the final
+        poweroff only (is_final_shutdown defaults False)."""
+        server = RemoteServerConfig(host="192.168.1.50", user="root")
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (255, "", "Broken pipe")
+            success, err = ssh_monitor._run_remote_command(
+                server, "stop_vms", 30, "pre")
+            assert success is False
+
+    @pytest.mark.unit
+    def test_final_shutdown_teardown_sets_shutdown_sent(self, ssh_monitor):
+        """F-077 end-to-end: via _shutdown_remote_server, a 255-teardown on the
+        poweroff marks shutdown_sent=True (so the loopback-delegate path writes
+        the completion marker) without firing a false failure."""
+        ssh_monitor._notification_worker = MagicMock()
+        ssh_monitor.config.behavior.dry_run = False
+        server = RemoteServerConfig(host="192.168.1.50", user="root",
+                                    shutdown_command="poweroff")
+        with patch("eneru.shutdown.remote.run_command") as mock_run:
+            mock_run.return_value = (255, "", "Connection reset by peer")
+            result = ssh_monitor._shutdown_remote_server(server)
+            assert result.shutdown_sent is True
+            assert not result.error
+
+    @pytest.mark.unit
+    def test_is_ssh_transport_teardown_signatures(self):
+        """F-077: the teardown detector matches the known transport-drop
+        phrasings (fixed + OpenSSH's variable-host form) and nothing else."""
+        from eneru.shutdown.remote import _is_ssh_transport_teardown
+        assert _is_ssh_transport_teardown("Connection to h closed by remote host")
+        assert _is_ssh_transport_teardown("client_loop: send disconnect: Broken pipe")
+        assert _is_ssh_transport_teardown("Connection reset by peer")
+        assert _is_ssh_transport_teardown("Connection to 10.0.0.1 closed.")
+        assert not _is_ssh_transport_teardown("Permission denied (publickey).")
+        assert not _is_ssh_transport_teardown("")
+
+    @pytest.mark.unit
     def test_run_remote_command_uses_ssh_key_path(self, ssh_monitor):
         """ssh_key_path maps to OpenSSH -i without requiring ssh_options."""
         server = RemoteServerConfig(

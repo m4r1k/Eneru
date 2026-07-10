@@ -340,6 +340,23 @@ Two consequences worth knowing:
   `sudo /usr/syno/sbin/synoshutdown -s`). Absolute paths bypass `PATH`
   resolution entirely and always work.
 
+!!! warning "The prefix assumes a POSIX login shell — non-POSIX remotes must opt out"
+    The `PATH` augmentation is a POSIX-sh `export PATH=...` statement. It works
+    on any remote whose SSH login shell is `sh`/`bash`/`dash`/`zsh` (the vast
+    majority, including Synology). It does **not** work on non-POSIX shells:
+
+    - **csh/tcsh** (FreeBSD / TrueNAS CORE root default): `export` isn't a csh
+      builtin, so every command prints a harmless-but-noisy
+      `export: Command not found.` before running your real command.
+    - **cmd.exe / Windows**: `;` is not a command separator, so the whole
+      line — prefix and your `shutdown_command` together — is handed to a
+      nonexistent `export`. Your shutdown command **silently never runs**.
+
+    For those targets set `augment_remote_path: false` on that
+    `remote_servers` entry. Eneru then sends your command verbatim (no prefix),
+    and you supply absolute paths yourself where needed. The default is `true`
+    so every ordinary POSIX remote keeps the bare-command fix above.
+
 ## Safe test checklist
 
 Run these before relying on remote shutdown:

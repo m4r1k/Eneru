@@ -43,6 +43,32 @@ REMOTE_PATH_PREFIX = (
     '/sbin:/bin:/usr/syno/sbin:/usr/syno/bin"; '
 )
 
+# ELI5: you phone a warehouse and shout "SHIP IT!" — mid-sentence the line goes
+# dead. Did they hear you? On a small box (BusyBox/Alpine/dropbear/sysvinit) the
+# `poweroff` you just sent kills sshd BEFORE it can mail you back an exit status,
+# so ssh gives up with code 255 and a "connection dropped" complaint. That is
+# NOT the shutdown command failing — it's the shutdown WORKING so fast it hung up
+# on us. We only trust this reading for the FINAL poweroff (a mid-sequence
+# command that drops the line really did fail) and only when the stderr looks
+# like the transport tore down, never a real "Permission denied" 255.
+_SSH_TRANSPORT_TEARDOWN_SIGNATURES = (
+    "closed by remote host",
+    "broken pipe",
+    "connection reset",
+)
+
+
+def _is_ssh_transport_teardown(stderr: str) -> bool:
+    """True when ssh stderr looks like the session was cut mid-command.
+
+    Covers the fixed BusyBox/dropbear phrasings plus OpenSSH's
+    "Connection to <host> closed." (variable host in the middle).
+    """
+    low = stderr.lower()
+    if any(sig in low for sig in _SSH_TRANSPORT_TEARDOWN_SIGNATURES):
+        return True
+    return "connection to" in low and "closed" in low
+
 
 @dataclass
 class RemotePreShutdownResult:
@@ -413,11 +439,20 @@ class RemoteShutdownMixin:
             shutdown_command,
             server.command_timeout,
             "shutdown",
+            is_final_shutdown=True,
         )
 
         if success:
             result.shutdown_sent = True
-            self._log_message(f"  ✅  {display} shutdown command sent successfully")
+            if error_msg:
+                # F-077: sent but unconfirmed (SSH transport tore down before
+                # the exit status came back). shutdown_sent is still True so
+                # the marker is written and no false-incomplete alert fires.
+                self._log_message(
+                    f"  ✅  {display} shutdown command sent ({error_msg})"
+                )
+            else:
+                self._log_message(f"  ✅  {display} shutdown command sent successfully")
         else:
             result.error = error_msg
             self._log_message(
@@ -567,11 +602,19 @@ class RemoteShutdownMixin:
         description: str,
         *,
         deadline: Optional[float] = None,
+        is_final_shutdown: bool = False,
     ) -> Tuple[bool, str]:
         """Run a single command on a remote server via SSH.
 
+        ``is_final_shutdown`` marks the ONE poweroff command (not
+        pre_shutdown_commands): only then is an exit-255 transport teardown
+        treated as "sent (unconfirmed)" rather than a failure (F-077). On
+        success the second tuple element is normally "" but carries a
+        human-readable note ("SSH transport ended (result unknown)") for that
+        unconfirmed case so callers can log it honestly.
+
         Returns:
-            Tuple of (success, error_message)
+            Tuple of (success, error_or_note)
         """
         display_name = server.name or server.host
 
@@ -606,11 +649,25 @@ class RemoteShutdownMixin:
         # `ssh <opts> user@host "<prefix><command>"`). The LOCAL, non-SSH
         # execution paths never reach _run_remote_command, so they are
         # correctly left untouched.
+        #
+        # F-080: the prefix is a POSIX-sh `export PATH=...` statement. On a
+        # csh/tcsh remote (FreeBSD/TrueNAS CORE root) it emits noisy
+        # "export: Command not found." lines; on a cmd.exe/Windows remote `;`
+        # isn't a separator, so the ENTIRE line becomes args to a nonexistent
+        # `export` and the real shutdown silently never runs. Per-server
+        # `augment_remote_path` (default true, so the Synology bare-command fix
+        # still applies to every POSIX remote) lets those non-POSIX targets opt
+        # OUT and receive their command verbatim.
+        remote_command = (
+            REMOTE_PATH_PREFIX + command
+            if server.augment_remote_path
+            else command
+        )
         ssh_cmd.extend([
             "-o", f"ConnectTimeout={server.connect_timeout}",
             "-o", "BatchMode=yes",  # Prevent password prompts from hanging
             f"{server.user}@{server.host}",
-            REMOTE_PATH_PREFIX + command,
+            remote_command,
         ])
 
         # Add buffer to account for SSH connection overhead, unless a
@@ -640,6 +697,18 @@ class RemoteShutdownMixin:
                     f"(configured {timeout}s, capped by phase deadline)",
                 )
             return False, f"timed out after {timeout}s"
+        elif (
+            is_final_shutdown
+            and exit_code == 255
+            and _is_ssh_transport_teardown(stderr)
+        ):
+            # F-077: the remote accepted the poweroff and sshd died before
+            # returning status. Report "sent (unconfirmed)" so the
+            # loopback-delegate path writes the completion marker and skips the
+            # false "sequence incomplete" alert. Scoped to the final poweroff
+            # and a transport-teardown stderr — a mid-sequence drop, a non-255
+            # code, or "Permission denied" all stay failures.
+            return True, "SSH transport ended (result unknown)"
         else:
             error_msg = stderr.strip() if stderr.strip() else f"exit code {exit_code}"
             return False, error_msg
@@ -913,11 +982,19 @@ class RemoteShutdownMixin:
             server.command_timeout,
             "shutdown",
             deadline=deadline,
+            is_final_shutdown=True,
         )
 
         if success:
             result.shutdown_sent = True
-            self._log_message(f"  ✅  {display_name} shutdown command sent successfully")
+            if error_msg:
+                # F-077: sent but unconfirmed (SSH transport tore down before
+                # the exit status came back). Treated as sent, not failed.
+                self._log_message(
+                    f"  ✅  {display_name} shutdown command sent ({error_msg})"
+                )
+            else:
+                self._log_message(f"  ✅  {display_name} shutdown command sent successfully")
             # Per-server success used to fire a notification too; dropped in
             # v5.2 — the "Starting" notification is the per-server signal,
             # the aggregate "Sequence Complete" rolls up the result, and

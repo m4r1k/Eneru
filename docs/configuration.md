@@ -481,6 +481,7 @@ mounts:
 | `command_timeout` | `30` | Default timeout for remote commands |
 | `shutdown_command` | `sudo shutdown -h now` | Final shutdown command |
 | `use_sudo` | `false` | Prefix generated privileged actions and non-sudo final shutdown commands with `sudo -n`. Useful for non-root loopback or remote users with NOPASSWD sudo |
+| `augment_remote_path` | `true` | Prepend a POSIX-sh `export PATH=...` to every SSH command so bare command names (e.g. Synology's `synoshutdown`) resolve in the minimal non-interactive `PATH`. Set `false` for **non-POSIX** remotes — csh/tcsh (FreeBSD/TrueNAS CORE) print `export: Command not found.` noise, and cmd.exe/Windows treats `;` as literal so the command silently never runs. See [Bare command names and PATH](remote-servers.md#bare-command-names-and-path) |
 | `ssh_key_path` | `null` | Optional SSH private-key path, useful for container/Kubernetes volume mounts |
 | `ssh_options` | `[]` | Extra SSH options. Eneru defaults each remote to `StrictHostKeyChecking=accept-new` (learns and pins the host key on first use; bare metal uses the running user's `~/.ssh/known_hosts`, Docker/Podman uses `/var/lib/eneru/ssh/known_hosts`, Kubernetes samples set a PVC-backed path), so no entry is needed for normal use. Set your own `StrictHostKeyChecking` or `UserKnownHostsFile` to override; avoid `StrictHostKeyChecking=no` in production |
 | `pre_shutdown_commands` | `[]` | Pre-shutdown actions or commands. For loopback entries Eneru generates these from the local config — don't duplicate |
