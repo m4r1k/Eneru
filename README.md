@@ -18,7 +18,7 @@ sudo apt update
 sudo apt install eneru
 ```
 
-### RHEL / Fedora
+### RHEL 9/10 / Fedora
 
 ```bash
 # RHEL 8/9: Enable EPEL first (required for apprise dependency)
@@ -28,6 +28,14 @@ sudo dnf install -y epel-release
 sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
 
 # Install
+sudo dnf install eneru
+```
+
+### RHEL 8
+
+```bash
+sudo dnf install -y epel-release
+sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/el8/eneru-el8.repo
 sudo dnf install eneru
 ```
 
@@ -46,11 +54,18 @@ sudo apt update
 sudo apt install eneru
 ```
 
-### RHEL / Fedora
+### RHEL 9/10 / Fedora
 
 ```bash
 sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/eneru-testing.repo
 
+sudo dnf install eneru
+```
+
+### RHEL 8
+
+```bash
+sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/el8/eneru-testing-el8.repo
 sudo dnf install eneru
 ```
 

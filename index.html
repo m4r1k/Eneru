@@ -32,7 +32,7 @@ echo "deb [arch=all signed-by=/usr/share/keyrings/eneru.gpg] https://m4r1k.githu
 sudo apt update
 sudo apt install eneru</pre>
 
-    <h3>RHEL / Fedora</h3>
+    <h3>RHEL 9/10 / Fedora</h3>
     <pre>
 # RHEL 8/9: Enable EPEL first (required for apprise dependency)
 sudo dnf install -y epel-release
@@ -41,6 +41,12 @@ sudo dnf install -y epel-release
 sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
 
 # Install
+sudo dnf install eneru</pre>
+
+    <h3>RHEL 8</h3>
+    <pre>
+sudo dnf install -y epel-release
+sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/el8/eneru-el8.repo
 sudo dnf install eneru</pre>
   </div>
 
@@ -63,12 +69,17 @@ echo "deb [arch=all signed-by=/usr/share/keyrings/eneru.gpg] https://m4r1k.githu
 sudo apt update
 sudo apt install eneru</pre>
 
-    <h3>RHEL / Fedora</h3>
+    <h3>RHEL 9/10 / Fedora</h3>
     <pre>
 # Add testing repository
 sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/eneru-testing.repo
 
 # Install pre-release version
+sudo dnf install eneru</pre>
+
+    <h3>RHEL 8</h3>
+    <pre>
+sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/el8/eneru-testing-el8.repo
 sudo dnf install eneru</pre>
   </div>
 

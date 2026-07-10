@@ -1,16 +1,16 @@
 Package: eneru
-Version: 6.1.6
+Version: 6.1.7
 Architecture: all
 Maintainer: Eneru Maintainers <noreply@github.com>
-Installed-Size: 1442
+Installed-Size: 1565
 Depends: python3, python3-yaml, python3-paho-mqtt, python3-bcrypt, nut-client
 Recommends: apprise, openssh-client
 Suggests: apprise
-Filename: pool/main/eneru_6.1.6_all.deb
-Size: 413164
-MD5sum: a8606d2baee380ab2b8a79d37b9c0c02
-SHA1: da2e76228fd025057f4559a603f6c724b1b1dc52
-SHA256: 5d268310e1775405e3c947ec355db7d6dab148ae2f82d6bf865562cd29acbba9
+Filename: pool/main/eneru_6.1.7_all.deb
+Size: 452292
+MD5sum: 0ae55dbb6a2893583c202e80a716ac34
+SHA1: d3fd5c908e057c3cb0d6c78258e0bb89b72e6eb4
+SHA256: 8529900bb0837d7fc16e36d4156499df66a2ad5b964c1ecca99005414b4be2ca
 Section: admin
 Priority: optional
 Homepage: https://github.com/m4r1k/Eneru
