@@ -1138,8 +1138,12 @@ class MultiUPSCoordinator:
 
     def _reload_notification_worker(self) -> None:
         """Bounce the shared notification worker after config reload."""
+        # F-067: detach the old worker's memory-buffered rows (no SQLite
+        # backing) so the replacement worker can adopt them.
+        carryover = []
         if self._notification_worker is not None:
             self._notification_worker.stop()
+            carryover = self._notification_worker.drain_memory_buffer()
             self._notification_worker = None
         for mon in self._monitors:
             mon._notification_worker = None
@@ -1166,6 +1170,8 @@ class MultiUPSCoordinator:
             store = getattr(mon, "_stats_store", None)
             if store is not None and store._conn is not None:
                 worker.register_store(store)
+        # F-067: hand over the old worker's undelivered memory buffer.
+        worker.adopt_memory_buffer(carryover)
         for executor in self._redundancy_executors.values():
             executor._notification_worker = worker
         self._notification_worker = worker

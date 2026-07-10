@@ -1841,8 +1841,13 @@ class UPSGroupMonitor(
 
     def _reload_notification_worker(self) -> None:
         """Bounce the single-UPS notification worker after config reload."""
+        # F-067: memory-buffered rows (store never opened / refused the
+        # insert) have no SQLite backing — detach them from the old worker
+        # so the replacement can adopt them instead of dropping them.
+        carryover = []
         if self._notification_worker is not None:
             self._notification_worker.stop()
+            carryover = self._notification_worker.drain_memory_buffer()
             self._notification_worker = None
         if not self.config.notifications.enabled:
             self._log_message("📢  Notifications: disabled")
@@ -1859,6 +1864,8 @@ class UPSGroupMonitor(
         if worker.start():
             if self._stats_store is not None and self._stats_store._conn is not None:
                 worker.register_store(self._stats_store)
+            # F-067: hand over the old worker's undelivered memory buffer.
+            worker.adopt_memory_buffer(carryover)
             self._notification_worker = worker
             count = worker.get_service_count()
             self._log_message(f"📢  Notifications reloaded ({count} service(s))")

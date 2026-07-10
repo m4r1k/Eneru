@@ -421,6 +421,272 @@ class TestSendPersistence:
 
 
 # ==============================================================================
+# F-067: direct Apprise delivery of memory-buffered rows + reload handover
+# ==============================================================================
+
+class TestMemoryBufferDirectDelivery:
+    """F-067: rows the store keeps refusing must ship straight through
+    Apprise (drop from the buffer only on confirmed delivery), instead of
+    sitting in memory until process exit."""
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_closed_store_message_actually_delivered(
+        self, mock_apprise, notification_config, tmp_path
+    ):
+        """The report's regression case: a registered-but-CLOSED store
+        (unwritable /var/lib/eneru) + a working Apprise endpoint → the
+        message must actually be delivered, end-to-end via the worker
+        thread, and leave the memory buffer."""
+        mock_instance = _patch_apprise(mock_apprise, succeed=True)
+        closed_store = StatsStore(tmp_path / "never-opened.db")  # no open()
+        worker = NotificationWorker(notification_config)
+        try:
+            worker.start()
+            worker.register_store(closed_store)
+            worker._warn = lambda *_: None
+            assert worker.send("lost-no-more", "failure", "shutdown") is None
+            assert len(worker._memory_buffer) == 1
+            assert _wait_until(
+                lambda: mock_instance.notify.call_count >= 1
+                and len(worker._memory_buffer) == 0
+            )
+            bodies = [c.kwargs.get("body")
+                      for c in mock_instance.notify.call_args_list]
+            assert "lost-no-more" in bodies
+        finally:
+            worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_flush_returns_early_once_buffer_delivers(
+        self, mock_apprise, notification_config, tmp_path
+    ):
+        """F-067(c): flush() must not burn its full timeout when only
+        memory-buffered rows remain and they get delivered directly."""
+        _patch_apprise(mock_apprise, succeed=True)
+        closed_store = StatsStore(tmp_path / "never-opened.db")
+        worker = NotificationWorker(notification_config)
+        try:
+            worker.start()
+            worker.register_store(closed_store)
+            worker._warn = lambda *_: None
+            worker.send("drain-me", "info", "shutdown")
+            start = time.monotonic()
+            assert worker.flush(timeout=10) is True
+            assert time.monotonic() - start < 8  # returned early, not on timeout
+            assert worker._memory_buffer == []
+        finally:
+            worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_no_store_grace_holds_then_delivers(
+        self, mock_apprise, notification_config
+    ):
+        """With NO store registered, rows are held for the imminent
+        register_store during the startup grace, then direct-delivered
+        once the grace passes (no store is coming)."""
+        mock_instance = _patch_apprise(mock_apprise, succeed=True)
+        worker = NotificationWorker(notification_config)
+        try:
+            worker.start()
+            worker.stop()  # halt the thread; drive the direct path by hand
+            worker.send("held", "info", "lifecycle")
+            worker._stop_event.clear()  # allow the hand-driven sweep to run
+
+            # Inside the grace: held for register_store, nothing sent.
+            worker._deliver_memory_buffer_direct()
+            assert len(worker._memory_buffer) == 1
+            mock_instance.notify.assert_not_called()
+
+            # Past the grace: no store is coming → direct delivery.
+            worker._start_mono = time.monotonic() - 60
+            worker._deliver_memory_buffer_direct()
+            assert worker._memory_buffer == []
+            assert mock_instance.notify.call_count == 1
+        finally:
+            worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_direct_delivery_failure_backs_off(
+        self, mock_apprise, notification_config, tmp_path
+    ):
+        """A refusing endpoint keeps the rows buffered and arms a backoff so
+        the direct path doesn't hammer Apprise every 1s tick; a later
+        success resets the backoff."""
+        mock_instance = _patch_apprise(mock_apprise, succeed=False)
+        closed_store = StatsStore(tmp_path / "never-opened.db")
+        worker = NotificationWorker(notification_config)
+        try:
+            worker.start()
+            worker.stop()
+            worker.register_store(closed_store)
+            worker._warn = lambda *_: None
+            worker.send("stuck-1", "info", "shutdown")
+            worker.send("stuck-2", "info", "shutdown")
+            worker._stop_event.clear()
+
+            worker._deliver_memory_buffer_direct()
+            # Sweep stopped at the FIRST failure (one blocking call, not two).
+            assert mock_instance.notify.call_count == 1
+            assert len(worker._memory_buffer) == 2
+            assert worker._buffer_direct_attempts == 1
+            assert worker._buffer_direct_next_mono > time.monotonic()
+
+            # Within the backoff window: no new attempt at all.
+            worker._deliver_memory_buffer_direct()
+            assert mock_instance.notify.call_count == 1
+
+            # Backoff elapsed + endpoint recovered: both rows deliver,
+            # backoff state resets.
+            worker._buffer_direct_next_mono = 0.0
+            mock_instance.notify.return_value = True
+            worker._deliver_memory_buffer_direct()
+            assert worker._memory_buffer == []
+            assert worker._buffer_direct_attempts == 0
+        finally:
+            worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_direct_delivery_partial_failure_keeps_undelivered(
+        self, mock_apprise, notification_config, tmp_path
+    ):
+        """First row delivers, second fails → only the delivered row leaves
+        the buffer; age order of the remainder is preserved."""
+        mock_instance = _patch_apprise(mock_apprise, succeed=True)
+        mock_instance.notify.side_effect = [True, False]
+        closed_store = StatsStore(tmp_path / "never-opened.db")
+        worker = NotificationWorker(notification_config)
+        try:
+            worker.start()
+            worker.stop()
+            worker.register_store(closed_store)
+            worker._warn = lambda *_: None
+            worker.send("first", "info", "shutdown")
+            worker.send("second", "info", "shutdown")
+            worker._stop_event.clear()
+
+            worker._deliver_memory_buffer_direct()
+            assert [row[0] for row in worker._memory_buffer] == ["second"]
+        finally:
+            worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_direct_delivery_stops_on_stop_event(
+        self, mock_apprise, notification_config, tmp_path
+    ):
+        """The sweep aborts promptly when the worker is being stopped."""
+        mock_instance = _patch_apprise(mock_apprise, succeed=True)
+        closed_store = StatsStore(tmp_path / "never-opened.db")
+        worker = NotificationWorker(notification_config)
+        try:
+            worker.start()
+            worker.stop()
+            worker.register_store(closed_store)
+            worker._warn = lambda *_: None
+            worker.send("late", "info", "shutdown")
+
+            # stop_event stays SET (from stop()) → sweep sends nothing.
+            worker._deliver_memory_buffer_direct()
+            mock_instance.notify.assert_not_called()
+            assert len(worker._memory_buffer) == 1
+        finally:
+            worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_direct_delivery_noop_on_empty_buffer(
+        self, mock_apprise, notification_config
+    ):
+        mock_instance = _patch_apprise(mock_apprise, succeed=True)
+        worker = NotificationWorker(notification_config)
+        try:
+            worker.start()
+            worker.stop()
+            worker._stop_event.clear()
+            worker._deliver_memory_buffer_direct()
+            mock_instance.notify.assert_not_called()
+        finally:
+            worker.stop()
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_drain_and_adopt_memory_buffer(
+        self, mock_apprise, notification_config
+    ):
+        """F-067(b): a reload bounce hands the old worker's buffer to the
+        replacement — drain detaches, adopt prepends preserving age order."""
+        _patch_apprise(mock_apprise, succeed=True)
+        old = NotificationWorker(notification_config)
+        old._memory_buffer = [("old-1", "info", "lifecycle", 100),
+                              ("old-2", "info", "lifecycle", 200)]
+        entries = old.drain_memory_buffer()
+        assert [e[0] for e in entries] == ["old-1", "old-2"]
+        assert old._memory_buffer == []
+
+        new = NotificationWorker(notification_config)
+        new._memory_buffer = [("new-1", "info", "lifecycle", 300)]
+        new.adopt_memory_buffer(entries)
+        assert [e[0] for e in new._memory_buffer] == ["old-1", "old-2", "new-1"]
+
+        # No-op adoption paths.
+        new.adopt_memory_buffer(None)
+        new.adopt_memory_buffer([])
+        assert len(new._memory_buffer) == 3
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_adopt_memory_buffer_respects_cap(
+        self, mock_apprise, notification_config
+    ):
+        """Adoption enforces max_pending (oldest dropped) so a reload can't
+        resurrect an unbounded backlog."""
+        _patch_apprise(mock_apprise, succeed=True)
+        notification_config.notifications.max_pending = 2
+        worker = NotificationWorker(notification_config)
+        worker._warn = lambda *_: None
+        worker.adopt_memory_buffer([
+            ("a", "info", "lifecycle", 1),
+            ("b", "info", "lifecycle", 2),
+            ("c", "info", "lifecycle", 3),
+        ])
+        assert [e[0] for e in worker._memory_buffer] == ["b", "c"]
+
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_stop_warns_about_buffered_rows(
+        self, mock_apprise, notification_config
+    ):
+        """stop() must say how many memory-buffered rows are at risk instead
+        of silently discarding them."""
+        _patch_apprise(mock_apprise, succeed=True)
+        worker = NotificationWorker(notification_config)
+        try:
+            worker.start()
+            warnings = []
+            worker._warn = warnings.append
+            worker._memory_buffer = [("orphan", "info", "lifecycle", 1)]
+            worker.stop()
+            assert any("memory-buffered" in w for w in warnings)
+        finally:
+            worker.stop()
+
+
+# ==============================================================================
 # Retry / backoff / max_attempts
 # ==============================================================================
 
