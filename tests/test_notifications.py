@@ -937,7 +937,10 @@ class TestRetryAndBackoff:
                 "SELECT status, cancel_reason FROM notifications "
                 "WHERE body='forever'",
             )
-            assert row[0] == "pending"
+            # Atomic delivery claims briefly expose ``delivering`` while the
+            # worker retries. Unlimited means "never cancelled", not "always
+            # sampled between attempts".
+            assert row[0] in {"pending", "delivering"}
             assert row[1] is None
         finally:
             worker.stop()
