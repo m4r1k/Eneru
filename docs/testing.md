@@ -277,13 +277,13 @@ matrix wall-clock is bounded by a smaller slowest group):
 | Group | Focus |
 |-------|-------|
 | CLI | Validation, bare command safety, one-shot output |
-| UPS Single Core | Single UPS events, shutdown paths, embedded API, MQTT |
+| UPS Single Core | Single UPS events, shutdown paths, embedded API, MQTT, remote PATH opt-out, real Compose timeout shutdown |
 | UPS Single Auth | v6.0 auth, UPS control, hot-reload, dashboard, event management (tests 52–56) |
 | UPS Multi | Independent UPS groups and local-drain policies |
 | Redundancy Quorum | Quorum behavior and advisory triggers (tests 21–27, 37, 38) |
 | Redundancy Regression | Runtime NUT-visibility regressions (R1, R2) |
 | Stats | SQLite, graphs, events, notification coalescing |
-| Loopback | Containerized local-host ownership through root and sudo SSH loopback, including generated local VM/container/sync/unmount actions and strict container SSH trust |
+| Loopback | Containerized local-host ownership through root and sudo SSH loopback, including generated local VM/container/sync/unmount actions, verified delegated-poweroff completion markers, and strict container SSH trust |
 
 In the inventory below the **Group** column shows the original coarse
 focus area; *UPS Single* rows now run in **UPS Single Core** or **UPS
@@ -294,7 +294,7 @@ The scenario files simulate online, on-battery, low-battery, FSD, brownout, over
 
 ### E2E test inventory
 
-The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 58 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
+The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 61 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
 
 | Test | Group | What it proves |
 |------|-------|----------------|
@@ -358,6 +358,9 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 58 numb
 | 56 | UPS Single | Event management: a wide-range `/api/v1/events` query returns source-qualified rows, an authenticated `DELETE` removes a real event (anonymous is 401), and a history `from > to` is 400 |
 | 57 | Loopback | Containerized remote SSH with **no** `ssh_options` relies on the built-in `StrictHostKeyChecking=accept-new` default: it learns the host key on the first probe into `/var/lib/eneru/ssh/known_hosts`, reaches `HEALTHY`, and preserves the first learned trust entries after the container is recreated |
 | 58 | CLI | NUT name autodiscovery (issue #71) lists a single exposed UPS with `upsc -l`, auto-corrects the runtime poll target, and logs the `ups.name` fix hint |
+| 59 | UPS Single | `augment_remote_path: false` delivers a custom SSH command without the POSIX/Synology PATH prefix |
+| 60 | UPS Single | A real local Compose stack is removed through Eneru's `down -t <seconds>` shutdown path |
+| 61 | Loopback | A real coordinator/list-form delegated poweroff reaches the SSH target, skips in-container poweroff, and persists a `sequence_complete` recovery marker |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
 
 Every commit on the protected workflow has to prove the daemon works against real services. That means real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.

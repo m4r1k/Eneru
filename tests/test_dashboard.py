@@ -171,8 +171,8 @@ def test_dashboard_perf_hardening_v617(minimal_config):
 
     F-043: refresh() has an in-flight re-entrancy guard so a slow 10s cycle
     can't stack overlapping refreshes.
-    F-022: chart event markers are cached between refreshes — the passive poll
-    passes refetchEvents:false and only genuine activation/range changes rescan.
+    F-022/F-088: chart event markers are cached between steady-state refreshes;
+    genuine activation/range and exact NUT power-state changes rescan.
     F-029: the accumulated-events cap grows on explicit "Load older" so paged
     rows survive the newest-N slice instead of being discarded.
     """
@@ -182,9 +182,10 @@ def test_dashboard_perf_hardening_v617(minimal_config):
     assert "let refreshing = false;" in js
     assert "if (refreshing) return;" in js
     assert "async function refreshOnce()" in js
-    # F-022: passive poll reuses cached markers; genuine changes refetch.
+    # F-022/F-088: steady-state polls reuse markers; power changes refetch.
     assert "refetchEvents" in js
-    assert "onTabActivated(activeTab, { refetchEvents: false })" in js
+    assert "powerStateSignature(lastUpsRows)" in js
+    assert "refetchEvents: powerStateChanged" in js
     assert "state.eventsKey" in js
     # F-029: the newest-rows cap grows on explicit paging, resets on new dataset.
     assert "let eventsCap = EVENTS_BASE_CAP;" in js
@@ -657,31 +658,59 @@ def test_stylesheet_makes_hidden_attribute_win(minimal_config):
 @pytest.mark.unit
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
 def test_dashboard_merge_events_dedup_sort_cap(minimal_config):
-    """F-062: exercise app.js `mergeEvents` (+ its `eventKey`) in a node shim.
-    Verifies the merge de-duplicates by (source,id), sorts by timestamp, and
-    caps the accumulated list to the newest `eventsCap` rows. Skips cleanly
-    where node is unavailable."""
+    """Execute event merge, power-transition, and auth-state helpers in Node."""
     js = _handler(minimal_config, path="/app.js")._serve_static(
         "/app.js")[1].decode("utf-8")
     event_key = js[js.index("function eventKey"):js.index("// F-029: the accumulated")]
     merge = js[js.index("function mergeEvents"):js.index("function eventRangeFrom")]
+    refresh_helpers = js[
+        js.index("function nutStatusTokens"):
+        js.index("// ----- theme (light / dark / system)")
+    ]
     script = textwrap.dedent("""
         let lastEvents = [];
         let eventsCap = 3;
         function updateEventTypeFilter() {}
         function preserveWindowScroll(fn) { if (fn) fn(); }
         function applyEventFilters() {}
-    """) + event_key + merge + textwrap.dedent("""
+    """) + refresh_helpers + event_key + merge + textwrap.dedent("""
         mergeEvents([{source:"A", id:1, ts:10, eventType:"ON_BATTERY"}]);
         mergeEvents([{source:"A", id:1, ts:10, eventType:"ON_LINE"}]); // same key -> replace
         mergeEvents([{source:"A", id:2, ts:5}]);                        // earlier ts sorts first
         const afterDedup = lastEvents.map(e => e.source + ":" + e.id + ":" + e.eventType);
         mergeEvents([{source:"A", id:3, ts:20}, {source:"A", id:4, ts:30}]); // overflow cap
+        const power = {
+          olNoiseStable: powerStateSignature([{name:"A", status:"OL CHRG"}])
+            === powerStateSignature([{name:"A", status:"OL"}]),
+          orderStable: powerStateSignature([
+            {name:"B", status:"OB"}, {name:"A", status:"OL"}
+          ]) === powerStateSignature([
+            {name:"A", status:"OL"}, {name:"B", status:"OB"}
+          ]),
+          outageStarts: powerStateSignature([{name:"A", status:"OL"}])
+            !== powerStateSignature([{name:"A", status:"OB DISCHRG"}]),
+          outageEnds: powerStateSignature([{name:"A", status:"OB"}])
+            !== powerStateSignature([{name:"A", status:"OL CHRG"}]),
+        };
+        const auth = {
+          enabledKeeps: authStateRequiresClear(
+            {ok:true, data:{enabled:true}}, {ok:true, data:{detail:"extended"}}, true),
+          transientKeeps: authStateRequiresClear(
+            {ok:false, data:null}, {ok:false, data:null}, true),
+          disabledClears: authStateRequiresClear(
+            {ok:true, data:{enabled:false}}, {ok:true, data:{}}, true),
+          sanitizedClears: authStateRequiresClear(
+            {ok:true, data:{enabled:true}}, {ok:true, data:{detail:"sanitized"}}, true),
+          api401Clears: responseInvalidatesAuth(401, "/api/v1/config"),
+          login401Keeps: responseInvalidatesAuth(401, "/api/v1/auth/login"),
+        };
         process.stdout.write(JSON.stringify({
           afterDedup: afterDedup,
           count: lastEvents.length,
           oldest: lastEvents[0].id,
           newest: lastEvents[lastEvents.length - 1].id,
+          power,
+          auth,
         }));
     """)
     result = subprocess.run(["node", "-"], input=script, text=True,
@@ -694,6 +723,20 @@ def test_dashboard_merge_events_dedup_sort_cap(minimal_config):
     assert data["count"] == 3
     assert data["oldest"] == 1
     assert data["newest"] == 4
+    assert data["power"] == {
+        "olNoiseStable": True,
+        "orderStable": True,
+        "outageStarts": True,
+        "outageEnds": True,
+    }
+    assert data["auth"] == {
+        "enabledKeeps": False,
+        "transientKeeps": False,
+        "disabledClears": True,
+        "sanitizedClears": True,
+        "api401Clears": True,
+        "login401Keeps": False,
+    }
 
 
 @pytest.mark.unit

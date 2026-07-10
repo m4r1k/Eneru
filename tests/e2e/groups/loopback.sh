@@ -468,6 +468,102 @@ YAML
   echo "  PASS: learned host key persisted across container recreate"
 }
 
+delegated_completion_marker_case() {
+  local config="/tmp/e2e-loopback-delivery.yaml"
+  local state_dir="/tmp/e2e-loopback-delivery-state"
+  local name="eneru-e2e-loopback-delivery"
+  local log="/tmp/e2e-loopback-delivery.log"
+
+  cat >"$config" <<'YAML'
+ups:
+  - name: "TestUPS@nut-server"
+    display_name: "Loopback delivery UPS"
+    is_local: true
+    check_interval: 1
+    triggers:
+      on_battery_stabilization_delay: 0
+      low_battery_threshold: 95
+      critical_runtime_threshold: 600
+    remote_servers:
+      - name: host-loopback
+        enabled: true
+        host: ssh-target
+        user: root
+        ssh_key_path: /var/lib/eneru/ssh/id_loopback
+        ssh_options:
+          - "StrictHostKeyChecking=no"
+          - "UserKnownHostsFile=/dev/null"
+        is_host_loopback: true
+        host_identity_command: "echo e2e-loopback-delivery"
+        expected_host_identity: "e2e-loopback-delivery"
+        shutdown_command: "shutdown -h now"
+behavior:
+  dry_run: false
+local_shutdown:
+  enabled: true
+  trigger_on: any
+logging:
+  file: null
+  state_file: "/var/lib/eneru/ups-monitor.state"
+  battery_history_file: "/var/lib/eneru/ups-battery-history"
+  shutdown_flag_file: "/var/lib/eneru/ups-shutdown-scheduled"
+statistics:
+  db_directory: "/var/lib/eneru"
+YAML
+
+  sudo rm -rf "$state_dir"
+  install -d -m 0755 "$state_dir"
+  sudo chown 10001:10001 "$state_dir"
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
+    rm -f /var/run/shutdown-triggered
+  apply_scenario low-battery
+
+  set +e
+  timeout 60s docker run --name "$name" \
+    --network "$NETWORK" \
+    -v "$config":/etc/ups-monitor/config.yaml:ro \
+    -v /tmp/e2e-loopback-key:/var/lib/eneru/ssh/id_loopback:ro \
+    -v "$state_dir":/var/lib/eneru \
+    eneru:e2e \
+    run --config /etc/ups-monitor/config.yaml --exit-after-shutdown \
+    2>&1 | tee "$log"
+  rc=${PIPESTATUS[0]}
+  set -e
+  docker rm -f "$name" >/dev/null 2>&1 || true
+
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: delegated completion case exited with rc=$rc"
+    cat "$log"
+    exit 1
+  fi
+  if ! docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
+      test -f /var/run/shutdown-triggered; then
+    echo "FAIL: loopback host poweroff command was not delivered"
+    cat "$log"
+    exit 1
+  fi
+  if ! grep -q "Skipping in-container poweroff" "$log"; then
+    echo "FAIL: coordinator did not take the delegated poweroff skip path"
+    cat "$log"
+    exit 1
+  fi
+  if grep -qi "sequence is incomplete" "$log"; then
+    echo "FAIL: successful loopback delivery was classified incomplete"
+    cat "$log"
+    exit 1
+  fi
+  if ! sudo grep -q '"reason": "sequence_complete"' \
+      "$state_dir/.shutdown_state.json"; then
+    echo "FAIL: successful delegated poweroff did not persist completion marker"
+    sudo find "$state_dir" -maxdepth 1 -type f -ls || true
+    cat "$log"
+    exit 1
+  fi
+  apply_scenario online-charging
+  echo "  PASS: delivered loopback poweroff skipped container halt and wrote completion marker"
+}
+
 echo ">>> Building Eneru OCI image for loopback E2E"
 docker build -t eneru:e2e .
 NETWORK="$(network_name)"
@@ -492,5 +588,7 @@ echo ">>> Running: Test 50: E2E Loopback missing delegate startup failure"
 negative_missing_loopback
 echo ">>> Running: Test 57: E2E container remote accept-new learns host key and survives recreate"
 accept_new_known_hosts_remote 19194
+echo ">>> Running: Test 61: E2E delegated poweroff delivery writes completion marker"
+delegated_completion_marker_case
 
-echo "PASS: E2E loopback root/sudo, accept-new SSH trust, and negative readiness checks passed"
+echo "PASS: E2E loopback root/sudo, delivery marker, accept-new SSH trust, and negative readiness checks passed"

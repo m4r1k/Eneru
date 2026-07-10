@@ -436,6 +436,13 @@ compose_files:
     stop_timeout: 120
 ```
 
+Eneru runs Compose shutdown as `down -t <seconds>`. Docker Compose v2 and
+Podman's current Compose provider support that form, but older standalone
+`podman-compose` releases may reject `-t` on `down`. Upgrade the provider (or
+use Podman's Docker-compatible Compose provider); keeping
+`shutdown_all_remaining_containers: true` provides a fallback stop pass for
+containers left behind by a failed stack shutdown.
+
 ### Legacy `docker:` compatibility
 
 Older single-UPS configs may use a top-level `docker:` section instead of `containers:`. Eneru still parses it and treats it as Docker-only container config:

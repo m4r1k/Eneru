@@ -25,6 +25,33 @@ let lastUpsRows = [];
 let lastGroups = [];
 let eventSortDirection = "asc";
 
+// Pure refresh helpers kept separate from DOM work so the state transitions can
+// be exercised in the no-browser Node harness.
+function nutStatusTokens(status) {
+  return new Set(String(status || "").toUpperCase().trim().split(/\s+/).filter(Boolean));
+}
+
+function powerStateSignature(rows) {
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    const tokens = nutStatusTokens(row && row.status);
+    const state = ["OL", "OB", "LB", "FSD"].filter((t) => tokens.has(t)).join("+");
+    return String((row && row.name) || "") + "=" + state;
+  }).sort().join("|");
+}
+
+function authStateRequiresClear(authState, cfg, hasToken) {
+  if (!hasToken) return false;
+  const explicitlyDisabled = !!(authState && authState.ok && authState.data
+    && authState.data.enabled === false);
+  const treatedAsAnonymous = !!(cfg && cfg.ok && cfg.data
+    && cfg.data.detail === "sanitized");
+  return explicitlyDisabled || treatedAsAnonymous;
+}
+
+function responseInvalidatesAuth(status, path) {
+  return status === 401 && path !== "/api/v1/auth/login";
+}
+
 // ----- theme (light / dark / system) -----
 
 function applyTheme(value) {
@@ -68,7 +95,7 @@ async function api(path, opts) {
     // instead of an unhandled rejection that silently freezes the poll loop.
     return { ok: false, status: 0, data: null };
   }
-  if (res.status === 401 && path !== "/api/v1/auth/login") clearAuthState();
+  if (responseInvalidatesAuth(res.status, path)) clearAuthState();
   let data = null;
   try { data = await res.json(); } catch (_e) { /* non-JSON (static) */ }
   return { ok: res.ok, status: res.status, data };
@@ -3649,28 +3676,28 @@ async function refreshOnce() {
   const [authState, cfg, rh] = await Promise.all([
     api("/api/v1/auth/state"), api("/api/v1/config"), api("/api/v1/remote-health"),
   ]);
-  authEnabled = !!(authState.ok && authState.data && authState.data.enabled);
+  if (authState.ok && authState.data) {
+    authEnabled = !!authState.data.enabled;
+  }
   // Only sign out when the server explicitly reports auth is OFF. A transient
-  // /api/v1/auth/state failure leaves authState.ok false (and authEnabled
-  // false), which must NOT be mistaken for "auth disabled server-side" — that
-  // would log the operator out on every network blip.
-  if (authState.ok && authState.data && authState.data.enabled === false && token()) {
+  // /api/v1/auth/state failure leaves authState.ok false and preserves the
+  // last known authEnabled value. It must NOT be mistaken for "auth disabled
+  // server-side" — that would log the operator out on every network blip.
+  if (authStateRequiresClear(authState, cfg, !!token())) {
     clearAuthState();
   }
   if (cfg.ok && cfg.data) {
     cfgSnapshot = cfg.data;
-    // If we hold a token but the server treats us as anonymous (sanitized
-    // config), the session was invalidated server-side — e.g. the account was
-    // deleted. Reads stay open (no 401 to trip the api() handler), so detect it
-    // here and sign out locally instead of showing a stale "Signed in".
-    if (token() && cfg.data.detail === "sanitized") {
-      clearAuthState();
-    }
     refreshAuthUI();
   }
   if (rh.ok) remoteHealthSnapshot = (rh.data && rh.data.servers) || [];
 
   const ups = await api("/api/v1/ups");
+  const powerStateChanged = !!(
+    ups.ok && ups.data
+    && powerStateSignature(lastUpsRows)
+      !== powerStateSignature(ups.data.ups || [])
+  );
   if (ups.ok && ups.data) {
     if (ups.data.version) daemonVersion = ups.data.version;
     // Prefer the top-level runtimeContext; fall back to the nested runtime block.
@@ -3695,9 +3722,11 @@ async function refreshOnce() {
   await loadEvents();        // merges fresh recent events into the accumulated list
   // Redraw only the active tab's chart/widgets (the others redraw on activate).
   // F-022: the passive poll must NOT re-scan chart event markers every tick —
-  // refetchEvents:false reuses the cached markers (a genuine activate/range/UPS
-  // change still refetches them).
-  preserveWindowScroll(() => onTabActivated(activeTab, { refetchEvents: false }));
+  // Reuse cached markers during steady state, but refetch on an exact NUT power
+  // transition so live outage bands/dots appear without a tab switch (F-088).
+  preserveWindowScroll(() => onTabActivated(
+    activeTab, { refetchEvents: powerStateChanged },
+  ));
   // If a detail modal is open, keep it live with the fresh snapshot.
   if (!document.getElementById("detail-modal").hidden && openDetailName) {
     renderDetail(openDetailName);

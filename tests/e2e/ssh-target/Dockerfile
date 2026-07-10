@@ -40,6 +40,14 @@ RUN echo '#!/bin/bash' > /usr/local/bin/fake-shutdown && \
     echo 'echo "Shutdown initiated"' >> /usr/local/bin/fake-shutdown && \
     chmod +x /usr/local/bin/fake-shutdown
 
+# F-090/F-080: verifies `augment_remote_path: false` sends a custom command
+# without Eneru's POSIX PATH prefix. The command deliberately fails if the
+# Synology-only directory appears in its inherited PATH.
+RUN echo '#!/bin/sh' > /usr/local/bin/verify-unaugmented-path && \
+    echo 'case ":${PATH}:" in *:/usr/syno/sbin:*) exit 42 ;; esac' >> /usr/local/bin/verify-unaugmented-path && \
+    echo 'touch /tmp/eneru-path-verbatim' >> /usr/local/bin/verify-unaugmented-path && \
+    chmod +x /usr/local/bin/verify-unaugmented-path
+
 # Alias shutdown to our fake version
 RUN ln -sf /usr/local/bin/fake-shutdown /usr/local/bin/shutdown
 

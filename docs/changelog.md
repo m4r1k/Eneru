@@ -163,12 +163,22 @@ config. They share one root cause and are fixed as a unit.
   keep-alive with a bounded request-processing pool (idle connections reaped by
   a short timeout, so keep-alive can't starve it); the per-UPS energy block is
   cached for ~10s instead of re-scanning today+month+year on every poll; the
-  dashboard fetches the large chart-event scan only on tab/range change and
-  guards against overlapping refreshes; `aggregate()` releases its DB lock
-  between tiers; the TUI reads recent events with a `LIMIT`; and
-  runtime-context detection is memoized.
+  dashboard now refreshes cached chart event markers only when an exact NUT
+  power-state transition occurs, so live outage bands appear without restoring
+  the old every-poll event scan, and guards against overlapping refreshes;
+  `aggregate()` releases its DB lock between tiers; the TUI reads recent events
+  with a `LIMIT`; and runtime-context detection is memoized.
 
 ### Packaging & CI
+
+- **Drain-path behavior changes now have real-service E2E coverage.** CI sends a
+  custom SSH command with remote PATH augmentation disabled, removes a live
+  Compose stack through `down -t`, and verifies that a coordinator loopback
+  poweroff both reaches the target and writes the completion marker.
+- **Older standalone `podman-compose` may reject `down -t`.** Docker Compose v2
+  and current Podman providers support the configured timeout form; operators
+  on older standalone releases should upgrade or keep the remaining-container
+  fallback enabled.
 
 - **RHEL 8 gets a dedicated RPM** that requires `python39`/`python39-pyyaml`,
   so it installs Python 3.9 automatically instead of crash-looping on 3.6;
