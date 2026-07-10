@@ -7,10 +7,10 @@ Depends: python3, python3-yaml, python3-paho-mqtt, python3-bcrypt, nut-client
 Recommends: apprise, openssh-client
 Suggests: apprise
 Filename: pool/main/eneru_6.1.7_all.deb
-Size: 452292
-MD5sum: 0ae55dbb6a2893583c202e80a716ac34
-SHA1: d3fd5c908e057c3cb0d6c78258e0bb89b72e6eb4
-SHA256: 8529900bb0837d7fc16e36d4156499df66a2ad5b964c1ecca99005414b4be2ca
+Size: 452302
+MD5sum: 531fe8f01a3e17678e8f66f7e4e5a536
+SHA1: ce7aacb36e1b06f387bdb5ff5822f431a4a732e0
+SHA256: d73d46e0c2f3a1eee48a0a18b4952805b6d0944220300ae93975287d56daae81
 Section: admin
 Priority: optional
 Homepage: https://github.com/m4r1k/Eneru
