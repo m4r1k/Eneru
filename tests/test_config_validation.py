@@ -1088,6 +1088,23 @@ remote_servers:
         assert server.shutdown_safety_margin == 60  # default
 
     @pytest.mark.unit
+    def test_legacy_augment_remote_path_key_is_accepted_but_ignored(
+        self, temp_config_file
+    ):
+        """A 6.1.7 config upgrades cleanly after PATH becomes unconditional."""
+        temp_config_file.write_text("""
+remote_servers:
+  - host: "nas.lan"
+    user: "ups"
+    augment_remote_path: false
+""")
+
+        config = ConfigLoader.load(str(temp_config_file))
+
+        assert len(config.remote_servers) == 1
+        assert not hasattr(config.remote_servers[0], "augment_remote_path")
+
+    @pytest.mark.unit
     def test_filesystems_sync_disabled(self, temp_config_file):
         """Test disabling filesystem sync."""
         config_data = """

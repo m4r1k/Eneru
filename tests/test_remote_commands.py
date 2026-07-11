@@ -1442,7 +1442,6 @@ class TestRunRemoteCommand:
             host="192.168.1.50",
             user="admin",
             connect_timeout=10,
-            augment_remote_path=True,
             ssh_options=["-o StrictHostKeyChecking=no"],
         )
 
@@ -1483,7 +1482,6 @@ class TestRunRemoteCommand:
             host="192.168.1.60",
             user="admin",
             use_sudo=True,
-            augment_remote_path=True,
             shutdown_command="synoshutdown -s",
         )
 
@@ -1503,32 +1501,10 @@ class TestRunRemoteCommand:
             assert sent_command.endswith("sudo -n synoshutdown -s")
 
     @pytest.mark.unit
-    def test_augment_remote_path_false_sends_command_verbatim(self, ssh_monitor):
-        """F-080: a non-POSIX remote (csh/tcsh, cmd.exe) opts out via
-        augment_remote_path=false and receives its command with NO
-        `export PATH=...` prefix, so the POSIX-only statement can't break it."""
-        server = RemoteServerConfig(
-            name="TrueNAS CORE", host="192.168.1.70", user="root",
-            augment_remote_path=False,
-        )
-        with patch("eneru.shutdown.remote.run_command") as mock_run:
-            mock_run.return_value = (0, "", "")
-            ssh_monitor._run_remote_command(server, "shutdown -p now", 30, "test")
-            sent = mock_run.call_args[0][0][-1]
-            assert sent == "shutdown -p now"
-            assert "export PATH" not in sent
-
-    @pytest.mark.unit
-    def test_augment_remote_path_is_opt_in(self, ssh_monitor):
-        """Non-POSIX remotes stay compatible unless PATH expansion is opted in."""
+    def test_remote_path_is_always_augmented(self, ssh_monitor):
+        """Privileged bare commands resolve without a per-server switch."""
         server = RemoteServerConfig(host="192.168.1.50", user="root")
-        assert server.augment_remote_path is False
-        with patch("eneru.shutdown.remote.run_command") as mock_run:
-            mock_run.return_value = (0, "", "")
-            ssh_monitor._run_remote_command(server, "echo hi", 30, "test")
-            assert mock_run.call_args[0][0][-1] == "echo hi"
-
-        server.augment_remote_path = True
+        assert not hasattr(server, "augment_remote_path")
         with patch("eneru.shutdown.remote.run_command") as mock_run:
             mock_run.return_value = (0, "", "")
             ssh_monitor._run_remote_command(server, "echo hi", 30, "test")

@@ -650,24 +650,11 @@ class RemoteShutdownMixin:
         # execution paths never reach _run_remote_command, so they are
         # correctly left untouched.
         #
-        # F-080: the prefix is a POSIX-sh `export PATH=...` statement. On a
-        # csh/tcsh remote (FreeBSD/TrueNAS CORE root) it emits noisy
-        # "export: Command not found." lines; on a cmd.exe/Windows remote `;`
-        # isn't a separator, so the ENTIRE line becomes args to a nonexistent
-        # `export` and the real shutdown silently never runs. Per-server
-        # `augment_remote_path` is opt-in because Eneru cannot reliably infer a
-        # remote login shell before it sends the command. POSIX targets that
-        # need bare commands can enable it; every other shell stays verbatim.
-        remote_command = (
-            REMOTE_PATH_PREFIX + command
-            if server.augment_remote_path
-            else command
-        )
         ssh_cmd.extend([
             "-o", f"ConnectTimeout={server.connect_timeout}",
             "-o", "BatchMode=yes",  # Prevent password prompts from hanging
             f"{server.user}@{server.host}",
-            remote_command,
+            REMOTE_PATH_PREFIX + command,
         ])
 
         # Add buffer to account for SSH connection overhead, unless a
