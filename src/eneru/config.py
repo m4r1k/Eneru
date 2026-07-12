@@ -426,11 +426,6 @@ class RemoteServerConfig:
     command_timeout: int = 30
     shutdown_command: str = "sudo shutdown -h now"
     use_sudo: bool = False
-    # Prepend a POSIX-sh `export PATH=...` to every command sent over SSH so a
-    # bare command name (e.g. Synology's `synoshutdown`) resolves in the minimal
-    # non-interactive PATH (see RemoteShutdownMixin.REMOTE_PATH_PREFIX). Opt in:
-    # prepending POSIX syntax by default would break csh and Windows remotes.
-    augment_remote_path: bool = False
     ssh_key_path: Optional[str] = None
     ssh_options: List[str] = field(default_factory=list)
     pre_shutdown_commands: List[RemoteCommandConfig] = field(default_factory=list)
@@ -1338,7 +1333,6 @@ class ConfigLoader:
                 command_timeout=server_data.get('command_timeout', 30),
                 shutdown_command=server_data.get('shutdown_command', 'sudo shutdown -h now'),
                 use_sudo=server_data.get('use_sudo', False),
-                augment_remote_path=server_data.get('augment_remote_path', False),
                 ssh_key_path=server_data.get('ssh_key_path'),
                 ssh_options=server_data.get('ssh_options', []),
                 pre_shutdown_commands=pre_cmds,
@@ -2044,6 +2038,9 @@ class ConfigLoader:
             remote_server_keys = {
                 "name", "enabled", "host", "user", "connect_timeout",
                 "command_timeout", "shutdown_command", "ssh_key_path",
+                # v6.1.7 exposed this switch briefly. It is accepted but
+                # ignored so upgraded configs still pass strict validation;
+                # remote PATH augmentation is unconditional from v6.1.8.
                 "use_sudo", "augment_remote_path", "ssh_options",
                 "pre_shutdown_commands", "parallel",
                 "shutdown_order", "shutdown_safety_margin",
@@ -3143,12 +3140,6 @@ class ConfigLoader:
                     messages.append(
                         f"ERROR: Remote server '{display}': use_sudo must be "
                         f"a boolean, got {server.use_sudo!r}"
-                    )
-
-                if not isinstance(server.augment_remote_path, bool):
-                    messages.append(
-                        f"ERROR: Remote server '{display}': augment_remote_path "
-                        f"must be a boolean, got {server.augment_remote_path!r}"
                     )
 
                 if not isinstance(server.is_host_loopback, bool):

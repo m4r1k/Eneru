@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.1.8] - 2026-07-12
+
+### Fixed
+
+- **Remote shutdown always receives the expanded system `PATH`.** Eneru 6.1.7
+  added the expanded path after a Synology NAS failed to shut down during a
+  real outage, but the final release made it opt-in. Existing configurations
+  therefore kept sending bare commands through SSH without `/usr/syno/sbin`,
+  and `synoshutdown` could still fail with `command not found`. Eneru now adds
+  the standard system directories and Synology directories to every remote
+  command. The short-lived `augment_remote_path` option has been removed;
+  6.1.7 configurations that contain it still load, but its value is ignored.
+
 ## [6.1.7] - 2026-07-10
 
 A stabilizing bug-fix release built on a full-repository pre-release code

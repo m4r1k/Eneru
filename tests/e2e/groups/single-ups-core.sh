@@ -1060,15 +1060,15 @@ echo "PASS: MQTT status payload arrived with power-quality metrics"
 )
 
 # ======================================================================
-# Test 59: Remote PATH augmentation opt-in and safe default both work
+# Test 59: Remote PATH augmentation always resolves bare commands
 # ======================================================================
 (
 echo ""
-echo ">>> Running: Test 59: Remote PATH augmentation opt-in and safe default both work"
+echo ">>> Running: Test 59: Remote PATH augmentation always resolves bare commands"
 
-config=/tmp/config-e2e-path-opt-out.yaml
+config=/tmp/config-e2e-path.yaml
 docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
-  rm -f /tmp/eneru-path-verbatim /tmp/eneru-path-augmented
+  rm -f /tmp/eneru-path-augmented
 cat >"$config" <<'YAML'
 ups:
   name: "TestUPS@localhost:3493"
@@ -1087,22 +1087,11 @@ logging:
 statistics:
   db_directory: "/tmp/eneru-e2e-path-stats"
 remote_servers:
-  - name: "default-path-target"
+  - name: "always-augmented-path-target"
     enabled: true
     host: "localhost"
     user: "testuser"
-    augment_remote_path: true
     shutdown_command: "eneru-path-probe"
-    ssh_options:
-      - "-o Port=2222"
-      - "-o StrictHostKeyChecking=no"
-      - "-o UserKnownHostsFile=/dev/null"
-      - "-o IdentityFile=/tmp/e2e-ssh-key"
-  - name: "verbatim-path-target"
-    enabled: true
-    host: "localhost"
-    user: "testuser"
-    shutdown_command: "/usr/local/bin/verify-unaugmented-path"
     ssh_options:
       - "-o Port=2222"
       - "-o StrictHostKeyChecking=no"
@@ -1117,18 +1106,12 @@ eneru run --config "$config" --exit-after-shutdown \
   2>&1 | tee /tmp/test59.log
 
 if ! docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
-    test -f /tmp/eneru-path-verbatim; then
-  echo "FAIL: safe PATH default did not deliver the custom command verbatim"
-  cat /tmp/test59.log
-  exit 1
-fi
-if ! docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
     test -f /tmp/eneru-path-augmented; then
-  echo "FAIL: opted-in PATH augmentation did not resolve the Synology probe"
+  echo "FAIL: unconditional PATH augmentation did not resolve the Synology probe"
   cat /tmp/test59.log
   exit 1
 fi
-echo "PASS: opted-in PATH augmentation and the safe default both worked"
+echo "PASS: unconditional PATH augmentation resolved the Synology probe"
 )
 
 # ======================================================================
