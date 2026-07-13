@@ -65,3 +65,14 @@ def test_dashboard_audit_rejects_credentialed_or_non_http_urls():
         audit.normalize_url("http://user:secret@eneru.local:9191")
     with pytest.raises(ValueError, match="http"):
         audit.normalize_url("file:///tmp/index.html")
+
+
+@pytest.mark.unit
+def test_dashboard_audit_tab_filter_also_limits_drilldowns():
+    """A focused audit must not visit tabs outside the requested subset."""
+    source = TOOL.read_text(encoding="utf-8")
+
+    assert 'if "overview" in tabs:' in source
+    assert 'if "events" in tabs:' in source
+    assert 'if "config" in tabs:' in source
+    assert 'args.mobile_width and "overview" in tabs' in source

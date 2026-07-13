@@ -237,7 +237,7 @@ def audit(args):
 
         # Safe drill-downs: read-only UPS detail dialogs, Event type disclosure,
         # and the sanitized Config tree. Never click generic action buttons.
-        if "overview" in visible_tabs:
+        if "overview" in tabs:
             page.locator("#tab-overview").click()
             rows = page.locator(".fleet-overview-row")
             for index in range(rows.count()):
@@ -254,7 +254,7 @@ def audit(args):
                 page.keyboard.press("Escape")
                 page.locator("#detail-modal").wait_for(state="hidden")
 
-        if "events" in visible_tabs:
+        if "events" in tabs:
             page.locator("#tab-events").click()
             picker = page.locator("#event-type-summary")
             if picker.is_visible():
@@ -264,7 +264,7 @@ def audit(args):
                 page.screenshot(path=str(args.out / "events-types.png"), full_page=True)
                 picker.click()
 
-        if "config" in visible_tabs:
+        if "config" in tabs:
             page.locator("#tab-config").click()
             before = page.locator("#config-body details.json-node[open]").count()
             expanded = _expand_visible_config_nodes(page)
@@ -276,7 +276,8 @@ def audit(args):
             }
             page.screenshot(path=str(args.out / "config-expanded.png"), full_page=True)
 
-        if args.capture_scopes and page.locator("#global-ups").count():
+        if (args.capture_scopes and "overview" in tabs
+                and page.locator("#global-ups").count()):
             scope_options = page.locator("#global-ups option").evaluate_all(
                 "options => options.map(option => ({value: option.value, "
                 "text: option.textContent.trim()}))")
@@ -293,7 +294,7 @@ def audit(args):
             report["extras"]["scopes"] = captures
             page.locator("#global-ups").select_option("__all__")
 
-        if args.mobile_width and "overview" in visible_tabs:
+        if args.mobile_width and "overview" in tabs:
             page.locator("#tab-overview").click()
             page.set_viewport_size({"width": args.mobile_width, "height": 844})
             page.wait_for_timeout(args.tab_settle_ms)
@@ -304,7 +305,7 @@ def audit(args):
             page.screenshot(path=str(args.out / "mobile-overview.png"), full_page=True)
 
         page.set_viewport_size({"width": 1440, "height": 1050})
-        if "overview" in visible_tabs:
+        if "overview" in tabs:
             page.locator("#tab-overview").click()
         unnamed = page.locator(
             "button:visible, select:visible, input:visible").evaluate_all("""
