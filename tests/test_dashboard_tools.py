@@ -26,6 +26,8 @@ def test_dashboard_audit_parser_defaults_to_safe_read_only_run():
     assert args.themes == "light,dark"
     assert args.tabs is None
     assert args.username is None
+    assert args.settle_ms == 1200
+    assert args.tab_settle_ms == 650
     assert args.mobile_width == 390
     assert args.capture_scopes is False
 
@@ -56,6 +58,18 @@ def test_dashboard_audit_safe_slug(raw, expected):
 
 
 @pytest.mark.unit
+def test_dashboard_audit_scope_screenshot_names_are_unique():
+    audit = _load_tool()
+
+    assert audit.scope_screenshot_name(0, "Rack UPS") == (
+        "scope-01-rack-ups.png")
+    assert audit.scope_screenshot_name(1, "Rack UPS") == (
+        "scope-02-rack-ups.png")
+    assert audit.scope_screenshot_name(2, "Rack/UPS") == (
+        "scope-03-rack-ups.png")
+
+
+@pytest.mark.unit
 def test_dashboard_audit_rejects_credentialed_or_non_http_urls():
     audit = _load_tool()
 
@@ -70,9 +84,59 @@ def test_dashboard_audit_rejects_credentialed_or_non_http_urls():
 @pytest.mark.unit
 def test_dashboard_audit_tab_filter_also_limits_drilldowns():
     """A focused audit must not visit tabs outside the requested subset."""
-    source = TOOL.read_text(encoding="utf-8")
+    audit = _load_tool()
 
-    assert 'if "overview" in tabs:' in source
-    assert 'if "events" in tabs:' in source
-    assert 'if "config" in tabs:' in source
-    assert 'args.mobile_width and "overview" in tabs' in source
+    assert audit.build_drilldown_plan(
+        ["events"], capture_scopes=True, mobile_width=390) == {
+            "details": False,
+            "events": True,
+            "config": False,
+            "scopes": False,
+            "mobile": False,
+        }
+    assert audit.build_drilldown_plan(
+        ["overview", "config"], capture_scopes=True, mobile_width=390) == {
+            "details": True,
+            "events": False,
+            "config": True,
+            "scopes": True,
+            "mobile": True,
+        }
+    assert audit.build_drilldown_plan(
+        ["overview"], capture_scopes=False, mobile_width=0)["mobile"] is False
+
+
+@pytest.mark.unit
+def test_dashboard_audit_ignores_only_expected_pre_login_http_errors():
+    audit = _load_tool()
+    report = {"httpErrors": []}
+    recorder = audit.HttpErrorRecorder(report, wait_for_login=True)
+
+    response = type(
+        "Response", (),
+        {"status": 401, "url": "https://host/api/v1/ups"})()
+    recorder(response)
+    assert report["httpErrors"] == []
+
+    recorder.enable()
+    recorder(response)
+    assert report["httpErrors"] == [{"status": 401, "path": "/api/v1/ups"}]
+
+
+@pytest.mark.unit
+def test_dashboard_audit_mobile_inventory_handles_missing_tab_strip():
+    audit = _load_tool()
+
+    class MissingLocator:
+        def count(self):
+            return 0
+
+        def evaluate(self, _script):
+            raise AssertionError("evaluate must not run without a matching node")
+
+    class Page:
+        def locator(self, selector):
+            assert selector == ".tabs"
+            return MissingLocator()
+
+    assert audit.mobile_layout_inventory(Page()) == {"tabsPresent": False}

@@ -442,6 +442,48 @@ def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
 
 @pytest.mark.unit
 @pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_fleet_overview_marks_blank_telemetry_unknown(minimal_config):
+    """Empty monitoring values must render as unknown, never as bare units."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    helper_start = js.index("function numOrNull")
+    helper_end = js.index("function statusClass", helper_start)
+    helpers = js[helper_start:helper_end]
+    script = helpers + textwrap.dedent("""
+        process.stdout.write(JSON.stringify({
+          emptyLoad: formatFleetMetric("", "%"),
+          emptyInput: formatFleetMetric("", " V"),
+          missing: formatFleetMetric(null, "%"),
+          invalid: formatFleetMetric("unknown", " V"),
+          zero: formatFleetMetric(0, "%"),
+          numericText: formatFleetMetric("230", " V"),
+        }));
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    assert json.loads(result.stdout) == {
+        "emptyLoad": "—",
+        "emptyInput": "—",
+        "missing": "—",
+        "invalid": "—",
+        "zero": "0%",
+        "numericText": "230 V",
+    }
+
+
+@pytest.mark.unit
+def test_dashboard_fleet_overview_stays_accessible_at_tablet_width(minimal_config):
+    """Wide comparison rows must remain scrollable before mobile stacking."""
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+
+    assert ".fleet-overview-list { padding: 0.35rem 0; overflow-x: auto;" in css
+    assert ".fleet-overview-name strong { min-width: 0; overflow: hidden;" in css
+    assert "text-overflow: ellipsis; white-space: nowrap;" in css
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
 def test_dashboard_fleet_chart_source_is_explicit_and_persistent(minimal_config):
     """Fleet charts keep their explicit source instead of resetting to UPS 1."""
     html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")

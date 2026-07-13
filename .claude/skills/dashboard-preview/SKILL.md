@@ -105,6 +105,8 @@ tests belong in a purpose-built, disposable environment.
 | `--tabs` | every visible tab | comma-separated tabs to capture |
 | `--themes` | `light,dark` | comma-separated themes |
 | `--username` | none | sign in to expose authenticated read-only UI; password is prompted |
+| `--settle-ms` | `1200` | wait after initial load before inspection |
+| `--tab-settle-ms` | `650` | wait after each tab or scope change |
 | `--capture-scopes` | off | capture Overview once per individual UPS |
 | `--mobile-width` | `390` | mobile Overview width; `0` disables it |
 

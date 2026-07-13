@@ -13,9 +13,9 @@
   <header>
     <h1><svg class="ic brand-bolt" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3 6 13h5l-1 8 8-11h-5z"/></svg>Eneru</h1>
     <div id="authbox" class="authbox">
-      <!-- Global dashboard view: drives every tab. "Fleet overview" keeps the
-           fleet comparison; historical charts then expose their own UPS source.
-           Hidden for single-UPS deployments (wired in app.js). -->
+      <!-- Global dashboard view: scopes Overview, Events, and Control. In fleet
+           mode, historical charts expose their own UPS source; Config always
+           remains fleet-wide. Hidden for single-UPS deployments (wired in app.js). -->
       <label class="ups-scope" id="global-ups-wrap" hidden>View
         <select id="global-ups" aria-label="Dashboard view"></select>
       </label>

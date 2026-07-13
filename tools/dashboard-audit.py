@@ -63,7 +63,57 @@ def select_tabs(visible, requested):
     return list(requested)
 
 
+def scope_screenshot_name(index, label):
+    """Return a unique, readable filename for one UPS scope capture."""
+    return f"scope-{index + 1:02d}-{safe_slug(label)}.png"
+
+
+def build_drilldown_plan(tabs, capture_scopes, mobile_width):
+    """Describe which read-only drill-downs a focused tab audit may visit."""
+    overview = "overview" in tabs
+    return {
+        "details": overview,
+        "events": "events" in tabs,
+        "config": "config" in tabs,
+        "scopes": overview and capture_scopes,
+        "mobile": overview and bool(mobile_width),
+    }
+
+
+def mobile_layout_inventory(page):
+    """Measure the tab strip, or report its absence without crashing."""
+    tabs = page.locator(".tabs")
+    if not tabs.count():
+        return {"tabsPresent": False}
+    result = tabs.evaluate(
+        "node => ({clientWidth: node.clientWidth, scrollWidth: node.scrollWidth, "
+        "bodyOverflow: document.documentElement.scrollWidth > "
+        "document.documentElement.clientWidth})")
+    result["tabsPresent"] = True
+    return result
+
+
+class HttpErrorRecorder:
+    """Collect failures, optionally ignoring the anonymous login bootstrap."""
+
+    def __init__(self, report, wait_for_login=False):
+        self.report = report
+        self.enabled = not wait_for_login
+
+    def enable(self):
+        """Start recording responses once an authenticated audit submits login."""
+        self.enabled = True
+
+    def __call__(self, response):
+        if self.enabled and response.status >= 400:
+            self.report["httpErrors"].append({
+                "status": response.status,
+                "path": urlsplit(response.url).path,
+            })
+
+
 def build_parser():
+    """Build the deployed-dashboard audit command-line parser."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--url", default=DEFAULT_URL,
                         help="deployed dashboard base URL")
@@ -87,6 +137,7 @@ def build_parser():
 
 
 def _visible_texts(locator):
+    """Return normalized text for every visible node in a locator."""
     values = []
     for index in range(locator.count()):
         node = locator.nth(index)
@@ -119,6 +170,7 @@ def _select_inventory(locator):
 
 
 def _login(page, username):
+    """Sign into the dashboard without exposing or retaining the password."""
     button = page.locator("#loginBtn")
     if not button.is_visible():
         raise RuntimeError("Sign in is not available on this dashboard")
@@ -134,6 +186,7 @@ def _login(page, username):
 
 
 def _expand_visible_config_nodes(page):
+    """Expand the visible sanitized Config tree with a convergence guard."""
     expanded = 0
     while True:
         collapsed = page.locator(
@@ -185,14 +238,9 @@ def audit(args):
             "type": message.type, "text": message.text[:300],
         }) if message.type in ("error", "warning") else None)
 
-        def record_response(response):
-            if response.status >= 400:
-                report["httpErrors"].append({
-                    "status": response.status,
-                    "path": urlsplit(response.url).path,
-                })
-
-        page.on("response", record_response)
+        response_recorder = HttpErrorRecorder(
+            report, wait_for_login=bool(args.username))
+        page.on("response", response_recorder)
         page.on("requestfailed", lambda request: report["requestFailures"].append({
             "path": urlsplit(request.url).path,
             "failure": request.failure,
@@ -203,6 +251,10 @@ def audit(args):
         page.locator("#tabs [role=tab]").first.wait_for(state="visible")
         page.wait_for_timeout(args.settle_ms)
         if args.username:
+            # Anonymous 401s are the expected login bootstrap when reads are
+            # gated. Start recording immediately before authentication so the
+            # login response and the authenticated refresh are still audited.
+            response_recorder.enable()
             _login(page, args.username)
             page.wait_for_timeout(args.tab_settle_ms)
 
@@ -211,6 +263,8 @@ def audit(args):
             ".map(tab => tab.dataset.tab)")
         requested = parse_csv(args.tabs) if args.tabs is not None else None
         tabs = select_tabs(visible_tabs, requested)
+        drilldowns = build_drilldown_plan(
+            tabs, args.capture_scopes, args.mobile_width)
         report["visibleTabs"] = visible_tabs
         report["footer"] = page.locator("#status-line").inner_text().strip()
         report["initialRenderMs"] = round((time.monotonic() - started) * 1000)
@@ -237,7 +291,7 @@ def audit(args):
 
         # Safe drill-downs: read-only UPS detail dialogs, Event type disclosure,
         # and the sanitized Config tree. Never click generic action buttons.
-        if "overview" in tabs:
+        if drilldowns["details"]:
             page.locator("#tab-overview").click()
             rows = page.locator(".fleet-overview-row")
             for index in range(rows.count()):
@@ -254,7 +308,7 @@ def audit(args):
                 page.keyboard.press("Escape")
                 page.locator("#detail-modal").wait_for(state="hidden")
 
-        if "events" in tabs:
+        if drilldowns["events"]:
             page.locator("#tab-events").click()
             picker = page.locator("#event-type-summary")
             if picker.is_visible():
@@ -264,7 +318,7 @@ def audit(args):
                 page.screenshot(path=str(args.out / "events-types.png"), full_page=True)
                 picker.click()
 
-        if "config" in tabs:
+        if drilldowns["config"]:
             page.locator("#tab-config").click()
             before = page.locator("#config-body details.json-node[open]").count()
             expanded = _expand_visible_config_nodes(page)
@@ -276,32 +330,30 @@ def audit(args):
             }
             page.screenshot(path=str(args.out / "config-expanded.png"), full_page=True)
 
-        if (args.capture_scopes and "overview" in tabs
-                and page.locator("#global-ups").count()):
+        if (drilldowns["scopes"] and page.locator("#global-ups").count()):
             scope_options = page.locator("#global-ups option").evaluate_all(
                 "options => options.map(option => ({value: option.value, "
                 "text: option.textContent.trim()}))")
+            scope_options = [
+                option for option in scope_options
+                if option["value"] != "__all__"
+            ]
             captures = []
-            for option in scope_options:
-                if option["value"] == "__all__":
-                    continue
+            for index, option in enumerate(scope_options):
                 page.locator("#global-ups").select_option(option["value"])
                 page.locator("#tab-overview").click()
                 page.wait_for_timeout(args.tab_settle_ms)
-                name = safe_slug(option["text"])
-                page.screenshot(path=str(args.out / f"scope-{name}.png"), full_page=True)
+                filename = scope_screenshot_name(index, option["text"])
+                page.screenshot(path=str(args.out / filename), full_page=True)
                 captures.append(option["text"])
             report["extras"]["scopes"] = captures
             page.locator("#global-ups").select_option("__all__")
 
-        if args.mobile_width and "overview" in tabs:
+        if drilldowns["mobile"]:
             page.locator("#tab-overview").click()
             page.set_viewport_size({"width": args.mobile_width, "height": 844})
             page.wait_for_timeout(args.tab_settle_ms)
-            report["extras"]["mobile"] = page.locator(".tabs").evaluate(
-                "node => ({clientWidth: node.clientWidth, scrollWidth: node.scrollWidth, "
-                "bodyOverflow: document.documentElement.scrollWidth > "
-                "document.documentElement.clientWidth})")
+            report["extras"]["mobile"] = mobile_layout_inventory(page)
             page.screenshot(path=str(args.out / "mobile-overview.png"), full_page=True)
 
         page.set_viewport_size({"width": 1440, "height": 1050})
@@ -331,6 +383,7 @@ def audit(args):
 
 
 def main(argv=None):
+    """Run the CLI and return its shell exit status."""
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

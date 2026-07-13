@@ -172,7 +172,8 @@ h2 { font-size: 0.8125rem; color: var(--muted); text-transform: uppercase;
 .fleet-overview-heading h3 { margin: 0; font-size: 1.1rem; }
 .fleet-overview-heading p { margin: 0.15rem 0 0; color: var(--muted);
   font-size: 0.85rem; }
-.fleet-overview-list { padding: 0.35rem 0; }
+.fleet-overview-list { padding: 0.35rem 0; overflow-x: auto;
+  -webkit-overflow-scrolling: touch; }
 .fleet-overview-columns, .fleet-overview-row {
   display: grid; grid-template-columns: minmax(10rem, 1.5fr) minmax(7rem, 1fr)
     repeat(4, minmax(4.5rem, 0.65fr)); align-items: center; gap: 0.75rem;
@@ -189,7 +190,8 @@ h2 { font-size: 0.8125rem; color: var(--muted); text-transform: uppercase;
 .fleet-overview-row.s-crit { border-left-color: var(--crit); }
 .fleet-overview-name { display: flex; align-items: center; gap: 0.45rem;
   min-width: 0; flex-wrap: wrap; }
-.fleet-overview-name strong { overflow: hidden; text-overflow: ellipsis; }
+.fleet-overview-name strong { min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
 .fleet-overview-value { color: var(--text-2); font-size: 0.9rem;
   font-variant-numeric: tabular-nums; white-space: nowrap; }
 

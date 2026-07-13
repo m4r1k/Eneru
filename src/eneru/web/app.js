@@ -245,6 +245,11 @@ function fmtUnit(v, unit) {
   return numOrNull(v) != null ? v + " " + unit : null;
 }
 
+function formatFleetMetric(v, unit) {
+  const number = numOrNull(v);
+  return number == null ? "—" : number + unit;
+}
+
 function statusClass(status) {
   const s = (status || "").toUpperCase();
   if (s.includes("OB") || s.includes("LB") || s.includes("FSD")) return "crit";
@@ -585,14 +590,13 @@ function fleetOverview(rows) {
   ]));
   rows.forEach((u) => {
     const cls = fleetUpsClass(u);
-    const charge = parseFloat(u.batteryCharge);
     const pq = u.powerQuality || {};
     const label = u.label || u.name;
     const values = {
-      charge: isNaN(charge) ? "—" : charge + "%",
+      charge: formatFleetMetric(u.batteryCharge, "%"),
       runtime: formatRuntimeSeconds(u.runtime),
-      load: u.load != null ? u.load + "%" : "—",
-      input: pq.inputVoltage != null ? pq.inputVoltage + " V" : "—",
+      load: formatFleetMetric(u.load, "%"),
+      input: formatFleetMetric(pq.inputVoltage, " V"),
     };
     const aria = label + ": " + (u.status || "status unknown") + ", "
       + values.charge + " charge, " + values.runtime + " runtime, "

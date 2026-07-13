@@ -271,8 +271,17 @@ reload, or shutdown. See the `dashboard-preview` skill
 | UPS control | `upscmd`/`upsrw` wrappers and output parsing (including PTY output on NUT errors), fixed-binary argv validation before subprocess execution, username/password pairing before PTY prompt handling, command/variable allowlist enforcement, per-group credential/allowlist overrides, feature-disabled and unknown-UPS handling, NUT-error mapping, self-test pending-row handoff/recovery for API and scheduler paths, fail-closed config validation (control requires auth), value sanitization, audit logging to the events table |
 | Config hot-reload | Strict load+validate (bad YAML / non-mapping / validation error rejected, running config kept), safe-vs-restart classification, in-place live apply across shared + per-monitor configs, subsystem reload hooks for stats/notifications/MQTT/remote-health, SIGHUP handler and API `/config/reload` endpoint |
 | Periodic reports | Daily/weekly/monthly scheduling and deduplication, retry after gather/render/enqueue failures, previous-full-day event and uptime windows, current-day/month energy windows, aggregate multi-UPS delivery |
-| Web dashboard | Static asset serving via `importlib.resources`, MIME mapping, path-traversal rejection, strict CSP + `nosniff` on HTML, bytes-body responses, dashboard open before the read gate, event filters, sortable Time header, uppercase remote-health status rendering, fleet-level summary counts, explicit chart-source persistence, Fleet/Lab/APC scoping on the authenticated Control tab, control variable forms, `nutControl` exposure in the config summary, Power-tab line-quality handling for AVR `BOOST`/`TRIM` versus binary bypass/overload states, deployed-audit CLI parsing/safety helpers, and marker guards for the asset-level surfaces with no browser in CI (`[hidden]` reset, resize-safe graph, wide-history range/paging, delete-selected, drill-down, Light/Dark/System theme) |
+| Web dashboard | Static asset serving via `importlib.resources`, MIME mapping, path-traversal rejection, strict CSP + `nosniff` on HTML, bytes-body responses, dashboard open before the read gate, event filters, sortable Time header, uppercase remote-health status rendering, fleet-level summary counts and blank-telemetry handling, explicit chart-source persistence, Fleet/Lab/APC scoping on the authenticated Control tab including stale asynchronous render rejection, control variable forms, `nutControl` exposure in the config summary, Power-tab line-quality handling for AVR `BOOST`/`TRIM` versus binary bypass/overload states, deployed-audit CLI parsing/safety helpers, and marker guards for the asset-level surfaces with no browser in CI (`[hidden]` reset, resize-safe graph, wide-history range/paging, delete-selected, drill-down, Light/Dark/System theme) |
 | Packaging | nFPM file list, package install paths, dynamic EL8 interpreter re-exec, EL8 repository routing, exact-version release smoke contracts, safe artifact selection, readable Actions-ref policy, parallel native AMD64/ARM64 OCI smoke tests with a required aggregate gate |
+
+Dashboard regression tests are split by responsibility:
+
+- `tests/test_dashboard.py` covers fleet summary rendering, explicit and
+  persistent chart sources, Control-tab view scoping, stale Control render
+  rejection, blank fleet telemetry, and tablet-width comparison-table access.
+- `tests/test_dashboard_tools.py` covers the deployed-audit CLI contract,
+  focused drill-down planning, authentication-aware HTTP findings, unique
+  scope captures, and structural fallbacks.
 
 ## End-to-end tests
 
