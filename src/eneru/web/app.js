@@ -317,13 +317,16 @@ function scopedName() {
   return lastUpsRows.length ? lastUpsRows[0].name : "";
 }
 
-// UPS rows honoring the scope: every row under "All", else just the scoped one.
-// Used by the per-UPS card grids (line quality / battery health / energy).
+function rowsForScope(rows, scope) {
+  if (scope === SCOPE_ALL) return rows;
+  const one = rows.filter((u) => u.name === scope);
+  return one.length ? one : rows;
+}
+
+// UPS rows honoring the scope: every row under Fleet, else just the scoped one.
+// Used by the per-UPS card grids and the authenticated Control tab.
 function scopedRows() {
-  const scope = currentScope();
-  if (scope === SCOPE_ALL) return lastUpsRows;
-  const one = lastUpsRows.filter((u) => u.name === scope);
-  return one.length ? one : lastUpsRows;
+  return rowsForScope(lastUpsRows, currentScope());
 }
 
 // Resolve the UPS used by a single-series chart. A specific dashboard view wins;
@@ -3334,7 +3337,8 @@ async function renderControl(payload) {
   }
   sec.hidden = false;
   if (empty) empty.hidden = true;
-  const rows = (payload && payload.ups) || [];
+  const allRows = (payload && payload.ups) || [];
+  const rows = rowsForScope(allRows, currentScope());
   // Key on token + UPS set AND the allowlists, so a live config reload that
   // changes allowed commands/variables (without changing token or UPS set)
   // still busts the cache and rebuilds (CodeRabbit). /api/v1/config exposes the
@@ -3753,6 +3757,7 @@ function onTabActivated(name, opts) {
   else if (name === "power") { renderLineQuality(); if (charts.power) charts.power.load(chartOpts); }
   else if (name === "battery") { renderBatteryHealthTab(); if (charts.battery) charts.battery.load(chartOpts); }
   else if (name === "energy") { renderEnergyTab(); if (charts.energy) charts.energy.load(chartOpts); }
+  else if (name === "control") renderControl({ ups: lastUpsRows });
   else if (name === "shutdown") renderShutdownPlan();
   else if (name === "config") renderConfigTab();
 }

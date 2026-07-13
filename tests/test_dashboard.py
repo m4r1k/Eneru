@@ -440,6 +440,39 @@ def test_dashboard_fleet_chart_source_is_explicit_and_persistent(minimal_config)
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_control_tab_honors_dashboard_view(minimal_config):
+    """Control shows the fleet or exactly the UPS selected in View."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+
+    control = js[js.index("async function renderControl"):
+                 js.index("async function renderVariableForms")]
+    assert "rowsForScope(allRows, currentScope())" in control
+    assert 'else if (name === "control") renderControl({ ups: lastUpsRows })' in js
+
+    start = js.index("function rowsForScope")
+    helper = js[start:js.index("function scopedRows", start)]
+    script = "const SCOPE_ALL = '__all__';\n" + helper + textwrap.dedent("""
+        const rows = [{name: "rack"}, {name: "desk"}];
+        process.stdout.write(JSON.stringify({
+          fleet: rowsForScope(rows, SCOPE_ALL).map(row => row.name),
+          rack: rowsForScope(rows, "rack").map(row => row.name),
+          desk: rowsForScope(rows, "desk").map(row => row.name),
+          staleFallsBackSafely: rowsForScope(rows, "missing").map(row => row.name),
+        }));
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    assert json.loads(result.stdout) == {
+        "fleet": ["rack", "desk"],
+        "rack": ["rack"],
+        "desk": ["desk"],
+        "staleFallsBackSafely": ["rack", "desk"],
+    }
+
+
+@pytest.mark.unit
 def test_dashboard_charts_have_bands_and_event_overlays(minimal_config):
     # v6.1 B9b: the Power chart carries voltage threshold bands (reference
     # overlay of the live config) and charts carry power-event overlay markers.

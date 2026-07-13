@@ -17,8 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The always-visible health rail collapses a healthy fleet to one pill and names
   only UPSes needing attention. Historical charts remain deliberately
   single-series, but now expose and retain an explicit **Chart UPS** selector in
-  fleet mode rather than silently plotting the first UPS. This addresses #101
-  without restoring the retired duplicate per-UPS card grid.
+  fleet mode rather than silently plotting the first UPS. The authenticated
+  Control tab now follows the same Fleet/Lab/APC view instead of always showing
+  every UPS. This addresses #101 without restoring the retired duplicate per-UPS
+  card grid.
 - **ARM64 missing from the official OCI artifact.** Release tags now publish
   one multi-platform manifest for `linux/amd64` and `linux/arm64`. Pulling the
   same tag selects the correct image automatically. PR CI builds AMD64 and
