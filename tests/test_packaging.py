@@ -250,3 +250,35 @@ class TestReleaseWorkflowContracts:
         assert 'debs=(../*.deb)' in workflow
         assert 'rpms=(../*.rpm)' in workflow
         assert 'for r in "${rpms[@]}"' in workflow
+
+    @pytest.mark.unit
+    def test_release_oci_build_exports_name_and_version_metadata(self) -> None:
+        """The release image tag and OCI version label must not be empty/stale."""
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text()
+        image_name_step = workflow.split("- name: Prepare IMAGE_NAME", 1)[1].split(
+            "- name: Prepare version.py", 1
+        )[0]
+        build_step = workflow.split("- name: Build and push", 1)[1].split(
+            "- name: Verify Multi-Arch Manifest", 1
+        )[0]
+
+        assert 'echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_OUTPUT"' in image_name_step
+        assert "$GITHUB_ENV" not in image_name_step
+        assert "build-args:" in build_step
+        assert "VERSION=${{ steps.version.outputs.VERSION }}" in build_step
+
+    @pytest.mark.unit
+    def test_integration_smokes_arm64_oci_runtime_and_dependencies(self) -> None:
+        """PR CI must boot and validate the shipped ARM64 runtime under QEMU."""
+        workflow = (REPO_ROOT / ".github/workflows/integration.yml").read_text()
+        oci_job = workflow.split("test-oci-image:", 1)[1]
+
+        assert "docker/setup-qemu-action@" in oci_job
+        assert "docker/setup-buildx-action@" in oci_job
+        assert "docker/build-push-action@" in oci_job
+        assert "platforms: linux/arm64" in oci_job
+        assert "load: true" in oci_job
+        assert "docker run --rm --platform linux/arm64" in oci_job
+        assert "validate --config /etc/ups-monitor/config.yaml" in oci_job
+        assert "import bcrypt" in oci_job
+        assert "org.opencontainers.image.version" in oci_job

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Official ARM64 OCI images.** Release tags now publish one multi-platform
+  manifest for `linux/amd64` and `linux/arm64`. Pulling the same tag selects the
+  correct image automatically. PR CI also builds and runs the ARM64 image under
+  QEMU, validates the bundled configuration, and imports the architecture-
+  sensitive `bcrypt` dependency.
+
 ## [6.1.8] - 2026-07-12
 
 ### Fixed
