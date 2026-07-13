@@ -516,7 +516,10 @@ function heroCard(u) {
 }
 
 function fleetSnapshot(rows) {
-  const healthy = rows.filter(upsHealthy).length;
+  // This is an operator-facing count, not the redundancy quorum count.
+  // BOOST/TRIM/BYPASS remain electrically available for quorum purposes, but
+  // they are warning states the dashboard must name rather than hide.
+  const healthy = rows.filter((u) => fleetUpsClass(u) === "ok").length;
   const onBattery = rows.filter(
     (u) => (u.status || "").toUpperCase().includes("OB")).length;
   return {
@@ -528,9 +531,11 @@ function fleetSnapshot(rows) {
 }
 
 function fleetUpsClass(u) {
-  if (upsHealthy(u)) return "ok";
+  const state = (u.connectionState || "").toUpperCase();
+  if (state && state !== "OK" && state !== "CONNECTED") return "warn";
   const cls = statusClass(u.status);
-  return cls === "crit" ? "crit" : "warn";
+  if (cls !== "ok") return cls;
+  return upsHealthy(u) ? "ok" : "warn";
 }
 
 function fleetOverallClass(rows) {
@@ -752,7 +757,7 @@ function renderFleetStrip(rows) {
   });
   strip.appendChild(summary);
 
-  rows.filter((u) => !upsHealthy(u)).forEach((u) => {
+  rows.filter((u) => fleetUpsClass(u) !== "ok").forEach((u) => {
     const cls = fleetUpsClass(u);
     const charge = parseFloat(u.batteryCharge);
     // Full accessible name — the status/charge/runtime/monitoring live in
@@ -3312,8 +3317,13 @@ function renderConfigTab() {
 // requests per UPS each cycle AND it wiped any half-typed variable value. We
 // rebuild only when the auth token or the set of UPS names actually changes.
 let _controlBuiltKey = null;
+let _controlRenderGen = 0;
 
 async function renderControl(payload) {
+  // A View change can start a second render while the first is waiting on NUT
+  // allowlist requests. Invalidate the earlier render before doing any work so
+  // it can never put controls for the old UPS back into the live panel.
+  const myGen = ++_controlRenderGen;
   const sec = document.getElementById("control-section");
   const empty = document.getElementById("control-empty");
   const panel = document.getElementById("control-panel");
@@ -3332,6 +3342,7 @@ async function renderControl(payload) {
     if (activeTab === "control") selectTab("overview", { updateHash: true });
     sec.hidden = true;
     if (empty) empty.hidden = false;
+    panel.replaceChildren();
     _controlBuiltKey = null;  // rebuild when control becomes available again
     return;
   }
@@ -3351,6 +3362,11 @@ async function renderControl(payload) {
     variables: nc.allowedVariables || [],
   });
   if (key === _controlBuiltKey) return;  // already built for this token + UPS set + allowlists
+  // Remove the old UPS's actionable buttons synchronously. The new panel is
+  // assembled off-DOM and becomes interactive only after every request for the
+  // currently selected View has completed.
+  _controlBuiltKey = null;
+  panel.replaceChildren(el("p", { class: "chart-note", text: "Loading controls…" }));
   // Build into a detached fragment and commit the cache key only once EVERY
   // fetch succeeded (cubic P2). Setting the key up-front meant a transient
   // commands/variables fetch failure built an empty panel that then never
@@ -3362,6 +3378,7 @@ async function renderControl(payload) {
     box.appendChild(el("h4", { text: "Commands" }));
     const cmds = el("div", { class: "cmds" });
     const res = await api("/api/v1/ups/" + encodeURIComponent(u.name) + "/commands");
+    if (myGen !== _controlRenderGen) return;
     if (!res.ok) builtOk = false;
     ((res.data && res.data.commands) || []).forEach((c) => {
       const btn = el("button", { type: "button", text: c });
@@ -3372,6 +3389,7 @@ async function renderControl(payload) {
     box.appendChild(cmds);
     box.appendChild(el("h4", { text: "Variables" }));
     const vres = await renderVariableForms(u.name);
+    if (myGen !== _controlRenderGen) return;
     if (!vres.ok) builtOk = false;
     box.appendChild(vres.node);
     // v6.1: self-test trigger (auth-gated; goes through the control allowlist).
@@ -3383,6 +3401,7 @@ async function renderControl(payload) {
     box.appendChild(stBox);
     frag.appendChild(box);
   }
+  if (myGen !== _controlRenderGen) return;
   panel.replaceChildren(frag);
   _controlBuiltKey = builtOk ? key : null;  // retry next poll if anything failed
 }

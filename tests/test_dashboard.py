@@ -372,6 +372,7 @@ def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
           {name: "rack", status: "OL", connectionState: "OK"},
           {name: "desk", status: "OB DISCHRG", connectionState: "OK"},
           {name: "lab", status: "OL", connectionState: "DISCONNECTED"},
+          {name: "bypass", status: "OL BYPASS", connectionState: "OK"},
         ]);
         const severity = {
           healthy: fleetOverallClass([
@@ -386,6 +387,15 @@ def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
           forcedShutdown: fleetOverallClass([
             {name: "rack", status: "FSD", connectionState: "OK"},
           ]),
+          boost: fleetOverallClass([
+            {name: "rack", status: "OL BOOST", connectionState: "OK"},
+          ]),
+          trim: fleetOverallClass([
+            {name: "rack", status: "OL TRIM", connectionState: "OK"},
+          ]),
+          bypass: fleetOverallClass([
+            {name: "rack", status: "OL BYPASS", connectionState: "OK"},
+          ]),
         };
         process.stdout.write(JSON.stringify({state, severity}));
     """)
@@ -393,9 +403,9 @@ def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
                             capture_output=True, check=True)
     assert json.loads(result.stdout) == {
         "state": {
-            "total": 3,
+            "total": 4,
             "healthy": 1,
-            "attention": 2,
+            "attention": 3,
             "onBattery": 1,
         },
         "severity": {
@@ -403,6 +413,9 @@ def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
             "disconnected": "warn",
             "lowBattery": "crit",
             "forcedShutdown": "crit",
+            "boost": "warn",
+            "trim": "warn",
+            "bypass": "warn",
         },
     }
 
@@ -469,6 +482,98 @@ def test_dashboard_control_tab_honors_dashboard_view(minimal_config):
         "rack": ["rack"],
         "desk": ["desk"],
         "staleFallsBackSafely": ["rack", "desk"],
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_control_discards_stale_scope_render(minimal_config):
+    """A slow old request must never restore controls for the prior View."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    helper_start = js.index("function rowsForScope")
+    helper = js[helper_start:js.index("function scopedRows", helper_start)]
+    control_start = js.index("let _controlBuiltKey")
+    control = js[control_start:js.index(
+        "async function renderVariableForms", control_start)]
+    script = "const SCOPE_ALL = '__all__';\n" + helper + textwrap.dedent("""
+        let scope = "lab";
+        let cfgSnapshot = {nutControl: {
+          enabled: true, allowedCommands: [], allowedVariables: [],
+        }};
+        let activeTab = "control";
+        const nodes = {
+          "control-section": {hidden: false},
+          "control-empty": {hidden: false},
+          "control-panel": {
+            childNodes: [],
+            replaceChildren(...children) {
+              this.childNodes = children.flatMap(
+                child => child && child.isFragment ? child.childNodes : [child]);
+            },
+          },
+          "tab-control": {hidden: false},
+        };
+        const document = {
+          getElementById: id => nodes[id],
+          createDocumentFragment() {
+            return {isFragment: true, childNodes: [], appendChild(node) {
+              this.childNodes.push(node);
+            }};
+          },
+        };
+        function el(tag, attrs, children) {
+          return {
+            tag, attrs: attrs || {}, childNodes: (children || []).slice(),
+            appendChild(node) { this.childNodes.push(node); },
+            addEventListener() {},
+          };
+        }
+        function token() { return "session"; }
+        function currentScope() { return scope; }
+        function selectTab() {}
+        function runCommand() {}
+        function runSelfTest() {}
+        async function renderVariableForms(name) {
+          return {ok: true, node: el("div", {ups: name})};
+        }
+        const pending = {};
+        function api(path) {
+          const name = decodeURIComponent(path.split("/")[4]);
+          return new Promise(resolve => { pending[name] = resolve; });
+        }
+    """) + control + textwrap.dedent("""
+        function headings() {
+          return nodes["control-panel"].childNodes
+            .flatMap(box => box.childNodes || [])
+            .filter(node => node.tag === "h3")
+            .map(node => node.attrs.text);
+        }
+        (async () => {
+          const lab = renderControl({ups: [
+            {name: "lab", label: "Lab"}, {name: "apc", label: "APC"},
+          ]});
+          scope = "apc";
+          const apc = renderControl({ups: [
+            {name: "lab", label: "Lab"}, {name: "apc", label: "APC"},
+          ]});
+          const loadingIsInert = headings().length === 0;
+          pending.apc({ok: true, data: {commands: ["test.apc"]}});
+          await apc;
+          const afterApc = headings();
+          pending.lab({ok: true, data: {commands: ["test.lab"]}});
+          await lab;
+          process.stdout.write(JSON.stringify({
+            loadingIsInert, afterApc, afterLateLab: headings(),
+          }));
+        })();
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    assert json.loads(result.stdout) == {
+        "loadingIsInert": True,
+        "afterApc": ["APC"],
+        "afterLateLab": ["APC"],
     }
 
 
