@@ -113,7 +113,7 @@ jobs:
       # 3.12 is in both the reduced PR matrix and the full push matrix, so
       # coverage uploads on PRs as well as on main.
       if: matrix.python-version == '3.12'
-      uses: codecov/codecov-action@v6
+      uses: codecov/codecov-action@v7
       with:
         files: ./coverage.xml
         fail_ci_if_error: false
