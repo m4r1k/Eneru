@@ -350,6 +350,296 @@ def test_dashboard_serves_tabbed_shell(minimal_config):
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
+    """Fleet mode must describe the fleet instead of promoting one UPS."""
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+
+    assert 'aria-label="Dashboard view"' in html
+    assert "Fleet overview" in js
+    assert "function fleetOverview" in js
+    assert "hero.appendChild(fleetOverview(view))" in js
+    assert "heroCard(primary)" not in js
+
+    status = js[js.index("function statusClass"):js.index("// ----- rendering -----")]
+    health = js[js.index("function upsHealthy"):js.index("function groupHealthyCount")]
+    start = js.index("function fleetSnapshot")
+    snapshot = js[start:js.index("function fleetOverview", start)]
+    script = status + health + snapshot + textwrap.dedent("""
+        const state = fleetSnapshot([
+          {name: "rack", status: "OL", connectionState: "OK"},
+          {name: "desk", status: "OB DISCHRG", connectionState: "OK"},
+          {name: "lab", status: "OL", connectionState: "DISCONNECTED"},
+          {name: "bypass", status: "OL BYPASS", connectionState: "OK"},
+        ]);
+        const severity = {
+          healthy: fleetOverallClass([
+            {name: "rack", status: "OL", connectionState: "OK"},
+          ]),
+          disconnected: fleetOverallClass([
+            {name: "rack", status: "OL", connectionState: "DISCONNECTED"},
+          ]),
+          lowBattery: fleetOverallClass([
+            {name: "rack", status: "LB", connectionState: "OK"},
+          ]),
+          forcedShutdown: fleetOverallClass([
+            {name: "rack", status: "FSD", connectionState: "OK"},
+          ]),
+          boost: fleetOverallClass([
+            {name: "rack", status: "OL BOOST", connectionState: "OK"},
+          ]),
+          trim: fleetOverallClass([
+            {name: "rack", status: "OL TRIM", connectionState: "OK"},
+          ]),
+          bypass: fleetOverallClass([
+            {name: "rack", status: "OL BYPASS", connectionState: "OK"},
+          ]),
+          disconnectedOnBattery: fleetOverallClass([
+            {name: "rack", status: "OB", connectionState: "DISCONNECTED"},
+          ]),
+          disconnectedForcedShutdown: fleetOverallClass([
+            {name: "rack", status: "FSD", connectionState: "DISCONNECTED"},
+          ]),
+        };
+        const quorumHealth = {
+          boost: upsHealthy({status: "OL BOOST", connectionState: "OK"}),
+          trim: upsHealthy({status: "OL TRIM", connectionState: "OK"}),
+          bypass: upsHealthy({status: "OL BYPASS", connectionState: "OK"}),
+          forcedShutdown: upsHealthy({status: "FSD", connectionState: "OK"}),
+        };
+        process.stdout.write(JSON.stringify({state, severity, quorumHealth}));
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    assert json.loads(result.stdout) == {
+        "state": {
+            "total": 4,
+            "healthy": 1,
+            "attention": 3,
+            "onBattery": 1,
+        },
+        "severity": {
+            "healthy": "ok",
+            "disconnected": "warn",
+            "lowBattery": "crit",
+            "forcedShutdown": "crit",
+            "boost": "warn",
+            "trim": "warn",
+            "bypass": "warn",
+            "disconnectedOnBattery": "crit",
+            "disconnectedForcedShutdown": "crit",
+        },
+        "quorumHealth": {
+            "boost": True,
+            "trim": True,
+            "bypass": True,
+            "forcedShutdown": False,
+        },
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_fleet_overview_marks_blank_telemetry_unknown(minimal_config):
+    """Empty monitoring values must render as unknown, never as bare units."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    helper_start = js.index("function numOrNull")
+    helper_end = js.index("function statusClass", helper_start)
+    helpers = js[helper_start:helper_end]
+    script = helpers + textwrap.dedent("""
+        process.stdout.write(JSON.stringify({
+          emptyLoad: formatFleetMetric("", "%"),
+          emptyInput: formatFleetMetric("", " V"),
+          missing: formatFleetMetric(null, "%"),
+          invalid: formatFleetMetric("unknown", " V"),
+          zero: formatFleetMetric(0, "%"),
+          numericText: formatFleetMetric("230", " V"),
+        }));
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    assert json.loads(result.stdout) == {
+        "emptyLoad": "—",
+        "emptyInput": "—",
+        "missing": "—",
+        "invalid": "—",
+        "zero": "0%",
+        "numericText": "230 V",
+    }
+
+
+@pytest.mark.unit
+def test_dashboard_fleet_overview_stays_accessible_at_tablet_width(minimal_config):
+    """Wide comparison rows must remain scrollable before mobile stacking."""
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+
+    assert ".fleet-overview-list { padding: 0.35rem 0; overflow-x: auto;" in css
+    assert ".fleet-overview-name strong { min-width: 0; overflow: hidden;" in css
+    assert "text-overflow: ellipsis; white-space: nowrap;" in css
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_fleet_chart_source_is_explicit_and_persistent(minimal_config):
+    """Fleet charts keep their explicit source instead of resetting to UPS 1."""
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+
+    assert html.count("Chart UPS") == 3
+    assert '" (primary)"' not in js
+
+    start = js.index("function chartSourceName")
+    helper = js[start:js.index("function populateChartUpsSelects", start)]
+    script = "const SCOPE_ALL = '__all__';\n" + helper + textwrap.dedent("""
+        const rows = [{name: "rack"}, {name: "desk"}];
+        process.stdout.write(JSON.stringify({
+          fleetKeepsPrior: chartSourceName(SCOPE_ALL, rows, "desk"),
+          fleetDefaultsFirst: chartSourceName(SCOPE_ALL, rows, "missing"),
+          scopedFollowsView: chartSourceName("desk", rows, "rack"),
+          emptyHasNoSource: chartSourceName(SCOPE_ALL, [], "rack"),
+        }));
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    assert json.loads(result.stdout) == {
+        "fleetKeepsPrior": "desk",
+        "fleetDefaultsFirst": "rack",
+        "scopedFollowsView": "desk",
+        "emptyHasNoSource": "",
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_control_tab_honors_dashboard_view(minimal_config):
+    """Control shows the fleet or exactly the UPS selected in View."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+
+    control = js[js.index("async function renderControl"):
+                 js.index("async function renderVariableForms")]
+    assert "rowsForScope(allRows, currentScope())" in control
+    assert 'else if (name === "control") renderControl({ ups: lastUpsRows })' in js
+
+    start = js.index("function rowsForScope")
+    helper = js[start:js.index("function scopedRows", start)]
+    script = "const SCOPE_ALL = '__all__';\n" + helper + textwrap.dedent("""
+        const rows = [{name: "rack"}, {name: "desk"}];
+        process.stdout.write(JSON.stringify({
+          fleet: rowsForScope(rows, SCOPE_ALL).map(row => row.name),
+          rack: rowsForScope(rows, "rack").map(row => row.name),
+          desk: rowsForScope(rows, "desk").map(row => row.name),
+          staleFallsBackSafely: rowsForScope(rows, "missing").map(row => row.name),
+        }));
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    assert json.loads(result.stdout) == {
+        "fleet": ["rack", "desk"],
+        "rack": ["rack"],
+        "desk": ["desk"],
+        "staleFallsBackSafely": ["rack", "desk"],
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_control_discards_stale_scope_render(minimal_config):
+    """A slow old request must never restore controls for the prior View."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    helper_start = js.index("function rowsForScope")
+    helper = js[helper_start:js.index("function scopedRows", helper_start)]
+    control_start = js.index("let _controlBuiltKey")
+    control = js[control_start:js.index(
+        "async function renderVariableForms", control_start)]
+    script = "const SCOPE_ALL = '__all__';\n" + helper + textwrap.dedent("""
+        let scope = "lab";
+        let cfgSnapshot = {nutControl: {
+          enabled: true, allowedCommands: [], allowedVariables: [],
+        }};
+        let activeTab = "control";
+        const nodes = {
+          "control-section": {hidden: false},
+          "control-empty": {hidden: false},
+          "control-panel": {
+            childNodes: [],
+            replaceChildren(...children) {
+              this.childNodes = children.flatMap(
+                child => child && child.isFragment ? child.childNodes : [child]);
+            },
+          },
+          "tab-control": {hidden: false},
+        };
+        const document = {
+          getElementById: id => nodes[id],
+          createDocumentFragment() {
+            return {isFragment: true, childNodes: [], appendChild(node) {
+              this.childNodes.push(node);
+            }};
+          },
+        };
+        function el(tag, attrs, children) {
+          return {
+            tag, attrs: attrs || {}, childNodes: (children || []).slice(),
+            appendChild(node) { this.childNodes.push(node); },
+            addEventListener() {},
+          };
+        }
+        function token() { return "session"; }
+        function currentScope() { return scope; }
+        function selectTab() {}
+        function runCommand() {}
+        function runSelfTest() {}
+        async function renderVariableForms(name) {
+          return {ok: true, node: el("div", {ups: name})};
+        }
+        const pending = {};
+        function api(path) {
+          const name = decodeURIComponent(path.split("/")[4]);
+          return new Promise(resolve => { pending[name] = resolve; });
+        }
+    """) + control + textwrap.dedent("""
+        function headings() {
+          return nodes["control-panel"].childNodes
+            .flatMap(box => box.childNodes || [])
+            .filter(node => node.tag === "h3")
+            .map(node => node.attrs.text);
+        }
+        (async () => {
+          const lab = renderControl({ups: [
+            {name: "lab", label: "Lab"}, {name: "apc", label: "APC"},
+          ]});
+          scope = "apc";
+          const apc = renderControl({ups: [
+            {name: "lab", label: "Lab"}, {name: "apc", label: "APC"},
+          ]});
+          const loadingIsInert = headings().length === 0;
+          pending.apc({ok: true, data: {commands: ["test.apc"]}});
+          await apc;
+          const afterApc = headings();
+          pending.lab({ok: true, data: {commands: ["test.lab"]}});
+          await lab;
+          process.stdout.write(JSON.stringify({
+            loadingIsInert, afterApc, afterLateLab: headings(),
+          }));
+        })();
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    assert json.loads(result.stdout) == {
+        "loadingIsInert": True,
+        "afterApc": ["APC"],
+        "afterLateLab": ["APC"],
+    }
+
+
+@pytest.mark.unit
 def test_dashboard_charts_have_bands_and_event_overlays(minimal_config):
     # v6.1 B9b: the Power chart carries voltage threshold bands (reference
     # overlay of the live config) and charts carry power-event overlay markers.
