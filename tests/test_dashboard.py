@@ -396,8 +396,20 @@ def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
           bypass: fleetOverallClass([
             {name: "rack", status: "OL BYPASS", connectionState: "OK"},
           ]),
+          disconnectedOnBattery: fleetOverallClass([
+            {name: "rack", status: "OB", connectionState: "DISCONNECTED"},
+          ]),
+          disconnectedForcedShutdown: fleetOverallClass([
+            {name: "rack", status: "FSD", connectionState: "DISCONNECTED"},
+          ]),
         };
-        process.stdout.write(JSON.stringify({state, severity}));
+        const quorumHealth = {
+          boost: upsHealthy({status: "OL BOOST", connectionState: "OK"}),
+          trim: upsHealthy({status: "OL TRIM", connectionState: "OK"}),
+          bypass: upsHealthy({status: "OL BYPASS", connectionState: "OK"}),
+          forcedShutdown: upsHealthy({status: "FSD", connectionState: "OK"}),
+        };
+        process.stdout.write(JSON.stringify({state, severity, quorumHealth}));
     """)
     result = subprocess.run([NODE, "-"], input=script, text=True,
                             capture_output=True, check=True)
@@ -416,6 +428,14 @@ def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
             "boost": "warn",
             "trim": "warn",
             "bypass": "warn",
+            "disconnectedOnBattery": "crit",
+            "disconnectedForcedShutdown": "crit",
+        },
+        "quorumHealth": {
+            "boost": True,
+            "trim": True,
+            "bypass": True,
+            "forcedShutdown": False,
         },
     }
 

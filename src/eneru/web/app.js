@@ -531,10 +531,13 @@ function fleetSnapshot(rows) {
 }
 
 function fleetUpsClass(u) {
-  const state = (u.connectionState || "").toUpperCase();
-  if (state && state !== "OK" && state !== "CONNECTED") return "warn";
+  // Preserve the worst known electrical state even when the source is now
+  // disconnected. A stale OB/LB/FSD reading is still more urgent than the
+  // connection warning layered on top of it.
   const cls = statusClass(u.status);
   if (cls !== "ok") return cls;
+  const state = (u.connectionState || "").toUpperCase();
+  if (state && state !== "OK" && state !== "CONNECTED") return "warn";
   return upsHealthy(u) ? "ok" : "warn";
 }
 
