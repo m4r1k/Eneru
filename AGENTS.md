@@ -106,7 +106,7 @@ This repo deliberately keeps individual source files on the smaller side (the v5
 
 `main` is protected. All changes go through feature branches and pull requests.
 
-**Branch protection on `main`:** required checks = `validate` (reduced PR matrix `3.9`, `3.12`, `3.15-dev`; only `3.9` + `3.12` required) + `test-oci-image` (AMD64, ARM64/QEMU, config, native dependency, metadata, and Podman smoke checks) + **8** parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single Core`, `E2E UPS Single Auth`, `E2E UPS Multi`, `E2E Redundancy Quorum`, `E2E Redundancy Regression`, `E2E Stats`, `E2E Loopback`). Strict mode (branch up-to-date with main), enforce admins, no force pushes, 0 required reviewers (CI-gated), branches auto-delete after merge.
+**Branch protection on `main`:** required checks = `validate` (reduced PR matrix `3.9`, `3.12`, `3.15-dev`; only `3.9` + `3.12` required) + `test-oci-image` (aggregates parallel native AMD64 and ARM64 builds, config/native-dependency/metadata checks, and the Podman smoke) + **8** parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single Core`, `E2E UPS Single Auth`, `E2E UPS Multi`, `E2E Redundancy Quorum`, `E2E Redundancy Regression`, `E2E Stats`, `E2E Loopback`). Strict mode (branch up-to-date with main), enforce admins, no force pushes, 0 required reviewers (CI-gated), branches auto-delete after merge.
 
 **Workflow:**
 ```text

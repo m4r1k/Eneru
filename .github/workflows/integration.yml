@@ -388,11 +388,13 @@ jobs:
             eneru validate --config "$config"
           done
 
-  # Build the official OCI image from the checked-out commit. PR CI must
-  # not depend on a GHCR tag that may not exist before the first 5.4 release.
-  test-oci-image:
+  # Build the official OCI image from the checked-out commit. PR CI must not
+  # depend on a GHCR tag that may not exist before the release publishes it.
+  # Native runners build both architectures in parallel; test-oci-image below
+  # keeps the stable branch-protection context and gates both results.
+  test-oci-image-amd64:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v7.0.0
@@ -416,36 +418,6 @@ jobs:
           # this job) — that runs in E2E Test 46 against the real NUT dummy.
           docker run --rm --entrypoint python eneru:ci -c "import importlib.resources as r; assert (r.files('eneru.web')/'index.html').read_text().find('<title>Eneru</title>') >= 0; print('dashboard asset present in image')"
 
-      # This is the ARM equivalent of starting the engine before shipping the
-      # car: QEMU boots the actual ARM64 image and checks its native wheels.
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4.2.0
-        with:
-          platforms: arm64
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.2.0
-
-      - name: Build ARM64 OCI image
-        uses: docker/build-push-action@v7.3.0
-        with:
-          context: .
-          platforms: linux/arm64
-          load: true
-          tags: eneru:ci-arm64
-          build-args: |
-            VERSION=${{ steps.version.outputs.VERSION }}
-          cache-from: type=gha,scope=oci-arm64
-          cache-to: type=gha,mode=max,scope=oci-arm64
-
-      - name: Verify ARM64 OCI image
-        run: |
-          docker run --rm --platform linux/arm64 eneru:ci-arm64 version
-          docker run --rm --platform linux/arm64 eneru:ci-arm64 validate --config /etc/ups-monitor/config.yaml
-          docker run --rm --platform linux/arm64 --entrypoint python eneru:ci-arm64 -c "import bcrypt, yaml; print('ARM64 dependencies import correctly')"
-          ACTUAL=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' eneru:ci-arm64)
-          test "$ACTUAL" = "${{ steps.version.outputs.VERSION }}"
-
       - name: Verify OCI image with Podman
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -456,3 +428,47 @@ jobs:
           docker save localhost/eneru:ci -o /tmp/eneru-ci.tar
           sudo podman load -i /tmp/eneru-ci.tar
           sudo podman run --rm localhost/eneru:ci version
+
+  # A native ARM runner is the actual road, not a QEMU driving simulator. It
+  # validates the architecture-specific wheels while avoiding emulation cost.
+  test-oci-image-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.0
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep -oP '__version__\s*=\s*"\K[^"]+' src/eneru/version.py)
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build ARM64 OCI image natively
+        run: docker build --build-arg VERSION=${{ steps.version.outputs.VERSION }} -t eneru:ci-arm64 .
+
+      - name: Verify ARM64 OCI image
+        run: |
+          docker run --rm eneru:ci-arm64 version
+          docker run --rm eneru:ci-arm64 validate --config /etc/ups-monitor/config.yaml
+          docker run --rm --entrypoint python eneru:ci-arm64 -c "import bcrypt, yaml; print('ARM64 dependencies import correctly')"
+          ARCH=$(docker image inspect --format '{{ .Architecture }}' eneru:ci-arm64)
+          test "$ARCH" = "arm64"
+          ACTUAL=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' eneru:ci-arm64)
+          test "$ACTUAL" = "${{ steps.version.outputs.VERSION }}"
+
+  # Branch protection requires this exact job ID. The small aggregator makes
+  # that one check represent both parallel architecture jobs.
+  test-oci-image:
+    needs: [test-oci-image-amd64, test-oci-image-arm64]
+    if: always()
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    steps:
+      - name: Require both OCI architecture jobs
+        env:
+          AMD64_RESULT: ${{ needs.test-oci-image-amd64.result }}
+          ARM64_RESULT: ${{ needs.test-oci-image-arm64.result }}
+        run: |
+          test "$AMD64_RESULT" = "success"
+          test "$ARM64_RESULT" = "success"

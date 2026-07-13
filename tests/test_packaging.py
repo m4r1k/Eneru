@@ -268,20 +268,36 @@ class TestReleaseWorkflowContracts:
         assert "VERSION=${{ steps.version.outputs.VERSION }}" in build_step
 
     @pytest.mark.unit
-    def test_integration_smokes_arm64_oci_runtime_and_dependencies(self) -> None:
-        """PR CI must boot and validate the shipped ARM64 runtime under QEMU."""
+    def test_integration_uses_native_arm64_and_required_aggregator(self) -> None:
+        """PR CI must gate both native architectures without QEMU emulation."""
         workflow = (REPO_ROOT / ".github/workflows/integration.yml").read_text()
-        oci_job = workflow.split("test-oci-image:", 1)[1]
+        amd64_job = workflow.split("  test-oci-image-amd64:\n", 1)[1].split(
+            "\n  test-oci-image-arm64:\n", 1
+        )[0]
+        arm64_job = workflow.split("  test-oci-image-arm64:\n", 1)[1].split(
+            "\n  test-oci-image:\n", 1
+        )[0]
+        required_gate = workflow.split("\n  test-oci-image:\n", 1)[1]
 
-        assert "docker/setup-qemu-action@" in oci_job
-        assert "docker/setup-buildx-action@" in oci_job
-        assert "docker/build-push-action@" in oci_job
-        assert "platforms: linux/arm64" in oci_job
-        assert "load: true" in oci_job
-        assert "docker run --rm --platform linux/arm64" in oci_job
-        assert "validate --config /etc/ups-monitor/config.yaml" in oci_job
-        assert "import bcrypt" in oci_job
-        assert "org.opencontainers.image.version" in oci_job
+        assert "runs-on: ubuntu-latest" in amd64_job
+        assert "Verify OCI image with Podman" in amd64_job
+        assert "dashboard asset present in image" in amd64_job
+
+        assert "runs-on: ubuntu-24.04-arm" in arm64_job
+        assert "docker/setup-qemu-action@" not in arm64_job
+        assert "docker/setup-buildx-action@" not in arm64_job
+        assert "docker/build-push-action@" not in arm64_job
+        assert "docker build --build-arg VERSION=" in arm64_job
+        assert "validate --config /etc/ups-monitor/config.yaml" in arm64_job
+        assert "import bcrypt" in arm64_job
+        assert "org.opencontainers.image.version" in arm64_job
+        assert 'test "$ARCH" = "arm64"' in arm64_job
+
+        assert "test-oci-image-amd64" in required_gate
+        assert "test-oci-image-arm64" in required_gate
+        assert "if: always()" in required_gate
+        assert 'test "$AMD64_RESULT" = "success"' in required_gate
+        assert 'test "$ARM64_RESULT" = "success"' in required_gate
 
 
 class TestGithubActionReferences:

@@ -13,9 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **ARM64 missing from the official OCI artifact.** Release tags now publish
   one multi-platform manifest for `linux/amd64` and `linux/arm64`. Pulling the
-  same tag selects the correct image automatically. PR CI also builds and runs
-  the ARM64 image under QEMU, validates the bundled configuration, and imports
-  the architecture-sensitive `bcrypt` dependency.
+  same tag selects the correct image automatically. PR CI builds AMD64 and
+  ARM64 images in parallel on native GitHub-hosted runners, validates the
+  bundled configuration, and imports the architecture-sensitive `bcrypt`
+  dependency.
 
 ### Changed
 
