@@ -282,3 +282,26 @@ class TestReleaseWorkflowContracts:
         assert "validate --config /etc/ups-monitor/config.yaml" in oci_job
         assert "import bcrypt" in oci_job
         assert "org.opencontainers.image.version" in oci_job
+
+
+class TestGithubActionReferences:
+    """Keep action dependencies readable under the repository's tag policy."""
+
+    @pytest.mark.unit
+    def test_third_party_actions_do_not_use_commit_shas(self) -> None:
+        """Every third-party ``uses:`` reference must avoid opaque SHA refs."""
+        action_files = sorted((REPO_ROOT / ".github").rglob("*.yml"))
+        action_files += sorted((REPO_ROOT / ".github").rglob("*.yaml"))
+        sha_ref = re.compile(r"^\s*(?:-\s*)?uses:\s*[^\s#]+@[0-9a-f]{40}(?:\s|$)")
+        pinned = []
+
+        for path in action_files:
+            for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+                if sha_ref.match(line):
+                    pinned.append(
+                        f"{path.relative_to(REPO_ROOT)}:{line_number}: {line.strip()}"
+                    )
+
+        assert not pinned, "Opaque GitHub Action SHA references remain:\n" + "\n".join(
+            pinned
+        )

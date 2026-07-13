@@ -2,9 +2,9 @@ version: 2
 updates:
   # Keep GitHub Actions up to date.
   # ISS-041: the default "/" directory only scans .github/workflows; composite
-  # actions under .github/actions/ were invisible to Dependabot, so their pins
-  # rotted structurally (e2e-setup drifted from the workflows' setup-python pin).
-  # List both so composite-action pins get update PRs too.
+  # actions under .github/actions/ were invisible to Dependabot, so their
+  # versions drifted (e2e-setup diverged from the workflows' setup-python ref).
+  # List both so composite-action release refs get update PRs too.
   - package-ecosystem: "github-actions"
     directories:
       - "/"

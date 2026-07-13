@@ -11,14 +11,8 @@ on:
 permissions:
   contents: read
 
-# All third-party action invocations are SHA-pinned (with the
-# corresponding tag in a comment) so a moved tag in the upstream
-# action repo cannot silently change what runs in CI. Refresh
-# periodically by re-running
-# `gh api repos/<owner>/<repo>/git/refs/tags/<tag>` (or, for branch-
-# tracked actions like pypa/gh-action-pypi-publish@release/v1,
-# `gh api repos/<owner>/<repo>/branches/<branch>`) and updating both
-# the SHA and the comment in lockstep across every workflow.
+# Third-party actions use readable upstream release refs. Dependabot proposes
+# updates weekly; review their release notes and let CI test each change.
 jobs:
   # F-042: cheap regression guard against XSS sinks in the dashboard. The
   # dashboard deliberately builds DOM via el()/txt() helpers behind a strict
@@ -30,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+    - uses: actions/checkout@v7.0.0
     - name: Forbid innerHTML / insertAdjacentHTML / eval( under src/eneru/web
       run: |
         if grep -rnE 'innerHTML|insertAdjacentHTML|eval\(' src/eneru/web/; then
@@ -62,10 +56,10 @@ jobs:
     continue-on-error: ${{ matrix.python-version == '3.15-dev' }}
 
     steps:
-    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+    - uses: actions/checkout@v7.0.0
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ matrix.python-version }}
         allow-prereleases: true
@@ -119,7 +113,7 @@ jobs:
       # 3.12 is in both the reduced PR matrix and the full push matrix, so
       # coverage uploads on PRs as well as on main.
       if: matrix.python-version == '3.12'
-      uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v6
+      uses: codecov/codecov-action@v6
       with:
         files: ./coverage.xml
         fail_ci_if_error: false

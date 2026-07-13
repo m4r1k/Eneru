@@ -6,14 +6,9 @@ description: >-
   All four E2E matrix jobs invoke this action so they share an
   identical, isolated test environment.
 
-# All third-party action invocations are SHA-pinned (with the
-# corresponding tag in a comment) so a moved tag in the upstream
-# action repo cannot silently change what runs in CI. Refresh
-# periodically by re-running
-# `gh api repos/<owner>/<repo>/git/refs/tags/<tag>` (or, for branch-
-# tracked actions, `gh api repos/<owner>/<repo>/branches/<branch>`)
-# and updating both the SHA and the comment in lockstep across every
-# workflow.
+# Third-party actions use readable upstream release refs. Dependabot watches
+# this composite action weekly; review its release notes and let CI test each
+# proposed update. The accepted mutability tradeoff is in docs/maintenance.md.
 
 inputs:
   e2e-dir:
@@ -25,8 +20,8 @@ runs:
   using: composite
   steps:
     - name: Set up Python
-      # ISS-041: kept in lockstep with the workflows' setup-python pin.
-      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      # ISS-041: kept in lockstep with the workflows' setup-python version.
+      uses: actions/setup-python@v6
       with:
         python-version: '3.11'
 
@@ -48,7 +43,7 @@ runs:
         cp /tmp/e2e-ssh-key.pub ${{ inputs.e2e-dir }}/ssh-target/authorized_keys
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
+      uses: docker/setup-buildx-action@v4.2.0
 
     # Pre-build the two E2E image contexts once, with the GitHub Actions
     # cache backend, then bring the stack up with --no-build. Before
@@ -63,7 +58,7 @@ runs:
     # token the gha cache backend needs — a raw `docker buildx build`
     # would additionally require crazy-max/ghaction-github-runtime.
     - name: Build nut-dummy image (cached)
-      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+      uses: docker/build-push-action@v7.3.0
       with:
         context: ${{ inputs.e2e-dir }}/nut-dummy
         load: true
@@ -72,7 +67,7 @@ runs:
         cache-to: type=gha,mode=max,scope=e2e-nut-dummy
 
     - name: Build ssh-target image (cached)
-      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+      uses: docker/build-push-action@v7.3.0
       with:
         context: ${{ inputs.e2e-dir }}/ssh-target
         load: true

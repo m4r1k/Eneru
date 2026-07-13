@@ -15,14 +15,8 @@ on:
         type: string
         default: 'main'
 
-# All third-party action invocations are SHA-pinned (with the
-# corresponding tag in a comment) so a moved tag in the upstream
-# action repo cannot silently change what runs in CI. Refresh
-# periodically by re-running
-# `gh api repos/<owner>/<repo>/git/refs/tags/<tag>` (or, for branch-
-# tracked actions like pypa/gh-action-pypi-publish@release/v1,
-# `gh api repos/<owner>/<repo>/branches/<branch>`) and updating both
-# the SHA and the comment in lockstep across every workflow.
+# Third-party actions use readable upstream release refs. Dependabot proposes
+# updates weekly; review their release notes and let CI test each change.
 #
 # nFPM is pinned + checksum-verified; bump NFPM_VERSION here to refresh.
 env:
@@ -52,7 +46,7 @@ jobs:
       version_full: ${{ steps.version.outputs.VERSION_FULL }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@v7.0.0
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
           # ISS-010 (minimal hardening): this job pip-installs the full
@@ -64,7 +58,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -273,7 +267,7 @@ jobs:
 
       - name: Upload packages to GitHub Release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: |
@@ -321,7 +315,7 @@ jobs:
 
       - name: Checkout gh-pages branch
         if: steps.ghpages.outputs.exists == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@v7.0.0
         with:
           ref: gh-pages
           path: gh-pages
