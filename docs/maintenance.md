@@ -4,62 +4,54 @@ Maintainer-facing reference: dependency pinning, installation layouts, and
 release mechanics. Day-to-day contributor rules live in `AGENTS.md` at the
 repo root; this page holds the detail that is only needed a few times a year.
 
-## GitHub Actions SHA pin maintenance
+## GitHub Actions tag maintenance
 
-Every third-party GitHub Actions invocation across the workflows
-(`validate.yml`, `integration.yml`, `e2e.yml`, `codeql.yml`, `pypi.yml`,
-`release.yml`, plus `.github/actions/e2e-setup/action.yml`) is pinned to a
-full commit SHA with the corresponding tag in a trailing comment. A moved
-upstream tag therefore cannot silently change what runs in CI — the pinned
-SHA is the single source of truth.
+Third-party GitHub Actions use readable upstream release refs across the
+workflows and `.github/actions/e2e-setup/action.yml`. Think of the ref as the
+label on a toolbox: `@v7.0.0` tells a maintainer what is inside at a glance,
+while a 40-character commit ID must be looked up before it means anything.
 
-These pins drift over time as upstream actions ship security fixes,
-dependency bumps, and bug fixes under the same major-version tag. The repo
-doesn't auto-renew them; refresh **about every 3 months**, or when a security
-advisory lands for one of the pinned actions, or when an upstream
-major-version bump is needed.
+The tradeoff is deliberate: unlike a commit SHA, an upstream tag or release
+branch can be moved. Eneru accepts that supply-chain risk for maintainability
+and limits it by using actions from trusted publishers, having Dependabot scan
+both workflow and composite-action directories weekly, reviewing upstream
+release notes, and requiring CI to pass before an update merges.
 
-**How to refresh:**
+Prefer an exact release tag when the publisher provides one. Use a maintained
+major tag when that is the action's normal release channel, and retain an
+official release branch only where the publisher documents one (currently
+`pypa/gh-action-pypi-publish@release/v1`). Dependabot opens update PRs; review
+the proposed ref and release notes, then let the full CI matrix test it.
 
-```bash
-# For tag-tracked actions (most cases — actions/checkout@v6, etc.):
-gh api repos/<owner>/<repo>/git/refs/tags/<tag> --jq '.object.sha'
+The current set (as of 2026-07-13):
 
-# For branch-tracked actions (pypa/gh-action-pypi-publish@release/v1):
-gh api repos/<owner>/<repo>/branches/<branch> --jq '.commit.sha'
-```
-
-Update both the SHA and the `# vX.Y` trailing comment in lockstep. After
-bumping, run the full CI matrix on a throwaway branch before merging — silent
-breakage is the failure mode the pins exist to prevent in the first place.
-
-The current pinned set (as of 2026-06-29):
-
-| Action | Tag | SHA prefix |
-|---|---|---|
-| `actions/checkout` | `v7.0.0` | `9c091bb2…` |
-| `actions/setup-python` | `v6` | `ece7cb06…` |
-| `actions/upload-artifact` | `v7` | `043fb46d…` |
-| `actions/download-artifact` | `v8` | `3e5f45b2…` |
-| `codecov/codecov-action` | `v6` | `fb8b3582…` |
-| `github/codeql-action` | `v4` | `54f647b7…` |
-| `pypa/gh-action-pypi-publish` | `release/v1` | `cef22109…` |
-| `softprops/action-gh-release` | `v3` | `718ea10b…` |
-| `docker/setup-buildx-action` | `v4.2.0` | `bb05f3f5…` |
-| `docker/build-push-action` | `v7.3.0` | `53b7df96…` |
+| Action | Release ref |
+|---|---|
+| `actions/checkout` | `v7.0.0` |
+| `actions/setup-python` | `v6` |
+| `actions/upload-artifact` | `v7.0.1` |
+| `actions/download-artifact` | `v8.0.1` |
+| `codecov/codecov-action` | `v6` |
+| `github/codeql-action` | `v4` |
+| `pypa/gh-action-pypi-publish` | `release/v1` |
+| `softprops/action-gh-release` | `v3` |
+| `docker/setup-qemu-action` | `v4.2.0` |
+| `docker/setup-buildx-action` | `v4.2.0` |
+| `docker/login-action` | `v4.4.0` |
+| `docker/build-push-action` | `v7.3.0` |
 
 `nFPM` is similarly pinned (`NFPM_VERSION` env var in `release.yml` and
 `integration.yml`) and verified against the goreleaser-published
 `checksums.txt` before extraction. Bump the version constant and the checksum
 check still verifies the new download.
 
-The **Docker base image** (`Dockerfile`, `python:3.12-slim-trixie`) is
-deliberately NOT digest-pinned (ISS-045). A base OS image is the one
-dependency where freshness beats reproducibility: the mutable tag plus
+The **Docker base image** (`Dockerfile`, `python:3.12-slim-trixie`) is also
+deliberately tag-based rather than digest-pinned (ISS-045). For the base OS,
+freshness beats reproducibility: the mutable tag plus
 `apt-get upgrade -y` pulls current security patches on every build, whereas a
 frozen digest drifts stale (and potentially vulnerable) between manual
-refreshes. This is the intentional exception to the SHA-pinning convention,
-which still governs GitHub Actions and nFPM.
+refreshes. nFPM remains version-pinned and checksum-verified because it is a
+downloaded executable rather than an action or base image.
 
 ## Installation paths
 

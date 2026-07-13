@@ -106,7 +106,7 @@ This repo deliberately keeps individual source files on the smaller side (the v5
 
 `main` is protected. All changes go through feature branches and pull requests.
 
-**Branch protection on `main`:** required checks = `validate` (reduced PR matrix `3.9`, `3.12`, `3.15-dev`; only `3.9` + `3.12` required) + **8** parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single Core`, `E2E UPS Single Auth`, `E2E UPS Multi`, `E2E Redundancy Quorum`, `E2E Redundancy Regression`, `E2E Stats`, `E2E Loopback`). Strict mode (branch up-to-date with main), enforce admins, no force pushes, 0 required reviewers (CI-gated), branches auto-delete after merge.
+**Branch protection on `main`:** required checks = `validate` (reduced PR matrix `3.9`, `3.12`, `3.15-dev`; only `3.9` + `3.12` required) + `test-oci-image` (aggregates parallel native AMD64 and ARM64 builds, config/native-dependency/metadata checks, and the Podman smoke) + **8** parallel E2E matrix jobs (`E2E CLI`, `E2E UPS Single Core`, `E2E UPS Single Auth`, `E2E UPS Multi`, `E2E Redundancy Quorum`, `E2E Redundancy Regression`, `E2E Stats`, `E2E Loopback`). Strict mode (branch up-to-date with main), enforce admins, no force pushes, 0 required reviewers (CI-gated), branches auto-delete after merge.
 
 **Workflow:**
 ```text
@@ -141,7 +141,7 @@ Tags are the immutable release snapshots; no release branches. Point releases (`
 
 Three layers of AI review, all **manually invoked** (free-tier quotas: CodeRabbit one review/45 min, cubic.dev 40/month; per-commit auto-review burns quota on noisy intermediate diffs while the E2E suite already gates every push):
 
-1. **Pre-push:** spawn the `agent-skills:code-reviewer` skill as a SUBAGENT via the `Agent` tool (fresh context = independent opinion — a same-session review defends its own choices; findings come back P0-P3, triage before pushing).
+1. **Pre-push:** spawn the `agent-skills:code-reviewer` skill as a SUBAGENT via the `Agent` tool (fresh context = independent opinion — a same-session review defends its own choices; findings come back P0-P3, triage before pushing). Record the reviewer's exact model identifier and reasoning level in the review audit trail when the runtime exposes them; never guess missing metadata.
    - if you're Claude Code, you must leverage the `model: opus`.
    - if you're Codex, you must leverage the `model: gpt-5.5` with `reasoning_effort: high`.
 2. **After CI is green** (never before), post in PR comments:
@@ -164,7 +164,7 @@ Two install methods with different invocation styles — package (deb/rpm → `s
 
 ## Maintenance reference
 
-GitHub Actions SHA-pin refresh (quarterly), the nFPM pin, the deliberate Docker-base-image freshness exception (ISS-045), and GitHub-release mechanics live in `docs/maintenance.md`. Read it before touching workflow pins or cutting a release.
+GitHub Actions tag maintenance, the nFPM pin, the deliberate Docker-base-image freshness policy (ISS-045), and GitHub-release mechanics live in `docs/maintenance.md`. Read it before touching workflow refs or cutting a release.
 
 ## Key Dependencies
 

@@ -6,14 +6,8 @@ on:
   pull_request:
     branches: [main]
 
-# All third-party action invocations are SHA-pinned (with the
-# corresponding tag in a comment) so a moved tag in the upstream
-# action repo cannot silently change what runs in CI. Refresh
-# periodically by re-running
-# `gh api repos/<owner>/<repo>/git/refs/tags/<tag>` (or, for branch-
-# tracked actions like pypa/gh-action-pypi-publish@release/v1,
-# `gh api repos/<owner>/<repo>/branches/<branch>`) and updating both
-# the SHA and the comment in lockstep across every workflow.
+# Third-party actions use readable upstream release refs. Dependabot proposes
+# updates weekly; review their release notes and let CI test each change.
 #
 # nFPM is pinned to a specific release AND its archive is verified
 # against the goreleaser-published checksums.txt before extraction.
@@ -39,10 +33,10 @@ jobs:
       version: ${{ steps.version.outputs.VERSION }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@v7.0.0
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -94,7 +88,7 @@ jobs:
           VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager rpm --target . -f nfpm-el8.yaml
 
       - name: Upload packages
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: packages
           path: |
@@ -113,10 +107,10 @@ jobs:
     continue-on-error: ${{ matrix.python-version == '3.15-dev' }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@v7.0.0
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: true
@@ -165,10 +159,10 @@ jobs:
       image: ${{ matrix.distro }}:${{ matrix.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@v7.0.0
 
       - name: Download packages
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        uses: actions/download-artifact@v8.0.1
         with:
           name: packages
 
@@ -230,10 +224,10 @@ jobs:
       image: ${{ matrix.image }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@v7.0.0
 
       - name: Download packages
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        uses: actions/download-artifact@v8.0.1
         with:
           name: packages
 
@@ -364,7 +358,7 @@ jobs:
       image: ${{ matrix.image || format('{0}:{1}', matrix.distro, matrix.version) }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@v7.0.0
 
       - name: Install pip and dependencies (Debian/Ubuntu)
         if: matrix.distro != ''
@@ -394,14 +388,16 @@ jobs:
             eneru validate --config "$config"
           done
 
-  # Build the official OCI image from the checked-out commit. PR CI must
-  # not depend on a GHCR tag that may not exist before the first 5.4 release.
-  test-oci-image:
+  # Build the official OCI image from the checked-out commit. PR CI must not
+  # depend on a GHCR tag that may not exist before the release publishes it.
+  # Native runners build both architectures in parallel; test-oci-image below
+  # keeps the stable branch-protection context and gates both results.
+  test-oci-image-amd64:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@v7.0.0
 
       - name: Extract version
         id: version
@@ -432,3 +428,47 @@ jobs:
           docker save localhost/eneru:ci -o /tmp/eneru-ci.tar
           sudo podman load -i /tmp/eneru-ci.tar
           sudo podman run --rm localhost/eneru:ci version
+
+  # A native ARM runner is the actual road, not a QEMU driving simulator. It
+  # validates the architecture-specific wheels while avoiding emulation cost.
+  test-oci-image-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.0
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep -oP '__version__\s*=\s*"\K[^"]+' src/eneru/version.py)
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build ARM64 OCI image natively
+        run: docker build --build-arg VERSION=${{ steps.version.outputs.VERSION }} -t eneru:ci-arm64 .
+
+      - name: Verify ARM64 OCI image
+        run: |
+          docker run --rm eneru:ci-arm64 version
+          docker run --rm eneru:ci-arm64 validate --config /etc/ups-monitor/config.yaml
+          docker run --rm --entrypoint python eneru:ci-arm64 -c "import bcrypt, yaml; print('ARM64 dependencies import correctly')"
+          ARCH=$(docker image inspect --format '{{ .Architecture }}' eneru:ci-arm64)
+          test "$ARCH" = "arm64"
+          ACTUAL=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' eneru:ci-arm64)
+          test "$ACTUAL" = "${{ steps.version.outputs.VERSION }}"
+
+  # Branch protection requires this exact job ID. The small aggregator makes
+  # that one check represent both parallel architecture jobs.
+  test-oci-image:
+    needs: [test-oci-image-amd64, test-oci-image-arm64]
+    if: always()
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    steps:
+      - name: Require both OCI architecture jobs
+        env:
+          AMD64_RESULT: ${{ needs.test-oci-image-amd64.result }}
+          ARM64_RESULT: ${{ needs.test-oci-image-arm64.result }}
+        run: |
+          test "$AMD64_RESULT" = "success"
+          test "$ARM64_RESULT" = "success"

@@ -255,7 +255,7 @@ workflow.
 | Config hot-reload | Strict load+validate (bad YAML / non-mapping / validation error rejected, running config kept), safe-vs-restart classification, in-place live apply across shared + per-monitor configs, subsystem reload hooks for stats/notifications/MQTT/remote-health, SIGHUP handler and API `/config/reload` endpoint |
 | Periodic reports | Daily/weekly/monthly scheduling and deduplication, retry after gather/render/enqueue failures, previous-full-day event and uptime windows, current-day/month energy windows, aggregate multi-UPS delivery |
 | Web dashboard | Static asset serving via `importlib.resources`, MIME mapping, path-traversal rejection, strict CSP + `nosniff` on HTML, bytes-body responses, dashboard open before the read gate, event filters, sortable Time header, uppercase remote-health status rendering, control variable forms, `nutControl` exposure in the config summary, Power-tab line-quality handling for AVR `BOOST`/`TRIM` versus binary bypass/overload states, and marker guards for the asset-level surfaces with no browser in CI (`[hidden]` reset, resize-safe graph, wide-history range/paging, delete-selected, drill-down, Light/Dark/System theme) |
-| Packaging | nFPM file list, package install paths, dynamic EL8 interpreter re-exec, EL8 repository routing, exact-version release smoke contracts, safe artifact selection, OCI image smoke tests |
+| Packaging | nFPM file list, package install paths, dynamic EL8 interpreter re-exec, EL8 repository routing, exact-version release smoke contracts, safe artifact selection, readable Actions-ref policy, parallel native AMD64/ARM64 OCI smoke tests with a required aggregate gate |
 
 ## End-to-end tests
 

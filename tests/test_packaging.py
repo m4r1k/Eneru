@@ -250,3 +250,74 @@ class TestReleaseWorkflowContracts:
         assert 'debs=(../*.deb)' in workflow
         assert 'rpms=(../*.rpm)' in workflow
         assert 'for r in "${rpms[@]}"' in workflow
+
+    @pytest.mark.unit
+    def test_release_oci_build_exports_name_and_version_metadata(self) -> None:
+        """The release image tag and OCI version label must not be empty/stale."""
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text()
+        image_name_step = workflow.split("- name: Prepare IMAGE_NAME", 1)[1].split(
+            "- name: Prepare version.py", 1
+        )[0]
+        build_step = workflow.split("- name: Build and push", 1)[1].split(
+            "- name: Verify Multi-Arch Manifest", 1
+        )[0]
+
+        assert 'echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_OUTPUT"' in image_name_step
+        assert "$GITHUB_ENV" not in image_name_step
+        assert "build-args:" in build_step
+        assert "VERSION=${{ steps.version.outputs.VERSION }}" in build_step
+
+    @pytest.mark.unit
+    def test_integration_uses_native_arm64_and_required_aggregator(self) -> None:
+        """PR CI must gate both native architectures without QEMU emulation."""
+        workflow = (REPO_ROOT / ".github/workflows/integration.yml").read_text()
+        amd64_job = workflow.split("  test-oci-image-amd64:\n", 1)[1].split(
+            "\n  test-oci-image-arm64:\n", 1
+        )[0]
+        arm64_job = workflow.split("  test-oci-image-arm64:\n", 1)[1].split(
+            "\n  test-oci-image:\n", 1
+        )[0]
+        required_gate = workflow.split("\n  test-oci-image:\n", 1)[1]
+
+        assert "runs-on: ubuntu-latest" in amd64_job
+        assert "Verify OCI image with Podman" in amd64_job
+        assert "dashboard asset present in image" in amd64_job
+
+        assert "runs-on: ubuntu-24.04-arm" in arm64_job
+        assert "docker/setup-qemu-action@" not in arm64_job
+        assert "docker/setup-buildx-action@" not in arm64_job
+        assert "docker/build-push-action@" not in arm64_job
+        assert "docker build --build-arg VERSION=" in arm64_job
+        assert "validate --config /etc/ups-monitor/config.yaml" in arm64_job
+        assert "import bcrypt" in arm64_job
+        assert "org.opencontainers.image.version" in arm64_job
+        assert 'test "$ARCH" = "arm64"' in arm64_job
+
+        assert "test-oci-image-amd64" in required_gate
+        assert "test-oci-image-arm64" in required_gate
+        assert "if: always()" in required_gate
+        assert 'test "$AMD64_RESULT" = "success"' in required_gate
+        assert 'test "$ARM64_RESULT" = "success"' in required_gate
+
+
+class TestGithubActionReferences:
+    """Keep action dependencies readable under the repository's tag policy."""
+
+    @pytest.mark.unit
+    def test_third_party_actions_do_not_use_commit_shas(self) -> None:
+        """Every third-party ``uses:`` reference must avoid opaque SHA refs."""
+        action_files = sorted((REPO_ROOT / ".github").rglob("*.yml"))
+        action_files += sorted((REPO_ROOT / ".github").rglob("*.yaml"))
+        sha_ref = re.compile(r"^\s*(?:-\s*)?uses:\s*[^\s#]+@[0-9a-f]{40}(?:\s|$)")
+        pinned = []
+
+        for path in action_files:
+            for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+                if sha_ref.match(line):
+                    pinned.append(
+                        f"{path.relative_to(REPO_ROOT)}:{line_number}: {line.strip()}"
+                    )
+
+        assert not pinned, "Opaque GitHub Action SHA references remain:\n" + "\n".join(
+            pinned
+        )

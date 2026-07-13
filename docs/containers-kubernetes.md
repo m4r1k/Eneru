@@ -7,6 +7,10 @@ docker pull ghcr.io/m4r1k/eneru:latest
 podman pull ghcr.io/m4r1k/eneru:latest
 ```
 
+The same tag supports `linux/amd64` and `linux/arm64`; Docker and Podman
+automatically pull the image matching the host. The published image supports
+64-bit ARM systems, not 32-bit ARM devices.
+
 The v5.5 image is **first-class for both remote-only and full
 local-host deployments**. For local-host ownership from a container,
 Eneru SSHes to the host it runs on (the "loopback delegate") so the

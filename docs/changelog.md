@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **ARM64 missing from the official OCI artifact.** Release tags now publish
+  one multi-platform manifest for `linux/amd64` and `linux/arm64`. Pulling the
+  same tag selects the correct image automatically. PR CI builds AMD64 and
+  ARM64 images in parallel on native GitHub-hosted runners, validates the
+  bundled configuration, and imports the architecture-sensitive `bcrypt`
+  dependency.
+
+### Changed
+
+- **Readable GitHub Actions release refs.** Workflows now use upstream version
+  tags instead of opaque commit SHAs. Dependabot continues to propose weekly
+  updates, with release-note review and the full CI matrix as the maintenance
+  gate.
+
 ## [6.1.8] - 2026-07-12
 
 ### Fixed

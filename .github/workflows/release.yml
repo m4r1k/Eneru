@@ -15,14 +15,8 @@ on:
         type: string
         default: 'main'
 
-# All third-party action invocations are SHA-pinned (with the
-# corresponding tag in a comment) so a moved tag in the upstream
-# action repo cannot silently change what runs in CI. Refresh
-# periodically by re-running
-# `gh api repos/<owner>/<repo>/git/refs/tags/<tag>` (or, for branch-
-# tracked actions like pypa/gh-action-pypi-publish@release/v1,
-# `gh api repos/<owner>/<repo>/branches/<branch>`) and updating both
-# the SHA and the comment in lockstep across every workflow.
+# Third-party actions use readable upstream release refs. Dependabot proposes
+# updates weekly; review their release notes and let CI test each change.
 #
 # nFPM is pinned + checksum-verified; bump NFPM_VERSION here to refresh.
 env:
@@ -52,7 +46,7 @@ jobs:
       version_full: ${{ steps.version.outputs.VERSION_FULL }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@v7.0.0
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
           # ISS-010 (minimal hardening): this job pip-installs the full
@@ -64,7 +58,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -189,70 +183,91 @@ jobs:
           PY
           nfpm package --packager rpm --target . -f nfpm-el8.yaml
           ls -la -- ./*.el8.*.rpm
+          
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4.2.0
 
-      - name: Build OCI image
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.2.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare IMAGE_NAME
+        id: image_name
+        run: |
+          IMAGE_NAME="ghcr.io/${{ github.repository }}"
+          IMAGE_NAME="${IMAGE_NAME,,}"
+          echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+
+      # Docker installs the copied source with pip, and
+      # pyproject.toml derives the package version from this file.
+      # Keep the OCI image on the clean release version so the
+      # wheel metadata and exact image tag are both valid/simple.
+      - name: Prepare version.py
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
-          IMAGE_NAME: ghcr.io/${{ github.repository }}
         run: |
-          IMAGE_NAME="${IMAGE_NAME,,}"
-          # Docker installs the copied source with pip, and
-          # pyproject.toml derives the package version from this file.
-          # Keep the OCI image on the clean release version so the
-          # wheel metadata and exact image tag are both valid/simple.
           sed -i "s/^__version__ = .*/__version__ = \"$VERSION\"/" src/eneru/version.py
           grep "__version__" src/eneru/version.py
-          docker build --build-arg VERSION="$VERSION" -t "${IMAGE_NAME}:${VERSION}" .
-
+      
+      # Build and push using Buildx
       # F-014: push ONLY the immutable version tag first, verify it below, and
       # only then move the `:latest`/`:testing` channel alias onto it. This
       # keeps a broken build from ever landing on `:latest`/`:testing` while
-      # verification fails. F-037: GITHUB_TOKEN and the actor username are passed
-      # via env (referenced as "$GITHUB_TOKEN"/"$ACTOR") rather than interpolated
-      # into the shell text, so a value containing quotes/backslashes can't break
-      # the step or inject shell.
-      - name: Push versioned OCI image to GHCR
-        env:
-          VERSION: ${{ steps.version.outputs.VERSION }}
-          IMAGE_NAME: ghcr.io/${{ github.repository }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ACTOR: ${{ github.actor }}
-        run: |
-          IMAGE_NAME="${IMAGE_NAME,,}"
-          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
-          docker push "${IMAGE_NAME}:${VERSION}"
+      # verification fails.
+      - name: Build and push
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image_name.outputs.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
+          # Optional: Enables GitHub Actions cache backend for faster builds
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Verify pushed OCI image
-        env:
-          VERSION: ${{ steps.version.outputs.VERSION }}
-          IMAGE_NAME: ghcr.io/${{ github.repository }}
+      - name: Verify Multi-Arch Manifest
         run: |
-          IMAGE_NAME="${IMAGE_NAME,,}"
-          docker pull "${IMAGE_NAME}:${VERSION}"
-          docker run --rm "${IMAGE_NAME}:${VERSION}" version
+          docker buildx imagetools inspect ${{ steps.image_name.outputs.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }} | grep -E "Platform:.*linux/amd64"
+          docker buildx imagetools inspect ${{ steps.image_name.outputs.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }} | grep -E "Platform:.*linux/arm64"
+      
+      # Test/Run the specific architectures locally on the runner
+      - name: Test AMD64 Container
+        run: |
+          docker run --rm --platform linux/amd64 "${{ steps.image_name.outputs.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}" version
+
+      # QEMU automatically handles this execution transparently
+      - name: Test ARM64 Container
+        run: |
+          docker run --rm --platform linux/arm64 "${{ steps.image_name.outputs.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}" version
 
       # F-014: only now — after the versioned image is verified — promote the
-      # channel alias. `docker login` from the push step above persists in the
-      # runner's docker config for this job, so no re-login (and no extra
-      # wall-clock) is needed. Stable -> `:latest`, pre-release -> `:testing`.
+      # channel alias.
+      # buildx imagetools create is used to create the latest/testing manifest from the source VERSION manifest
+      # Stable -> `:latest`, pre-release -> `:testing`.
       - name: Promote OCI channel alias
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
           CHANNEL: ${{ steps.channel.outputs.CHANNEL }}
-          IMAGE_NAME: ghcr.io/${{ github.repository }}
+          IMAGE_NAME: ${{ steps.image_name.outputs.IMAGE_NAME }}
         run: |
-          IMAGE_NAME="${IMAGE_NAME,,}"
           if [ "$CHANNEL" = "stable" ]; then
-            docker tag "${IMAGE_NAME}:${VERSION}" "${IMAGE_NAME}:latest"
-            docker push "${IMAGE_NAME}:latest"
+            docker buildx imagetools create -t "${IMAGE_NAME}:latest" "${IMAGE_NAME}:${VERSION}"
           else
-            docker tag "${IMAGE_NAME}:${VERSION}" "${IMAGE_NAME}:testing"
-            docker push "${IMAGE_NAME}:testing"
+            docker buildx imagetools create -t "${IMAGE_NAME}:testing" "${IMAGE_NAME}:${VERSION}"
           fi
 
       - name: Upload packages to GitHub Release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: |
@@ -300,7 +315,7 @@ jobs:
 
       - name: Checkout gh-pages branch
         if: steps.ghpages.outputs.exists == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@v7.0.0
         with:
           ref: gh-pages
           path: gh-pages

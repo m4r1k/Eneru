@@ -9,11 +9,8 @@ on:
     # Run weekly on Monday at 06:00 UTC
     - cron: '0 6 * * 1'
 
-# All third-party action invocations are SHA-pinned (with the
-# corresponding tag in a comment) so a moved tag in the upstream
-# action repo cannot silently change what runs in CI. Refresh by
-# re-running `gh api repos/<owner>/<repo>/git/refs/tags/<tag>` and
-# updating both the SHA and the comment.
+# Third-party actions use readable upstream release refs. Dependabot proposes
+# updates weekly; review their release notes and let CI test each change.
 jobs:
   analyze:
     name: Analyze (Python)
@@ -27,14 +24,14 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@v7.0.0
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4
+        uses: github/codeql-action/init@v4
         with:
           languages: python
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4
+        uses: github/codeql-action/analyze@v4
         with:
           category: "/language:python"

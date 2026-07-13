@@ -91,9 +91,8 @@ services:
   mqtt-broker:
     # Pinned to a specific version so PR CI is reproducible — a moved
     # `:2` floating tag would let upstream Mosquitto changes break our
-    # E2E without any local code change. Refresh on the same cadence
-    # as the GitHub Actions SHA pins (~quarterly), or sooner on a
-    # security advisory. The `-alpine` variant is ~5x smaller so the
+    # E2E without any local code change. Refresh periodically, or
+    # sooner on a security advisory. The `-alpine` variant is ~5x smaller so the
     # CI pull is faster.
     image: eclipse-mosquitto:2.1.2-alpine
     container_name: eneru-e2e-mqtt
