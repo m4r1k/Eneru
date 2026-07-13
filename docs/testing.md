@@ -216,9 +216,18 @@ catch layout, theming, or chart-rendering regressions. **Any change under
 `src/eneru/web/` should be screenshot-verified against a live daemon before
 pushing** — this is strongly recommended, not optional.
 
-`tools/dashboard-preview.py` serves the working-tree assets and proxies every
-`/api/*` call to a running daemon, then screenshots each tab (light + dark) with
-Playwright. Playwright ships in the `dev` extra; fetch the browser once:
+There are two browser harnesses. Think of the preview as trying on a new shirt
+in the mirror, while the deployed audit photographs the shirt that actually
+left the shop:
+
+- `tools/dashboard-preview.py` serves the working-tree assets and proxies every
+  `/api/*` call to a running daemon. Use it before committing UI code.
+- `tools/dashboard-audit.py` visits a deployment directly, screenshots every
+  visible tab and safe submenu, inventories select options, checks a mobile
+  viewport, and records console, HTTP, request, and accessible-name findings in
+  `report.json`. Use it after building or deploying an image.
+
+Playwright ships in the `dev` extra; fetch the browser once:
 
 ```bash
 uv pip install -e ".[dev]"   # inside the uv venv (includes playwright)
@@ -227,12 +236,20 @@ playwright install chromium
 # With a daemon running on :9191 (curl -s 127.0.0.1:9191/api/v1/ups -> 200):
 python tools/dashboard-preview.py                 # all tabs, light + dark
 python tools/dashboard-preview.py --themes light --tabs overview,battery
+
+# Audit the exact static assets served by a deployed instance:
+python tools/dashboard-audit.py --url http://eneru-host:9191 \
+  --out /tmp/eneru-dashboard-audit --capture-scopes
+
+# Authenticated read-only audit (password is prompted, never passed on argv):
+python tools/dashboard-audit.py --url https://eneru.example.test --username admin
 ```
 
 Read the resulting `dash-*.png` files to confirm the change renders; the script
-also prints any browser console errors and exits non-zero if it saw any. See the
-`dashboard-preview` skill (`.claude/skills/dashboard-preview/`) for the agent
-workflow.
+also exits non-zero on browser/runtime findings. The deployed audit never clicks
+UPS control commands, self-tests, variable writes, event deletion, config
+reload, or shutdown. See the `dashboard-preview` skill
+(`.claude/skills/dashboard-preview/`) for the complete agent workflow.
 
 ## Test areas
 
@@ -254,7 +271,7 @@ workflow.
 | UPS control | `upscmd`/`upsrw` wrappers and output parsing (including PTY output on NUT errors), fixed-binary argv validation before subprocess execution, username/password pairing before PTY prompt handling, command/variable allowlist enforcement, per-group credential/allowlist overrides, feature-disabled and unknown-UPS handling, NUT-error mapping, self-test pending-row handoff/recovery for API and scheduler paths, fail-closed config validation (control requires auth), value sanitization, audit logging to the events table |
 | Config hot-reload | Strict load+validate (bad YAML / non-mapping / validation error rejected, running config kept), safe-vs-restart classification, in-place live apply across shared + per-monitor configs, subsystem reload hooks for stats/notifications/MQTT/remote-health, SIGHUP handler and API `/config/reload` endpoint |
 | Periodic reports | Daily/weekly/monthly scheduling and deduplication, retry after gather/render/enqueue failures, previous-full-day event and uptime windows, current-day/month energy windows, aggregate multi-UPS delivery |
-| Web dashboard | Static asset serving via `importlib.resources`, MIME mapping, path-traversal rejection, strict CSP + `nosniff` on HTML, bytes-body responses, dashboard open before the read gate, event filters, sortable Time header, uppercase remote-health status rendering, fleet-level summary counts, explicit chart-source persistence, Fleet/Lab/APC scoping on the authenticated Control tab, control variable forms, `nutControl` exposure in the config summary, Power-tab line-quality handling for AVR `BOOST`/`TRIM` versus binary bypass/overload states, and marker guards for the asset-level surfaces with no browser in CI (`[hidden]` reset, resize-safe graph, wide-history range/paging, delete-selected, drill-down, Light/Dark/System theme) |
+| Web dashboard | Static asset serving via `importlib.resources`, MIME mapping, path-traversal rejection, strict CSP + `nosniff` on HTML, bytes-body responses, dashboard open before the read gate, event filters, sortable Time header, uppercase remote-health status rendering, fleet-level summary counts, explicit chart-source persistence, Fleet/Lab/APC scoping on the authenticated Control tab, control variable forms, `nutControl` exposure in the config summary, Power-tab line-quality handling for AVR `BOOST`/`TRIM` versus binary bypass/overload states, deployed-audit CLI parsing/safety helpers, and marker guards for the asset-level surfaces with no browser in CI (`[hidden]` reset, resize-safe graph, wide-history range/paging, delete-selected, drill-down, Light/Dark/System theme) |
 | Packaging | nFPM file list, package install paths, dynamic EL8 interpreter re-exec, EL8 repository routing, exact-version release smoke contracts, safe artifact selection, readable Actions-ref policy, parallel native AMD64/ARM64 OCI smoke tests with a required aggregate gate |
 
 ## End-to-end tests

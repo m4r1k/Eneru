@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tags instead of opaque commit SHAs. Dependabot continues to propose weekly
   updates, with release-note review and the full CI matrix as the maintenance
   gate.
+- **Repeatable dashboard deployment audit.** A camera pass for the dashboard is
+  now kept in the repository instead of improvised during each release.
+  `tools/dashboard-audit.py` captures every visible tab in both themes, safe
+  drill-downs, per-UPS views, and a mobile viewport from the exact deployed
+  assets. Its JSON report also records browser, request, and basic accessible-
+  name findings. Authenticated runs prompt for the password, and the tool never
+  invokes hardware-changing or destructive controls.
 
 ## [6.1.8] - 2026-07-12
 
