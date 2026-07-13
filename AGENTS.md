@@ -142,8 +142,6 @@ Tags are the immutable release snapshots; no release branches. Point releases (`
 Three layers of AI review, all **manually invoked** (free-tier quotas: CodeRabbit one review/45 min, cubic.dev 40/month; per-commit auto-review burns quota on noisy intermediate diffs while the E2E suite already gates every push):
 
 1. **Pre-push:** spawn the `agent-skills:code-reviewer` skill as a SUBAGENT via the `Agent` tool (fresh context = independent opinion — a same-session review defends its own choices; findings come back P0-P3, triage before pushing). Record the reviewer's exact model identifier and reasoning level in the review audit trail when the runtime exposes them; never guess missing metadata.
-   - if you're Claude Code, you must leverage the `model: opus`.
-   - if you're Codex, you must leverage the `model: gpt-5.5` with `reasoning_effort: high`.
 2. **After CI is green** (never before), post in PR comments:
    `@coderabbitai full review` and `@cubic-dev-ai review this pull request`
 3. Triage findings, push fixes (CI re-runs), re-trigger AI review only if substantive new code was added. Merge when both GitHub-side reviewers + branch protection are satisfied.
