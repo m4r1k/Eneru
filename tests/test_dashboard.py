@@ -350,6 +350,96 @@ def test_dashboard_serves_tabbed_shell(minimal_config):
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
+    """Fleet mode must describe the fleet instead of promoting one UPS."""
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+
+    assert 'aria-label="Dashboard view"' in html
+    assert "Fleet overview" in js
+    assert "function fleetOverview" in js
+    assert "hero.appendChild(fleetOverview(view))" in js
+    assert "heroCard(primary)" not in js
+
+    status = js[js.index("function statusClass"):js.index("// ----- rendering -----")]
+    health = js[js.index("function upsHealthy"):js.index("function groupHealthyCount")]
+    start = js.index("function fleetSnapshot")
+    snapshot = js[start:js.index("function fleetOverview", start)]
+    script = status + health + snapshot + textwrap.dedent("""
+        const state = fleetSnapshot([
+          {name: "rack", status: "OL", connectionState: "OK"},
+          {name: "desk", status: "OB DISCHRG", connectionState: "OK"},
+          {name: "lab", status: "OL", connectionState: "DISCONNECTED"},
+        ]);
+        const severity = {
+          healthy: fleetOverallClass([
+            {name: "rack", status: "OL", connectionState: "OK"},
+          ]),
+          disconnected: fleetOverallClass([
+            {name: "rack", status: "OL", connectionState: "DISCONNECTED"},
+          ]),
+          lowBattery: fleetOverallClass([
+            {name: "rack", status: "LB", connectionState: "OK"},
+          ]),
+          forcedShutdown: fleetOverallClass([
+            {name: "rack", status: "FSD", connectionState: "OK"},
+          ]),
+        };
+        process.stdout.write(JSON.stringify({state, severity}));
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    assert json.loads(result.stdout) == {
+        "state": {
+            "total": 3,
+            "healthy": 1,
+            "attention": 2,
+            "onBattery": 1,
+        },
+        "severity": {
+            "healthy": "ok",
+            "disconnected": "warn",
+            "lowBattery": "crit",
+            "forcedShutdown": "crit",
+        },
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_fleet_chart_source_is_explicit_and_persistent(minimal_config):
+    """Fleet charts keep their explicit source instead of resetting to UPS 1."""
+    html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+
+    assert html.count("Chart UPS") == 3
+    assert '" (primary)"' not in js
+
+    start = js.index("function chartSourceName")
+    helper = js[start:js.index("function populateChartUpsSelects", start)]
+    script = "const SCOPE_ALL = '__all__';\n" + helper + textwrap.dedent("""
+        const rows = [{name: "rack"}, {name: "desk"}];
+        process.stdout.write(JSON.stringify({
+          fleetKeepsPrior: chartSourceName(SCOPE_ALL, rows, "desk"),
+          fleetDefaultsFirst: chartSourceName(SCOPE_ALL, rows, "missing"),
+          scopedFollowsView: chartSourceName("desk", rows, "rack"),
+          emptyHasNoSource: chartSourceName(SCOPE_ALL, [], "rack"),
+        }));
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    assert json.loads(result.stdout) == {
+        "fleetKeepsPrior": "desk",
+        "fleetDefaultsFirst": "rack",
+        "scopedFollowsView": "desk",
+        "emptyHasNoSource": "",
+    }
+
+
+@pytest.mark.unit
 def test_dashboard_charts_have_bands_and_event_overlays(minimal_config):
     # v6.1 B9b: the Power chart carries voltage threshold bands (reference
     # overlay of the live config) and charts carry power-event overlay markers.

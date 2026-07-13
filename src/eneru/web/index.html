@@ -13,11 +13,11 @@
   <header>
     <h1><svg class="ic brand-bolt" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3 6 13h5l-1 8 8-11h-5z"/></svg>Eneru</h1>
     <div id="authbox" class="authbox">
-      <!-- Global UPS scope: drives Power/Battery/Energy/Shutdown + the scoped
-           Overview/Battery/Energy cards. "All UPS" keeps the fleet comparison.
+      <!-- Global dashboard view: drives every tab. "Fleet overview" keeps the
+           fleet comparison; historical charts then expose their own UPS source.
            Hidden for single-UPS deployments (wired in app.js). -->
-      <label class="ups-scope" id="global-ups-wrap" hidden>UPS
-        <select id="global-ups" aria-label="UPS to show"></select>
+      <label class="ups-scope" id="global-ups-wrap" hidden>View
+        <select id="global-ups" aria-label="Dashboard view"></select>
       </label>
       <label class="theme-pick">Theme
         <select id="theme-select" aria-label="Color theme">
@@ -97,7 +97,7 @@
       <h2>Power quality</h2>
       <div id="line-quality" class="cards"></div>
       <div class="graph-controls">
-        <label>UPS <select id="power-ups"></select></label>
+        <label>Chart UPS <select id="power-ups"></select></label>
         <label>Metric
           <select id="power-metric">
             <option value="voltage">Input voltage (V)</option>
@@ -130,7 +130,7 @@
       <p class="chart-note" id="bh-graph-note" hidden></p>
       <h2>History</h2>
       <div class="graph-controls">
-        <label>UPS <select id="battery-ups"></select></label>
+        <label>Chart UPS <select id="battery-ups"></select></label>
         <label>Metric
           <select id="battery-metric">
             <option value="charge">Battery charge (%)</option>
@@ -161,7 +161,7 @@
       <div id="energy-cards" class="cards"></div>
       <h2>Load &amp; power</h2>
       <div class="graph-controls">
-        <label>UPS <select id="energy-ups"></select></label>
+        <label>Chart UPS <select id="energy-ups"></select></label>
         <label>Range
           <select id="energy-range">
             <option value="3600">Last hour</option>

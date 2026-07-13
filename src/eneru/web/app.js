@@ -308,8 +308,9 @@ function currentScope() {
 }
 function scopeIsAll() { return currentScope() === SCOPE_ALL; }
 
-// Concrete UPS name for single-series views (charts): the scoped UPS, or the
-// primary (first) UPS when scope is "All".
+// Concrete UPS name for views that cannot show a fleet (for example the
+// single-plan shutdown fallback). Historical charts use their explicit source
+// selectors instead.
 function scopedName() {
   const scope = currentScope();
   if (scope !== SCOPE_ALL && lastUpsRows.some((u) => u.name === scope)) return scope;
@@ -325,10 +326,27 @@ function scopedRows() {
   return one.length ? one : lastUpsRows;
 }
 
-// Populate the header global UPS selector and mirror the pick into the (now
-// hidden) per-tab chart selects so the existing chart controllers, which read
-// their upsSelId, resolve to the scoped/primary UPS. The global selector is the
-// single source of truth; the per-tab dropdowns are retired from the UI.
+// Resolve the UPS used by a single-series chart. A specific dashboard view wins;
+// fleet view preserves the operator's explicit chart pick across the 10s poll.
+function chartSourceName(scope, rows, previous) {
+  if (!rows.length) return "";
+  if (scope !== SCOPE_ALL && rows.some((u) => u.name === scope)) return scope;
+  if (rows.some((u) => u.name === previous)) return previous;
+  return rows[0].name;
+}
+
+function updateChartSourceVisibility(rows) {
+  const visible = rows.length > 1 && scopeIsAll();
+  CHART_UPS_SELECTS.forEach((id) => {
+    const sel = document.getElementById(id);
+    const label = sel && sel.closest("label");
+    if (label) label.hidden = !visible;
+  });
+}
+
+// Populate the dashboard-view selector and the chart-local source selectors.
+// Fleet charts are intentionally single-series in this patch, so their source
+// must be visible and stable instead of silently meaning "the first UPS".
 function populateChartUpsSelects(rows) {
   const g = document.getElementById("global-ups");
   const wrap = document.getElementById("global-ups-wrap");
@@ -340,32 +358,33 @@ function populateChartUpsSelects(rows) {
   if (wrap) wrap.hidden = !multi;
   if (g) {
     g.replaceChildren();
-    if (multi) g.appendChild(el("option", { value: SCOPE_ALL, text: "All UPS" }));
+    if (multi) g.appendChild(el("option", { value: SCOPE_ALL, text: "Fleet overview" }));
     rows.forEach((u) => g.appendChild(el("option", { value: u.name, text: u.label || u.name })));
     g.value = scope;
   }
-  const chosen = (scope === SCOPE_ALL || !rows.some((u) => u.name === scope))
-    ? (rows.length ? rows[0].name : "") : scope;
   CHART_UPS_SELECTS.forEach((id) => {
     const sel = document.getElementById(id);
     if (!sel) return;
+    const chosen = chartSourceName(scope, rows, sel.value);
     sel.replaceChildren();
     rows.forEach((u) =>
       sel.appendChild(el("option", { value: u.name, text: u.label || u.name })));
     if (chosen) sel.value = chosen;
-    const lbl = sel.closest("label");
-    if (lbl) lbl.hidden = true;   // retired: the global selector drives these
   });
+  updateChartSourceVisibility(rows);
 }
 
-// React to a global-scope change: mirror into the chart selects, refresh the
-// scope-dependent chrome, and redraw the active tab.
+// A concrete view also scopes its chart. Fleet view leaves the explicit chart
+// source alone, then exposes that selector so the operator controls the series.
 function onScopeChanged() {
-  const chosen = scopedName();
-  CHART_UPS_SELECTS.forEach((id) => {
-    const s = document.getElementById(id);
-    if (s && chosen) s.value = chosen;
-  });
+  if (!scopeIsAll()) {
+    const chosen = scopedName();
+    CHART_UPS_SELECTS.forEach((id) => {
+      const s = document.getElementById(id);
+      if (s && chosen) s.value = chosen;
+    });
+  }
+  updateChartSourceVisibility(lastUpsRows);
   applyScopeChrome();
   onTabActivated(activeTab);
 }
@@ -493,6 +512,103 @@ function heroCard(u) {
   return wrap;
 }
 
+function fleetSnapshot(rows) {
+  const healthy = rows.filter(upsHealthy).length;
+  const onBattery = rows.filter(
+    (u) => (u.status || "").toUpperCase().includes("OB")).length;
+  return {
+    total: rows.length,
+    healthy,
+    attention: rows.length - healthy,
+    onBattery,
+  };
+}
+
+function fleetUpsClass(u) {
+  if (upsHealthy(u)) return "ok";
+  const cls = statusClass(u.status);
+  return cls === "crit" ? "crit" : "warn";
+}
+
+function fleetOverallClass(rows) {
+  const classes = rows.map(fleetUpsClass);
+  if (classes.includes("crit")) return "crit";
+  if (classes.includes("warn")) return "warn";
+  return "ok";
+}
+
+// Fleet mode is a comparison surface, not a disguised single-UPS hero. Each
+// source appears once with the five readings an operator needs to decide where
+// to drill in; the existing detail modal remains the deeper view.
+function fleetOverview(rows) {
+  const state = fleetSnapshot(rows);
+  const overall = fleetOverallClass(rows);
+  const headline = state.onBattery
+    ? state.onBattery + " UPS on battery"
+    : state.attention
+      ? state.attention + " UPS " + (state.attention === 1 ? "needs" : "need") + " attention"
+      : "Fleet healthy";
+  const counts = state.healthy + " healthy · " + state.total + " monitored";
+
+  const wrap = el("section", { class: "fleet-overview s-" + overall,
+    "aria-labelledby": "fleet-overview-title" });
+  wrap.appendChild(el("div", { class: "fleet-overview-head" }, [
+    el("div", { class: "fleet-overview-heading" }, [
+      el("span", { class: "card-ico s-" + overall }, [icon("battery")]),
+      el("div", null, [
+        el("h3", { id: "fleet-overview-title", text: headline }),
+        el("p", { text: counts }),
+      ]),
+    ]),
+    state.onBattery
+      ? el("span", { class: "badge crit", text: state.onBattery + " on battery" })
+      : el("span", { class: "badge " + overall,
+        text: state.attention ? state.attention + " attention" : "All online" }),
+  ]));
+
+  const list = el("div", { class: "fleet-overview-list" });
+  list.appendChild(el("div", { class: "fleet-overview-columns", "aria-hidden": "true" }, [
+    el("span", { text: "UPS" }), el("span", { text: "Status" }),
+    el("span", { text: "Charge" }), el("span", { text: "Runtime" }),
+    el("span", { text: "Load" }), el("span", { text: "Input" }),
+  ]));
+  rows.forEach((u) => {
+    const cls = fleetUpsClass(u);
+    const charge = parseFloat(u.batteryCharge);
+    const pq = u.powerQuality || {};
+    const label = u.label || u.name;
+    const values = {
+      charge: isNaN(charge) ? "—" : charge + "%",
+      runtime: formatRuntimeSeconds(u.runtime),
+      load: u.load != null ? u.load + "%" : "—",
+      input: pq.inputVoltage != null ? pq.inputVoltage + " V" : "—",
+    };
+    const aria = label + ": " + (u.status || "status unknown") + ", "
+      + values.charge + " charge, " + values.runtime + " runtime, "
+      + values.load + " load, " + values.input + " input — view details";
+    const row = el("button", { class: "fleet-overview-row s-" + cls,
+      type: "button", "aria-label": aria, title: "View " + label + " details" }, [
+      el("span", { class: "fleet-overview-name" }, [
+        el("strong", { text: label }),
+        u.isLocal === false ? monitoringBadge(u) : null,
+      ].filter(Boolean)),
+      el("span", { class: "badge " + cls, text: u.status || "—" }),
+      el("span", { class: "fleet-overview-value", "data-label": "Charge",
+        text: values.charge }),
+      el("span", { class: "fleet-overview-value", "data-label": "Runtime",
+        text: values.runtime }),
+      el("span", { class: "fleet-overview-value", "data-label": "Load",
+        text: values.load }),
+      el("span", { class: "fleet-overview-value", "data-label": "Input",
+        text: values.input }),
+    ]);
+    row.addEventListener("click", () => openDetail(u.name));
+    list.appendChild(row);
+  });
+  wrap.appendChild(list);
+  return wrap;
+}
+
 // A compact KPI summary card that drills through to its tab on click.
 function kpiCard({ iconName, label, value, unit, cap, valueStatus, tab }) {
   const card = el("div", { class: "card kpi card-click", tabindex: "0", role: "button" });
@@ -526,11 +642,11 @@ function renderOverviewSummary(rows) {
   const picked = !scopeIsAll() && rows.filter((u) => u.name === currentScope());
   const view = (picked && picked.length) ? picked : rows;
 
-  // Hero shows the (scoped) worst-status UPS so a problem surfaces immediately.
-  const rank = { crit: 0, warn: 1, ok: 2 };
-  const primary = view.slice().sort(
-    (a, b) => rank[statusClass(a.status)] - rank[statusClass(b.status)])[0];
-  hero.appendChild(heroCard(primary));
+  if (scopeIsAll() && view.length > 1) {
+    hero.appendChild(fleetOverview(view));
+  } else {
+    hero.appendChild(heroCard(view[0]));
+  }
 
   // Three drill-through KPI cards surfacing the v6.1 data otherwise buried on
   // other tabs. Under "All UPS" they summarize ACROSS the fleet (worst battery
@@ -603,17 +719,38 @@ function monitoringBadge(u) {
     ? el("span", { class: "badge muted mon-badge", text: "monitoring only" }) : null;
 }
 
-// Persistent fleet-status strip (above the tabs, every tab): each UPS at a
-// glance so a second UPS is never below the fold during an outage. Chips drill
-// into the detail modal. Hidden for a single-UPS deployment. (operator #1)
+// Persistent fleet-status strip (above the tabs, every tab). A healthy fleet is
+// one calm summary; only sources needing attention get their own safety chip.
+// Hidden for a single-UPS deployment. (operator #1)
 function renderFleetStrip(rows) {
   const strip = document.getElementById("fleet-strip");
   if (!strip) return;
   strip.replaceChildren();
   if (rows.length <= 1) { strip.hidden = true; return; }
   strip.hidden = false;
-  rows.forEach((u) => {
-    const cls = statusClass(u.status);
+  const state = fleetSnapshot(rows);
+  const overall = fleetOverallClass(rows);
+  const summaryText = state.attention
+    ? state.healthy + " healthy · " + state.attention + " "
+      + (state.attention === 1 ? "needs" : "need") + " attention"
+    : state.total + " UPS healthy";
+  const summary = el("button", { class: "fleet-chip fleet-summary-chip s-" + overall,
+    type: "button", title: "Open fleet overview",
+    "aria-label": summaryText + " — open fleet overview" }, [
+    el("span", { class: "fleet-dot", "aria-hidden": "true" }),
+    el("span", { class: "fleet-name", text: summaryText }),
+    el("span", { class: "fleet-go", "aria-hidden": "true", text: "›" }),
+  ]);
+  summary.addEventListener("click", () => {
+    const view = document.getElementById("global-ups");
+    if (view) view.value = SCOPE_ALL;
+    onScopeChanged();
+    selectTab("overview", { updateHash: true });
+  });
+  strip.appendChild(summary);
+
+  rows.filter((u) => !upsHealthy(u)).forEach((u) => {
+    const cls = fleetUpsClass(u);
     const charge = parseFloat(u.batteryCharge);
     // Full accessible name — the status/charge/runtime/monitoring live in
     // separate spans that a screen reader would run together ambiguously.
@@ -625,8 +762,7 @@ function renderFleetStrip(rows) {
       title: "View " + (u.label || u.name) + " details", "aria-label": aria }, [
       el("span", { class: "fleet-name", text: u.label || u.name }),
       el("span", { class: "badge " + cls, text: u.status || "—" }),
-      el("span", { class: "fleet-metric",
-        text: (isNaN(charge) ? "—" : charge + "%") + " · " + formatRuntimeSeconds(u.runtime) }),
+      el("span", { class: "fleet-metric", text: isNaN(charge) ? "—" : charge + "%" }),
       u.isLocal === false ? el("span", { class: "fleet-tag", text: "monitoring" }) : null,
       el("span", { class: "fleet-go", "aria-hidden": "true", text: "›" }),
     ].filter(Boolean));
@@ -1885,11 +2021,11 @@ function drawChart(hostId, series, options) {
     const t = document.createElementNS(SVG_NS, "text");
     t.setAttribute("x", (W / 2).toFixed(0)); t.setAttribute("y", "12");
     t.setAttribute("text-anchor", "middle"); t.setAttribute("class", "chart-title");
-    // Name the UPS the (single-series) chart is showing, so "All UPS" makes clear
-    // it's the primary — the per-UPS comparison lives in the cards above.
+    // Name the UPS the single-series chart is showing. Fleet mode exposes this
+    // same source as an explicit selector above the graph.
     let title = metricLabel(options.metric);
     if (options.upsLabel) {
-      title += " · " + options.upsLabel + (options.scopeAll ? " (primary)" : "");
+      title += " · " + options.upsLabel;
     }
     t.textContent = title;
     svg.appendChild(t);
@@ -2393,7 +2529,6 @@ function makeChart(opts) {
       metric: metric(),
       // Only label the UPS in a fleet; a lone UPS needs no disambiguation.
       upsLabel: lastUpsRows.length > 1 ? upsLabel() : "",
-      scopeAll: typeof scopeIsAll === "function" && scopeIsAll(),
       unavailable: metricUnavailable(),
       from: state.from, to: state.to,
       bands: opts.bands ? state.thresholds : null,
@@ -2457,14 +2592,13 @@ function drawEnergyChart(hostId, rows, options) {
   mkline(pad, H - pad, W - 5, H - pad, "axis");
   mkline(pad, 5, pad, H - pad, "axis");
 
-  // Title names the UPS the (single-series) chart shows — "· Lab (primary)"
-  // under "All UPS" — so it's clear which UPS, like the metric charts.
+  // Title names the UPS the single-series chart shows, matching the explicit
+  // chart source selector exposed in fleet mode.
   if (options.upsLabel) {
     const tt = document.createElementNS(SVG_NS, "text");
     tt.setAttribute("x", (W / 2).toFixed(0)); tt.setAttribute("y", "12");
     tt.setAttribute("text-anchor", "middle"); tt.setAttribute("class", "chart-title");
-    tt.textContent = "Load & power · " + options.upsLabel
-      + (options.scopeAll ? " (primary)" : "");
+    tt.textContent = "Load & power · " + options.upsLabel;
     svg.appendChild(tt);
   }
 
@@ -2764,7 +2898,6 @@ function makeEnergyChart(opts) {
     drawEnergyChart(opts.hostId, state.rows, {
       events: state.events,
       upsLabel: lastUpsRows.length > 1 ? upsLabel() : "",
-      scopeAll: typeof scopeIsAll === "function" && scopeIsAll(),
       from: state.from, to: state.to,
     });
     setEventsHint(opts.eventsNoteId, state.hiddenEvents);
@@ -2891,13 +3024,11 @@ async function renderBatteryHealthGraph() {
   const scores = pts.map((p) => p.value);
   let floorRef = Math.min.apply(null, scores);
   if (repl.thresholdScore != null) floorRef = Math.min(floorRef, repl.thresholdScore);
-  // Name the UPS in the title (with "(primary)" under All UPS), matching the
-  // other charts — the cards above show every UPS, so the trend needs to say
-  // whose it is.
+  // Name the UPS in the title, matching the explicit chart source selector.
   const bhU = lastUpsRows.find((r) => r.name === name);
   const bhLabel = bhU ? (bhU.label || bhU.name) : name;
   const title = "Health score"
-    + (lastUpsRows.length > 1 ? " · " + bhLabel + (scopeIsAll() ? " (primary)" : "") : "");
+    + (lastUpsRows.length > 1 ? " · " + bhLabel : "");
   const opts = {
     title, unit: "",
     min: Math.max(0, Math.floor((floorRef - 8) / 5) * 5), max: 100,
@@ -3779,9 +3910,8 @@ async function init() {
     rangeSelId: "energy-range", eventsNoteId: "energy-events-note" });
   Object.values(charts).forEach((c) => c.observe());
 
-  // Global UPS scope selector drives Power/Battery/Energy/Shutdown + the scoped
-  // card grids. It is the single source of truth; the per-tab dropdowns are
-  // hidden and mirrored from it (see populateChartUpsSelects/onScopeChanged).
+  // The dashboard view scopes cards and plans. Historical charts follow a
+  // concrete view, or expose one shared chart-source selector in fleet mode.
   const gsel = document.getElementById("global-ups");
   if (gsel) gsel.addEventListener("change", onScopeChanged);
 

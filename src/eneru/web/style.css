@@ -156,6 +156,43 @@ h2 { font-size: 0.8125rem; color: var(--muted); text-transform: uppercase;
 .hero-ob { margin-left: 0.25rem; }
 @media (max-width: 560px) { .hero { grid-template-columns: 1fr; text-align: center; } }
 
+/* Fleet Overview: one honest fleet-level header followed by compact comparison
+   rows. It deliberately does not reuse the old per-UPS card grid. */
+.fleet-overview { position: relative; overflow: hidden; margin-bottom: 1.25rem;
+  background: var(--panel); border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-sm); }
+.fleet-overview::before { content: ""; position: absolute; inset: 0 0 auto 0;
+  height: 3px; background: var(--ok); }
+.fleet-overview.s-warn::before { background: var(--warn); }
+.fleet-overview.s-crit::before { background: var(--crit); }
+.fleet-overview-head { display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem; padding: 1.15rem 1.25rem; background: var(--hero-grad);
+  border-bottom: 1px solid var(--line); }
+.fleet-overview-heading { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
+.fleet-overview-heading h3 { margin: 0; font-size: 1.1rem; }
+.fleet-overview-heading p { margin: 0.15rem 0 0; color: var(--muted);
+  font-size: 0.85rem; }
+.fleet-overview-list { padding: 0.35rem 0; }
+.fleet-overview-columns, .fleet-overview-row {
+  display: grid; grid-template-columns: minmax(10rem, 1.5fr) minmax(7rem, 1fr)
+    repeat(4, minmax(4.5rem, 0.65fr)); align-items: center; gap: 0.75rem;
+  padding: 0.55rem 1.25rem; }
+.fleet-overview-columns { color: var(--muted); font-size: 0.72rem;
+  font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.fleet-overview-row { width: 100%; border: 0; border-top: 1px solid var(--line);
+  border-left: 3px solid transparent; background: transparent; color: var(--text);
+  font: inherit; text-align: left; cursor: pointer; }
+.fleet-overview-row:hover { background: var(--accent-weak); }
+.fleet-overview-row:focus-visible { outline: 2px solid var(--accent);
+  outline-offset: -2px; }
+.fleet-overview-row.s-warn { border-left-color: var(--warn); }
+.fleet-overview-row.s-crit { border-left-color: var(--crit); }
+.fleet-overview-name { display: flex; align-items: center; gap: 0.45rem;
+  min-width: 0; flex-wrap: wrap; }
+.fleet-overview-name strong { overflow: hidden; text-overflow: ellipsis; }
+.fleet-overview-value { color: var(--text-2); font-size: 0.9rem;
+  font-variant-numeric: tabular-nums; white-space: nowrap; }
+
 /* Battery ring gauge (SVG). */
 .ring { width: 132px; height: 132px; }
 .ring-track { fill: none; stroke: var(--panel-2); stroke-width: 11; }
@@ -421,6 +458,13 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
   letter-spacing: 0.04em; }
 .fleet-go { color: var(--muted); font-size: 1.1rem; line-height: 1; margin-left: 0.1rem; }
 .fleet-chip:hover .fleet-go { color: var(--accent); }
+.fleet-summary-chip { background: var(--panel-2); }
+.fleet-dot { width: 0.55rem; height: 0.55rem; border-radius: 999px;
+  background: var(--ok); box-shadow: 0 0 0 3px var(--ok-weak); }
+.fleet-summary-chip.s-warn .fleet-dot { background: var(--warn);
+  box-shadow: 0 0 0 3px var(--warn-weak); }
+.fleet-summary-chip.s-crit .fleet-dot { background: var(--crit);
+  box-shadow: 0 0 0 3px var(--crit-weak); }
 /* Card header title row (title + optional badge, e.g. "monitoring only"). */
 .card-title { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .card-title h3 { margin: 0; }
@@ -593,6 +637,14 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
   .authbox { flex-wrap: wrap; }
   .tabs { padding: 0 0.5rem; }
   .tab { padding: 0.5rem 0.6rem; }
+  .fleet-overview-head { align-items: flex-start; }
+  .fleet-overview-columns { display: none; }
+  .fleet-overview-row { grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.5rem 1rem; padding: 0.8rem 1rem; }
+  .fleet-overview-value { display: flex; justify-content: space-between;
+    grid-column: 1 / -1; }
+  .fleet-overview-value::before { content: attr(data-label); color: var(--muted);
+    font-size: 0.78rem; font-weight: 600; }
 }
 /* Narrow phones: scroll the tab bar horizontally instead of wrapping the 7 tabs
    into a ragged block; keep the divider from collapsing. (a11y #13) */
