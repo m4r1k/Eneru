@@ -64,7 +64,7 @@ jobs:
           - { group: loopback,              label: "Loopback" }
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Set up E2E environment
         uses: ./.github/actions/e2e-setup
