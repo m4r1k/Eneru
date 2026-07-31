@@ -33,7 +33,7 @@ jobs:
       version: ${{ steps.version.outputs.VERSION }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -107,7 +107,7 @@ jobs:
     continue-on-error: ${{ matrix.python-version == '3.15-dev' }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v6
@@ -159,7 +159,7 @@ jobs:
       image: ${{ matrix.distro }}:${{ matrix.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Download packages
         uses: actions/download-artifact@v8.0.1
@@ -224,7 +224,7 @@ jobs:
       image: ${{ matrix.image }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Download packages
         uses: actions/download-artifact@v8.0.1
@@ -358,7 +358,7 @@ jobs:
       image: ${{ matrix.image || format('{0}:{1}', matrix.distro, matrix.version) }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Install pip and dependencies (Debian/Ubuntu)
         if: matrix.distro != ''
@@ -397,7 +397,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Extract version
         id: version
@@ -436,7 +436,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Extract version
         id: version

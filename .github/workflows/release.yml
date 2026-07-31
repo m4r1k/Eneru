@@ -46,7 +46,7 @@ jobs:
       version_full: ${{ steps.version.outputs.VERSION_FULL }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
           # ISS-010 (minimal hardening): this job pip-installs the full
@@ -315,7 +315,7 @@ jobs:
 
       - name: Checkout gh-pages branch
         if: steps.ghpages.outputs.exists == 'true'
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           ref: gh-pages
           path: gh-pages
