@@ -55,5 +55,12 @@ notifications:
   retry_backoff_max: 5
   max_attempts: 0
 
+reports:
+  enabled: true
+  daily: true
+  time: "00:00"
+  include: [events, self_tests, uptime]
+  format: text
+
 local_shutdown:
   enabled: false

@@ -1990,7 +1990,9 @@ def _self_test_run_direct(
         # (same per-UPS lock identity) so this direct write can't race another
         # control command on the same device.
         with command_lock(name):
-            result = selftest.issue_self_test(name, cmd, nc, store, source="cli")
+            result = selftest.issue_self_test(
+                name, cmd, nc, store, source="cli",
+                result_poll_after=st_cfg.result_poll_after)
     finally:
         store.close()
     if result.get("ok"):

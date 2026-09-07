@@ -9,10 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.0-rc1] - 2026-09-08
+
+### Added
+
+- **Failed self-tests now protect the next outage.** A hard failure is stored
+  across restarts and can trigger the normal shutdown path when a later real
+  outage lasts longer than `triggers.self_test_failure_shutdown_delay` (30
+  seconds by default). The self-test's own battery transfer never fires this
+  trigger. Redundancy members use the existing quorum path, while
+  monitoring-only UPSes alert without running shutdown actions.
+
 ### Changed
+
+- **Periodic reports are compact and use one time window.** Each UPS now takes
+  one or two lines with its display name, outage duration, self-test results,
+  restart count, battery score, and period energy/cost. Multi-UPS reports add
+  fleet totals. Estimated energy is marked with `~`, with one explanation at
+  the bottom. Daily reports cover yesterday, weekly reports cover the trailing
+  seven days, and monthly reports cover the current month to date.
+- **Self-test tracking now follows a persisted ticket.** Eneru writes the active
+  row before sending the NUT command, refuses a duplicate active test, polls
+  non-terminal results until completion or a 24-hour timeout, and sends one
+  start and one final notification even across daemon restarts. Normalized
+  results now distinguish `warning` and `aborted`.
 
 - **Debian 11 retired from CI.** Package and pip installation tests no longer
   run on Debian 11 (Bullseye), which reached the end of LTS support.
+
+### Fixed
+
+- **UPS battery exercises no longer look like utility outages.** Eneru records
+  test-caused transfers as `SELF_TEST_ON_BATTERY` and
+  `SELF_TEST_POWER_RESTORED`, suppresses the ordinary outage notifications, and
+  leaves every shutdown safety check active. If the UPS stays on battery after
+  the test, the continuing interval becomes a normal outage. A one-time,
+  conservative repair relabels only short historical pairs with exactly one
+  nearby self-test.
 
 ## [6.1.9] - 2026-07-13
 

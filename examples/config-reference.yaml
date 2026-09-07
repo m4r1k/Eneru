@@ -86,6 +86,11 @@ triggers:
   # failsafe still trigger immediately. Default 30s.
   on_battery_stabilization_delay: 30
 
+  # A hard self-test failure arms shutdown for the NEXT real outage. Wait this
+  # many seconds after that later OB transition before acting. The OB interval
+  # caused by the test itself never fires this trigger. Set 0 for immediate.
+  self_test_failure_shutdown_delay: 30
+
   # Battery depletion tracking
   depletion:
     # Window for calculating depletion rate (seconds)
@@ -299,7 +304,7 @@ self_test:
   result_poll_after: 60
 
 # ==============================================================================
-# REPORTS (v6.1) — periodic summaries via the notification channel
+# REPORTS (v6.1) — compact periodic summaries via the notification channel
 # ==============================================================================
 reports:
   enabled: false
@@ -309,7 +314,9 @@ reports:
   time: "08:00"        # send time (daemon local)
   weekly_day: monday
   monthly_day: 1
-  include: [events, battery_health, energy, uptime]
+  # Compact rows can include outage count/duration, battery score, self-test
+  # result counts, period energy/cost, and daemon restart count.
+  include: [events, battery_health, self_tests, energy, uptime]
   format: text         # text | csv
 
 # ==============================================================================

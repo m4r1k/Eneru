@@ -56,6 +56,7 @@ class TriggersConfig:
     low_battery_threshold: int = 20
     critical_runtime_threshold: int = 600
     on_battery_stabilization_delay: int = 30
+    self_test_failure_shutdown_delay: int = 30
     depletion: DepletionConfig = field(default_factory=DepletionConfig)
     extended_time: ExtendedTimeConfig = field(default_factory=ExtendedTimeConfig)
     # Voltage warning band as a fraction of input.voltage.nominal.
@@ -263,7 +264,7 @@ class ReportsConfig:
     weekly_day: str = "monday"
     monthly_day: int = 1
     include: List[str] = field(default_factory=lambda: [
-        "events", "battery_health", "energy", "uptime"])
+        "events", "battery_health", "self_tests", "energy", "uptime"])
     format: str = "text"                 # text | csv
 
 
@@ -1275,6 +1276,10 @@ class ConfigLoader:
                 'on_battery_stabilization_delay',
                 defaults.on_battery_stabilization_delay,
             ),
+            self_test_failure_shutdown_delay=triggers_data.get(
+                'self_test_failure_shutdown_delay',
+                defaults.self_test_failure_shutdown_delay,
+            ),
             depletion=DepletionConfig(
                 window=depletion_data.get('window', defaults.depletion.window),
                 critical_rate=depletion_data.get('critical_rate',
@@ -2032,7 +2037,8 @@ class ConfigLoader:
             messages.extend(cls._schema_errors(raw_data))
             trigger_keys = {
                 "low_battery_threshold", "critical_runtime_threshold",
-                "on_battery_stabilization_delay", "depletion",
+                "on_battery_stabilization_delay",
+                "self_test_failure_shutdown_delay", "depletion",
                 "extended_time", "voltage_sensitivity",
             }
             remote_server_keys = {
@@ -2148,7 +2154,9 @@ class ConfigLoader:
             _raw_reports = raw_data.get("reports")
             if isinstance(_raw_reports, dict) and "include" in _raw_reports:
                 _inc = _raw_reports["include"]
-                _valid_inc = {"events", "battery_health", "energy", "uptime"}
+                _valid_inc = {
+                    "events", "battery_health", "self_tests", "energy", "uptime",
+                }
                 if not isinstance(_inc, list):
                     messages.append("ERROR: reports.include must be a list")
                 else:
@@ -2621,6 +2629,13 @@ class ConfigLoader:
                 messages.append(
                     f"ERROR: {label}.triggers.critical_runtime_threshold must be "
                     f"a non-negative integer, got {t.critical_runtime_threshold!r}."
+                )
+            if not cls._is_int_nonbool_in_range(
+                    t.self_test_failure_shutdown_delay, minimum=0):
+                messages.append(
+                    f"ERROR: {label}.triggers.self_test_failure_shutdown_delay "
+                    "must be a non-negative integer, got "
+                    f"{t.self_test_failure_shutdown_delay!r}."
                 )
             if not cls._is_int_nonbool_in_range(t.depletion.window, minimum=1):
                 messages.append(

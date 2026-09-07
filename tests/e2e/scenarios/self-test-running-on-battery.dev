@@ -1,0 +1,22 @@
+# Scenario: a device-run battery test temporarily switches the UPS to battery.
+ups.status: OB DISCHRG CAL
+ups.load: 25
+
+battery.charge: 99
+battery.runtime: 1800
+battery.voltage: 53.8
+
+input.voltage: 230.5
+input.voltage.nominal: 230
+input.frequency: 50.0
+input.transfer.low: 170
+input.transfer.high: 280
+
+output.voltage: 230.0
+
+ups.test.result: In progress
+ups.test.date: 2026-09-07
+ups.test.interval: 2592000
+
+device.mfr: Eneru
+device.model: E2E Test UPS

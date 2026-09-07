@@ -12,6 +12,7 @@ Everything here keeps I/O behind ``nut_control`` so tests mock it.
 """
 
 from dataclasses import replace
+import time
 from typing import Dict, Optional, Tuple
 
 from eneru import nut_control as nutctl
@@ -21,6 +22,7 @@ __all__ = [
     "PENDING_DUE_TS_META",
     "PENDING_ID_META",
     "RESULT_ENUMS",
+    "RESULT_TIMEOUT_SECONDS",
     "SelfTestUnavailable",
     "clear_pending_self_test",
     "discover_self_test_command",
@@ -44,9 +46,13 @@ class SelfTestUnavailable(Exception):
 # The normalized result vocabulary the API / Prometheus / UI consume. The raw
 # ``ups.test.result`` string is unbounded and vendor-specific, so it is stored
 # alongside but never used as a label/enum directly.
-RESULT_ENUMS = ("passed", "failed", "running", "unknown", "unsupported")
+RESULT_ENUMS = (
+    "passed", "warning", "failed", "aborted", "running", "unknown",
+    "unsupported",
+)
 PENDING_ID_META = "self_test_pending_id"
 PENDING_DUE_TS_META = "self_test_pending_due_ts"
+RESULT_TIMEOUT_SECONDS = 24 * 60 * 60
 
 
 def normalize_result(raw: Optional[str]) -> str:
@@ -65,8 +71,12 @@ def normalize_result(raw: Optional[str]) -> str:
     if "in progress" in t or "inprogress" in t or "progress" in t \
             or "running" in t or "pending" in t:
         return "running"
+    if "abort" in t or "cancel" in t:
+        return "aborted"
     if "fail" in t or "bad" in t or "error" in t:
         return "failed"
+    if "warning" in t or "warn" in t:
+        return "warning"
     if "pass" in t or t == "ok" or t == "done" or "done and passed" in t:
         return "passed"
     return "unknown"
@@ -163,7 +173,8 @@ def self_test_control(nut_control, self_test_cfg,
 
 
 def issue_self_test(ups_name: str, command: str, nut_control, store, *,
-                    source: str = "scheduler") -> Dict:
+                    source: str = "scheduler",
+                    result_poll_after: int = 60) -> Dict:
     """Issue a self-test, enforcing the shared allowlist first.
 
     Records a ``running`` self_tests row (so a poll can finalise it) and
@@ -174,9 +185,63 @@ def issue_self_test(ups_name: str, command: str, nut_control, store, *,
         return {"ok": False, "test_id": None,
                 "error": f"command {command!r} is not in nut_control.allowed_commands"}
 
+    if store is not None:
+        pending_raw = store.get_meta(PENDING_ID_META)
+        if pending_raw:
+            try:
+                pending_id = int(pending_raw)
+            except (TypeError, ValueError):
+                pending_id = None
+            row = (store.get_self_test(pending_id)
+                   if pending_id is not None else None)
+            active = bool(
+                row and row.get("result_enum") == "running"
+                and time.time() - row.get("started_ts", time.time())
+                < RESULT_TIMEOUT_SECONDS)
+            if active or not clear_pending_self_test(store):
+                return {"ok": False, "test_id": None,
+                        "error": "a self-test is already active"}
+            if row and row.get("result_enum") == "running":
+                store.update_self_test_result(
+                    pending_id,
+                    result_raw="Result polling timed out before a new test",
+                    result_enum="unknown",
+                    result_date=row.get("result_date"),
+                )
+        else:
+            row = store.latest_running_self_test()
+            if row:
+                age = time.time() - row.get("started_ts", time.time())
+                if age < RESULT_TIMEOUT_SECONDS:
+                    due_ts = self_test_poll_due_ts(
+                        row["started_ts"], result_poll_after)
+                    persist_pending_self_test(store, row["id"], due_ts)
+                    return {"ok": False, "test_id": None,
+                            "error": "a self-test is already active"}
+                store.update_self_test_result(
+                    row["id"],
+                    result_raw="Result polling timed out before a new test",
+                    result_enum="unknown",
+                    result_date=row.get("result_date"),
+                )
+
     test_id = None
     if store is not None:
         test_id = store.record_self_test(command, source, result_enum="running")
+        if test_id is None:
+            return {"ok": False, "test_id": None,
+                    "error": "could not persist self-test state"}
+        # Persist the active ticket before issuing the real NUT command. An OB
+        # transition can then be attributed even if it arrives immediately.
+        due_ts = self_test_poll_due_ts(time.time(), result_poll_after)
+        if not persist_pending_self_test(store, test_id, due_ts):
+            store.update_self_test_result(
+                test_id,
+                result_raw="Could not persist active self-test ticket",
+                result_enum="aborted",
+            )
+            return {"ok": False, "test_id": test_id,
+                    "error": "could not persist active self-test ticket"}
 
     ok, _out, err = nutctl.run_instant_command(
         ups_name, command, nut_control.username, nut_control.password,
@@ -185,7 +250,8 @@ def issue_self_test(ups_name: str, command: str, nut_control, store, *,
     if not ok:
         if store is not None and test_id is not None:
             store.update_self_test_result(
-                test_id, result_raw=err, result_enum="failed")
+                test_id, result_raw=err, result_enum="aborted")
+            clear_pending_self_test(store, clear_attribution=True)
         return {"ok": False, "test_id": test_id, "error": err}
     return {"ok": True, "test_id": test_id, "error": ""}
 
@@ -195,20 +261,32 @@ def self_test_poll_due_ts(started_ts: float, result_poll_after: int) -> int:
     return int(float(started_ts) + max(1, int(result_poll_after)))
 
 
-def persist_pending_self_test(store, test_id: Optional[int], due_ts: int) -> None:
+def persist_pending_self_test(store, test_id: Optional[int],
+                              due_ts: Optional[int]) -> bool:
     """Persist the in-flight self-test handoff used by API/scheduler -> monitor."""
     if store is None or test_id is None:
-        return
-    store.set_meta(PENDING_ID_META, str(int(test_id)))
-    store.set_meta(PENDING_DUE_TS_META, str(int(due_ts)))
+        return False
+    values = {
+        PENDING_DUE_TS_META: str(int(due_ts)) if due_ts is not None else "",
+        PENDING_ID_META: str(int(test_id)),
+    }
+    setter = getattr(store, "set_meta_many", None)
+    if setter is not None:
+        return bool(setter(values))
+    return all(store.set_meta(key, value) for key, value in values.items())
 
 
-def clear_pending_self_test(store) -> None:
+def clear_pending_self_test(store, *, clear_attribution: bool = False) -> bool:
     """Clear persisted in-flight self-test handoff metadata."""
     if store is None:
-        return
-    store.set_meta(PENDING_ID_META, "")
-    store.set_meta(PENDING_DUE_TS_META, "")
+        return False
+    values = {PENDING_ID_META: "", PENDING_DUE_TS_META: ""}
+    if clear_attribution:
+        values["self_test_attributed_id"] = ""
+    setter = getattr(store, "set_meta_many", None)
+    if setter is not None:
+        return bool(setter(values))
+    return all(store.set_meta(key, value) for key, value in values.items())
 
 
 def record_self_test_result(store, test_id: Optional[int],

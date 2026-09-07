@@ -442,10 +442,10 @@ class StatsStore:
                     detail TEXT
                 );
 
-                -- v7: self-test results. One row per issued test; the row
-                -- starts 'running' and is updated once upsd reports a
-                -- result. result_enum is the normalized form
-                -- (passed|failed|running|unknown|unsupported) the
+                -- v7: self-test results. One row per issued or device-observed
+                -- test; an active row starts 'running' and is updated once
+                -- upsd reports a result. result_enum is the normalized form
+                -- (passed|warning|failed|aborted|running|unknown|unsupported) the
                 -- API/Prometheus/UI consume; result_raw keeps the original
                 -- ups.test.result string.
                 CREATE TABLE IF NOT EXISTS self_tests (
@@ -1177,7 +1177,9 @@ class StatsStore:
 
     def enqueue_notification(self, body: str, notify_type: str,
                              category: str,
-                             ts: Optional[int] = None) -> Optional[int]:
+                             ts: Optional[int] = None,
+                             meta_updates: Optional[Dict[str, str]] = None,
+                             ) -> Optional[int]:
         """Persist a pending notification. Returns the new row id, or
         ``None`` if the store isn't open (caller should fall back).
 
@@ -1196,6 +1198,12 @@ class StatsStore:
                     "VALUES (?, ?, ?, ?)",
                     (ts, str(body), str(notify_type), str(category)),
                 )
+                if meta_updates:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                        [(str(key), str(value))
+                         for key, value in meta_updates.items()],
+                    )
                 return int(cur.lastrowid)
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: enqueue_notification failed: {e}")
@@ -1603,6 +1611,23 @@ class StatsStore:
             self._log_error_once(f"stats: set_meta failed: {e}")
             return False
 
+    def set_meta_many(self, values: Dict[str, str]) -> bool:
+        """Commit several ``meta`` values atomically."""
+        if self._conn is None:
+            return False
+        try:
+            with self._write() as conn:
+                if conn is None:
+                    return False
+                conn.executemany(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                    [(str(key), str(value)) for key, value in values.items()],
+                )
+            return True
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: set_meta_many failed: {e}")
+            return False
+
     # ----- v7: battery-health, self-test, energy data -----
 
     def record_battery_health(
@@ -1695,6 +1720,38 @@ class StatsStore:
                 "anomaly": r[5], "age": r[6], "detail": detail,
             })
         return out
+
+    def latest_battery_health(self) -> Optional[Dict[str, Any]]:
+        """Return the newest stored battery-health row."""
+        if self._conn is None:
+            return None
+        try:
+            with self._db_lock:
+                if self._conn is None:
+                    return None
+                row = self._conn.execute(
+                    """
+                    SELECT ts, score, capacity, runtime, self_test, anomaly,
+                           age, detail
+                    FROM battery_health ORDER BY ts DESC LIMIT 1
+                    """
+                ).fetchone()
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: latest_battery_health failed: {e}")
+            return None
+        if row is None:
+            return None
+        detail = None
+        if row[7]:
+            try:
+                detail = json.loads(row[7])
+            except (TypeError, ValueError):
+                pass
+        return {
+            "ts": int(row[0]), "score": row[1], "capacity": row[2],
+            "runtime": row[3], "self_test": row[4], "anomaly": row[5],
+            "age": row[6], "detail": detail,
+        }
 
     def record_self_test(
         self,
@@ -1792,6 +1849,84 @@ class StatsStore:
             "source": r[6],
         }
 
+    def get_self_test(self, test_id: int) -> Optional[Dict[str, Any]]:
+        """Return one self-test row by id, or ``None`` when absent."""
+        if self._conn is None:
+            return None
+        try:
+            with self._db_lock:
+                if self._conn is None:
+                    return None
+                r = self._conn.execute(
+                    """
+                    SELECT id, started_ts, command, result_raw, result_enum,
+                           result_date, source
+                    FROM self_tests WHERE id = ?
+                    """,
+                    (int(test_id),),
+                ).fetchone()
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: get_self_test failed: {e}")
+            return None
+        if r is None:
+            return None
+        return {
+            "id": int(r[0]), "started_ts": int(r[1]), "command": r[2],
+            "result_raw": r[3], "result_enum": r[4], "result_date": r[5],
+            "source": r[6],
+        }
+
+    def query_self_tests(self, start_ts: int, end_ts: int) -> List[Dict[str, Any]]:
+        """Return self-tests started inside an inclusive time window."""
+        if self._conn is None:
+            return []
+        try:
+            with self._db_lock:
+                if self._conn is None:
+                    return []
+                rows = self._conn.execute(
+                    """
+                    SELECT id, started_ts, command, result_raw, result_enum,
+                           result_date, source
+                    FROM self_tests
+                    WHERE started_ts BETWEEN ? AND ?
+                    ORDER BY started_ts, id
+                    """,
+                    (int(start_ts), int(end_ts)),
+                ).fetchall()
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: query_self_tests failed: {e}")
+            return []
+        return [{
+            "id": int(r[0]), "started_ts": int(r[1]), "command": r[2],
+            "result_raw": r[3], "result_enum": r[4], "result_date": r[5],
+            "source": r[6],
+        } for r in rows]
+
+    def latest_power_event_before(self, ts: int) -> Optional[Tuple[int, str, str]]:
+        """Return the last ordinary outage transition before ``ts``."""
+        if self._conn is None:
+            return None
+        try:
+            with self._db_lock:
+                if self._conn is None:
+                    return None
+                row = self._conn.execute(
+                    """
+                    SELECT ts, event_type, detail FROM events
+                    WHERE ts < ?
+                      AND event_type IN ('ON_BATTERY', 'POWER_RESTORED')
+                    ORDER BY ts DESC, id DESC LIMIT 1
+                    """,
+                    (int(ts),),
+                ).fetchone()
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(f"stats: latest_power_event_before failed: {e}")
+            return None
+        if row is None:
+            return None
+        return int(row[0]), str(row[1]), str(row[2] or "")
+
     def latest_running_self_test(self) -> Optional[Dict[str, Any]]:
         """Return the most-recent running self-test row, or ``None``."""
         if self._conn is None:
@@ -1821,6 +1956,62 @@ class StatsStore:
             "result_raw": r[3], "result_enum": r[4], "result_date": r[5],
             "source": r[6],
         }
+
+    def repair_self_test_power_events(self) -> Optional[int]:
+        """Relabel high-confidence historical self-test OB/OL event pairs.
+
+        Only short, closed outages with exactly one self-test timestamp within
+        30 seconds of the pair are changed. Ambiguous or long outages remain
+        ordinary power events.
+        """
+        if self._conn is None:
+            return None
+        try:
+            with self._write() as conn:
+                if conn is None:
+                    return None
+                events = conn.execute(
+                    """
+                    SELECT id, ts, event_type FROM events
+                    WHERE event_type IN ('ON_BATTERY', 'POWER_RESTORED')
+                    ORDER BY ts, id
+                    """
+                ).fetchall()
+                tests = conn.execute(
+                    "SELECT started_ts FROM self_tests "
+                    "WHERE source != 'device' AND command != '' "
+                    "ORDER BY started_ts"
+                ).fetchall()
+                test_times = [int(row[0]) for row in tests]
+                changed = 0
+                pending = None
+                for event_id, ts, event_type in events:
+                    ts = int(ts)
+                    if event_type == "ON_BATTERY":
+                        pending = (int(event_id), ts)
+                        continue
+                    if pending is None:
+                        continue
+                    ob_id, ob_ts = pending
+                    pending = None
+                    if ts - ob_ts > 120:
+                        continue
+                    candidates = [test_ts for test_ts in test_times
+                                  if ob_ts - 30 <= test_ts <= ts + 30]
+                    if len(candidates) != 1:
+                        continue
+                    conn.execute(
+                        "UPDATE events SET event_type = 'SELF_TEST_ON_BATTERY' "
+                        "WHERE id = ?", (ob_id,))
+                    conn.execute(
+                        "UPDATE events SET event_type = 'SELF_TEST_POWER_RESTORED' "
+                        "WHERE id = ?", (int(event_id),))
+                    changed += 1
+                return changed
+        except (sqlite3.Error, OSError) as e:
+            self._log_error_once(
+                f"stats: repair_self_test_power_events failed: {e}")
+            return None
 
     def power_samples(
         self,

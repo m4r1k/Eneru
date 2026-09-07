@@ -374,7 +374,8 @@ class NotificationWorker:
              category: str = "general",
              store: Optional[StatsStore] = None,
              blocking: bool = False,
-             require_persistent: bool = False) -> Optional[int]:
+             require_persistent: bool = False,
+             meta_updates: Optional[Dict[str, str]] = None) -> Optional[int]:
         """Queue a notification for persistent, retried delivery.
 
         Args:
@@ -395,6 +396,8 @@ class NotificationWorker:
             require_persistent: Return ``None`` without memory-buffering when
                 SQLite cannot accept the row. Reports use this to roll back
                 their cadence stamp and retry without creating duplicates.
+            meta_updates: Optional ``meta`` values committed in the same
+                transaction as the notification row.
 
         Returns the new notification id, or ``None`` if the send was
         buffered (no store yet) or the worker isn't initialized.
@@ -427,6 +430,7 @@ class NotificationWorker:
 
         notification_id = target_store.enqueue_notification(
             body=body, notify_type=notify_type, category=category, ts=ts,
+            meta_updates=meta_updates,
         )
         if notification_id is None:
             # The store exists but isn't open (e.g. /var/lib/eneru was

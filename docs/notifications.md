@@ -265,6 +265,21 @@ The default dwell is 30 seconds. The log and `events` table are immediate; only 
 | 30s | Still outside threshold | Notification is sent with a persisted-duration note |
 | Any time | Severe deviation exceeds +/- 15% nominal | Notification bypasses dwell and sends immediately |
 
+### Self-test notifications
+
+Eneru sends one start notification when it begins tracking a test and one final
+notification when the result settles. Passed results use success severity,
+failed results use failure severity, and warning, aborted, unknown, or
+unsupported results use warning severity. Persisted notification markers stop
+a daemon restart from sending either message twice.
+
+An `OB`/`OL` pair attributed to an active self-test is stored as
+`SELF_TEST_ON_BATTERY` / `SELF_TEST_POWER_RESTORED` without ordinary outage
+notifications. Safety checks remain active. If a failed-test latch later meets
+a genuine outage, Eneru sends the normal shutdown notifications; a
+monitoring-only UPS instead sends one critical self-test notification and takes
+no shutdown action.
+
 ### Suppression list
 
 ```yaml

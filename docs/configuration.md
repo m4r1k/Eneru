@@ -230,6 +230,7 @@ See [Troubleshooting](troubleshooting.md#intermittent-nut-drops) for tuning guid
 | `low_battery_threshold` | `20` | Battery percentage that triggers shutdown |
 | `critical_runtime_threshold` | `600` | UPS runtime estimate, in seconds, that triggers shutdown |
 | `on_battery_stabilization_delay` | `30` | Seconds after a fresh OB transition before charge/runtime/rate/time triggers can fire |
+| `self_test_failure_shutdown_delay` | `30` | Seconds into the next real outage before a latched hard self-test failure triggers shutdown. `0` means immediate |
 | `depletion.window` | `300` | Battery-history window for depletion calculation |
 | `depletion.critical_rate` | `15.0` | Percentage points per minute that triggers shutdown |
 | `depletion.grace_period` | `90` | Seconds after power loss before depletion rate can trigger shutdown |
@@ -238,6 +239,22 @@ See [Troubleshooting](troubleshooting.md#intermittent-nut-drops) for tuning guid
 | `voltage_sensitivity` | `normal` | Voltage warning preset: `tight`, `normal`, or `loose` |
 
 See [Shutdown triggers](triggers.md) for decision order, voltage threshold details, and common UPS transfer points by vendor.
+
+## Reports
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `false` | Enable periodic reports |
+| `daily` | `false` | Send the previous complete local calendar day |
+| `weekly` | `false` | Send a rolling seven-day summary |
+| `monthly` | `false` | Send a month-to-date summary |
+| `time` | `08:00` | Daemon-local send time |
+| `weekly_day` | `monday` | Day for the weekly report |
+| `monthly_day` | `1` | Day for the monthly report |
+| `include` | `[events, battery_health, self_tests, energy, uptime]` | Compact row fields to include |
+| `format` | `text` | `text` or `csv`; CSV attaches the power-event rows |
+
+See [Reports](reports.md) for window and aggregation details.
 
 ## Notifications
 

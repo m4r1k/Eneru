@@ -444,6 +444,32 @@ class TestCrossFieldValidation:
         assert any("reports.include must be a list" in e for e in errs), errs
 
     @pytest.mark.unit
+    def test_self_test_failure_shutdown_delay_parses_and_defaults(self):
+        default = _parse("ups:\n  name: U@h\n")
+        configured = _parse(
+            "ups:\n  name: U@h\ntriggers:\n"
+            "  self_test_failure_shutdown_delay: 45\n")
+        assert default.triggers.self_test_failure_shutdown_delay == 30
+        assert configured.triggers.self_test_failure_shutdown_delay == 45
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("value", [-1, 1.5, True, "bad"])
+    def test_self_test_failure_shutdown_delay_must_be_nonnegative_int(
+        self, value,
+    ):
+        raw_value = repr(value).lower() if isinstance(value, bool) else value
+        _, errs = _validate(
+            "ups:\n  name: U@h\ntriggers:\n"
+            f"  self_test_failure_shutdown_delay: {raw_value}\n")
+        assert any("self_test_failure_shutdown_delay" in e for e in errs), errs
+
+    @pytest.mark.unit
+    def test_reports_include_accepts_self_tests(self):
+        _, errs = _validate(
+            "ups:\n  name: U@h\nreports:\n  include: [self_tests]\n")
+        assert not any("reports.include" in e for e in errs), errs
+
+    @pytest.mark.unit
     def test_reports_include_unknown_entry_is_error(self):
         _, errs = _validate(
             "ups:\n  name: U@h\nreports:\n  include:\n    - events\n    - bogus\n")

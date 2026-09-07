@@ -324,6 +324,11 @@ def _open_store_stub():
 
         def set_meta(self, key, value):
             self.meta[key] = value
+            return True
+
+        def set_meta_many(self, values):
+            self.meta.update(values)
+            return True
 
         def get_meta(self, key):
             return self.meta.get(key)
@@ -346,10 +351,15 @@ def test_run_self_test_issues_and_persists_monitor_handoff(minimal_config, monke
     monkeypatch.setattr(apimod.time, "time", lambda: 1000.0)
     monkeypatch.setattr(apimod.selftest, "list_supported_commands",
                         lambda *a, **k: ["test.battery.start"])
-    monkeypatch.setattr(apimod.selftest, "issue_self_test",
-                        lambda *a, **k: {"ok": True, "test_id": 5, "error": ""})
     logs = []
     store = _open_store_stub()
+
+    def issue(*args, **kwargs):
+        assert kwargs["result_poll_after"] == 60
+        apimod.selftest.persist_pending_self_test(store, 5, 1060)
+        return {"ok": True, "test_id": 5, "error": ""}
+
+    monkeypatch.setattr(apimod.selftest, "issue_self_test", issue)
     h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/self-test",
                          method_body=b"{}", logs=logs)
     h.api_source = _src_with_store("UPS@h", store=store)
@@ -440,9 +450,10 @@ def test_run_self_test_permitted_by_self_test_flag_without_nut_control(
     monkeypatch.setattr(apimod.selftest, "list_supported_commands",
                         lambda *a, **k: ["test.battery.start"])
 
-    def _issue(ups, cmd, nc, store, source="api"):
+    def _issue(ups, cmd, nc, store, source="api", **kwargs):
         captured["allowed"] = list(nc.allowed_commands)
         captured["source"] = source
+        captured["poll_after"] = kwargs["result_poll_after"]
         return {"ok": True, "test_id": 9, "error": ""}
     monkeypatch.setattr(apimod.selftest, "issue_self_test", _issue)
     h = _control_handler(minimal_config, path="/api/v1/ups/UPS@h/self-test",
@@ -453,6 +464,7 @@ def test_run_self_test_permitted_by_self_test_flag_without_nut_control(
     assert status == 200 and payload["testId"] == 9
     assert "test.battery.start" in captured["allowed"]   # auto-allowed
     assert captured["source"] == "api"
+    assert captured["poll_after"] == 60
 
 
 @pytest.mark.unit
