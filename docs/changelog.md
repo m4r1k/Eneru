@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Debian 11 retired from CI.** Package and pip installation tests no longer
+  run on Debian 11 (Bullseye), which reached the end of LTS support.
+
 ## [6.1.9] - 2026-07-13
 
 ### Fixed
