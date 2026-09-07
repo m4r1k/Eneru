@@ -3158,10 +3158,16 @@ class TestNotificationSQLiteErrorPaths:
         try:
             assert s.set_meta_many({"a": "1"}) is False
             assert s.latest_battery_health() is None
+            assert s.get_self_test(1) is None
+            assert s.query_self_tests(0, 10) == []
             assert s.latest_power_event_before(10) is None
+            assert s.repair_self_test_power_events() is None
             assert any("set_meta_many failed" in m for m in logged)
             assert any("latest_battery_health failed" in m for m in logged)
+            assert any("get_self_test failed" in m for m in logged)
+            assert any("query_self_tests failed" in m for m in logged)
             assert any("latest_power_event_before failed" in m for m in logged)
+            assert any("repair_self_test_power_events failed" in m for m in logged)
         finally:
             s._conn = real
             s.close()
