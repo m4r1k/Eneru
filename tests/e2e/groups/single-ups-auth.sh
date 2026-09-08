@@ -715,7 +715,17 @@ done
 
 # The failed test does not shut anything down on line power. A later genuine OB
 # does, after the configured three-second delay, through the normal trigger path.
+RESTORE_BASE=$(sqlite3 "$ST_DB" "SELECT COALESCE(MAX(id),0) FROM events;")
 apply_scenario online-charging
+for _ in $(seq 1 30); do
+  restored=$(sqlite3 "$ST_DB" \
+    "SELECT COUNT(*) FROM events WHERE id > $RESTORE_BASE \
+     AND event_type='POWER_RESTORED';")
+  [ "$restored" = "1" ] && break
+  sleep 0.5
+done
+[ "${restored:-0}" = "1" ] \
+  || { echo "FAIL: UPS did not return online before later outage"; cat /tmp/test57-daemon.log; exit 1; }
 OUTAGE_BASE=$(sqlite3 "$ST_DB" "SELECT COALESCE(MAX(id),0) FROM events;")
 apply_scenario on-battery
 for _ in $(seq 1 40); do
@@ -730,9 +740,11 @@ done
   || { echo "FAIL: failed-test latch did not trigger later outage shutdown"; cat /tmp/test57-daemon.log; exit 1; }
 trigger_delay=$(sqlite3 "$ST_DB" \
   "SELECT shutdown.ts - outage.ts FROM events outage JOIN events shutdown \
-   WHERE outage.id > $OUTAGE_BASE AND outage.event_type='ON_BATTERY' \
-     AND shutdown.event_type='EMERGENCY_SHUTDOWN_INITIATED' \
-   ORDER BY shutdown.id LIMIT 1;")
+    WHERE outage.id > $OUTAGE_BASE AND outage.event_type='ON_BATTERY' \
+      AND shutdown.id > $OUTAGE_BASE \
+      AND shutdown.id > outage.id \
+      AND shutdown.event_type='EMERGENCY_SHUTDOWN_INITIATED' \
+    ORDER BY shutdown.id LIMIT 1;")
 [ -n "$trigger_delay" ] && [ "$trigger_delay" -ge 3 ] \
   || { echo "FAIL: shutdown delay was '${trigger_delay:-missing}', expected >=3s"; exit 1; }
 echo "PASS: self-test notifications, outage attribution, and delayed failure trigger verified"
