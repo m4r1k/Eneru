@@ -59,7 +59,7 @@ reports:
   enabled: true
   daily: true
   time: "00:00"
-  include: [events, self_tests, uptime]
+  include: [events, self_tests, energy, uptime]
   format: text
 
 local_shutdown:

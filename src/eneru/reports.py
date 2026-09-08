@@ -18,7 +18,7 @@ import io
 import time
 from datetime import datetime, timedelta
 from statistics import median
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from eneru import energy as energy_mod
 from eneru.scheduler import Schedule
@@ -83,6 +83,8 @@ def _fmt_duration(seconds: int) -> str:
 
 
 def _period_label(sources: Dict) -> str:
+    if "period_start" not in sources or "period_end" not in sources:
+        return ""
     start = datetime.fromtimestamp(sources.get("period_start", 0))
     end = datetime.fromtimestamp(sources.get("period_end", 0))
     if start.date() == end.date():
@@ -200,7 +202,11 @@ def build_report(period: str, sources: Dict, *, include: List[str],
     self_tests / energy / uptime).
     """
     ups = sources.get("ups_label") or sources.get("ups_name", "UPS")
-    lines = [f"📊 {period.title()} report · {_period_label(sources)}", ""]
+    title = f"📊 {period.title()} report"
+    period_text = _period_label(sources)
+    if period_text:
+        title += f" · {period_text}"
+    lines = [title, ""]
     lines += _summary_lines(sources, include)
     if ("energy" in include
             and (sources.get("energy") or {}).get("estimated")):
@@ -221,7 +227,10 @@ def build_aggregate_report(period: str, per_ups_sources: List[Dict], *,
     """
     n = len(per_ups_sources)
     period_text = _period_label(per_ups_sources[0]) if per_ups_sources else ""
-    lines = [f"📊 {period.title()} report · {period_text} · {n} UPS", ""]
+    title = f"📊 {period.title()} report"
+    if period_text:
+        title += f" · {period_text}"
+    lines = [f"{title} · {n} UPS", ""]
     width = max((len(str(s.get("ups_label") or s.get("ups_name") or "UPS"))
                  for s in per_ups_sources), default=0)
     for sources in per_ups_sources:
@@ -268,9 +277,28 @@ def _period_start(period: str, now: float) -> int:
     return int(now - PERIOD_WINDOW_SECONDS.get(period, 24 * 3600))
 
 
+def _report_storage_tier(
+        store, start: int, now: float, poll_interval: Optional[float],
+        sample_dts: List[int]) -> Tuple[str, Optional[float]]:
+    """Choose a retained tier and its expected sampling cadence."""
+    age = max(1, int(now) - start)
+    five_minute_days = min(
+        30, getattr(store, "retention_5min_days", 30))
+    raw_hours = min(24, getattr(store, "retention_raw_hours", 24))
+    if age > five_minute_days * 86400:
+        return "agg_hourly", 3600.0
+    if age > raw_hours * 3600:
+        return "agg_5min", 300.0
+    try:
+        return "samples", max(1.0, float(poll_interval))
+    except (TypeError, ValueError):
+        return "samples", median(sample_dts) if sample_dts else None
+
+
 def gather_report_sources(store, ups_name: str, energy_config, *,
                           period: str, now: float,
-                          ups_label: Optional[str] = None) -> Dict:
+                          ups_label: Optional[str] = None,
+                          poll_interval: Optional[float] = None) -> Dict:
     """Fetch the report sources for one UPS/store over the period window."""
     start = _period_start(period, now)
     sources: Dict = {"ups_name": ups_name, "ups_label": ups_label or ups_name}
@@ -332,15 +360,18 @@ def gather_report_sources(store, ups_name: str, energy_config, *,
     # Energy follows the report window. A weekly digest therefore reports the
     # week it summarizes rather than unrelated today/month status figures.
     if store and getattr(energy_config, "enabled", True):
-        samples = store.power_samples(event_start, event_end)
+        tier, expected_interval = _report_storage_tier(
+            store, event_start, now, poll_interval, [])
+        samples = store.power_samples(
+            event_start, event_end, prefer_tier=tier)
         energy_boundary = event_end + 1 if period == "daily" else event_end
-        sample_dts = [
-            nxt[0] - current[0]
-            for current, nxt in zip(samples, samples[1:])
-            if nxt[0] - current[0] > 0
-        ]
-        expected_interval = median(sample_dts) if sample_dts else None
-        if (expected_interval is not None
+        sample_dts = [nxt[0] - current[0]
+                      for current, nxt in zip(samples, samples[1:])
+                      if nxt[0] - current[0] > 0]
+        if tier == "samples" and expected_interval is None:
+            _, expected_interval = _report_storage_tier(
+                store, event_start, now, poll_interval, sample_dts)
+        if (sample_dts
                 and samples[-1][0] < energy_boundary):
             # integrate_kwh consumes intervals between samples. Add the window
             # boundary so the final retained bucket contributes up to the end.
@@ -408,7 +439,8 @@ def maybe_send_due_reports(config, store, ups_name: str,
         # instead of silently burning the whole report period.
         sources = gather_report_sources(
             store, ups_name, config.energy, period=period, now=now,
-            ups_label=config.ups.label)
+            ups_label=config.ups.label,
+            poll_interval=config.ups.check_interval)
         content = build_report(period, sources, include=reports.include,
                                fmt=reports.format)
         # F-028: stamp the dedup key BEFORE enqueuing, and only send if the stamp
@@ -488,10 +520,16 @@ def maybe_send_due_reports_multi(config, units, meta_store,
             continue
         # F-081: gather/render first so a transient source failure does not burn
         # the report period before there is a message ready to enqueue.
+        poll_intervals = {
+            group.ups.name: group.ups.check_interval
+            for group in config.ups_groups
+        }
         per_ups = [
-            gather_report_sources(store, ups_name, energy_cfg,
-                                  period=period, now=now,
-                                  ups_label=ups_label)
+            gather_report_sources(
+                store, ups_name, energy_cfg, period=period, now=now,
+                ups_label=ups_label,
+                poll_interval=poll_intervals.get(ups_name),
+            )
             for ups_name, ups_label, store, energy_cfg in units
         ]
         content = build_aggregate_report(period, per_ups,

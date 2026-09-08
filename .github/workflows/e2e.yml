@@ -157,8 +157,9 @@ jobs:
         if: matrix.group == 'stats' || matrix.group == 'single-ups-auth'
         run: |
           if [ "${{ matrix.group }}" = "stats" ]; then
-            grep -q "PASS (35d): compact report uses display_name" tests/e2e/groups/stats.sh
+            grep -q "PASS (35d): compact report uses display_name, energy tier" tests/e2e/groups/stats.sh
             grep -q "category='report'" tests/e2e/groups/stats.sh
+            grep -q "E2E Restart UPS  0.008 kWh" tests/e2e/groups/stats.sh
           else
             grep -q "PASS (55a): dashboard labels are readable while API status stays raw" tests/e2e/groups/single-ups-auth.sh
             grep -q "self-test-running-on-battery" tests/e2e/groups/single-ups-auth.sh

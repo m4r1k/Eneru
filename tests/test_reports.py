@@ -69,6 +69,7 @@ class TestBuildReport:
         body = reports.build_report(
             "weekly", sources,
             include=["energy", "battery_health", "events"])["body"]
+        assert "1970" not in body
         assert "unknown" in body          # energy unknown
         assert "🔋 unknown" in body
         assert "no outages" in body
@@ -153,6 +154,29 @@ class TestPeriodStart:
         start = reports._period_start("weekly", now)
         assert start == int(now - 7 * 86400)
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize(("age", "expected"), [
+        (24 * 3600, ("samples", 7.0)),
+        (24 * 3600 + 1, ("agg_5min", 300.0)),
+        (30 * 86400, ("agg_5min", 300.0)),
+        (30 * 86400 + 1, ("agg_hourly", 3600.0)),
+    ])
+    def test_report_storage_tier_matches_retention(self, store, age, expected):
+        now = 2_000_000_000
+        assert reports._report_storage_tier(
+            store, now - age, now, 7, [9999]) == expected
+
+    @pytest.mark.unit
+    def test_increased_retention_does_not_assume_deleted_rows_return(self, store):
+        now = 2_000_000_000
+        store.retention_raw_hours = 48
+        store.retention_5min_days = 60
+
+        assert reports._report_storage_tier(
+            store, now - 32 * 3600, now, 7, []) == ("agg_5min", 300.0)
+        assert reports._report_storage_tier(
+            store, now - 31 * 86400, now, 7, []) == ("agg_hourly", 3600.0)
+
 
 class TestGather:
     @pytest.mark.unit
@@ -213,8 +237,8 @@ class TestGather:
     @pytest.mark.unit
     def test_energy_and_self_tests_follow_report_window(self, store):
         now = 1_800_000_000
-        store.power_samples = lambda start, end: [
-            (now - 3600, 100.0, None, None),
+        store.power_samples = lambda start, end, **kwargs: [
+            (now - 300, 100.0, None, None),
             (now, 100.0, None, None),
         ]
         store.record_self_test(
@@ -228,8 +252,8 @@ class TestGather:
             ups_label="Lab")
 
         assert sources["ups_label"] == "Lab"
-        assert sources["energy"]["periodKwh"] == pytest.approx(0.1)
-        assert sources["energy"]["periodCost"] == pytest.approx(0.025)
+        assert sources["energy"]["periodKwh"] == pytest.approx(1 / 120)
+        assert sources["energy"]["periodCost"] == pytest.approx(1 / 480)
         assert [row["result_enum"] for row in sources["self_tests"]] == [
             "passed"]
 
@@ -265,7 +289,7 @@ class TestGather:
     @pytest.mark.unit
     def test_energy_includes_final_bucket_to_window_boundary(self, store):
         now = 2_000_000_000
-        store.power_samples = lambda start, end: [
+        store.power_samples = lambda start, end, **kwargs: [
             (end - 600, 100.0, None, None),
             (end - 300, 100.0, None, None),
         ]
@@ -276,20 +300,59 @@ class TestGather:
 
         assert sources["energy"]["periodKwh"] == pytest.approx(1 / 60)
 
-        store.power_samples = lambda start, end: [
+        store.power_samples = lambda start, end, **kwargs: [
             (end - 600, 100.0, None, None),
         ]
         sources = reports.gather_report_sources(
             store, "U@h", cfg.energy, period="weekly", now=now)
         assert sources["energy"]["periodKwh"] is None
 
-        store.power_samples = lambda start, end: [
+        store.power_samples = lambda start, end, **kwargs: [
             (start, 100.0, None, None),
             (start + 1, 100.0, None, None),
         ]
         sources = reports.gather_report_sources(
             store, "U@h", cfg.energy, period="weekly", now=now)
         assert sources["energy"]["periodKwh"] == pytest.approx(1 / 36000)
+        assert sources["energy"]["partial"] is True
+
+    @pytest.mark.unit
+    def test_sparse_raw_samples_use_configured_poll_interval(self, store):
+        now = datetime(2026, 6, 29, 8, 0).timestamp()
+        store.power_samples = lambda start, end, **kwargs: [
+            (start, 100.0, None, None),
+            (start + 3600, 100.0, None, None),
+        ]
+        cfg = _config("ups:\n  name: U@h\n  check_interval: 1\n")
+
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="daily", now=now,
+            poll_interval=cfg.ups.check_interval)
+
+        assert sources["energy"]["periodKwh"] is None
+        assert sources["energy"]["partial"] is True
+
+    @pytest.mark.unit
+    def test_daily_energy_uses_retained_five_minute_tier(self, store,
+                                                         monkeypatch):
+        now = datetime(2026, 6, 29, 8, 0).timestamp()
+        start = int(datetime(2026, 6, 28).timestamp())
+        with store._conn:
+            store._conn.executemany(
+                "INSERT INTO samples (ts, real_power) VALUES (?, ?)",
+                [(start, 100.0), (start + 300, 100.0)],
+            )
+        store.aggregate()
+        monkeypatch.setattr("eneru.stats.time.time", lambda: now)
+        store.purge()
+        cfg = _config("ups:\n  name: U@h\n  check_interval: 1\n")
+
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="daily", now=now,
+            poll_interval=cfg.ups.check_interval)
+
+        assert store.power_samples(start, int(now), prefer_tier="samples") == []
+        assert sources["energy"]["periodKwh"] == pytest.approx(1 / 120)
         assert sources["energy"]["partial"] is True
 
     @pytest.mark.unit
@@ -520,6 +583,7 @@ class TestAggregate:
         s2 = {"ups_name": "B@h", "ups_label": "Beta Shelf", "events": [],
               "uptime": {"daemon_starts": 0, "since": None}}
         content = reports.build_aggregate_report("daily", [s1, s2], include=["uptime"])
+        assert "1970" not in content["body"]
         assert content["body"].count("Alpha Rack") == 1
         assert content["body"].count("Beta Shelf") == 1
         assert "A@h" not in content["body"] and "B@h" not in content["body"]

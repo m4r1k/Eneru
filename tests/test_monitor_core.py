@@ -5216,6 +5216,7 @@ class TestUpscCommandSerialization:
 
         monitor = make_monitor(tmp_path)
         monitor._poll_target = "autodiscovered@localhost"
+        attempted = threading.Event()
         entered = threading.Event()
         finished = threading.Event()
 
@@ -5226,6 +5227,7 @@ class TestUpscCommandSerialization:
         monkeypatch.setattr("eneru.monitor.run_command", run_command)
 
         def poll():
+            attempted.set()
             monitor._run_upsc([], full_poll=True)
             finished.set()
 
@@ -5233,6 +5235,7 @@ class TestUpscCommandSerialization:
         with lock:
             thread = threading.Thread(target=poll)
             thread.start()
+            assert attempted.wait(1)
             assert entered.wait(0.05) is False
         thread.join(timeout=1)
 
