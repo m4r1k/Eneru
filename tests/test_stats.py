@@ -3387,6 +3387,25 @@ class TestSelfTestEventRepair:
             store.close()
 
     @pytest.mark.unit
+    def test_aborted_command_cannot_relabel_real_outage(
+        self, tmp_path: Path,
+    ) -> None:
+        store = StatsStore(tmp_path / "aborted-repair.db")
+        store.open()
+        try:
+            store.log_event("ON_BATTERY", ts=1000)
+            store.log_event("POWER_RESTORED", ts=1009)
+            store.record_self_test(
+                "test.battery.start", "scheduler", started_ts=1005,
+                result_enum="aborted")
+
+            assert store.repair_self_test_power_events() == 0
+            assert [row[1] for row in store.query_events(0, 2000)] == [
+                "ON_BATTERY", "POWER_RESTORED"]
+        finally:
+            store.close()
+
+    @pytest.mark.unit
     def test_atomic_meta_and_report_helpers(self, tmp_path: Path) -> None:
         store = StatsStore(tmp_path / "helpers.db")
         store.open()

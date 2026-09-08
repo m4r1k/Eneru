@@ -1980,6 +1980,7 @@ class StatsStore:
                 tests = conn.execute(
                     "SELECT started_ts FROM self_tests "
                     "WHERE source != 'device' AND command != '' "
+                    "AND result_enum != 'aborted' "
                     "ORDER BY started_ts"
                 ).fetchall()
                 test_times = [int(row[0]) for row in tests]
