@@ -2,6 +2,12 @@
 
 Eneru sends notifications through [Apprise](https://github.com/caronc/apprise), so one config format covers Discord, Slack, Telegram, ntfy, Pushover, email, Matrix, Gotify, Home Assistant, and many more services.
 
+Power notifications use plain-language state and event names. A restored UPS
+reported by NUT as `OL CHRG`, for example, is described as **Utility power ·
+Battery charging**. This affects only the outgoing message. Logs and SQLite
+events keep the raw NUT status and event identifier, the terminal UI is
+unchanged, and vendor-specific status tokens remain visible as custom states.
+
 Notifications are not on the shutdown critical path. Eneru queues the message and continues shutting things down.
 
 ## Basic config

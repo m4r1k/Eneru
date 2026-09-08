@@ -351,6 +351,115 @@ def test_dashboard_serves_tabbed_shell(minimal_config):
 
 @pytest.mark.unit
 @pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_humanizes_nut_status_and_event_labels(minimal_config):
+    """Friendly labels must retain custom tokens and raw matching semantics."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    helpers = js[
+        js.index("function nutStatusTokens"):
+        js.index("// ----- theme (light / dark / system)")
+    ]
+    status = js[js.index("function statusClass"):js.index("// ----- rendering -----")]
+    health = js[js.index("function upsHealthy"):js.index("function groupHealthyCount")]
+    filters = js[
+        js.index("function eventTypeFilterLabels"):
+        js.index("function updateEventTypeFilter")
+    ]
+    script = helpers + status + health + filters + textwrap.dedent("""
+        process.stdout.write(JSON.stringify({
+          statuses: {
+            online: humanNutStatus("OL"),
+            charging: humanNutStatus("OL CHRG"),
+            batteryLow: humanNutStatus("OB DISCHRG LB"),
+            shutdown: humanNutStatus("OL OB FSD LB"),
+            alarm: humanNutStatus("OL ALARM"),
+            replace: humanNutStatus("OL HB RB"),
+            custom: humanNutStatus("OL ECO VENDOR_MODE"),
+            customOnly: humanNutStatus("ECO"),
+            highBattery: humanNutStatus("OL HB"),
+            waiting: humanNutStatus("WAIT"),
+            staleOnline: humanNutStatus("OL WAIT"),
+            staleBattery: humanNutStatus("OB WAIT"),
+            blank: humanNutStatus(""),
+          },
+          events: {
+            outage: humanEventType("ON_BATTERY"),
+            restored: humanEventType("POWER_RESTORED"),
+            legacyNut: humanEventType("OB LB"),
+            customNut: humanEventType("OB ECO"),
+            custom: humanEventType("VENDOR_WIDGET_ALERT"),
+            overloadEvent: humanEventType("OVERLOAD_ACTIVE"),
+            overloadStatus: humanEventType("OVER"),
+            detail: humanEventDetail(
+              "Battery: 95% (Status: OL CHRG ECO), Input: 230V"),
+          },
+          customTokenSafety: {
+            className: statusClass("NOTOB"),
+            healthy: upsHealthy({status: "NOTOB", connectionState: "OK"}),
+            alarmClass: statusClass("OL ALARM"),
+            waitingClass: statusClass("OL WAIT"),
+            offHealthy: upsHealthy({status: "OFF", connectionState: "OK"}),
+            waitingHealthy: upsHealthy({status: "OL WAIT", connectionState: "OK"}),
+          },
+          filterLabels: Object.fromEntries(eventTypeFilterLabels([
+            "OB LB", "LB OB", "ON_BATTERY",
+          ])),
+        }));
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    assert json.loads(result.stdout) == {
+        "statuses": {
+            "online": "Utility power",
+            "charging": "Utility power · Battery charging",
+            "batteryLow": (
+                "Battery low · Running on battery · Battery discharging"
+            ),
+            "shutdown": "Shutdown in progress · Battery low",
+            "alarm": "UPS alarm active · Utility power",
+            "replace": (
+                "Battery replacement needed · Utility power · "
+                "Battery charge sufficient"
+            ),
+            "custom": "Utility power · Custom states: ECO, VENDOR_MODE",
+            "customOnly": "Custom state: ECO",
+            "highBattery": "Utility power · Battery charge sufficient",
+            "waiting": "Waiting for UPS data",
+            "staleOnline": "Waiting for UPS data",
+            "staleBattery": "Running on battery",
+            "blank": "Status unknown",
+        },
+        "events": {
+            "outage": "Power failure",
+            "restored": "Power restored",
+            "legacyNut": "Battery low · Running on battery",
+            "customNut": "Running on battery · Custom state: ECO",
+            "custom": "Vendor widget alert",
+            "overloadEvent": "UPS overload detected",
+            "overloadStatus": "UPS overloaded",
+            "detail": (
+                "Battery: 95% (Status: Utility power · Battery charging · "
+                "Custom state: ECO), Input: 230V"
+            ),
+        },
+        "customTokenSafety": {
+            "className": "warn",
+            "healthy": False,
+            "alarmClass": "crit",
+            "waitingClass": "warn",
+            "offHealthy": False,
+            "waitingHealthy": False,
+        },
+        "filterLabels": {
+            "OB LB": "Battery low · Running on battery (OB LB)",
+            "LB OB": "Battery low · Running on battery (LB OB)",
+            "ON_BATTERY": "Power failure",
+        },
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
 def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
     """Fleet mode must describe the fleet instead of promoting one UPS."""
     html = _handler(minimal_config, path="/")._serve_static("/")[1].decode("utf-8")
@@ -363,11 +472,15 @@ def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
     assert "hero.appendChild(fleetOverview(view))" in js
     assert "heroCard(primary)" not in js
 
+    helpers = js[
+        js.index("function nutStatusTokens"):
+        js.index("// ----- theme (light / dark / system)")
+    ]
     status = js[js.index("function statusClass"):js.index("// ----- rendering -----")]
     health = js[js.index("function upsHealthy"):js.index("function groupHealthyCount")]
     start = js.index("function fleetSnapshot")
     snapshot = js[start:js.index("function fleetOverview", start)]
-    script = status + health + snapshot + textwrap.dedent("""
+    script = helpers + status + health + snapshot + textwrap.dedent("""
         const state = fleetSnapshot([
           {name: "rack", status: "OL", connectionState: "OK"},
           {name: "desk", status: "OB DISCHRG", connectionState: "OK"},

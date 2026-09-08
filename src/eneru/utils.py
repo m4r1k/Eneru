@@ -10,6 +10,45 @@ from typing import Any, Dict, List, Optional, Tuple
 CONTAINER_DEFAULT_KNOWN_HOSTS_FILE = "/var/lib/eneru/ssh/known_hosts"
 KNOWN_HOSTS_ENV = "ENERU_SSH_KNOWN_HOSTS_FILE"
 
+NUT_STATUS_LABELS = {
+    "FSD": "Shutdown in progress",
+    "OFF": "UPS output off",
+    "WAIT": "Waiting for UPS data",
+    "OB": "Running on battery",
+    "OL": "Utility power",
+    "LB": "Battery low",
+    "HB": "Battery charge sufficient",
+    "RB": "Battery replacement needed",
+    "BYPASS": "Bypass active",
+    "OVER": "UPS overloaded",
+    "ALARM": "UPS alarm active",
+    "CAL": "Battery calibration in progress",
+    "CHRG": "Battery charging",
+    "DISCHRG": "Battery discharging",
+    "BOOST": "Voltage boost active",
+    "TRIM": "Voltage trim active",
+}
+
+EVENT_TYPE_LABELS = {
+    "ON_BATTERY": "Power failure",
+    "POWER_RESTORED": "Power restored",
+    "SELF_TEST_ON_BATTERY": "Self-test running on battery",
+    "SELF_TEST_POWER_RESTORED": "Self-test power restored",
+    "BROWNOUT_DETECTED": "Low input voltage",
+    "OVER_VOLTAGE_DETECTED": "High input voltage",
+    "VOLTAGE_NORMALIZED": "Input voltage normal",
+    "AVR_BOOST_ACTIVE": "Voltage boost started",
+    "AVR_TRIM_ACTIVE": "Voltage trim started",
+    "AVR_INACTIVE": "Automatic voltage regulation inactive",
+    "BYPASS_MODE_ACTIVE": "UPS entered bypass mode",
+    "BYPASS_MODE_INACTIVE": "UPS left bypass mode",
+    "OVERLOAD_ACTIVE": "UPS overload detected",
+    "OVERLOAD_RESOLVED": "UPS overload resolved",
+    "CONNECTION_LOST": "UPS connection lost",
+    "CONNECTION_RESTORED": "UPS connection restored",
+    "BATTERY_LOW": "Low battery detected",
+}
+
 
 def redact_apprise_url(url: Any) -> str:
     """Return an Apprise/notification URL with credentials stripped to scheme.
@@ -195,6 +234,63 @@ def status_has_token(status: Any, token: str) -> bool:
     handlers and health/voltage.py so every status check uses the same rule.
     """
     return token in str(status or "").split()
+
+
+def humanize_nut_status(status: Any) -> str:
+    """Return a safety-first English label without dropping vendor tokens."""
+    tokens = str(status or "").upper().strip().split()
+    if not tokens:
+        return "Status unknown"
+
+    parts = []
+    primary = next(
+        (token for token in ("FSD", "OFF", "OB", "WAIT", "OL")
+         if token in tokens),
+        None,
+    )
+    if primary in ("FSD", "OFF"):
+        parts.append(NUT_STATUS_LABELS[primary])
+    for token in (
+        "ALARM", "OVER", "LB", "RB", "BYPASS",
+    ):
+        if token in tokens:
+            parts.append(NUT_STATUS_LABELS[token])
+    if primary and primary not in ("FSD", "OFF"):
+        parts.append(NUT_STATUS_LABELS[primary])
+    for token in ("DISCHRG", "CAL", "CHRG", "BOOST", "TRIM", "HB"):
+        if token in tokens:
+            parts.append(NUT_STATUS_LABELS[token])
+
+    unknown = list(dict.fromkeys(
+        token for token in tokens if token not in NUT_STATUS_LABELS
+    ))
+    if unknown:
+        label = "Custom state: " if len(unknown) == 1 else "Custom states: "
+        parts.append(label + ", ".join(unknown))
+    return " · ".join(parts)
+
+
+def humanize_event_type(event_type: Any) -> str:
+    """Return a notification label while preserving the caller's raw value."""
+    raw = str(event_type or "").strip()
+    if not raw:
+        return "Event"
+    upper = raw.upper()
+    tokens = upper.split()
+    if any(token in NUT_STATUS_LABELS for token in tokens):
+        return humanize_nut_status(raw)
+    if upper in EVENT_TYPE_LABELS:
+        return EVENT_TYPE_LABELS[upper]
+
+    words = [word for word in upper.replace("-", "_").split("_") if word]
+    rendered = []
+    for index, word in enumerate(words):
+        if word in ("UPS", "API", "AVR"):
+            rendered.append(word)
+        else:
+            lower = word.lower()
+            rendered.append(lower.capitalize() if index == 0 else lower)
+    return " ".join(rendered)
 
 
 def format_seconds(seconds: Any) -> str:

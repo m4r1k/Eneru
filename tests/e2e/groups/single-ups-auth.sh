@@ -383,8 +383,69 @@ grep -q "<title>Eneru</title>" /tmp/test55-index.html \
 # v6.1: the dashboard is a tabbed SPA — the tab nav must be served.
 grep -q 'role="tablist"' /tmp/test55-index.html \
   || { echo "FAIL: dashboard tab nav not served"; cat /tmp/test55-index.html; exit 1; }
-curl -fsS http://127.0.0.1:9100/app.js   >/dev/null || { echo "FAIL: app.js not served"; exit 1; }
+curl -fsS http://127.0.0.1:9100/app.js > /tmp/test55-app.js \
+  || { echo "FAIL: app.js not served"; exit 1; }
 curl -fsS http://127.0.0.1:9100/style.css >/dev/null || { echo "FAIL: style.css not served"; exit 1; }
+
+# User-facing labels are translated in the packaged browser asset, while the
+# API keeps the exact NUT value for integrations and troubleshooting.
+node - /tmp/test55-app.js <<'NODE' \
+  || { echo "FAIL: deployed dashboard formatters returned unexpected labels"; exit 1; }
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[2], "utf8");
+const helpers = source.slice(
+  source.indexOf("function nutStatusTokens"),
+  source.indexOf("// ----- theme (light / dark / system)"),
+);
+const statusClass = source.slice(
+  source.indexOf("function statusClass"),
+  source.indexOf("// ----- rendering -----"),
+);
+const badge = source.slice(
+  source.indexOf("function eventMarkerClass"),
+  source.indexOf("// Event tiers"),
+);
+const domStub = `
+  function el(tag, attrs, children) { return {tag, attrs, children}; }
+  function icon(name) { return {name}; }
+`;
+const actual = vm.runInNewContext(helpers + statusClass + domStub + badge + `;({
+  normal: humanNutStatus("OL CHRG"),
+  critical: humanNutStatus("OB DISCHRG LB"),
+  waiting: humanNutStatus("OL WAIT"),
+  waitingOnBattery: humanNutStatus("OB WAIT"),
+  custom: humanNutStatus("OL ECO"),
+  event: humanEventType("ON_BATTERY"),
+  eventBadge: eventTypeBadge({eventType: "ON_BATTERY"}).children[1].attrs.text,
+  alarmClass: statusClass("OL ALARM"),
+  waitingClass: statusClass("OL WAIT"),
+  customClass: statusClass("NOTOB"),
+})`);
+const expected = {
+  normal: "Utility power · Battery charging",
+  critical: "Battery low · Running on battery · Battery discharging",
+  waiting: "Waiting for UPS data",
+  waitingOnBattery: "Running on battery",
+  custom: "Utility power · Custom state: ECO",
+  event: "Power failure",
+  eventBadge: "Power failure",
+  alarmClass: "crit",
+  waitingClass: "warn",
+  customClass: "warn",
+};
+if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+  console.error({actual, expected});
+  process.exit(1);
+}
+NODE
+grep -q 'text: humanNutStatus(u.status)' /tmp/test55-app.js \
+  || { echo "FAIL: dashboard status formatter is not used for rendered labels"; exit 1; }
+API_STATUS=$(curl -fsS http://127.0.0.1:9100/api/v1/ups \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["ups"][0]["status"])')
+[ "$API_STATUS" = "OL CHRG" ] \
+  || { echo "FAIL: API status changed from raw NUT value: '$API_STATUS'"; exit 1; }
+echo "PASS (55a): dashboard labels are readable while API status stays raw"
 
 # Content-Type + CSP on the HTML response.
 HDRS=$(curl -fsS -D - -o /dev/null http://127.0.0.1:9100/)

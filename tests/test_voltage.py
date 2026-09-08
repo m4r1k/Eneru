@@ -298,7 +298,7 @@ class TestVoltageHysteresis:
         h._check_voltage_issues("OL", "260")
         assert h.state.voltage_state == "HIGH"
         # Notification dispatched (via _send_notification, not _log_power_event).
-        assert any("VOLTAGE ISSUE" in body for body, _ in h.notifications)
+        assert any("HIGH INPUT VOLTAGE" in body for body, _ in h.notifications)
 
     @pytest.mark.unit
     def test_hysteresis_short_flap_suppresses_notification(self):
@@ -341,7 +341,7 @@ class TestVoltageHysteresis:
         h._check_voltage_issues("OL", "260")
         assert h.notifications, "expected the deferred notification to fire"
         body, _ = h.notifications[0]
-        assert "OVER_VOLTAGE" in body or "VOLTAGE ISSUE" in body
+        assert "HIGH INPUT VOLTAGE" in body
         assert "Persisted" in body  # the dwell-annotation is present
 
         # Same poll cycle running again must NOT double-fire.
@@ -713,7 +713,7 @@ class TestSeverityBypass:
         assert h.state.voltage_pending_severe is True
         assert h.notifications, "severe deviation must notify immediately"
         body, _ = h.notifications[0]
-        assert "BROWNOUT_DETECTED" in body
+        assert "LOW INPUT VOLTAGE" in body
         assert "(severe," in body
 
     @pytest.mark.unit
@@ -757,7 +757,7 @@ class TestSeverityBypass:
         assert h.state.voltage_pending_severe is True
         assert h.notifications
         body, _ = h.notifications[0]
-        assert "OVER_VOLTAGE_DETECTED" in body
+        assert "HIGH INPUT VOLTAGE" in body
         assert "(severe," in body
 
     @pytest.mark.unit
@@ -809,7 +809,7 @@ class TestVoltageSeverityEscalation:
         assert h.state.voltage_pending_voltage == 180.0
         assert h.notifications, "severity escalation must fire immediate notify"
         body, _ = h.notifications[0]
-        assert "BROWNOUT_DETECTED" in body
+        assert "LOW INPUT VOLTAGE" in body
         assert "(severe," in body
         assert "Notifying immediately" in body
 
@@ -846,7 +846,7 @@ class TestVoltageSeverityEscalation:
         assert h.state.voltage_pending_severe is True
         assert h.notifications
         body, _ = h.notifications[0]
-        assert "OVER_VOLTAGE_DETECTED" in body
+        assert "HIGH INPUT VOLTAGE" in body
         assert "(severe," in body
 
 

@@ -4121,7 +4121,7 @@ class TestLogPowerEventDefensiveBranches:
     @pytest.mark.unit
     def test_unmapped_event_uses_generic_info_notification(self, tmp_path):
         """An event name not in the per-event mapping falls through to
-        the generic `⚡  **Event:** ...` body with NOTIFY_INFO."""
+        a human-readable generic body with NOTIFY_INFO."""
         monitor = make_monitor(tmp_path)
         monitor._stats_store = MagicMock()
         monitor._shutdown_flag_path.unlink(missing_ok=True)
@@ -4130,8 +4130,32 @@ class TestLogPowerEventDefensiveBranches:
             monitor._log_power_event("CUSTOM_TELEMETRY", "value=42")
 
         send_kwargs = monitor._notification_worker.send.call_args.kwargs
-        assert "⚡  **Event:** CUSTOM_TELEMETRY" in send_kwargs["body"]
+        assert "⚡  **Event:** Custom telemetry" in send_kwargs["body"]
         assert send_kwargs["category"] == "power_event"
+
+    @pytest.mark.unit
+    def test_notification_details_do_not_change_stored_event(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        monitor._stats_store = store
+        monitor._shutdown_flag_path.unlink(missing_ok=True)
+        raw = "Battery: 95% (Status: OL CHRG), Input: 230V"
+        friendly = (
+            "Battery: 95% (Status: Utility power · Battery charging), "
+            "Input: 230V"
+        )
+
+        with patch("eneru.monitor.run_command", return_value=(0, "", "")):
+            monitor._log_power_event(
+                "POWER_RESTORED", raw, notification_details=friendly,
+            )
+
+        store.log_event.assert_called_once_with(
+            "POWER_RESTORED", raw, notification_sent=True,
+        )
+        body = monitor._notification_worker.send.call_args.kwargs["body"]
+        assert friendly in body
+        assert "OL CHRG" not in body
 
 
 class TestSaveStateDefensive:

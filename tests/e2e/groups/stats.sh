@@ -542,6 +542,24 @@ if [ "$coalesced" -ne 2 ]; then
 fi
 echo "PASS (34a): 2 power_event rows cancelled with reason='coalesced'"
 
+# The notification uses a readable status, but the events row retains NUT's
+# raw OL CHRG value for API, TUI event history, and database consumers.
+friendly_restored=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM notifications \
+   WHERE category='power_event_on_line' \
+     AND body LIKE '%Status: Utility power%Battery charging%' \
+     AND body NOT LIKE '%Status: OL%';")
+raw_restored=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM events \
+   WHERE event_type='POWER_RESTORED' AND detail LIKE '%Status: OL CHRG%';")
+if [ "$friendly_restored" -ne 1 ] || [ "$raw_restored" -ne 1 ]; then
+  echo "FAIL: readable notification/raw event boundary was not preserved"
+  sqlite3 "$DB" "SELECT category, body FROM notifications ORDER BY id;"
+  sqlite3 "$DB" "SELECT event_type, detail FROM events ORDER BY id;"
+  exit 1
+fi
+echo "PASS (34b): notification status is readable and stored event stays raw"
+
 # Summary: 1 pending row whose body says "Brief Power Outage".
 summary=$(sqlite3 "$DB" \
   "SELECT body FROM notifications \
@@ -553,7 +571,7 @@ if [ -z "$summary" ]; then
   cat /tmp/test34.log
   exit 1
 fi
-echo "PASS (34b): coalesced summary row present and pending"
+echo "PASS (34c): coalesced summary row present and pending"
 
 echo ""
 echo "=== Test 34 PASSED: panic-attack coalescing verified ==="

@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Debian 11 retired from CI.** Package and pip installation tests no longer
   run on Debian 11 (Bullseye), which reached the end of LTS support.
+- **Power states now read like normal language where people see them.** The Web
+  dashboard and Apprise notifications translate NUT flags and internal event
+  identifiers into labels such as **Utility power**, **Running on battery**,
+  and **Shutdown in progress**. Combined states keep safety-first ordering, and
+  unknown vendor tokens remain visible as custom states. API responses, SQLite,
+  and logs retain their raw values; the terminal UI is unchanged.
 
 ### Fixed
 

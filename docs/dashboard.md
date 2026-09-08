@@ -53,6 +53,20 @@ Open `http://<host>:9191/` in a browser.
 
 The page polls every 10 seconds.
 
+### Status and event wording
+
+The dashboard translates NUT status flags and Eneru event identifiers into
+plain language. For example, `OL CHRG` appears as **Utility power · Battery
+charging**, `OB LB` appears as **Battery low · Running on battery**, and
+`POWER_RESTORED` appears as **Power restored**. Safety states take priority, so
+`FSD` appears first as **Shutdown in progress** even if the UPS also reports
+`OL` or `OB`.
+
+Vendor-specific status tokens are not hidden. The dashboard appends them as a
+custom state after any recognized status. This translation happens only in the
+browser: the REST API, SQLite history, and logs retain the exact NUT values for
+integrations and troubleshooting. The terminal UI is unchanged.
+
 ## Theme
 
 A **Theme** switcher in the header offers **System / Light / Dark**, persisted in

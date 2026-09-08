@@ -209,6 +209,62 @@ class TestStatusHasToken:
         assert eneru_utils.status_has_token("", "OB") is False
 
 
+class TestHumanizedPowerLabels:
+    """Raw NUT and event values get translated only at presentation time."""
+
+    @pytest.mark.unit
+    def test_nut_status_uses_priority_and_modifiers(self):
+        assert eneru_utils.humanize_nut_status("OL CHRG") == (
+            "Utility power · Battery charging"
+        )
+        assert eneru_utils.humanize_nut_status("OL OB FSD LB") == (
+            "Shutdown in progress · Battery low"
+        )
+        assert eneru_utils.humanize_nut_status("OL ALARM") == (
+            "UPS alarm active · Utility power"
+        )
+        assert eneru_utils.humanize_nut_status("OL HB RB") == (
+            "Battery replacement needed · Utility power · "
+            "Battery charge sufficient"
+        )
+        assert eneru_utils.humanize_nut_status("OL HB") == (
+            "Utility power · Battery charge sufficient"
+        )
+        assert eneru_utils.humanize_nut_status("WAIT") == "Waiting for UPS data"
+        assert eneru_utils.humanize_nut_status("OL WAIT") == (
+            "Waiting for UPS data"
+        )
+        assert eneru_utils.humanize_nut_status("OB WAIT") == (
+            "Running on battery"
+        )
+
+    @pytest.mark.unit
+    def test_nut_status_retains_unknown_vendor_tokens(self):
+        assert eneru_utils.humanize_nut_status("OL ECO VENDOR_MODE ECO") == (
+            "Utility power · Custom states: ECO, VENDOR_MODE"
+        )
+        assert eneru_utils.humanize_nut_status("ECO") == "Custom state: ECO"
+        assert eneru_utils.humanize_nut_status(None) == "Status unknown"
+
+    @pytest.mark.unit
+    def test_event_type_has_known_and_lossless_fallback_labels(self):
+        assert eneru_utils.humanize_event_type("ON_BATTERY") == "Power failure"
+        assert eneru_utils.humanize_event_type("OB LB") == (
+            "Battery low · Running on battery"
+        )
+        assert eneru_utils.humanize_event_type("OB ECO") == (
+            "Running on battery · Custom state: ECO"
+        )
+        assert eneru_utils.humanize_event_type("VENDOR_WIDGET_ALERT") == (
+            "Vendor widget alert"
+        )
+        assert eneru_utils.humanize_event_type("OVERLOAD_ACTIVE") == (
+            "UPS overload detected"
+        )
+        assert eneru_utils.humanize_event_type("OVER") == "UPS overloaded"
+        assert eneru_utils.humanize_event_type("") == "Event"
+
+
 class TestRuntimeSshOptions:
     """Test runtime-dependent SSH defaults."""
 

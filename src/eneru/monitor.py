@@ -48,6 +48,8 @@ from eneru.utils import (
     command_exists,
     is_numeric,
     format_seconds,
+    humanize_event_type,
+    humanize_nut_status,
     status_has_token,
 )
 from eneru.shutdown.vms import VMShutdownMixin
@@ -823,8 +825,14 @@ class UPSGroupMonitor(
             meta_updates=meta_updates,
         )
 
-    def _log_power_event(self, event: str, details: str,
-                         *, suppress_notification: bool = False):
+    def _log_power_event(
+        self,
+        event: str,
+        details: str,
+        *,
+        suppress_notification: bool = False,
+        notification_details: Optional[str] = None,
+    ):
         """Log power events with centralized notification logic.
 
         ``suppress_notification`` (kw-only) lets a caller explicitly
@@ -833,6 +841,10 @@ class UPSGroupMonitor(
         immediately on the state transition and fires the notification
         later (after the dwell timer elapses) via a separate code
         path. Stats persistence and syslog still happen.
+
+        ``notification_details`` replaces raw diagnostic wording only in the
+        outgoing message. Logs, SQLite, API consumers, and TUI event history
+        retain ``details`` unchanged.
 
         ``notifications.suppress`` (config) provides the user-facing
         per-event-type mute. Logs always record the event; only the
@@ -864,54 +876,57 @@ class UPSGroupMonitor(
         # Determine notification disposition first so we can record an
         # accurate notification_sent flag in the stats events row.
         notification: Optional[Tuple[str, str]] = None  # (body, type)
+        display_details = (details if notification_details is None
+                           else notification_details)
+        event_label = humanize_event_type(event)
 
         event_handlers = {
             "ON_BATTERY": (
-                f"⚠️  **POWER FAILURE DETECTED!**\nSystem running on battery.\nDetails: {details}",
+                f"⚠️  **POWER FAILURE DETECTED!**\nSystem running on battery.\nDetails: {display_details}",
                 self.config.NOTIFY_WARNING
             ),
             "POWER_RESTORED": (
-                f"✅  **POWER RESTORED**\nSystem back on line power/charging.\nDetails: {details}",
+                f"✅  **POWER RESTORED**\nSystem back on utility power/charging.\nDetails: {display_details}",
                 self.config.NOTIFY_SUCCESS
             ),
             "BROWNOUT_DETECTED": (
-                f"⚠️  **VOLTAGE ISSUE:** {event}\nDetails: {details}",
+                f"⚠️  **{event_label.upper()}**\nDetails: {display_details}",
                 self.config.NOTIFY_WARNING
             ),
             "OVER_VOLTAGE_DETECTED": (
-                f"⚠️  **VOLTAGE ISSUE:** {event}\nDetails: {details}",
+                f"⚠️  **{event_label.upper()}**\nDetails: {display_details}",
                 self.config.NOTIFY_WARNING
             ),
             "AVR_BOOST_ACTIVE": (
-                f"⚡  **AVR ACTIVE:** {event}\nDetails: {details}",
+                f"⚡  **{event_label.upper()}**\nDetails: {display_details}",
                 self.config.NOTIFY_WARNING
             ),
             "AVR_TRIM_ACTIVE": (
-                f"⚡  **AVR ACTIVE:** {event}\nDetails: {details}",
+                f"⚡  **{event_label.upper()}**\nDetails: {display_details}",
                 self.config.NOTIFY_WARNING
             ),
             "BYPASS_MODE_ACTIVE": (
-                f"⚠️  **UPS IN BYPASS MODE!**\nNo protection active!\nDetails: {details}",
+                f"⚠️  **UPS IN BYPASS MODE!**\nNo protection active!\nDetails: {display_details}",
                 self.config.NOTIFY_FAILURE
             ),
             "BYPASS_MODE_INACTIVE": (
-                f"✅  **Bypass Mode Inactive**\nProtection restored.\nDetails: {details}",
+                f"✅  **Bypass Mode Inactive**\nProtection restored.\nDetails: {display_details}",
                 self.config.NOTIFY_SUCCESS
             ),
             "OVERLOAD_ACTIVE": (
-                f"⚠️  **UPS OVERLOAD DETECTED!**\nDetails: {details}",
+                f"⚠️  **UPS OVERLOAD DETECTED!**\nDetails: {display_details}",
                 self.config.NOTIFY_FAILURE
             ),
             "OVERLOAD_RESOLVED": (
-                f"✅  **Overload Resolved**\nDetails: {details}",
+                f"✅  **Overload Resolved**\nDetails: {display_details}",
                 self.config.NOTIFY_SUCCESS
             ),
             "CONNECTION_LOST": (
-                f"❌  **ERROR: Connection Lost**\n{details}",
+                f"❌  **ERROR: Connection Lost**\n{display_details}",
                 self.config.NOTIFY_FAILURE
             ),
             "CONNECTION_RESTORED": (
-                f"✅  **Connection Restored**\n{details}",
+                f"✅  **Connection Restored**\n{display_details}",
                 self.config.NOTIFY_SUCCESS
             ),
         }
@@ -948,7 +963,7 @@ class UPSGroupMonitor(
             notification = event_handlers[event]
         else:
             notification = (
-                f"⚡  **Event:** {event}\nDetails: {details}",
+                f"⚡  **Event:** {event_label}\nDetails: {display_details}",
                 self.config.NOTIFY_INFO
             )
 
@@ -2363,6 +2378,7 @@ class UPSGroupMonitor(
 
             event = ("SELF_TEST_POWER_RESTORED"
                      if self._self_test_outage_attributed else "POWER_RESTORED")
+            status_label = humanize_nut_status(ups_status)
             self._log_power_event(
                 event,
                 f"Battery: {battery_charge}% (Status: {ups_status}), "
@@ -2370,11 +2386,18 @@ class UPSGroupMonitor(
                 + ("; attributed to active UPS self-test"
                    if self._self_test_outage_attributed else ""),
                 suppress_notification=self._self_test_outage_attributed,
+                notification_details=(
+                    f"Battery: {battery_charge}% (Status: {status_label}), "
+                    f"Input: {input_voltage}V, Outage duration: "
+                    f"{format_seconds(time_on_battery)}"
+                    + ("; attributed to active UPS self-test"
+                       if self._self_test_outage_attributed else "")
+                ),
             )
             if not self._self_test_outage_attributed and self._should_fire_wall():
                 run_command([
                     "wall",
-                    f"✅  Power has been restored. UPS Status: {ups_status}. "
+                    f"✅  Power has been restored. UPS status: {status_label}. "
                     f"Battery at {battery_charge}%."
                 ])
 
