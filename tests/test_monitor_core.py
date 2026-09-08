@@ -4970,6 +4970,27 @@ class TestSelfTestPowerContract:
             store.close()
 
     @pytest.mark.unit
+    def test_new_ob_interval_rearms_failed_test_trigger_without_ol(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path, delay=0)
+        try:
+            store.set_meta("self_test_failure_latched", str(time.time() - 100))
+            monitor.state.previous_status = "UNKNOWN"
+            monitor._self_test_failure_triggered = True
+            monitor._trigger_immediate_shutdown = MagicMock()
+
+            monitor._handle_on_battery({
+                "ups.status": "OB DISCHRG", "battery.charge": "90",
+                "battery.runtime": "1200", "ups.load": "20",
+            })
+
+            monitor._trigger_immediate_shutdown.assert_called_once()
+            assert "Previous UPS self-test failed" in (
+                monitor._trigger_immediate_shutdown.call_args.args[0]
+            )
+        finally:
+            store.close()
+
+    @pytest.mark.unit
     def test_failed_test_waits_and_ignores_same_test_ob(self, tmp_path):
         monitor, store = self._monitor_with_store(tmp_path, delay=30)
         try:

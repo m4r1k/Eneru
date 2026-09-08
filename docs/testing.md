@@ -256,7 +256,7 @@ reload, or shutdown. See the `dashboard-preview` skill
 | Area | Coverage |
 |------|----------|
 | Config loading and validation | YAML parsing, defaults, enum validation, multi-UPS inheritance, local ownership, loopback delegation config shape, redundancy rules |
-| Monitor state machine | OL/OB transitions, self-test power attribution and continuing-OB reclassification, failed-test latch and delayed later-outage trigger, FSD, failsafe, shutdown trigger order, dry-run behavior |
+| Monitor state machine | OL/OB transitions, self-test power attribution and continuing-OB reclassification, failed-test latch and delayed later-outage trigger re-arming after an unknown interval, FSD, failsafe, shutdown trigger order, dry-run behavior |
 | Shutdown mixins | VMs, containers, compose files, filesystem sync and unmounts, remote SSH phases, remote pre-shutdown action rendering, loopback delegate bracketing (Phase A pre-actions → regulars → Phase C poweroff), exception isolation across phases, dry-run + per-server notification paths |
 | CLI inspection vs runtime | `python -m eneru validate` shutdown-sequence tree, `python -m eneru remote list` ORDER + last-known HEALTH columns, `python -m eneru shutdown remote` drill, container legacy-path rewrite — all partition `is_host_loopback` delegates out of `compute_effective_order` and invoke `_prepare_runtime_config` / `_load_config` so the inspection output matches what the daemon would execute |
 | Multi-UPS coordinator | Group routing, `is_local`, drain policy, local shutdown locking, signal handling |

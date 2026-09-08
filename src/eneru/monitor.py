@@ -2148,6 +2148,10 @@ class UPSGroupMonitor(
             self.state.on_battery_start_mono = time.monotonic()  # ISS-020
             self.state.extended_time_logged = False
             self.state.battery_history.clear()
+            # A disconnected/unknown interval can separate outages without an
+            # OL poll. Re-arm T5 here as well as in _handle_on_line so the new
+            # outage is not mistaken for a continuing, already-fired interval.
+            self._self_test_failure_triggered = False
 
             event = ("SELF_TEST_ON_BATTERY"
                      if self._self_test_outage_attributed else "ON_BATTERY")
