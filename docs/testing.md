@@ -393,9 +393,15 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 62 numb
 
 Every commit on the protected workflow has to prove the daemon works against real services. That means real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.
 
-## Run E2E locally
+## Run E2E locally (human authorization required)
 
-Use the Python venv for Eneru commands, but Docker Compose provides the services.
+Do not run the Docker-backed E2E suite locally unless a human explicitly
+authorizes it for the current task. This includes Docker Compose setup,
+execution, and teardown. Authorization from an earlier task does not carry
+forward. Use GitHub Actions by default.
+
+When a human has authorized a local run for the current task, use the Python
+venv for Eneru commands; Docker Compose provides the services.
 
 ```bash
 source /tmp/eneru-venv/bin/activate
