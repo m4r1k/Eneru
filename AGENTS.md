@@ -19,6 +19,8 @@ These apply to every task in this repo, ahead of any section-specific guidance b
 
 **CRITICAL: NEVER run `pip`, `pip3`, `python -m pip`, `python`, `pytest`, or any other dev/Python tooling directly against the system Python. ALL Python work — install, uninstall, run, test, version-check — MUST happen inside a `uv` virtualenv. No exceptions.**
 
+**CRITICAL: Unless a human explicitly authorizes it for the current task, NEVER run the Docker-backed E2E suite locally. This includes Docker/Compose setup, execution, and teardown under `tests/e2e/`. Use GitHub Actions for E2E execution. Local unit tests, static checks, shell syntax checks, and workflow parsing remain allowed. Authorization from an earlier task does not carry forward.**
+
 This rule applies to *every* operation, including **uninstalls**: a system-wide `pip uninstall eneru` rips out files claimed by both pip and the deb/rpm package (e.g. `/usr/local/bin/eneru`), breaking the package install. If a system has stale pip-installed Eneru packages, the only correct cleanup is to reinstall the deb/rpm to restore its files and leave the pip remnants alone, *or* hand-delete only the pip-owned site-packages directory. Never invoke pip against system Python.
 
 To verify an installed deb/rpm package, invoke the package's own entry point (`/usr/local/bin/eneru version`, `python3 /opt/ups-monitor/eneru.py version`) — these read from `/opt/ups-monitor/`, no venv required.
@@ -121,6 +123,16 @@ This repo deliberately keeps individual source files on the smaller side (the v5
 6. All required checks green before merge
 7. Merge via GitHub (branch auto-deletes)
 ```
+
+**Commit boundaries:** Think of each commit as one labelled box: it should
+contain one complete, coherent behavior and everything needed to prove and
+explain it. Keep an independent feature, fix, or workstream in its own commit,
+including its related tests, docs, config, and CI changes. Do not collect all
+production code in one commit and all tests or docs in later commits. For
+example, self-test behavior, weekly reports, and an APC compatibility fix are
+three separate commits even when they ship in the same release PR. Prepare
+these commits locally, then batch pushes when practical so this rule does not
+create a CI run for every commit.
 
 **Releasing a new version:**
 ```text
