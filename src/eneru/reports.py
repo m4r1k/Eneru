@@ -183,7 +183,9 @@ def _events_csv(*source_dicts: Dict) -> str:
     writer.writerow(["ups", "timestamp", "event_type", "detail"])
     for sources in source_dicts:
         ups = sources.get("ups_name", "UPS")
-        for ts, etype, detail in (sources.get("events") or []):
+        events = ((sources["csv_events"] or []) if "csv_events" in sources
+                  else sources.get("events") or [])
+        for ts, etype, detail in events:
             writer.writerow([
                 _csv_safe(ups),
                 datetime.fromtimestamp(ts).isoformat(),
@@ -231,9 +233,19 @@ def build_aggregate_report(period: str, per_ups_sources: List[Dict], *,
     if period_text:
         title += f" · {period_text}"
     lines = [f"{title} · {n} UPS", ""]
+    labels = [str(s.get("ups_label") or s.get("ups_name") or "UPS")
+              for s in per_ups_sources]
+    label_counts = {label: labels.count(label) for label in labels}
+    display_sources = []
+    for sources, label in zip(per_ups_sources, labels):
+        if label_counts[label] > 1:
+            name = str(sources.get("ups_name") or "UPS")
+            label = f"{label} ({name})"
+            sources = {**sources, "ups_label": label}
+        display_sources.append(sources)
     width = max((len(str(s.get("ups_label") or s.get("ups_name") or "UPS"))
-                 for s in per_ups_sources), default=0)
-    for sources in per_ups_sources:
+                 for s in display_sources), default=0)
+    for sources in display_sources:
         lines += _summary_lines(sources, include, width=width)
         lines.append("")
     if "energy" in include and per_ups_sources:
@@ -322,6 +334,8 @@ def gather_report_sources(store, ups_name: str, energy_config, *,
     sources["period_end_exclusive"] = period_end_exclusive
 
     events = store.query_events(event_start, event_end) if store else []
+    from eneru.status import POWER_EVENT_TYPES
+    real_power_events = [e for e in events if e[1] in POWER_EVENT_TYPES]
     if store:
         previous_power = store.latest_power_event_before(event_start)
         if previous_power and previous_power[1] == "ON_BATTERY":
@@ -331,8 +345,8 @@ def gather_report_sources(store, ups_name: str, energy_config, *,
     # power-event set — lifecycle/diagnostic rows (DAEMON_START, etc.) would
     # otherwise be miscounted under that heading and skew the digest. The full
     # `events` list is still used below for the DAEMON_START uptime math.
-    from eneru.status import POWER_EVENT_TYPES
     sources["events"] = [e for e in events if e[1] in POWER_EVENT_TYPES]
+    sources["csv_events"] = real_power_events
 
     # Count classified restarts, not every daemon start. A cold boot or first
     # installation is a start, but it is not an operator-requested restart.

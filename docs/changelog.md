@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.0-rc2] - 2026-09-08
+
+### Fixed
+
+- **Release-candidate review follow-ups.** Failed self-test protection now
+  re-arms across neutral UPS states without confusing failed polls for new
+  outages, historical repair ignores aborted commands, and terminal device
+  results cannot emit a late `test started` notification.
+- **Reports retain accurate identity, timing, and energy data.** Duplicate
+  display labels include the raw UPS name, synthetic carry-in outages stay out
+  of CSV exports, missing bounds no longer show 1970, and sparse energy uses the
+  retained storage tier's real cadence.
+- **Dashboard event search accepts raw identifiers.** Filters match values such
+  as `SELF_TEST_ON_BATTERY` as well as their human-readable labels.
+
 ## [6.2.0-rc1] - 2026-09-08
 
 ### Added

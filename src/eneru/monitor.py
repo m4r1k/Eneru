@@ -2779,7 +2779,6 @@ class UPSGroupMonitor(
         if row is None:
             self._self_test_outage_attributed = False
             return
-        self._notify_self_test_start(pending_id, row.get("command", ""))
         already_attributed = (
             store.get_meta("self_test_attributed_id") == str(pending_id))
         if row.get("result_enum") in (
@@ -2791,6 +2790,7 @@ class UPSGroupMonitor(
             # clear failed so completion can safely retry it.
             self._self_test_outage_attributed = already_attributed
             return
+        self._notify_self_test_start(pending_id, row.get("command", ""))
         recent_issue = (
             time.time() - row["started_ts"] <= SELF_TEST_ATTRIBUTION_SECONDS)
         on_battery = status_has_token(ups_data.get("ups.status", ""), "OB")

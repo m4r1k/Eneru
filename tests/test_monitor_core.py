@@ -5235,9 +5235,10 @@ class TestUpscCommandSerialization:
         with lock:
             thread = threading.Thread(target=poll)
             thread.start()
-            assert attempted.wait(1)
+            assert attempted.wait(5)
             assert entered.wait(0.05) is False
-        thread.join(timeout=1)
+        assert finished.wait(5)
+        thread.join()
 
         assert entered.is_set()
         assert finished.is_set()

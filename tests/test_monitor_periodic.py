@@ -825,6 +825,27 @@ class TestSelfTestRuntimeContract:
         assert any("Self-Test Started" in n[0] for n in mon.notifications)
 
     @pytest.mark.unit
+    def test_terminal_device_retry_does_not_notify_started(self, store):
+        mon = _make_monitor(_cfg(
+            "notifications:\n  enabled: true\n"
+            "  urls: ['json://notify.invalid']\nups:\n  name: U@h\n"), store)
+        notifications = []
+        mon._send_notification = (
+            lambda body, *args, **kwargs: notifications.append(body) or None)
+
+        mon._check_observed_self_test({
+            "ups.status": "OL", "ups.test.result": "Battery test failed",
+        })
+        assert mon._self_test_pending_id is not None
+        notifications.clear()
+
+        mon._prepare_self_test_attribution({
+            "ups.status": "OL", "ups.test.result": "Battery test failed",
+        })
+
+        assert notifications == []
+
+    @pytest.mark.unit
     def test_online_poll_does_not_pre_latch_attribution(self, store):
         mon = _make_monitor(_cfg(_ENABLED), store)
         tid = store.record_self_test("test.battery.start", "api")

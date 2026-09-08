@@ -284,6 +284,13 @@ Dashboard regression tests are split by responsibility:
   focused drill-down planning, authentication-aware HTTP findings, unique
   scope captures, and structural fallbacks.
 
+Self-test and notification regressions are split by responsibility:
+
+- `tests/test_self_test.py` covers result normalization and persisted tickets.
+- `tests/test_monitor_core.py` and `tests/test_monitor_periodic.py` cover power
+  attribution, delayed triggers, scheduling, and passive device observations.
+- `tests/test_notifications.py` covers durable queueing, replay, and retries.
+
 ## End-to-end tests
 
 The E2E suite runs on every pull request to `main` and every push to `main`. It is intentionally heavier than unit testing because it starts the same kinds of services Eneru depends on in production: NUT, SSH, Docker targets, real config files, and SQLite-backed state.
@@ -400,8 +407,9 @@ authorizes it for the current task. This includes Docker Compose setup,
 execution, and teardown. Authorization from an earlier task does not carry
 forward. Use GitHub Actions by default.
 
-When a human has authorized a local run for the current task, use the Python
-venv for Eneru commands; Docker Compose provides the services.
+When a human has authorized a local run for the current task, use the `uv`
+virtualenv created in [Local test environment](#local-test-environment) for
+Eneru commands; Docker Compose provides the services.
 
 ```bash
 source /tmp/eneru-venv/bin/activate

@@ -269,8 +269,12 @@ class TestGather:
             store, "U@h", cfg.energy, period="weekly", now=now)
         body = reports.build_report(
             "weekly", sources, include=["events"])["body"]
+        csv_text = reports.build_report(
+            "weekly", sources, include=["events"], fmt="csv")["csv"]
 
         assert "1 outage (2m)" in body
+        assert "before window" not in csv_text
+        assert "inside window" in csv_text
 
     @pytest.mark.unit
     def test_open_carry_in_outage_spans_whole_window(self, store):
@@ -318,11 +322,14 @@ class TestGather:
 
     @pytest.mark.unit
     def test_sparse_raw_samples_use_configured_poll_interval(self, store):
-        now = datetime(2026, 6, 29, 8, 0).timestamp()
-        store.power_samples = lambda start, end, **kwargs: [
-            (start, 100.0, None, None),
-            (start + 3600, 100.0, None, None),
-        ]
+        now = datetime(2026, 6, 29).timestamp()
+
+        def sparse_samples(start, end, **kwargs):
+            assert kwargs["prefer_tier"] == "samples"
+            return [(start, 100.0, None, None),
+                    (start + 300, 100.0, None, None)]
+
+        store.power_samples = sparse_samples
         cfg = _config("ups:\n  name: U@h\n  check_interval: 1\n")
 
         sources = reports.gather_report_sources(
@@ -589,6 +596,19 @@ class TestAggregate:
         assert "A@h" not in content["body"] and "B@h" not in content["body"]
         assert "2 UPS" in content["subject"]
         assert "~ estimated from UPS load" not in content["body"]
+
+    @pytest.mark.unit
+    def test_duplicate_labels_include_raw_ups_names(self):
+        sources = [
+            {"ups_name": "A@h", "ups_label": "Rack", "uptime": {}},
+            {"ups_name": "B@h", "ups_label": "Rack", "uptime": {}},
+        ]
+
+        body = reports.build_aggregate_report(
+            "daily", sources, include=["uptime"])["body"]
+
+        assert "Rack (A@h)" in body
+        assert "Rack (B@h)" in body
 
     @pytest.mark.unit
     def test_compact_aggregate_has_fleet_totals_and_estimate_note(self):

@@ -13,7 +13,8 @@ part in prose and name the exact `file:line` spans they cover, plus a wiring
 graph of who-calls-what. Querying a node costs a few hundred tokens; rebuilding
 that understanding by reading source costs thousands, and misses the edges.
 
-Every command below is `$0`, needs no API key, and returns in under a second.
+Each command below is a local `graft` command, needs no API key, and returns in
+under a second.
 There are six of them. **Pick the one that fits the task, run it, act on the
 answer; don't chain tools hoping for more. Most tasks need one call.**
 

@@ -1515,7 +1515,8 @@ function visibleEvents() {
       && eventMatchesSource(e, source)
       && eventPassesTier(eventType)              // window-independent tier gate
       && (types.size === 0 || types.has(eventType))  // optional advanced narrowing
-      && (!text || detail.includes(text) || displayed.includes(text));
+      && (!text || detail.includes(text) || displayed.includes(text)
+        || eventType.toLowerCase().includes(text));
   });
   if (eventSortDirection === "desc") rows.reverse();
   return rows;

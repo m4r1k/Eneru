@@ -270,6 +270,7 @@ def test_dashboard_event_type_filter_supports_multiple_selection(minimal_config)
     assert 'role="group" aria-labelledby="event-type-label"' in html
     assert "selectedEventTypes" in js
     assert "types.size === 0 || types.has(eventType)" in js
+    assert "eventType.toLowerCase().includes(text)" in js
     assert 'input[type="checkbox"]:checked' in js
     assert 'selected.length + " types"' in js
     assert ".event-type-picker" in css

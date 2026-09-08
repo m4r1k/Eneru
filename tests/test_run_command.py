@@ -258,6 +258,9 @@ class TestHumanizedPowerLabels:
         assert eneru_utils.humanize_event_type("VENDOR_WIDGET_ALERT") == (
             "Vendor widget alert"
         )
+        assert eneru_utils.humanize_event_type("UPS_API_TIMEOUT") == (
+            "UPS API timeout"
+        )
         assert eneru_utils.humanize_event_type("OVERLOAD_ACTIVE") == (
             "UPS overload detected"
         )
