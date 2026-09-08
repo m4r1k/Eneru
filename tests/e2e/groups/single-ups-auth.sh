@@ -774,19 +774,18 @@ done
 [ "${continuing_outage:-0}" = "1" ] && [ "${continuing_shutdown:-0}" = "1" ] \
   || { echo "FAIL: failed test did not reclassify continuing OB and trigger shutdown"; cat /tmp/test57-daemon.log; exit 1; }
 
-# The failed test does not shut anything down on line power. A later genuine OB
-# does, after the configured three-second delay, through the normal trigger path.
-RESTORE_BASE=$(sqlite3 "$ST_DB" "SELECT COALESCE(MAX(id),0) FROM events;")
-apply_scenario online-charging
+# A successful neutral status can hide an OL transition between polls. The next
+# genuine OB must still re-arm T5 and fire after the configured three-second
+# delay, without relying on _handle_on_line.
+apply_scenario unknown-status
 for _ in $(seq 1 30); do
-  restored=$(sqlite3 "$ST_DB" \
-    "SELECT COUNT(*) FROM events WHERE id > $RESTORE_BASE \
-     AND event_type='POWER_RESTORED';")
-  [ "$restored" = "1" ] && break
+  unknown_seen=$(grep -c "UPS status 'UNKNOWN' is neither on-line nor on-battery" \
+    /tmp/test57-daemon.log || true)
+  [ "$unknown_seen" -ge 1 ] && break
   sleep 0.5
 done
-[ "${restored:-0}" = "1" ] \
-  || { echo "FAIL: UPS did not return online before later outage"; cat /tmp/test57-daemon.log; exit 1; }
+[ "${unknown_seen:-0}" -ge 1 ] \
+  || { echo "FAIL: daemon did not observe the unknown-status interval"; cat /tmp/test57-daemon.log; exit 1; }
 OUTAGE_BASE=$(sqlite3 "$ST_DB" "SELECT COALESCE(MAX(id),0) FROM events;")
 apply_scenario on-battery
 for _ in $(seq 1 40); do

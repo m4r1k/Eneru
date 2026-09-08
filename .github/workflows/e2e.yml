@@ -164,9 +164,11 @@ jobs:
             grep -q "self-test-running-on-battery" tests/e2e/groups/single-ups-auth.sh
             grep -q "self-test-failed-online" tests/e2e/groups/single-ups-auth.sh
             grep -q "self-test-failed-on-battery" tests/e2e/groups/single-ups-auth.sh
+            grep -q "apply_scenario unknown-status" tests/e2e/groups/single-ups-auth.sh
             grep -q "^ups.test.result: In progress" tests/e2e/scenarios/self-test-running-on-battery.dev
             grep -q "^ups.test.result: Battery test failed" tests/e2e/scenarios/self-test-failed-online.dev
             grep -q "^ups.status: OB DISCHRG" tests/e2e/scenarios/self-test-failed-on-battery.dev
+            grep -q "^ups.status: UNKNOWN" tests/e2e/scenarios/unknown-status.dev
           fi
           grep -q "PASS (34b): notification status is readable and stored event stays raw" tests/e2e/groups/stats.sh
 

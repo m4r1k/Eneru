@@ -4991,6 +4991,57 @@ class TestSelfTestPowerContract:
             store.close()
 
     @pytest.mark.unit
+    def test_new_ob_interval_rearms_monitor_only_alert_without_ol(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path, delay=0)
+        try:
+            monitor.config.ups_groups[0].is_local = False
+            store.set_meta("self_test_failure_latched", str(time.time() - 100))
+            monitor.state.previous_status = "UNKNOWN"
+            monitor._self_test_failure_triggered = True
+            monitor._self_test_monitor_only_alerted = True
+            monitor._send_notification = MagicMock(return_value=1)
+            monitor._trigger_immediate_shutdown = MagicMock()
+
+            monitor._handle_on_battery({
+                "ups.status": "OB DISCHRG", "battery.charge": "90",
+                "battery.runtime": "1200", "ups.load": "20",
+            })
+
+            monitor._trigger_immediate_shutdown.assert_not_called()
+            self_test_calls = [
+                call for call in monitor._send_notification.call_args_list
+                if call.kwargs.get("category") == "self_test"
+            ]
+            assert len(self_test_calls) == 1
+            assert "monitoring-only" in self_test_calls[0].args[0]
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_failed_poll_does_not_rearm_current_ob_interval(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path, delay=0)
+        try:
+            monitor.state.previous_status = "OB DISCHRG"
+            monitor.state.on_battery_start_time = int(time.time()) - 10
+            monitor.state.on_battery_start_mono = time.monotonic() - 10
+            monitor._self_test_failure_triggered = True
+            monitor._self_test_monitor_only_alerted = True
+            original_start = monitor.state.on_battery_start_time
+
+            _run_one_iteration(monitor, (False, {}, "connection refused"))
+            monitor._stop_event.clear()
+            _run_one_iteration(monitor, (True, {
+                "ups.status": "OB DISCHRG", "battery.charge": "90",
+                "battery.runtime": "1200", "ups.load": "20",
+            }, ""))
+
+            assert monitor.state.on_battery_start_time == original_start
+            assert monitor._self_test_failure_triggered is True
+            assert monitor._self_test_monitor_only_alerted is True
+        finally:
+            store.close()
+
+    @pytest.mark.unit
     def test_failed_test_waits_and_ignores_same_test_ob(self, tmp_path):
         monitor, store = self._monitor_with_store(tmp_path, delay=30)
         try:

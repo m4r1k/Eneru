@@ -13,6 +13,10 @@ These tests spin up a complete test environment:
 
 ## Running locally
 
+Do not run Docker or Docker Compose setup, execution, or teardown locally unless
+a human explicitly authorizes it for the current task. Earlier authorization
+does not carry forward. Use GitHub Actions by default.
+
 ### Prerequisites
 
 - Docker and Docker Compose
@@ -69,6 +73,7 @@ docker compose down -v
 |------|-------------|-------------------|
 | `online-charging.dev` | Normal operation, fully charged | No |
 | `on-battery.dev` | On battery, battery OK | No |
+| `unknown-status.dev` | Successful poll with an unknown power state | No |
 | `low-battery.dev` | Battery below 20% threshold | Yes |
 | `critical-runtime.dev` | Runtime below 600s threshold | Yes |
 | `fsd.dev` | UPS signals Forced Shutdown | Yes |

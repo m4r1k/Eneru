@@ -165,9 +165,9 @@ it when no daemon is running. `--ups` defaults to the only configured UPS.
 The NUT **dummy driver has no INSTCMD**, so *issuing* a test has no end-to-end CI
 coverage (the issue logic is unit-tested). The **observe** path *is* covered
 end-to-end: the E2E suite serves passive running and failed states, checks
-self-test attribution, then simulates a later outage and verifies the delayed
-failed-test trigger. On real
-hardware, confirm `upscmd -l` lists your test command first — e.g. the Ubiquiti
+self-test attribution, then simulates an unknown-status interval followed by a
+later outage and verifies the delayed failed-test trigger without an OL poll.
+On real hardware, confirm `upscmd -l` lists your test command first — e.g. the Ubiquiti
 TOWER_1000VA exposes `test.battery.start` (pass `nut_control` credentials if your
 upsd requires a login to list) — then run `eneru self-test run` and check
 `eneru self-test status`.

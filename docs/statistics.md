@@ -74,9 +74,10 @@ history repair. It relabels only a closed `ON_BATTERY` / `POWER_RESTORED` pair
 lasting at most 120 seconds when exactly one Eneru-issued self-test began
 between 30 seconds before the transfer and 30 seconds after restoration.
 Device-observed rows are excluded because their observation timestamp may not
-be the test's real start time. Aborted commands are also excluded because the
-UPS never accepted them. Long, open, or ambiguous outages remain ordinary power
-events. The `self_test_event_repair_v1` marker prevents repeat scans.
+be the test's real start time. Aborted results are also excluded because they do
+not establish with enough confidence that the test caused the transfer. Long,
+open, or ambiguous outages remain ordinary power events. The
+`self_test_event_repair_v1` marker prevents repeat scans.
 
 ## Retention
 

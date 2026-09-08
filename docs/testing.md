@@ -256,14 +256,14 @@ reload, or shutdown. See the `dashboard-preview` skill
 | Area | Coverage |
 |------|----------|
 | Config loading and validation | YAML parsing, defaults, enum validation, multi-UPS inheritance, local ownership, loopback delegation config shape, redundancy rules |
-| Monitor state machine | OL/OB transitions, self-test power attribution and continuing-OB reclassification, failed-test latch and delayed later-outage trigger re-arming after an unknown interval, FSD, failsafe, shutdown trigger order, dry-run behavior |
+| Monitor state machine | OL/OB transitions, self-test power attribution and continuing-OB reclassification, failed-test latch and delayed later-outage trigger re-arming after a successful unknown-status interval, FSD, failsafe, shutdown trigger order, dry-run behavior |
 | Shutdown mixins | VMs, containers, compose files, filesystem sync and unmounts, remote SSH phases, remote pre-shutdown action rendering, loopback delegate bracketing (Phase A pre-actions → regulars → Phase C poweroff), exception isolation across phases, dry-run + per-server notification paths |
 | CLI inspection vs runtime | `python -m eneru validate` shutdown-sequence tree, `python -m eneru remote list` ORDER + last-known HEALTH columns, `python -m eneru shutdown remote` drill, container legacy-path rewrite — all partition `is_host_loopback` delegates out of `compute_effective_order` and invoke `_prepare_runtime_config` / `_load_config` so the inspection output matches what the daemon would execute |
 | Multi-UPS coordinator | Group routing, `is_local`, drain policy, local shutdown locking, signal handling |
 | Redundancy runtime | Quorum evaluation, advisory triggers, connection-grace handling, idempotent group execution |
 | Health monitoring | Voltage thresholds, AVR, bypass, overload, battery anomaly filtering |
 | Notifications | Plain-language power-event/status formatting with raw database preservation, retry queue, lifecycle classification, coalescing, suppression rules, atomic metadata preservation across memory replay/reload, container restart/upgrade stop-row deferral, deferred stop delivery claim/recovery races, reload-worker claim races, and mark-sent failure logging |
-| Statistics and TUI | SQLite schema (incl. the v5 `events.id` AUTOINCREMENT table-rebuild migration — column added, rows/version preserved, idempotent, id-not-reused-after-delete — and the v6 `notifications.delivering_at` migration for stale deferred-delivery claim recovery), self-test queries and conservative OB/OL history repair that excludes device observations and aborted commands, stale-claim recovery failure propagation, aggregation, event tier filtering, wide-range + composite-cursor event paging across duplicate timestamps, `delete_events` (id+ts+type guard, dedup, per-DB isolation), TUI grouping, graphs, one-shot monitor output |
+| Statistics and TUI | SQLite schema (incl. the v5 `events.id` AUTOINCREMENT table-rebuild migration — column added, rows/version preserved, idempotent, id-not-reused-after-delete — and the v6 `notifications.delivering_at` migration for stale deferred-delivery claim recovery), self-test queries and conservative OB/OL history repair that excludes device observations and aborted results, stale-claim recovery failure propagation, aggregation, event tier filtering, wide-range + composite-cursor event paging across duplicate timestamps, `delete_events` (id+ts+type guard, dedup, per-DB isolation), TUI grouping, graphs, one-shot monitor output |
 | Observability | API routing, readiness, Prometheus escaping, power-quality metrics, remote-health sidecars, MQTT publishing |
 | Authentication | User/API-key SQLite store (bcrypt hashing, salt uniqueness, truncation, CRUD), `eneru user`/`apikey` CLI lifecycle, password-input safety (getpass/generate/stdin), lazy bcrypt import |
 | API auth middleware | Session manager (TTL/expiry), tiered authorization matrix (reads open vs `require_for_reads`, writes fail-closed when auth off), bearer/API-key resolution, session re-validation against user state (deleted user or password reset signs out; DB error preserves the session), login/logout, transition-only throttle auditing, Host-rejection warn-once, body-size + JSON validation including total body-read deadlines, read-error mapping, and closing keep-alive after an unread body, tiered `/config` |
@@ -317,7 +317,7 @@ focus area; *UPS Single* rows now run in **UPS Single Core** or **UPS
 Single Auth**, and *Redundancy* rows in **Redundancy Quorum** (21–27,
 37, 38) or **Redundancy Regression** (R1, R2), per the table above.
 
-The scenario files simulate online, on-battery, low-battery, FSD, brownout, overload, hot-grid, nominal-voltage-mismatch, and passive self-test states.
+The scenario files simulate online, on-battery, neutral/unknown, low-battery, FSD, brownout, overload, hot-grid, nominal-voltage-mismatch, and passive self-test states.
 
 ### E2E test inventory
 
@@ -388,7 +388,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 62 numb
 | 59 | UPS Single | Unconditional remote PATH augmentation resolves a Synology-only bare command without per-server configuration |
 | 60 | UPS Single | A real local Compose stack is removed through Eneru's `down -t <seconds>` shutdown path |
 | 61 | Loopback | A real coordinator/list-form delegated poweroff reaches the SSH target, skips in-container poweroff, and persists a `sequence_complete` recovery marker |
-| 62 | UPS Single | Passive running/failed self-test states are recorded and attributed without ordinary outage alerts; failed tests that remain on battery are reclassified as outages, and later real outages fire the delayed failed-test trigger |
+| 62 | UPS Single | Passive running/failed self-test states are recorded and attributed without ordinary outage alerts; failed tests that remain on battery are reclassified as outages, and a later outage after a successful unknown-status interval fires the delayed failed-test trigger without an OL poll |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
 
 Every commit on the protected workflow has to prove the daemon works against real services. That means real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.
