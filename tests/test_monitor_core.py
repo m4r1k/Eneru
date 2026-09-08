@@ -4975,6 +4975,47 @@ class TestSelfTestPowerContract:
             store.close()
 
     @pytest.mark.unit
+    def test_failed_attributed_test_reclassifies_continuing_ob(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path, delay=30)
+        try:
+            test_id = store.record_self_test(
+                "test.battery.start", "scheduler",
+                started_ts=int(time.time()) - 5,
+                result_raw="Done and error", result_enum="failed",
+            )
+            monitor._self_test_pending_id = test_id
+            store.set_meta("self_test_attributed_id", str(test_id))
+            store.set_meta("self_test_start_notified", str(test_id))
+            monitor._self_test_outage_attributed = True
+            monitor.state.latest_status = "OB DISCHRG"
+            monitor.state.previous_status = "OB DISCHRG"
+            monitor.state.on_battery_start_time = int(time.time()) - 31
+            monitor.state.on_battery_start_mono = time.monotonic() - 31
+            monitor._log_power_event = MagicMock()
+            monitor._trigger_immediate_shutdown = MagicMock()
+            monitor.config.notifications.urls = ["json://notify.invalid"]
+            monitor._send_notification = MagicMock(side_effect=[None, 1])
+
+            assert monitor._complete_self_test(
+                test_id, "failed", "Done and error") is False
+            data = {
+                "ups.status": "OB DISCHRG", "battery.charge": "90",
+                "battery.runtime": "1200", "ups.load": "20",
+            }
+            monitor._prepare_self_test_attribution(data)
+            assert monitor._self_test_outage_attributed is False
+            assert store.get_meta("self_test_failure_outage_start") == ""
+            monitor._handle_on_battery(data)
+
+            monitor._trigger_immediate_shutdown.assert_called_once()
+            assert monitor._complete_self_test(
+                test_id, "failed", "Done and error") is True
+            monitor._log_power_event.assert_called_once()
+            assert monitor._log_power_event.call_args.args[0] == "ON_BATTERY"
+        finally:
+            store.close()
+
+    @pytest.mark.unit
     def test_prior_failure_ignores_attributed_test_ob(self, tmp_path):
         monitor, store = self._monitor_with_store(tmp_path, delay=30)
         try:
@@ -5078,6 +5119,7 @@ class TestUpscCommandSerialization:
         from eneru import nut_control
 
         monitor = make_monitor(tmp_path)
+        monitor._poll_target = "autodiscovered@localhost"
         entered = threading.Event()
         finished = threading.Event()
 
@@ -5091,7 +5133,7 @@ class TestUpscCommandSerialization:
             monitor._run_upsc([], full_poll=True)
             finished.set()
 
-        lock = nut_control.command_lock(monitor._poll_target)
+        lock = nut_control.command_lock(monitor.config.ups.name)
         with lock:
             thread = threading.Thread(target=poll)
             thread.start()

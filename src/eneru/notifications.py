@@ -45,6 +45,8 @@ _PRUNE_INTERVAL_SECS = 60.0
 # through Apprise so they are never silently lost.
 _BUFFER_DIRECT_GRACE_SECS = 10.0
 
+_MemoryEntry = Tuple[str, str, str, int, Optional[Dict[str, str]]]
+
 
 class NotificationWorker:
     """Persistent, lossless notification worker.
@@ -92,10 +94,10 @@ class NotificationWorker:
         self._stores: List[StatsStore] = []
         self._stores_lock = threading.Lock()
         # Pre-store memory buffer: tuples of
-        # (body, notify_type, category, ts) for sends that arrived
+        # (body, notify_type, category, ts, meta_updates) for sends that arrived
         # before any store was registered. Drained on the first
         # ``register_store`` call.
-        self._memory_buffer: List[Tuple[str, str, str, int]] = []
+        self._memory_buffer: List[_MemoryEntry] = []
         # A bounded stop() can return while Apprise is still sending. During
         # reload, failed in-flight memory rows are forwarded to this worker;
         # successful rows are already gone and therefore cannot be duplicated.
@@ -215,7 +217,7 @@ class NotificationWorker:
 
     # ----- reload handover (F-067) -----
 
-    def drain_memory_buffer(self) -> List[Tuple[str, str, str, int]]:
+    def drain_memory_buffer(self) -> List[_MemoryEntry]:
         """Detach and return the in-memory buffered rows.
 
         Called on the OLD worker when a config reload bounces the
@@ -264,14 +266,14 @@ class NotificationWorker:
             replacement._adopt_delivered_claims({key: (store, row_id)})
 
     def adopt_memory_buffer(
-            self, entries: Optional[List[Tuple[str, str, str, int]]]) -> None:
+            self, entries: Optional[List[_MemoryEntry]]) -> None:
         """Prepend rows drained from a predecessor worker (age order kept)."""
         if not entries:
             return
         self._restore_memory_entries(entries, prepend=True)
 
     def _restore_memory_entries(
-            self, entries: List[Tuple[str, str, str, int]], *,
+            self, entries: List[_MemoryEntry], *,
             prepend: bool) -> None:
         """Put rows back locally, or forward them across a reload handoff."""
         replacement = None
@@ -346,15 +348,17 @@ class NotificationWorker:
             # persist are dropped from the buffer.
             buffered = list(self._memory_buffer)
             self._memory_buffer = []
-        leftovers: List[Tuple[str, str, str, int]] = []
-        for body, notify_type, category, ts in buffered:
+        leftovers: List[_MemoryEntry] = []
+        for entry in buffered:
+            body, notify_type, category, ts, meta_updates = entry
             row_id = store.enqueue_notification(
                 body, notify_type, category, ts=ts,
+                meta_updates=meta_updates,
             )
             if row_id is None:
                 # enqueue returned None → store wasn't open or SQLite
                 # raised; keep the row buffered for the next attempt.
-                leftovers.append((body, notify_type, category, ts))
+                leftovers.append(entry)
         if leftovers:
             # Prepend so age order is preserved against new sends. If reload
             # happened during the SQLite calls, forward to the replacement.
@@ -409,7 +413,10 @@ class NotificationWorker:
         ts = int(time.time())
         target_store = store
         replacement = None
-        entry = (body, notify_type, category, ts)
+        entry = (
+            body, notify_type, category, ts,
+            dict(meta_updates) if meta_updates else None,
+        )
         with self._stores_lock:
             if target_store is None and self._stores:
                 target_store = self._stores[0]
@@ -631,6 +638,7 @@ class NotificationWorker:
             return
 
         failed = False
+        atomic_entries: List[_MemoryEntry] = []
         for _ in range(entry_count):  # oldest-first (buffer keeps age order)
             if self._stop_event.is_set():
                 break
@@ -640,7 +648,13 @@ class NotificationWorker:
                 # Claim before blocking in Apprise. Reload can safely transfer
                 # the rest; this row is restored only if its delivery fails.
                 entry = self._memory_buffer.pop(0)
-            body, notify_type, _category, _ts = entry
+            body, notify_type, _category, _ts, meta_updates = entry
+            if meta_updates:
+                # These values must commit with the queue row. Direct delivery
+                # cannot provide that transaction, so retain the entry until a
+                # store accepts it rather than sending an unmarked duplicate.
+                atomic_entries.append(entry)
+                continue
             if self._send_via_apprise(body, notify_type):
                 continue
             else:
@@ -649,6 +663,10 @@ class NotificationWorker:
                 self._restore_memory_entries([entry], prepend=True)
                 failed = True
                 break
+        if atomic_entries:
+            # Keep atomic rows ahead of any unsent tail while allowing later
+            # ordinary alerts to use the last-resort direct path.
+            self._restore_memory_entries(atomic_entries, prepend=True)
         if failed:
             self._buffer_direct_attempts += 1
             base = max(0, int(self.config.notifications.retry_interval))

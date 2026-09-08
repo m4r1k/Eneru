@@ -598,7 +598,7 @@ echo "PASS: self_test without auth is rejected at validation"
 
 # --- (B) passive observation: the UPS reports its own last self-test ---
 apply_scenario self-test-passed
-timeout 90s eneru run --config /tmp/config-e2e-selftest-soft.yaml > /tmp/test57-daemon.log 2>&1 &
+timeout 180s eneru run --config /tmp/config-e2e-selftest-soft.yaml > /tmp/test57-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
 
@@ -682,6 +682,36 @@ premature_shutdowns=$(sqlite3 "$ST_DB" \
    AND event_type='EMERGENCY_SHUTDOWN_INITIATED';")
 [ "$premature_shutdowns" = "0" ] \
   || { echo "FAIL: self-test or line-power phase triggered shutdown"; exit 1; }
+
+# A second test that finishes failed while OB persists must reclassify the
+# continuing interval as a normal outage and allow the delayed T5 trigger.
+apply_scenario online-charging
+CONTINUING_BASE=$(sqlite3 "$ST_DB" "SELECT COALESCE(MAX(id),0) FROM events;")
+apply_scenario self-test-running-on-battery
+for _ in $(seq 1 30); do
+  continuing_test_ob=$(sqlite3 "$ST_DB" \
+    "SELECT COUNT(*) FROM events WHERE id > $CONTINUING_BASE \
+     AND event_type='SELF_TEST_ON_BATTERY';")
+  [ "$continuing_test_ob" = "1" ] && break
+  sleep 0.5
+done
+[ "${continuing_test_ob:-0}" = "1" ] \
+  || { echo "FAIL: continuing-OB test was not attributed"; cat /tmp/test57-daemon.log; exit 1; }
+
+apply_scenario self-test-failed-on-battery
+for _ in $(seq 1 40); do
+  continuing_outage=$(sqlite3 "$ST_DB" \
+    "SELECT COUNT(*) FROM events WHERE id > $CONTINUING_BASE \
+     AND event_type='ON_BATTERY';")
+  continuing_shutdown=$(sqlite3 "$ST_DB" \
+    "SELECT COUNT(*) FROM events WHERE id > $CONTINUING_BASE \
+     AND event_type='EMERGENCY_SHUTDOWN_INITIATED' \
+     AND detail LIKE '%Previous UPS self-test failed%';")
+  [ "$continuing_outage" = "1" ] && [ "$continuing_shutdown" = "1" ] && break
+  sleep 0.5
+done
+[ "${continuing_outage:-0}" = "1" ] && [ "${continuing_shutdown:-0}" = "1" ] \
+  || { echo "FAIL: failed test did not reclassify continuing OB and trigger shutdown"; cat /tmp/test57-daemon.log; exit 1; }
 
 # The failed test does not shut anything down on line power. A later genuine OB
 # does, after the configured three-second delay, through the normal trigger path.

@@ -17,6 +17,7 @@ import csv as _csv
 import io
 import time
 from datetime import datetime, timedelta
+from statistics import median
 from typing import Callable, Dict, List, Optional
 
 from eneru import energy as energy_mod
@@ -124,7 +125,10 @@ def _summary_lines(sources: Dict, include: List[str], *, width: int = 0) -> List
     if "events" in include:
         events = sources.get("events") or []
         count, duration, open_count = _outage_summary(
-            events, sources.get("period_end", int(time.time())))
+            events, sources.get(
+                "period_end_exclusive",
+                sources.get("period_end", int(time.time())),
+            ))
         if count:
             text = f"{count} outage{'s' if count != 1 else ''} ({_fmt_duration(duration)})"
             if open_count:
@@ -198,7 +202,8 @@ def build_report(period: str, sources: Dict, *, include: List[str],
     ups = sources.get("ups_label") or sources.get("ups_name", "UPS")
     lines = [f"📊 {period.title()} report · {_period_label(sources)}", ""]
     lines += _summary_lines(sources, include)
-    if (sources.get("energy") or {}).get("estimated"):
+    if ("energy" in include
+            and (sources.get("energy") or {}).get("estimated")):
         lines += ["", "~ estimated from UPS load"]
     body = "\n".join(lines).rstrip() + "\n"
     csv_text = _events_csv(sources) if fmt == "csv" else None
@@ -237,7 +242,9 @@ def build_aggregate_report(period: str, per_ups_sources: List[Dict], *,
                     first.get("costFormat"))
                 total += f" · {total_cost}"
             lines.append(f"Total  {total}")
-    if any((s.get("energy") or {}).get("estimated") for s in per_ups_sources):
+    if ("energy" in include
+            and any((s.get("energy") or {}).get("estimated")
+                    for s in per_ups_sources)):
         lines += ["", "~ estimated from UPS load"]
     body = "\n".join(lines).rstrip() + "\n"
     csv_text = _events_csv(*per_ups_sources) if fmt == "csv" else None
@@ -270,6 +277,7 @@ def gather_report_sources(store, ups_name: str, energy_config, *,
 
     event_start = start
     event_end = int(now)
+    period_end_exclusive = event_end
     if period == "daily":
         # A digest sent at 08:00 should summarize yesterday's complete day,
         # not midnight->08:00 and then permanently lose the other 16 hours.
@@ -279,9 +287,11 @@ def gather_report_sources(store, ups_name: str, energy_config, *,
         current_midnight = datetime(now_dt.year, now_dt.month, now_dt.day)
         previous_midnight = current_midnight - timedelta(days=1)
         event_start = int(previous_midnight.timestamp())
-        event_end = int(current_midnight.timestamp()) - 1
+        period_end_exclusive = int(current_midnight.timestamp())
+        event_end = period_end_exclusive - 1
     sources["period_start"] = event_start
     sources["period_end"] = event_end
+    sources["period_end_exclusive"] = period_end_exclusive
 
     events = store.query_events(event_start, event_end) if store else []
     if store:
@@ -324,13 +334,22 @@ def gather_report_sources(store, ups_name: str, energy_config, *,
     if store and getattr(energy_config, "enabled", True):
         samples = store.power_samples(event_start, event_end)
         energy_boundary = event_end + 1 if period == "daily" else event_end
-        if samples and samples[-1][0] < energy_boundary:
+        sample_dts = [
+            nxt[0] - current[0]
+            for current, nxt in zip(samples, samples[1:])
+            if nxt[0] - current[0] > 0
+        ]
+        expected_interval = median(sample_dts) if sample_dts else None
+        if (expected_interval is not None
+                and samples[-1][0] < energy_boundary):
             # integrate_kwh consumes intervals between samples. Add the window
-            # boundary so the final retained bucket contributes up to the end,
-            # while its large gap protection still rejects stale data.
+            # boundary so the final retained bucket contributes up to the end.
+            # Pass the cadence inferred from real samples so this synthetic row
+            # cannot make a stale final gap look normal.
             samples.append((energy_boundary, None, None, None))
         result = energy_mod.integrate_kwh(
             samples,
+            expected_interval_s=expected_interval,
             nominal_fallback=getattr(energy_config, "nominal_power", None))
         cost = energy_mod.compute_cost(result.kwh, energy_config.cost_per_kwh)
         currency = (energy_config.currency or "USD").upper()

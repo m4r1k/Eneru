@@ -1105,7 +1105,7 @@ class UPSGroupMonitor(
 
     def _run_upsc(self, args: List[str], *, full_poll: bool) -> Tuple[int, str, str]:
         cmd = ["upsc", self._poll_target, *args]
-        with nutctl.command_lock(self._poll_target):
+        with nutctl.command_lock(self.config.ups.name):
             started = time.monotonic()
             # NUT's NSS-backed libupsclient can emit "Init SSL without certificate
             # database" on stderr even for plain read-only polling. Suppress that
@@ -2644,14 +2644,26 @@ class UPSGroupMonitor(
         if store is None:
             return True
         row = store.get_self_test(test_id) or {}
+        attributed = (
+            self._self_test_outage_attributed
+            or store.get_meta("self_test_attributed_id") == str(test_id)
+        )
         state_ready = True
         if enum == "failed":
             failed_at = row.get("started_ts", time.time())
-            failed_during_outage = (
-                str(self.state.on_battery_start_time)
-                if status_has_token(self.state.latest_status, "OB") else "")
+            failed_key = str(failed_at)
+            if store.get_meta("self_test_failure_latched") == failed_key:
+                # A notification retry must preserve the first completion's
+                # decision about whether this OB interval is the test's own.
+                failed_during_outage = (
+                    store.get_meta("self_test_failure_outage_start") or "")
+            else:
+                failed_during_outage = (
+                    str(self.state.on_battery_start_time)
+                    if (status_has_token(self.state.latest_status, "OB")
+                        and not attributed) else "")
             state_ready = store.set_meta_many({
-                    "self_test_failure_latched": str(failed_at),
+                    "self_test_failure_latched": failed_key,
                     "self_test_failure_outage_start": failed_during_outage,
             })
             if not state_ready:
@@ -2687,18 +2699,18 @@ class UPSGroupMonitor(
                 )
                 notification_ready = queued is not None
 
-        attributed = (
-            self._self_test_outage_attributed
-            or store.get_meta("self_test_attributed_id") == str(test_id)
-        )
-        self._self_test_outage_attributed = False
-        store.set_meta("self_test_attributed_id", "")
-        if attributed and status_has_token(self.state.latest_status, "OB"):
-            self._log_power_event(
-                "ON_BATTERY",
-                "UPS remained on battery after its self-test completed; "
-                "treating the continuing condition as a utility outage.",
-            )
+        if state_ready:
+            attribution_ready = store.set_meta("self_test_attributed_id", "")
+            state_ready = state_ready and attribution_ready
+            if attribution_ready:
+                self._self_test_outage_attributed = False
+                if attributed and status_has_token(
+                        self.state.latest_status, "OB"):
+                    self._log_power_event(
+                        "ON_BATTERY",
+                        "UPS remained on battery after its self-test completed; "
+                        "treating the continuing condition as a utility outage.",
+                    )
         return state_ready and notification_ready
 
     def _prepare_self_test_attribution(self, ups_data: Dict[str, str]) -> None:
@@ -2742,6 +2754,15 @@ class UPSGroupMonitor(
         self._notify_self_test_start(pending_id, row.get("command", ""))
         already_attributed = (
             store.get_meta("self_test_attributed_id") == str(pending_id))
+        if row.get("result_enum") in (
+                "passed", "warning", "failed", "aborted", "unsupported",
+                "unknown"):
+            # A terminal row can remain pending solely because its notification
+            # enqueue needs retrying. Do not mistake that bookkeeping retry for
+            # a newly running test, but preserve an attribution whose durable
+            # clear failed so completion can safely retry it.
+            self._self_test_outage_attributed = already_attributed
+            return
         recent_issue = (
             time.time() - row["started_ts"] <= SELF_TEST_ATTRIBUTION_SECONDS)
         on_battery = status_has_token(ups_data.get("ups.status", ""), "OB")
@@ -2986,7 +3007,7 @@ class UPSGroupMonitor(
         # Build the effective control the issue path uses: self_test.enabled
         # auto-allows exactly `cmd` (the general allowlist is untouched).
         _permitted, eff_nc = selftest.self_test_control(nc, cfg, cmd)
-        with nutctl.command_lock(self._poll_target):
+        with nutctl.command_lock(self.config.ups.name):
             result = selftest.issue_self_test(
                 self._poll_target, cmd, eff_nc, store, source="scheduler",
                 result_poll_after=cfg.result_poll_after)

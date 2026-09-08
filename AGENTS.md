@@ -97,9 +97,9 @@ pyproject.toml        # PEP 517/518 packaging
 
 This repo deliberately keeps individual source files on the smaller side (the v5.1 mixin decomposition). To stay within the context window during longer sessions:
 
-- **Use Explore subagents for any "where is X" / "how does Y work" question.** A subagent search returns ~800 tokens vs. ~15-20k for a direct `Read` of a large file — the single biggest context lever. Direct `Read` is right when you already know the file and need its current contents.
+- **Use Graft directly, or delegate its query to an Explore subagent, for "where is X" / "how does Y work" questions.** Open only the exact source spans still needed. Direct `Read` is right when you already know the file and need its current contents.
 - **Read `src/eneru/AGENTS.md`** for the per-module map before reading implementations; the map is far cheaper than the `monitor.py` it summarizes.
-- **Don't add `.mcp.json` or context-injecting hooks.** They pre-load files into every session — exactly the wrong direction. On-demand loading is the whole point.
+- **Don't add startup context-injecting hooks.** They pre-load files into every session — exactly the wrong direction. On-demand tool configuration such as the Graft MCP is fine; keep local `.mcp.json` files untracked.
 - **On long multi-finding tasks, track every item with `/goals`** (or the task tools) and re-check the list before declaring done — "61 of 62 done" reads as done in a long session unless the tracker says otherwise.
 
 ## Git Workflow
@@ -173,8 +173,9 @@ GitHub Actions tag maintenance, the nFPM pin, the deliberate Docker-base-image f
 <!-- graft:start -->
 ## Graft — repo context graph
 
-This repo is indexed in `graft/`: small linked markdown nodes that explain each
-system and carry exact file:line spans, kept in sync with the code through git.
+This repo is indexed in `graft/`: a regenerable, gitignored local graph of small
+linked nodes with exact file:line spans. Graft tools keep it synchronized with
+the current working tree.
 
 For ANY task here — understanding how something works, finding where code lives,
 or scoping a change — get context from the graph before grepping or opening
@@ -208,6 +209,7 @@ range before finalizing. Only open source files when a node genuinely lacks a
 needed detail, and then at the exact file:line the node points to — never
 re-read whole files.
 
-After big code changes, refresh the graph with `graft build` (deterministic,
-no API key, $0).
+Graft query tools refresh automatically after edits. Run `graft build` only
+when explicitly refreshing the materialized graph (deterministic, no API key,
+$0).
 <!-- graft:end -->

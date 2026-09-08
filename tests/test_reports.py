@@ -109,11 +109,15 @@ class TestBuildReport:
 
     @pytest.mark.unit
     def test_include_filters_sections(self):
-        sources = {"ups_name": "U", "energy": {"periodKwh": 1.0},
+        sources = {"ups_name": "U",
+                   "energy": {"periodKwh": 1.0, "estimated": True},
                    "battery_health": {"score": 50, "confidence": 0.5}}
         body = reports.build_report("daily", sources, include=["energy"])["body"]
         assert "1.000 kWh" in body
         assert "🔋" not in body
+        body = reports.build_report(
+            "daily", sources, include=["battery_health"])["body"]
+        assert "~ estimated from UPS load" not in body
 
 
 # --------------------------------------------------------------------------
@@ -202,6 +206,9 @@ class TestGather:
 
         assert [event[2] for event in sources["events"]] == ["evening outage"]
         assert sources["uptime"]["restarts"] == 1
+        body = reports.build_report(
+            "daily", sources, include=["events"])["body"]
+        assert "1 outage (5h), ongoing" in body
 
     @pytest.mark.unit
     def test_energy_and_self_tests_follow_report_window(self, store):
@@ -268,6 +275,22 @@ class TestGather:
             store, "U@h", cfg.energy, period="weekly", now=now)
 
         assert sources["energy"]["periodKwh"] == pytest.approx(1 / 60)
+
+        store.power_samples = lambda start, end: [
+            (end - 600, 100.0, None, None),
+        ]
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="weekly", now=now)
+        assert sources["energy"]["periodKwh"] is None
+
+        store.power_samples = lambda start, end: [
+            (start, 100.0, None, None),
+            (start + 1, 100.0, None, None),
+        ]
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="weekly", now=now)
+        assert sources["energy"]["periodKwh"] == pytest.approx(1 / 36000)
+        assert sources["energy"]["partial"] is True
 
     @pytest.mark.unit
     def test_latest_health_may_predate_report_window(self, store):
@@ -491,14 +514,17 @@ class TestMaybeSend:
 class TestAggregate:
     @pytest.mark.unit
     def test_build_aggregate_report_has_per_ups_sections(self):
-        s1 = {"ups_name": "A@h", "ups_label": "Lab", "events": [],
+        s1 = {"ups_name": "A@h", "ups_label": "Alpha Rack", "events": [],
+              "energy": {"periodKwh": 1.0, "estimated": True},
               "uptime": {"daemon_starts": 0, "since": None}}
-        s2 = {"ups_name": "B@h", "ups_label": "APC", "events": [],
+        s2 = {"ups_name": "B@h", "ups_label": "Beta Shelf", "events": [],
               "uptime": {"daemon_starts": 0, "since": None}}
         content = reports.build_aggregate_report("daily", [s1, s2], include=["uptime"])
-        assert "Lab" in content["body"] and "APC" in content["body"]
+        assert content["body"].count("Alpha Rack") == 1
+        assert content["body"].count("Beta Shelf") == 1
         assert "A@h" not in content["body"] and "B@h" not in content["body"]
         assert "2 UPS" in content["subject"]
+        assert "~ estimated from UPS load" not in content["body"]
 
     @pytest.mark.unit
     def test_compact_aggregate_has_fleet_totals_and_estimate_note(self):
@@ -547,14 +573,15 @@ class TestAggregate:
             now = DUE_TS   # fixed due timestamp (+ tz=UTC) so the due-path is
             s1.set_meta("last_report_sent_daily", str(int(now - 2 * DAY)))  # deterministic
             bodies = []
-            units = [("A@h", "A", s1, cfg.energy),
-                     ("B@h", "B", s2, cfg.energy)]
+            units = [("A@h", "Alpha Unit", s1, cfg.energy),
+                     ("B@h", "Beta Unit", s2, cfg.energy)]
             sent = reports.maybe_send_due_reports_multi(
                 cfg, units, s1, lambda b, t, c: bodies.append(b) or 1,
                 now=now, tz=timezone.utc)
             assert sent == ["daily"]
             assert len(bodies) == 1
-            assert bodies[0].count("A") == 1 and bodies[0].count("B") == 1
+            assert bodies[0].count("Alpha Unit") == 1
+            assert bodies[0].count("Beta Unit") == 1
             # dedup stamp lands in the designated meta store
             assert s1.get_meta("last_report_sent_daily") == str(int(now))
         finally:
