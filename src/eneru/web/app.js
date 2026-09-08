@@ -31,6 +31,94 @@ function nutStatusTokens(status) {
   return new Set(String(status || "").toUpperCase().trim().split(/\s+/).filter(Boolean));
 }
 
+const NUT_STATUS_LABELS = {
+  FSD: "Shutdown in progress",
+  OFF: "UPS output off",
+  WAIT: "Waiting for UPS data",
+  OB: "Running on battery",
+  OL: "Utility power",
+  LB: "Battery low",
+  HB: "Battery charge sufficient",
+  RB: "Battery replacement needed",
+  BYPASS: "Bypass active",
+  OVER: "UPS overloaded",
+  ALARM: "UPS alarm active",
+  CAL: "Battery calibration in progress",
+  CHRG: "Battery charging",
+  DISCHRG: "Battery discharging",
+  BOOST: "Voltage boost active",
+  TRIM: "Voltage trim active",
+};
+
+// Lead with hazards, choose one primary electrical state, then retain routine
+// modifiers. Unknown vendor tokens stay visible instead of disappearing.
+function humanNutStatus(status) {
+  const tokens = nutStatusTokens(status);
+  if (tokens.size === 0) return "Status unknown";
+
+  const parts = [];
+  const primary = ["FSD", "OFF", "OB", "WAIT", "OL"].find((token) => tokens.has(token));
+  if (["FSD", "OFF"].includes(primary)) parts.push(NUT_STATUS_LABELS[primary]);
+  ["ALARM", "OVER", "LB", "RB", "BYPASS"]
+    .filter((token) => tokens.has(token))
+    .forEach((token) => parts.push(NUT_STATUS_LABELS[token]));
+  if (primary && !["FSD", "OFF"].includes(primary)) parts.push(NUT_STATUS_LABELS[primary]);
+  ["DISCHRG", "CAL", "CHRG", "BOOST", "TRIM", "HB"]
+    .filter((token) => tokens.has(token))
+    .forEach((token) => parts.push(NUT_STATUS_LABELS[token]));
+
+  const unknown = Array.from(tokens).filter(
+    (token) => !Object.prototype.hasOwnProperty.call(NUT_STATUS_LABELS, token));
+  if (unknown.length) {
+    parts.push((unknown.length === 1 ? "Custom state: " : "Custom states: ")
+      + unknown.join(", "));
+  }
+  return parts.join(" · ");
+}
+
+const EVENT_TYPE_LABELS = {
+  ON_BATTERY: "Power failure",
+  POWER_RESTORED: "Power restored",
+  SELF_TEST_ON_BATTERY: "Self-test running on battery",
+  SELF_TEST_POWER_RESTORED: "Self-test power restored",
+  BROWNOUT_DETECTED: "Low input voltage",
+  OVER_VOLTAGE_DETECTED: "High input voltage",
+  VOLTAGE_NORMALIZED: "Input voltage normal",
+  AVR_BOOST_ACTIVE: "Voltage boost started",
+  AVR_TRIM_ACTIVE: "Voltage trim started",
+  AVR_INACTIVE: "Automatic voltage regulation inactive",
+  BYPASS_MODE_ACTIVE: "UPS entered bypass mode",
+  BYPASS_MODE_INACTIVE: "UPS left bypass mode",
+  OVERLOAD_ACTIVE: "UPS overload detected",
+  OVERLOAD_RESOLVED: "UPS overload resolved",
+  CONNECTION_LOST: "UPS connection lost",
+  CONNECTION_RESTORED: "UPS connection restored",
+  BATTERY_LOW: "Low battery detected",
+};
+
+function humanEventType(type) {
+  const raw = String(type || "").trim();
+  if (!raw) return "Event";
+  const statusTokens = nutStatusTokens(raw);
+  if (Array.from(statusTokens).some(
+    (token) => Object.prototype.hasOwnProperty.call(NUT_STATUS_LABELS, token))) {
+    return humanNutStatus(raw);
+  }
+  if (EVENT_TYPE_LABELS[raw.toUpperCase()]) return EVENT_TYPE_LABELS[raw.toUpperCase()];
+  return raw.toLowerCase().split(/[_\s-]+/).filter(Boolean).map((word, index) => {
+    const upper = word.toUpperCase();
+    if (["UPS", "API", "AVR"].includes(upper)) return upper;
+    return index === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word;
+  }).join(" ");
+}
+
+function humanEventDetail(detail) {
+  return String(detail || "").replace(
+    /(\bStatus:\s*)([^)]+)(?=\))/gi,
+    (_match, prefix, status) => prefix + humanNutStatus(status),
+  );
+}
+
 function powerStateSignature(rows) {
   return (Array.isArray(rows) ? rows : []).map((row) => {
     const tokens = nutStatusTokens(row && row.status);
@@ -251,22 +339,26 @@ function formatFleetMetric(v, unit) {
 }
 
 function statusClass(status) {
-  const s = (status || "").toUpperCase();
-  if (s.includes("OB") || s.includes("LB") || s.includes("FSD")) return "crit";
-  if (s.includes("BOOST") || s.includes("TRIM") || s.includes("BYPASS")) return "warn";
-  return "ok";
+  const tokens = nutStatusTokens(status);
+  if (["FSD", "OFF", "OB", "LB", "RB", "OVER", "ALARM"]
+    .some((t) => tokens.has(t))) return "crit";
+  if (["WAIT", "BOOST", "TRIM", "BYPASS", "DISCHRG"]
+    .some((t) => tokens.has(t))) return "warn";
+  return tokens.has("OL") ? "ok" : "warn";
 }
 
 // ----- rendering -----
 
-// A UPS counts as healthy for a redundancy rollup when it is reachable and not
-// on battery / low / replace-battery.
+// A UPS counts as electrically available for a redundancy rollup only when it
+// is reachable, has a known powered state, and has no unsafe status flags.
 function upsHealthy(u) {
   const state = (u.connectionState || "").toUpperCase();
   if (state && state !== "OK" && state !== "CONNECTED") return false;
-  const s = (u.status || "").toUpperCase();
-  return !(s.includes("OB") || s.includes("LB") || s.includes("RB")
-           || s.includes("FSD") || s === "");
+  const tokens = nutStatusTokens(u.status);
+  if (["OB", "LB", "RB", "FSD", "OFF", "OVER", "ALARM", "WAIT"]
+    .some((t) => tokens.has(t))) return false;
+  return ["OL", "BOOST", "TRIM", "BYPASS", "CHRG", "HB", "CAL"]
+    .some((t) => tokens.has(t));
 }
 
 function groupHealthyCount(g, rows) {
@@ -468,9 +560,9 @@ function heroCard(u) {
   const charge = parseFloat(u.batteryCharge);
   const sCls = statusClass(u.status);
   const pq = u.powerQuality || {};
-  const st = (u.status || "").toUpperCase();
-  const onBattery = st.includes("OB");
-  const low = st.includes("LB") || st.includes("FSD");
+  const statusTokens = nutStatusTokens(u.status);
+  const onBattery = statusTokens.has("OB");
+  const low = statusTokens.has("LB") || statusTokens.has("FSD");
   // Ring turns amber the moment we're on battery (red once low/FSD), and the
   // caption says ON BATTERY — so an outage doesn't read as a calm green ring.
   const ringCls = low ? "crit" : (onBattery ? "warn" : (batteryClass(charge) || sCls));
@@ -484,7 +576,7 @@ function heroCard(u) {
   ]);
   const title = el("div", { class: "hero-title" }, [
     icon("battery"), el("h3", { text: u.label || u.name }),
-    el("span", { class: "badge " + sCls, text: u.status || "—" }),
+    el("span", { class: "badge " + sCls, text: humanNutStatus(u.status) }),
   ]);
   // Promote time-on-battery to a prominent alarm chip during an outage — it's
   // the number the operator needs first, and it was the last, easily-missed vital.
@@ -526,7 +618,7 @@ function fleetSnapshot(rows) {
   // they are warning states the dashboard must name rather than hide.
   const healthy = rows.filter((u) => fleetUpsClass(u) === "ok").length;
   const onBattery = rows.filter(
-    (u) => (u.status || "").toUpperCase().includes("OB")).length;
+    (u) => nutStatusTokens(u.status).has("OB")).length;
   return {
     total: rows.length,
     healthy,
@@ -598,7 +690,7 @@ function fleetOverview(rows) {
       load: formatFleetMetric(u.load, "%"),
       input: formatFleetMetric(pq.inputVoltage, " V"),
     };
-    const aria = label + ": " + (u.status || "status unknown") + ", "
+    const aria = label + ": " + humanNutStatus(u.status) + ", "
       + values.charge + " charge, " + values.runtime + " runtime, "
       + values.load + " load, " + values.input + " input — view details";
     const row = el("button", { class: "fleet-overview-row s-" + cls,
@@ -607,7 +699,7 @@ function fleetOverview(rows) {
         el("strong", { text: label }),
         u.isLocal === false ? monitoringBadge(u) : null,
       ].filter(Boolean)),
-      el("span", { class: "badge " + cls, text: u.status || "—" }),
+      el("span", { class: "badge " + cls, text: humanNutStatus(u.status) }),
       el("span", { class: "fleet-overview-value", "data-label": "Charge",
         text: values.charge }),
       el("span", { class: "fleet-overview-value", "data-label": "Runtime",
@@ -769,14 +861,14 @@ function renderFleetStrip(rows) {
     const charge = parseFloat(u.batteryCharge);
     // Full accessible name — the status/charge/runtime/monitoring live in
     // separate spans that a screen reader would run together ambiguously.
-    const aria = (u.label || u.name) + ": " + (u.status || "unknown") + ", "
+    const aria = (u.label || u.name) + ": " + humanNutStatus(u.status) + ", "
       + (isNaN(charge) ? "charge unknown" : charge + "% charge") + ", "
       + formatRuntimeSeconds(u.runtime) + " runtime"
       + (u.isLocal === false ? ", monitoring only" : "") + " — view details";
     const chip = el("button", { class: "fleet-chip s-" + cls, type: "button",
       title: "View " + (u.label || u.name) + " details", "aria-label": aria }, [
       el("span", { class: "fleet-name", text: u.label || u.name }),
-      el("span", { class: "badge " + cls, text: u.status || "—" }),
+      el("span", { class: "badge " + cls, text: humanNutStatus(u.status) }),
       el("span", { class: "fleet-metric", text: isNaN(charge) ? "—" : charge + "%" }),
       u.isLocal === false ? el("span", { class: "fleet-tag", text: "monitoring" }) : null,
       el("span", { class: "fleet-go", "aria-hidden": "true", text: "›" }),
@@ -1111,7 +1203,7 @@ function renderDetail(name) {
 
   sections.push(detailSection("Live status", [
     el("div", { class: "row" }, [el("span", { text: "Status" }),
-      el("span", { class: "badge " + statusClass(u.status), text: u.status || "—" })]),
+      el("span", { class: "badge " + statusClass(u.status), text: humanNutStatus(u.status) })]),
     detailRow("Battery", u.batteryCharge != null ? u.batteryCharge + "%" : null),
     detailRow("Runtime", formatRuntimeSeconds(u.runtime)),
     detailRow("Load", u.load != null ? u.load + "%" : null),
@@ -1210,15 +1302,15 @@ function renderBanner() {
   const rows = lastUpsRows;
   let crit = null, warn = null;
   for (const u of rows) {
-    const s = (u.status || "").toUpperCase();
-    if (s.includes("LB") || s.includes("FSD") || u.triggerActive) {
+    const tokens = nutStatusTokens(u.status);
+    if (tokens.has("LB") || tokens.has("FSD") || u.triggerActive) {
       const groups = lastGroups.filter((g) => (g.upsSources || []).includes(u.name));
       const causesShutdown = groups.length === 0
         || groups.some((g) => groupQuorumLost(g, rows));
       if (causesShutdown) { crit = u; break; }
       if (!warn) warn = u;
     }
-    if (s.includes("OB") && !warn) warn = u;
+    if (tokens.has("OB") && !warn) warn = u;
   }
   const setBanner = (cls, iconName, text) => {
     banner.className = "banner " + cls;
@@ -1341,6 +1433,18 @@ function updateEventSourceFilter(upsRows, groups) {
   if (knownEventSources.some((s) => s.value === prev)) sel.value = prev;
 }
 
+function eventTypeFilterLabels(types) {
+  const friendly = types.map((type) => humanEventType(type));
+  const counts = new Map();
+  friendly.forEach((label) => counts.set(label, (counts.get(label) || 0) + 1));
+  return new Map(types.map((type, index) => [
+    type,
+    counts.get(friendly[index]) > 1
+      ? friendly[index] + " (" + type + ")"
+      : friendly[index],
+  ]));
+}
+
 // Rebuild the per-type checkbox list from the loaded events (the Tier dropdown
 // is the primary filter; these only narrow within the tier).
 function updateEventTypeFilter(rows) {
@@ -1352,6 +1456,7 @@ function updateEventTypeFilter(rows) {
   const types = Array.from(new Set((rows || [])
     .map((e) => e.eventType || e.event || "")
     .filter((v) => v))).sort();
+  const labels = eventTypeFilterLabels(types);
   box.replaceChildren();
   const kept = new Set();
   types.forEach((type) => {
@@ -1362,7 +1467,7 @@ function updateEventTypeFilter(rows) {
     }
     box.appendChild(el("label", { class: "event-type-option" }, [
       input,
-      el("span", { text: type }),
+      el("span", { text: labels.get(type) }),
     ]));
   });
   updateEventTypeSummary(kept);
@@ -1381,7 +1486,7 @@ function updateEventTypeSummary(types) {
   if (!summary) return;
   const selected = Array.from(types || selectedEventTypes());
   if (selected.length === 0) summary.textContent = "All types";
-  else if (selected.length === 1) summary.textContent = selected[0];
+  else if (selected.length === 1) summary.textContent = humanEventType(selected[0]);
   else summary.textContent = selected.length + " types";
 }
 
@@ -1404,11 +1509,14 @@ function visibleEvents() {
   const rows = lastEvents.filter((e) => {
     const eventType = e.eventType || e.event || "";
     const detail = (e.detail || e.details || "").toLowerCase();
+    const displayed = (humanEventType(eventType) + " "
+      + humanEventDetail(e.detail || e.details || "")).toLowerCase();
     return (from === null || e.ts >= from)
       && eventMatchesSource(e, source)
       && eventPassesTier(eventType)              // window-independent tier gate
       && (types.size === 0 || types.has(eventType))  // optional advanced narrowing
-      && (!text || detail.includes(text));
+      && (!text || detail.includes(text) || displayed.includes(text)
+        || eventType.toLowerCase().includes(text));
   });
   if (eventSortDirection === "desc") rows.reverse();
   return rows;
@@ -1515,7 +1623,7 @@ function applyEventFilters() {
     if (multi) cells.push(el("td", { class: "ev-src", text: eventSourceLabel(e) }));
     cells.push(
       el("td", null, [eventTypeBadge(e)]),
-      el("td", { text: e.detail || e.details || "" }),
+      el("td", { text: humanEventDetail(e.detail || e.details) }),
     );
     body.appendChild(el("tr", null, cells));
   });
@@ -1599,7 +1707,8 @@ function eventTypeBadge(e) {
   else if (cls === "ev-info" && m && ["ok", "passed", "done", "success"].includes(m[1])) cls = "ev-ok";
   const tone = { "ev-ok": "ok", "ev-warn": "warn", "ev-crit": "crit" }[cls] || "info";
   const ico = { "ev-ok": "check", "ev-warn": "alert", "ev-crit": "alert" }[cls] || "bell";
-  return el("span", { class: "ev-badge " + tone }, [icon(ico), el("span", { text: type })]);
+  return el("span", { class: "ev-badge " + tone },
+    [icon(ico), el("span", { text: humanEventType(type) })]);
 }
 
 // Event tiers (mirror the TUI's Power / Diagnostics / Lifecycle split):
@@ -1652,18 +1761,19 @@ function eventPassesTier(type) {
 function eventDescription(e) {
   const type = e.eventType || e.event || "event";
   const when = e.ts ? new Date(e.ts * 1000).toLocaleString() : "";
-  const detail = e.detail || e.details || "";
-  return type + (when ? (" @ " + when) : "") + (detail ? ("\n" + detail) : "");
+  const detail = humanEventDetail(e.detail || e.details);
+  return humanEventType(type) + (when ? (" @ " + when) : "")
+    + (detail ? ("\n" + detail) : "");
 }
 
 // The same event as a structured tooltip body (type / time / detail) for the
 // instant floating tip.
 function eventTipNode(e) {
   const kids = [el("div", { class: "tip-head",
-    text: e.eventType || e.event || "event" })];
+    text: humanEventType(e.eventType || e.event) })];
   if (e.ts) kids.push(el("div", { class: "tip-sub",
     text: new Date(e.ts * 1000).toLocaleString() }));
-  const detail = e.detail || e.details || "";
+  const detail = humanEventDetail(e.detail || e.details);
   if (detail) kids.push(el("div", { class: "tip-body", text: detail }));
   return kids;
 }

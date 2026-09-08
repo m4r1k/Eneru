@@ -2,6 +2,12 @@
 
 Eneru sends notifications through [Apprise](https://github.com/caronc/apprise), so one config format covers Discord, Slack, Telegram, ntfy, Pushover, email, Matrix, Gotify, Home Assistant, and many more services.
 
+Power notifications use plain-language state and event names. A restored UPS
+reported by NUT as `OL CHRG`, for example, is described as **Utility power ·
+Battery charging**. This affects only the outgoing message. Logs and SQLite
+events keep the raw NUT status and event identifier, the terminal UI is
+unchanged, and vendor-specific status tokens remain visible as custom states.
+
 Notifications are not on the shutdown critical path. Eneru queues the message and continues shutting things down.
 
 ## Basic config
@@ -264,6 +270,21 @@ The default dwell is 30 seconds. The log and `events` table are immediate; only 
 | 0s | Input crosses warning threshold again | New dwell window starts |
 | 30s | Still outside threshold | Notification is sent with a persisted-duration note |
 | Any time | Severe deviation exceeds +/- 15% nominal | Notification bypasses dwell and sends immediately |
+
+### Self-test notifications
+
+Eneru sends one start notification when it begins tracking a test and one final
+notification when the result settles. Passed results use success severity,
+failed results use failure severity, and warning, aborted, unknown, or
+unsupported results use warning severity. Persisted notification markers stop
+a daemon restart from sending either message twice.
+
+An `OB`/`OL` pair attributed to an active self-test is stored as
+`SELF_TEST_ON_BATTERY` / `SELF_TEST_POWER_RESTORED` without ordinary outage
+notifications. Safety checks remain active. If a failed-test latch later meets
+a genuine outage, Eneru sends the normal shutdown notifications; a
+monitoring-only UPS instead sends one critical self-test notification and takes
+no shutdown action.
 
 ### Suppression list
 

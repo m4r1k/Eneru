@@ -150,8 +150,28 @@ jobs:
           # v6.1.2 wiring guard: passive self-test observation + softened
           # permission (self_test without nut_control; effective auth via DB
           # user) must stay present, and the scenario file it depends on.
-          grep -q "Test 57: self-test passive observation" tests/e2e/groups/single-ups-auth.sh
+          grep -q "Test 62: self-test observation" tests/e2e/groups/single-ups-auth.sh
           grep -q "^ups.test.result:" tests/e2e/scenarios/self-test-passed.dev
+
+      - name: Verify v6.2 report and self-test E2E coverage is wired
+        if: matrix.group == 'stats' || matrix.group == 'single-ups-auth'
+        run: |
+          if [ "${{ matrix.group }}" = "stats" ]; then
+            grep -q "PASS (35d): compact report uses display_name, energy tier" tests/e2e/groups/stats.sh
+            grep -q "category='report'" tests/e2e/groups/stats.sh
+            grep -q "E2E Restart UPS  0.008 kWh" tests/e2e/groups/stats.sh
+          else
+            grep -q "PASS (55a): dashboard labels are readable while API status stays raw" tests/e2e/groups/single-ups-auth.sh
+            grep -q "self-test-running-on-battery" tests/e2e/groups/single-ups-auth.sh
+            grep -q "self-test-failed-online" tests/e2e/groups/single-ups-auth.sh
+            grep -q "self-test-failed-on-battery" tests/e2e/groups/single-ups-auth.sh
+            grep -q "apply_scenario unknown-status" tests/e2e/groups/single-ups-auth.sh
+            grep -q "^ups.test.result: In progress" tests/e2e/scenarios/self-test-running-on-battery.dev
+            grep -q "^ups.test.result: Battery test failed" tests/e2e/scenarios/self-test-failed-online.dev
+            grep -q "^ups.status: OB DISCHRG" tests/e2e/scenarios/self-test-failed-on-battery.dev
+            grep -q "^ups.status: UNKNOWN" tests/e2e/scenarios/unknown-status.dev
+          fi
+          grep -q "PASS (34b): notification status is readable and stored event stays raw" tests/e2e/groups/stats.sh
 
       - name: Verify v6.1.7 drain-path E2E coverage is wired
         if: matrix.group == 'single-ups-core' || matrix.group == 'loopback'

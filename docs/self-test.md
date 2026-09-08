@@ -12,7 +12,8 @@ NUT `upscmd` path as [UPS control](nut-control.md).
 ## Observing device-run tests (no config)
 
 On every poll Eneru reads `ups.test.result` / `ups.test.date` and, when a new
-settled result appears (pass or fail), records it as a `source: device` row.
+settled result appears (`passed`, `warning`, `failed`, or `aborted`), records it
+as a `source: device` row.
 This happens whether or not scheduled self-tests are enabled — many UPSes run a
 test on their own cadence (`ups.test.interval`), and some operators only ever
 test by hand. The latest result shows up in the dashboard, the API `selfTest`
@@ -86,7 +87,43 @@ The raw `ups.test.result` string is vendor-specific and unbounded, so Eneru
 stores it verbatim **and** maps it to a small stable enum that the API,
 Prometheus, and UI consume:
 
-`passed` · `failed` · `running` · `unknown` · `unsupported`
+`passed` · `warning` · `failed` · `aborted` · `running` · `unknown` · `unsupported`
+
+Eneru writes the active test row before it sends the NUT command. Think of the
+row as a claim ticket: if the daemon restarts after issuing the command, it can
+still find the ticket and finish tracking the result. A second test is refused
+while that ticket is active. If the row cannot be stored, Eneru sends no command.
+
+After `result_poll_after`, Eneru reads the result. `running` and `unknown` are
+polled again at the same interval instead of being treated as final. Polling
+ends on a terminal result or after 24 hours; a timeout becomes `unknown`.
+Eneru queues one start notification and one terminal notification per test,
+including across daemon restarts.
+
+The direct CLI path has no resident monitor. Its active ticket therefore blocks
+another direct test for at most 24 hours; after that, the stale row becomes
+`unknown` and a new test may start.
+
+## Power events and failed tests
+
+A UPS may briefly report `OB` while it exercises the battery. If Eneru sees
+`CAL`, a running result, or a recently issued test, it records that pair as
+`SELF_TEST_ON_BATTERY` and `SELF_TEST_POWER_RESTORED`. Ordinary outage
+notifications are suppressed for the pair, but FSD, low battery, runtime,
+depletion, extended-time, and connection-loss protections still run. If the
+UPS remains on battery after the test finishes, Eneru records a normal
+`ON_BATTERY` event and treats the continuing interval as a utility outage.
+
+A hard `failed` result persists a failure latch. A later `passed` result clears
+it; `warning`, `aborted`, and `unknown` leave it unchanged. The failed test does
+not shut anything down while line power is present or during the test's own OB
+interval. On a later genuine outage, shutdown starts after
+`triggers.self_test_failure_shutdown_delay`, which defaults to 30 seconds. Set
+the value to `0` to act on the first poll of that later outage.
+
+Redundancy members publish this condition as an advisory trigger and let the
+group quorum decide whether to act. A monitoring-only UPS sends a critical
+notification but runs no shutdown actions.
 
 ## CLI
 
@@ -127,9 +164,10 @@ it when no daemon is running. `--ups` defaults to the only configured UPS.
 
 The NUT **dummy driver has no INSTCMD**, so *issuing* a test has no end-to-end CI
 coverage (the issue logic is unit-tested). The **observe** path *is* covered
-end-to-end: the E2E suite serves a dummy UPS reporting `ups.test.result` and
-asserts Eneru records a `source: device` row surfaced via the API. On real
-hardware, confirm `upscmd -l` lists your test command first — e.g. the Ubiquiti
+end-to-end: the E2E suite serves passive running and failed states, checks
+self-test attribution, then simulates an unknown-status interval followed by a
+later outage and verifies the delayed failed-test trigger without an OL poll.
+On real hardware, confirm `upscmd -l` lists your test command first — e.g. the Ubiquiti
 TOWER_1000VA exposes `test.battery.start` (pass `nut_control` credentials if your
 upsd requires a login to list) — then run `eneru self-test run` and check
 `eneru self-test status`.

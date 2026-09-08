@@ -39,40 +39,48 @@ class TestBuildReport:
     def test_text_report_sections(self):
         sources = {
             "ups_name": "U@h",
-            "energy": {"todayKwh": 1.234, "monthKwh": 30.0,
-                       "todayCostFormatted": "$0.30", "estimated": False},
+            "ups_label": "Lab",
+            "period_start": datetime(2026, 9, 1).timestamp(),
+            "period_end": datetime(2026, 9, 7, 23, 59).timestamp(),
+            "energy": {"periodKwh": 1.234,
+                       "periodCostFormatted": "$0.30", "estimated": False},
             "battery_health": {"score": 82.0, "confidence": 0.7},
             "events": [(1000, "ON_BATTERY", "x"), (1001, "POWER_RESTORED", "y"),
-                       (1002, "ON_BATTERY", "z")],
-            "uptime": {"daemon_starts": 1, "since": 1000},
+                       ],
+            "self_tests": [{"result_enum": "passed"}],
+            "uptime": {"restarts": 1, "since": 1000},
         }
-        out = build = reports.build_report(
-            "daily", sources,
-            include=["energy", "battery_health", "events", "uptime"])
+        out = reports.build_report(
+            "weekly", sources,
+            include=["energy", "battery_health", "events", "self_tests", "uptime"])
         body = out["body"]
-        assert "daily report — U@h" in body
+        assert "Weekly report · 1-7 Sep 2026" in body
+        assert "Lab" in body and "U@h" not in body
         assert "1.234 kWh" in body and "$0.30" in body
-        assert "Score: 82/100" in body
-        assert "ON_BATTERY: 2" in body and "POWER_RESTORED: 1" in body
+        assert "🔋 82" in body and "confidence 70%" in body
+        assert "1 outage (1s)" in body and "1 test passed" in body
+        assert "1 restart" in body
         assert out["csv"] is None
 
     @pytest.mark.unit
     def test_unknown_health_and_energy(self):
-        sources = {"ups_name": "U", "energy": {"todayKwh": None, "monthKwh": None},
+        sources = {"ups_name": "U", "energy": {"periodKwh": None},
                    "battery_health": None, "events": [], "uptime": {}}
         body = reports.build_report(
             "weekly", sources,
             include=["energy", "battery_health", "events"])["body"]
+        assert "1970" not in body
         assert "unknown" in body          # energy unknown
-        assert "Score: unknown" in body
-        assert "none" in body             # no events
+        assert "🔋 unknown" in body
+        assert "no outages" in body
 
     @pytest.mark.unit
     def test_estimated_energy_note(self):
         sources = {"ups_name": "U",
-                   "energy": {"todayKwh": 1.0, "monthKwh": 2.0, "estimated": True}}
+                   "energy": {"periodKwh": 1.0, "estimated": True}}
         body = reports.build_report("daily", sources, include=["energy"])["body"]
-        assert "estimated" in body
+        assert "~1.000 kWh" in body
+        assert "~ estimated from UPS load" in body
 
     @pytest.mark.unit
     def test_csv_attachment(self):
@@ -102,11 +110,15 @@ class TestBuildReport:
 
     @pytest.mark.unit
     def test_include_filters_sections(self):
-        sources = {"ups_name": "U", "energy": {"todayKwh": 1.0, "monthKwh": 2.0},
+        sources = {"ups_name": "U",
+                   "energy": {"periodKwh": 1.0, "estimated": True},
                    "battery_health": {"score": 50, "confidence": 0.5}}
         body = reports.build_report("daily", sources, include=["energy"])["body"]
-        assert "Energy:" in body
-        assert "Battery health:" not in body
+        assert "1.000 kWh" in body
+        assert "🔋" not in body
+        body = reports.build_report(
+            "daily", sources, include=["battery_health"])["body"]
+        assert "~ estimated from UPS load" not in body
 
 
 # --------------------------------------------------------------------------
@@ -142,22 +154,46 @@ class TestPeriodStart:
         start = reports._period_start("weekly", now)
         assert start == int(now - 7 * 86400)
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize(("age", "expected"), [
+        (24 * 3600, ("samples", 7.0)),
+        (24 * 3600 + 1, ("agg_5min", 300.0)),
+        (30 * 86400, ("agg_5min", 300.0)),
+        (30 * 86400 + 1, ("agg_hourly", 3600.0)),
+    ])
+    def test_report_storage_tier_matches_retention(self, store, age, expected):
+        now = 2_000_000_000
+        assert reports._report_storage_tier(
+            store, now - age, now, 7, [9999]) == expected
+
+    @pytest.mark.unit
+    def test_increased_retention_does_not_assume_deleted_rows_return(self, store):
+        now = 2_000_000_000
+        store.retention_raw_hours = 48
+        store.retention_5min_days = 60
+
+        assert reports._report_storage_tier(
+            store, now - 32 * 3600, now, 7, []) == ("agg_5min", 300.0)
+        assert reports._report_storage_tier(
+            store, now - 31 * 86400, now, 7, []) == ("agg_hourly", 3600.0)
+
 
 class TestGather:
     @pytest.mark.unit
     def test_gathers_from_store(self, store):
         now = time.time()
         store.log_event("DAEMON_START", "boot")
+        store.log_event("DAEMON_RESTARTED", "restart")
         store.log_event("ON_BATTERY", "outage")
         store.record_battery_health(75.0, {"runtime": 80.0}, ts=int(now))
         cfg = _config("ups:\n  name: U@h\nenergy:\n  enabled: true\n")
         sources = reports.gather_report_sources(
             store, "U@h", cfg.energy, period="weekly", now=now)
         assert sources["ups_name"] == "U@h"
-        assert sources["uptime"]["daemon_starts"] == 1
+        assert sources["uptime"]["restarts"] == 1
         assert sources["battery_health"]["score"] == 75.0
         assert any(e[1] == "ON_BATTERY" for e in sources["events"])
-        assert "todayKwh" in sources["energy"]
+        assert "periodKwh" in sources["energy"]
 
     @pytest.mark.unit
     def test_report_confidence_from_store_detail(self, store):
@@ -181,7 +217,8 @@ class TestGather:
         previous_boot = datetime(2026, 6, 28, 7, 0).timestamp()
         current_morning = datetime(2026, 6, 29, 7, 0).timestamp()
         send_time = datetime(2026, 6, 29, 8, 0).timestamp()
-        store.log_event("DAEMON_START", "yesterday boot", ts=int(previous_boot))
+        store.log_event("DAEMON_RESTARTED", "yesterday restart",
+                        ts=int(previous_boot))
         store.log_event("ON_BATTERY", "evening outage", ts=int(previous_evening))
         store.log_event("DAEMON_START", "today boot", ts=int(current_morning))
         store.log_event("ON_BATTERY", "today outage", ts=int(current_morning))
@@ -192,7 +229,161 @@ class TestGather:
         )
 
         assert [event[2] for event in sources["events"]] == ["evening outage"]
-        assert sources["uptime"]["daemon_starts"] == 1
+        assert sources["uptime"]["restarts"] == 1
+        body = reports.build_report(
+            "daily", sources, include=["events"])["body"]
+        assert "1 outage (5h), ongoing" in body
+
+    @pytest.mark.unit
+    def test_energy_and_self_tests_follow_report_window(self, store):
+        now = 1_800_000_000
+        store.power_samples = lambda start, end, **kwargs: [
+            (now - 300, 100.0, None, None),
+            (now, 100.0, None, None),
+        ]
+        store.record_self_test(
+            "test.battery.start", "scheduler", started_ts=now - 60,
+            result_enum="passed")
+        cfg = _config(
+            "ups:\n  name: U@h\nenergy:\n  cost_per_kwh: 0.25\n")
+
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="weekly", now=now,
+            ups_label="Lab")
+
+        assert sources["ups_label"] == "Lab"
+        assert sources["energy"]["periodKwh"] == pytest.approx(1 / 120)
+        assert sources["energy"]["periodCost"] == pytest.approx(1 / 480)
+        assert [row["result_enum"] for row in sources["self_tests"]] == [
+            "passed"]
+
+    @pytest.mark.unit
+    def test_carry_in_outage_counts_only_time_inside_window(self, store):
+        now = 2_000_000_000
+        start = int(now - 7 * DAY)
+        store.log_event("ON_BATTERY", "before window", ts=start - 60)
+        store.log_event("POWER_RESTORED", "inside window", ts=start + 120)
+        cfg = _config("ups:\n  name: U@h\n")
+
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="weekly", now=now)
+        body = reports.build_report(
+            "weekly", sources, include=["events"])["body"]
+        csv_text = reports.build_report(
+            "weekly", sources, include=["events"], fmt="csv")["csv"]
+
+        assert "1 outage (2m)" in body
+        assert "before window" not in csv_text
+        assert "inside window" in csv_text
+
+    @pytest.mark.unit
+    def test_open_carry_in_outage_spans_whole_window(self, store):
+        now = 2_000_000_000
+        start = int(now - 7 * DAY)
+        store.log_event("ON_BATTERY", "before window", ts=start - 60)
+        cfg = _config("ups:\n  name: U@h\n")
+
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="weekly", now=now)
+        count, duration, open_count = reports._outage_summary(
+            sources["events"], sources["period_end"])
+
+        assert (count, duration, open_count) == (1, int(7 * DAY), 1)
+
+    @pytest.mark.unit
+    def test_energy_includes_final_bucket_to_window_boundary(self, store):
+        now = 2_000_000_000
+        store.power_samples = lambda start, end, **kwargs: [
+            (end - 600, 100.0, None, None),
+            (end - 300, 100.0, None, None),
+        ]
+        cfg = _config("ups:\n  name: U@h\nenergy:\n  enabled: true\n")
+
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="weekly", now=now)
+
+        assert sources["energy"]["periodKwh"] == pytest.approx(1 / 60)
+
+        store.power_samples = lambda start, end, **kwargs: [
+            (end - 600, 100.0, None, None),
+        ]
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="weekly", now=now)
+        assert sources["energy"]["periodKwh"] is None
+
+        store.power_samples = lambda start, end, **kwargs: [
+            (start, 100.0, None, None),
+            (start + 1, 100.0, None, None),
+        ]
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="weekly", now=now)
+        assert sources["energy"]["periodKwh"] == pytest.approx(1 / 36000)
+        assert sources["energy"]["partial"] is True
+
+    @pytest.mark.unit
+    def test_sparse_raw_samples_use_configured_poll_interval(self, store):
+        now = datetime(2026, 6, 29).timestamp()
+
+        def sparse_samples(start, end, **kwargs):
+            assert kwargs["prefer_tier"] == "samples"
+            return [(start, 100.0, None, None),
+                    (start + 300, 100.0, None, None)]
+
+        store.power_samples = sparse_samples
+        cfg = _config("ups:\n  name: U@h\n  check_interval: 1\n")
+
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="daily", now=now,
+            poll_interval=cfg.ups.check_interval)
+
+        assert sources["energy"]["periodKwh"] is None
+        assert sources["energy"]["partial"] is True
+
+    @pytest.mark.unit
+    def test_daily_energy_uses_retained_five_minute_tier(self, store,
+                                                         monkeypatch):
+        now = datetime(2026, 6, 29, 8, 0).timestamp()
+        start = int(datetime(2026, 6, 28).timestamp())
+        with store._conn:
+            store._conn.executemany(
+                "INSERT INTO samples (ts, real_power) VALUES (?, ?)",
+                [(start, 100.0), (start + 300, 100.0)],
+            )
+        store.aggregate()
+        monkeypatch.setattr("eneru.stats.time.time", lambda: now)
+        store.purge()
+        cfg = _config("ups:\n  name: U@h\n  check_interval: 1\n")
+
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="daily", now=now,
+            poll_interval=cfg.ups.check_interval)
+
+        assert store.power_samples(start, int(now), prefer_tier="samples") == []
+        assert sources["energy"]["periodKwh"] == pytest.approx(1 / 120)
+        assert sources["energy"]["partial"] is True
+
+    @pytest.mark.unit
+    def test_latest_health_may_predate_report_window(self, store):
+        now = 2_000_000_000
+        store.record_battery_health(
+            88.0, {"runtime": 90.0}, ts=int(now - 8 * DAY))
+        cfg = _config("ups:\n  name: U@h\n")
+
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="weekly", now=now)
+
+        assert sources["battery_health"]["score"] == 88.0
+
+    @pytest.mark.unit
+    def test_initial_start_is_not_counted_as_restart(self, store):
+        now = 2_000_000_000
+        store.log_event("DAEMON_START", "cold boot", ts=int(now - 60))
+        cfg = _config("ups:\n  name: U@h\n")
+
+        sources = reports.gather_report_sources(
+            store, "U@h", cfg.energy, period="weekly", now=now)
+
+        assert sources["uptime"]["restarts"] == 0
 
 
 # --------------------------------------------------------------------------
@@ -362,7 +553,7 @@ class TestMaybeSend:
             store, "U@h", _config("ups:\n  name: U@h\n").energy,
             period="daily", now=now)
         assert sources["uptime"]["since"] is not None
-        assert sources["uptime"]["daemon_starts"] == 0   # none inside the daily window
+        assert sources["uptime"]["restarts"] == 0  # none inside the daily window
 
     @pytest.mark.unit
     def test_weekly_and_monthly_due(self, store):
@@ -393,11 +584,66 @@ class TestMaybeSend:
 class TestAggregate:
     @pytest.mark.unit
     def test_build_aggregate_report_has_per_ups_sections(self):
-        s1 = {"ups_name": "A@h", "events": [], "uptime": {"daemon_starts": 0, "since": None}}
-        s2 = {"ups_name": "B@h", "events": [], "uptime": {"daemon_starts": 0, "since": None}}
+        s1 = {"ups_name": "A@h", "ups_label": "Alpha Rack", "events": [],
+              "energy": {"periodKwh": 1.0, "estimated": True},
+              "uptime": {"daemon_starts": 0, "since": None}}
+        s2 = {"ups_name": "B@h", "ups_label": "Beta Shelf", "events": [],
+              "uptime": {"daemon_starts": 0, "since": None}}
         content = reports.build_aggregate_report("daily", [s1, s2], include=["uptime"])
-        assert "A@h" in content["body"] and "B@h" in content["body"]
+        assert "1970" not in content["body"]
+        assert content["body"].count("Alpha Rack") == 1
+        assert content["body"].count("Beta Shelf") == 1
+        assert "A@h" not in content["body"] and "B@h" not in content["body"]
         assert "2 UPS" in content["subject"]
+        assert "~ estimated from UPS load" not in content["body"]
+
+    @pytest.mark.unit
+    def test_duplicate_labels_include_raw_ups_names(self):
+        sources = [
+            {"ups_name": "A@h", "ups_label": "Rack", "uptime": {}},
+            {"ups_name": "B@h", "ups_label": "Rack", "uptime": {}},
+        ]
+
+        body = reports.build_aggregate_report(
+            "daily", sources, include=["uptime"])["body"]
+
+        assert "Rack (A@h)" in body
+        assert "Rack (B@h)" in body
+
+    @pytest.mark.unit
+    def test_compact_aggregate_has_fleet_totals_and_estimate_note(self):
+        period = {
+            "period_start": datetime(2026, 9, 1).timestamp(),
+            "period_end": datetime(2026, 9, 7).timestamp(),
+        }
+        common = {
+            "events": [], "self_tests": [{"result_enum": "passed"}],
+            "battery_health": {"score": 98, "confidence": 1.0},
+            "uptime": {"daemon_starts": 0}, **period,
+        }
+        lab = {
+            **common, "ups_name": "lab@host", "ups_label": "Lab",
+            "energy": {"periodKwh": 6.31, "periodCost": 2.21,
+                       "periodCostFormatted": "€2.21", "currency": "EUR",
+                       "costFormat": "€{value}", "estimated": False},
+        }
+        apc = {
+            **common, "ups_name": "apc@host", "ups_label": "APC",
+            "energy": {"periodKwh": 2.38, "periodCost": 0.83,
+                       "periodCostFormatted": "€0.83", "currency": "EUR",
+                       "costFormat": "€{value}", "estimated": True},
+        }
+
+        body = reports.build_aggregate_report(
+            "weekly", [lab, apc],
+            include=["events", "self_tests", "battery_health", "energy",
+                     "uptime"])["body"]
+
+        assert "Weekly report · 1-7 Sep 2026 · 2 UPS" in body
+        assert "Lab" in body and "APC" in body
+        assert "1 test passed" in body and "no restarts" in body
+        assert "Total  ~8.690 kWh · €3.04" in body
+        assert body.count("~ estimated from UPS load") == 1
 
     @pytest.mark.unit
     def test_multi_covers_every_unit_once(self, tmp_path):
@@ -411,13 +657,15 @@ class TestAggregate:
             now = DUE_TS   # fixed due timestamp (+ tz=UTC) so the due-path is
             s1.set_meta("last_report_sent_daily", str(int(now - 2 * DAY)))  # deterministic
             bodies = []
-            units = [("A@h", s1, cfg.energy), ("B@h", s2, cfg.energy)]
+            units = [("A@h", "Alpha Unit", s1, cfg.energy),
+                     ("B@h", "Beta Unit", s2, cfg.energy)]
             sent = reports.maybe_send_due_reports_multi(
                 cfg, units, s1, lambda b, t, c: bodies.append(b) or 1,
                 now=now, tz=timezone.utc)
             assert sent == ["daily"]
             assert len(bodies) == 1
-            assert bodies[0].count("A@h") == 1 and bodies[0].count("B@h") == 1
+            assert bodies[0].count("Alpha Unit") == 1
+            assert bodies[0].count("Beta Unit") == 1
             # dedup stamp lands in the designated meta store
             assert s1.get_meta("last_report_sent_daily") == str(int(now))
         finally:
@@ -443,7 +691,7 @@ class TestAggregate:
 
             with pytest.raises(RuntimeError, match="gather"):
                 reports.maybe_send_due_reports_multi(
-                    cfg, [("A@h", store, cfg.energy)], store,
+                    cfg, [("A@h", "A", store, cfg.energy)], store,
                     lambda *args: None, now=DUE_TS, tz=timezone.utc,
                 )
 
@@ -466,7 +714,7 @@ class TestAggregate:
 
             with pytest.raises(RuntimeError, match="queue down"):
                 reports.maybe_send_due_reports_multi(
-                    cfg, [("A@h", store, cfg.energy)], store, reject,
+                    cfg, [("A@h", "A", store, cfg.energy)], store, reject,
                     now=DUE_TS, tz=timezone.utc,
                 )
 
@@ -485,7 +733,7 @@ class TestAggregate:
             store.set_meta("last_report_sent_daily", old)
 
             periods = reports.maybe_send_due_reports_multi(
-                cfg, [("A@h", store, cfg.energy)], store,
+                cfg, [("A@h", "A", store, cfg.energy)], store,
                 lambda *_args: None, now=DUE_TS, tz=timezone.utc,
             )
 
@@ -501,12 +749,13 @@ class TestAggregate:
         s.open()
         try:
             assert reports.maybe_send_due_reports_multi(
-                off, [("A@h", s, off.energy)], s, lambda *a: None) == []
+                off, [("A@h", "A", s, off.energy)], s, lambda *a: None) == []
             on = _config("ups:\n  - name: A@h\nreports:\n  enabled: true\n  daily: true\n")
             assert reports.maybe_send_due_reports_multi(
                 on, [], s, lambda *a: None) == []          # no units
             assert reports.maybe_send_due_reports_multi(
-                on, [("A@h", s, on.energy)], None, lambda *a: None) == []  # no meta store
+                on, [("A@h", "A", s, on.energy)], None,
+                lambda *a: None) == []  # no meta store
         finally:
             s.close()
 
@@ -519,12 +768,12 @@ class TestAggregate:
         try:
             # First sight: no explicit now -> seeds baseline, sends nothing.
             assert reports.maybe_send_due_reports_multi(
-                cfg, [("A@h", s, cfg.energy)], s, lambda *a: None) == []
+                cfg, [("A@h", "A", s, cfg.energy)], s, lambda *a: None) == []
             assert s.get_meta("last_report_sent_daily") is not None
             # Corrupt meta -> treated as unrun -> reseeds, still no send.
             s.set_meta("last_report_sent_daily", "garbage")
             assert reports.maybe_send_due_reports_multi(
-                cfg, [("A@h", s, cfg.energy)], s, lambda *a: None,
+                cfg, [("A@h", "A", s, cfg.energy)], s, lambda *a: None,
                 now=time.time()) == []
         finally:
             s.close()
@@ -538,7 +787,7 @@ class TestAggregate:
                             lambda *a, **k: (_ for _ in ()).throw(ValueError("bad")))
         try:
             assert reports.maybe_send_due_reports_multi(
-                cfg, [("A@h", s, cfg.energy)], s, lambda *a: None,
+                cfg, [("A@h", "A", s, cfg.energy)], s, lambda *a: None,
                 now=time.time()) == []
         finally:
             s.close()

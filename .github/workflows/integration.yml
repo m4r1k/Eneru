@@ -138,9 +138,6 @@ jobs:
       matrix:
         include:
           - distro: debian
-            version: '11'
-            name: Debian 11 (Bullseye)
-          - distro: debian
             version: '12'
             name: Debian 12 (Bookworm)
           - distro: debian
@@ -333,9 +330,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - distro: debian
-            version: '11'
-            name: Debian 11
           - distro: debian
             version: '12'
             name: Debian 12

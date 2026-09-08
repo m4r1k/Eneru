@@ -355,7 +355,10 @@ class TestSendPersistence:
             registered_store.enqueue_notification = MagicMock(
                 return_value=None)
             worker._warn = lambda *_: None
-            worker.send("buffered-1", "info", "shutdown")
+            worker.send(
+                "buffered-1", "info", "shutdown",
+                meta_updates={"buffered_marker": "committed"},
+            )
             worker.send("buffered-2", "warning", "shutdown")
             assert len(worker._memory_buffer) == 2
 
@@ -370,6 +373,7 @@ class TestSendPersistence:
             assert worker._replay_memory_buffer() == 2
             assert worker._memory_buffer == []
             assert registered_store.pending_notification_count() == 2
+            assert registered_store.get_meta("buffered_marker") == "committed"
         finally:
             worker.stop()
 
@@ -513,7 +517,7 @@ class TestMemoryBufferDirectDelivery:
     @patch("eneru.notifications.APPRISE_AVAILABLE", True)
     @patch("eneru.notifications.apprise")
     def test_no_store_grace_holds_then_delivers(
-        self, mock_apprise, notification_config
+        self, mock_apprise, notification_config, registered_store
     ):
         """With NO store registered, rows are held for the imminent
         register_store during the startup grace, then direct-delivered
@@ -523,19 +527,29 @@ class TestMemoryBufferDirectDelivery:
         try:
             worker.start()
             worker.stop()  # halt the thread; drive the direct path by hand
+            worker.send(
+                "atomic", "info", "lifecycle",
+                meta_updates={"atomic_marker": "committed"},
+            )
             worker.send("held", "info", "lifecycle")
             worker._stop_event.clear()  # allow the hand-driven sweep to run
 
             # Inside the grace: held for register_store, nothing sent.
             worker._deliver_memory_buffer_direct()
-            assert len(worker._memory_buffer) == 1
+            assert len(worker._memory_buffer) == 2
             mock_instance.notify.assert_not_called()
 
             # Past the grace: no store is coming → direct delivery.
             worker._start_mono = time.monotonic() - 60
             worker._deliver_memory_buffer_direct()
-            assert worker._memory_buffer == []
+            assert [entry[0] for entry in worker._memory_buffer] == ["atomic"]
             assert mock_instance.notify.call_count == 1
+
+            # Once SQLite is available, the notification and marker commit
+            # together instead of direct delivery losing the metadata.
+            worker.register_store(registered_store)
+            assert worker._memory_buffer == []
+            assert registered_store.get_meta("atomic_marker") == "committed"
         finally:
             worker.stop()
 
@@ -658,14 +672,14 @@ class TestMemoryBufferDirectDelivery:
         replacement — drain detaches, adopt prepends preserving age order."""
         _patch_apprise(mock_apprise, succeed=True)
         old = NotificationWorker(notification_config)
-        old._memory_buffer = [("old-1", "info", "lifecycle", 100),
-                              ("old-2", "info", "lifecycle", 200)]
+        old._memory_buffer = [("old-1", "info", "lifecycle", 100, None),
+                              ("old-2", "info", "lifecycle", 200, None)]
         entries = old.drain_memory_buffer()
         assert [e[0] for e in entries] == ["old-1", "old-2"]
         assert old._memory_buffer == []
 
         new = NotificationWorker(notification_config)
-        new._memory_buffer = [("new-1", "info", "lifecycle", 300)]
+        new._memory_buffer = [("new-1", "info", "lifecycle", 300, None)]
         new.adopt_memory_buffer(entries)
         assert [e[0] for e in new._memory_buffer] == ["old-1", "old-2", "new-1"]
 
@@ -687,9 +701,9 @@ class TestMemoryBufferDirectDelivery:
         worker = NotificationWorker(notification_config)
         worker._warn = lambda *_: None
         worker.adopt_memory_buffer([
-            ("a", "info", "lifecycle", 1),
-            ("b", "info", "lifecycle", 2),
-            ("c", "info", "lifecycle", 3),
+            ("a", "info", "lifecycle", 1, None),
+            ("b", "info", "lifecycle", 2, None),
+            ("c", "info", "lifecycle", 3, None),
         ])
         assert [e[0] for e in worker._memory_buffer] == ["b", "c"]
 
@@ -701,7 +715,7 @@ class TestMemoryBufferDirectDelivery:
         """A blocked direct send is delivered once or retried, never copied."""
         old = NotificationWorker(notification_config)
         new = NotificationWorker(notification_config)
-        entry = ("inflight", "info", "lifecycle", 1)
+        entry = ("inflight", "info", "lifecycle", 1, None)
         old._memory_buffer = [entry]
         old._stores = [MagicMock()]
         entered = threading.Event()
@@ -742,7 +756,8 @@ class TestMemoryBufferDirectDelivery:
             worker.start()
             warnings = []
             worker._warn = warnings.append
-            worker._memory_buffer = [("orphan", "info", "lifecycle", 1)]
+            worker._memory_buffer = [
+                ("orphan", "info", "lifecycle", 1, None)]
             worker.stop()
             assert any("memory-buffered" in w for w in warnings)
         finally:

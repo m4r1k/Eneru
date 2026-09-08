@@ -1394,14 +1394,12 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 "STATS_UNAVAILABLE", "the statistics store is unavailable")
         with _ups_lock(real):
             result = selftest.issue_self_test(
-                real, command, nc, store, source="api")
+                real, command, nc, store, source="api",
+                result_poll_after=st_cfg.result_poll_after)
         self._audit(principal, "self-test", f"{real}:{command}",
                     "ok" if result["ok"] else "failed")
         if not result["ok"]:
             return 502, "application/json", self._error("NUT_ERROR", result["error"])
-        selftest.persist_pending_self_test(
-            store, result["test_id"],
-            selftest.self_test_poll_due_ts(time.time(), st_cfg.result_poll_after))
         return 200, "application/json", {"ups": real, "command": command,
                                          "status": "issued",
                                          "testId": result["test_id"]}
@@ -1980,7 +1978,7 @@ _METRIC_CATALOGUE = (
      "energy.cost_per_kwh is unset."),
     ("eneru_ups_self_test_result", "gauge",
      "Latest self-test result, one series per normalized result label "
-     "(passed|failed|running|unknown|unsupported)."),
+     "(passed|warning|failed|aborted|running|unknown|unsupported)."),
 )
 
 

@@ -14,9 +14,29 @@ When a UPS is on battery, Eneru evaluates these conditions in order. The first m
 | 4 | Critical runtime | `600s` | UPS estimate says runtime is too short |
 | 5 | Depletion rate | `15%/min` after `90s` | Observed battery loss is too fast |
 | 6 | Extended time | `900s` | Safety net for long outages or stuck UPS readings |
+| 7 | Previous self-test failure | `30s` | A known bad battery should not ride through the next real outage |
 | Always | Failsafe battery protection | built in | Connection lost while on battery means shut down now |
 
 Only on-battery status activates the shutdown triggers. Voltage, AVR, bypass, overload, and battery anomaly events are health alerts unless they also lead to one of the trigger conditions above.
+
+## Previous self-test failure
+
+```yaml
+triggers:
+  self_test_failure_shutdown_delay: 30
+```
+
+A hard failed self-test arms this trigger in the UPS stats database. It never
+fires while the UPS is online, and the battery interval caused by the test does
+not count as the later outage. When a subsequent genuine `OB` transition lasts
+for the configured delay, Eneru starts the normal shutdown sequence. Set the
+delay to `0` to fire on the first poll of that outage.
+
+A passed self-test clears the stored failure. Warning, aborted, unknown, and
+unsupported results do not arm or clear it. For a redundancy member the result
+is advisory and the existing quorum evaluator decides whether the group acts.
+For a monitoring-only UPS, Eneru sends a critical notification and performs no
+shutdown actions.
 
 ### Power-event evaluation timeline
 

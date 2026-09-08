@@ -167,3 +167,9 @@ secrets.json
 # contributor/agent gets them. Local-only settings stay ignored.
 .claude/*
 !.claude/skills/
+
+# Local Claude MCP configuration.
+/.mcp.json
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

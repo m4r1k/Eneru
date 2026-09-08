@@ -19,6 +19,8 @@ from eneru import (
     RemoteServerConfig, LocalShutdownConfig, MonitorState,
 )
 from eneru.monitor import UPSGroupMonitor, compute_effective_order
+from eneru.config import SelfTestConfig
+from eneru.stats import StatsStore
 
 
 def make_monitor(tmp_path, **overrides):
@@ -4119,7 +4121,7 @@ class TestLogPowerEventDefensiveBranches:
     @pytest.mark.unit
     def test_unmapped_event_uses_generic_info_notification(self, tmp_path):
         """An event name not in the per-event mapping falls through to
-        the generic `⚡  **Event:** ...` body with NOTIFY_INFO."""
+        a human-readable generic body with NOTIFY_INFO."""
         monitor = make_monitor(tmp_path)
         monitor._stats_store = MagicMock()
         monitor._shutdown_flag_path.unlink(missing_ok=True)
@@ -4128,8 +4130,32 @@ class TestLogPowerEventDefensiveBranches:
             monitor._log_power_event("CUSTOM_TELEMETRY", "value=42")
 
         send_kwargs = monitor._notification_worker.send.call_args.kwargs
-        assert "⚡  **Event:** CUSTOM_TELEMETRY" in send_kwargs["body"]
+        assert "⚡  **Event:** Custom telemetry" in send_kwargs["body"]
         assert send_kwargs["category"] == "power_event"
+
+    @pytest.mark.unit
+    def test_notification_details_do_not_change_stored_event(self, tmp_path):
+        monitor = make_monitor(tmp_path)
+        store = MagicMock()
+        monitor._stats_store = store
+        monitor._shutdown_flag_path.unlink(missing_ok=True)
+        raw = "Battery: 95% (Status: OL CHRG), Input: 230V"
+        friendly = (
+            "Battery: 95% (Status: Utility power · Battery charging), "
+            "Input: 230V"
+        )
+
+        with patch("eneru.monitor.run_command", return_value=(0, "", "")):
+            monitor._log_power_event(
+                "POWER_RESTORED", raw, notification_details=friendly,
+            )
+
+        store.log_event.assert_called_once_with(
+            "POWER_RESTORED", raw, notification_sent=True,
+        )
+        body = monitor._notification_worker.send.call_args.kwargs["body"]
+        assert friendly in body
+        assert "OL CHRG" not in body
 
 
 class TestSaveStateDefensive:
@@ -4855,3 +4881,364 @@ class TestUpscNameDiagnosticCooldown:
         clock[0] += 60
         _run_one_iteration(monitor, (False, {}, "connection refused"))
         assert monitor._run_ups_name_diagnostic.call_count == 1
+
+
+class TestSelfTestPowerContract:
+    def _monitor_with_store(self, tmp_path, *, delay=30):
+        monitor = make_monitor(
+            tmp_path,
+            triggers=TriggersConfig(
+                low_battery_threshold=20,
+                critical_runtime_threshold=600,
+                on_battery_stabilization_delay=0,
+                self_test_failure_shutdown_delay=delay,
+            ),
+            self_test=SelfTestConfig(enabled=True),
+        )
+        store = StatsStore(tmp_path / "self-test-power.db")
+        store.open()
+        monitor._stats_store = store
+        monitor._calculate_depletion_rate = MagicMock(return_value=0.0)
+        return monitor, store
+
+    @pytest.mark.unit
+    def test_attributed_ob_is_silent_but_triggers_still_run(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path)
+        try:
+            test_id = store.record_self_test("test.battery.start", "scheduler")
+            store.set_meta("self_test_pending_id", str(test_id))
+            monitor._prepare_self_test_attribution({"ups.status": "OB DISCHRG"})
+            monitor.state.previous_status = "OL"
+            monitor._log_power_event = MagicMock()
+            monitor._trigger_immediate_shutdown = MagicMock()
+
+            monitor._handle_on_battery({
+                "ups.status": "OB DISCHRG", "battery.charge": "10",
+                "battery.runtime": "1200", "ups.load": "20",
+            })
+
+            event = monitor._log_power_event.call_args
+            assert event.args[0] == "SELF_TEST_ON_BATTERY"
+            assert event.kwargs["suppress_notification"] is True
+            monitor._trigger_immediate_shutdown.assert_called_once()
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_attributed_recovery_is_not_an_outage_notification(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path)
+        try:
+            monitor.state.previous_status = "OB DISCHRG"
+            monitor.state.on_battery_start_time = int(time.time()) - 5
+            monitor.state.on_battery_start_mono = time.monotonic() - 5
+            monitor._self_test_outage_attributed = True
+            monitor._log_power_event = MagicMock()
+
+            monitor._handle_on_line({
+                "ups.status": "OL CHRG", "battery.charge": "99",
+                "input.voltage": "230",
+            })
+
+            event = monitor._log_power_event.call_args
+            assert event.args[0] == "SELF_TEST_POWER_RESTORED"
+            assert event.kwargs["suppress_notification"] is True
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_failed_test_triggers_only_after_later_ob_delay(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path, delay=30)
+        try:
+            failed_at = time.time() - 100
+            store.set_meta("self_test_failure_latched", str(failed_at))
+            monitor.state.previous_status = "OB DISCHRG"
+            monitor.state.on_battery_start_time = int(time.time()) - 31
+            monitor.state.on_battery_start_mono = time.monotonic() - 31
+            monitor._trigger_immediate_shutdown = MagicMock()
+
+            data = {
+                "ups.status": "OB DISCHRG", "battery.charge": "90",
+                "battery.runtime": "1200", "ups.load": "20",
+            }
+            monitor._handle_on_battery(data)
+            monitor._handle_on_battery(data)
+
+            reason = monitor._trigger_immediate_shutdown.call_args.args[0]
+            assert "Previous UPS self-test failed" in reason
+            monitor._trigger_immediate_shutdown.assert_called_once()
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_new_ob_interval_rearms_failed_test_trigger_without_ol(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path, delay=0)
+        try:
+            store.set_meta("self_test_failure_latched", str(time.time() - 100))
+            monitor.state.previous_status = "UNKNOWN"
+            monitor._self_test_failure_triggered = True
+            monitor._trigger_immediate_shutdown = MagicMock()
+
+            monitor._handle_on_battery({
+                "ups.status": "OB DISCHRG", "battery.charge": "90",
+                "battery.runtime": "1200", "ups.load": "20",
+            })
+
+            monitor._trigger_immediate_shutdown.assert_called_once()
+            assert "Previous UPS self-test failed" in (
+                monitor._trigger_immediate_shutdown.call_args.args[0]
+            )
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_new_ob_interval_rearms_monitor_only_alert_without_ol(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path, delay=0)
+        try:
+            monitor.config.ups_groups[0].is_local = False
+            store.set_meta("self_test_failure_latched", str(time.time() - 100))
+            monitor.state.previous_status = "UNKNOWN"
+            monitor._self_test_failure_triggered = True
+            monitor._self_test_monitor_only_alerted = True
+            monitor._send_notification = MagicMock(return_value=1)
+            monitor._trigger_immediate_shutdown = MagicMock()
+
+            monitor._handle_on_battery({
+                "ups.status": "OB DISCHRG", "battery.charge": "90",
+                "battery.runtime": "1200", "ups.load": "20",
+            })
+
+            monitor._trigger_immediate_shutdown.assert_not_called()
+            self_test_calls = [
+                call for call in monitor._send_notification.call_args_list
+                if call.kwargs.get("category") == "self_test"
+            ]
+            assert len(self_test_calls) == 1
+            assert "monitoring-only" in self_test_calls[0].args[0]
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_failed_poll_does_not_rearm_current_ob_interval(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path, delay=0)
+        try:
+            monitor.state.previous_status = "OB DISCHRG"
+            monitor.state.on_battery_start_time = int(time.time()) - 10
+            monitor.state.on_battery_start_mono = time.monotonic() - 10
+            monitor._self_test_failure_triggered = True
+            monitor._self_test_monitor_only_alerted = True
+            original_start = monitor.state.on_battery_start_time
+
+            _run_one_iteration(monitor, (False, {}, "connection refused"))
+            monitor._stop_event.clear()
+            _run_one_iteration(monitor, (True, {
+                "ups.status": "OB DISCHRG", "battery.charge": "90",
+                "battery.runtime": "1200", "ups.load": "20",
+            }, ""))
+
+            assert monitor.state.on_battery_start_time == original_start
+            assert monitor._self_test_failure_triggered is True
+            assert monitor._self_test_monitor_only_alerted is True
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_failed_test_waits_and_ignores_same_test_ob(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path, delay=30)
+        try:
+            monitor._trigger_immediate_shutdown = MagicMock()
+            monitor.state.previous_status = "OB"
+            monitor.state.on_battery_start_time = int(time.time()) - 10
+            monitor.state.on_battery_start_mono = time.monotonic() - 10
+            # Failure happened during this OB interval, so this is not a later
+            # genuine outage and must never activate T5.
+            store.set_meta("self_test_failure_latched", str(time.time() - 5))
+            store.set_meta(
+                "self_test_failure_outage_start",
+                str(monitor.state.on_battery_start_time))
+            data = {"ups.status": "OB", "battery.charge": "90",
+                    "battery.runtime": "1200", "ups.load": "20"}
+            monitor._handle_on_battery(data)
+            monitor._trigger_immediate_shutdown.assert_not_called()
+
+            # A later outage still waits for the configured delay.
+            store.set_meta("self_test_failure_latched", str(time.time() - 100))
+            store.set_meta("self_test_failure_outage_start", "")
+            monitor.state.on_battery_start_time = int(time.time()) - 29
+            monitor.state.on_battery_start_mono = time.monotonic() - 29
+            monitor._handle_on_battery(data)
+            monitor._trigger_immediate_shutdown.assert_not_called()
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_failed_attributed_test_reclassifies_continuing_ob(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path, delay=30)
+        try:
+            test_id = store.record_self_test(
+                "test.battery.start", "scheduler",
+                started_ts=int(time.time()) - 5,
+                result_raw="Done and error", result_enum="failed",
+            )
+            monitor._self_test_pending_id = test_id
+            store.set_meta("self_test_attributed_id", str(test_id))
+            store.set_meta("self_test_start_notified", str(test_id))
+            monitor._self_test_outage_attributed = True
+            monitor.state.latest_status = "OB DISCHRG"
+            monitor.state.previous_status = "OB DISCHRG"
+            monitor.state.on_battery_start_time = int(time.time()) - 31
+            monitor.state.on_battery_start_mono = time.monotonic() - 31
+            monitor._log_power_event = MagicMock()
+            monitor._trigger_immediate_shutdown = MagicMock()
+            monitor.config.notifications.urls = ["json://notify.invalid"]
+            monitor._send_notification = MagicMock(side_effect=[None, 1])
+
+            assert monitor._complete_self_test(
+                test_id, "failed", "Done and error") is False
+            data = {
+                "ups.status": "OB DISCHRG", "battery.charge": "90",
+                "battery.runtime": "1200", "ups.load": "20",
+            }
+            monitor._prepare_self_test_attribution(data)
+            assert monitor._self_test_outage_attributed is False
+            assert store.get_meta("self_test_failure_outage_start") == ""
+            monitor._handle_on_battery(data)
+
+            monitor._trigger_immediate_shutdown.assert_called_once()
+            assert monitor._complete_self_test(
+                test_id, "failed", "Done and error") is True
+            monitor._log_power_event.assert_called_once()
+            assert monitor._log_power_event.call_args.args[0] == "ON_BATTERY"
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_prior_failure_ignores_attributed_test_ob(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path, delay=30)
+        try:
+            store.set_meta("self_test_failure_latched", str(time.time() - 100))
+            store.set_meta("self_test_failure_outage_start", "")
+            monitor.state.previous_status = "OB"
+            monitor.state.on_battery_start_time = int(time.time()) - 31
+            monitor.state.on_battery_start_mono = time.monotonic() - 31
+            monitor._self_test_outage_attributed = True
+            monitor._trigger_immediate_shutdown = MagicMock()
+            data = {"ups.status": "OB", "battery.charge": "90",
+                    "battery.runtime": "1200", "ups.load": "20"}
+
+            monitor._handle_on_battery(data)
+            monitor._trigger_immediate_shutdown.assert_not_called()
+
+            # Once the test ends while OB persists, the continuing interval is
+            # a real outage and the older failure latch may protect it.
+            monitor._self_test_outage_attributed = False
+            monitor._handle_on_battery(data)
+            monitor._trigger_immediate_shutdown.assert_called_once()
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_redundancy_uses_advisory_path(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path, delay=0)
+        try:
+            monitor._in_redundancy_group = True
+            store.set_meta("self_test_failure_latched", str(time.time() - 100))
+            monitor.state.previous_status = "OB"
+            monitor.state.on_battery_start_time = int(time.time()) - 10
+            monitor.state.on_battery_start_mono = time.monotonic() - 10
+            monitor._record_advisory_trigger = MagicMock(
+                side_effect=lambda reason: setattr(
+                    monitor.state, "trigger_active", True))
+            monitor._trigger_immediate_shutdown = MagicMock()
+
+            monitor._handle_on_battery({
+                "ups.status": "OB", "battery.charge": "90",
+                "battery.runtime": "1200", "ups.load": "20",
+            })
+            monitor._handle_on_battery({
+                "ups.status": "OB", "battery.charge": "90",
+                "battery.runtime": "1200", "ups.load": "20",
+            })
+
+            assert monitor._record_advisory_trigger.call_count == 2
+            assert monitor.state.trigger_active is True
+            monitor._trigger_immediate_shutdown.assert_not_called()
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_monitor_only_notifies_without_shutdown(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path, delay=0)
+        try:
+            monitor.config.ups_groups[0].is_local = False
+            store.set_meta("self_test_failure_latched", str(time.time() - 100))
+            monitor.state.previous_status = "OB"
+            monitor.state.on_battery_start_time = int(time.time()) - 10
+            monitor.state.on_battery_start_mono = time.monotonic() - 10
+            monitor._send_notification = MagicMock(return_value=1)
+            monitor._trigger_immediate_shutdown = MagicMock()
+
+            data = {"ups.status": "OB", "battery.charge": "90",
+                    "battery.runtime": "1200", "ups.load": "20"}
+            monitor._handle_on_battery(data)
+            monitor._handle_on_battery(data)
+
+            monitor._trigger_immediate_shutdown.assert_not_called()
+            monitor._send_notification.assert_called_once()
+            assert "monitoring-only" in monitor._send_notification.call_args.args[0]
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_passive_failure_triggers_with_scheduler_disabled(self, tmp_path):
+        monitor, store = self._monitor_with_store(tmp_path, delay=0)
+        try:
+            monitor.config.self_test.enabled = False
+            store.set_meta("self_test_failure_latched", str(time.time() - 100))
+            monitor.state.previous_status = "OB"
+            monitor.state.on_battery_start_time = int(time.time()) - 10
+            monitor.state.on_battery_start_mono = time.monotonic() - 10
+            monitor._trigger_immediate_shutdown = MagicMock()
+
+            monitor._handle_on_battery({
+                "ups.status": "OB", "battery.charge": "90",
+                "battery.runtime": "1200", "ups.load": "20",
+            })
+
+            monitor._trigger_immediate_shutdown.assert_called_once()
+        finally:
+            store.close()
+
+
+class TestUpscCommandSerialization:
+    @pytest.mark.unit
+    def test_poll_waits_for_control_command_lock(self, tmp_path, monkeypatch):
+        from eneru import nut_control
+
+        monitor = make_monitor(tmp_path)
+        monitor._poll_target = "autodiscovered@localhost"
+        attempted = threading.Event()
+        entered = threading.Event()
+        finished = threading.Event()
+
+        def run_command(*args, **kwargs):
+            entered.set()
+            return 0, "ups.status: OL", ""
+
+        monkeypatch.setattr("eneru.monitor.run_command", run_command)
+
+        def poll():
+            attempted.set()
+            monitor._run_upsc([], full_poll=True)
+            finished.set()
+
+        lock = nut_control.command_lock(monitor.config.ups.name)
+        with lock:
+            thread = threading.Thread(target=poll)
+            thread.start()
+            assert attempted.wait(5)
+            assert entered.wait(0.05) is False
+        assert finished.wait(5)
+        thread.join()
+
+        assert entered.is_set()
+        assert finished.is_set()

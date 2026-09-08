@@ -10,7 +10,7 @@ import statistics
 import time
 
 from eneru.config import VOLTAGE_SENSITIVITY_PRESETS
-from eneru.utils import is_numeric, status_has_token
+from eneru.utils import humanize_event_type, is_numeric, status_has_token
 
 
 # Standard grid voltages, sorted ascending. ``input.voltage.nominal``
@@ -592,7 +592,7 @@ class VoltageMonitorMixin:
         # calling _send_notification directly; we already wrote the log
         # row when the state transitioned, and we're explicitly
         # bypassing _log_power_event to avoid double-logging.
-        body = f"⚠️  **VOLTAGE ISSUE:** {event}\nDetails: {detail}"
+        body = f"⚠️  **{humanize_event_type(event).upper()}**\nDetails: {detail}"
         try:
             self._send_notification(
                 body, self.config.NOTIFY_WARNING, category="voltage",

@@ -2785,7 +2785,10 @@ class TestClosedConnectionGuards:
     @pytest.mark.unit
     def test_set_meta_no_ops_when_closed(self, tmp_path):
         s = self._closed(tmp_path)
-        s.set_meta("k", "v")
+        assert s.set_meta("k", "v") is False
+        assert s.set_meta_many({"a": "1"}) is False
+        assert s.latest_battery_health() is None
+        assert s.latest_power_event_before(1) is None
 
 
 class TestV7ConnRaceUnderLock:
@@ -3036,6 +3039,9 @@ class _BrokenConn:
     def execute(self, *a, **kw):
         raise self._exc
 
+    def executemany(self, *a, **kw):
+        raise self._exc
+
     def __enter__(self):
         return self
 
@@ -3139,6 +3145,29 @@ class TestNotificationSQLiteErrorPaths:
         try:
             s.set_meta("k", "v")  # must not raise
             assert any("set_meta failed" in m for m in logged)
+        finally:
+            s._conn = real
+            s.close()
+
+    @pytest.mark.unit
+    def test_new_meta_and_report_helpers_swallow_sqlite_error(self, tmp_path):
+        s = self._open(tmp_path)
+        logged = []
+        s._log_error_once = lambda m: logged.append(m)
+        real = self._swap_conn(s)
+        try:
+            assert s.set_meta_many({"a": "1"}) is False
+            assert s.latest_battery_health() is None
+            assert s.get_self_test(1) is None
+            assert s.query_self_tests(0, 10) == []
+            assert s.latest_power_event_before(10) is None
+            assert s.repair_self_test_power_events() is None
+            assert any("set_meta_many failed" in m for m in logged)
+            assert any("latest_battery_health failed" in m for m in logged)
+            assert any("get_self_test failed" in m for m in logged)
+            assert any("query_self_tests failed" in m for m in logged)
+            assert any("latest_power_event_before failed" in m for m in logged)
+            assert any("repair_self_test_power_events failed" in m for m in logged)
         finally:
             s._conn = real
             s.close()
@@ -3267,3 +3296,141 @@ class TestNotificationStoreMethodsDegradeSafely:
             assert s.pending_notification_ids() is None
         finally:
             s.close()
+
+
+class TestSelfTestEventRepair:
+    @pytest.mark.unit
+    def test_query_and_get_self_tests(self, tmp_path: Path) -> None:
+        store = StatsStore(tmp_path / "self-tests.db")
+        store.open()
+        try:
+            first = store.record_self_test(
+                "test.battery.start", "scheduler", started_ts=1000,
+                result_enum="passed")
+            store.record_self_test(
+                "", "device", started_ts=2000, result_enum="warning")
+            assert store.get_self_test(first)["source"] == "scheduler"
+            rows = store.query_self_tests(900, 1500)
+            assert [row["id"] for row in rows] == [first]
+            assert store.get_self_test(9999) is None
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_relabels_one_short_unambiguous_pair(self, tmp_path: Path) -> None:
+        store = StatsStore(tmp_path / "repair.db")
+        store.open()
+        try:
+            store.log_event("ON_BATTERY", "brief", ts=1000)
+            store.log_event("POWER_RESTORED", "brief", ts=1009)
+            store.record_self_test(
+                "test.battery.start", "scheduler", started_ts=1005,
+                result_enum="passed")
+
+            assert store.repair_self_test_power_events() == 1
+            assert [row[1] for row in store.query_events(0, 2000)] == [
+                "SELF_TEST_ON_BATTERY", "SELF_TEST_POWER_RESTORED",
+            ]
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("ambiguous,long_outage", [(True, False),
+                                                        (False, True)])
+    def test_leaves_ambiguous_or_long_outage_untouched(
+        self, tmp_path: Path, ambiguous: bool, long_outage: bool,
+    ) -> None:
+        store = StatsStore(tmp_path / f"keep-{ambiguous}-{long_outage}.db")
+        store.open()
+        try:
+            store.log_event("ON_BATTERY", ts=1000)
+            store.log_event("POWER_RESTORED", ts=1201 if long_outage else 1009)
+            store.record_self_test(
+                "test.battery.start", "scheduler", started_ts=1005,
+                result_enum="passed")
+            if ambiguous:
+                store.record_self_test(
+                    "test.battery.start", "scheduler", started_ts=1006,
+                    result_enum="passed")
+            assert store.repair_self_test_power_events() == 0
+            assert [row[1] for row in store.query_events(0, 2000)] == [
+                "ON_BATTERY", "POWER_RESTORED",
+            ]
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_closed_store_returns_safe_defaults(self, tmp_path: Path) -> None:
+        store = StatsStore(tmp_path / "closed-self-tests.db")
+        store.open()
+        store.close()
+        assert store.get_self_test(1) is None
+        assert store.query_self_tests(0, 1) == []
+        assert store.repair_self_test_power_events() is None
+
+    @pytest.mark.unit
+    def test_device_observation_cannot_relabel_real_outage(
+        self, tmp_path: Path,
+    ) -> None:
+        store = StatsStore(tmp_path / "device-repair.db")
+        store.open()
+        try:
+            store.log_event("ON_BATTERY", ts=1000)
+            store.log_event("POWER_RESTORED", ts=1060)
+            store.record_self_test(
+                "", "device", started_ts=1059, result_enum="failed")
+
+            assert store.repair_self_test_power_events() == 0
+            assert [row[1] for row in store.query_events(0, 2000)] == [
+                "ON_BATTERY", "POWER_RESTORED"]
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_aborted_command_cannot_relabel_real_outage(
+        self, tmp_path: Path,
+    ) -> None:
+        store = StatsStore(tmp_path / "aborted-repair.db")
+        store.open()
+        try:
+            store.log_event("ON_BATTERY", ts=1000)
+            store.log_event("POWER_RESTORED", ts=1009)
+            store.record_self_test(
+                "test.battery.start", "scheduler", started_ts=1005,
+                result_enum="aborted")
+
+            assert store.repair_self_test_power_events() == 0
+            assert [row[1] for row in store.query_events(0, 2000)] == [
+                "ON_BATTERY", "POWER_RESTORED"]
+        finally:
+            store.close()
+
+    @pytest.mark.unit
+    def test_atomic_meta_and_report_helpers(self, tmp_path: Path) -> None:
+        store = StatsStore(tmp_path / "helpers.db")
+        store.open()
+        try:
+            assert store.set_meta_many({"a": "1", "b": "2"}) is True
+            assert store.get_meta("a") == "1"
+            assert store.get_meta("b") == "2"
+
+            store.record_battery_health(77.0, ts=100)
+            store.record_battery_health(88.0, ts=200)
+            store._conn.execute(
+                "UPDATE battery_health SET detail='not-json' WHERE ts=200")
+            store._conn.commit()
+            assert store.latest_battery_health()["score"] == 88.0
+
+            store.log_event("ON_BATTERY", "old", ts=300)
+            store.log_event("POWER_RESTORED", "new", ts=400)
+            assert store.latest_power_event_before(350) == (
+                300, "ON_BATTERY", "old")
+            assert store.latest_power_event_before(100) is None
+
+            notification_id = store.enqueue_notification(
+                "body", "info", "self_test",
+                meta_updates={"self_test_terminal_notified": "7"})
+            assert notification_id is not None
+            assert store.get_meta("self_test_terminal_notified") == "7"
+        finally:
+            store.close()

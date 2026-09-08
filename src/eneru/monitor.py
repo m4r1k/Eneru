@@ -48,6 +48,8 @@ from eneru.utils import (
     command_exists,
     is_numeric,
     format_seconds,
+    humanize_event_type,
+    humanize_nut_status,
     status_has_token,
 )
 from eneru.shutdown.vms import VMShutdownMixin
@@ -74,6 +76,7 @@ SLOW_NUT_NOTIFY_CONSECUTIVE_POLLS = 3
 # persistently-broken config doesn't re-attempt (and spawn an upscmd subprocess)
 # on every poll tick.
 SELF_TEST_ISSUE_RETRY_SECONDS = 300.0
+SELF_TEST_ATTRIBUTION_SECONDS = 30
 # ISS-022: minimum interval between `upsc -l` ups.name diagnostics -- the
 # probe blocks the poll thread for up to ~10s, so a flapping NUT server is
 # probed at most once per window.
@@ -257,6 +260,10 @@ class UPSGroupMonitor(
         # v6.1: per-UPS self-test issue/poll timing (set up in B6).
         self._self_test_pending_id: Optional[int] = None
         self._self_test_poll_due_mono: Optional[float] = None
+        self._self_test_outage_attributed = False
+        self._self_test_repair_done = False
+        self._self_test_monitor_only_alerted = False
+        self._self_test_failure_triggered = False
         # Backoff after a failed ISSUE so a persistently-broken self-test (bad
         # creds, command pulled from the allowlist) retries periodically instead
         # of re-attempting on every poll tick.
@@ -772,7 +779,9 @@ class UPSGroupMonitor(
     def _send_notification(self, body: str, notify_type: str = "info",
                            blocking: bool = False,
                            category: str = "general",
-                           require_persistent: bool = False) -> Optional[int]:
+                           require_persistent: bool = False,
+                           meta_updates: Optional[Dict[str, str]] = None,
+                           ) -> Optional[int]:
         """Queue a notification via the persistent notification worker.
 
         v5.2 change: notifications are inserted as ``pending`` rows in
@@ -794,6 +803,8 @@ class UPSGroupMonitor(
             require_persistent: Do not fall back to volatile memory if the
                 SQLite queue refuses the row. Periodic reports need the return
                 value so they can restore their cadence stamp and retry.
+            meta_updates: Optional ``meta`` values committed atomically with
+                the notification row.
         """
         del blocking  # see docstring
         if not self._notification_worker:
@@ -811,10 +822,17 @@ class UPSGroupMonitor(
             category=category,
             store=self._stats_store,
             require_persistent=require_persistent,
+            meta_updates=meta_updates,
         )
 
-    def _log_power_event(self, event: str, details: str,
-                         *, suppress_notification: bool = False):
+    def _log_power_event(
+        self,
+        event: str,
+        details: str,
+        *,
+        suppress_notification: bool = False,
+        notification_details: Optional[str] = None,
+    ):
         """Log power events with centralized notification logic.
 
         ``suppress_notification`` (kw-only) lets a caller explicitly
@@ -823,6 +841,10 @@ class UPSGroupMonitor(
         immediately on the state transition and fires the notification
         later (after the dwell timer elapses) via a separate code
         path. Stats persistence and syslog still happen.
+
+        ``notification_details`` replaces raw diagnostic wording only in the
+        outgoing message. Logs, SQLite, API consumers, and TUI event history
+        retain ``details`` unchanged.
 
         ``notifications.suppress`` (config) provides the user-facing
         per-event-type mute. Logs always record the event; only the
@@ -854,54 +876,57 @@ class UPSGroupMonitor(
         # Determine notification disposition first so we can record an
         # accurate notification_sent flag in the stats events row.
         notification: Optional[Tuple[str, str]] = None  # (body, type)
+        display_details = (details if notification_details is None
+                           else notification_details)
+        event_label = humanize_event_type(event)
 
         event_handlers = {
             "ON_BATTERY": (
-                f"⚠️  **POWER FAILURE DETECTED!**\nSystem running on battery.\nDetails: {details}",
+                f"⚠️  **POWER FAILURE DETECTED!**\nSystem running on battery.\nDetails: {display_details}",
                 self.config.NOTIFY_WARNING
             ),
             "POWER_RESTORED": (
-                f"✅  **POWER RESTORED**\nSystem back on line power/charging.\nDetails: {details}",
+                f"✅  **POWER RESTORED**\nSystem back on utility power/charging.\nDetails: {display_details}",
                 self.config.NOTIFY_SUCCESS
             ),
             "BROWNOUT_DETECTED": (
-                f"⚠️  **VOLTAGE ISSUE:** {event}\nDetails: {details}",
+                f"⚠️  **{event_label.upper()}**\nDetails: {display_details}",
                 self.config.NOTIFY_WARNING
             ),
             "OVER_VOLTAGE_DETECTED": (
-                f"⚠️  **VOLTAGE ISSUE:** {event}\nDetails: {details}",
+                f"⚠️  **{event_label.upper()}**\nDetails: {display_details}",
                 self.config.NOTIFY_WARNING
             ),
             "AVR_BOOST_ACTIVE": (
-                f"⚡  **AVR ACTIVE:** {event}\nDetails: {details}",
+                f"⚡  **{event_label.upper()}**\nDetails: {display_details}",
                 self.config.NOTIFY_WARNING
             ),
             "AVR_TRIM_ACTIVE": (
-                f"⚡  **AVR ACTIVE:** {event}\nDetails: {details}",
+                f"⚡  **{event_label.upper()}**\nDetails: {display_details}",
                 self.config.NOTIFY_WARNING
             ),
             "BYPASS_MODE_ACTIVE": (
-                f"⚠️  **UPS IN BYPASS MODE!**\nNo protection active!\nDetails: {details}",
+                f"⚠️  **UPS IN BYPASS MODE!**\nNo protection active!\nDetails: {display_details}",
                 self.config.NOTIFY_FAILURE
             ),
             "BYPASS_MODE_INACTIVE": (
-                f"✅  **Bypass Mode Inactive**\nProtection restored.\nDetails: {details}",
+                f"✅  **Bypass Mode Inactive**\nProtection restored.\nDetails: {display_details}",
                 self.config.NOTIFY_SUCCESS
             ),
             "OVERLOAD_ACTIVE": (
-                f"⚠️  **UPS OVERLOAD DETECTED!**\nDetails: {details}",
+                f"⚠️  **UPS OVERLOAD DETECTED!**\nDetails: {display_details}",
                 self.config.NOTIFY_FAILURE
             ),
             "OVERLOAD_RESOLVED": (
-                f"✅  **Overload Resolved**\nDetails: {details}",
+                f"✅  **Overload Resolved**\nDetails: {display_details}",
                 self.config.NOTIFY_SUCCESS
             ),
             "CONNECTION_LOST": (
-                f"❌  **ERROR: Connection Lost**\n{details}",
+                f"❌  **ERROR: Connection Lost**\n{display_details}",
                 self.config.NOTIFY_FAILURE
             ),
             "CONNECTION_RESTORED": (
-                f"✅  **Connection Restored**\n{details}",
+                f"✅  **Connection Restored**\n{display_details}",
                 self.config.NOTIFY_SUCCESS
             ),
         }
@@ -938,7 +963,7 @@ class UPSGroupMonitor(
             notification = event_handlers[event]
         else:
             notification = (
-                f"⚡  **Event:** {event}\nDetails: {details}",
+                f"⚡  **Event:** {event_label}\nDetails: {display_details}",
                 self.config.NOTIFY_INFO
             )
 
@@ -1095,11 +1120,13 @@ class UPSGroupMonitor(
 
     def _run_upsc(self, args: List[str], *, full_poll: bool) -> Tuple[int, str, str]:
         cmd = ["upsc", self._poll_target, *args]
-        started = time.monotonic()
-        # NUT's NSS-backed libupsclient can emit "Init SSL without certificate
-        # database" on stderr even for plain read-only polling. Suppress that
-        # upstream noise so real connection/UPS-name errors stay visible.
-        result = run_command(cmd, env_overrides={"NUT_QUIET_INIT_SSL": "true"})
+        with nutctl.command_lock(self.config.ups.name):
+            started = time.monotonic()
+            # NUT's NSS-backed libupsclient can emit "Init SSL without certificate
+            # database" on stderr even for plain read-only polling. Suppress that
+            # upstream noise so real connection/UPS-name errors stay visible.
+            result = run_command(
+                cmd, env_overrides={"NUT_QUIET_INIT_SSL": "true"})
         elapsed = time.monotonic() - started
         self._record_upsc_latency(elapsed, cmd, full_poll=full_poll)
         return result
@@ -2121,12 +2148,22 @@ class UPSGroupMonitor(
             self.state.on_battery_start_mono = time.monotonic()  # ISS-020
             self.state.extended_time_logged = False
             self.state.battery_history.clear()
+            # A successful neutral/unknown status can separate outages without
+            # an OL poll. Re-arm T5 here as well as in _handle_on_line so the
+            # new outage is not mistaken for a continuing, already-fired one.
+            self._self_test_failure_triggered = False
+            self._self_test_monitor_only_alerted = False
 
+            event = ("SELF_TEST_ON_BATTERY"
+                     if self._self_test_outage_attributed else "ON_BATTERY")
             self._log_power_event(
-                "ON_BATTERY",
+                event,
                 f"Battery: {battery_charge}%, Runtime: {battery_runtime} seconds, Load: {ups_load}%"
+                + ("; attributed to active UPS self-test"
+                   if self._self_test_outage_attributed else ""),
+                suppress_notification=self._self_test_outage_attributed,
             )
-            if self._should_fire_wall():
+            if not self._self_test_outage_attributed and self._should_fire_wall():
                 run_command([
                     "wall",
                     f"⚠️  WARNING: Power failure detected! System running on UPS battery "
@@ -2246,6 +2283,34 @@ class UPSGroupMonitor(
                 )
                 self.state.extended_time_logged = True
 
+        # T5. A hard self-test failure arms a future-outage trigger. It never
+        # fires on line power or on the same OB transition caused by the test.
+        self_test_failure_trigger = False
+        new_self_test_failure_trigger = False
+        if not shutdown_reason:
+            store = getattr(self, "_stats_store", None)
+            failed_raw = store.get_meta("self_test_failure_latched") if store else None
+            try:
+                failed_at = float(failed_raw) if failed_raw else 0.0
+            except (TypeError, ValueError):
+                failed_at = 0.0
+            failed_outage = (store.get_meta("self_test_failure_outage_start")
+                             if store else None)
+            delay = max(
+                0, int(self.config.triggers.self_test_failure_shutdown_delay))
+            if (failed_at
+                    and not self._self_test_outage_attributed
+                    and str(self.state.on_battery_start_time) != failed_outage
+                    and time_on_battery >= delay):
+                self_test_failure_trigger = True
+                new_self_test_failure_trigger = (
+                    not self._self_test_failure_triggered)
+                self._self_test_failure_triggered = True
+                shutdown_reason = (
+                    "Previous UPS self-test failed and utility power has been "
+                    f"unavailable for {format_seconds(time_on_battery)}"
+                )
+
         # Publish the freshly computed depletion_rate for the snapshot reader.
         with self.state._lock:
             self.state.latest_depletion_rate = (
@@ -2253,10 +2318,25 @@ class UPSGroupMonitor(
             )
 
         if shutdown_reason:
-            if self._in_redundancy_group:
+            if self_test_failure_trigger and self._is_monitor_only_group():
+                if not self._self_test_monitor_only_alerted:
+                    self._self_test_monitor_only_alerted = True
+                    self._send_notification(
+                        "🚨  **FAILED SELF-TEST OUTAGE TRIGGERED**\n"
+                        f"{shutdown_reason}. This UPS is monitoring-only; no "
+                        "shutdown actions were executed.",
+                        self.config.NOTIFY_FAILURE,
+                        category="self_test",
+                    )
+                    self._log_message(
+                        "🚨  Failed self-test outage trigger reached on a "
+                        "monitoring-only UPS; no shutdown actions executed.")
+            elif self._in_redundancy_group:
                 # Advisory mode: the redundancy-group evaluator decides whether
                 # the group should drain. Per-UPS shutdown is suppressed.
                 self._record_advisory_trigger(shutdown_reason)
+            elif self_test_failure_trigger and not new_self_test_failure_trigger:
+                pass
             else:
                 self._trigger_immediate_shutdown(shutdown_reason)
         elif (self._in_redundancy_group and not stabilizing
@@ -2301,15 +2381,28 @@ class UPSGroupMonitor(
             elif self.state.on_battery_start_time > 0:
                 time_on_battery = int(time.time()) - self.state.on_battery_start_time
 
+            event = ("SELF_TEST_POWER_RESTORED"
+                     if self._self_test_outage_attributed else "POWER_RESTORED")
+            status_label = humanize_nut_status(ups_status)
             self._log_power_event(
-                "POWER_RESTORED",
+                event,
                 f"Battery: {battery_charge}% (Status: {ups_status}), "
                 f"Input: {input_voltage}V, Outage duration: {format_seconds(time_on_battery)}"
+                + ("; attributed to active UPS self-test"
+                   if self._self_test_outage_attributed else ""),
+                suppress_notification=self._self_test_outage_attributed,
+                notification_details=(
+                    f"Battery: {battery_charge}% (Status: {status_label}), "
+                    f"Input: {input_voltage}V, Outage duration: "
+                    f"{format_seconds(time_on_battery)}"
+                    + ("; attributed to active UPS self-test"
+                       if self._self_test_outage_attributed else "")
+                ),
             )
-            if self._should_fire_wall():
+            if not self._self_test_outage_attributed and self._should_fire_wall():
                 run_command([
                     "wall",
-                    f"✅  Power has been restored. UPS Status: {ups_status}. "
+                    f"✅  Power has been restored. UPS status: {status_label}. "
                     f"Battery at {battery_charge}%."
                 ])
 
@@ -2317,6 +2410,8 @@ class UPSGroupMonitor(
             self.state.on_battery_start_mono = 0.0  # ISS-020
             self.state.extended_time_logged = False
             self.state.battery_history.clear()
+            self._self_test_monitor_only_alerted = False
+            self._self_test_failure_triggered = False
 
             # Re-arm the shutdown trigger (bug #4). The flag file is
             # _trigger_immediate_shutdown's re-entry guard; the
@@ -2446,6 +2541,10 @@ class UPSGroupMonitor(
         except Exception as exc:
             self._log_message(f"⚠️  battery-health task failed: {exc}")
         try:
+            self._repair_historical_self_test_events()
+        except Exception as exc:
+            self._log_message(f"⚠️  self-test event repair failed: {exc}")
+        try:
             self._run_self_test_task()
         except Exception as exc:
             self._log_message(f"⚠️  self-test task failed: {exc}")
@@ -2524,7 +2623,7 @@ class UPSGroupMonitor(
         enum = selftest.normalize_result(raw)
         # Only persist a SETTLED, meaningful result. running/unknown churn while a
         # test is in flight or was never run; unsupported is one-time noise.
-        if enum not in ("passed", "failed"):
+        if enum not in ("passed", "warning", "failed", "aborted"):
             return
         date = (ups_data or {}).get("ups.test.date") or ""
         key = f"{date}|{raw}"
@@ -2543,6 +2642,189 @@ class UPSGroupMonitor(
             return  # write failed — don't fingerprint, so it retries next poll
         store.set_meta("self_test_observed_key", key)
         self._log_message(f"🔋 Observed UPS self-test: {enum} ({raw!r})")
+        if not self._complete_self_test(test_id, enum, raw):
+            due_ts = selftest.self_test_poll_due_ts(time.time(), 1)
+            if selftest.persist_pending_self_test(store, test_id, due_ts):
+                self._self_test_pending_id = test_id
+                self._self_test_poll_due_mono = time.monotonic() + 1
+
+    def _notify_self_test_start(self, test_id: int, command: str) -> bool:
+        """Queue one start notification for a persisted self-test ticket."""
+        store = getattr(self, "_stats_store", None)
+        if store is None or store.get_meta("self_test_start_notified") == str(test_id):
+            return True
+        if not self.config.notifications.urls:
+            return store.set_meta("self_test_start_notified", str(test_id))
+        queued = self._send_notification(
+            "🔋  **UPS Self-Test Started**\n"
+            f"Command: {command or 'device-scheduled test'}",
+            self.config.NOTIFY_INFO,
+            category="self_test",
+            require_persistent=True,
+            meta_updates={"self_test_start_notified": str(test_id)},
+        )
+        return queued is not None
+
+    def _complete_self_test(self, test_id: int, enum: str,
+                            raw: Optional[str]) -> bool:
+        """Apply terminal notification, latch, and attribution semantics."""
+        store = getattr(self, "_stats_store", None)
+        if store is None:
+            return True
+        row = store.get_self_test(test_id) or {}
+        attributed = (
+            self._self_test_outage_attributed
+            or store.get_meta("self_test_attributed_id") == str(test_id)
+        )
+        state_ready = True
+        if enum == "failed":
+            failed_at = row.get("started_ts", time.time())
+            failed_key = str(failed_at)
+            if store.get_meta("self_test_failure_latched") == failed_key:
+                # A notification retry must preserve the first completion's
+                # decision about whether this OB interval is the test's own.
+                failed_during_outage = (
+                    store.get_meta("self_test_failure_outage_start") or "")
+            else:
+                failed_during_outage = (
+                    str(self.state.on_battery_start_time)
+                    if (status_has_token(self.state.latest_status, "OB")
+                        and not attributed) else "")
+            state_ready = store.set_meta_many({
+                    "self_test_failure_latched": failed_key,
+                    "self_test_failure_outage_start": failed_during_outage,
+            })
+            if not state_ready:
+                self._log_message(
+                    "⚠️  Could not persist failed self-test safety latch.")
+        elif enum == "passed":
+            state_ready = store.set_meta_many({
+                "self_test_failure_latched": "",
+                "self_test_failure_outage_start": "",
+            })
+            if not state_ready:
+                self._log_message(
+                    "⚠️  Could not clear failed self-test safety latch.")
+
+        notification_ready = True
+        if store.get_meta("self_test_terminal_notified") != str(test_id):
+            if not self.config.notifications.urls:
+                notification_ready = store.set_meta(
+                    "self_test_terminal_notified", str(test_id))
+            else:
+                notify_type = {
+                    "passed": self.config.NOTIFY_SUCCESS,
+                    "failed": self.config.NOTIFY_FAILURE,
+                }.get(enum, self.config.NOTIFY_WARNING)
+                queued = self._send_notification(
+                    f"🔋  **UPS Self-Test {enum.title()}**\n"
+                    f"Result: {raw or enum}",
+                    notify_type,
+                    category="self_test",
+                    require_persistent=True,
+                    meta_updates={
+                        "self_test_terminal_notified": str(test_id)},
+                )
+                notification_ready = queued is not None
+
+        if state_ready:
+            attribution_ready = store.set_meta("self_test_attributed_id", "")
+            state_ready = state_ready and attribution_ready
+            if attribution_ready:
+                self._self_test_outage_attributed = False
+                if attributed and status_has_token(
+                        self.state.latest_status, "OB"):
+                    self._log_power_event(
+                        "ON_BATTERY",
+                        "UPS remained on battery after its self-test completed; "
+                        "treating the continuing condition as a utility outage.",
+                    )
+        return state_ready and notification_ready
+
+    def _prepare_self_test_attribution(self, ups_data: Dict[str, str]) -> None:
+        """Recognize active issued/device tests before OB/OL event handling."""
+        store = getattr(self, "_stats_store", None)
+        if store is None or not getattr(store, "is_open", False):
+            self._self_test_outage_attributed = False
+            return
+        cfg = self._resolve_self_test_config()
+        pending_id = self._self_test_pending_id
+        if pending_id is None:
+            raw_id = store.get_meta(selftest.PENDING_ID_META)
+            try:
+                pending_id = int(raw_id) if raw_id else None
+            except (TypeError, ValueError):
+                pending_id = None
+
+        raw = ups_data.get("ups.test.result")
+        positive_device_evidence = (
+            status_has_token(ups_data.get("ups.status", ""), "CAL")
+            or selftest.normalize_result(raw) == "running"
+        )
+        if pending_id is None and positive_device_evidence:
+            pending_id = store.record_self_test(
+                "", "device", result_raw=raw, result_enum="running")
+            if pending_id is not None:
+                due_ts = selftest.self_test_poll_due_ts(
+                    time.time(), cfg.result_poll_after)
+                selftest.persist_pending_self_test(store, pending_id, due_ts)
+                self._self_test_pending_id = pending_id
+                self._self_test_poll_due_mono = (
+                    time.monotonic() + max(1, int(cfg.result_poll_after)))
+
+        if pending_id is None:
+            self._self_test_outage_attributed = False
+            return
+        row = store.get_self_test(pending_id)
+        if row is None:
+            self._self_test_outage_attributed = False
+            return
+        already_attributed = (
+            store.get_meta("self_test_attributed_id") == str(pending_id))
+        if row.get("result_enum") in (
+                "passed", "warning", "failed", "aborted", "unsupported",
+                "unknown"):
+            # A terminal row can remain pending solely because its notification
+            # enqueue needs retrying. Do not mistake that bookkeeping retry for
+            # a newly running test, but preserve an attribution whose durable
+            # clear failed so completion can safely retry it.
+            self._self_test_outage_attributed = already_attributed
+            return
+        self._notify_self_test_start(pending_id, row.get("command", ""))
+        recent_issue = (
+            time.time() - row["started_ts"] <= SELF_TEST_ATTRIBUTION_SECONDS)
+        on_battery = status_has_token(ups_data.get("ups.status", ""), "OB")
+        self._self_test_outage_attributed = (
+            already_attributed or (on_battery and recent_issue))
+        if self._self_test_outage_attributed:
+            store.set_meta("self_test_attributed_id", str(pending_id))
+
+    def _is_monitor_only_group(self) -> bool:
+        """Return whether this UPS owns no shutdown-capable resources."""
+        group = self.config.ups_groups[0] if self.config.ups_groups else None
+        if group is None or group.is_local or self._in_redundancy_group:
+            return False
+        return not any(server.enabled for server in group.remote_servers)
+
+    def _repair_historical_self_test_events(self) -> None:
+        """Run the conservative historical OB/OL relabel once per database."""
+        if self._self_test_repair_done:
+            return
+        store = getattr(self, "_stats_store", None)
+        if store is None or not getattr(store, "is_open", False):
+            return
+        if store.get_meta("self_test_event_repair_v1"):
+            self._self_test_repair_done = True
+            return
+        changed = store.repair_self_test_power_events()
+        if changed is None:
+            return
+        store.set_meta("self_test_event_repair_v1", "1")
+        self._self_test_repair_done = True
+        if changed:
+            self._log_message(
+                f"🔋 Relabeled {changed} historical self-test power event "
+                f"pair{'s' if changed != 1 else ''}.")
 
     def _run_self_test_task(self) -> None:
         """Issue / poll the scheduled UPS self-test (v6.1).
@@ -2601,19 +2883,83 @@ class UPSGroupMonitor(
         # issued — its result (a read, not a control command) is finalised first.
         if (self._self_test_pending_id is not None
                 and self._self_test_poll_due_mono is not None):
+            pending_row = store.get_self_test(self._self_test_pending_id)
+            if pending_row is None:
+                self._self_test_pending_id = None
+                self._self_test_poll_due_mono = None
+                selftest.clear_pending_self_test(
+                    store, clear_attribution=True)
+                return
+            if pending_row.get("result_enum") in (
+                    "passed", "warning", "failed", "aborted", "unsupported",
+                    "unknown"):
+                if self._complete_self_test(
+                        self._self_test_pending_id,
+                        pending_row["result_enum"],
+                        pending_row.get("result_raw")):
+                    self._self_test_pending_id = None
+                    self._self_test_poll_due_mono = None
+                    selftest.clear_pending_self_test(store)
+                else:
+                    poll_delay = max(1, int(cfg.result_poll_after))
+                    self._self_test_poll_due_mono = (
+                        time.monotonic() + poll_delay)
+                    selftest.persist_pending_self_test(
+                        store, self._self_test_pending_id,
+                        selftest.self_test_poll_due_ts(
+                            time.time(), poll_delay))
+                return
             if time.monotonic() >= self._self_test_poll_due_mono:
                 raw = self._get_ups_var("ups.test.result")
                 date = self._get_ups_var("ups.test.date")
-                enum = selftest.record_self_test_result(
-                    store, self._self_test_pending_id, raw, date)
-                self._log_message(f"🔋 Self-test result: {enum} ({raw!r})")
-                # Stamp the observer fingerprint so the passive path doesn't
-                # re-record the same result Eneru just finalised.
-                store.set_meta(
-                    "self_test_observed_key", f"{date or ''}|{raw or ''}")
-                self._self_test_pending_id = None
-                self._self_test_poll_due_mono = None
-                selftest.clear_pending_self_test(store)
+                enum = selftest.normalize_result(raw)
+                timed_out = (
+                    time.time() - pending_row["started_ts"]
+                    >= selftest.RESULT_TIMEOUT_SECONDS)
+                terminal = enum in (
+                    "passed", "warning", "failed", "aborted", "unsupported",
+                )
+                if terminal or timed_out:
+                    forced_timeout = timed_out and not terminal
+                    if forced_timeout:
+                        raw = (f"Result polling timed out (last result: {raw})"
+                               if raw else "Result polling timed out")
+                        enum = "unknown"
+                    if forced_timeout:
+                        store.update_self_test_result(
+                            self._self_test_pending_id,
+                            result_raw=raw,
+                            result_enum="unknown",
+                            result_date=date,
+                        )
+                    else:
+                        selftest.record_self_test_result(
+                            store, self._self_test_pending_id, raw, date)
+                    test_id = self._self_test_pending_id
+                    self._log_message(
+                        f"🔋 Self-test result: {enum} ({raw!r})")
+                    # Stamp the observer fingerprint so the passive path doesn't
+                    # re-record the same result Eneru just finalised.
+                    store.set_meta(
+                        "self_test_observed_key", f"{date or ''}|{raw or ''}")
+                    if self._complete_self_test(test_id, enum, raw):
+                        self._self_test_pending_id = None
+                        self._self_test_poll_due_mono = None
+                        selftest.clear_pending_self_test(store)
+                    else:
+                        poll_delay = max(1, int(cfg.result_poll_after))
+                        self._self_test_poll_due_mono = (
+                            time.monotonic() + poll_delay)
+                        selftest.persist_pending_self_test(
+                            store, test_id,
+                            selftest.self_test_poll_due_ts(
+                                time.time(), poll_delay))
+                else:
+                    poll_delay = max(1, int(cfg.result_poll_after))
+                    self._self_test_poll_due_mono = time.monotonic() + poll_delay
+                    selftest.persist_pending_self_test(
+                        store, self._self_test_pending_id,
+                        selftest.self_test_poll_due_ts(time.time(), poll_delay))
             return  # never issue while one is in flight
 
         # Now honor the current config: a disabled self_test issues nothing
@@ -2689,9 +3035,10 @@ class UPSGroupMonitor(
         # Build the effective control the issue path uses: self_test.enabled
         # auto-allows exactly `cmd` (the general allowlist is untouched).
         _permitted, eff_nc = selftest.self_test_control(nc, cfg, cmd)
-        with nutctl.command_lock(self._poll_target):
+        with nutctl.command_lock(self.config.ups.name):
             result = selftest.issue_self_test(
-                self._poll_target, cmd, eff_nc, store, source="scheduler")
+                self._poll_target, cmd, eff_nc, store, source="scheduler",
+                result_poll_after=cfg.result_poll_after)
         if result["ok"]:
             # Stamp the cadence ONLY once the issue succeeds: a failed issue
             # (NUT error, transient lock contention) must retry next cycle, not
@@ -2710,6 +3057,7 @@ class UPSGroupMonitor(
             self._log_message(
                 f"🔋 Self-test issued ({cmd}); polling result in "
                 f"{cfg.result_poll_after}s")
+            self._notify_self_test_start(result["test_id"], cmd)
         else:
             # Don't stamp the cadence (so it retries), but back off so a
             # persistent failure doesn't re-attempt every poll tick.
@@ -2936,6 +3284,7 @@ class UPSGroupMonitor(
             # order); token membership fixes that aliasing structurally and lets
             # neutral statuses (OFF, BYPASS, bare DISCHRG) fall through cleanly.
             status_tokens = set(ups_status.split())
+            self._prepare_self_test_attribution(ups_data)
 
             # Re-arm the FAILSAFE latch only when the outage is over: we have a
             # VALID status AND it shows line power. A missing/empty status is an

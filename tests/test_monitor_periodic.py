@@ -43,13 +43,21 @@ def _make_monitor(cfg, store=None, *, coordinator_mode=False):
     mon._self_test_pending_id = None
     mon._self_test_poll_due_mono = None
     mon._self_test_retry_after_mono = None
+    mon._self_test_outage_attributed = False
+    mon._self_test_repair_done = False
+    mon._self_test_monitor_only_alerted = False
+    mon._self_test_failure_triggered = False
     mon._poll_target = cfg.ups.name
     mon.logs = []
     mon.notifications = []
     mon._log_message = lambda m: mon.logs.append(m)
-    mon._send_notification = (
-        lambda body, ntype, category="general", **kwargs:
-        mon.notifications.append((body, ntype, category, kwargs)) or 1)
+    def send_notification(body, ntype, category="general", **kwargs):
+        meta_updates = kwargs.get("meta_updates")
+        if meta_updates and store is not None:
+            store.set_meta_many(meta_updates)
+        mon.notifications.append((body, ntype, category, kwargs))
+        return 1
+    mon._send_notification = send_notification
     mon._get_ups_var = lambda var: None
     return mon
 
@@ -59,6 +67,7 @@ _ENABLED = (
     "nut_control:\n  enabled: true\n  allowed_commands: [test.battery.start]\n"
     "self_test:\n  enabled: true\n  schedule: monthly\n  command: test.battery.start\n"
     "  result_poll_after: 60\n"
+    "notifications:\n  enabled: true\n  urls: ['json://notify.invalid']\n"
     "ups:\n  name: U@h\n"
 )
 
@@ -234,7 +243,7 @@ class TestRunSelfTestTask:
         monkeypatch.setattr(selftest, "discover_self_test_command",
                             lambda *a, **k: "test.battery.start")
 
-        def _issue(ups, cmd, nc, s, source="scheduler"):
+        def _issue(ups, cmd, nc, s, source="scheduler", **kwargs):
             captured["allowed"] = list(nc.allowed_commands)
             return {"ok": True, "test_id": 5, "error": ""}
         monkeypatch.setattr(selftest, "issue_self_test", _issue)
@@ -362,7 +371,8 @@ class TestRunSelfTestTask:
     @pytest.mark.unit
     def test_pending_poll_finalizes_result(self, store, monkeypatch):
         mon = _make_monitor(_cfg(_ENABLED), store)
-        mon._self_test_pending_id = 3
+        test_id = store.record_self_test("test.battery.start", "scheduler")
+        mon._self_test_pending_id = test_id
         mon._self_test_poll_due_mono = time.monotonic() - 1   # poll window elapsed
         mon._get_ups_var = lambda var: {"ups.test.result": "Done and passed",
                                         "ups.test.date": "2026-06-28"}.get(var)
@@ -379,9 +389,10 @@ class TestRunSelfTestTask:
         # issued/pending test: its result is finalised before the disabled
         # config is honored (otherwise the `running` row lives forever).
         mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)  # self_test OFF
-        mon._self_test_pending_id = 9
+        test_id = store.record_self_test("test.battery.start", "scheduler")
+        mon._self_test_pending_id = test_id
         mon._self_test_poll_due_mono = time.monotonic() - 1   # poll window elapsed
-        store.set_meta(selftest.PENDING_ID_META, "9")
+        store.set_meta(selftest.PENDING_ID_META, str(test_id))
         store.set_meta(selftest.PENDING_DUE_TS_META, str(int(time.time()) - 1))
         mon._get_ups_var = lambda var: {"ups.test.result": "Done and passed",
                                         "ups.test.date": "2026-06-28"}.get(var)
@@ -432,10 +443,11 @@ class TestRunSelfTestTask:
     @pytest.mark.unit
     def test_pending_poll_not_yet_due(self, store):
         mon = _make_monitor(_cfg(_ENABLED), store)
-        mon._self_test_pending_id = 3
+        test_id = store.record_self_test("test.battery.start", "scheduler")
+        mon._self_test_pending_id = test_id
         mon._self_test_poll_due_mono = time.monotonic() + 1000   # not yet
         mon._run_self_test_task()
-        assert mon._self_test_pending_id == 3      # still pending, nothing issued
+        assert mon._self_test_pending_id == test_id  # still pending, nothing issued
 
     @pytest.mark.unit
     def test_issue_persists_pending_id_for_restart(self, store, monkeypatch):
@@ -453,7 +465,9 @@ class TestRunSelfTestTask:
     def test_recovers_in_flight_test_after_restart(self, store, monkeypatch):
         # Simulate a restart: a pending id is in meta but the in-memory fields
         # are fresh (None). The next tick must adopt + finalize it.
-        store.set_meta(selftest.PENDING_ID_META, "11")
+        test_id = store.record_self_test(
+            "test.battery.start", "api", started_ts=int(time.time()) - 120)
+        store.set_meta(selftest.PENDING_ID_META, str(test_id))
         mon = _make_monitor(_cfg(_ENABLED), store)
         mon._get_ups_var = lambda var: {"ups.test.result": "Done and passed",
                                         "ups.test.date": "2026-06-28"}.get(var)
@@ -464,20 +478,21 @@ class TestRunSelfTestTask:
             return "passed"
         monkeypatch.setattr(selftest, "record_self_test_result", _rec)
         mon._run_self_test_task()
-        assert recorded["id"] == 11                # adopted the persisted id
+        assert recorded["id"] == test_id           # adopted the persisted id
         assert mon._self_test_pending_id is None   # finalized
         assert store.get_meta(selftest.PENDING_ID_META) == ""   # cleared
         assert store.get_meta(selftest.PENDING_DUE_TS_META) == ""
 
     @pytest.mark.unit
     def test_recovers_in_flight_test_but_waits_for_due_timestamp(self, store):
-        store.set_meta(selftest.PENDING_ID_META, "12")
+        test_id = store.record_self_test("test.battery.start", "api")
+        store.set_meta(selftest.PENDING_ID_META, str(test_id))
         store.set_meta(selftest.PENDING_DUE_TS_META, str(int(time.time()) + 600))
         mon = _make_monitor(_cfg(_ENABLED), store)
         mon._get_ups_var = lambda var: pytest.fail("poll should wait for due timestamp")
         mon._run_self_test_task()
-        assert mon._self_test_pending_id == 12
-        assert store.get_meta(selftest.PENDING_ID_META) == "12"
+        assert mon._self_test_pending_id == test_id
+        assert store.get_meta(selftest.PENDING_ID_META) == str(test_id)
 
     @pytest.mark.unit
     def test_adopts_running_api_row_without_pending_meta(self, store, monkeypatch):
@@ -628,7 +643,8 @@ class TestObservedSelfTest:
         # After Eneru finalises its OWN test, the observer must not re-record the
         # same result: the finalise stamps the observer fingerprint.
         mon = _make_monitor(_cfg(_ENABLED), store)
-        mon._self_test_pending_id = 3
+        test_id = store.record_self_test("test.battery.start", "scheduler")
+        mon._self_test_pending_id = test_id
         mon._self_test_poll_due_mono = time.monotonic() - 1
         mon._get_ups_var = lambda var: {"ups.test.result": "done and passed",
                                         "ups.test.date": "2026-06-02"}.get(var)
@@ -641,3 +657,228 @@ class TestObservedSelfTest:
         mon._check_observed_self_test(
             {"ups.test.result": "done and passed", "ups.test.date": "2026-06-02"})
         assert store.latest_self_test() == before
+
+
+class TestSelfTestRuntimeContract:
+    @pytest.mark.unit
+    def test_unknown_result_stays_running_and_repolls(self, store):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        tid = store.record_self_test("test.battery.start", "scheduler")
+        mon._self_test_pending_id = tid
+        mon._self_test_poll_due_mono = time.monotonic() - 1
+        mon._get_ups_var = lambda var: {
+            "ups.test.result": "No test initiated",
+            "ups.test.date": "2026-09-01",
+        }.get(var)
+
+        mon._run_self_test_task()
+
+        assert store.get_self_test(tid)["result_enum"] == "running"
+        assert mon._self_test_pending_id == tid
+        assert mon._self_test_poll_due_mono > time.monotonic()
+        assert store.get_meta(selftest.PENDING_ID_META) == str(tid)
+
+    @pytest.mark.unit
+    def test_timeout_persists_unknown_even_when_raw_says_in_progress(self, store):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        tid = store.record_self_test(
+            "test.battery.start", "scheduler",
+            started_ts=int(time.time()) - selftest.RESULT_TIMEOUT_SECONDS - 1)
+        mon._self_test_pending_id = tid
+        mon._self_test_poll_due_mono = time.monotonic() - 1
+        mon._get_ups_var = lambda var: {
+            "ups.test.result": "In progress",
+            "ups.test.date": "2026-09-01",
+        }.get(var)
+
+        mon._run_self_test_task()
+
+        row = store.get_self_test(tid)
+        assert row["result_enum"] == "unknown"
+        assert "timed out" in row["result_raw"]
+        assert mon._self_test_pending_id is None
+
+    @pytest.mark.unit
+    def test_terminal_notification_failure_retries_same_row(self, store):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        tid = store.record_self_test("test.battery.start", "scheduler")
+        mon._self_test_pending_id = tid
+        mon._self_test_poll_due_mono = time.monotonic() - 1
+        mon._get_ups_var = lambda var: "Done and passed"
+        mon._send_notification = lambda *a, **k: None
+
+        mon._run_self_test_task()
+
+        assert store.get_self_test(tid)["result_enum"] == "passed"
+        assert mon._self_test_pending_id == tid
+        assert store.get_meta(selftest.PENDING_ID_META) in (None, str(tid))
+
+        def successful_send(*args, **kwargs):
+            store.set_meta_many(kwargs["meta_updates"])
+            return 1
+
+        mon._send_notification = successful_send
+        mon._self_test_poll_due_mono = time.monotonic() - 1
+        mon._run_self_test_task()
+        assert mon._self_test_pending_id is None
+        assert store.get_meta("self_test_terminal_notified") == str(tid)
+
+    @pytest.mark.unit
+    def test_latch_pair_is_not_partially_written(self, store, monkeypatch):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        tid = store.record_self_test("test.battery.start", "scheduler")
+        monkeypatch.setattr(store, "set_meta_many", lambda values: False)
+
+        assert mon._complete_self_test(tid, "failed", "failed") is False
+        assert store.get_meta("self_test_failure_latched") is None
+        assert store.get_meta("self_test_failure_outage_start") is None
+
+    @pytest.mark.unit
+    def test_pass_clear_failure_keeps_terminal_retry_active(
+        self, store, monkeypatch,
+    ):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        tid = store.record_self_test(
+            "test.battery.start", "scheduler", result_enum="passed")
+        mon._self_test_pending_id = tid
+        mon._self_test_poll_due_mono = time.monotonic() - 1
+        monkeypatch.setattr(store, "set_meta_many", lambda values: False)
+
+        mon._run_self_test_task()
+
+        assert mon._self_test_pending_id == tid
+        assert any("Could not clear" in line for line in mon.logs)
+
+    @pytest.mark.unit
+    def test_missing_pending_row_clears_ticket(self, store):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        mon._self_test_pending_id = 999
+        mon._self_test_poll_due_mono = time.monotonic() - 1
+        store.set_meta(selftest.PENDING_ID_META, "999")
+
+        mon._run_self_test_task()
+
+        assert mon._self_test_pending_id is None
+        assert store.get_meta(selftest.PENDING_ID_META) == ""
+
+    @pytest.mark.unit
+    def test_notification_helpers_are_safe_without_store(self):
+        mon = _make_monitor(_cfg(_ENABLED), None)
+        assert mon._notify_self_test_start(1, "test.battery.start") is True
+        assert mon._complete_self_test(1, "passed", "passed") is True
+
+    @pytest.mark.unit
+    def test_start_notification_marker_prevents_duplicate(self, store):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+
+        assert mon._notify_self_test_start(4, "test.battery.start") is True
+        assert mon._notify_self_test_start(4, "test.battery.start") is True
+
+        starts = [n for n in mon.notifications if "Self-Test Started" in n[0]]
+        assert len(starts) == 1
+
+    @pytest.mark.unit
+    def test_hard_failure_notifies_once_and_persists_latch(self, store):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        tid = store.record_self_test("test.battery.start", "scheduler")
+
+        mon._complete_self_test(tid, "failed", "Done and error")
+        mon._complete_self_test(tid, "failed", "Done and error")
+
+        assert float(store.get_meta("self_test_failure_latched")) > 0
+        terminal = [n for n in mon.notifications if "Self-Test Failed" in n[0]]
+        assert len(terminal) == 1
+        assert terminal[0][1] == mon.config.NOTIFY_FAILURE
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("result", ["warning", "aborted", "unknown"])
+    def test_noncritical_result_does_not_arm_failure_latch(
+        self, store, result,
+    ):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        tid = store.record_self_test("test.battery.start", "scheduler")
+        mon._complete_self_test(tid, result, result)
+        assert store.get_meta("self_test_failure_latched") in (None, "")
+
+    @pytest.mark.unit
+    def test_passed_result_clears_failure_latch(self, store):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        store.set_meta("self_test_failure_latched", "123")
+        tid = store.record_self_test("test.battery.start", "scheduler")
+        mon._complete_self_test(tid, "passed", "Done and passed")
+        assert store.get_meta("self_test_failure_latched") == ""
+
+    @pytest.mark.unit
+    def test_positive_device_evidence_creates_active_test(self, store):
+        mon = _make_monitor(_cfg(
+            "notifications:\n  enabled: true\n"
+            "  urls: ['json://notify.invalid']\nups:\n  name: U@h\n"), store)
+        mon._prepare_self_test_attribution({
+            "ups.status": "OB CAL",
+            "ups.test.result": "In progress",
+        })
+        latest = store.latest_self_test()
+        assert latest["source"] == "device"
+        assert latest["result_enum"] == "running"
+        assert mon._self_test_outage_attributed is True
+        assert store.get_meta("self_test_attributed_id") == str(latest["id"])
+        assert any("Self-Test Started" in n[0] for n in mon.notifications)
+
+    @pytest.mark.unit
+    def test_terminal_device_retry_does_not_notify_started(self, store):
+        mon = _make_monitor(_cfg(
+            "notifications:\n  enabled: true\n"
+            "  urls: ['json://notify.invalid']\nups:\n  name: U@h\n"), store)
+        notifications = []
+        mon._send_notification = (
+            lambda body, *args, **kwargs: notifications.append(body) or None)
+
+        mon._check_observed_self_test({
+            "ups.status": "OL", "ups.test.result": "Battery test failed",
+        })
+        assert mon._self_test_pending_id is not None
+        notifications.clear()
+
+        mon._prepare_self_test_attribution({
+            "ups.status": "OL", "ups.test.result": "Battery test failed",
+        })
+
+        assert notifications == []
+
+    @pytest.mark.unit
+    def test_online_poll_does_not_pre_latch_attribution(self, store):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        tid = store.record_self_test("test.battery.start", "api")
+        selftest.persist_pending_self_test(store, tid, int(time.time()) + 60)
+
+        mon._prepare_self_test_attribution({"ups.status": "OL CHRG"})
+
+        assert mon._self_test_outage_attributed is False
+        assert store.get_meta("self_test_attributed_id") in (None, "")
+
+    @pytest.mark.unit
+    def test_issued_test_only_attributes_ob_inside_30_seconds(self, store):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        old = store.record_self_test(
+            "test.battery.start", "api", started_ts=int(time.time()) - 31)
+        selftest.persist_pending_self_test(store, old, int(time.time()) + 60)
+        mon._prepare_self_test_attribution({"ups.status": "OB DISCHRG"})
+        assert mon._self_test_outage_attributed is False
+
+        selftest.clear_pending_self_test(store)
+        recent = store.record_self_test("test.battery.start", "api")
+        selftest.persist_pending_self_test(store, recent, int(time.time()) + 60)
+        mon._self_test_pending_id = recent
+        mon._prepare_self_test_attribution({"ups.status": "OB DISCHRG"})
+        assert mon._self_test_outage_attributed is True
+
+    @pytest.mark.unit
+    def test_historical_repair_runs_once(self, store, monkeypatch):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        calls = []
+        monkeypatch.setattr(
+            store, "repair_self_test_power_events", lambda: calls.append(1) or 0)
+        mon._repair_historical_self_test_events()
+        mon._repair_historical_self_test_events()
+        assert calls == [1]
+        assert store.get_meta("self_test_event_repair_v1") == "1"

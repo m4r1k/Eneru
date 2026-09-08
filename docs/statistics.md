@@ -59,13 +59,25 @@ These intervals come from `StatsWriter` defaults in `src/eneru/stats.py`: `flush
 | `samples` | Raw poll samples, typically 1 Hz |
 | `agg_5min` | Five-minute aggregate buckets |
 | `agg_hourly` | Hourly aggregate buckets |
-| `events` | Power, health, lifecycle, slow-response diagnostics, remote-health transition, and shutdown events. Each row has an `id` (`INTEGER PRIMARY KEY AUTOINCREMENT`, schema v5) that the API uses to target individual events for deletion; the id is never reused, so deletion is always safe |
+| `events` | Power, self-test power transitions, health, lifecycle, slow-response diagnostics, remote-health transition, and shutdown events. Each row has an `id` (`INTEGER PRIMARY KEY AUTOINCREMENT`, schema v5) that the API uses to target individual events for deletion; the id is never reused, so deletion is always safe |
 | `notifications` | Persistent notification queue and delivery history |
 | `battery_health` | One row per periodic battery-health computation (schema v7): composite score plus per-term sub-scores, feeding replacement-prediction trending |
-| `self_tests` | UPS self-test results (schema v7): one row per issued test with the normalized result enum and the raw `ups.test.result` |
+| `self_tests` | UPS self-test results (schema v7): one row per issued or device-observed test with the normalized result enum and the raw `ups.test.result` |
 | `meta` | Schema version and lifecycle metadata |
 
 The main sample metrics include status, battery charge, runtime, load, input/output voltage, battery voltage, temperature, frequency, real power and nominal power (schema v7, for energy tracking), depletion rate, time on battery, and connection state.
+
+Self-test state that must survive a restart lives in `meta`: the active test id
+and next poll time, notification deduplication markers, and the hard-failure
+latch. On first startup with this behavior, Eneru also performs one conservative
+history repair. It relabels only a closed `ON_BATTERY` / `POWER_RESTORED` pair
+lasting at most 120 seconds when exactly one Eneru-issued self-test began
+between 30 seconds before the transfer and 30 seconds after restoration.
+Device-observed rows are excluded because their observation timestamp may not
+be the test's real start time. Aborted results are also excluded because they do
+not establish with enough confidence that the test caused the transfer. Long,
+open, or ambiguous outages remain ordinary power events. The
+`self_test_event_repair_v1` marker prevents repeat scans.
 
 ## Retention
 

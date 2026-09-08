@@ -19,6 +19,8 @@ These apply to every task in this repo, ahead of any section-specific guidance b
 
 **CRITICAL: NEVER run `pip`, `pip3`, `python -m pip`, `python`, `pytest`, or any other dev/Python tooling directly against the system Python. ALL Python work — install, uninstall, run, test, version-check — MUST happen inside a `uv` virtualenv. No exceptions.**
 
+**CRITICAL: Unless a human explicitly authorizes it for the current task, NEVER run the Docker-backed E2E suite locally. This includes Docker/Compose setup, execution, and teardown under `tests/e2e/`. Use GitHub Actions for E2E execution. Local unit tests, static checks, shell syntax checks, and workflow parsing remain allowed. Authorization from an earlier task does not carry forward.**
+
 This rule applies to *every* operation, including **uninstalls**: a system-wide `pip uninstall eneru` rips out files claimed by both pip and the deb/rpm package (e.g. `/usr/local/bin/eneru`), breaking the package install. If a system has stale pip-installed Eneru packages, the only correct cleanup is to reinstall the deb/rpm to restore its files and leave the pip remnants alone, *or* hand-delete only the pip-owned site-packages directory. Never invoke pip against system Python.
 
 To verify an installed deb/rpm package, invoke the package's own entry point (`/usr/local/bin/eneru version`, `python3 /opt/ups-monitor/eneru.py version`) — these read from `/opt/ups-monitor/`, no venv required.
@@ -97,9 +99,9 @@ pyproject.toml        # PEP 517/518 packaging
 
 This repo deliberately keeps individual source files on the smaller side (the v5.1 mixin decomposition). To stay within the context window during longer sessions:
 
-- **Use Explore subagents for any "where is X" / "how does Y work" question.** A subagent search returns ~800 tokens vs. ~15-20k for a direct `Read` of a large file — the single biggest context lever. Direct `Read` is right when you already know the file and need its current contents.
+- **Use Graft directly, or delegate its query to an Explore subagent, for "where is X" / "how does Y work" questions.** Open only the exact source spans still needed. Direct `Read` is right when you already know the file and need its current contents.
 - **Read `src/eneru/AGENTS.md`** for the per-module map before reading implementations; the map is far cheaper than the `monitor.py` it summarizes.
-- **Don't add `.mcp.json` or context-injecting hooks.** They pre-load files into every session — exactly the wrong direction. On-demand loading is the whole point.
+- **Don't add startup context-injecting hooks.** They pre-load files into every session — exactly the wrong direction. On-demand tool configuration such as the Graft MCP is fine; keep local `.mcp.json` files untracked.
 - **On long multi-finding tasks, track every item with `/goals`** (or the task tools) and re-check the list before declaring done — "61 of 62 done" reads as done in a long session unless the tracker says otherwise.
 
 ## Git Workflow
@@ -121,6 +123,16 @@ This repo deliberately keeps individual source files on the smaller side (the v5
 6. All required checks green before merge
 7. Merge via GitHub (branch auto-deletes)
 ```
+
+**Commit boundaries:** Think of each commit as one labelled box: it should
+contain one complete, coherent behavior and everything needed to prove and
+explain it. Keep an independent feature, fix, or workstream in its own commit,
+including its related tests, docs, config, and CI changes. Do not collect all
+production code in one commit and all tests or docs in later commits. For
+example, self-test behavior, weekly reports, and an APC compatibility fix are
+three separate commits even when they ship in the same release PR. Prepare
+these commits locally, then batch pushes when practical so this rule does not
+create a CI run for every commit.
 
 **Releasing a new version:**
 ```text
@@ -169,3 +181,47 @@ GitHub Actions tag maintenance, the nFPM pin, the deliberate Docker-base-image f
 - PyYAML: Configuration parsing
 - Apprise (optional): Notifications
 - pytest: Testing framework
+
+<!-- graft:start -->
+## Graft — repo context graph
+
+This repo is indexed in `graft/`: a regenerable, gitignored local graph of small
+linked nodes with exact file:line spans. Graft tools keep it synchronized with
+the current working tree.
+
+For ANY task here — understanding how something works, finding where code lives,
+or scoping a change — get context from the graph before grepping or opening
+source files. Re-ask freely (it's cheap) and reuse literal identifiers you
+already have (symbol, error string, file name) as the query. New to this repo?
+Run `graft map` first — a token-budgeted orientation (dir clusters, hubs,
+hotspots), no LLM, no key.
+
+- Run `graft ask "<your question>" --source` → ranked nodes with the relevant
+  code spans inlined (each hit's ≤8-line crux by default; `--full` for whole
+  definitions when the crux isn't enough). Match the tool to the task shape:
+  for understanding or editing, the top node IS the answer — cite its
+  `covers:` file:line spans and edit straight from `--source`. For
+  exhaustive tasks ("every occurrence / every caller of this pattern"), ranked
+  results are top-N, not complete — run `graft grep "<literal>"` instead
+  (exhaustive over indexed files, grouped by enclosing symbol), falling back
+  to raw `grep -rn` only for unindexed files.
+- `graft skeleton <file>` → every definition's signature + span, ~10× cheaper
+  than reading the file; use it to skim an API surface.
+- `graft callers <symbol>` gives precomputed, exact edges — who calls this.
+  Add `--direction out` for what it calls, or `--depth N` to walk
+  transitively for the full blast radius. For structural questions, skip
+  ranking and use this directly.
+- Or browse: `graft/INDEX.md` lists every node; follow the links.
+- Monorepos and folders of multiple repos rank fairly across sub-projects —
+  hits carry `[scope/]` labels naming which one they're from. Narrow with
+  `graft ask "<task>" --in <scope>/` once you know where you're working.
+
+If a returned span is truncated ("+N more lines"), open the file at that exact
+range before finalizing. Only open source files when a node genuinely lacks a
+needed detail, and then at the exact file:line the node points to — never
+re-read whole files.
+
+Graft query tools refresh automatically after edits. Run `graft build` only
+when explicitly refreshing the materialized graph (deterministic, no API key,
+$0).
+<!-- graft:end -->

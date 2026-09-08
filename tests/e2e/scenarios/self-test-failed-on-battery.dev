@@ -1,0 +1,22 @@
+# Scenario: a battery test fails while the UPS remains on battery.
+ups.status: OB DISCHRG
+ups.load: 25
+
+battery.charge: 98
+battery.runtime: 1750
+battery.voltage: 53.5
+
+input.voltage: 0.0
+input.voltage.nominal: 230
+input.frequency: 0.0
+input.transfer.low: 170
+input.transfer.high: 280
+
+output.voltage: 230.0
+
+ups.test.result: Battery test failed
+ups.test.date: 2026-09-08
+ups.test.interval: 2592000
+
+device.mfr: Eneru
+device.model: E2E Test UPS

@@ -1074,7 +1074,8 @@ class MultiUPSCoordinator:
             primary = self._monitors[0]
             from eneru import reports as reports_mod
             units = [
-                (m.config.ups.name, getattr(m, "_stats_store", None),
+                (m.config.ups.name, m.config.ups.label,
+                 getattr(m, "_stats_store", None),
                  m.config.energy)
                 for m in self._monitors
             ]

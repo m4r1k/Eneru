@@ -542,6 +542,24 @@ if [ "$coalesced" -ne 2 ]; then
 fi
 echo "PASS (34a): 2 power_event rows cancelled with reason='coalesced'"
 
+# The notification uses a readable status, but the events row retains NUT's
+# raw OL CHRG value for API, TUI event history, and database consumers.
+friendly_restored=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM notifications \
+   WHERE category='power_event_on_line' \
+     AND body LIKE '%Status: Utility power%Battery charging%' \
+     AND body NOT LIKE '%Status: OL%';")
+raw_restored=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM events \
+   WHERE event_type='POWER_RESTORED' AND detail LIKE '%Status: OL CHRG%';")
+if [ "$friendly_restored" -ne 1 ] || [ "$raw_restored" -ne 1 ]; then
+  echo "FAIL: readable notification/raw event boundary was not preserved"
+  sqlite3 "$DB" "SELECT category, body FROM notifications ORDER BY id;"
+  sqlite3 "$DB" "SELECT event_type, detail FROM events ORDER BY id;"
+  exit 1
+fi
+echo "PASS (34b): notification status is readable and stored event stays raw"
+
 # Summary: 1 pending row whose body says "Brief Power Outage".
 summary=$(sqlite3 "$DB" \
   "SELECT body FROM notifications \
@@ -553,7 +571,7 @@ if [ -z "$summary" ]; then
   cat /tmp/test34.log
   exit 1
 fi
-echo "PASS (34b): coalesced summary row present and pending"
+echo "PASS (34c): coalesced summary row present and pending"
 
 echo ""
 echo "=== Test 34 PASSED: panic-attack coalescing verified ==="
@@ -616,10 +634,31 @@ if [ "$pending_stop" != "1" ]; then
 fi
 echo "PASS (35a): old daemon left exactly 1 pending lifecycle 'Service Stopped' row"
 
+# Force the persisted daily cadence into the past. The second daemon must gather
+# real stats, build the compact report, and enqueue it through the normal worker.
+sqlite3 "$DB" \
+  "INSERT INTO meta(key,value) VALUES('last_report_sent_daily','1') \
+   ON CONFLICT(key) DO UPDATE SET value='1';"
+# Seed two five-minute buckets from yesterday. Raw retention cannot cover the
+# complete previous day at the 08:00 report time, so the report must use these.
+report_start=$(date -d 'yesterday 00:00' +%s)
+sqlite3 "$DB" \
+  "INSERT INTO agg_5min(ts,real_power_avg,samples_count) VALUES \
+   ($report_start,100.0,1),($((report_start + 300)),100.0,1);"
+
 # --- Second run: same config, simulating `systemctl restart`. ---
 eneru run --config "$E2E_DIR/config-e2e-restart.yaml" > /tmp/test35-run2.log 2>&1 &
 ENERU_PID=$!
-sleep 6  # _initialize → classify_startup → cancel pending + send Restarted
+report_body=""
+for _ in $(seq 1 40); do
+  if ! report_body=$(sqlite3 "$DB" \
+      "SELECT body FROM notifications \
+       WHERE category='report' ORDER BY id DESC LIMIT 1;" 2>/dev/null); then
+    report_body=""
+  fi
+  [ -n "$report_body" ] && break
+  sleep 0.5
+done
 
 # Stop cleanly so the test environment isn't left with a runaway daemon.
 kill -TERM $ENERU_PID 2>/dev/null || true
@@ -657,6 +696,25 @@ if [ "$restarted" -lt "1" ]; then
   exit 1
 fi
 echo "PASS (35c): new daemon emitted a 'Restarted' lifecycle row"
+
+if [ -z "$report_body" ]; then
+  echo "FAIL (35d): compact daily report was not queued"
+  sqlite3 "$DB" "SELECT id, category, substr(body,1,100) FROM notifications ORDER BY id;"
+  cat /tmp/test35-run2.log
+  exit 1
+fi
+printf '%s\n' "$report_body" | grep -q '^📊 Daily report · ' \
+  || { echo "FAIL (35d): compact report title missing"; printf '%s\n' "$report_body"; exit 1; }
+printf '%s\n' "$report_body" | grep -q '^E2E Restart UPS  0.008 kWh$' \
+  || { echo "FAIL (35d): display_name or five-minute energy tier missing"; printf '%s\n' "$report_body"; exit 1; }
+printf '%s\n' "$report_body" | grep -q '^  no outages · no restarts$' \
+  || { echo "FAIL (35d): compact summary missing"; printf '%s\n' "$report_body"; exit 1; }
+if printf '%s\n' "$report_body" | grep -q 'TestUPS@localhost:3493'; then
+  echo "FAIL (35d): raw NUT address leaked into report body"
+  printf '%s\n' "$report_body"
+  exit 1
+fi
+echo "PASS (35d): compact report uses display_name, energy tier, and period summary"
 
 echo ""
 echo "=== Test 35 PASSED: single notification per restart verified ==="

@@ -3,6 +3,8 @@
 nut_control I/O is mocked (the dummy driver has no INSTCMD; real-hardware
 coverage is the maintainer's)."""
 
+import time
+
 import pytest
 
 from eneru import self_test
@@ -35,6 +37,8 @@ class TestNormalize:
         ("OK", "passed"),
         ("done", "passed"),
         ("Battery test failed", "failed"),
+        ("Done and warning", "warning"),
+        ("Aborted", "aborted"),
         ("In progress", "running"),
         ("test pending", "running"),
         # "no test initiated" = nothing has run yet -> unknown (NOT unsupported).
@@ -207,22 +211,125 @@ class TestIssue:
 
     @pytest.mark.unit
     def test_success_records_running_row(self, store, monkeypatch):
-        monkeypatch.setattr(self_test.nutctl, "run_instant_command",
-                            lambda *a, **k: (True, "Initiating test", ""))
+        active_during_command = []
+
+        def run(*_args, **_kwargs):
+            active_during_command.append(
+                store.get_meta(self_test.PENDING_ID_META))
+            return True, "Initiating test", ""
+
+        monkeypatch.setattr(self_test.nutctl, "run_instant_command", run)
         r = self_test.issue_self_test("U@h", "test.battery.start", _nc(), store,
                                       source="api")
         assert r["ok"] is True and r["test_id"] is not None
+        assert active_during_command == [str(r["test_id"])]
         latest = store.latest_self_test()
         assert latest["result_enum"] == "running"
         assert latest["source"] == "api"
 
     @pytest.mark.unit
-    def test_failure_marks_row_failed(self, store, monkeypatch):
+    def test_issue_failure_marks_row_aborted(self, store, monkeypatch):
         monkeypatch.setattr(self_test.nutctl, "run_instant_command",
                             lambda *a, **k: (False, "", "access denied"))
         r = self_test.issue_self_test("U@h", "test.battery.start", _nc(), store)
         assert r["ok"] is False
-        assert store.latest_self_test()["result_enum"] == "failed"
+        assert store.latest_self_test()["result_enum"] == "aborted"
+        assert store.get_meta(self_test.PENDING_ID_META) == ""
+
+    @pytest.mark.unit
+    def test_refuses_when_another_test_is_active(self, store, monkeypatch):
+        test_id = store.record_self_test(
+            "test.battery.start", "api", started_ts=int(time.time()))
+        store.set_meta(self_test.PENDING_ID_META, str(test_id))
+        monkeypatch.setattr(
+            self_test.nutctl, "run_instant_command",
+            lambda *a, **k: pytest.fail("must not issue a second test"))
+        result = self_test.issue_self_test(
+            "U@h", "test.battery.start", _nc(), store)
+        assert result["ok"] is False
+        assert "already active" in result["error"]
+
+    @pytest.mark.unit
+    def test_refuses_when_active_state_cannot_be_persisted(
+        self, store, monkeypatch,
+    ):
+        monkeypatch.setattr(store, "record_self_test", lambda *a, **k: None)
+        monkeypatch.setattr(
+            self_test.nutctl, "run_instant_command",
+            lambda *a, **k: pytest.fail("must not issue an untracked test"))
+        result = self_test.issue_self_test(
+            "U@h", "test.battery.start", _nc(), store)
+        assert result["ok"] is False
+        assert "persist" in result["error"]
+
+    @pytest.mark.unit
+    def test_refuses_when_pending_ticket_metadata_cannot_commit(
+        self, store, monkeypatch,
+    ):
+        monkeypatch.setattr(store, "set_meta_many", lambda values: False)
+        monkeypatch.setattr(
+            self_test.nutctl, "run_instant_command",
+            lambda *a, **k: pytest.fail("must not issue an untracked test"))
+
+        result = self_test.issue_self_test(
+            "U@h", "test.battery.start", _nc(), store)
+
+        assert result["ok"] is False
+        assert "active self-test ticket" in result["error"]
+        assert store.latest_self_test()["result_enum"] == "aborted"
+
+    @pytest.mark.unit
+    def test_fresh_running_row_without_meta_still_blocks_duplicate(
+        self, store, monkeypatch,
+    ):
+        test_id = store.record_self_test(
+            "test.battery.start", "cli", started_ts=int(time.time()))
+        monkeypatch.setattr(
+            self_test.nutctl, "run_instant_command",
+            lambda *a, **k: pytest.fail("must not issue a second test"))
+
+        result = self_test.issue_self_test(
+            "U@h", "test.battery.start", _nc(), store)
+
+        assert result["ok"] is False
+        assert store.get_meta(self_test.PENDING_ID_META) == str(test_id)
+
+    @pytest.mark.unit
+    def test_stale_running_ticket_is_finalized_before_new_issue(
+        self, store, monkeypatch,
+    ):
+        old_id = store.record_self_test(
+            "test.battery.start", "cli",
+            started_ts=int(time.time()) - self_test.RESULT_TIMEOUT_SECONDS - 1)
+        store.set_meta(self_test.PENDING_ID_META, str(old_id))
+        monkeypatch.setattr(self_test.nutctl, "run_instant_command",
+                            lambda *a, **k: (True, "started", ""))
+
+        result = self_test.issue_self_test(
+            "U@h", "test.battery.start", _nc(), store, source="cli")
+
+        assert result["ok"] is True
+        assert store.get_self_test(old_id)["result_enum"] == "unknown"
+        assert store.get_meta(self_test.PENDING_ID_META) == str(
+            result["test_id"])
+
+    @pytest.mark.unit
+    def test_issue_failure_clears_attribution_marker(self, store, monkeypatch):
+        monkeypatch.setattr(self_test.nutctl, "run_instant_command",
+                            lambda *a, **k: (False, "", "rejected"))
+        original = store.update_self_test_result
+
+        def update_and_attribute(test_id, **kwargs):
+            store.set_meta("self_test_attributed_id", str(test_id))
+            original(test_id, **kwargs)
+
+        monkeypatch.setattr(store, "update_self_test_result",
+                            update_and_attribute)
+        result = self_test.issue_self_test(
+            "U@h", "test.battery.start", _nc(), store)
+
+        assert result["ok"] is False
+        assert store.get_meta("self_test_attributed_id") == ""
 
     @pytest.mark.unit
     def test_passes_creds_to_nut_control(self, store, monkeypatch):
@@ -266,18 +373,21 @@ class TestPendingHandoff:
 
     @pytest.mark.unit
     def test_persist_and_clear_pending_self_test(self, store):
-        self_test.persist_pending_self_test(store, 7, 1060)
+        assert self_test.persist_pending_self_test(store, 7, 1060) is True
         assert store.get_meta(self_test.PENDING_ID_META) == "7"
         assert store.get_meta(self_test.PENDING_DUE_TS_META) == "1060"
-        self_test.clear_pending_self_test(store)
+        self_test.persist_pending_self_test(store, 8, None)
+        assert store.get_meta(self_test.PENDING_ID_META) == "8"
+        assert store.get_meta(self_test.PENDING_DUE_TS_META) == ""
+        assert self_test.clear_pending_self_test(store) is True
         assert store.get_meta(self_test.PENDING_ID_META) == ""
         assert store.get_meta(self_test.PENDING_DUE_TS_META) == ""
 
     @pytest.mark.unit
     def test_pending_helpers_noop_without_store_or_id(self, store):
-        self_test.persist_pending_self_test(None, 7, 1060)
-        self_test.persist_pending_self_test(store, None, 1060)
-        self_test.clear_pending_self_test(None)
+        assert self_test.persist_pending_self_test(None, 7, 1060) is False
+        assert self_test.persist_pending_self_test(store, None, 1060) is False
+        assert self_test.clear_pending_self_test(None) is False
         assert store.get_meta(self_test.PENDING_ID_META) is None
 
 

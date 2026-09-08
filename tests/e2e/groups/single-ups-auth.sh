@@ -383,8 +383,69 @@ grep -q "<title>Eneru</title>" /tmp/test55-index.html \
 # v6.1: the dashboard is a tabbed SPA — the tab nav must be served.
 grep -q 'role="tablist"' /tmp/test55-index.html \
   || { echo "FAIL: dashboard tab nav not served"; cat /tmp/test55-index.html; exit 1; }
-curl -fsS http://127.0.0.1:9100/app.js   >/dev/null || { echo "FAIL: app.js not served"; exit 1; }
+curl -fsS http://127.0.0.1:9100/app.js > /tmp/test55-app.js \
+  || { echo "FAIL: app.js not served"; exit 1; }
 curl -fsS http://127.0.0.1:9100/style.css >/dev/null || { echo "FAIL: style.css not served"; exit 1; }
+
+# User-facing labels are translated in the packaged browser asset, while the
+# API keeps the exact NUT value for integrations and troubleshooting.
+node - /tmp/test55-app.js <<'NODE' \
+  || { echo "FAIL: deployed dashboard formatters returned unexpected labels"; exit 1; }
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[2], "utf8");
+const helpers = source.slice(
+  source.indexOf("function nutStatusTokens"),
+  source.indexOf("// ----- theme (light / dark / system)"),
+);
+const statusClass = source.slice(
+  source.indexOf("function statusClass"),
+  source.indexOf("// ----- rendering -----"),
+);
+const badge = source.slice(
+  source.indexOf("function eventMarkerClass"),
+  source.indexOf("// Event tiers"),
+);
+const domStub = `
+  function el(tag, attrs, children) { return {tag, attrs, children}; }
+  function icon(name) { return {name}; }
+`;
+const actual = vm.runInNewContext(helpers + statusClass + domStub + badge + `;({
+  normal: humanNutStatus("OL CHRG"),
+  critical: humanNutStatus("OB DISCHRG LB"),
+  waiting: humanNutStatus("OL WAIT"),
+  waitingOnBattery: humanNutStatus("OB WAIT"),
+  custom: humanNutStatus("OL ECO"),
+  event: humanEventType("ON_BATTERY"),
+  eventBadge: eventTypeBadge({eventType: "ON_BATTERY"}).children[1].attrs.text,
+  alarmClass: statusClass("OL ALARM"),
+  waitingClass: statusClass("OL WAIT"),
+  customClass: statusClass("NOTOB"),
+})`);
+const expected = {
+  normal: "Utility power · Battery charging",
+  critical: "Battery low · Running on battery · Battery discharging",
+  waiting: "Waiting for UPS data",
+  waitingOnBattery: "Running on battery",
+  custom: "Utility power · Custom state: ECO",
+  event: "Power failure",
+  eventBadge: "Power failure",
+  alarmClass: "crit",
+  waitingClass: "warn",
+  customClass: "warn",
+};
+if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+  console.error({actual, expected});
+  process.exit(1);
+}
+NODE
+grep -q 'text: humanNutStatus(u.status)' /tmp/test55-app.js \
+  || { echo "FAIL: dashboard status formatter is not used for rendered labels"; exit 1; }
+API_STATUS=$(curl -fsS http://127.0.0.1:9100/api/v1/ups \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["ups"][0]["status"])')
+[ "$API_STATUS" = "OL CHRG" ] \
+  || { echo "FAIL: API status changed from raw NUT value: '$API_STATUS'"; exit 1; }
+echo "PASS (55a): dashboard labels are readable while API status stays raw"
 
 # Content-Type + CSP on the HTML response.
 HDRS=$(curl -fsS -D - -o /dev/null http://127.0.0.1:9100/)
@@ -507,7 +568,7 @@ echo "PASS: event wide-range query, auth-gated delete, and history validation ve
 )
 
 # ======================================================================
-# Test 57: self-test — passive observation + softened permission (v6.1.2)
+# Test 62: self-test observation, attribution, and failure trigger
 # ======================================================================
 # Two v6.1.2 behaviours the pre-6.1.2 suite never exercised:
 #   (A) enabling self_test no longer requires nut_control.enabled, and
@@ -518,11 +579,14 @@ echo "PASS: event wide-range query, auth-gated delete, and history validation ve
 #       in the /api/v1/ups selfTest block, regardless of self_test being on.
 # The dummy-ups driver has no INSTCMD, so ISSUING a test cannot be E2E'd;
 # (A)+(B) are the reachable — and previously-missing — self-test coverage.
-echo ">>> Running: Test 57: self-test passive observation + softened permission"
+echo ">>> Running: Test 62: self-test observation, attribution, and failure trigger"
 (
 set -euo pipefail
 
-ST_AUTH_DB="$(mktemp -d)/auth.db"
+ST_ROOT="$(mktemp -d)"
+ST_AUTH_DB="$ST_ROOT/auth.db"
+ST_STATS_DIR="$ST_ROOT/stats"
+mkdir -p "$ST_STATS_DIR"
 printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$ST_AUTH_DB" \
   || { echo "FAIL: could not create auth user"; exit 1; }
 
@@ -530,11 +594,24 @@ printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$ST_
 cat > /tmp/config-e2e-selftest-soft.yaml <<YAML
 ups:
   name: "TestUPS@localhost:3493"
+  display_name: "E2E Self-Test UPS"
+  is_local: true
+  check_interval: 1
 behavior:
   dry_run: true
 statistics:
   enabled: true
-  db_directory: "$(mktemp -d)"
+  db_directory: "$ST_STATS_DIR"
+triggers:
+  low_battery_threshold: 5
+  critical_runtime_threshold: 1
+  self_test_failure_shutdown_delay: 3
+  depletion:
+    window: 300
+    critical_rate: 1000
+    grace_period: 300
+  extended_time:
+    enabled: false
 api:
   enabled: true
   bind: "127.0.0.1"
@@ -545,8 +622,12 @@ api:
 self_test:
   enabled: true
   command: test.battery.start
+  result_poll_after: 1
 notifications:
-  enabled: false
+  enabled: true
+  urls: ["json://192.0.2.1/notify"]
+  timeout: 1
+  retry_interval: 1
 local_shutdown:
   enabled: false
 YAML
@@ -578,7 +659,7 @@ echo "PASS: self_test without auth is rejected at validation"
 
 # --- (B) passive observation: the UPS reports its own last self-test ---
 apply_scenario self-test-passed
-timeout 30s eneru run --config /tmp/config-e2e-selftest-soft.yaml > /tmp/test57-daemon.log 2>&1 &
+timeout 180s eneru run --config /tmp/config-e2e-selftest-soft.yaml > /tmp/test57-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
 
@@ -607,6 +688,126 @@ done
 [ "$DATE" = "2026-06-02" ]   || { echo "FAIL: selfTest.date was '$DATE', expected 2026-06-02"; cat /tmp/test57-daemon.log; exit 1; }
 grep -q "Observed UPS self-test: passed" /tmp/test57-daemon.log \
   || { echo "FAIL: daemon did not log the passive observation"; cat /tmp/test57-daemon.log; exit 1; }
+
+ST_DB=$(find "$ST_STATS_DIR" -maxdepth 1 -name '*.db' 2>/dev/null | head -1)
+[ -n "$ST_DB" ] || { echo "FAIL: self-test stats DB not found"; cat /tmp/test57-daemon.log; exit 1; }
+passed_notice=$(sqlite3 "$ST_DB" \
+  "SELECT COUNT(*) FROM notifications WHERE category='self_test' \
+   AND notify_type='success' AND body LIKE '%UPS Self-Test Passed%';")
+[ "$passed_notice" = "1" ] \
+  || { echo "FAIL: expected one passed self-test notification, got $passed_notice"; exit 1; }
+
+# A positively identified device test may briefly report OB. Those transitions
+# are self-test events, not an outage, and must not emit ordinary power alerts.
+BASE_EVENT_ID=$(sqlite3 "$ST_DB" "SELECT COALESCE(MAX(id),0) FROM events;")
+apply_scenario self-test-running-on-battery
+for _ in $(seq 1 30); do
+  seen=$(sqlite3 "$ST_DB" \
+    "SELECT COUNT(*) FROM events WHERE id > $BASE_EVENT_ID \
+     AND event_type='SELF_TEST_ON_BATTERY';")
+  [ "$seen" = "1" ] && break
+  sleep 0.5
+done
+[ "${seen:-0}" = "1" ] \
+  || { echo "FAIL: device test OB was not attributed"; cat /tmp/test57-daemon.log; exit 1; }
+
+apply_scenario self-test-failed-online
+for _ in $(seq 1 40); do
+  latch=$(sqlite3 "$ST_DB" \
+    "SELECT value FROM meta WHERE key='self_test_failure_latched';")
+  [ -n "$latch" ] && break
+  sleep 0.5
+done
+[ -n "${latch:-}" ] \
+  || { echo "FAIL: hard self-test failure did not persist its latch"; cat /tmp/test57-daemon.log; exit 1; }
+
+test_ob=$(sqlite3 "$ST_DB" \
+  "SELECT COUNT(*) FROM events WHERE id > $BASE_EVENT_ID \
+   AND event_type='SELF_TEST_ON_BATTERY' AND notification_sent=0;")
+test_ol=$(sqlite3 "$ST_DB" \
+  "SELECT COUNT(*) FROM events WHERE id > $BASE_EVENT_ID \
+   AND event_type='SELF_TEST_POWER_RESTORED' AND notification_sent=0;")
+ordinary=$(sqlite3 "$ST_DB" \
+  "SELECT COUNT(*) FROM events WHERE id > $BASE_EVENT_ID \
+   AND event_type IN ('ON_BATTERY','POWER_RESTORED');")
+[ "$test_ob" = "1" ] && [ "$test_ol" = "1" ] && [ "$ordinary" = "0" ] \
+  || { echo "FAIL: attributed event counts OB=$test_ob OL=$test_ol ordinary=$ordinary"; exit 1; }
+failed_notice=$(sqlite3 "$ST_DB" \
+  "SELECT COUNT(*) FROM notifications WHERE category='self_test' \
+   AND notify_type='failure' AND body LIKE '%UPS Self-Test Failed%' \
+   AND body LIKE '%Battery test failed%';")
+[ "$failed_notice" = "1" ] \
+  || { echo "FAIL: expected one hard-failure notification, got $failed_notice"; exit 1; }
+premature_shutdowns=$(sqlite3 "$ST_DB" \
+  "SELECT COUNT(*) FROM events WHERE id > $BASE_EVENT_ID \
+   AND event_type='EMERGENCY_SHUTDOWN_INITIATED';")
+[ "$premature_shutdowns" = "0" ] \
+  || { echo "FAIL: self-test or line-power phase triggered shutdown"; exit 1; }
+
+# A second test that finishes failed while OB persists must reclassify the
+# continuing interval as a normal outage and allow the delayed T5 trigger.
+apply_scenario online-charging
+CONTINUING_BASE=$(sqlite3 "$ST_DB" "SELECT COALESCE(MAX(id),0) FROM events;")
+apply_scenario self-test-running-on-battery
+for _ in $(seq 1 30); do
+  continuing_test_ob=$(sqlite3 "$ST_DB" \
+    "SELECT COUNT(*) FROM events WHERE id > $CONTINUING_BASE \
+     AND event_type='SELF_TEST_ON_BATTERY';")
+  [ "$continuing_test_ob" = "1" ] && break
+  sleep 0.5
+done
+[ "${continuing_test_ob:-0}" = "1" ] \
+  || { echo "FAIL: continuing-OB test was not attributed"; cat /tmp/test57-daemon.log; exit 1; }
+
+apply_scenario self-test-failed-on-battery
+for _ in $(seq 1 40); do
+  continuing_outage=$(sqlite3 "$ST_DB" \
+    "SELECT COUNT(*) FROM events WHERE id > $CONTINUING_BASE \
+     AND event_type='ON_BATTERY';")
+  continuing_shutdown=$(sqlite3 "$ST_DB" \
+    "SELECT COUNT(*) FROM events WHERE id > $CONTINUING_BASE \
+     AND event_type='EMERGENCY_SHUTDOWN_INITIATED' \
+     AND detail LIKE '%Previous UPS self-test failed%';")
+  [ "$continuing_outage" = "1" ] && [ "$continuing_shutdown" = "1" ] && break
+  sleep 0.5
+done
+[ "${continuing_outage:-0}" = "1" ] && [ "${continuing_shutdown:-0}" = "1" ] \
+  || { echo "FAIL: failed test did not reclassify continuing OB and trigger shutdown"; cat /tmp/test57-daemon.log; exit 1; }
+
+# A successful neutral status can hide an OL transition between polls. The next
+# genuine OB must still re-arm T5 and fire after the configured three-second
+# delay, without relying on _handle_on_line.
+apply_scenario unknown-status
+for _ in $(seq 1 30); do
+  unknown_seen=$(grep -c "UPS status 'UNKNOWN' is neither on-line nor on-battery" \
+    /tmp/test57-daemon.log || true)
+  [ "$unknown_seen" -ge 1 ] && break
+  sleep 0.5
+done
+[ "${unknown_seen:-0}" -ge 1 ] \
+  || { echo "FAIL: daemon did not observe the unknown-status interval"; cat /tmp/test57-daemon.log; exit 1; }
+OUTAGE_BASE=$(sqlite3 "$ST_DB" "SELECT COALESCE(MAX(id),0) FROM events;")
+apply_scenario on-battery
+for _ in $(seq 1 40); do
+  shutdowns=$(sqlite3 "$ST_DB" \
+    "SELECT COUNT(*) FROM events WHERE id > $OUTAGE_BASE \
+     AND event_type='EMERGENCY_SHUTDOWN_INITIATED' \
+     AND detail LIKE '%Previous UPS self-test failed%';")
+  [ "$shutdowns" = "1" ] && break
+  sleep 0.5
+done
+[ "${shutdowns:-0}" = "1" ] \
+  || { echo "FAIL: failed-test latch did not trigger later outage shutdown"; cat /tmp/test57-daemon.log; exit 1; }
+trigger_delay=$(sqlite3 "$ST_DB" \
+  "SELECT shutdown.ts - outage.ts FROM events outage JOIN events shutdown \
+    WHERE outage.id > $OUTAGE_BASE AND outage.event_type='ON_BATTERY' \
+      AND shutdown.id > $OUTAGE_BASE \
+      AND shutdown.id > outage.id \
+      AND shutdown.event_type='EMERGENCY_SHUTDOWN_INITIATED' \
+    ORDER BY shutdown.id LIMIT 1;")
+[ -n "$trigger_delay" ] && [ "$trigger_delay" -ge 3 ] \
+  || { echo "FAIL: shutdown delay was '${trigger_delay:-missing}', expected >=3s"; exit 1; }
+echo "PASS: self-test notifications, outage attribution, and delayed failure trigger verified"
 
 kill "$DAEMON_PID" 2>/dev/null || true
 wait "$DAEMON_PID" 2>/dev/null || true
