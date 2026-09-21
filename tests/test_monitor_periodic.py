@@ -396,13 +396,17 @@ class TestRunSelfTestTask:
         assert any("Self-test result: passed" in m for m in mon.logs)
 
     @pytest.mark.unit
-    def test_pending_poll_uses_power_snapshot_result(self, store, monkeypatch):
+    @pytest.mark.parametrize(("status", "on_battery_event"), [
+        ("OL CHRG", False),
+        ("OB DISCHRG", True),
+    ])
+    def test_pending_poll_uses_power_snapshot_result(
+            self, store, monkeypatch, status, on_battery_event):
         mon = _make_monitor(_cfg(_ENABLED), store)
         test_id = store.record_self_test("test.battery.start", "scheduler")
         mon._self_test_pending_id = test_id
         mon._self_test_poll_due_mono = time.monotonic() - 1
-        mon._self_test_outage_attributed = True
-        mon.state.latest_status = "OL CHRG"
+        mon.state.latest_status = status
         store.set_meta("self_test_attributed_id", str(test_id))
         events = []
         mon._log_power_event = lambda event, detail, **kwargs: events.append(event)
@@ -412,13 +416,13 @@ class TestRunSelfTestTask:
                             lambda s, tid, raw, date: "failed")
 
         mon._run_self_test_task({
-            "ups.status": "OL CHRG",
+            "ups.status": status,
             "ups.test.result": "Battery test failed",
             "ups.test.date": "2026-09-19",
         })
 
         assert mon._self_test_pending_id is None
-        assert "ON_BATTERY" not in events
+        assert ("ON_BATTERY" in events) is on_battery_event
         assert any("Self-test result: failed" in m for m in mon.logs)
 
     @pytest.mark.unit
