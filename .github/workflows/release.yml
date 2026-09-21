@@ -221,7 +221,7 @@ jobs:
       # keeps a broken build from ever landing on `:latest`/`:testing` while
       # verification fails.
       - name: Build and push
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@v7.4.0
         with:
           context: .
           file: ./Dockerfile
