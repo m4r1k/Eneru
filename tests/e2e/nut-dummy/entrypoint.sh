@@ -53,10 +53,19 @@ upsc TestUPS@localhost 2>/dev/null | grep -E "ups.status|battery.charge" || true
 # between cp and touch can't leave a false positive behind.
 apply_one() {
     local trigger="$1" ups="$2"
+    local before_mtime after_mtime
     [ -f "/scenarios/$trigger" ] || return 0
     echo "Applying scenario to $ups"
     rm -f "/scenarios/applied-$ups"
+    before_mtime="$(stat -c %Y "/etc/nut/$ups.dev" 2>/dev/null || echo -1)"
     cp "/scenarios/$trigger" "/etc/nut/$ups.dev"
+    after_mtime="$(stat -c %Y "/etc/nut/$ups.dev")"
+    if [ "$after_mtime" = "$before_mtime" ]; then
+        # dummy-ups compares time_t seconds, so two writes in one second look
+        # identical. Advance to the next second and give it a visible mtime.
+        sleep 1.1
+        touch "/etc/nut/$ups.dev"
+    fi
     chown nut:nut "/etc/nut/$ups.dev"
     rm -f "/scenarios/$trigger"
 
