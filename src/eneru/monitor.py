@@ -2545,7 +2545,7 @@ class UPSGroupMonitor(
         except Exception as exc:
             self._log_message(f"⚠️  self-test event repair failed: {exc}")
         try:
-            self._run_self_test_task()
+            self._run_self_test_task(ups_data)
         except Exception as exc:
             self._log_message(f"⚠️  self-test task failed: {exc}")
         # Passive observation: record a self-test the UPS ran on its own
@@ -2826,7 +2826,8 @@ class UPSGroupMonitor(
                 f"🔋 Relabeled {changed} historical self-test power event "
                 f"pair{'s' if changed != 1 else ''}.")
 
-    def _run_self_test_task(self) -> None:
+    def _run_self_test_task(
+            self, ups_data: Optional[Dict[str, str]] = None) -> None:
         """Issue / poll the scheduled UPS self-test (v6.1).
 
         Wall-clock + meta-persisted due check (survives restarts, unlike a
@@ -2910,8 +2911,15 @@ class UPSGroupMonitor(
                             time.time(), poll_delay))
                 return
             if time.monotonic() >= self._self_test_poll_due_mono:
-                raw = self._get_ups_var("ups.test.result")
-                date = self._get_ups_var("ups.test.date")
+                # Keep the result and power state from one poll. A second upsc
+                # call can observe a completed test while latest_status still
+                # describes the preceding on-battery snapshot.
+                if ups_data is not None:
+                    raw = ups_data.get("ups.test.result")
+                    date = ups_data.get("ups.test.date")
+                else:
+                    raw = self._get_ups_var("ups.test.result")
+                    date = self._get_ups_var("ups.test.date")
                 enum = selftest.normalize_result(raw)
                 timed_out = (
                     time.time() - pending_row["started_ts"]
