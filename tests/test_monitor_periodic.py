@@ -157,11 +157,23 @@ class TestRunPeriodicTasks:
         mon = _make_monitor(cfg, store)
         mon._update_battery_health_periodic = lambda *a: None
 
-        def boom():
+        def boom(_ups_data=None):
             raise RuntimeError("st-boom")
         mon._run_self_test_task = boom
         mon._run_periodic_tasks()
         assert any("self-test task failed" in m for m in mon.logs)
+
+    @pytest.mark.unit
+    def test_self_test_receives_current_ups_snapshot(self, store):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        mon._update_battery_health_periodic = lambda *a: None
+        seen = []
+        mon._run_self_test_task = lambda ups_data=None: seen.append(ups_data)
+        snapshot = {"ups.status": "OL CHRG", "ups.test.result": "In progress"}
+
+        mon._run_periodic_tasks(snapshot)
+
+        assert seen == [snapshot]
 
 
 # --------------------------------------------------------------------------
@@ -382,6 +394,32 @@ class TestRunSelfTestTask:
         assert mon._self_test_pending_id is None
         assert mon._self_test_poll_due_mono is None
         assert any("Self-test result: passed" in m for m in mon.logs)
+
+    @pytest.mark.unit
+    def test_pending_poll_uses_power_snapshot_result(self, store, monkeypatch):
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        test_id = store.record_self_test("test.battery.start", "scheduler")
+        mon._self_test_pending_id = test_id
+        mon._self_test_poll_due_mono = time.monotonic() - 1
+        mon._self_test_outage_attributed = True
+        mon.state.latest_status = "OL CHRG"
+        store.set_meta("self_test_attributed_id", str(test_id))
+        events = []
+        mon._log_power_event = lambda event, detail, **kwargs: events.append(event)
+        mon._get_ups_var = lambda var: pytest.fail(
+            f"unexpected second UPS read for {var}")
+        monkeypatch.setattr(selftest, "record_self_test_result",
+                            lambda s, tid, raw, date: "failed")
+
+        mon._run_self_test_task({
+            "ups.status": "OL CHRG",
+            "ups.test.result": "Battery test failed",
+            "ups.test.date": "2026-09-19",
+        })
+
+        assert mon._self_test_pending_id is None
+        assert "ON_BATTERY" not in events
+        assert any("Self-test result: failed" in m for m in mon.logs)
 
     @pytest.mark.unit
     def test_pending_finalized_even_when_config_now_disabled(self, store, monkeypatch):
