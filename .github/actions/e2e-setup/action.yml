@@ -58,7 +58,7 @@ runs:
     # token the gha cache backend needs — a raw `docker buildx build`
     # would additionally require crazy-max/ghaction-github-runtime.
     - name: Build nut-dummy image (cached)
-      uses: docker/build-push-action@v7.3.0
+      uses: docker/build-push-action@v7.4.0
       with:
         context: ${{ inputs.e2e-dir }}/nut-dummy
         load: true
@@ -67,7 +67,7 @@ runs:
         cache-to: type=gha,mode=max,scope=e2e-nut-dummy
 
     - name: Build ssh-target image (cached)
-      uses: docker/build-push-action@v7.3.0
+      uses: docker/build-push-action@v7.4.0
       with:
         context: ${{ inputs.e2e-dir }}/ssh-target
         load: true
