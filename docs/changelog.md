@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Self-test completion no longer mixes two UPS readings.** Eneru now reads the
+  test result and power state from one snapshot. This prevents a test that ends
+  between polls from turning its battery transfer into a false utility outage.
+  The E2E dummy UPS also forces distinct modification times for rapid scenario
+  changes, so NUT cannot miss a second update written in the same second.
+
 ## [6.2.0-rc2] - 2026-09-08
 
 ### Fixed

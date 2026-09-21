@@ -288,7 +288,8 @@ Self-test and notification regressions are split by responsibility:
 
 - `tests/test_self_test.py` covers result normalization and persisted tickets.
 - `tests/test_monitor_core.py` and `tests/test_monitor_periodic.py` cover power
-  attribution, delayed triggers, scheduling, and passive device observations.
+  attribution, delayed triggers, scheduling, snapshot-consistent result polling,
+  and passive device observations.
 - `tests/test_notifications.py` covers durable queueing, replay, and retries.
 
 ## End-to-end tests
