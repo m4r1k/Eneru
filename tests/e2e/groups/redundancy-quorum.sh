@@ -444,12 +444,15 @@ PY
 # Issue #98: the per-UPS 800 W override must differ from UPS2's inherited
 # 1200 W default, and both configured watt ratings must beat reported VA.
 POWER_SEEN=false
+# Keep the query in the raw-sample retention tier. A from=0 query is clamped
+# to five years and selects hourly rollups, which a fresh daemon has not made.
+POWER_FROM=$(($(date +%s) - 60))
 for _ in $(seq 1 30); do
   if curl -fsS \
-      'http://127.0.0.1:9193/api/v1/ups/UPS1%40localhost%3A3493/power?from=0' \
+      "http://127.0.0.1:9193/api/v1/ups/UPS1%40localhost%3A3493/power?from=$POWER_FROM" \
       > /tmp/test63-power1.json 2>/dev/null && \
      curl -fsS \
-      'http://127.0.0.1:9193/api/v1/ups/UPS2%40localhost%3A3493/power?from=0' \
+      "http://127.0.0.1:9193/api/v1/ups/UPS2%40localhost%3A3493/power?from=$POWER_FROM" \
       > /tmp/test63-power2.json 2>/dev/null && \
      curl -fsS http://127.0.0.1:9193/api/v1/ups \
       > /tmp/test63-status.json 2>/dev/null && \
