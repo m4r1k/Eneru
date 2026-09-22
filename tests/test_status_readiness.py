@@ -475,14 +475,14 @@ class TestRedundancyGroupStatus:
                 "batteryCharge": 95, "runtime": 1200,
                 "energy": {"todayKwh": 1.25, "todayCost": 0.25,
                            "monthKwh": 10, "yearKwh": 100,
+                           "todayLabel": "2026-09-23",
                            "estimated": False, "partial": False},
             },
             {
                 "name": "UPS-B@host", "status": "OL", "load": 30,
                 "realPowerNominal": 1000, "powerNominal": 1500,
                 "batteryCharge": 90, "runtime": 900,
-                "energy": {"todayKwh": 2.0, "todayCost": 0.40,
-                           "monthKwh": 20, "yearKwh": 200,
+                "energy": {"todayKwh": 2.0, "monthKwh": 20,
                            "estimated": True, "partial": False},
             },
         ]
@@ -498,9 +498,10 @@ class TestRedundancyGroupStatus:
         }
         energy = row["telemetry"]["energy"]
         assert energy["todayKwh"] == 3.25
-        assert energy["todayCostFormatted"] == "$0.65"
+        assert energy["todayCostFormatted"] == "$0.25"
+        assert energy["todayLabel"] == "2026-09-23"
         assert energy["estimated"] is True
-        assert energy["partial"] is False
+        assert energy["partial"] is True
         assert row["shutdownProgress"]["reason"] == "quorum lost"
 
 
