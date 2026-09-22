@@ -279,8 +279,8 @@ class EnergyConfig:
     cost_per_kwh: Optional[float] = None
     currency: str = "USD"                # ISO 4217 code
     cost_format: Optional[str] = None    # e.g. "{value} €"; overrides the currency table
-    nominal_power: Optional[float] = None  # rated W/VA; estimates watts when the
-    # UPS reports neither ups.realpower nor ups.power.nominal
+    nominal_power: Optional[float] = None  # rated W fallback when NUT reports
+    # neither ups.realpower nor ups.realpower.nominal
 
 
 @dataclass
@@ -535,6 +535,9 @@ class UPSGroupConfig:
     # multi-UPS user can give each UPS its own values. None => use global.
     battery_health: Optional[BatteryHealthConfig] = None
     self_test: Optional[SelfTestConfig] = None
+    # Optional per-UPS tariff/rated-watt overrides. The parser expands this to
+    # an effective EnergyConfig; None means use the global energy block.
+    energy: Optional[EnergyConfig] = None
 
     @property
     def is_multi_ups(self) -> bool:
@@ -655,6 +658,14 @@ class Config:
         if self.ups_groups:
             return self.ups_groups[0].filesystems
         return FilesystemsConfig()
+
+
+def resolve_energy_config(config: Config) -> EnergyConfig:
+    """Return the effective energy settings for a single-monitor config."""
+    groups = getattr(config, "ups_groups", None) or []
+    group = groups[0] if groups else None
+    override = getattr(group, "energy", None) if group is not None else None
+    return override or getattr(config, "energy", EnergyConfig())
 
 
 # ==============================================================================
@@ -785,6 +796,12 @@ _FILESYSTEMS_SCHEMA = _sch_map(
 # the (fatal) mapping shape is enforced here.
 _CLGP_SCHEMA = _sch_map(fatal=True, keys={})
 
+_ENERGY_OVERRIDE_SCHEMA = _sch_map(
+    fatal=True, sweep=True,
+    allowed={"cost_per_kwh", "nominal_power"},
+    keys={},
+)
+
 # Full per-UPS-entry body (multi-UPS list items). Unknown keys are swept by the
 # hand-written `_sweep_ups_entry`, so this node does NOT sweep.
 _UPS_ENTRY_SCHEMA = _sch_map(fatal=True, keys={
@@ -794,6 +811,7 @@ _UPS_ENTRY_SCHEMA = _sch_map(fatal=True, keys={
     "virtual_machines": _VM_SCHEMA,
     "containers": _CONTAINERS_SCHEMA,
     "filesystems": _FILESYSTEMS_SCHEMA,
+    "energy": _ENERGY_OVERRIDE_SCHEMA,
     "is_local": _SCH_BOOL,  # F-002
 })
 
@@ -1734,7 +1752,7 @@ class ConfigLoader:
             # --- Multi-UPS mode ---
             config.ups_groups = cls._parse_multi_ups(
                 ups_raw, global_triggers, config.nut_control,
-                config.battery_health, config.self_test)
+                config.battery_health, config.self_test, config.energy)
         else:
             # --- Legacy single-UPS mode ---
             config.ups_groups = [cls._parse_legacy_ups(data, ups_raw, global_triggers)]
@@ -1867,13 +1885,27 @@ class ConfigLoader:
                 'result_poll_after', base.result_poll_after),
         )
 
+    @staticmethod
+    def _parse_energy_override(energy_data: Dict[str, Any],
+                               base: "EnergyConfig") -> "EnergyConfig":
+        """Expand a per-UPS tariff/rated-watt override over global policy."""
+        base = base or EnergyConfig()
+        return EnergyConfig(
+            enabled=base.enabled,
+            cost_per_kwh=energy_data.get('cost_per_kwh', base.cost_per_kwh),
+            currency=base.currency,
+            cost_format=base.cost_format,
+            nominal_power=energy_data.get('nominal_power', base.nominal_power),
+        )
+
     @classmethod
     def _parse_multi_ups(cls, ups_list: list,
                           global_triggers: TriggersConfig,
-                          global_nut_control: "NutControlConfig" = None,
-                          global_battery_health: "BatteryHealthConfig" = None,
-                          global_self_test: "SelfTestConfig" = None
-                          ) -> List[UPSGroupConfig]:
+                           global_nut_control: "NutControlConfig" = None,
+                           global_battery_health: "BatteryHealthConfig" = None,
+                           global_self_test: "SelfTestConfig" = None,
+                           global_energy: "EnergyConfig" = None,
+                           ) -> List[UPSGroupConfig]:
         """Parse multi-UPS list format into UPSGroupConfig list."""
         groups = []
         for entry in ups_list:
@@ -1940,6 +1972,10 @@ class ConfigLoader:
             if isinstance(entry.get('self_test'), dict):
                 base = global_self_test or SelfTestConfig()
                 self_test = cls._parse_self_test(entry['self_test'], base)
+            energy = None
+            if isinstance(entry.get('energy'), dict):
+                base = global_energy or EnergyConfig()
+                energy = cls._parse_energy_override(entry['energy'], base)
 
             group = UPSGroupConfig(
                 ups=ups_config,
@@ -1952,6 +1988,7 @@ class ConfigLoader:
                 nut_control=nut_control,
                 battery_health=battery_health,
                 self_test=self_test,
+                energy=energy,
             )
             group._multi_ups = True
             groups.append(group)
@@ -2237,7 +2274,7 @@ class ConfigLoader:
                     name = entry.get("name") or f"ups[{idx}]"
                     # Same non-mapping guard as the top-level sections: a scalar
                     # per-UPS override silently reverts to the global config.
-                    for _sec in ("battery_health", "self_test"):
+                    for _sec in ("battery_health", "self_test", "energy"):
                         if _sec in entry and not isinstance(entry[_sec], dict):
                             messages.append(
                                 f"ERROR: ups '{name}' {_sec} must be a mapping")
@@ -2249,6 +2286,10 @@ class ConfigLoader:
                         messages.extend(cls._unknown_key_errors(
                             f"ups '{name}' self_test",
                             entry["self_test"], _st_keys))
+                    if isinstance(entry.get("energy"), dict):
+                        messages.extend(cls._unknown_key_errors(
+                            f"ups '{name}' energy", entry["energy"],
+                            {"cost_per_kwh", "nominal_power"}))
             logging_raw = raw_data.get("logging", {})
             messages.extend(cls._unknown_key_errors(
                 "logging",
@@ -2330,7 +2371,7 @@ class ConfigLoader:
                 "is_local", "triggers", "remote_servers", "virtual_machines",
                 "containers", "filesystems", "nut_control",
                 # v6.1 per-UPS overrides
-                "battery_health", "self_test",
+                "battery_health", "self_test", "energy",
             }
             redundancy_entry_keys = {
                 "name", "ups_sources", "min_healthy", "degraded_counts_as",
@@ -3459,21 +3500,28 @@ class ConfigLoader:
 
         # Energy cost: cost_per_kwh, when set, must be a non-negative number.
         # None/unset is valid and disables cost tracking entirely (B3).
-        cpk = config.energy.cost_per_kwh
-        if cpk is not None:
-            if (isinstance(cpk, bool)
-                    or not isinstance(cpk, (int, float))
-                    or not math.isfinite(cpk) or cpk < 0):
-                messages.append(
-                    f"ERROR: energy.cost_per_kwh must be a non-negative number "
-                    f"or unset, got {cpk!r}")
-        npw = config.energy.nominal_power
-        if npw is not None:
-            if (isinstance(npw, bool)
-                    or not isinstance(npw, (int, float))
-                    or not math.isfinite(npw) or npw <= 0):
-                messages.append(
-                    f"ERROR: energy.nominal_power must be a positive number "
-                    f"or unset, got {npw!r}")
+        for label_prefix, energy in (
+            ("energy", config.energy),
+            *((f"energy (UPS '{g.ups.name}')", getattr(g, "energy", None))
+              for g in config.ups_groups),
+        ):
+            if energy is None:
+                continue
+            cpk = energy.cost_per_kwh
+            if cpk is not None:
+                if (isinstance(cpk, bool)
+                        or not isinstance(cpk, (int, float))
+                        or not math.isfinite(cpk) or cpk < 0):
+                    messages.append(
+                        f"ERROR: {label_prefix}.cost_per_kwh must be a "
+                        f"non-negative number or unset, got {cpk!r}")
+            npw = energy.nominal_power
+            if npw is not None:
+                if (isinstance(npw, bool)
+                        or not isinstance(npw, (int, float))
+                        or not math.isfinite(npw) or npw <= 0):
+                    messages.append(
+                        f"ERROR: {label_prefix}.nominal_power must be a positive "
+                        f"number or unset, got {npw!r}")
 
         return messages

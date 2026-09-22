@@ -65,7 +65,7 @@ These intervals come from `StatsWriter` defaults in `src/eneru/stats.py`: `flush
 | `self_tests` | UPS self-test results (schema v7): one row per issued or device-observed test with the normalized result enum and the raw `ups.test.result` |
 | `meta` | Schema version and lifecycle metadata |
 
-The main sample metrics include status, battery charge, runtime, load, input/output voltage, battery voltage, temperature, frequency, real power and nominal power (schema v7, for energy tracking), depletion rate, time on battery, and connection state.
+The main sample metrics include status, battery charge, runtime, load, input/output voltage, battery voltage, temperature, frequency, measured `real_power` (W), `real_power_nominal` (W), `power_nominal` (VA), depletion rate, time on battery, and connection state. The measured and apparent-power columns arrived in schema v7; schema v8 added the nominal real-power rating.
 
 Self-test state that must survive a restart lives in `meta`: the active test id
 and next poll time, notification deduplication markers, and the hard-failure
@@ -127,6 +127,9 @@ SELECT datetime(ts, 'unixepoch') AS time,
        battery_charge,
        battery_runtime,
        ups_load,
+       real_power,
+       real_power_nominal,
+       power_nominal,
        input_voltage
 FROM samples
 ORDER BY ts DESC
@@ -183,7 +186,7 @@ sqlite3 /var/lib/eneru/UPS-192-168-1-100.db \
 
 ## Schema migrations
 
-Eneru stores the schema version in `meta.schema_version`. New releases migrate existing databases with additive `ALTER TABLE` statements and preserve old rows. When a column cannot be added in place, the table is rebuilt inside the same transaction. Schema **v5** does this for `events.id INTEGER PRIMARY KEY AUTOINCREMENT`, which SQLite cannot `ALTER ADD`; existing rows keep their identity as `id = old rowid`, so the migration is still atomic and replay-safe. Schema **v7** adds the `real_power` / `power_nominal` sample columns (with matching `*_avg` on the aggregate tables) plus the `battery_health` and `self_tests` tables; all additive, so existing rows are untouched.
+Eneru stores the schema version in `meta.schema_version`. New releases migrate existing databases with additive `ALTER TABLE` statements and preserve old rows. When a column cannot be added in place, the table is rebuilt inside the same transaction. Schema **v5** does this for `events.id INTEGER PRIMARY KEY AUTOINCREMENT`, which SQLite cannot `ALTER ADD`; existing rows keep their identity as `id = old rowid`, so the migration is still atomic and replay-safe. Schema **v7** adds the `real_power` / `power_nominal` sample columns (with matching `*_avg` on the aggregate tables) plus the `battery_health` and `self_tests` tables. Schema **v8** adds `samples.real_power_nominal` and `real_power_nominal_avg` to both aggregate tables. These energy migrations are additive, so existing rows are untouched.
 
 Check the version:
 

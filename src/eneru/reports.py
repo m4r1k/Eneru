@@ -451,8 +451,9 @@ def maybe_send_due_reports(config, store, ups_name: str,
             continue
         # F-081: build before stamping so gather/render failures retry next tick
         # instead of silently burning the whole report period.
+        from eneru.config import resolve_energy_config
         sources = gather_report_sources(
-            store, ups_name, config.energy, period=period, now=now,
+            store, ups_name, resolve_energy_config(config), period=period, now=now,
             ups_label=config.ups.label,
             poll_interval=config.ups.check_interval)
         content = build_report(period, sources, include=reports.include,

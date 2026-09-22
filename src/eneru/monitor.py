@@ -60,6 +60,7 @@ from eneru.shutdown.remote import (
     loopback_poweroff_sent,
     select_loopback_results,
 )
+from eneru.shutdown.progress import ShutdownProgress
 from eneru.health.voltage import VoltageMonitorMixin
 from eneru.health.battery import BatteryMonitorMixin
 # ISS-017: single source of truth for the connection-retry cadence. The poll
@@ -158,13 +159,21 @@ class UPSGroupMonitor(
                  log_prefix: str = "",
                  notification_worker: Optional[NotificationWorker] = None,
                  logger: Optional[UPSLogger] = None,
-                 state_file_suffix: str = "",
-                 in_redundancy_group: bool = False,
-                 coordinator_startup_event: Optional[Tuple[str, str]] = None):
+                  state_file_suffix: str = "",
+                  in_redundancy_group: bool = False,
+                  coordinator_handoff: Optional[bool] = None,
+                  coordinator_startup_event: Optional[Tuple[str, str]] = None):
         self.config = config
         self.state = MonitorState()
+        self._shutdown_progress = ShutdownProgress("ups", config.ups.name)
+        self._pending_shutdown_reason = ""
         self.logger: Optional[UPSLogger] = logger
         self._coordinator_mode = coordinator_mode
+        self._coordinator_handoff = (
+            coordinator_mode
+            if coordinator_handoff is None
+            else bool(coordinator_handoff)
+        )
         # The coordinator classifies startup once (to avoid N user-facing
         # messages) and passes the resulting event to each monitor so every
         # per-UPS stats DB still receives the recovery/upgrade breadcrumb.
@@ -1474,11 +1483,24 @@ class UPSGroupMonitor(
         self._shutdown_sequence_in_flight = True
         try:
             self._execute_shutdown_sequence_impl()
+        except Exception:
+            snapshot = self._shutdown_progress.snapshot()
+            for phase in snapshot.get("phases", []):
+                if phase.get("state") == "running":
+                    self._shutdown_progress.phase_finish(
+                        phase.get("id", ""), "failed")
+            if snapshot.get("state") == "running":
+                self._shutdown_progress.finish("failed")
+            raise
         finally:
             self._shutdown_sequence_in_flight = False
 
     def _execute_shutdown_sequence_impl(self) -> None:
         """Execute the controlled shutdown sequence."""
+        progress = self._shutdown_progress
+        progress.start(self._pending_shutdown_reason or "UPS shutdown conditions met")
+        self._pending_shutdown_reason = ""
+        phase_failed = False
         self._mark_shutdown_in_progress("starting shutdown sequence")
         sequence_start = time.monotonic()
 
@@ -1529,34 +1551,71 @@ class UPSGroupMonitor(
             # protective action. Previously an unguarded exception here
             # propagated to run() (FATAL + re-raise) or, in coordinator mode,
             # was swallowed without ever reaching the poweroff. Wrap each phase.
-            for phase_name, phase_fn in (
-                ("VM shutdown", self._shutdown_vms),
-                ("container shutdown", self._shutdown_containers),
-                ("filesystem sync", self._sync_filesystems),
-                ("filesystem unmount", self._unmount_filesystems),
+            for phase_id, phase_name, enabled, phase_fn in (
+                ("vms", "VM shutdown", self.config.virtual_machines.enabled,
+                 self._shutdown_vms),
+                ("containers", "container shutdown", self.config.containers.enabled,
+                 self._shutdown_containers),
+                ("filesystem-sync", "filesystem sync",
+                 self.config.filesystems.sync_enabled, self._sync_filesystems),
+                ("filesystem-unmount", "filesystem unmount",
+                 self.config.filesystems.unmount.enabled,
+                 self._unmount_filesystems),
             ):
+                if not enabled:
+                    progress.phase_skip(phase_id, "disabled")
+                    continue
+                progress.phase_start(phase_id)
                 try:
                     phase_fn()
                 except Exception as exc:
+                    phase_failed = True
+                    progress.phase_finish(phase_id, "failed", str(exc))
                     self._log_message(
                         f"❌  {phase_name} phase failed: {exc}. Continuing the "
                         "shutdown sequence -- drain is best-effort, the host "
                         "halt is not."
                     )
+                else:
+                    progress.phase_finish(phase_id)
+        else:
+            reason = "delegated to host" if delegated else "non-local group"
+            for phase_id in (
+                "vms", "containers", "filesystem-sync", "filesystem-unmount"
+            ):
+                progress.phase_skip(phase_id, reason)
         # Remote shutdown is also best-effort: its per-server work is already
         # guarded internally, but wrap the call too so the H4 contract -- the
         # host poweroff below is ALWAYS reached -- is structural, not dependent
         # on the callee never raising during setup.
+        has_enabled_remotes = any(
+            server.enabled for server in self.config.remote_servers)
+        if has_enabled_remotes:
+            progress.phase_start("remote")
+        else:
+            progress.phase_skip("remote", "none configured")
         try:
             remote_results = self._shutdown_remote_servers() or []
         except Exception as exc:
+            phase_failed = True
+            progress.phase_finish("remote", "failed", str(exc))
             self._log_message(
                 f"❌  remote shutdown phase failed: {exc}. Continuing to the "
                 "host poweroff."
             )
             remote_results = []
+        else:
+            if has_enabled_remotes:
+                remote_state = (
+                    "succeeded" if all(result.success for result in remote_results)
+                    else "failed"
+                )
+                if remote_state == "failed":
+                    phase_failed = True
+                progress.phase_finish("remote", remote_state)
 
         if is_local and self.config.filesystems.sync_enabled and not delegated:
+            progress.phase_start("final-sync")
             self._log_message("💾  Final filesystem sync...")
             if self.config.behavior.dry_run:
                 self._log_message("  🧪  [DRY-RUN] Would perform final sync")
@@ -1564,6 +1623,17 @@ class UPSGroupMonitor(
                 # Bounded sync (FilesystemShutdownMixin) so a hung mount can't
                 # wedge the sequence before the host poweroff below.
                 self._bounded_sync("Final filesystem sync")
+            progress.phase_finish("final-sync")
+        else:
+            if delegated:
+                final_sync_reason = "delegated to host"
+            elif not is_local:
+                final_sync_reason = "non-local group"
+            else:
+                final_sync_reason = "disabled"
+            progress.phase_skip(
+                "final-sync", final_sync_reason,
+            )
 
         # In coordinator mode, notify the coordinator instead of doing local shutdown
         if self._coordinator_mode:
@@ -1571,9 +1641,36 @@ class UPSGroupMonitor(
             # F-066: publish the remote results BEFORE the callback so the
             # coordinator can check whether the loopback poweroff went out.
             self._last_remote_results = remote_results
-            if self._shutdown_callback:
-                group = self.config.ups_groups[0] if self.config.ups_groups else None
-                self._shutdown_callback(group)
+            if not self._shutdown_callback:
+                progress.phase_start("local-poweroff")
+                progress.phase_finish(
+                    "local-poweroff", "failed", "coordinator callback missing")
+                progress.finish("failed")
+                return
+            group = self.config.ups_groups[0] if self.config.ups_groups else None
+            if delegated:
+                progress.phase_skip("local-poweroff", "delegated to host")
+            elif self._coordinator_handoff:
+                # Publish the handoff before invoking the coordinator: a real
+                # host poweroff may never return control to this monitor thread.
+                progress.phase_start("local-poweroff")
+                progress.phase_finish(
+                    "local-poweroff", detail="handoff delivered")
+            else:
+                progress.phase_skip(
+                    "local-poweroff", "coordinator keeps host running")
+            try:
+                handoff_state = self._shutdown_callback(group)
+            except Exception:
+                progress.phase_finish(
+                    "local-poweroff", "failed", "coordinator callback failed")
+                progress.finish("failed")
+                raise
+            if handoff_state in ("failed", "timed-out"):
+                progress.phase_finish("local-poweroff", handoff_state)
+                progress.finish(handoff_state)
+            elif handoff_state != "pending":
+                progress.finish("failed" if phase_failed else "succeeded")
             return
 
         elapsed = int(time.monotonic() - sequence_start)
@@ -1590,6 +1687,7 @@ class UPSGroupMonitor(
                 pass
 
         if self.config.local_shutdown.enabled and not delegated:
+            progress.phase_start("local-poweroff")
             if self.config.behavior.dry_run:
                 record_sequence_complete()
                 self._log_message("🔌  Shutting down local server NOW")
@@ -1597,6 +1695,8 @@ class UPSGroupMonitor(
                 self._log_message(f"🧪  [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
                 self._log_message("🧪  [DRY-RUN] Shutdown sequence completed successfully (no actual shutdown)")
                 self._clear_shutdown_in_progress()
+                progress.phase_finish("local-poweroff")
+                progress.finish("failed" if phase_failed else "succeeded")
             else:
                 # Validate the poweroff command BEFORE recording the run as a
                 # completed shutdown (CodeRabbit). Config validation rejects an
@@ -1620,6 +1720,9 @@ class UPSGroupMonitor(
                         category="shutdown_summary",
                     )
                     self._clear_shutdown_in_progress()
+                    progress.phase_finish(
+                        "local-poweroff", "failed", "empty poweroff command")
+                    progress.finish("failed")
                     return
 
                 record_sequence_complete()
@@ -1672,6 +1775,8 @@ class UPSGroupMonitor(
                         "(rc=124) — the shutdown may still be proceeding. "
                         "Keeping the completion marker."
                     )
+                    progress.phase_finish("local-poweroff", "timed-out")
+                    progress.finish("timed-out")
                 elif rc != 0:
                     # A healthy `systemctl poweroff` never returns — the host
                     # cuts power mid-call. If it DOES return non-zero the host
@@ -1696,13 +1801,20 @@ class UPSGroupMonitor(
                     delete_shutdown_marker(
                         Path(self.config.statistics.db_directory)
                     )
+                    progress.phase_finish(
+                        "local-poweroff", "failed", f"command returned rc={rc}")
+                    progress.finish("failed")
                     # The one-shot flag means "exit after a completed
                     # shutdown", not "hide a failed poweroff by exiting".
                     return
+                else:
+                    progress.phase_finish("local-poweroff")
+                    progress.finish("failed" if phase_failed else "succeeded")
         elif self.config.local_shutdown.enabled and delegated:
             # v5.5: the loopback's shutdown_command (already executed during
             # _shutdown_remote_servers) is what actually powers off the host.
             # The container dies with it. Notify + flush + marker, then exit.
+            progress.phase_skip("local-poweroff", "delegated to host")
             loopback_results = select_loopback_results(
                 self.config.remote_servers, remote_results,
             )
@@ -1730,6 +1842,9 @@ class UPSGroupMonitor(
                 # the host; here the container stays up, so any subsequent
                 # trigger has to be allowed through.
                 self._clear_shutdown_in_progress()
+                progress.phase_finish(
+                    "local-poweroff", "failed", "loopback poweroff not sent")
+                progress.finish("failed")
                 return
             # ISS-005: the poweroff WAS delivered (loopback_poweroff_sent is
             # True for every loopback result), so the sequence is complete even
@@ -1771,6 +1886,7 @@ class UPSGroupMonitor(
                     "SSH (no actual shutdown performed)."
                 )
                 self._clear_shutdown_in_progress()
+                progress.finish("failed" if phase_failed else "succeeded")
             else:
                 self._send_notification(
                     f"✅  **Shutdown Sequence Complete** (took {elapsed}s)\n"
@@ -1786,7 +1902,9 @@ class UPSGroupMonitor(
                     version=__version__,
                     reason=REASON_SEQUENCE_COMPLETE,
                 )
+                progress.finish("failed" if phase_failed else "succeeded")
         else:
+            progress.phase_skip("local-poweroff", "local shutdown disabled")
             record_sequence_complete()
             self._log_message("✅  SHUTDOWN SEQUENCE COMPLETE (local shutdown disabled)")
             self._send_notification(
@@ -1796,6 +1914,7 @@ class UPSGroupMonitor(
                 category="shutdown_summary",
             )
             self._clear_shutdown_in_progress()
+            progress.finish("failed" if phase_failed else "succeeded")
 
         # Exit after every successfully completed path, including a delegated
         # host poweroff. This flag is primarily an E2E/one-shot control; the
@@ -1830,6 +1949,7 @@ class UPSGroupMonitor(
         # _cleanup_and_exit and abort the emergency shutdown before poweroff.
         # _execute_shutdown_sequence re-sets it and clears it in its finally.
         self._shutdown_sequence_in_flight = True
+        self._pending_shutdown_reason = reason
         self._mark_shutdown_in_progress("triggering immediate shutdown")
 
         # Send notification (non-blocking - fire and forget)
@@ -3407,6 +3527,11 @@ class UPSGroupMonitor(
                 self.state.latest_ups_temperature = ups_data.get('ups.temperature', '')
                 self.state.latest_input_frequency = ups_data.get('input.frequency', '')
                 self.state.latest_output_frequency = ups_data.get('output.frequency', '')
+                self.state.latest_real_power = ups_data.get('ups.realpower', '')
+                self.state.latest_real_power_nominal = ups_data.get(
+                    'ups.realpower.nominal', '')
+                self.state.latest_power_nominal = ups_data.get(
+                    'ups.power.nominal', '')
                 # ISS-020: publish the MONOTONIC on-battery duration. This field
                 # becomes snapshot.time_on_battery, which the redundancy
                 # evaluator's assess_health() feeds into DECISION logic

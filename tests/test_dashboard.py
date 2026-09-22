@@ -123,6 +123,8 @@ def test_dashboard_js_contains_v61_surfaces(minimal_config):
     assert "u.energy" in text
     assert "runSelfTest(" in text
     assert "/self-test" in text
+    assert 'attrs["data-remote-role"] = s.role || "shutdown"' in text
+    assert 'item.getAttribute("data-remote-role") === "shutdown"' in text
     # The self-test button must debounce: a non-idempotent hardware POST can't be
     # double-clicked into multiple tests.
     assert "if (btn) btn.disabled = true" in text
@@ -607,14 +609,22 @@ def test_dashboard_fleet_chart_source_is_explicit_and_persistent(minimal_config)
     assert html.count("Chart UPS") == 3
     assert '" (primary)"' not in js
 
+    scope_start = js.index("function rowsForScope")
+    scope_helper = js[scope_start:js.index("function scopedRows", scope_start)]
     start = js.index("function chartSourceName")
-    helper = js[start:js.index("function populateChartUpsSelects", start)]
-    script = "const SCOPE_ALL = '__all__';\n" + helper + textwrap.dedent("""
+    helper = js[start:js.index("function updateChartSourceVisibility", start)]
+    script = textwrap.dedent("""
+        const SCOPE_ALL = "__all__";
+        const SCOPE_UPS = "ups:";
+        const SCOPE_GROUP = "redundancy:";
+        const lastGroups = [{name: "rack-pair", upsSources: ["rack", "desk"]}];
+    """) + scope_helper + helper + textwrap.dedent("""
         const rows = [{name: "rack"}, {name: "desk"}];
         process.stdout.write(JSON.stringify({
           fleetKeepsPrior: chartSourceName(SCOPE_ALL, rows, "desk"),
           fleetDefaultsFirst: chartSourceName(SCOPE_ALL, rows, "missing"),
-          scopedFollowsView: chartSourceName("desk", rows, "rack"),
+          scopedFollowsView: chartSourceName("ups:desk", rows, "rack"),
+          groupKeepsMember: chartSourceName("redundancy:rack-pair", rows, "desk"),
           emptyHasNoSource: chartSourceName(SCOPE_ALL, [], "rack"),
         }));
     """)
@@ -624,6 +634,7 @@ def test_dashboard_fleet_chart_source_is_explicit_and_persistent(minimal_config)
         "fleetKeepsPrior": "desk",
         "fleetDefaultsFirst": "rack",
         "scopedFollowsView": "desk",
+        "groupKeepsMember": "desk",
         "emptyHasNoSource": "",
     }
 
@@ -642,12 +653,18 @@ def test_dashboard_control_tab_honors_dashboard_view(minimal_config):
 
     start = js.index("function rowsForScope")
     helper = js[start:js.index("function scopedRows", start)]
-    script = "const SCOPE_ALL = '__all__';\n" + helper + textwrap.dedent("""
+    script = textwrap.dedent("""
+        const SCOPE_ALL = "__all__";
+        const SCOPE_UPS = "ups:";
+        const SCOPE_GROUP = "redundancy:";
+        const lastGroups = [{name: "rack-pair", upsSources: ["rack", "desk"]}];
+    """) + helper + textwrap.dedent("""
         const rows = [{name: "rack"}, {name: "desk"}];
         process.stdout.write(JSON.stringify({
           fleet: rowsForScope(rows, SCOPE_ALL).map(row => row.name),
-          rack: rowsForScope(rows, "rack").map(row => row.name),
-          desk: rowsForScope(rows, "desk").map(row => row.name),
+          rack: rowsForScope(rows, "ups:rack").map(row => row.name),
+          desk: rowsForScope(rows, "ups:desk").map(row => row.name),
+          redundancy: rowsForScope(rows, "redundancy:rack-pair").map(row => row.name),
           staleFallsBackSafely: rowsForScope(rows, "missing").map(row => row.name),
         }));
     """)
@@ -657,6 +674,7 @@ def test_dashboard_control_tab_honors_dashboard_view(minimal_config):
         "fleet": ["rack", "desk"],
         "rack": ["rack"],
         "desk": ["desk"],
+        "redundancy": ["rack", "desk"],
         "staleFallsBackSafely": ["rack", "desk"],
     }
 
@@ -672,8 +690,13 @@ def test_dashboard_control_discards_stale_scope_render(minimal_config):
     control_start = js.index("let _controlBuiltKey")
     control = js[control_start:js.index(
         "async function renderVariableForms", control_start)]
-    script = "const SCOPE_ALL = '__all__';\n" + helper + textwrap.dedent("""
-        let scope = "lab";
+    script = textwrap.dedent("""
+        const SCOPE_ALL = "__all__";
+        const SCOPE_UPS = "ups:";
+        const SCOPE_GROUP = "redundancy:";
+        const lastGroups = [];
+    """) + helper + textwrap.dedent("""
+        let scope = "ups:lab";
         let cfgSnapshot = {nutControl: {
           enabled: true, allowedCommands: [], allowedVariables: [],
         }};
@@ -707,6 +730,7 @@ def test_dashboard_control_discards_stale_scope_render(minimal_config):
         }
         function token() { return "session"; }
         function currentScope() { return scope; }
+        function scopedGroup() { return null; }
         function selectTab() {}
         function runCommand() {}
         function runSelfTest() {}
@@ -729,7 +753,7 @@ def test_dashboard_control_discards_stale_scope_render(minimal_config):
           const lab = renderControl({ups: [
             {name: "lab", label: "Lab"}, {name: "apc", label: "APC"},
           ]});
-          scope = "apc";
+          scope = "ups:apc";
           const apc = renderControl({ups: [
             {name: "lab", label: "Lab"}, {name: "apc", label: "APC"},
           ]});
@@ -1015,12 +1039,23 @@ def test_dashboard_rc11_surfaces(minimal_config):
     assert 'id="shutdown-plan"' in html
     assert "function renderShutdownPlan" in js and "shutdown-plan" in js
     assert ".sd-flow" in css and ".sd-node" in css
+    assert "function shutdownPlanTargets" in js
+    assert "function refreshShutdownProgress" in js
+    assert 'setInterval(refreshShutdownProgress, 1000)' in js
+    assert '"/api/v1/redundancy-groups/"' in js
+    assert ".sd-state-running" in css and ".sd-progress" in css
     # Shutdown plan is reachable per-UPS (remote-only/multi-UPS) + shows the
     # redundancy-group quorum trigger.
     assert 'id="shutdown-ups"' in html
     assert "function populateShutdownUpsSelect" in js
     assert "function shutdownTriggerNodes" in js and ".sd-trigger" in css
     assert "drops below" in js
+    # The global selector can scope every telemetry tab to a whole redundancy
+    # group without confusing that value with a raw UPS name.
+    assert 'const SCOPE_GROUP = "redundancy:"' in js
+    assert 'text: "Redundancy · " + group.name' in js
+    assert 'group.name + " · group total"' in js
+    assert 'hintedRow("Failover load"' in js
     # Battery: per-term breakdown + score trend graph (new history endpoint).
     assert "BH_TERM_LABELS" in js and "function renderBatteryHealthGraph" in js
     assert "battery-health-history" in js

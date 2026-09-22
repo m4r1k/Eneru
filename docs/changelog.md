@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Redundancy groups are first-class dashboard scopes.** The global View
+  selector can now focus telemetry, events, remotes, and shutdown details on a
+  configured redundancy group. Group status includes member telemetry,
+  aggregate energy, conservative failover load, trigger settings, and the
+  group-owned shutdown plan.
+- **Shutdown progress is visible while the sequence runs.** Per-UPS and
+  redundancy-group API endpoints expose sanitized phase and remote-target
+  state. The Shutdown tab polls these snapshots once per second while visible
+  and retains the last result for incident review.
+
+### Changed
+
+- **Energy estimates use each UPS's effective rating.** Per-UPS tariff and
+  nominal-power overrides now participate in live status, history, reports,
+  reloads, and group totals. When NUT reports `ups.realpower.nominal`, Eneru
+  prefers that watt rating over configured or apparent-power fallbacks.
+
 ### Fixed
 
 - **Self-test completion no longer mixes two UPS readings.** Eneru now reads the

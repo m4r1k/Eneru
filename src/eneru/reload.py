@@ -202,7 +202,8 @@ def apply_reload(primary: Config, monitor_configs: List[Config],
     # --- per-group SAFE fields (live) + other per-group fields (restart) ---
     # The daemon reads these per-group fields live each tick/request:
     #   triggers (poll loop), and the v6.1 resolvers for nut_control / battery_health
-    #   / self_test (_resolve_*_config read self.config.ups_groups[*] fresh). So a
+    #   / self_test / energy (_resolve_* helpers read self.config.ups_groups[*]
+    #   fresh). So a
     #   per-UPS override of any of them swaps in place, exactly like the top-level
     #   counterparts -- not restart-required.
     new_by_name = {g.ups.name: g for g in new.ups_groups}
@@ -223,12 +224,15 @@ def apply_reload(primary: Config, monitor_configs: List[Config],
             if grp.self_test != ng.self_test:
                 grp.self_test = ng.self_test
                 _add(applied, f"self_test:{grp.ups.name}")
+            if grp.energy != ng.energy:
+                grp.energy = ng.energy
+                _add(applied, f"energy:{grp.ups.name}")
             # Anything else changed on the group (VMs, containers, remote
             # servers, ...) is captured by the shutdown path at run time and is
             # reported as restart-required.
             if replace(grp, triggers=ng.triggers, nut_control=ng.nut_control,
-                       battery_health=ng.battery_health,
-                       self_test=ng.self_test) != ng:
+                        battery_health=ng.battery_health,
+                        self_test=ng.self_test, energy=ng.energy) != ng:
                 _add(restart, f"ups_groups:{grp.ups.name}")
 
     return {"applied": applied, "restartRequired": restart,

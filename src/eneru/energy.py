@@ -11,8 +11,9 @@ Integration contract (deliberately explicit):
   the sample spacing jumps.
 - Power for an interval = the power at its START sample, held for ``dt``
   (left-Riemann; periodic power readings are "the draw until the next poll").
-  Power is ``real_power`` when the UPS reports it, else the explicit fallback
-  ``ups.load% / 100 * power.nominal``, else the interval is **unknown**.
+  Power is ``ups.realpower`` when reported. Otherwise load is multiplied by,
+  in order, ``ups.realpower.nominal`` (W), configured nominal watts, or
+  ``ups.power.nominal`` (VA, last-resort estimate).
 - Energy(interval) = ``power_W * dt_h / 1000``. ``dt`` is capped: a gap larger
   than ``gap_factor`` x the expected sample interval means the daemon was down
   / data is missing, so that interval is skipped and the window marked partial
@@ -24,6 +25,7 @@ Integration contract (deliberately explicit):
 """
 
 from dataclasses import dataclass
+import math
 from typing import Dict, List, Optional, Tuple
 
 __all__ = [
@@ -35,8 +37,10 @@ __all__ = [
     "summarize",
 ]
 
-# (ts, real_power_W, ups_load_pct, power_nominal_VA) — what power_samples returns.
-PowerSample = Tuple[int, Optional[float], Optional[float], Optional[float]]
+# (ts, real_power_W, ups_load_pct, real_power_nominal_W, power_nominal_VA).
+PowerSample = Tuple[
+    int, Optional[float], Optional[float], Optional[float], Optional[float]
+]
 
 # Currency symbol + placement. "before" => "$0.20"; "after" => "0.20 €".
 # Unknown codes fall back to "<amount> <CODE>".
@@ -65,17 +69,23 @@ class EnergyResult:
 
 def power_sample_w(real_power: Optional[float],
                    ups_load: Optional[float],
-                   power_nominal: Optional[float]) -> Tuple[Optional[float], bool]:
+                   power_nominal: Optional[float], *,
+                   real_power_nominal: Optional[float] = None,
+                   nominal_fallback: Optional[float] = None,
+                   ) -> Tuple[Optional[float], bool]:
     """Power (W) for one sample and whether it used the fallback.
 
     Returns ``(power_w, was_fallback)``. ``power_w`` is ``None`` when neither
     real power nor a usable load+nominal pair is available.
     """
-    if real_power is not None and real_power >= 0:
+    if (real_power is not None and math.isfinite(real_power)
+            and real_power >= 0):
         return float(real_power), False
-    if (ups_load is not None and power_nominal is not None
-            and power_nominal > 0 and ups_load >= 0):
-        return max(0.0, float(ups_load) / 100.0 * float(power_nominal)), True
+    if ups_load is None or not math.isfinite(ups_load) or ups_load < 0:
+        return None, False
+    for nominal in (real_power_nominal, nominal_fallback, power_nominal):
+        if nominal is not None and math.isfinite(nominal) and nominal > 0:
+            return max(0.0, float(ups_load) / 100.0 * float(nominal)), True
     return None, False
 
 
@@ -106,9 +116,9 @@ def integrate_kwh(samples: List[PowerSample], *,
     raw tier (~1s) and the aggregate tiers (300s / 3600s) without the caller
     having to know which tier it fetched.
 
-    ``nominal_fallback`` (from ``energy.nominal_power``) supplies a rated power
-    when a sample reports neither ``ups.realpower`` nor ``ups.power.nominal``, so
-    watts can still be estimated from load% on UPSes that expose neither.
+    ``nominal_fallback`` (from the effective per-UPS energy config) is used
+    after ``ups.realpower.nominal`` and before the less precise
+    ``ups.power.nominal`` apparent-power fallback.
     """
     if expected_interval_s is None or expected_interval_s <= 0:
         dts = [nxt[0] - cur[0] for cur, nxt in zip(samples, samples[1:])
@@ -120,15 +130,25 @@ def integrate_kwh(samples: List[PowerSample], *,
     estimated = False
     partial = False
 
-    for (ts0, rp0, load0, nom0), nxt in zip(samples, samples[1:]):
+    for current, nxt in zip(samples, samples[1:]):
+        # Accept the v6.1 four-cell tuple for callers/tests that construct power
+        # rows directly; persisted v8 rows include rated real power separately.
+        if len(current) >= 5:
+            ts0, rp0, load0, real_nom0, va_nom0 = current[:5]
+        else:
+            ts0, rp0, load0, va_nom0 = current[:4]
+            real_nom0 = None
         dt = nxt[0] - ts0
         if dt <= 0:
             continue  # out-of-order / duplicate timestamp; ignore
         if dt > cap:
             partial = True
             continue
-        nominal = nom0 if nom0 is not None else nominal_fallback
-        power, was_fallback = power_sample_w(rp0, load0, nominal)
+        power, was_fallback = power_sample_w(
+            rp0, load0, va_nom0,
+            real_power_nominal=real_nom0,
+            nominal_fallback=nominal_fallback,
+        )
         if power is None:
             partial = True
             continue

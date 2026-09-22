@@ -14,6 +14,7 @@ from eneru.config import (
     EnergyConfig,
     ReportsConfig,
     SelfTestConfig,
+    resolve_energy_config,
 )
 
 
@@ -94,6 +95,38 @@ class TestDefaults:
 
 class TestPerUpsOverrides:
     @pytest.mark.unit
+    def test_per_ups_energy_overrides_only_tariff_and_rated_watts(self):
+        cfg = _parse(
+            "energy:\n  enabled: true\n  cost_per_kwh: 0.35\n"
+            "  currency: EUR\n  cost_format: '{value:.2f} EUR'\n"
+            "  nominal_power: 600\n"
+            "ups:\n"
+            "  - name: U1@h\n    energy:\n      nominal_power: 1000\n"
+            "  - name: U2@h\n    energy:\n      cost_per_kwh: 0.47\n"
+            "  - name: U3@h\n"
+        )
+        u1, u2, u3 = cfg.ups_groups
+        assert resolve_energy_config(Config(
+            ups_groups=[u1], energy=cfg.energy)).nominal_power == 1000
+        assert u1.energy.cost_per_kwh == 0.35
+        assert u2.energy.cost_per_kwh == 0.47
+        assert u2.energy.nominal_power == 600
+        assert u1.energy.currency == u2.energy.currency == "EUR"
+        assert u1.energy.cost_format == "{value:.2f} EUR"
+        assert u1.energy.enabled is True
+        assert u3.energy is None
+
+    @pytest.mark.unit
+    def test_per_ups_energy_explicit_null_clears_optional_default(self):
+        cfg = _parse(
+            "energy:\n  cost_per_kwh: 0.35\n  nominal_power: 600\n"
+            "ups:\n  - name: U1@h\n    energy:\n"
+            "      cost_per_kwh: null\n      nominal_power: null\n"
+        )
+        assert cfg.ups_groups[0].energy.cost_per_kwh is None
+        assert cfg.ups_groups[0].energy.nominal_power is None
+
+    @pytest.mark.unit
     def test_per_ups_battery_health_inherits_global(self):
         cfg = _parse(
             "battery_health:\n  update_interval: 1800\n  expected_life_years: 5\n"
@@ -145,6 +178,18 @@ class TestUnknownKeys:
         _, errs = _validate(
             "ups:\n  name: U@h\nbattery_health:\n  replacement:\n    horizn_days: 90\n")
         assert any("battery_health.replacement.horizn_days" in e for e in errs)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("key", ["enabled", "currency", "cost_format"])
+    def test_per_ups_energy_rejects_global_policy_keys(self, key):
+        _, errs = _validate(
+            f"ups:\n  - name: U1@h\n    energy:\n      {key}: x\n")
+        assert any(f"ups 'U1@h' energy.{key}" in e for e in errs), errs
+
+    @pytest.mark.unit
+    def test_per_ups_energy_requires_mapping(self):
+        _, errs = _validate("ups:\n  - name: U1@h\n    energy: true\n")
+        assert any("ups 'U1@h' energy must be a mapping" in e for e in errs)
 
     @pytest.mark.unit
     def test_unknown_per_ups_battery_health_key(self):
@@ -366,6 +411,19 @@ class TestCrossFieldValidation:
     def test_energy_nominal_power_must_be_positive_number(self, val):
         _, errs = _validate(f"ups:\n  name: U@h\nenergy:\n  nominal_power: {val}\n")
         assert any("nominal_power must be a positive number" in e for e in errs)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("field,val,needle", [
+        ("cost_per_kwh", "-1", "non-negative number"),
+        ("cost_per_kwh", "true", "non-negative number"),
+        ("nominal_power", "0", "positive number"),
+        ("nominal_power", "true", "positive number"),
+    ])
+    def test_per_ups_energy_numeric_validation(self, field, val, needle):
+        _, errs = _validate(
+            "energy:\n  nominal_power: 600\n"
+            f"ups:\n  - name: U1@h\n    energy:\n      {field}: {val}\n")
+        assert any("energy (UPS 'U1@h')" in e and needle in e for e in errs), errs
 
     # ---- v6.1 string/enum schedule field validation (finding 9) ----
 

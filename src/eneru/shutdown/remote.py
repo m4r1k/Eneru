@@ -178,6 +178,19 @@ class RemoteShutdownMixin:
             return command
         return f"sudo -n {command}"
 
+    def _track_remote_start(self, server: RemoteServerConfig) -> Optional[int]:
+        tracker = getattr(self, "_shutdown_progress", None)
+        if tracker is not None:
+            return tracker.remote_start(server.name or server.host, server.host)
+        return None
+
+    def _track_remote_finish(
+        self, result: RemoteShutdownResult, generation: Optional[int],
+    ) -> None:
+        tracker = getattr(self, "_shutdown_progress", None)
+        if tracker is not None:
+            tracker.remote_finish(result, generation)
+
     def _shutdown_remote_servers(self) -> List[RemoteShutdownResult]:
         """Shutdown all enabled remote servers via SSH.
 
@@ -348,6 +361,7 @@ class RemoteShutdownMixin:
                 # loopback's poweroff must not skip the others (rare,
                 # but possible in K8s multi-pod with several loopbacks).
                 display = lb.name or lb.host
+                generation = self._track_remote_start(lb)
                 try:
                     self._shutdown_loopback_command(lb, loopback_results[id(lb)])
                 except Exception as exc:
@@ -357,6 +371,9 @@ class RemoteShutdownMixin:
                     result = loopback_results[id(lb)]
                     result.error = str(exc)
                     result.crashed = True
+                finally:
+                    self._track_remote_finish(
+                        loopback_results[id(lb)], generation)
 
         results: List[RemoteShutdownResult] = (
             list(loopback_results.values()) + regular_results
@@ -528,7 +545,9 @@ class RemoteShutdownMixin:
             coerced.shutdown_sent = True
             return coerced
 
-        def shutdown_server_thread(server: RemoteServerConfig):
+        def shutdown_server_thread(
+            server: RemoteServerConfig, generation: Optional[int],
+        ):
             """Thread worker for shutting down a single server."""
             result = None
             try:
@@ -551,18 +570,22 @@ class RemoteShutdownMixin:
                     f"  ❌  Remote shutdown thread for {display} crashed: {exc}"
                 )
                 result = default_result(server, error=str(exc), crashed=True)
+            self._track_remote_finish(result, generation)
             with lock:
                 results[threading.current_thread()] = result
 
         deadline = time.monotonic() + max_timeout
         threads: List[threading.Thread] = []
+        thread_generations: Dict[threading.Thread, Optional[int]] = {}
         for server in servers:
+            generation = self._track_remote_start(server)
             t = threading.Thread(
                 target=shutdown_server_thread,
-                args=(server,),
+                args=(server, generation),
                 name=f"remote-shutdown-{server.name or server.host}",
                 daemon=True,
             )
+            thread_generations[t] = generation
             t.start()
             threads.append(t)
 
@@ -591,6 +614,8 @@ class RemoteShutdownMixin:
                         timed_out=True,
                         error="remote shutdown worker timed out",
                     )
+                    generation = thread_generations.get(thread)
+                    self._track_remote_finish(result, generation)
                 final_results.append(result)
         return final_results
 
@@ -903,7 +928,6 @@ class RemoteShutdownMixin:
             host=server.host,
             pre_commands=RemotePreShutdownResult(),
         )
-
         self._log_message(f"🌐  Initiating remote shutdown: {display_name} ({server.host})...")
 
         # Send notification for remote server shutdown start

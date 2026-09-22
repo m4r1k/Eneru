@@ -400,5 +400,135 @@ apply_scenario online-charging UPS2
 echo "PASS: stale restart flag was cleared before redundancy shutdown"
 )
 
+# ======================================================================
+# Test 63: Redundancy plan and live shutdown progress API
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 63: Redundancy plan and live shutdown progress API"
+
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
+eneru run --config "$E2E_DIR/config-e2e-redundancy.yaml" \
+  --api --api-bind 127.0.0.1 --api-port 9193 > /tmp/test63.log 2>&1 &
+ENERU_PID=$!
+cleanup_test63() {
+  kill -TERM "$ENERU_PID" 2>/dev/null || true
+  wait "$ENERU_PID" 2>/dev/null || true
+}
+trap cleanup_test63 EXIT
+
+for _ in $(seq 1 40); do
+  curl -fsS http://127.0.0.1:9193/health >/dev/null 2>&1 && break
+  sleep 0.5
+done
+curl -fsS \
+  http://127.0.0.1:9193/api/v1/redundancy-groups/rack-1-dual-psu/shutdown-plan \
+  > /tmp/test63-plan.json
+python3 - /tmp/test63-plan.json <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+assert payload["group"] == "rack-1-dual-psu"
+assert payload["upsSources"] == ["UPS1@localhost:3493", "UPS2@localhost:3493"]
+phases = payload["plan"]["phases"]
+assert [phase["id"] for phase in phases] == [
+    "vms", "containers", "filesystem-sync", "filesystem-unmount",
+    "remote", "final-sync", "local-poweroff",
+]
+assert [phase["id"] for phase in phases if phase["enabled"]] == ["remote"]
+PY
+
+# Issue #98: the per-UPS 800 W override must differ from UPS2's inherited
+# 1200 W default, and both configured watt ratings must beat reported VA.
+POWER_SEEN=false
+for _ in $(seq 1 30); do
+  if curl -fsS \
+      'http://127.0.0.1:9193/api/v1/ups/UPS1%40localhost%3A3493/power?from=0' \
+      > /tmp/test63-power1.json 2>/dev/null && \
+     curl -fsS \
+      'http://127.0.0.1:9193/api/v1/ups/UPS2%40localhost%3A3493/power?from=0' \
+      > /tmp/test63-power2.json 2>/dev/null && \
+     curl -fsS http://127.0.0.1:9193/api/v1/ups \
+      > /tmp/test63-status.json 2>/dev/null && \
+     python3 - /tmp/test63-power1.json /tmp/test63-power2.json \
+       /tmp/test63-status.json <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    power1 = json.load(handle)["data"]
+with open(sys.argv[2], encoding="utf-8") as handle:
+    power2 = json.load(handle)["data"]
+with open(sys.argv[3], encoding="utf-8") as handle:
+    status = json.load(handle)
+assert power1 and power2
+assert power1[-1]["estimated"] and power1[-1]["watts"] == 200.0
+assert power2[-1]["estimated"] and power2[-1]["watts"] == 300.0
+group = status["redundancyGroups"][0]
+assert group["upsSources"] == ["UPS1@localhost:3493", "UPS2@localhost:3493"]
+assert group["telemetry"]["redundancyLoad"]["percent"] == 50.0
+energy = group["telemetry"]["energy"]
+assert energy and energy["membersReported"] == 2
+member_kwh = [row["energy"]["todayKwh"] for row in status["ups"]]
+assert all(value is not None for value in member_kwh)
+assert abs(energy["todayKwh"] - round(sum(member_kwh), 6)) < 1e-9
+PY
+  then
+    POWER_SEEN=true
+    break
+  fi
+  sleep 0.5
+done
+if [ "$POWER_SEEN" != true ]; then
+  echo "FAIL: per-UPS energy overrides or redundancy telemetry were not published"
+  cat /tmp/test63-power1.json /tmp/test63-power2.json \
+    /tmp/test63-status.json 2>/dev/null || true
+  exit 1
+fi
+
+apply_scenario low-battery UPS1
+apply_scenario low-battery UPS2
+PROGRESS_SEEN=false
+for _ in $(seq 1 60); do
+  if curl -fsS \
+      http://127.0.0.1:9193/api/v1/redundancy-groups/rack-1-dual-psu/shutdown-progress \
+      > /tmp/test63-progress.json 2>/dev/null && \
+      python3 - /tmp/test63-progress.json <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    progress = json.load(handle)["progress"]
+assert progress["runId"] > 0
+assert progress["state"] == "succeeded"
+assert progress["finishedAt"] is not None
+remote_phase = next(phase for phase in progress["phases"]
+                    if phase["id"] == "remote")
+assert remote_phase["state"] == "succeeded"
+assert progress["remotes"]
+assert all(remote["state"] == "succeeded" for remote in progress["remotes"])
+assert all(remote["finishedAt"] is not None for remote in progress["remotes"])
+PY
+  then
+    PROGRESS_SEEN=true
+    break
+  fi
+  sleep 0.5
+done
+if [ "$PROGRESS_SEEN" != true ]; then
+  echo "FAIL: redundancy shutdown progress was never published"
+  cat /tmp/test63-progress.json 2>/dev/null || true
+  tail -60 /tmp/test63.log
+  exit 1
+fi
+
+apply_scenario online-charging UPS1
+apply_scenario online-charging UPS2
+echo "PASS: per-UPS energy, redundancy telemetry, plan, and progress verified"
+)
+
 echo ""
 echo "=== Group 'redundancy-quorum' completed successfully ==="

@@ -693,7 +693,7 @@ echo ""
 echo ">>> Running: Test 43: Embedded API health/readiness/metrics/index"
 
 cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-timeout 12s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml \
+timeout 25s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml \
   > /tmp/test43-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
@@ -765,10 +765,56 @@ if ! grep -q '"availableEndpoints"' /tmp/test43-missing-ups.json; then
   exit 1
 fi
 
+# Exercise the per-UPS shutdown plan/progress path against a real NUT event.
+UPS_PROGRESS_URL='http://127.0.0.1:9100/api/v1/ups/TestUPS%40localhost%3A3493/shutdown-progress'
+UPS_PLAN_URL='http://127.0.0.1:9100/api/v1/ups/TestUPS%40localhost%3A3493/shutdown-plan'
+if ! curl -fsS "$UPS_PLAN_URL" > /tmp/test43-plan.json; then
+  echo "FAIL: per-UPS shutdown plan endpoint did not respond"
+  exit 1
+fi
+cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply.dev
+UPS_PROGRESS_SEEN=false
+for _ in $(seq 1 30); do
+  if curl -fsS "$UPS_PROGRESS_URL" > /tmp/test43-progress.json 2>/dev/null && \
+     python3 - /tmp/test43-plan.json /tmp/test43-progress.json <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    plan = json.load(handle)["plan"]
+with open(sys.argv[2], encoding="utf-8") as handle:
+    progress = json.load(handle)["progress"]
+assert [phase["id"] for phase in plan["phases"]] == [
+    "vms", "containers", "filesystem-sync", "filesystem-unmount",
+    "remote", "final-sync", "local-poweroff",
+]
+assert progress["runId"] > 0
+assert progress["state"] == "succeeded"
+assert progress["finishedAt"] is not None
+phases = {phase["id"]: phase for phase in progress["phases"]}
+assert phases["vms"]["state"] == "skipped"
+assert phases["vms"]["detail"] == "disabled"
+assert phases["remote"]["state"] == "succeeded"
+assert progress["remotes"]
+assert all(remote["state"] == "succeeded" for remote in progress["remotes"])
+PY
+  then
+    UPS_PROGRESS_SEEN=true
+    break
+  fi
+  sleep 0.5
+done
+if [ "$UPS_PROGRESS_SEEN" != true ]; then
+  echo "FAIL: per-UPS terminal shutdown progress was not published"
+  cat /tmp/test43-progress.json /tmp/test43-daemon.log 2>/dev/null || true
+  exit 1
+fi
+cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+
 kill "$DAEMON_PID" 2>/dev/null || true
 wait "$DAEMON_PID" 2>/dev/null || true
 trap - EXIT
-echo "PASS: embedded API health/readiness/metrics/index responded"
+echo "PASS: embedded API and per-UPS shutdown observability responded"
 )
 
 # ======================================================================

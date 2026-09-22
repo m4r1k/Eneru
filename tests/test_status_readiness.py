@@ -444,6 +444,65 @@ class TestRedundancyGroupStatus:
         assert rows[0]["quorumLost"] is False
         assert rows[0]["quorumDeferred"] is True
 
+    @pytest.mark.unit
+    def test_group_status_includes_member_and_aggregate_telemetry(self):
+        from eneru.shutdown.progress import ShutdownProgress
+
+        group = RedundancyGroupConfig(
+            name="rack", ups_sources=["UPS-A@host", "UPS-B@host"],
+            min_healthy=1,
+        )
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS-A@host")),
+                UPSGroupConfig(ups=UPSConfig(name="UPS-B@host")),
+            ],
+            redundancy_groups=[group],
+        )
+        config.energy.currency = "USD"
+        tracker = ShutdownProgress("redundancy", "rack")
+        tracker.start("quorum lost")
+        source = MagicMock()
+        source._monitors = []
+        source._redundancy_remote_health_managers = []
+        source._redundancy_executors = {
+            "rack": MagicMock(_shutdown_progress=tracker),
+        }
+        ups_rows = [
+            {
+                "name": "UPS-A@host", "status": "OL", "load": 50,
+                "realPowerNominal": 800, "powerNominal": 1000,
+                "batteryCharge": 95, "runtime": 1200,
+                "energy": {"todayKwh": 1.25, "todayCost": 0.25,
+                           "monthKwh": 10, "yearKwh": 100,
+                           "estimated": False, "partial": False},
+            },
+            {
+                "name": "UPS-B@host", "status": "OL", "load": 30,
+                "realPowerNominal": 1000, "powerNominal": 1500,
+                "batteryCharge": 90, "runtime": 900,
+                "energy": {"todayKwh": 2.0, "todayCost": 0.40,
+                           "monthKwh": 20, "yearKwh": 200,
+                           "estimated": True, "partial": False},
+            },
+        ]
+
+        row = redundancy_group_statuses(
+            source, config, ups_rows=ups_rows)[0]
+
+        assert row["members"][0]["batteryCharge"] == 95
+        assert row["telemetry"]["redundancyLoad"] == {
+            "percent": 87.5, "draw": 700.0, "capacity": 800.0,
+            "unit": "W", "basis": "1 smallest member rating",
+            "unavailableReason": None,
+        }
+        energy = row["telemetry"]["energy"]
+        assert energy["todayKwh"] == 3.25
+        assert energy["todayCostFormatted"] == "$0.65"
+        assert energy["estimated"] is True
+        assert energy["partial"] is False
+        assert row["shutdownProgress"]["reason"] == "quorum lost"
+
 
 class TestReadinessContainerWithLoopback:
     """Container with loopback: local_* achievability = loopback HEALTHY."""

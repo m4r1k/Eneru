@@ -808,7 +808,7 @@ class TestSchemaMigrationV7:
         s.open()
         try:
             cols = {r[1] for r in s._conn.execute("PRAGMA table_info(samples)")}
-            assert {"real_power", "power_nominal"} <= cols
+            assert {"real_power", "power_nominal", "real_power_nominal"} <= cols
         finally:
             s.close()
 
@@ -822,7 +822,8 @@ class TestSchemaMigrationV7:
             for table in ("agg_5min", "agg_hourly"):
                 cols = {r[1] for r in s._conn.execute(
                     f"PRAGMA table_info({table})")}
-                assert {"real_power_avg", "power_nominal_avg"} <= cols
+                assert {"real_power_avg", "power_nominal_avg",
+                        "real_power_nominal_avg"} <= cols
         finally:
             s.close()
 
@@ -847,11 +848,12 @@ class TestSchemaMigrationV7:
         s.open()
         try:
             row = s._conn.execute(
-                "SELECT ts, status, battery_charge, real_power, power_nominal "
+                "SELECT ts, status, battery_charge, real_power, power_nominal, "
+                "real_power_nominal "
                 "FROM samples"
             ).fetchone()
             # Pre-existing row preserved; new energy columns NULL until next sample.
-            assert row == (1000, "OL", 95.0, None, None)
+            assert row == (1000, "OL", 95.0, None, None, None)
         finally:
             s.close()
 
@@ -865,7 +867,7 @@ class TestSchemaMigrationV7:
             sv = s._conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'"
             ).fetchone()
-            assert int(sv[0]) == SCHEMA_VERSION == 7
+            assert int(sv[0]) == SCHEMA_VERSION == 8
         finally:
             s.close()
 
@@ -879,7 +881,7 @@ class TestSchemaMigrationV7:
         s.open()
         try:
             cols = {r[1] for r in s._conn.execute("PRAGMA table_info(samples)")}
-            assert {"real_power", "power_nominal"} <= cols
+            assert {"real_power", "power_nominal", "real_power_nominal"} <= cols
             assert s._conn.execute("SELECT ts FROM samples").fetchone() == (1000,)
         finally:
             s.close()
@@ -1010,7 +1012,8 @@ class TestV7StoreMethods:
         try:
             s.buffer_sample(
                 {"ups.status": "OL", "ups.load": "40",
-                 "ups.realpower": "120", "ups.power.nominal": "300"},
+                 "ups.realpower": "120", "ups.power.nominal": "300",
+                 "ups.realpower.nominal": "250"},
                 ts=1000,
             )
             s.buffer_sample(
@@ -1019,8 +1022,8 @@ class TestV7StoreMethods:
             )
             s.flush()
             rows = s.power_samples(0, 9999, prefer_tier="samples")
-            assert rows[0] == (1000, 120.0, 40.0, 300.0)
-            assert rows[1] == (1001, None, 50.0, None)  # NULL cells preserved
+            assert rows[0] == (1000, 120.0, 40.0, 250.0, 300.0)
+            assert rows[1] == (1001, None, 50.0, None, None)
         finally:
             s.close()
 

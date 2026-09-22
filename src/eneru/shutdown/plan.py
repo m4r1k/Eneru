@@ -61,6 +61,8 @@ def _local_skip(is_local: bool, delegated: bool, enabled: bool) -> Optional[str]
 def build_shutdown_plan(config: Any, *, is_local: bool = True,
                         delegated: bool = False,
                         coordinator_mode: bool = False,
+                        coordinator_handoff: Optional[bool] = None,
+                        include_final_sync: bool = True,
                         reveal_commands: bool = True) -> Dict[str, Any]:
     """Build the structured shutdown plan from a (group-scoped) config.
 
@@ -130,7 +132,7 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
     loopbacks = [s for s in enabled_servers if s.is_host_loopback is True]
     regulars = [s for s in enabled_servers if s.is_host_loopback is not True]
 
-    def _remote_step(s, note):
+    def _remote_step(s, note, role="shutdown"):
         bits = [f"{(s.user + '@') if s.user else ''}{s.host}",
                 (s.shutdown_command or "shutdown") if reveal_commands else hidden]
         if getattr(s, "command_timeout", None):
@@ -141,7 +143,7 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
             bits.append("host-loopback")
         return {"label": s.name or s.host, "detail": " · ".join(bits),
                 "host": s.host, "order": s.shutdown_order,
-                "loopback": bool(s.is_host_loopback)}
+                "loopback": bool(s.is_host_loopback), "role": role}
 
     rsteps = []
     est = 0.0
@@ -150,7 +152,8 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
     if any(getattr(lb, "pre_shutdown_commands", None) for lb in loopbacks):
         for lb in loopbacks:
             if getattr(lb, "pre_shutdown_commands", None):
-                rsteps.append(_remote_step(lb, "pre-shutdown · runs first"))
+                rsteps.append(_remote_step(
+                    lb, "pre-shutdown · runs first", role="pre-actions"))
     # Regular remotes, grouped by the SAME effective-order logic the executor uses.
     if regulars:
         from eneru.monitor import compute_effective_order
@@ -181,10 +184,11 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
         estimate_s=(est or None), steps=rsteps))
 
     # 6) Final filesystem sync (local, sync enabled, not delegated).
-    final_on = is_local and fs.sync_enabled and not delegated
+    final_on = include_final_sync and is_local and fs.sync_enabled and not delegated
     phases.append(_phase(
         "final-sync", "Final filesystem sync", enabled=final_on,
-        skipped=_local_skip(is_local, delegated, fs.sync_enabled),
+        skipped=("not part of redundancy sequence" if not include_final_sync
+                 else _local_skip(is_local, delegated, fs.sync_enabled)),
         steps=[{"label": "Final sync before halt"}] if final_on else []))
 
     # 7) Terminal step — coordinator handoff, or the local host poweroff.
@@ -193,8 +197,14 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
         # LOCAL-ownership action. A non-local (monitoring-only) group must NOT
         # show a host-poweroff handoff: losing a UPS that doesn't power this host
         # triggers nothing here. Gate it exactly like the other local phases.
-        handoff_skip = _local_skip(is_local, delegated, True)
-        handoff_on = handoff_skip is None
+        requested_handoff = (
+            is_local if coordinator_handoff is None else coordinator_handoff)
+        handoff_on = bool(requested_handoff and not delegated)
+        handoff_skip = (
+            None if handoff_on
+            else "delegated to host" if delegated
+            else "coordinator keeps host running"
+        )
         phases.append(_phase(
             "local-poweroff", "Group handoff", enabled=handoff_on,
             skipped=handoff_skip,

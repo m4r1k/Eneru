@@ -72,6 +72,28 @@ class TestPowerSample:
     def test_negative_real_power_falls_back(self):
         assert power_sample_w(-5.0, 50.0, 1000.0) == (500.0, True)
 
+    @pytest.mark.unit
+    def test_real_nominal_watts_precede_config_and_apparent_va(self):
+        assert power_sample_w(
+            None, 50.0, 1500.0,
+            real_power_nominal=800.0,
+            nominal_fallback=1000.0,
+        ) == (400.0, True)
+
+    @pytest.mark.unit
+    def test_configured_watts_precede_apparent_va(self):
+        assert power_sample_w(
+            None, 50.0, 1500.0, nominal_fallback=1000.0,
+        ) == (500.0, True)
+
+    @pytest.mark.unit
+    def test_invalid_reported_ratings_fall_through(self):
+        assert power_sample_w(
+            None, 50.0, float("inf"),
+            real_power_nominal=0.0,
+            nominal_fallback=600.0,
+        ) == (300.0, True)
+
 
 # --------------------------------------------------------------------------
 # integrate_kwh
@@ -96,6 +118,17 @@ class TestIntegrate:
         assert r.kwh == pytest.approx(500 * (1 / 3600) / 1000)
         assert r.estimated is True
         assert r.partial is False
+
+    @pytest.mark.unit
+    def test_five_column_series_prefers_real_nominal_watts(self):
+        samples = [
+            (0, None, 50.0, 800.0, 1500.0),
+            (1, None, 50.0, 800.0, 1500.0),
+        ]
+        r = integrate_kwh(
+            samples, expected_interval_s=1, nominal_fallback=1000.0)
+        assert r.kwh == pytest.approx(400 * (1 / 3600) / 1000)
+        assert r.estimated is True
 
     @pytest.mark.unit
     def test_missing_power_is_unknown_not_zero(self):

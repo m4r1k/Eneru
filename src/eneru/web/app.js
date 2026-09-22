@@ -397,6 +397,8 @@ function formatRuntimeSeconds(value) {
 
 const CHART_UPS_SELECTS = ["power-ups", "battery-ups", "energy-ups"];
 const SCOPE_ALL = "__all__";
+const SCOPE_UPS = "ups:";
+const SCOPE_GROUP = "redundancy:";
 
 // The global UPS scope (header selector). "" / missing → All UPS.
 function currentScope() {
@@ -404,20 +406,46 @@ function currentScope() {
   return (s && s.value) || SCOPE_ALL;
 }
 function scopeIsAll() { return currentScope() === SCOPE_ALL; }
+function scopeUpsName() {
+  const scope = currentScope();
+  if (scope.startsWith(SCOPE_UPS)) return scope.slice(SCOPE_UPS.length);
+  return "";
+}
+function scopedGroup() {
+  const scope = currentScope();
+  if (!scope.startsWith(SCOPE_GROUP)) return null;
+  const name = scope.slice(SCOPE_GROUP.length);
+  return lastGroups.find((g) => g.name === name) || null;
+}
 
 // Concrete UPS name for views that cannot show a fleet (for example the
 // single-plan shutdown fallback). Historical charts use their explicit source
 // selectors instead.
 function scopedName() {
-  const scope = currentScope();
-  if (scope !== SCOPE_ALL && lastUpsRows.some((u) => u.name === scope)) return scope;
+  const upsName = scopeUpsName();
+  if (upsName) return upsName;
+  const group = scopedGroup();
+  if (group) {
+    const member = (group.upsSources || []).find(
+      (name) => lastUpsRows.some((u) => u.name === name));
+    if (member) return member;
+  }
   return lastUpsRows.length ? lastUpsRows[0].name : "";
 }
 
 function rowsForScope(rows, scope) {
   if (scope === SCOPE_ALL) return rows;
-  const one = rows.filter((u) => u.name === scope);
-  return one.length ? one : rows;
+  if (scope.startsWith(SCOPE_UPS)) {
+    const upsName = scope.slice(SCOPE_UPS.length);
+    const one = rows.filter((u) => u.name === upsName);
+    return one.length ? one : rows;
+  }
+  if (scope.startsWith(SCOPE_GROUP)) {
+    const groupName = scope.slice(SCOPE_GROUP.length);
+    const group = lastGroups.find((g) => g.name === groupName);
+    if (group) return rows.filter((u) => (group.upsSources || []).includes(u.name));
+  }
+  return rows;
 }
 
 // UPS rows honoring the scope: every row under Fleet, else just the scoped one.
@@ -430,13 +458,15 @@ function scopedRows() {
 // fleet view preserves the operator's explicit chart pick across the 10s poll.
 function chartSourceName(scope, rows, previous) {
   if (!rows.length) return "";
-  if (scope !== SCOPE_ALL && rows.some((u) => u.name === scope)) return scope;
+  const scoped = rowsForScope(rows, scope);
+  if (scope !== SCOPE_ALL && scoped.some((u) => u.name === previous)) return previous;
+  if (scope !== SCOPE_ALL && scoped.length) return scoped[0].name;
   if (rows.some((u) => u.name === previous)) return previous;
   return rows[0].name;
 }
 
 function updateChartSourceVisibility(rows) {
-  const visible = rows.length > 1 && scopeIsAll();
+  const visible = scopedRows().length > 1;
   CHART_UPS_SELECTS.forEach((id) => {
     const sel = document.getElementById(id);
     const label = sel && sel.closest("label");
@@ -450,24 +480,34 @@ function updateChartSourceVisibility(rows) {
 function populateChartUpsSelects(rows) {
   const g = document.getElementById("global-ups");
   const wrap = document.getElementById("global-ups-wrap");
-  const multi = rows.length > 1;
+  const totalScopes = rows.length + lastGroups.length;
+  const multi = totalScopes > 1;
   // Preserve a valid prior scope; default to All. Single-UPS → that UPS, no control.
   let scope = g && g.value ? g.value : SCOPE_ALL;
-  if (scope !== SCOPE_ALL && !rows.some((u) => u.name === scope)) scope = SCOPE_ALL;
-  if (!multi) scope = rows.length ? rows[0].name : SCOPE_ALL;
+  const valid = scope === SCOPE_ALL
+    || (scope.startsWith(SCOPE_UPS)
+      && rows.some((u) => u.name === scope.slice(SCOPE_UPS.length)))
+    || (scope.startsWith(SCOPE_GROUP)
+      && lastGroups.some((group) => group.name === scope.slice(SCOPE_GROUP.length)));
+  if (!valid) scope = SCOPE_ALL;
+  if (!multi) scope = rows.length ? SCOPE_UPS + rows[0].name : SCOPE_ALL;
   if (wrap) wrap.hidden = !multi;
   if (g) {
     g.replaceChildren();
     if (multi) g.appendChild(el("option", { value: SCOPE_ALL, text: "Fleet overview" }));
-    rows.forEach((u) => g.appendChild(el("option", { value: u.name, text: u.label || u.name })));
+    rows.forEach((u) => g.appendChild(el("option", {
+      value: SCOPE_UPS + u.name, text: u.label || u.name })));
+    lastGroups.forEach((group) => g.appendChild(el("option", {
+      value: SCOPE_GROUP + group.name, text: "Redundancy · " + group.name })));
     g.value = scope;
   }
   CHART_UPS_SELECTS.forEach((id) => {
     const sel = document.getElementById(id);
     if (!sel) return;
+    const chartRows = scope.startsWith(SCOPE_GROUP) ? rowsForScope(rows, scope) : rows;
     const chosen = chartSourceName(scope, rows, sel.value);
     sel.replaceChildren();
-    rows.forEach((u) =>
+    chartRows.forEach((u) =>
       sel.appendChild(el("option", { value: u.name, text: u.label || u.name })));
     if (chosen) sel.value = chosen;
   });
@@ -484,7 +524,7 @@ function onScopeChanged() {
       if (s && chosen) s.value = chosen;
     });
   }
-  updateChartSourceVisibility(lastUpsRows);
+  populateChartUpsSelects(lastUpsRows);
   applyScopeChrome();
   onTabActivated(activeTab);
 }
@@ -513,7 +553,7 @@ function seedEventSourceFromScope() {
   const src = document.getElementById("event-source-filter");
   if (!src) return;
   const scope = currentScope();
-  const target = scope === SCOPE_ALL ? "" : scope;
+  const target = scope.startsWith(SCOPE_UPS) ? scope.slice(SCOPE_UPS.length) : "";
   if (src.value === target) return;
   if (target === "" || [...src.options].some((o) => o.value === target)) {
     src.value = target;
@@ -746,10 +786,9 @@ function renderOverviewSummary(rows) {
   // The global UPS selector scopes the Overview too: a single pick drives the
   // hero + KPIs to that UPS; "All UPS" shows the whole fleet (worst status,
   // lowest health, total energy). The fleet strip above always lists every UPS.
-  const picked = !scopeIsAll() && rows.filter((u) => u.name === currentScope());
-  const view = (picked && picked.length) ? picked : rows;
+  const view = rowsForScope(rows, currentScope());
 
-  if (scopeIsAll() && view.length > 1) {
+  if (view.length > 1) {
     hero.appendChild(fleetOverview(view));
   } else {
     hero.appendChild(heroCard(view[0]));
@@ -881,6 +920,7 @@ function renderFleetStrip(rows) {
 function renderUps(payload) {
   const rows = (payload && payload.ups) || [];
   lastUpsRows = rows;
+  lastGroups = (payload && payload.redundancyGroups) || [];
   populateChartUpsSelects(rows);
   renderFleetStrip(rows);
   // The per-UPS "UPS status" grid is retired — it duplicated the always-on fleet
@@ -890,7 +930,6 @@ function renderUps(payload) {
   if (upsSec) upsSec.hidden = true;
   renderOverviewSummary(rows);
 
-  lastGroups = (payload && payload.redundancyGroups) || [];
   renderRedundancy();
   renderRemoteHealth();
   updateEventSourceFilter(rows, lastGroups);
@@ -904,8 +943,10 @@ function renderRedundancy() {
   if (!gsec || !gwrap) return;
   const rows = lastUpsRows;
   let groups = lastGroups || [];
-  const all = scopeIsAll();
-  if (!all) groups = groups.filter((g) => (g.upsSources || []).includes(currentScope()));
+  const group = scopedGroup();
+  const upsName = scopeUpsName();
+  if (group) groups = groups.filter((g) => g.name === group.name);
+  else if (upsName) groups = groups.filter((g) => (g.upsSources || []).includes(upsName));
   gwrap.replaceChildren();
   // Only surface the Redundancy section when groups are actually configured.
   // The vast majority run independent UPSes, for whom an empty "configure
@@ -919,13 +960,23 @@ function renderRedundancy() {
     const min = g.minHealthy;
     const quorumLost = groupQuorumLost(g, rows);
     const cls = quorumLost ? "crit" : (healthy === min ? "warn" : "ok");
-    gwrap.appendChild(el("div", { class: "card" }, [
+    const cardRows = [
       el("h3", { text: g.name }),
       el("div", { class: "row" }, [el("span", { text: "Healthy" }),
         el("span", { class: "badge " + cls, text: healthy + " / " + min + " required" })]),
       el("div", { class: "row" }, [el("span", { text: "Sources" }),
         el("b", { text: String(sources.length) })]),
-    ]));
+    ];
+    const telemetry = g.telemetry || {};
+    const load = telemetry.redundancyLoad || {};
+    if (load.percent != null) {
+      cardRows.push(hintedRow("Failover load", load.percent.toFixed(1) + "%",
+        load.draw + " " + load.unit + " across " + load.capacity + " "
+          + load.unit + " of " + load.basis));
+    } else if (load.unavailableReason) {
+      cardRows.push(hintedRow("Failover load", "—", load.unavailableReason));
+    }
+    gwrap.appendChild(el("div", { class: "card" }, cardRows));
   });
 }
 
@@ -973,13 +1024,16 @@ function renderRemoteHealth() {
   const sec = document.getElementById("remote-section");
   const wrap = document.getElementById("remote-cards");
   if (!sec || !wrap) return;
-  // Remote servers are per-UPS shutdown targets (row.group = owning UPS label),
-  // so honor the global scope: scoped to one UPS → just its servers; "All" → all.
+  // Remote servers belong either to a UPS label or to "redundancy:<name>".
   let servers = remoteHealthSnapshot || [];
-  if (!scopeIsAll()) {
-    const u = lastUpsRows.find((r) => r.name === currentScope());
+  const group = scopedGroup();
+  const upsName = scopeUpsName();
+  if (group) {
+    servers = servers.filter((s) => s.group === SCOPE_GROUP + group.name);
+  } else if (upsName) {
+    const u = lastUpsRows.find((r) => r.name === upsName);
     const lbl = u && (u.label || u.name);
-    servers = servers.filter((s) => s.group === lbl);
+    servers = servers.filter((s) => s.group === upsName || s.group === lbl);
   }
   sec.hidden = servers.length === 0;
   if (!servers.length) { wrap.replaceChildren(); return; }
@@ -1495,6 +1549,12 @@ function eventMatchesSource(event, source) {
   return event.ups === source || event.source === source || event.group === source;
 }
 
+function eventMatchesDashboardScope(event) {
+  const group = scopedGroup();
+  if (!group) return true;
+  return (group.upsSources || []).some((name) => eventMatchesSource(event, name));
+}
+
 // Selected event keys ((source,id)). Preserved across passive polling so an
 // in-progress selection survives a 10s refresh; cleared only on intentional
 // actions — range change, successful delete, sign-out, and server-side session
@@ -1513,6 +1573,7 @@ function visibleEvents() {
       + humanEventDetail(e.detail || e.details || "")).toLowerCase();
     return (from === null || e.ts >= from)
       && eventMatchesSource(e, source)
+      && eventMatchesDashboardScope(e)
       && eventPassesTier(eventType)              // window-independent tier gate
       && (types.size === 0 || types.has(eventType))  // optional advanced narrowing
       && (!text || detail.includes(text) || displayed.includes(text)
@@ -3195,6 +3256,16 @@ function renderEnergyTab() {
     return;
   }
   let costConfigured = false;
+  const group = scopedGroup();
+  const groupEnergy = group && group.telemetry && group.telemetry.energy;
+  if (groupEnergy) {
+    if (energyCostConfigured(groupEnergy)) costConfigured = true;
+    let badge = null;
+    if (groupEnergy.partial) badge = "partial";
+    else if (groupEnergy.estimated) badge = "estimated";
+    wrap.appendChild(widgetCard(group.name + " · group total", energyRows(groupEnergy),
+      badge ? { icon: "chart", badge, badgeClass: "muted" } : { icon: "chart" }));
+  }
   rows.forEach((u) => {
     const en = u.energy;
     if (en) {
@@ -3465,6 +3536,12 @@ async function renderControl(payload) {
   }
   sec.hidden = false;
   if (empty) empty.hidden = true;
+  if (scopedGroup()) {
+    panel.replaceChildren(el("p", { class: "chart-note",
+      text: "UPS commands are unavailable for a redundancy-group view. Select a UPS to use controls." }));
+    _controlBuiltKey = null;
+    return;
+  }
   const allRows = (payload && payload.ups) || [];
   const rows = rowsForScope(allRows, currentScope());
   // Key on token + UPS set AND the allowlists, so a live config reload that
@@ -3748,8 +3825,10 @@ function populateShutdownUpsSelect() {
 // "What triggers this sequence" — a redundancy-group quorum loss (coordinated),
 // or a standalone UPS's own low-battery / forced shutdown. Built from the
 // redundancy-group data the dashboard already holds (lastGroups).
-function shutdownTriggerNodes(name, plan) {
-  const groups = lastGroups.filter((g) => (g.upsSources || []).includes(name));
+function shutdownTriggerNodes(target, plan) {
+  const groups = target.kind === "redundancy"
+    ? lastGroups.filter((g) => g.name === target.name)
+    : lastGroups.filter((g) => (g.upsSources || []).includes(target.name));
   const coord = plan && plan.coordinatorMode ? " — coordinator-run" : "";
   if (groups.length) {
     return groups.map((g) => el("div", { class: "sd-trigger" }, [
@@ -3764,8 +3843,87 @@ function shutdownTriggerNodes(name, plan) {
 }
 
 let _sdGen = 0;
-// Append one UPS's shutdown-plan body (trigger + phase flow) into a container.
-function appendShutdownPlanBody(host, name, plan) {
+let _sdProgressRefreshing = false;
+
+function shutdownRemoteHealth(target) {
+  const groupLabel = target.kind === "redundancy" ? SCOPE_GROUP + target.name : null;
+  const ups = target.kind === "ups"
+    ? lastUpsRows.find((row) => row.name === target.name) : null;
+  const labels = new Set([target.name]);
+  if (ups) labels.add(ups.label || ups.name);
+  return (remoteHealthSnapshot || []).filter((row) =>
+    groupLabel ? row.group === groupLabel : labels.has(row.group));
+}
+
+function progressStateClass(state) {
+  if (state === "succeeded") return "ok";
+  if (state === "running") return "warn";
+  if (state === "failed" || state === "timed-out") return "crit";
+  return "muted";
+}
+
+function progressStateLabel(state) {
+  return String(state || "pending").replace(/-/g, " ");
+}
+
+function applyShutdownProgress(section, progress) {
+  if (!section) return;
+  const summary = section.querySelector(".sd-progress");
+  section.querySelectorAll(".sd-node").forEach((node) => {
+    node.classList.remove("sd-state-running", "sd-state-succeeded",
+      "sd-state-failed", "sd-state-timed-out", "sd-state-skipped");
+    const old = node.querySelector(".sd-progress-badge");
+    if (old) old.remove();
+  });
+  section.querySelectorAll(".sd-step").forEach((step) => {
+    step.classList.remove("sd-state-running", "sd-state-succeeded",
+      "sd-state-failed", "sd-state-timed-out");
+    const old = step.querySelector(".sd-progress-badge");
+    if (old) old.remove();
+  });
+  if (!progress || !summary || !progress.runId) {
+    if (summary) summary.hidden = true;
+    return;
+  }
+
+  const overall = progressStateLabel(progress.state);
+  const when = progress.state === "running" ? progress.startedAt : progress.finishedAt;
+  const prefix = progress.state === "running" ? "Shutdown in progress"
+    : "Last shutdown " + overall;
+  summary.className = "sd-progress s-" + progressStateClass(progress.state);
+  summary.textContent = prefix + (when ? " · " + relTime(when) : "")
+    + (progress.reason ? " · " + progress.reason : "");
+  summary.hidden = false;
+
+  (progress.phases || []).forEach((phase) => {
+    if (!phase || phase.state === "pending") return;
+    const node = Array.from(section.querySelectorAll(".sd-node")).find(
+      (item) => item.getAttribute("data-phase-id") === phase.id);
+    if (!node) return;
+    node.classList.add("sd-state-" + phase.state);
+    const badge = el("span", { class: "badge sd-progress-badge "
+      + progressStateClass(phase.state), text: progressStateLabel(phase.state) });
+    if (phase.detail) badge.title = phase.detail;
+    node.querySelector(".sd-head").appendChild(badge);
+  });
+
+  (progress.remotes || []).forEach((remote) => {
+    const step = Array.from(section.querySelectorAll(".sd-step")).find((item) =>
+      item.getAttribute("data-remote-host") === remote.host
+      && item.getAttribute("data-remote-server") === remote.server
+      && item.getAttribute("data-remote-role") === "shutdown");
+    if (!step || remote.state === "pending") return;
+    step.classList.add("sd-state-" + remote.state);
+    const label = remote.outcome || progressStateLabel(remote.state);
+    const badge = el("span", { class: "badge sd-progress-badge "
+      + progressStateClass(remote.state), text: progressStateLabel(label) });
+    if (remote.error) badge.title = remote.error;
+    step.appendChild(badge);
+  });
+}
+
+// Append one scope's shutdown-plan body (trigger + phase flow) into a container.
+function appendShutdownPlanBody(host, target, plan) {
   // A monitoring-only UPS whose plan has NO enabled phase runs nothing on this
   // host — don't render a full (all-skipped) sequence + a "triggers…" banner
   // that reads as if it does. Say plainly that it takes no action.
@@ -3773,12 +3931,12 @@ function appendShutdownPlanBody(host, name, plan) {
   if (!anyEnabled) {
     host.appendChild(el("p", { class: "sd-noop" },
       [icon("info"), el("span", { text: "Monitoring only — Eneru runs no shutdown "
-        + "actions for this UPS. It doesn't power this host, so losing it triggers "
+        + "actions for this scope. It doesn't power this host, so losing it triggers "
         + "nothing here (it's still monitored, with events and alerts)." })]));
     if (plan.note) host.appendChild(el("p", { class: "chart-note", text: plan.note }));
     return;
   }
-  shutdownTriggerNodes(name, plan).forEach((nd) => host.appendChild(nd));
+  shutdownTriggerNodes(target, plan).forEach((nd) => host.appendChild(nd));
   const intro = el("p", { class: "chart-note" },
     [el("span", { text: "What runs when a power-loss shutdown is triggered, top "
       + "to bottom. " })]);
@@ -3789,12 +3947,15 @@ function appendShutdownPlanBody(host, name, plan) {
   if (plan.coordinatorMode) intro.appendChild(el("span", { class: "badge info", text: "coordinator" }));
   host.appendChild(intro);
   if (plan.note) host.appendChild(el("p", { class: "chart-note", text: plan.note }));
+  host.appendChild(el("p", { class: "sd-progress", hidden: "", "aria-live": "polite" }));
 
   const flow = el("div", { class: "sd-flow" });
+  const remoteHealth = shutdownRemoteHealth(target);
   let n = 0;
   (plan.phases || []).forEach((p) => {
     n += 1;
-    const node = el("div", { class: "sd-node" + (p.enabled ? "" : " sd-skip") });
+    const node = el("div", { class: "sd-node" + (p.enabled ? "" : " sd-skip"),
+      "data-phase-id": p.id });
     const head = el("div", { class: "sd-head" }, [
       el("span", { class: "sd-num", text: String(n) }),
       el("span", { class: "sd-ico" + (p.enabled ? "" : " off") },
@@ -3831,9 +3992,30 @@ function appendShutdownPlanBody(host, name, plan) {
     if (p.enabled && (p.steps || []).length) {
       const steps = el("div", { class: "sd-steps" + (p.mode === "parallel" ? " sd-parallel" : "") });
       p.steps.forEach((s) => {
-        const st = el("div", { class: "sd-step" },
+        const attrs = { class: "sd-step" };
+        if (p.id === "remote" && s.host) {
+          attrs["data-remote-server"] = s.label;
+          attrs["data-remote-host"] = s.host;
+          attrs["data-remote-role"] = s.role || "shutdown";
+        }
+        const st = el("div", attrs,
           [el("div", { class: "sd-step-label", text: s.label })]);
         if (s.detail) st.appendChild(el("div", { class: "sd-step-detail", text: s.detail }));
+        if (p.id === "remote" && s.host) {
+          const health = remoteHealth.find((row) =>
+            row.host === s.host || row.server === s.label);
+          if (health) {
+            const healthClass = remoteStatusClass(health);
+            const healthLabel = healthClass === "ok" ? "reachable"
+              : healthClass === "warn" ? "degraded" : "unreachable";
+            const badge = el("span", { class: "badge sd-health-badge " + healthClass,
+              text: healthLabel });
+            if (health.last_checked_at) {
+              badge.title = "Last checked " + relTime(health.last_checked_at);
+            }
+            st.appendChild(badge);
+          }
+        }
         steps.appendChild(st);
       });
       node.appendChild(steps);
@@ -3841,6 +4023,45 @@ function appendShutdownPlanBody(host, name, plan) {
     flow.appendChild(node);
   });
   host.appendChild(flow);
+}
+
+function shutdownPlanTargets() {
+  const group = scopedGroup();
+  if (group) {
+    return [{ kind: "redundancy", name: group.name,
+      label: "Redundancy · " + group.name }];
+  }
+  const upsName = scopeUpsName();
+  if (upsName) {
+    const row = lastUpsRows.find((u) => u.name === upsName);
+    return row ? [{ kind: "ups", name: row.name, label: row.label || row.name,
+      row }] : [];
+  }
+  return lastUpsRows.map((row) => ({ kind: "ups", name: row.name,
+    label: row.label || row.name, row })).concat(lastGroups.map((item) => ({
+    kind: "redundancy", name: item.name, label: "Redundancy · " + item.name,
+  })));
+}
+
+function shutdownEndpoint(target, suffix) {
+  const root = target.kind === "redundancy"
+    ? "/api/v1/redundancy-groups/" : "/api/v1/ups/";
+  return root + encodeURIComponent(target.name) + "/" + suffix;
+}
+
+async function refreshShutdownProgress() {
+  if (activeTab !== "shutdown" || _sdProgressRefreshing) return;
+  const sections = Array.from(document.querySelectorAll(".sd-plan[data-progress-url]"));
+  if (!sections.length) return;
+  _sdProgressRefreshing = true;
+  try {
+    await Promise.all(sections.map(async (section) => {
+      const res = await api(section.getAttribute("data-progress-url"));
+      if (res.ok && res.data) applyShutdownProgress(section, res.data.progress);
+    }));
+  } finally {
+    _sdProgressRefreshing = false;
+  }
 }
 
 // Render shutdown plans driven by the global UPS scope. Under "All UPS" (fleet)
@@ -3852,29 +4073,30 @@ async function renderShutdownPlan() {
   if (!host) return;
   const ctl = document.getElementById("shutdown-controls");
   if (ctl) ctl.hidden = true;   // the header UPS selector is the scope control now
-  const rows = lastUpsRows;
-  if (!rows.length) {
+  const targets = shutdownPlanTargets();
+  if (!targets.length) {
     host.replaceChildren(el("p", { class: "chart-note", text: "No UPS data yet." }));
     return;
   }
-  const targets = (scopeIsAll() && rows.length > 1)
-    ? rows.slice()
-    : rows.filter((u) => u.name === scopedName());
   const stacked = targets.length > 1;
   const myGen = ++_sdGen;
   host.replaceChildren();
-  for (const u of targets) {
-    const res = await api("/api/v1/ups/" + encodeURIComponent(u.name) + "/shutdown-plan");
+  for (const target of targets) {
+    const planUrl = shutdownEndpoint(target, "shutdown-plan");
+    const progressUrl = shutdownEndpoint(target, "shutdown-progress");
+    const [res, progressRes] = await Promise.all([api(planUrl), api(progressUrl)]);
     if (myGen !== _sdGen) return;   // a newer render superseded us
     const plan = res.ok && res.data && res.data.plan;
-    const section = el("div", { class: "sd-plan" });
+    const section = el("div", { class: "sd-plan", "data-progress-url": progressUrl });
     section.appendChild(el("div", { class: "sd-plan-title card-title" },
-      [el("h3", { text: (stacked ? "Plan · " : "Viewing plan for: ") + (u.label || u.name) }),
-       monitoringBadge(u)].filter(Boolean)));
+      [el("h3", { text: (stacked ? "Plan · " : "Viewing plan for: ") + target.label }),
+       monitoringBadge(target.row)].filter(Boolean)));
     if (!plan) {
       section.appendChild(el("p", { class: "chart-note", text: "Shutdown plan unavailable." }));
     } else {
-      appendShutdownPlanBody(section, u.name, plan);
+      appendShutdownPlanBody(section, target, plan);
+      applyShutdownProgress(section,
+        progressRes.ok && progressRes.data && progressRes.data.progress);
     }
     host.appendChild(section);
   }
@@ -4139,6 +4361,7 @@ async function init() {
   initTabs();
   refresh();
   setInterval(refresh, 10000);
+  setInterval(refreshShutdownProgress, 1000);
 }
 
 document.addEventListener("DOMContentLoaded", init);

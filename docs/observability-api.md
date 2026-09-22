@@ -36,12 +36,21 @@ Endpoints:
 | `/api/v1/ups` | Current UPS/group status | 200 |
 | `/api/v1/ups/<name>` | One UPS status | 200 / 404 |
 | `/api/v1/ups/<name>/history` | SQLite metric history (`metric`, `from`, `to`) | 200 / 400 (bad metric or `from > to`) / 404 |
+| `/api/v1/ups/<name>/shutdown-plan` | Read-only ordered shutdown plan for one UPS | 200 / 404 |
+| `/api/v1/ups/<name>/shutdown-progress` | Current or most recent shutdown progress for one UPS | 200 / 404 |
+| `/api/v1/redundancy-groups/<name>/shutdown-plan` | Read-only group-owned shutdown plan | 200 / 404 |
+| `/api/v1/redundancy-groups/<name>/shutdown-progress` | Current or most recent group shutdown progress | 200 / 404 |
 | `/api/v1/events` | Recent event rows (`limit`, `verbosity`, `from`, `to`, `before`) | 200 / 400 (bad query) |
 | `DELETE /api/v1/ups/<name>/events` | Delete selected events (auth required) | 200 / 400 / 401 / 403 / 404 / 413 / 503 |
 | `/api/v1/config` | Sanitized config summary | 200 |
 | `/api/v1/auth/state` | Effective auth state for dashboard login bootstrap | 200 |
 | `/api/v1/remote-health` | Remote SSH health status | 200 |
 | `/metrics` | Prometheus text metrics | 200 / 404 (Prometheus disabled) |
+
+Shutdown-progress responses expose phase and remote outcome states, timestamps,
+and pre-command counts. Runtime exceptions and SSH stderr stay in the service
+logs; API error details are fixed messages so anonymous read access cannot leak
+command output or credentials.
 
 The API is disabled by default. When enabled, the default bind address is localhost. If you set `api.bind` to a non-loopback address (e.g. `0.0.0.0`) **without** enabling authentication, Eneru warns at startup: `/api/v1/config` returns configured server hostnames and presence flags, so anyone who can reach the socket can read that. Keep the API behind SSH, a local reverse proxy, a trusted network boundary, or enable `api.auth`.
 
@@ -64,7 +73,7 @@ is a JSON object: `{"username": "<username>", "password": "<password>"}`.
 | Surface | `auth.enabled=false` | `auth.enabled=true` |
 |---------|----------------------|---------------------|
 | `/health`, `/ready` | open | open (always) |
-| `/metrics`, `/api/v1/ups*`, `/history`, `/events`, `/remote-health` | open | open unless `require_for_reads` |
+| `/metrics`, `/api/v1/ups*`, `/api/v1/redundancy-groups/*`, `/history`, `/events`, `/remote-health` | open | open unless `require_for_reads` |
 
 > **`/metrics` discloses topology.** Prometheus label values include UPS names
 > and other identifying detail. `/metrics` honors `require_for_reads` like the

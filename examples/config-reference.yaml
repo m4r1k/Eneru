@@ -31,11 +31,11 @@ ups:
 # MULTI-UPS (list form) — watch several UPSes, each on its own upsd if needed.
 # ------------------------------------------------------------------------------
 # Make `ups:` a LIST instead of the single mapping above. Each entry is an
-# independent group. The global `nut_control:`, `self_test:`, and
-# `battery_health:` sections lower in this file are the DEFAULTS; any of them can
-# be OVERRIDDEN per UPS right here — because credentials, the self-test command,
-# and battery facts are device-specific. Unset fields in a per-UPS block inherit
-# the global default (an explicitly-empty allowed_commands means deny-all).
+# independent group. The global `nut_control:`, `self_test:`, `battery_health:`,
+# and `energy:` sections lower in this file are the DEFAULTS. They can be
+# OVERRIDDEN per UPS because credentials, test commands, battery facts, tariffs,
+# and watt ratings can differ by device. Unset fields inherit the global default
+# (an explicitly-empty allowed_commands means deny-all).
 #
 # ups:
 #   # --- The UPS that powers THIS host (drives local shutdown). ---
@@ -67,6 +67,11 @@ ups:
 #     battery_health:
 #       battery_install_date: "2021-06-25"
 #       expected_life_years: 5.0
+#     # Only these two energy keys are per-UPS; enabled/currency/cost_format are
+#     # global. Missing keys inherit, while an explicit null clears the default.
+#     energy:
+#       nominal_power: 2700       # rated watts, not VA
+#       cost_per_kwh: null        # disable cost for this UPS
 
 # ==============================================================================
 # SHUTDOWN TRIGGERS
@@ -331,10 +336,11 @@ energy:
   # Optional format override, e.g. "{value} €". When unset, a small built-in
   # symbol/placement table is used per currency code.
   cost_format: null
-  # Rated power (W/VA) used to estimate watts/kWh from load% when the UPS
-  # reports NEITHER ups.realpower NOR ups.power.nominal (some integrated UPSes
-  # expose neither). null = no estimate; energy stays "unknown" for such UPSes.
-  # e.g. a 1000 VA tower: nominal_power: 1000
+  # Rated watts used to estimate watts/kWh from load%. Precedence is reported
+  # ups.realpower, reported ups.realpower.nominal, this configured watt rating,
+  # then reported ups.power.nominal (VA). null leaves the reported ratings as
+  # the only fallbacks; energy stays "unknown" when none is usable.
+  # e.g. a UPS rated for 900 W: nominal_power: 900
   nominal_power: null
 
 # ==============================================================================

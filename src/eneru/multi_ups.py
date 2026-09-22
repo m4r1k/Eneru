@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from eneru.version import __version__
-from eneru.config import Config
+from eneru.config import Config, resolve_energy_config
 from eneru.logger import UPSLogger
 from eneru.notifications import APPRISE_AVAILABLE, NotificationWorker
 from eneru.monitor import UPSGroupMonitor
@@ -62,6 +62,8 @@ class MultiUPSCoordinator:
         self._stop_event = threading.Event()
         self._local_shutdown_lock = threading.Lock()
         self._local_shutdown_initiated = False
+        self._local_shutdown_outcome = "succeeded"
+        self._local_shutdown_progress_waiters = []
         # M1: set while a committed local shutdown is running outside the lock,
         # so recovery can't re-arm the guard mid-flight and admit a 2nd poweroff.
         self._local_shutdown_in_flight = False
@@ -439,6 +441,7 @@ class MultiUPSCoordinator:
                 logger=self._logger,
                 state_file_suffix=sanitized,
                 in_redundancy_group=in_rg,
+                coordinator_handoff=self._group_triggers_local_shutdown(group),
                 coordinator_startup_event=self._coordinator_startup_event,
             )
             self._monitors.append(monitor)
@@ -632,21 +635,22 @@ class MultiUPSCoordinator:
                     store=store,
                 )
 
+    def _group_triggers_local_shutdown(self, group) -> bool:
+        """Return whether this UPS group's outage powers off the local host."""
+        if group.is_local:
+            return True
+        return (
+            self.config.local_shutdown.trigger_on == "any"
+            and not any(item.is_local for item in self.config.ups_groups)
+        )
+
     def _on_group_shutdown(self, group):
         """Called by a UPS monitor when its group triggers shutdown."""
         if group is None:
-            return
+            return "skipped"
 
         label = group.ups.label
-        is_local = group.is_local
-        should_local_shutdown = False
-
-        if is_local:
-            should_local_shutdown = True
-        elif self.config.local_shutdown.trigger_on == "any":
-            has_any_local = any(g.is_local for g in self.config.ups_groups)
-            if not has_any_local:
-                should_local_shutdown = True
+        should_local_shutdown = self._group_triggers_local_shutdown(group)
 
         if should_local_shutdown:
             # F-066: fish the triggering monitor's loopback shutdown results
@@ -664,11 +668,15 @@ class MultiUPSCoordinator:
                     monitor.config.remote_servers,
                     getattr(monitor, "_last_remote_results", []) or [],
                 )
-            self._handle_local_shutdown(label, loopback_results=loopback_results)
+            return self._handle_local_shutdown(
+                label, loopback_results=loopback_results,
+                progress=getattr(monitor, "_shutdown_progress", None),
+            )
         elif self._exit_after_shutdown:
             # Non-local group shutdown completed, exit if requested
             self._log(f"🛑  Group {label} shutdown complete. Exiting (--exit-after-shutdown).")
             self._stop_event.set()
+        return "skipped"
 
     def _clear_local_shutdown_state(self):
         """Re-arm coordinator-level shutdown state on POWER_RESTORED.
@@ -710,14 +718,18 @@ class MultiUPSCoordinator:
             self._clear_global_shutdown_flag("power recovery")
 
     def _handle_local_shutdown(self, triggered_by: str,
-                               loopback_results: Optional[list] = None):
+                               loopback_results: Optional[list] = None,
+                               progress=None):
         """Execute local shutdown with defense-in-depth protection.
 
         ``loopback_results`` (F-066): the triggering monitor's loopback
         :class:`RemoteShutdownResult` rows, passed by ``_on_group_shutdown``
         so the delegated branch below can verify the host poweroff was
         actually DELIVERED over SSH before writing the completion marker.
-        ``None``/empty means "no evidence the poweroff went out".
+        ``None``/empty means "no evidence the poweroff went out". Returns the
+        terminal handoff state for the triggering monitor's progress record.
+        Concurrent requests subscribe their progress tracker to the active run
+        instead of blocking the drain path.
         """
         # Defense layer 1: in-memory lock. Set BOTH the "initiated" guard and the
         # "in flight" flag atomically: in_flight tells _clear_local_shutdown_state
@@ -726,14 +738,24 @@ class MultiUPSCoordinator:
         # run_command below run outside the lock and admit a SECOND poweroff.
         proceed = False
         with self._local_shutdown_lock:
-            if not self._local_shutdown_initiated:
+            if self._local_shutdown_initiated:
+                if self._local_shutdown_in_flight:
+                    if progress is not None:
+                        generation = progress.snapshot().get("runId")
+                        self._local_shutdown_progress_waiters.append(
+                            (progress, generation))
+                    return "pending"
+                return self._local_shutdown_outcome
+            else:
                 self._local_shutdown_initiated = True
                 self._local_shutdown_in_flight = True
+                self._local_shutdown_outcome = "succeeded"
                 proceed = True
 
         if not proceed:
-            return
+            return "succeeded"
 
+        outcome = "succeeded"
         try:
             # Defense layer 2: filesystem flag
             try:
@@ -815,6 +837,7 @@ class MultiUPSCoordinator:
                         self._rearm_after_inflight = True
                     self._clear_global_shutdown_flag(
                         "failed delegated local shutdown")
+                    outcome = "failed"
                 else:
                     if self._notification_worker:
                         self._notification_worker.send(
@@ -876,6 +899,7 @@ class MultiUPSCoordinator:
                                 "failure",
                                 category="shutdown_summary",
                             )
+                        outcome = "failed"
                     else:
                         # Slice 3: tag this shutdown as power-loss-triggered so
                         # the next start can emit "📊  Recovered" and the Slice 4
@@ -902,6 +926,7 @@ class MultiUPSCoordinator:
                                 "(rc=124) — the shutdown may still be "
                                 "proceeding. Keeping the completion marker."
                             )
+                            outcome = "timed-out"
                         elif rc != 0:
                             # A healthy `systemctl poweroff` never returns — the
                             # host cuts power mid-call. If it returns non-zero
@@ -927,6 +952,7 @@ class MultiUPSCoordinator:
                             delete_shutdown_marker(
                                 Path(self.config.statistics.db_directory)
                             )
+                            outcome = "failed"
                         # NOTE (H9): we deliberately do NOT eagerly re-arm the
                         # guard here. Re-entry during the SAME outage is already
                         # blocked by the monitor's suffixed _shutdown_flag_path
@@ -946,6 +972,9 @@ class MultiUPSCoordinator:
             if self._exit_after_shutdown:
                 self._log("🛑  Exiting after shutdown sequence (--exit-after-shutdown)")
                 self._stop_event.set()
+        except Exception:
+            outcome = "failed"
+            raise
         finally:
             # The committed sequence is no longer running outside the lock, so
             # recovery is allowed to re-arm again. (On a real halt the process
@@ -955,10 +984,28 @@ class MultiUPSCoordinator:
             # block the next outage (cubic P1).
             with self._local_shutdown_lock:
                 self._local_shutdown_in_flight = False
+                self._local_shutdown_outcome = outcome
+                waiters = self._local_shutdown_progress_waiters
+                self._local_shutdown_progress_waiters = []
                 if self._rearm_after_inflight:
                     self._rearm_after_inflight = False
                     self._local_shutdown_initiated = False
                     self._clear_global_shutdown_flag("deferred power recovery")
+            for waiter, generation in waiters:
+                snapshot = waiter.snapshot()
+                if snapshot.get("runId") != generation:
+                    continue
+                if outcome in ("failed", "timed-out"):
+                    waiter.phase_finish(
+                        "local-poweroff", outcome, generation=generation)
+                waiter_state = outcome
+                if outcome == "succeeded" and any(
+                    phase["state"] == "failed"
+                    for phase in snapshot.get("phases", [])
+                ):
+                    waiter_state = "failed"
+                waiter.finish(waiter_state, generation=generation)
+        return outcome
 
     def _drain_all_groups(self, timeout: int = 120):
         """Shut down all groups' resources, then stop monitor threads.
@@ -1076,7 +1123,7 @@ class MultiUPSCoordinator:
             units = [
                 (m.config.ups.name, m.config.ups.label,
                  getattr(m, "_stats_store", None),
-                 m.config.energy)
+                 resolve_energy_config(m.config))
                 for m in self._monitors
             ]
             reports_mod.maybe_send_due_reports_multi(

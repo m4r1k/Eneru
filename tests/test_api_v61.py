@@ -106,6 +106,18 @@ class TestPowerSeries:
         assert out[0]["watts"] == 200.0 and out[0]["estimated"] is True
 
     @pytest.mark.unit
+    def test_power_series_prefers_reported_nominal_watts(self):
+        from eneru.status import power_series
+
+        class _S:
+            def power_samples(self, a, b):
+                return [(100, None, 50.0, 800.0, 1500.0)]
+
+        out = power_series(_S(), 0, 200, nominal_fallback=1000.0)
+        assert out[0]["watts"] == 400.0
+        assert out[0]["estimated"] is True
+
+    @pytest.mark.unit
     def test_power_endpoint_route(self):
         from types import SimpleNamespace
         from eneru.api import EneruAPIHandler
@@ -343,6 +355,107 @@ class TestShutdownPlanEndpoint:
         # Unknown UPS -> 404.
         h.path = "/api/v1/ups/nope/shutdown-plan"
         assert h._route()[0] == 404
+
+    @pytest.mark.unit
+    def test_non_local_plan_handoff_matches_trigger_on_any(self):
+        from types import SimpleNamespace
+        from eneru.api import EneruAPIHandler
+
+        cfg = _parse_cfg(
+            "ups:\n  - name: U@h\n    is_local: false\n"
+            "local_shutdown:\n  enabled: true\n  trigger_on: any\n"
+        )
+        mon = SimpleNamespace(
+            config=cfg, _coordinator_mode=True,
+            _uses_loopback_delegate=False,
+        )
+        h = object.__new__(EneruAPIHandler)
+        h.api_config = cfg
+        h.api_source = SimpleNamespace(_monitors=[mon])
+        h.api_auth = None
+        h.api_sessions = None
+        h.headers = {}
+        h.path = "/api/v1/ups/U@h/shutdown-plan"
+
+        status, _, payload = h._route()
+
+        assert status == 200
+        handoff = payload["plan"]["phases"][-1]
+        assert handoff["id"] == "local-poweroff"
+        assert handoff["enabled"] is True
+
+    @pytest.mark.unit
+    def test_ups_shutdown_progress_route(self):
+        from types import SimpleNamespace
+        from eneru.shutdown.progress import ShutdownProgress
+        from eneru.shutdown.remote import RemoteShutdownResult
+
+        cfg = _parse_cfg("ups:\n  name: U@h\n")
+        tracker = ShutdownProgress("ups", "U@h")
+        tracker.start("battery low")
+        tracker.phase_finish("vms", "failed", "password=phase-secret")
+        generation = tracker.remote_start("nas", "10.0.0.2")
+        tracker.remote_finish(RemoteShutdownResult(
+            server="nas", host="10.0.0.2", error="token=remote-secret"),
+            generation)
+        mon = SimpleNamespace(config=cfg, _shutdown_progress=tracker)
+        h = object.__new__(EneruAPIHandler)
+        h.api_config = cfg
+        h.api_source = SimpleNamespace(_monitors=[mon])
+        h.api_auth = None
+        h.api_sessions = None
+        h.headers = {}
+
+        h.path = "/api/v1/ups/U@h/shutdown-progress"
+        status, _, payload = h._route()
+        assert status == 200
+        assert payload["progress"]["state"] == "running"
+        assert payload["progress"]["reason"] == "battery low"
+        assert "phase-secret" not in str(payload)
+        assert "remote-secret" not in str(payload)
+        h.path = "/api/v1/ups/nope/shutdown-progress"
+        assert h._route()[0] == 404
+
+    @pytest.mark.unit
+    def test_redundancy_shutdown_plan_and_progress_routes(self):
+        from types import SimpleNamespace
+        from eneru.shutdown.progress import ShutdownProgress
+
+        cfg = _parse_cfg(
+            "ups:\n  - name: A@h\n  - name: B@h\n"
+            "redundancy_groups:\n  - name: rack-a\n"
+            "    ups_sources: [A@h, B@h]\n    min_healthy: 1\n"
+        )
+        source = SimpleNamespace(_monitors=[], _redundancy_executors={})
+        h = object.__new__(EneruAPIHandler)
+        h.api_config = cfg
+        h.api_source = source
+        h.api_auth = None
+        h.api_sessions = None
+        h.headers = {}
+
+        # The plan remains available before the runtime executor is started.
+        h.path = "/api/v1/redundancy-groups/rack-a/shutdown-plan"
+        status, _, payload = h._route()
+        assert status == 200
+        assert payload["upsSources"] == ["A@h", "B@h"]
+        assert payload["plan"]["coordinatorMode"] is True
+
+        tracker = ShutdownProgress("redundancy", "rack-a")
+        tracker.start("quorum lost")
+        source._redundancy_executors["rack-a"] = SimpleNamespace(
+            _shutdown_progress=tracker)
+        h.path = "/api/v1/redundancy-groups/rack-a/shutdown-progress"
+        status, _, payload = h._route()
+        assert status == 200
+        assert payload["progress"]["reason"] == "quorum lost"
+        h.path = "/api/v1/redundancy-groups/missing/shutdown-plan"
+        assert h._route()[0] == 404
+
+        advertised = {item["path"] for item in h._api_index()["endpoints"]}
+        assert "/api/v1/ups/{name}/shutdown-progress" in advertised
+        assert "/api/v1/redundancy-groups/{name}/shutdown-plan" in advertised
+        assert "/api/v1/redundancy-groups/{name}/shutdown-progress" in advertised
 
 
 class TestBatteryHealthHistoryEndpoint:

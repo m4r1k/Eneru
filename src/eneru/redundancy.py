@@ -37,6 +37,7 @@ from eneru.shutdown.remote import (
     loopback_poweroff_sent,
     select_loopback_results,
 )
+from eneru.shutdown.progress import ShutdownProgress
 from eneru.shutdown.vms import VMShutdownMixin
 from eneru.state import MonitorState
 from eneru.utils import sanitize_name
@@ -89,7 +90,7 @@ class RedundancyGroupExecutor(
         log_prefix: str = "",
         stop_event: Optional[threading.Event] = None,
         notification_worker: Optional[NotificationWorker] = None,
-        local_shutdown_callback: Optional[Callable[[str], None]] = None,
+        local_shutdown_callback: Optional[Callable[..., str]] = None,
     ):
         # Build a one-group Config so the shutdown mixins' lookups
         # (self.config.behavior, self.config.remote_servers,
@@ -116,6 +117,7 @@ class RedundancyGroupExecutor(
 
         self._group = group
         self.state = MonitorState()
+        self._shutdown_progress = ShutdownProgress("redundancy", group.name)
         self.logger = logger
         self._log_prefix = log_prefix
         self._notification_worker = notification_worker
@@ -425,6 +427,8 @@ class RedundancyGroupExecutor(
         self._log_message(
             f"🚨  REDUNDANCY GROUP SHUTDOWN: {self._group.name}"
         )
+        progress = self._shutdown_progress
+        progress.start(reason)
         self._log_message(f"   Reason: {reason}")
         self._send_notification(
             f"🚨  **Redundancy Group Shutdown:** {self._group.name}\n"
@@ -442,28 +446,61 @@ class RedundancyGroupExecutor(
             delegating = self._uses_loopback_delegate
             if self._group.is_local and not delegating:
                 local_phases = [
-                    ("VM shutdown", self._shutdown_vms),
-                    ("Container shutdown", self._shutdown_containers),
-                    ("Filesystem sync", self._sync_filesystems),
-                    ("Filesystem unmount", self._unmount_filesystems),
+                    ("vms", "VM shutdown", self.config.virtual_machines.enabled,
+                     self._shutdown_vms),
+                    ("containers", "Container shutdown", self.config.containers.enabled,
+                     self._shutdown_containers),
+                    ("filesystem-sync", "Filesystem sync",
+                     self.config.filesystems.sync_enabled, self._sync_filesystems),
+                    ("filesystem-unmount", "Filesystem unmount",
+                     self.config.filesystems.unmount.enabled,
+                     self._unmount_filesystems),
                 ]
-                for label, func in local_phases:
+                for phase_id, label, enabled, func in local_phases:
+                    if not enabled:
+                        progress.phase_skip(phase_id, "disabled")
+                        continue
+                    progress.phase_start(phase_id)
                     try:
                         func()
                     except Exception as exc:
+                        progress.phase_finish(phase_id, "failed", str(exc))
                         phase_failed = True
                         self._log_message(
                             f"  ❌  {label} failed: {exc}. Continuing shutdown."
                         )
+                    else:
+                        progress.phase_finish(phase_id)
+            else:
+                skip_reason = (
+                    "delegated to host" if delegating else "non-local group")
+                for phase_id in (
+                    "vms", "containers", "filesystem-sync", "filesystem-unmount"
+                ):
+                    progress.phase_skip(phase_id, skip_reason)
 
+            has_enabled_remotes = any(
+                server.enabled for server in self.config.remote_servers)
+            if has_enabled_remotes:
+                progress.phase_start("remote")
+            else:
+                progress.phase_skip("remote", "none configured")
             try:
                 remote_results = self._shutdown_remote_servers() or []
             except Exception as exc:
+                progress.phase_finish("remote", "failed", str(exc))
                 phase_failed = True
                 self._log_message(
                     f"❌  Remote shutdown phase failed: {exc}. Continuing shutdown."
                 )
                 remote_results = []
+            else:
+                if has_enabled_remotes:
+                    progress.phase_finish(
+                        "remote",
+                        "succeeded" if all(r.success for r in remote_results) else "failed",
+                    )
+            progress.phase_skip("final-sync", "not part of redundancy sequence")
             if any(not result.success for result in remote_results):
                 phase_failed = True
 
@@ -492,6 +529,9 @@ class RedundancyGroupExecutor(
                         category="shutdown_summary",
                     )
                     self._clear_failed_loopback_shutdown_state()
+                    progress.phase_finish(
+                        "local-poweroff", "failed", "loopback poweroff not sent")
+                    progress.finish("failed")
                     return False
 
             if phase_failed:
@@ -510,15 +550,42 @@ class RedundancyGroupExecutor(
             # and global flag prevent a double-fire if the per-UPS path
             # also requested a local shutdown. The coordinator itself
             # checks dry_run and local_shutdown.enabled.
-            if (
-                self._group.is_local
-                and not delegating
-                and self._local_shutdown_callback is not None
-            ):
-                self._local_shutdown_callback(
-                    f"redundancy:{self._group.name}"
-                )
+            overall_state = "failed" if phase_failed else "succeeded"
+            if self._group.is_local and not delegating:
+                progress.phase_start("local-poweroff")
+                if self._local_shutdown_callback is None:
+                    # Standalone/unit embedding has historically allowed an
+                    # executor without a coordinator callback. Do not claim a
+                    # poweroff happened, but preserve that optional contract.
+                    progress.phase_skip(
+                        "local-poweroff", "coordinator callback unavailable")
+                    progress.finish(overall_state)
+                    return True
+                # Publish the handoff before invoking the coordinator because
+                # a successful host poweroff may never return to this thread.
+                progress.phase_finish("local-poweroff", detail="handoff delivered")
+                try:
+                    handoff_state = self._local_shutdown_callback(
+                        f"redundancy:{self._group.name}", progress=progress,
+                    )
+                except Exception:
+                    progress.phase_finish(
+                        "local-poweroff", "failed", "coordinator callback failed")
+                    progress.finish("failed")
+                    raise
+                if handoff_state in ("failed", "timed-out"):
+                    progress.phase_finish("local-poweroff", handoff_state)
+                    progress.finish(handoff_state)
+                elif handoff_state != "pending":
+                    progress.finish(overall_state)
+                return True
+            elif self._group.is_local and delegating:
+                progress.phase_skip("local-poweroff", "delegated to host")
+            else:
+                progress.phase_skip("local-poweroff", "non-local group")
+            progress.finish(overall_state)
         except Exception as e:
+            progress.finish("failed")
             self._log_message(
                 f"❌  Redundancy group '{self._group.name}' shutdown error: {e}"
             )

@@ -733,6 +733,10 @@ class TestShutdownSequence:
     def test_shutdown_sequence_order(self, tmp_path):
         """Shutdown sequence calls in correct order: VMs, containers, sync, unmount, remote."""
         monitor = make_monitor(tmp_path)
+        monitor.config.virtual_machines.enabled = True
+        monitor.config.containers.enabled = True
+        monitor.config.filesystems.sync_enabled = True
+        monitor.config.filesystems.unmount.enabled = True
         call_order = []
 
         monitor._shutdown_vms = lambda: call_order.append("vms")
@@ -778,6 +782,10 @@ class TestShutdownSequence:
         """
         monitor = make_monitor(tmp_path)
         monitor.config.behavior.dry_run = True  # don't actually power off in the test
+        monitor.config.virtual_machines.enabled = True
+        monitor.config.containers.enabled = True
+        monitor.config.filesystems.sync_enabled = True
+        monitor.config.filesystems.unmount.enabled = True
         call_order = []
 
         def failing_vms():
@@ -796,6 +804,7 @@ class TestShutdownSequence:
 
         # Every drain step ran AND the remote/poweroff path was reached.
         assert call_order == ["vms", "containers", "sync", "unmount", "remote"]
+        assert monitor._shutdown_progress.snapshot()["state"] == "failed"
 
     def _prep_local_poweroff_monitor(self, tmp_path):
         """Build a monitor wired for the real (non-dry-run) local poweroff
@@ -887,6 +896,15 @@ class TestShutdownSequence:
             "INCOMPLETE" in c.args[0]
             for c in monitor._send_notification.call_args_list
         )
+        progress = monitor._shutdown_progress.snapshot()
+        poweroff = next(
+            phase for phase in progress["phases"]
+            if phase["id"] == "local-poweroff"
+        )
+        assert progress["state"] == "timed-out"
+        assert progress["finishedAt"] is not None
+        assert poweroff["state"] == "timed-out"
+        assert poweroff["finishedAt"] is not None
 
 
 # ==============================================================================
@@ -2655,7 +2673,12 @@ class TestExecuteShutdownSequence:
     def test_coordinator_mode_invokes_callback_and_returns(self, tmp_path):
         monitor = self._stub_phases(make_monitor(tmp_path))
         monitor._coordinator_mode = True
-        callback = MagicMock()
+        monitor._coordinator_handoff = True
+        callback_snapshots = []
+
+        def callback(_group):
+            callback_snapshots.append(monitor._shutdown_progress.snapshot())
+
         monitor._shutdown_callback = callback
         log = []
         monitor._log_message = log.append
@@ -2664,11 +2687,100 @@ class TestExecuteShutdownSequence:
              patch("eneru.monitor.run_command") as runner:
             monitor._execute_shutdown_sequence()
 
-        callback.assert_called_once()
+        assert len(callback_snapshots) == 1
+        assert callback_snapshots[0]["state"] == "running"
+        handoff = next(
+            phase for phase in callback_snapshots[0]["phases"]
+            if phase["id"] == "local-poweroff"
+        )
+        assert handoff["state"] == "succeeded"
+        assert monitor._shutdown_progress.snapshot()["state"] == "succeeded"
         # Coordinator mode must NOT execute local shutdown or write markers
         marker.assert_not_called()
         runner.assert_not_called()
         assert any("GROUP SHUTDOWN SEQUENCE COMPLETE" in m for m in log), log
+
+    @pytest.mark.unit
+    def test_coordinator_mode_skips_rejected_handoff(self, tmp_path):
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor._coordinator_mode = True
+        monitor._coordinator_handoff = False
+        callback_snapshots = []
+        monitor._shutdown_callback = lambda _group: callback_snapshots.append(
+            monitor._shutdown_progress.snapshot())
+
+        monitor._execute_shutdown_sequence()
+
+        assert callback_snapshots[0]["state"] == "running"
+        handoff = next(
+            phase for phase in callback_snapshots[0]["phases"]
+            if phase["id"] == "local-poweroff"
+        )
+        assert handoff["state"] == "skipped"
+        assert handoff["detail"] == "coordinator keeps host running"
+        assert monitor._shutdown_progress.snapshot()["state"] == "succeeded"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("handoff_state", ["failed", "timed-out"])
+    def test_coordinator_handoff_result_updates_progress(
+            self, tmp_path, handoff_state):
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor._coordinator_mode = True
+        monitor._coordinator_handoff = True
+        monitor._shutdown_callback = lambda _group: handoff_state
+
+        monitor._execute_shutdown_sequence()
+
+        progress = monitor._shutdown_progress.snapshot()
+        handoff = next(
+            phase for phase in progress["phases"]
+            if phase["id"] == "local-poweroff"
+        )
+        assert progress["state"] == handoff_state
+        assert handoff["state"] == handoff_state
+
+    @pytest.mark.unit
+    def test_remote_failure_marks_overall_progress_failed(self, tmp_path):
+        from eneru.shutdown.remote import RemoteShutdownResult
+
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor.config.remote_servers.append(RemoteServerConfig(
+            name="nas", host="10.0.0.2", user="root", enabled=True,
+        ))
+        monitor._shutdown_remote_servers.return_value = [
+            RemoteShutdownResult(
+                server="nas", host="10.0.0.2", completed=True,
+                shutdown_sent=False, error="connection refused",
+            )
+        ]
+
+        monitor._execute_shutdown_sequence()
+
+        progress = monitor._shutdown_progress.snapshot()
+        remote = next(
+            phase for phase in progress["phases"] if phase["id"] == "remote"
+        )
+        assert progress["state"] == "failed"
+        assert remote["state"] == "failed"
+
+    @pytest.mark.unit
+    def test_poweroff_exception_marks_progress_failed(self, tmp_path):
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor.config.behavior.dry_run = False
+        monitor.config.local_shutdown.enabled = True
+
+        with patch("eneru.monitor.run_command", side_effect=TypeError("bad argv")), \
+             patch("eneru.monitor.write_shutdown_marker"):
+            with pytest.raises(TypeError, match="bad argv"):
+                monitor._execute_shutdown_sequence()
+
+        progress = monitor._shutdown_progress.snapshot()
+        handoff = next(
+            phase for phase in progress["phases"]
+            if phase["id"] == "local-poweroff"
+        )
+        assert progress["state"] == "failed"
+        assert handoff["state"] == "failed"
 
     @pytest.mark.unit
     def test_dry_run_skips_local_shutdown_command(self, tmp_path):
@@ -2687,6 +2799,15 @@ class TestExecuteShutdownSequence:
         # Dry-run: no marker, no shutdown command, but the dry-run preview log line
         marker.assert_not_called()
         runner.assert_not_called()
+        phases = {
+            phase["id"]: phase
+            for phase in monitor._shutdown_progress.snapshot()["phases"]
+        }
+        assert phases["vms"]["state"] == "skipped"
+        assert phases["vms"]["detail"] == "disabled"
+        assert phases["final-sync"]["state"] == "skipped"
+        assert phases["final-sync"]["detail"] == "disabled"
+        monitor._shutdown_vms.assert_not_called()
         assert any("[DRY-RUN] Would execute" in m for m in log), log
 
     @pytest.mark.unit

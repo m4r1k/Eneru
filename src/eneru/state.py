@@ -43,13 +43,16 @@ HealthSnapshot = namedtuple(
         "nominal_voltage",     # snapped grid nominal used for thresholds
         "voltage_warning_low", # derived warning lower bound
         "voltage_warning_high", # derived warning upper bound
+        "real_power",         # latest ups.realpower (W)
+        "real_power_nominal", # latest ups.realpower.nominal (W)
+        "power_nominal",      # latest ups.power.nominal (VA)
     ],
 )
 # Back-compat for tests / third-party code still constructing the old
 # 10-field HealthSnapshot shape directly.
 HealthSnapshot.__new__.__defaults__ = (
     0, 0.0, "", "", "", "", "", "", "NORMAL", "INACTIVE", "INACTIVE",
-    "INACTIVE", 230.0, 0.0, 0.0,
+    "INACTIVE", 230.0, 0.0, 0.0, "", "", "",
 )
 
 
@@ -151,6 +154,9 @@ class MonitorState:
     latest_ups_temperature: str = ""
     latest_input_frequency: str = ""
     latest_output_frequency: str = ""
+    latest_real_power: str = ""
+    latest_real_power_nominal: str = ""
+    latest_power_nominal: str = ""
     latest_depletion_rate: float = 0.0
     latest_time_on_battery: int = 0
     latest_update_time: float = 0.0
@@ -212,4 +218,7 @@ class MonitorState:
                 nominal_voltage=self.nominal_voltage,
                 voltage_warning_low=self.voltage_warning_low,
                 voltage_warning_high=self.voltage_warning_high,
+                real_power=self.latest_real_power,
+                real_power_nominal=self.latest_real_power_nominal,
+                power_nominal=self.latest_power_nominal,
             )
