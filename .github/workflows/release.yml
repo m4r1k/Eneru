@@ -158,32 +158,6 @@ jobs:
           VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager rpm --target .
           ls -la -- ./*.rpm
 
-      - name: Build el8 .rpm package
-        env:
-          VERSION: ${{ steps.version.outputs.VERSION }}
-        run: |
-          # F-013: RHEL 8's system `python3` is 3.6, but Eneru needs 3.9+. The
-          # default RPM's unversioned `python3` dep installs cleanly on el8 and
-          # then crash-loops. Ship a SEPARATE el8 RPM whose deps require the
-          # `python39` module (RHEL 8's 3.9). The el8 config is GENERATED from
-          # nfpm.yaml so `contents:` stay single-sourced (and the drift test in
-          # tests/test_packaging.py keeps validating the one committed config);
-          # only rpm.depends and a distinct `.el8` release marker differ.
-          python - <<'PY'
-          import yaml
-          with open("nfpm.yaml") as f:
-              cfg = yaml.safe_load(f)
-          rpm = cfg.setdefault("overrides", {}).setdefault("rpm", {})
-          rpm["depends"] = ["python39", "python39-pyyaml", "nut-client"]
-          # Distinct release marker -> artifact named eneru-<ver>-1.el8.noarch.rpm
-          # so it never collides with the default RPM in the published repo.
-          cfg["release"] = "1.el8"
-          with open("nfpm-el8.yaml", "w") as f:
-              yaml.safe_dump(cfg, f, sort_keys=False)
-          PY
-          nfpm package --packager rpm --target . -f nfpm-el8.yaml
-          ls -la -- ./*.el8.*.rpm
-          
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4.4.0
 
@@ -376,19 +350,17 @@ jobs:
           # Create directory structure for both channels
           mkdir -p deb/pool/main deb/pool/testing
           mkdir -p deb/dists/stable/main/binary-all deb/dists/testing/main/binary-all
-          # F-013: el8 RPMs live in their OWN rpm/el8 (and rpm/testing/el8)
-          # sub-repo. Keeping them out of the default rpm/ tree is deliberate:
-          # in a flat repo, `dnf install eneru` compares EVR only and would pick
-          # the higher-release el8 RPM on RHEL 9/10, dragging in the `python39`
-          # module those distros don't ship. Separate baseurls keep the default
-          # RPM serving RHEL 9/10 unchanged while el8 users point at rpm/el8.
-          mkdir -p rpm rpm/testing rpm/el8 rpm/testing/el8
+          # RHEL 8 packaging stopped at 6.1.x. The rpm/el8 and rpm/testing/el8
+          # sub-repos already on gh-pages are left FROZEN (never rebuilt, never
+          # deleted) so existing RHEL 8 users keep resolving their last 6.1.x
+          # RPM. Nothing new is routed there.
+          mkdir -p rpm rpm/testing
 
           shopt -s nullglob
           debs=(../*.deb)
           rpms=(../*.rpm)
-          if [ "${#debs[@]}" -ne 1 ] || [ "${#rpms[@]}" -ne 2 ]; then
-            echo "Expected exactly one deb and two RPM artifacts; found " \
+          if [ "${#debs[@]}" -ne 1 ] || [ "${#rpms[@]}" -ne 1 ]; then
+            echo "Expected exactly one deb and one RPM artifact; found " \
               "${#debs[@]} deb and ${#rpms[@]} RPM." >&2
             exit 1
           fi
@@ -396,24 +368,13 @@ jobs:
           # Export public GPG key
           gpg --armor --export > KEY.gpg
 
-          # Copy new packages to the correct channel. Route the el8 RPM (named
-          # ...el8...rpm) to the el8 sub-repo; everything else to the default.
+          # Copy new packages to the correct channel.
           if [ "$CHANNEL" = "stable" ]; then
             cp -- "${debs[@]}" deb/pool/main/
-            for r in "${rpms[@]}"; do
-              case "$r" in
-                *.el8.*) cp "$r" rpm/el8/ ;;
-                *) cp "$r" rpm/ ;;
-              esac
-            done
+            for r in "${rpms[@]}"; do cp -- "$r" rpm/; done
           else
             cp -- "${debs[@]}" deb/pool/testing/
-            for r in "${rpms[@]}"; do
-              case "$r" in
-                *.el8.*) cp "$r" rpm/testing/el8/ ;;
-                *) cp "$r" rpm/testing/ ;;
-              esac
-            done
+            for r in "${rpms[@]}"; do cp -- "$r" rpm/testing/; done
           fi
 
       - name: Build APT repository
@@ -482,8 +443,9 @@ jobs:
           sudo apt-get install -y createrepo-c
 
           # --- Stable RPM repository (rpm/ root — unchanged for backward compat) ---
-          # F-013: exclude the el8/ sub-repo (and testing/) so the default repo
-          # only ever advertises the default RPM to RHEL 9/10.
+          # Keep excluding the frozen el8/ sub-repo (RHEL 8 packaging ended at
+          # 6.1.x) and testing/, so the old el8 RPMs -- which require the
+          # python39 module -- never leak into the RHEL 9/10 repo metadata.
           cd gh-pages/rpm
           if ls *.rpm 1>/dev/null 2>&1; then
             echo "Building stable RPM metadata..."
@@ -505,32 +467,11 @@ jobs:
           REPOFILE
           sed -i 's/^          //' eneru.repo
 
-          # --- Stable el8 RPM repository (rpm/el8/) ---
-          # F-013: RHEL 8 uses this sub-repo; its RPM requires the python39
-          # module (RHEL 8's 3.9) rather than the system python3 (3.6).
-          cd "$GITHUB_WORKSPACE/gh-pages/rpm/el8"
-          if ls *.rpm 1>/dev/null 2>&1; then
-            echo "Building stable el8 RPM metadata..."
-            createrepo_c .
-            gpg --batch --yes --armor --detach-sign -o repodata/repomd.xml.asc repodata/repomd.xml
-          fi
-
-          # el8 repo file (RHEL 8 only)
-          cat > eneru-el8.repo << 'REPOFILE'
-          [eneru-el8]
-          name=Eneru UPS Monitor (RHEL 8)
-          baseurl=https://m4r1k.github.io/Eneru/rpm/el8
-          enabled=1
-          gpgcheck=0
-          repo_gpgcheck=1
-          gpgkey=https://m4r1k.github.io/Eneru/KEY.gpg
-          REPOFILE
-          sed -i 's/^          //' eneru-el8.repo
-
           # --- Testing RPM repository (rpm/testing/) ---
           cd "$GITHUB_WORKSPACE/gh-pages/rpm/testing"
           if ls *.rpm 1>/dev/null 2>&1; then
             echo "Building testing RPM metadata..."
+            # Frozen el8/ sub-repo stays out of the metadata (see above).
             createrepo_c --excludes='el8/*' .
             gpg --batch --yes --armor --detach-sign -o repodata/repomd.xml.asc repodata/repomd.xml
           fi
@@ -546,26 +487,6 @@ jobs:
           gpgkey=https://m4r1k.github.io/Eneru/KEY.gpg
           REPOFILE
           sed -i 's/^          //' eneru-testing.repo
-
-          # --- Testing el8 RPM repository (rpm/testing/el8/) ---
-          cd "$GITHUB_WORKSPACE/gh-pages/rpm/testing/el8"
-          if ls *.rpm 1>/dev/null 2>&1; then
-            echo "Building testing el8 RPM metadata..."
-            createrepo_c .
-            gpg --batch --yes --armor --detach-sign -o repodata/repomd.xml.asc repodata/repomd.xml
-          fi
-
-          # Testing el8 repo file
-          cat > eneru-testing-el8.repo << 'REPOFILE'
-          [eneru-testing-el8]
-          name=Eneru UPS Monitor (Testing, RHEL 8)
-          baseurl=https://m4r1k.github.io/Eneru/rpm/testing/el8
-          enabled=1
-          gpgcheck=0
-          repo_gpgcheck=1
-          gpgkey=https://m4r1k.github.io/Eneru/KEY.gpg
-          REPOFILE
-          sed -i 's/^          //' eneru-testing-el8.repo
 
       - name: Create index.html
         run: |
@@ -607,8 +528,11 @@ jobs:
 
               <h3>RHEL 9/10 / Fedora</h3>
               <pre>
-          # RHEL 8/9: Enable EPEL first (required for apprise dependency)
+          # RHEL 9: Enable EPEL first (required for apprise dependency)
           sudo dnf install -y epel-release
+          # Optional, RHEL 9: CodeReady Builder provides python3-ruamel-yaml for the `eneru config` editor.
+          # Rocky/Alma: sudo dnf install -y dnf-plugins-core && sudo dnf config-manager --set-enabled crb
+          # RHEL:       sudo subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms
 
           # Add repository
           sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
@@ -616,11 +540,7 @@ jobs:
           # Install
           sudo dnf install eneru</pre>
 
-              <h3>RHEL 8</h3>
-              <pre>
-          sudo dnf install -y epel-release
-          sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/el8/eneru-el8.repo
-          sudo dnf install eneru</pre>
+              <p class="note"><strong>RHEL 8:</strong> RPM packages ended with 6.1.x. Use the container image (Docker/Podman) for newer releases.</p>
             </div>
 
             <div class="section">
@@ -648,11 +568,6 @@ jobs:
           sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/eneru-testing.repo
 
           # Install pre-release version
-          sudo dnf install eneru</pre>
-
-              <h3>RHEL 8</h3>
-              <pre>
-          sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/el8/eneru-testing-el8.repo
           sudo dnf install eneru</pre>
             </div>
 
@@ -696,8 +611,11 @@ jobs:
           ### RHEL 9/10 / Fedora
 
           ```bash
-          # RHEL 8/9: Enable EPEL first (required for apprise dependency)
+          # RHEL 9: Enable EPEL first (required for apprise dependency)
           sudo dnf install -y epel-release
+          # Optional, RHEL 9: CodeReady Builder provides python3-ruamel-yaml for the `eneru config` editor.
+          # Rocky/Alma: sudo dnf install -y dnf-plugins-core && sudo dnf config-manager --set-enabled crb
+          # RHEL:       sudo subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms
 
           # Add repository
           sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
@@ -706,13 +624,7 @@ jobs:
           sudo dnf install eneru
           ```
 
-          ### RHEL 8
-
-          ```bash
-          sudo dnf install -y epel-release
-          sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/el8/eneru-el8.repo
-          sudo dnf install eneru
-          ```
+          > **RHEL 8:** RPM packages ended with 6.1.x. Use the container image (Docker/Podman) for newer releases.
 
           ## Testing / Pre-release
 
@@ -734,13 +646,6 @@ jobs:
           ```bash
           sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/eneru-testing.repo
 
-          sudo dnf install eneru
-          ```
-
-          ### RHEL 8
-
-          ```bash
-          sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/el8/eneru-testing-el8.repo
           sudo dnf install eneru
           ```
 
@@ -787,14 +692,12 @@ jobs:
           # block in the summary whenever a pool is empty.
           { ls -la gh-pages/deb/pool/main/*.deb 2>/dev/null || echo "No stable deb packages"; } >> "$GITHUB_STEP_SUMMARY"
           { ls -la gh-pages/rpm/*.rpm 2>/dev/null || echo "No stable rpm packages"; } >> "$GITHUB_STEP_SUMMARY"
-          { ls -la gh-pages/rpm/el8/*.rpm 2>/dev/null || echo "No stable el8 rpm packages"; } >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Testing Packages" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           { ls -la gh-pages/deb/pool/testing/*.deb 2>/dev/null || echo "No testing deb packages"; } >> "$GITHUB_STEP_SUMMARY"
           { ls -la gh-pages/rpm/testing/*.rpm 2>/dev/null || echo "No testing rpm packages"; } >> "$GITHUB_STEP_SUMMARY"
-          { ls -la gh-pages/rpm/testing/el8/*.rpm 2>/dev/null || echo "No testing el8 rpm packages"; } >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Package Repository" >> $GITHUB_STEP_SUMMARY
@@ -810,9 +713,7 @@ jobs:
   # just-built version — KEY.gpg is a long-lived file that survives from prior
   # releases, so its mere reachability proved nothing about THIS deploy; (b)
   # the INSTALLED binary's version is asserted against the built version, so a
-  # stale-metadata install can't pass the gate; (c) el8 gets its own matrix
-  # leg — its repo (rpm/el8) has separate createrepo/signing/.repo plumbing
-  # that the default-path smoke never exercised.
+  # stale-metadata install can't pass the gate.
   smoke-install:
     name: Smoke install from published repo (${{ matrix.pkg }})
     needs: build-packages
@@ -831,11 +732,6 @@ jobs:
             el: '9'
             repo_stable: rpm/eneru.repo
             repo_testing: rpm/testing/eneru-testing.repo
-          - pkg: dnf-el8
-            image: registry.access.redhat.com/ubi8/ubi
-            el: '8'
-            repo_stable: rpm/el8/eneru-el8.repo
-            repo_testing: rpm/testing/el8/eneru-testing-el8.repo
     container:
       image: ${{ matrix.image }}
     steps:
@@ -895,9 +791,7 @@ jobs:
             done
             apt-get install -y eneru
           else
-            # dnf smoke. ubi9 (python3 == 3.9) exercises the DEFAULT rpm/ repo;
-            # ubi8 exercises the DEDICATED el8 repo, whose RPM must pull the
-            # python39 module through its own declared deps (F-013).
+            # dnf smoke. ubi9 (python3 == 3.9) exercises the rpm/ repo.
             # EPEL provides nut-client (a hard dep of the RPM).
             dnf install -y "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${{ matrix.el }}.noarch.rpm"
             wait_for_pages

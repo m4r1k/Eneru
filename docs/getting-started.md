@@ -37,9 +37,16 @@ sudo apt install eneru
 
 ```bash
 sudo dnf install -y epel-release
+# Optional, RHEL 9 family only (skip on RHEL 10 / Fedora): CodeReady Builder
+# provides python3-ruamel-yaml for the `eneru config` editor. The daemon
+# installs and runs without it.
+#   Rocky/Alma: sudo dnf install -y dnf-plugins-core && sudo dnf config-manager --set-enabled crb
+#   RHEL:       sudo subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms
 sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
 sudo dnf install eneru
 ```
+
+RPM packages support RHEL 9 and 10 (and compatible rebuilds). RHEL 8 packages ended with 6.1.x; on RHEL 8, run the container image (Docker/Podman) instead.
 
 ### PyPI
 
@@ -53,7 +60,26 @@ The PyPI install is useful for development or user-managed services. Native pack
 
 ## Create the first config
 
-Edit `/etc/ups-monitor/config.yaml`:
+The quickest path is the guided editor. It asks for the UPS, its NUT login,
+your remote servers and notifications, explains every option, tests the
+connections, and shows what happens on power loss before saving:
+
+Package install:
+
+```bash
+sudo eneru config
+```
+
+PyPI install (sudo can't see the venv, so edit a path you can write, or
+run the venv's binary with sudo explicitly):
+
+```bash
+eneru config --config ./config.yaml
+sudo ~/.venv/eneru/bin/eneru config      # /etc/ups-monitor/config.yaml
+```
+
+See [Config editor and checker](config-editor.md). To write the file by hand
+instead, edit `/etc/ups-monitor/config.yaml`:
 
 ```yaml
 ups:
@@ -84,6 +110,12 @@ eneru validate --config /etc/ups-monitor/config.yaml
 ```
 
 Validation prints the UPS groups, enabled resources, remote shutdown phases, notification status, and configuration errors. Do not start the service until validation passes.
+
+Then run the live inspection. It logs in to NUT, SSHes to each remote server and checks every shutdown tool and sudo rule, all read-only:
+
+```bash
+sudo eneru config check --config /etc/ups-monitor/config.yaml
+```
 
 ## Test in dry-run mode
 

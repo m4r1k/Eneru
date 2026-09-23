@@ -68,25 +68,6 @@ jobs:
       - name: Build .rpm package
         run: VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager rpm --target .
 
-      - name: Build el8 .rpm package
-        run: |
-          # F-013: el8's system python3 is 3.6 but Eneru needs 3.9+, so ship a
-          # SEPARATE el8 RPM whose deps require the python39 module. Generate its
-          # nfpm config from nfpm.yaml (single source of truth for contents:),
-          # overriding only rpm.depends + a distinct .el8 release marker.
-          python -m pip install --quiet pyyaml
-          python - <<'PY'
-          import yaml
-          with open("nfpm.yaml") as f:
-              cfg = yaml.safe_load(f)
-          rpm = cfg.setdefault("overrides", {}).setdefault("rpm", {})
-          rpm["depends"] = ["python39", "python39-pyyaml", "nut-client"]
-          cfg["release"] = "1.el8"
-          with open("nfpm-el8.yaml", "w") as f:
-              yaml.safe_dump(cfg, f, sort_keys=False)
-          PY
-          VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager rpm --target . -f nfpm-el8.yaml
-
       - name: Upload packages
         uses: actions/upload-artifact@v7.0.1
         with:
@@ -119,7 +100,10 @@ jobs:
         run: pip install ".[notifications]"
 
       - name: Verify installation
-        run: eneru version
+        run: |
+          eneru version
+          # ruamel.yaml is a hard pip dependency since 6.2 (`eneru config`).
+          python3 -c "import eneru.config_doc, eneru.config_tui; print('config editor imports OK')"
 
       - name: Validate example configs
         run: |
@@ -170,6 +154,11 @@ jobs:
           apt-get update
           apt-get install -y python3 python3-yaml
           dpkg-deb -f eneru_*.deb Depends | grep -q "python3-paho-mqtt"
+          # ruamel.yaml is a SOFT dep (editor only): Recommends, never Depends.
+          dpkg-deb -f eneru_*.deb Recommends | grep -q "python3-ruamel.yaml"
+          if dpkg-deb -f eneru_*.deb Depends | grep -q "ruamel"; then
+            echo "ERROR: python3-ruamel.yaml regressed to a hard deb dep"; exit 1
+          fi
           # --force-depends lets us install even though nut-client isn't
           # in the test container; subsequent `apt-get install -f` then
           # resolves any dependencies it can. Real install failures must
@@ -186,6 +175,21 @@ jobs:
           python3 /opt/ups-monitor/eneru.py version
           python3 -c "import paho.mqtt.client; print('paho-mqtt import OK')"
           python3 /opt/ups-monitor/eneru.py validate --config /etc/ups-monitor/config.yaml
+          # 6.2 config tools. ruamel.yaml is only Recommended and this job
+          # installs with --no-install-recommends, so first prove the daemon
+          # side degrades cleanly without it: `config check` must still run
+          # from the package layout (no nut-client here, so it reports an
+          # ERROR and exits 1 by design; assert a full report).
+          if python3 -c "import ruamel.yaml" 2>/dev/null; then
+            echo "NOTE: ruamel.yaml already present; soft-dep path not exercised"
+          fi
+          out="$(python3 /opt/ups-monitor/eneru.py config check --offline --config /etc/ups-monitor/config.yaml || true)"
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -q "^Summary:"
+          # Then the Recommends the operator normally gets: the distro
+          # ruamel.yaml must satisfy the editor.
+          apt-get install -y python3-ruamel.yaml
+          python3 -c "import sys; sys.path.insert(0, '/opt/ups-monitor'); import eneru.config_doc, eneru.config_tui; print('config editor imports OK')"
 
       - name: Validate example configs
         run: |
@@ -203,20 +207,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - version: '8'
-            image: registry.access.redhat.com/ubi8/ubi
-            name: RHEL 8 (Ootpa)
-            # F-013: no python_pkg pre-install for el8 on purpose — the el8 RPM's
-            # own declared deps must pull python39, which is exactly the gap the
-            # old hand pre-install used to mask.
           - version: '9'
             image: registry.access.redhat.com/ubi9/ubi
             name: RHEL 9 (Plow)
-            python_pkg: python3 python3-pyyaml
+            python_pkg: python3 python3-pyyaml python3-ruamel-yaml
           - version: '10'
             image: registry.access.redhat.com/ubi10/ubi
             name: RHEL 10 (Coughlan)
-            python_pkg: python3 python3-pyyaml
+            python_pkg: python3 python3-pyyaml python3-ruamel-yaml
     container:
       image: ${{ matrix.image }}
     steps:
@@ -232,19 +230,12 @@ jobs:
         run: |
           dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-${{ matrix.version }}.noarch.rpm
 
-          # F-013: pick the RPM built for this RHEL major. el8 ships a DEDICATED
-          # RPM whose deps require the python39 module (el8's system python3 is
-          # 3.6 — too old for Eneru, which needs 3.9+). el9/el10 use the DEFAULT
-          # RPM (their python3 is already 3.9+). The default glob would also
-          # match the el8 artifact, so exclude it explicitly for el9/el10.
-          if [ "${{ matrix.version }}" = "8" ]; then
-            RPM=$(ls eneru-*.el8.*.rpm)
-          else
-            RPM=$(ls eneru-*.rpm | grep -v '\.el8\.')
-          fi
+          # One RPM serves RHEL 9 and 10 (their system python3 is 3.9+).
+          # RHEL 8 is no longer packaged (6.2.0+); use the container image.
+          RPM=$(ls eneru-*.rpm)
           echo "Selected RPM: $RPM"
 
-          # Contract guard (both variants): python3-paho-mqtt MUST NOT be a hard
+          # Contract guard: python3-paho-mqtt MUST NOT be a hard
           # dep — otherwise `dnf install eneru` would fail on RHEL 10 (package
           # doesn't exist there). It may still appear under Recommends:, which
           # dnf resolves opportunistically. `rpm -qpR` lists hard deps only.
@@ -253,70 +244,43 @@ jobs:
             echo "       Move it back to recommends: in nfpm.yaml."
             exit 1
           fi
-
-          if [ "${{ matrix.version }}" = "8" ]; then
-            # F-013: do NOT hand-install python39 here. A full `dnf install` of
-            # the el8 RPM must pull python39 + python39-pyyaml (and nut-client
-            # from EPEL) on its own — that is exactly the crash-loop gap the old
-            # `dnf install python39 python39-pyyaml` pre-install used to mask.
-            # First assert the packaging contract, then prove it end-to-end.
-            if ! rpm -qpR "$RPM" | grep -qx "python39"; then
-              echo "ERROR: el8 RPM must require the python39 module, not python3."
-              exit 1
-            fi
-            dnf install -y "./$RPM"
-            # paho-mqtt SOFT dep: pip into the python3.9 the RPM just pulled.
-            # python39-pip is the pip for the 3.9 stack (NOT python3-pip, which
-            # on ubi8 would drag in the system python3 == 3.6).
-            dnf install -y python39-pip
-            python3.9 -m pip install --no-deps paho-mqtt
-          else
-            # RHEL 9/10 (unchanged): default RPM, system python3 == 3.9+.
-            dnf install -y ${{ matrix.python_pkg }}
-            # paho-mqtt SOFT dep, installed per-version because the distro story
-            # is uneven (see nfpm.yaml):
-            #   * RHEL 9 + EPEL ships python3-paho-mqtt for the system python3.
-            #   * RHEL 10 has no python3-paho-mqtt in BaseOS/AppStream/CRB/EPEL
-            #     10 at all. pip-install it; --break-system-packages is required
-            #     by PEP 668 since EL 10 marks site-packages externally managed
-            #     (acceptable in a throw-away CI container). ubi10 ships python3
-            #     without pip, so install python3-pip (AppStream) first.
-            case "${{ matrix.version }}" in
-              9)
-                dnf install -y python3-paho-mqtt
-                ;;
-              10)
-                dnf install -y python3-pip
-                python3 -m pip install --no-deps --break-system-packages paho-mqtt
-                ;;
-            esac
-            # Try rpm first (fast, with --nodeps for the missing nut-client).
-            # --nodeps is kept only because nut-client is absent in the minimal
-            # UBI test images. If that fails for non-dep reasons, fall back to
-            # dnf with --skip-broken. Real install failures still propagate.
-            rpm -ivh --nodeps "$RPM" || dnf install -y "./$RPM" --skip-broken
+          # The config editor's ruamel.yaml is a SOFT dep (RHEL 9 needs CRB):
+          # never a hard Requires, always a Recommends.
+          if rpm -qpR "$RPM" | grep -q "ruamel"; then
+            echo "ERROR: python3-ruamel-yaml regressed to a hard rpm dep."
+            exit 1
           fi
+          rpm -qp --recommends "$RPM" | grep -q "^python3-ruamel-yaml"
+
+          # RHEL 9/10: system python3 == 3.9+.
+          dnf install -y ${{ matrix.python_pkg }}
+          # paho-mqtt SOFT dep (see nfpm.yaml): EPEL ships python3-paho-mqtt
+          # for the system python3 on both RHEL 9 and RHEL 10 (EPEL is
+          # enabled above), so the distro package is what we verify.
+          dnf install -y python3-paho-mqtt
+          # Try rpm first (fast, with --nodeps for the missing nut-client).
+          # --nodeps is kept only because nut-client is absent in the minimal
+          # UBI test images. If that fails for non-dep reasons, fall back to
+          # dnf with --skip-broken. Real install failures still propagate.
+          rpm -ivh --nodeps "$RPM" || dnf install -y "./$RPM" --skip-broken
 
       - name: Verify installation
         run: |
           # Check the script is installed
           test -f /opt/ups-monitor/eneru.py
           test -f /etc/ups-monitor/config.yaml
-          # EL8's unversioned python3 is 3.6; the package wrapper must re-exec
-          # into 3.9, while dependency imports/validation use that same 3.9.
           PYTHON_BIN=python3
-          if [ "${{ matrix.version }}" = "8" ]; then
-            python3 /opt/ups-monitor/eneru.py version
-            PYTHON_BIN=python3.9
-          fi
           "$PYTHON_BIN" /opt/ups-monitor/eneru.py version
           "$PYTHON_BIN" -c "import paho.mqtt.client; print('paho-mqtt import OK')"
           "$PYTHON_BIN" /opt/ups-monitor/eneru.py validate --config /etc/ups-monitor/config.yaml
+          "$PYTHON_BIN" -c "import sys; sys.path.insert(0, '/opt/ups-monitor'); import eneru.config_doc, eneru.config_tui; print('config editor imports OK')"
+          out="$("$PYTHON_BIN" /opt/ups-monitor/eneru.py config check --offline --config /etc/ups-monitor/config.yaml || true)"
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -q "^Summary:"
 
       - name: Validate example configs
         run: |
           PYTHON_BIN=python3
-          [ "${{ matrix.version }}" = "8" ] && PYTHON_BIN=python3.9
           for config in examples/*.yaml; do
             echo "Validating $config..."
             "$PYTHON_BIN" /opt/ups-monitor/eneru.py validate --config "$config"
@@ -373,7 +337,10 @@ jobs:
           python3 -m pip install ".[notifications]"
 
       - name: Verify installation
-        run: eneru version
+        run: |
+          eneru version
+          # ruamel.yaml is a hard pip dependency since 6.2 (`eneru config`).
+          python3 -c "import eneru.config_doc, eneru.config_tui; print('config editor imports OK')"
 
       - name: Validate example configs
         run: |
@@ -411,6 +378,9 @@ jobs:
           # blocks on the initial NUT connection, and there's no NUT server in
           # this job) — that runs in E2E Test 46 against the real NUT dummy.
           docker run --rm --entrypoint python eneru:ci -c "import importlib.resources as r; assert (r.files('eneru.web')/'index.html').read_text().find('<title>Eneru</title>') >= 0; print('dashboard asset present in image')"
+          # The image bundles ruamel.yaml, so the config editor always works
+          # in a container (soft dep only on deb/rpm).
+          docker run --rm --entrypoint python eneru:ci -c "import ruamel.yaml, eneru.config_doc, eneru.config_tui; print('config editor available in image')"
 
       - name: Verify OCI image with Podman
         env:
@@ -445,7 +415,7 @@ jobs:
         run: |
           docker run --rm eneru:ci-arm64 version
           docker run --rm eneru:ci-arm64 validate --config /etc/ups-monitor/config.yaml
-          docker run --rm --entrypoint python eneru:ci-arm64 -c "import bcrypt, yaml; print('ARM64 dependencies import correctly')"
+          docker run --rm --entrypoint python eneru:ci-arm64 -c "import bcrypt, yaml, ruamel.yaml; print('ARM64 dependencies import correctly')"
           ARCH=$(docker image inspect --format '{{ .Architecture }}' eneru:ci-arm64)
           test "$ARCH" = "arm64"
           ACTUAL=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' eneru:ci-arm64)

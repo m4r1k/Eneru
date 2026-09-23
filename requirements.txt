@@ -7,6 +7,9 @@
 
 # Required
 PyYAML>=5.4.1
+# Comment-preserving editing for `eneru config` (the daemon itself doesn't
+# import it; deb/rpm only Recommend it). Mirrors pyproject's bound.
+ruamel.yaml>=0.16.6,<0.20
 
 # Optional - for notifications (100+ services via Apprise)
 # Remove this line if you don't need notifications

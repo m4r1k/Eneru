@@ -84,10 +84,17 @@ Homelabs, virtualization hosts (Proxmox, ESXi, libvirt), Docker/Podman container
 ```bash
 docker pull ghcr.io/m4r1k/eneru:latest
 
+# No config yet? Create one with the guided editor shipped in the image.
+# SELinux hosts: keep :Z here AND add :Z to the daemon's /srv/eneru mounts
+# below (see docs/install-docker.md); non-SELinux hosts can drop both.
+sudo install -d -o 10001 -g 10001 /srv/eneru
+docker run --rm -it --network host -v /srv/eneru:/srv/eneru:Z \
+  ghcr.io/m4r1k/eneru:latest config --config /srv/eneru/config.yaml
+
 docker run -d --name eneru \
   --restart unless-stopped \
   -p 9191:9191 \
-  -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro \
+  -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml \
   -v /srv/eneru/state:/var/lib/eneru \
   -v /srv/eneru/run:/var/run/eneru \
   -v /srv/eneru/ssh:/var/lib/eneru/ssh \
@@ -116,9 +123,16 @@ sudo apt update && sudo apt install eneru
 **RHEL/Fedora:**
 ```bash
 sudo dnf install -y epel-release
+# Optional, RHEL 9 family only (skip on RHEL 10 / Fedora): CodeReady Builder
+# provides python3-ruamel-yaml for the `eneru config` editor. The daemon
+# installs and runs without it.
+#   Rocky/Alma: sudo dnf install -y dnf-plugins-core && sudo dnf config-manager --set-enabled crb
+#   RHEL:       sudo subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms
 sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
 sudo dnf install eneru
 ```
+
+RPM packages support RHEL 9 and 10 (and compatible rebuilds). RHEL 8 packages ended with 6.1.x; on RHEL 8, run the container image (Docker/Podman) instead.
 
 ### Configuration
 

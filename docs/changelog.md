@@ -9,6 +9,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.0-rc6] - 2026-09-23
+
+### Changed
+
+- **`use_sudo` now covers custom pre-shutdown commands.** Before, it prefixed
+  only the predefined actions and the final shutdown command, while a custom
+  `pre_shutdown_commands[].command` ran as the plain SSH user and usually
+  failed for lack of root. Now every command on a `use_sudo: true` server
+  runs through `sudo -n`, unless it already starts with `sudo`. Only the
+  first command of a pipeline or list is prefixed. If your sudoers only
+  allows the shutdown tools, add NOPASSWD rules for those custom commands:
+  `eneru config check` shows which ones sudo would refuse.
+
+- **Container config is mounted writable so the editor can save it.** The
+  documented Docker/Podman samples drop `:ro` from the config mount, and the
+  host file is owned by the container user (`chown 10001:10001`, mode 0600).
+  `docker exec -it eneru eneru config` then saves in place through the
+  single-file bind mount, keeps the previous version in the state volume
+  (`/srv/eneru/state/config.yaml.bak`), and `docker kill -s HUP eneru`
+  hot-reloads it. A `:ro` mount keeps working for the daemon; the editor
+  opens it read-only and explains the fix. For a first setup, the image
+  runs the editor without Eneru installed on the host: `docker run --rm -it
+  --network host -v /srv/eneru:/srv/eneru:Z ghcr.io/m4r1k/eneru config
+  --config /srv/eneru/config.yaml`. Kubernetes ConfigMaps stay read-only.
+
+### Fixed
+
+- **`eneru config check` no longer reports "host identity unknown" for a
+  correct container loopback.** It now fills `expected_host_identity` from
+  the bind-mounted `/etc/machine-id` exactly as the daemon does at startup.
+- **Editor polish.**
+  - Esc returns to the row you opened.
+  - Switching basic/advanced keeps the key bar visible.
+  - Rows named by a finding get a red `x` or yellow `!` marker.
+  - Review & save lists every change against the file on disk, and the
+    findings panel is larger.
+
+## [6.2.0-rc5] - 2026-09-23
+
+### Added
+
+- **`eneru config check` inspects a config before an outage does.** Think of a
+  building inspector who tries every key in every door but never flips the
+  main breaker. On top of `eneru validate`, it reports:
+  - The startup warnings that are easy to miss in the log: dry-run left on, a
+    local UPS with `local_shutdown` off, `trigger_on: any` without a local UPS,
+    a plain-HTTP LAN API, MQTT without TLS, and missing tools or Python
+    packages.
+  - A shutdown sequence longer than `critical_runtime_threshold`.
+  - Live, read-only probes (skip them with `--offline`): the NUT name,
+    variables, login and self-test command, one SSH session per remote server,
+    `command -v` for every tool each step needs, harmless listings (`docker
+    ps`, `virsh list`, `qm list`, ...), and `sudo -n -l <binary>` to prove
+    NOPASSWD sudo (arguments included, so argument-pinned sudoers rules
+    match) without running anything.
+  - Shutdown and custom commands are never executed, only located.
+  - The report ends with a "what happens on power loss" timeline and exits 1
+    on errors. See `docs/config-editor.md`.
+- **`eneru config`: a guided (basic) and full (advanced) config editor.** A
+  curses TUI in the dashboard's colors, organised in stages: UPS and NUT
+  login, safety and triggers, this host, remote servers, redundancy groups,
+  notifications, features, then review.
+  - Every option shows its default and a plain-language explanation.
+  - Each stage is validated as you go, with errors in red, and `T` live-tests
+    the UPS or server under the cursor.
+  - Edits are made in place with `ruamel.yaml`, so operator comments, quoting,
+    indentation, line endings, owner and mode survive, and a private `.bak`
+    keeps the previous version. Values YAML 1.1 would read differently (`on`,
+    `12:30`, `0644`) are quoted so the daemon reads exactly what was typed.
+  - New keys get an explanatory comment. New files are mode 0600 and start
+    with `dry_run: true`.
+  - `ruamel.yaml` is new: a core dependency for pip and the container image,
+    and a *recommended* package on deb (`python3-ruamel.yaml`) and rpm
+    (`python3-ruamel-yaml`; RHEL 9 has it in CRB), so installing Eneru never
+    fails over the editor.
+
+### Removed
+
+- **RHEL 8 RPM packages are no longer built (breaking).** Starting with 6.2.0,
+  RPMs target RHEL 9 and 10 (and compatible rebuilds) only. RHEL 8 is in
+  maintenance support and has no python3.9 build of `ruamel.yaml`, which the
+  new `eneru config` editor needs. On RHEL 8, run the container image
+  (Docker/Podman) or stay on 6.1.x. The existing `rpm/el8` repository stays
+  published, frozen at 6.1.x. The package wrapper no longer re-execs onto
+  `python39`; on Python older than 3.9 it exits with a pointer to the
+  container image.
+
 ## [6.2.0-rc4] - 2026-09-23
 
 ### Added

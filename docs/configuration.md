@@ -176,6 +176,8 @@ eneru validate --config /etc/ups-monitor/config.yaml
 
 Validation catches YAML errors, invalid enum values, local-resource ownership mistakes, duplicate remote-server ownership, bad redundancy-group references, and unsafe notification suppression.
 
+For a deeper, live inspection, run `eneru config check`. It also logs in to NUT, SSHes to every enabled remote server, proves sudo permissions with `sudo -n -l` without running anything, and prints what happens on power loss. To build or change a config step by step with every option explained, use `eneru config`. See [Config editor and checker](config-editor.md).
+
 ## Top-level sections
 
 | Section | Scope | Purpose |
@@ -424,14 +426,14 @@ needs a restart.
 
 `remote_health.probe_command` is rejected at validation time if it contains shell metacharacters (`;`, `|`, `&`, `$`, backtick, redirections, parentheses, or newlines) or any keyword in the dangerous-words blocklist. Probes are advisory: they never run pre-shutdown commands, VM/container shutdown commands, custom commands, or the configured `shutdown_command`.
 
-**MQTT on RHEL.** Debian/Ubuntu `.deb` packages install `python3-paho-mqtt` as a hard dependency. RPM packages list it as a `Recommends:` only. RHEL 9 + EPEL pulls it in automatically, but on RHEL 8 (where the EPEL build targets the system python3.6, not the python3.9 used by Eneru) and on RHEL 10 (no `python3-paho-mqtt` exists in BaseOS / AppStream / CRB / EPEL 10) you need to install it via pip after installing eneru:
+**MQTT on RHEL.** Debian/Ubuntu `.deb` packages install `python3-paho-mqtt` as a hard dependency. RPM packages list it as a `Recommends:` only. EPEL ships it for RHEL 9 and RHEL 10, so dnf pulls it in automatically when EPEL is enabled. Without EPEL, install it via pip after installing eneru:
 
 ```bash
-# RHEL 8 (with python39 alternative):
-python3 -m pip install paho-mqtt
-
-# RHEL 10 (PEP 668 — system site-packages externally managed):
+# Without EPEL, RHEL 10 (PEP 668 — system site-packages externally managed):
 python3 -m pip install --break-system-packages paho-mqtt
+
+# Without EPEL, RHEL 9 (older pip, no PEP 668 marker):
+python3 -m pip install paho-mqtt
 ```
 
 If MQTT is enabled but `paho-mqtt` isn't importable, the publisher logs a warning and disables itself; the daemon keeps running. The MQTT publisher reconnects with bounded exponential backoff (1 s → 60 s) on connection failure or unexpected disconnect.
@@ -518,7 +520,7 @@ mounts:
 | `connect_timeout` | `10` | SSH connection timeout |
 | `command_timeout` | `30` | Default timeout for remote commands |
 | `shutdown_command` | `sudo shutdown -h now` | Final shutdown command |
-| `use_sudo` | `false` | Prefix generated privileged actions and non-sudo final shutdown commands with `sudo -n`. Useful for non-root loopback or remote users with NOPASSWD sudo |
+| `use_sudo` | `false` | Run generated privileged actions, custom `pre_shutdown_commands` (6.2+) and the final shutdown command through `sudo -n`, unless a command already starts with `sudo`. Useful for non-root loopback or remote users with NOPASSWD sudo |
 | `ssh_key_path` | `null` | Optional SSH private-key path, useful for container/Kubernetes volume mounts |
 | `ssh_options` | `[]` | Extra SSH options. Eneru defaults each remote to `StrictHostKeyChecking=accept-new` (learns and pins the host key on first use; bare metal uses the running user's `~/.ssh/known_hosts`, Docker/Podman uses `/var/lib/eneru/ssh/known_hosts`, Kubernetes samples set a PVC-backed path), so no entry is needed for normal use. Set your own `StrictHostKeyChecking` or `UserKnownHostsFile` to override; avoid `StrictHostKeyChecking=no` in production |
 | `pre_shutdown_commands` | `[]` | Pre-shutdown actions or commands. For loopback entries Eneru generates these from the local config — don't duplicate |
@@ -605,6 +607,8 @@ See [Remote servers](remote-servers.md) for SSH keys, sudoers, predefined action
 | Command | Purpose |
 |---------|---------|
 | `run` | Start the monitoring daemon |
+| `config` | Guided (basic) or full (advanced) config editor; see [Config editor and checker](config-editor.md) |
+| `config check` | Validation plus live, read-only NUT/SSH/sudo/command probes and the power-loss preview |
 | `validate` | Validate config and print the shutdown plan |
 | `monitor` | Open the TUI dashboard |
 | `tui` | Alias for `monitor` |
@@ -620,7 +624,10 @@ Common flags:
 
 | Command | Flag | Purpose |
 |---------|------|---------|
-| `run`, `validate`, `monitor`, `test-notifications` | `-c`, `--config` | Config path |
+| `run`, `config`, `config check`, `validate`, `monitor`, `test-notifications` | `-c`, `--config` | Config path |
+| `config` | `--basic`, `--advanced` | Start the editor in that mode |
+| `config check` | `--offline` | Skip live probes (no NUT/SSH connections) |
+| `config check` | `-q`, `--quiet` | Show only problems and notes |
 | `run` | `--dry-run` | Override config and do not execute shutdown actions |
 | `run` | `--api` | Enable the embedded read-only API for this run |
 | `run` | `--api-bind ADDRESS` | API listen address for this run; implies `--api` |

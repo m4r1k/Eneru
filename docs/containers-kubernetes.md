@@ -30,6 +30,36 @@ step-by-step from a deb/rpm install.
 
 The samples below use `:latest` so they work without per-release edits. Pin to a specific `<version>` tag for production — `:latest` is convenient but not immutable, and rolling restarts on a moving tag can mix versions. When you pin a version, also flip `imagePullPolicy` from `Always` to `IfNotPresent` so pod restarts don't hit the registry on every reschedule. Pre-release builds never become `:latest`; they land at `:testing` and at their explicit `<version>` tag.
 
+## Create or edit the config
+
+The image includes the guided editor (`eneru config`) and the inspector
+(`eneru config check`), so the host needs nothing but Docker or Podman.
+
+First setup, before the daemon exists (writes `/srv/eneru/config.yaml`,
+owned by uid 10001, mode 0600):
+
+```bash
+sudo install -d -o 10001 -g 10001 /srv/eneru
+docker run --rm -it --network host -v /srv/eneru:/srv/eneru:Z \
+  ghcr.io/m4r1k/eneru:latest config --config /srv/eneru/config.yaml
+```
+
+With the daemon running, edit through it: the config is bind-mounted
+**writable** (no `:ro`) and owned by 10001, so the editor saves in place and
+keeps the previous version as `config.yaml.bak` in the state volume:
+
+```bash
+docker exec -it eneru eneru config
+docker kill -s HUP eneru        # hot-reload
+```
+
+A config mounted `:ro` (the pre-6.2 samples) still works for the daemon;
+the editor opens it read-only and tells you how to make it writable:
+`sudo chown 10001:10001 /srv/eneru/config.yaml`, drop `:ro`, recreate the
+container. Kubernetes ConfigMaps are always read-only: run `eneru config`
+on a copy and apply it with `kubectl create configmap ... --dry-run=client
+-o yaml | kubectl apply -f -`.
+
 ## Remote-only Docker
 
 Mount your config and any SSH key volume. The API flags keep healthchecks independent from the YAML file:
@@ -38,7 +68,7 @@ Mount your config and any SSH key volume. The API flags keep healthchecks indepe
 docker run -d --name eneru \
   --restart unless-stopped \
   -p 9191:9191 \
-  -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro \
+  -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml \
   -v /srv/eneru/state:/var/lib/eneru \
   -v /srv/eneru/run:/var/run/eneru \
   -v /srv/eneru/ssh:/var/lib/eneru/ssh:rw \
@@ -86,7 +116,7 @@ docker run -d --name eneru \
   --restart unless-stopped \
   --network host \
   -v /etc/machine-id:/etc/machine-id:ro \
-  -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro \
+  -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml \
   -v /srv/eneru/state:/var/lib/eneru \
   -v /srv/eneru/run:/var/run/eneru \
   -v /srv/eneru/ssh:/var/lib/eneru/ssh:rw \
@@ -328,7 +358,7 @@ podman run -d --name eneru \
   --replace \
   --network host \
   -v /etc/machine-id:/etc/machine-id:ro \
-  -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
+  -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:Z \
   -v /srv/eneru/state:/var/lib/eneru:Z \
   -v /srv/eneru/run:/var/run/eneru:Z \
   -v /srv/eneru/ssh:/var/lib/eneru/ssh:Z \

@@ -979,6 +979,71 @@ def _cmd_validate(args):
     sys.exit(exit_code)
 
 
+def _config_path_arg(args, *, must_exist: bool) -> Optional[str]:
+    """--config, else the first existing default path (else the first default).
+
+    Returns None (after printing why) when ``must_exist`` and nothing exists.
+    """
+    explicit = getattr(args, "config", None)
+    if explicit:
+        return explicit
+    for candidate in ConfigLoader.DEFAULT_CONFIG_PATHS:
+        if candidate.exists():
+            return str(candidate)
+    if must_exist:
+        print(
+            "ERROR: no config file found at "
+            + " or ".join(str(p) for p in ConfigLoader.DEFAULT_CONFIG_PATHS)
+            + ". Create one with `eneru config` or pass --config.",
+            file=sys.stderr,
+        )
+        return None
+    return str(ConfigLoader.DEFAULT_CONFIG_PATHS[0])
+
+
+def _cmd_config_check(args):
+    """Static + live inspection of a config (read-only)."""
+    from eneru import config_check
+
+    path = _config_path_arg(args, must_exist=True)
+    if path is None:
+        sys.exit(1)
+    report = config_check.check_file(path, probes=not args.offline)
+    print(config_check.format_report(
+        report, color=config_check.use_color(), verbose=not args.quiet))
+    sys.exit(1 if report.has_errors else 0)
+
+
+def _cmd_config_edit(args):
+    """Interactive TUI editor (basic or advanced mode)."""
+    path = _config_path_arg(args, must_exist=False)
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("ERROR: `eneru config` needs an interactive terminal. For "
+              "scripts and CI use `eneru config check`.", file=sys.stderr)
+        sys.exit(2)
+    try:
+        from eneru import config_tui
+        from eneru.config_doc import ConfigDocument
+    except ImportError as exc:
+        print(f"ERROR: the config editor needs ruamel.yaml ({exc}). Install "
+              "python3-ruamel.yaml (deb) / python3-ruamel-yaml (rpm) or "
+              "`pip install ruamel.yaml`.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        doc = ConfigDocument.load(path)
+    except Exception as exc:  # noqa: BLE001 - surface any parse problem cleanly
+        print(f"ERROR: cannot open {path} for editing: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if not doc.existed:
+        config_tui.seed_new_document(doc)
+    mode = None
+    if getattr(args, "basic", False):
+        mode = config_tui.MODE_BASIC
+    elif getattr(args, "advanced", False):
+        mode = config_tui.MODE_ADVANCED
+    sys.exit(config_tui.run_editor(doc, mode))
+
+
 def _cmd_test_notifications(args):
     """Send a test notification and exit."""
     config = _load_config(args)
@@ -2131,6 +2196,8 @@ def main():
             "  remote list          List configured remote shutdown targets\n"
             "  shutdown remote      Manually drill one configured remote shutdown\n"
             "  shutdown group       Rehearse the full shutdown sequence for one group\n"
+            "  config               Guided / advanced config editor (TUI)\n"
+            "  config check         Inspect a config: validation, live NUT/SSH/sudo probes\n"
             "  validate             Validate configuration and show overview\n"
             "  monitor / tui        Launch real-time TUI dashboard\n"
             "  test-notifications   Send a test notification\n"
@@ -2141,6 +2208,8 @@ def main():
             "  eneru run --config /etc/ups-monitor/config.yaml\n"
             "  eneru remote list --config /etc/ups-monitor/config.yaml\n"
             "  eneru shutdown group --group rack-a --dry-run --config /etc/ups-monitor/config.yaml\n"
+            "  eneru config --config /etc/ups-monitor/config.yaml\n"
+            "  eneru config check --config /etc/ups-monitor/config.yaml\n"
             "  eneru validate --config /etc/ups-monitor/config.yaml\n"
             "  eneru monitor --config /etc/ups-monitor/config.yaml\n"
             "  eneru tui --config /etc/ups-monitor/config.yaml\n"
@@ -2148,7 +2217,8 @@ def main():
     )
 
     public_subcommands = (
-        "run", "shutdown", "remote", "user", "apikey", "validate", "monitor",
+        "run", "shutdown", "remote", "user", "apikey", "config", "validate",
+        "monitor",
         "tui", "test-notifications", "self-test", "version", "completion",
     )
     subparsers = parser.add_subparsers(
@@ -2327,6 +2397,36 @@ def main():
     akr_parser.add_argument("id", type=int, help="API key id (from 'apikey list')")
     _add_auth_locator(akr_parser)
     akr_parser.set_defaults(func=_cmd_apikey_revoke)
+
+    # --- config (editor) / config check ---
+    cfg_parser = subparsers.add_parser(
+        "config",
+        help="Guided (basic) or full (advanced) config editor; `config check` inspects",
+        description=(
+            "Without a subcommand: open the interactive config editor. "
+            "`eneru config check` inspects a config without changing it."
+        ),
+    )
+    cfg_parser.add_argument("-c", "--config", default=None,
+                            help="Config file to edit or create")
+    cfg_mode = cfg_parser.add_mutually_exclusive_group()
+    cfg_mode.add_argument("--basic", action="store_true",
+                          help="Start in guided mode (essentials, safe defaults)")
+    cfg_mode.add_argument("--advanced", action="store_true",
+                          help="Start in advanced mode (every option)")
+    cfg_parser.set_defaults(func=_cmd_config_edit)
+    cfg_sub = cfg_parser.add_subparsers(dest="config_command", metavar="{check}")
+    cfg_check = cfg_sub.add_parser(
+        "check",
+        help="Validate + probe NUT, SSH, sudo and every shutdown command (read-only)")
+    # SUPPRESS: an unset sub-option must not overwrite `eneru config -c X check`.
+    cfg_check.add_argument("-c", "--config", default=argparse.SUPPRESS,
+                           help="Config file to inspect")
+    cfg_check.add_argument("--offline", action="store_true",
+                           help="Skip live probes (no NUT/SSH connections)")
+    cfg_check.add_argument("-q", "--quiet", action="store_true",
+                           help="Hide passing checks; show only problems and notes")
+    cfg_check.set_defaults(func=_cmd_config_check)
 
     # --- validate ---
     val_parser = subparsers.add_parser("validate", help="Validate configuration and show overview")

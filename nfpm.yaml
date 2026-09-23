@@ -45,22 +45,20 @@ overrides:
     recommends:
       - apprise
       - openssh-client
+      # SOFT: only the `eneru config` editor needs it (the daemon and
+      # `eneru config check` don't). apt installs Recommends by default.
+      - python3-ruamel.yaml
   rpm:
     depends:
       - python3
       - python3-pyyaml
       - nut-client
-    # python3-paho-mqtt is a SOFT dep on RPM. RHEL 10 doesn't ship it
-    # at all (not in BaseOS / AppStream / CRB / EPEL 10); RHEL 8 ships
-    # an EPEL build only for the system python3 (3.6), which doesn't
-    # match the python3.9+ interpreter we install. Making it a hard
-    # `depends:` would break installation on RHEL 8 and 10. The MQTT
-    # publisher gracefully degrades when paho is missing (see
-    # src/eneru/mqtt.py), so RPM users who want MQTT install it via
-    # `pip install paho-mqtt` (use a venv or `--break-system-packages`
-    # on EL10 per PEP 668). RHEL 9 with EPEL still resolves the
-    # `recommends:` automatically.
-    # python3-bcrypt is a SOFT dep on RPM for the same EL10 reason as
+    # python3-paho-mqtt is a SOFT dep on RPM: it only exists in EPEL (RHEL 9
+    # and 10), and a hard `depends:` would break installation on hosts
+    # without EPEL. The MQTT publisher gracefully degrades when paho is
+    # missing (see src/eneru/mqtt.py); with EPEL enabled dnf resolves the
+    # `recommends:` automatically, otherwise `pip install paho-mqtt`.
+    # python3-bcrypt is a SOFT dep on RPM for the same EPEL-only reason as
     # python3-paho-mqtt above: it may not resolve on every EL target.
     # API auth is opt-in and src/eneru/auth.py lazy-imports bcrypt with an
     # actionable install hint, so a missing package degrades cleanly rather
@@ -71,6 +69,11 @@ overrides:
       - openssh-clients
       - python3-paho-mqtt
       - python3-bcrypt
+      # SOFT: only the `eneru config` editor needs it, and a missing module
+      # degrades to an install hint. RHEL 10 ships it in AppStream, RHEL 9 in
+      # CodeReady Builder (CRB); dnf pulls weak deps when the repo is enabled
+      # and silently skips them otherwise, so the daemon always installs.
+      - python3-ruamel-yaml
 
 # Files to include in the package
 contents:
@@ -111,6 +114,34 @@ contents:
 
   - src: src/eneru/config.py
     dst: /opt/ups-monitor/eneru/config.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/config_catalog.py
+    dst: /opt/ups-monitor/eneru/config_catalog.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/config_check.py
+    dst: /opt/ups-monitor/eneru/config_check.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/config_doc.py
+    dst: /opt/ups-monitor/eneru/config_doc.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: src/eneru/config_tui.py
+    dst: /opt/ups-monitor/eneru/config_tui.py
     file_info:
       mode: 0644
       owner: root

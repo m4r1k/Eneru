@@ -74,8 +74,10 @@ Installs to `/opt/ups-monitor/`:
 **Invocation:** `sudo python3 /opt/ups-monitor/eneru.py [options]`
 
 The wrapper script (`eneru.py`) adds `/opt/ups-monitor` to `sys.path` and
-calls `eneru.cli.main()`. (On RHEL 8 it also re-execs onto `python39` — the
-system `python3` there is 3.6.)
+calls `eneru.cli.main()`. It refuses to start on Python older than 3.9 with a
+pointer to the container image. RPM packages target RHEL 9 and 10 only;
+RHEL 8 packaging ended with 6.1.x, and its frozen `rpm/el8` sub-repo on
+gh-pages is kept out of the default repo metadata.
 
 ### Pip installation
 

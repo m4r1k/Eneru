@@ -25,6 +25,10 @@ mixin pattern**, so a session can navigate without loading whole files first.
 | `actions.py` | `REMOTE_ACTIONS` — predefined SSH command templates (`shutdown`, `stop_compose`, etc.). |
 | `cli.py` | argparse + subcommand dispatch (`run`, `validate`, `version`, `test-notifications`, `monitor`). |
 | `tui.py` | curses-based dashboard, `--once` plain-text variant. |
+| `config_check.py` | `eneru config check`: static findings (validation, startup prep, privileges, dependencies, easy-to-miss startup warnings, runtime budget), read-only live probes (NUT, one SSH session per remote with `command -v` / read-only listings / `sudo -n -l`), and the power-loss preview built on `shutdown/plan.py`. Never executes shutdown or custom commands. |
+| `config_catalog.py` | Option catalog for the editor: every key's kind, help text and basic/advanced tier. Defaults come from the `config.py` dataclasses; `tests/test_config_catalog.py` fails when a dataclass field has no entry, so **a new config option needs a catalog entry too**. |
+| `config_doc.py` | `ConfigDocument`: ruamel.yaml round-trip editing (comments/indentation preserved, trailing section-heading comments moved when keys are appended, atomic 0600 saves with `.bak`). |
+| `config_tui.py` | `eneru config` curses editor: `EditorModel` + pure `handle_key` (testable without a terminal) and `draw`. |
 
 ## The mixin pattern (where to add a new shutdown phase)
 
