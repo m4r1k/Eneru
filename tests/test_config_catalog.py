@@ -268,3 +268,9 @@ def test_has_tier():
 ])
 def test_help_for_path(path, expected):
     assert cat.help_for_path(path) == expected
+
+
+@pytest.mark.unit
+def test_help_for_legacy_docker_alias_uses_containers_help():
+    assert cat.help_for_path(("docker", "stop_timeout")) == \
+        cat.help_for_path(("containers", "stop_timeout"))

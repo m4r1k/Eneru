@@ -1281,9 +1281,16 @@ class TestLegacyDocker:
         goto(m, "local")
         labels = [r.label for r in m.rows()]
         assert any("legacy `docker:`" in lbl for lbl in labels)
-        row = select(m, lambda r: r.label == "runtime")
-        assert row.path == ("docker", "runtime")
-        assert row.value == "docker" and row.is_default
+        # The loader forces Docker and ignores rootless user containers for
+        # the legacy alias, so those knobs aren't offered; a note explains.
+        assert not [r for r in m.rows() if r.label in (
+            "runtime", "include_user_containers")]
+        assert any(r.kind == "note" and "rename the section" in r.label
+                   for r in m.rows())
+        m.set_mode(tui.MODE_ADVANCED)
+        goto(m, "local")
+        assert not [r for r in m.rows() if r.label in (
+            "runtime", "include_user_containers")]
         en = select(m, lambda r: r.label == "enabled" and r.path[0] == "docker")
         assert en.value == "on"
         select(m, lambda r: r.label == "stop_timeout")

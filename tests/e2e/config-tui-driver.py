@@ -11,6 +11,7 @@ Exits with the editor's own exit code (124 if it never quit).
 
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -18,11 +19,24 @@ import sys
 import time
 
 
+_ESCAPES = re.compile(r"\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|[rnt\\])")
+
+
+def decode_keys(text: str) -> str:
+    """Decode \\r \\n \\t \\\\ \\xNN \\uNNNN; leave UTF-8 text untouched."""
+    simple = {"r": "\r", "n": "\n", "t": "\t", "\\": "\\"}
+
+    def repl(m: "re.Match[str]") -> str:
+        esc = m.group(1)
+        return simple[esc] if esc in simple else chr(int(esc[1:], 16))
+    return _ESCAPES.sub(repl, text)
+
+
 def main() -> int:
     if len(sys.argv) < 4 or sys.argv[2] != "--":
         print(__doc__)
         return 2
-    keys = sys.argv[1].encode("utf-8").decode("unicode_escape")
+    keys = decode_keys(sys.argv[1])
     argv = sys.argv[3:]
     pid, fd = pty.fork()
     if pid == 0:

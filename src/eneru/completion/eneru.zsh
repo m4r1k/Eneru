@@ -107,7 +107,8 @@ _eneru() {
                     esac
                     ;;
                 config)
-                    if [[ "$line[2]" == "check" ]]; then
+                    # `check` may follow options (`eneru config -c FILE check`).
+                    if (( ${line[(I)check]} > 1 )); then
                         _arguments \
                             '(-c --config)'{-c,--config}'[config file to inspect]:config file:_files' \
                             '--offline[skip live NUT/SSH probes]' \

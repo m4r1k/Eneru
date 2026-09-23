@@ -422,8 +422,6 @@ class EditorModel:
         else:
             present = self.doc.has(path)
             value = self.vget(path) if present else opt.default
-            if not present and base == ("docker",) and opt.key == "runtime":
-                value = "docker"  # the legacy alias forces Docker
         return Row("option", opt.key, path, opt, _fmt_value(opt, value),
                    is_default=not present, help=opt.help)
 
@@ -559,7 +557,19 @@ class EditorModel:
                     key = "docker"
                 rows.append(Row("heading", spec.title +
                                 (" (legacy `docker:` section)" if key == "docker" else "")))
-                rows += self._section_rows(base + (key,), spec)
+                section_rows = self._section_rows(base + (key,), spec)
+                if key == "docker":
+                    # The legacy alias always uses Docker and never stops
+                    # rootless user containers; don't offer knobs the
+                    # daemon ignores there.
+                    section_rows = [r for r in section_rows if r.label not in (
+                        "runtime", "include_user_containers")]
+                    section_rows.append(Row(
+                        "note", "Legacy `docker:` always uses Docker; rename "
+                        "the section to `containers:` to pick a runtime or "
+                        "stop rootless user containers.",
+                        help="The loader forces runtime docker for this alias."))
+                rows += section_rows
             return rows
         if stage == "remote":
             groups = self._group_paths()

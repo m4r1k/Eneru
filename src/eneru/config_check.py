@@ -492,20 +492,21 @@ def _estimate_seconds(config: Config, group: Any) -> Optional[float]:
 def _budget_findings(config: Config) -> List[Finding]:
     """Flag a shutdown sequence that can outlast the runtime trigger."""
     out: List[Finding] = []
-    for group in config.ups_groups:
+    for group in _all_groups(config):
         est = _estimate_seconds(config, group)
         threshold = group.triggers.critical_runtime_threshold
         if not est or not is_numeric(threshold):
             continue
+        label = _group_label(group)
         if est > float(threshold):
             out.append(Finding(
                 LEVEL_WARN, "safety",
-                f"{group.ups.label}: the shutdown sequence may need up to "
+                f"{label}: the shutdown sequence may need up to "
                 f"{format_seconds(est)}, but the runtime trigger fires with "
                 f"only {format_seconds(threshold)} of battery left",
                 "Raise triggers.critical_runtime_threshold or shorten the "
                 "VM/container/remote timeouts, or the host may lose power "
-                "mid-sequence.", subject=group.ups.label))
+                "mid-sequence.", subject=label))
     return out
 
 
@@ -737,6 +738,10 @@ def probe_ups(config: Config, group: UPSGroupConfig) -> List[Finding]:
             add(LEVEL_ERROR, f"{label}: NUT login as '{nc.username}' failed: {err}",
                 "Check the user in upsd.users (password, instcmds) and "
                 "reload upsd.")
+    elif nc.username or nc.password:
+        add(LEVEL_WARN, f"{label}: the NUT login is incomplete (username and "
+            "password must both be set); commands were listed anonymously",
+            "Set nut_control.password (or remove the username) for this UPS.")
     elif ok:
         add(LEVEL_INFO, f"{label}: {len(commands)} instant command(s) listed "
             "anonymously")
@@ -889,9 +894,19 @@ def action_checks(action: str, use_sudo: bool, *, path: str = "",
                     "or unreadable for the SSH user."))
         return checks
     if action == "stop_containers_rootless":
+        # The template runs `sudo -u "$user" podman` for every lingering
+        # user (uid >= 1000); prove that works for each, read-only.
         return [_exists("loginctl"), _exists("podman"),
                 RemoteCheck("listing logged-in users works",
-                            "loginctl list-users --no-legend", "run")]
+                            "loginctl list-users --no-legend", "run"),
+                RemoteCheck(
+                    "sudo -u <user> podman ps works for every user",
+                    "loginctl list-users --no-legend | awk '$1+0 >= 1000 "
+                    "{print $2}' | while read -r u; do sudo -n -u \"$u\" "
+                    "podman ps -q >/dev/null 2>&1 || { echo \"refused for $u\"; "
+                    "exit 1; }; done", "run",
+                    fail_hint="The SSH user needs NOPASSWD sudo to run podman "
+                    "as each user (sudoers: `(ALL) NOPASSWD: /usr/bin/podman`).")]
     if action == "stop_vms":
         return [_exists("virsh"),
                 RemoteCheck("listing running VMs works",

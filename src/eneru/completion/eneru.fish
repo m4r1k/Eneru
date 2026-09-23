@@ -127,8 +127,15 @@ end
 function __eneru_using_config_check
     set -l cmd (commandline -opc)
     set -l saw_config 0
+    set -l skip_value 0
     for word in $cmd[2..-1]
+        if test $skip_value -eq 1
+            set skip_value 0
+            continue
+        end
         switch $word
+            case -c --config
+                set skip_value 1
             case '-*'
                 continue
             case config

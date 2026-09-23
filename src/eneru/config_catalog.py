@@ -902,6 +902,8 @@ def child(node: Union[Section, ListSection], key: str) -> Optional[Node]:
 
 
 def root_section(key: str) -> Optional[Node]:
+    if key == "docker":  # legacy alias, edited in place by the TUI
+        key = "containers"
     for node in ROOT_SECTIONS:
         if node.key == key:
             return node

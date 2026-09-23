@@ -1303,3 +1303,54 @@ def test_probe_local_runtime_without_compose_files(env):
         out = cc.probe_local(cfg)
     assert [c.args[0] for c in run.call_args_list] == [["docker", "ps", "-q"]]
     assert msgs(out) == ["docker ps works"]
+
+
+class TestCubicRound:
+    def test_budget_covers_redundancy_groups(self, env):
+        data = multi({"name": "A@h"}, {"name": "B@h"}, redundancy_groups=[{
+            "name": "rack", "ups_sources": ["A@h", "B@h"], "min_healthy": 1,
+            "triggers": {"critical_runtime_threshold": 10},
+            "remote_servers": [{"name": "n1", "enabled": True, "host": "x",
+                                "user": "root", "command_timeout": 120}]}])
+        out = cc._budget_findings(build(data))
+        assert any("redundancy group 'rack'" in f.message for f in out)
+
+    def test_rootless_check_proves_sudo_u_podman(self):
+        checks = cc.action_checks("stop_containers_rootless", False)
+        script = checks[-1].script
+        assert "sudo -n -u \"$u\" podman ps -q" in script
+        assert "$1+0 >= 1000" in script
+
+    def test_rootless_script_runs_locally(self, tmp_path):
+        # loginctl lists one regular user; sudo refuses -> the check fails.
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "loginctl").write_text("#!/bin/sh\necho '1000 alice'\n")
+        (bin_dir / "sudo").write_text("#!/bin/sh\nexit 1\n")
+        for f in bin_dir.iterdir():
+            f.chmod(0o755)
+        script = cc.action_checks("stop_containers_rootless", False)[-1].script
+        env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+        r = subprocess.run(["sh", "-c", script], capture_output=True, text=True,
+                           env=env)
+        assert r.returncode != 0 and "refused for alice" in r.stdout
+        (bin_dir / "sudo").write_text("#!/bin/sh\nexit 0\n")
+        r = subprocess.run(["sh", "-c", script], capture_output=True, text=True,
+                           env=env)
+        assert r.returncode == 0
+
+    def test_incomplete_nut_login_warns(self, env):
+        from eneru.config import NutControlConfig
+        config = build({"ups": {"name": "ups@h"}})
+        group = config.ups_groups[0]
+        config.nut_control = NutControlConfig(username="mon", password="")
+
+        def run(cmd, timeout=10, env_overrides=None):
+            if cmd[:2] == ["upsc", "-l"]:
+                return 0, "ups\n", ""
+            return 0, "ups.status: OL\nbattery.charge: 100\nbattery.runtime: 900\n", ""
+        with patch.object(cc, "_run", side_effect=run), \
+                patch("eneru.nut_control.list_commands", return_value=(True, ["a"], "")):
+            out = cc.probe_ups(config, group)
+        assert any("NUT login is incomplete" in f.message and f.level == "warning"
+                   for f in out)

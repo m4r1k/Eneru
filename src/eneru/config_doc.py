@@ -300,11 +300,13 @@ def _add_comment_before(parent: CommentedMap, key: Any, text: str,
         tok.value = (value if value.endswith("\n") else value + "\n") + lines
 
 
-_ASTRAL_ESCAPE = re.compile(r"\\U([0-9A-Fa-f]{8})")
 # A double-quoted scalar starts at a line's indent, after "- ", ": ", "? ",
 # or a flow indicator; this keeps quote characters inside plain scalars
 # (e.g. "it's") out of the scan.
-_DQ_SCALAR = re.compile(r'(^[ \t]*(?:- )*|[:?,\[{-] )"((?:[^"\\]|\\.)*)"')
+_DQ_SCALAR = re.compile(r'(^[ \t]*(?:- )*|[:?-] |[,\[{] ?)"((?:[^"\\]|\\.)*)"')
+# One escape at a time, so `\\U0001F3E2` (an escaped backslash, then the
+# text "U0001F3E2") is never mistaken for a \U escape.
+_DQ_ESCAPE = re.compile(r"\\(U[0-9A-Fa-f]{8}|.)", re.DOTALL)
 
 
 def _unescape_astral(text: str) -> str:
@@ -321,9 +323,13 @@ def _unescape_astral(text: str) -> str:
 
     def fix_scalar(m: "re.Match[str]") -> str:
         def repl(e: "re.Match[str]") -> str:
-            ch = chr(int(e.group(1), 16))
-            return ch if ch.isprintable() else e.group(0)
-        return f'{m.group(1)}"{_ASTRAL_ESCAPE.sub(repl, m.group(2))}"'
+            body = e.group(1)
+            if len(body) == 9:  # U + 8 hex digits
+                ch = chr(int(body[1:], 16))
+                if ch.isprintable():
+                    return ch
+            return e.group(0)
+        return f'{m.group(1)}"{_DQ_ESCAPE.sub(repl, m.group(2))}"'
 
     return "\n".join(_DQ_SCALAR.sub(fix_scalar, line)
                      for line in text.split("\n"))
@@ -679,7 +685,14 @@ class ConfigDocument:
             self.data["containers"] = docker
         for section in PER_GROUP_SECTIONS:
             if section in self.data:
+                # The block trailing a moved section (usually the NEXT
+                # section's heading) belongs to the root: keep it there,
+                # exactly like delete() does.
+                tok = self._detach_element_comment(self.data, section)
+                idx = list(self.data).index(section)
                 entry[section] = self.data.pop(section)
+                if tok is not None:
+                    self._reattach_comment(self.data, idx, tok, ())
         seq = CommentedSeq()
         seq.append(entry)
         self.data["ups"] = seq

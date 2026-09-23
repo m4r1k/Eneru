@@ -1103,3 +1103,34 @@ def test_writable_for_existing_and_new_files(tmp_path):
     assert ConfigDocument.load(tmp_path / "x" / "y" / "new.yaml").writable()
     with patch.object(cd.os, "access", return_value=False):
         assert not ConfigDocument.load(p).writable()
+
+
+@pytest.mark.unit
+def test_unescape_is_escape_aware_and_covers_flow_forms():
+    text = ('a: "\\\\U0001F3E2"\n'          # escaped backslash + text: untouched
+            'b: ["\\U0001F3E2"]\n'          # flow sequence, no space
+            'c: {k: "\\U0001F600", j: 1}\n'  # flow mapping
+            'd: "x\\ny\\U0001F3E2"\n')      # other escapes kept, emoji restored
+    out = cd._unescape_astral(text).splitlines()
+    assert out[0] == 'a: "\\\\U0001F3E2"'
+    assert out[1] == 'b: ["\U0001F3E2"]'
+    assert out[2] == 'c: {k: "\U0001F600", j: 1}'
+    assert out[3] == 'd: "x\\ny\U0001F3E2"'
+
+
+@pytest.mark.unit
+def test_convert_to_multi_keeps_root_section_headings(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "ups:\n  name: a\n"
+        "remote_servers:\n  - name: nas\n\n"
+        "# === LOCAL SHUTDOWN ===\n"
+        "local_shutdown:\n  enabled: true\n")
+    doc = ConfigDocument.load(p)
+    doc.convert_to_multi_ups()
+    out = doc.dumps()
+    import yaml
+    data = yaml.safe_load(out)
+    assert data["ups"][0]["remote_servers"] == [{"name": "nas"}]
+    # The heading still sits right above local_shutdown at the root.
+    assert "# === LOCAL SHUTDOWN ===\nlocal_shutdown:" in out

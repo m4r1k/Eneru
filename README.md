@@ -121,10 +121,11 @@ sudo apt update && sudo apt install eneru
 **RHEL/Fedora:**
 ```bash
 sudo dnf install -y epel-release
-# Optional, RHEL 9 only: CodeReady Builder provides python3-ruamel-yaml for the
-# `eneru config` editor (the daemon installs and runs without it)
-sudo dnf install -y dnf-plugins-core && sudo dnf config-manager --set-enabled crb   # Rocky/Alma
-# RHEL:  sudo subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms
+# Optional, RHEL 9 family only (skip on RHEL 10 / Fedora): CodeReady Builder
+# provides python3-ruamel-yaml for the `eneru config` editor. The daemon
+# installs and runs without it.
+#   Rocky/Alma: sudo dnf install -y dnf-plugins-core && sudo dnf config-manager --set-enabled crb
+#   RHEL:       sudo subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms
 sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
 sudo dnf install eneru
 ```
