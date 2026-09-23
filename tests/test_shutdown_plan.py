@@ -208,6 +208,17 @@ def test_remote_loopback_brackets_and_parallel_group_estimate(cfg):
     loopback_steps = [s for s in remote["steps"] if s["loopback"]]
     assert [s["role"] for s in loopback_steps] == ["pre-actions", "shutdown"]
 
+    # With commands revealed, the pre-actions row shows the pre-shutdown
+    # commands and the shutdown row shows the poweroff command.
+    lb.pre_shutdown_commands.append(RemoteCommandConfig(action="stop_compose"))
+    lb.shutdown_command = "systemctl poweroff"
+    revealed = _by_id(build_shutdown_plan(
+        cfg, is_local=True, reveal_commands=True))["remote"]
+    pre, post = [s for s in revealed["steps"] if s["loopback"]]
+    assert "systemctl stop x; stop_compose" in pre["detail"]
+    assert "systemctl poweroff" not in pre["detail"]
+    assert "systemctl poweroff" in post["detail"]
+
 
 @pytest.mark.unit
 def test_shutdown_progress_tracks_phases_and_sanitized_remote_results():

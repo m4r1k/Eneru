@@ -1343,7 +1343,8 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     start = horizon
                 store = getattr(mon, "_stats_store", None)
                 from eneru.config import resolve_energy_config
-                nominal = resolve_energy_config(mon.config).nominal_power
+                nominal = getattr(
+                    resolve_energy_config(mon.config), "nominal_power", None)
                 return 200, "application/json", {
                     "ups": ups_name, "from": start, "to": end,
                     "data": power_series(store, start, end, nominal_fallback=nominal),

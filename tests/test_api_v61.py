@@ -140,6 +140,9 @@ class TestPowerSeries:
         status, _, payload = h._route()
         assert status == 200
         assert payload["data"][0]["watts"] == 120.0
+        # A config with no energy section must not turn the read into a 500.
+        mon.config.energy = None
+        assert h._route()[0] == 200
         # Unknown UPS -> 404.
         h.path = "/api/v1/ups/nope/power"
         assert h._route()[0] == 404
@@ -209,6 +212,13 @@ class TestStatusHelperGuards:
         clock[0] += status._ENERGY_CACHE_TTL_SECONDS + 1   # expire the TTL
         _energy_for_monitor(mon)
         assert calls["n"] == 6               # refreshed -> a second scan set
+
+        # A reload changes the key; the superseded entry is pruned once it
+        # expires instead of accumulating forever.
+        cfg.energy.nominal_power = 900
+        clock[0] += status._ENERGY_CACHE_TTL_SECONDS + 1
+        _energy_for_monitor(mon)
+        assert len(status._energy_cache) == 1
         status._energy_cache.clear()
 
     @pytest.mark.unit

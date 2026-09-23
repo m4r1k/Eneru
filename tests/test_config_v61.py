@@ -188,6 +188,13 @@ class TestUnknownKeys:
         assert len(matching) == 1, errs
 
     @pytest.mark.unit
+    def test_legacy_dict_ups_energy_is_rejected_not_ignored(self):
+        _, errs = _validate(
+            "ups:\n  name: U1@h\n  energy:\n    nominal_power: 900\n")
+        assert any("ups.energy is only supported in the list form" in e
+                   for e in errs), errs
+
+    @pytest.mark.unit
     def test_per_ups_energy_requires_mapping(self):
         _, errs = _validate("ups:\n  - name: U1@h\n    energy: true\n")
         assert any("ups 'U1@h' energy must be a mapping" in e for e in errs)

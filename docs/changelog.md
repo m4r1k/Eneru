@@ -37,6 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A remote worker that can't start no longer skips the host poweroff.** If
+  a remote-shutdown thread fails to start (e.g. resource exhaustion), that
+  server is recorded as crashed. The other workers are still awaited, and the
+  loopback host poweroff still runs.
+- **Single-UPS `ups.energy` is rejected instead of silently ignored.** Per-UPS
+  energy overrides work only in list form; the legacy dict form now fails
+  validation and points to the top-level `energy:` section.
+- **Older redundancy callbacks keep working.** A `local_shutdown_callback`
+  that accepts only the reason is still called (without the progress
+  tracker).
 - **Group energy cost gaps no longer read as kWh gaps.** A member with
   `cost_per_kwh: null` now sets `costPartial` on the redundancy-group energy
   block (dashboard hint on the cost row) instead of the kWh `partial` badge.

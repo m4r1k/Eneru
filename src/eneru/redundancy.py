@@ -16,6 +16,7 @@ executor idempotent; the in-memory ``_lock`` + ``_shutdown_done`` pair
 catches concurrent calls inside one process.
 """
 
+import inspect
 import os
 import threading
 import time
@@ -41,6 +42,18 @@ from eneru.shutdown.progress import ShutdownProgress
 from eneru.shutdown.vms import VMShutdownMixin
 from eneru.state import MonitorState
 from eneru.utils import sanitize_name
+
+
+def _accepts_keyword(func: Optional[Callable[..., Any]], name: str) -> bool:
+    """True when ``func`` accepts keyword ``name`` (or ``**kwargs``)."""
+    if func is None:
+        return False
+    try:
+        params = inspect.signature(func).parameters.values()
+    except (TypeError, ValueError):
+        return True  # uninspectable callable: keep the current contract
+    return any(p.name == name or p.kind is inspect.Parameter.VAR_KEYWORD
+               for p in params)
 
 
 def _sanitize(name: str) -> str:
@@ -161,6 +174,10 @@ class RedundancyGroupExecutor(
         # prevent the per-UPS path and this redundancy path from
         # double-firing the local poweroff command.
         self._local_shutdown_callback = local_shutdown_callback
+        # Older callbacks take only the reason; pass the progress tracker only
+        # to callbacks that accept it so a legacy callback still powers off.
+        self._callback_takes_progress = _accepts_keyword(
+            local_shutdown_callback, "progress")
 
         self._lock = threading.Lock()
         self._shutdown_done = False
@@ -565,9 +582,12 @@ class RedundancyGroupExecutor(
                 # a successful host poweroff may never return to this thread.
                 progress.phase_finish("local-poweroff", detail="handoff delivered")
                 try:
-                    handoff_state = self._local_shutdown_callback(
-                        f"redundancy:{self._group.name}", progress=progress,
-                    )
+                    reason = f"redundancy:{self._group.name}"
+                    if self._callback_takes_progress:
+                        handoff_state = self._local_shutdown_callback(
+                            reason, progress=progress)
+                    else:
+                        handoff_state = self._local_shutdown_callback(reason)
                 except Exception:
                     progress.phase_finish(
                         "local-poweroff", "failed", "coordinator callback failed")

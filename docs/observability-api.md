@@ -55,9 +55,10 @@ object per finished remote: the final shutdown command's `exitCode` (`null` when
 it never ran, e.g. dry-run), its combined stdout/stderr `response`, and the raw
 `error` / `preCommandsError` text. Those strings pass a best-effort credential
 redaction (`key=value`, `key: value`, `--flag value`, JSON keys, URL userinfo,
-`Authorization` headers) and are capped at the last 8,000 characters. Output of a
-remote that timed out is kept even when it arrives after the deadline. The dashboard shows them in a pop-up when
-you click a remote's result badge on the Shutdown tab.
+`Authorization` headers) and are capped at the last 8,000 characters. Output of
+a remote that timed out is kept even when it arrives after the deadline. The
+dashboard shows this detail in a pop-up when you click a remote's result badge
+on the Shutdown tab.
 
 The API is disabled by default. When enabled, the default bind address is localhost. If you set `api.bind` to a non-loopback address (e.g. `0.0.0.0`) **without** enabling authentication, Eneru warns at startup: `/api/v1/config` returns configured server hostnames and presence flags, so anyone who can reach the socket can read that. Keep the API behind SSH, a local reverse proxy, a trusted network boundary, or enable `api.auth`.
 

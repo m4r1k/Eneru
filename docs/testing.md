@@ -257,7 +257,7 @@ reload, or shutdown. See the `dashboard-preview` skill
 |------|----------|
 | Config loading and validation | YAML parsing, defaults, enum validation, multi-UPS inheritance (including per-UPS energy tariff/nominal-watt overrides, explicit-null clearing, single-error unknown-key reporting, and oversized-number rejection), local ownership, loopback delegation config shape, redundancy rules |
 | Monitor state machine | OL/OB transitions, one-time warning when configured `nominal_power` exceeds the reported watt rating, self-test power attribution and continuing-OB reclassification, failed-test latch and delayed later-outage trigger re-arming after a successful unknown-status interval, FSD, failsafe, shutdown trigger order, dry-run behavior |
-| Shutdown mixins | VMs, containers, compose files, filesystem sync and unmounts, remote SSH phases (including final-command exit code/response capture for regular and loopback remotes), remote pre-shutdown action rendering, loopback delegate bracketing (Phase A pre-actions → regulars → Phase C poweroff), full-lifecycle loopback progress, partial-drain failure reporting, exception isolation across phases, dry-run + per-server notification paths |
+| Shutdown mixins | VMs, containers, compose files, filesystem sync and unmounts, remote SSH phases (including final-command exit code/response capture for regular and loopback remotes, and worker-start failures that still reach the loopback poweroff), remote pre-shutdown action rendering, loopback delegate bracketing (Phase A pre-actions → regulars → Phase C poweroff), full-lifecycle loopback progress, partial-drain failure reporting, exception isolation across phases, dry-run + per-server notification paths |
 | CLI inspection vs runtime | `python -m eneru validate` shutdown-sequence tree, `python -m eneru remote list` ORDER + last-known HEALTH columns, `python -m eneru shutdown remote` drill, container legacy-path rewrite — all partition `is_host_loopback` delegates out of `compute_effective_order` and invoke `_prepare_runtime_config` / `_load_config` so the inspection output matches what the daemon would execute |
 | Multi-UPS coordinator | Group routing, `is_local`, drain policy, local shutdown locking, trigger-specific progress reasons, shared poweroff outcomes for concurrent handoffs (including owner failure), positional startup-event compatibility, signal handling |
 | Redundancy runtime | Quorum evaluation, advisory triggers, connection-grace handling, idempotent group execution, aggregate member telemetry with configured watts overriding reported ratings, exact group plans, and live phase/remote progress snapshots including coordinator-callback failure |
@@ -331,7 +331,7 @@ The scenario files simulate online, on-battery, neutral/unknown, low-battery, FS
 
 ### E2E test inventory
 
-The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 63 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
+The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 64 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
 
 | Test | Group | What it proves |
 |------|-------|----------------|

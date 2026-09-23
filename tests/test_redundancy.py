@@ -1460,6 +1460,32 @@ class TestLocalShutdownCallback:
             "succeeded" if handoff_state == "pending" else handoff_state)
 
     @pytest.mark.unit
+    def test_legacy_reason_only_callback_still_fires(self, tmp_path: Path):
+        # A callback written before the progress kwarg existed must still be
+        # called (without it) so the local host is powered off.
+        calls = []
+        group = _redundancy_group(name="rack-local", is_local=True)
+        ex = RedundancyGroupExecutor(
+            group, base_config=_base_config(tmp_path=tmp_path),
+            local_shutdown_callback=lambda reason: calls.append(reason),
+        )
+        ex.shutdown(reason="quorum lost")
+        assert calls == ["redundancy:rack-local"]
+
+    @pytest.mark.unit
+    def test_accepts_keyword_helper(self):
+        from eneru.redundancy import _accepts_keyword
+
+        assert _accepts_keyword(lambda r, progress=None: r, "progress")
+        assert _accepts_keyword(lambda r, **kw: r, "progress")
+        assert not _accepts_keyword(lambda r: r, "progress")
+        assert not _accepts_keyword(None, "progress")
+        # Builtins without a signature keep the current (keyword) contract.
+        with patch("eneru.redundancy.inspect.signature",
+                   side_effect=ValueError("no signature")):
+            assert _accepts_keyword(print, "progress")
+
+    @pytest.mark.unit
     def test_callback_exception_marks_redundancy_progress_failed(
             self, tmp_path: Path) -> None:
         group = _redundancy_group(name="rack-local", is_local=True)

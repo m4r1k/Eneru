@@ -619,13 +619,29 @@ class RemoteShutdownMixin:
                 daemon=True,
             )
             thread_generations[t] = generation
-            t.start()
+            try:
+                t.start()
+            except Exception as exc:
+                # e.g. "can't start new thread" under resource exhaustion.
+                # Record it and keep going: workers already started are still
+                # joined below, and the caller still reaches the loopback
+                # poweroff (Phase C) instead of aborting the whole phase.
+                display = server.name or server.host
+                self._log_message(
+                    f"  ❌  Could not start remote shutdown worker for {display}: {exc}"
+                )
+                failed = default_result(server, error=str(exc), crashed=True)
+                self._track_remote_finish(failed, generation)
+                with lock:
+                    results[t] = failed
             threads.append(t)
 
         # Deadline-based join: cap total wait at max_timeout regardless of
         # how many threads are stuck. Per-thread join() with the same
         # max_timeout would stack to N × max_timeout in the worst case.
         for t in threads:
+            if t.ident is None:
+                continue  # never started; its failure is already recorded
             remaining = max(0.0, deadline - time.monotonic())
             t.join(timeout=remaining)
 

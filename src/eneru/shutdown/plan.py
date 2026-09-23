@@ -133,8 +133,16 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
     regulars = [s for s in enabled_servers if s.is_host_loopback is not True]
 
     def _remote_step(s, note, role="shutdown"):
-        bits = [f"{(s.user + '@') if s.user else ''}{s.host}",
-                (s.shutdown_command or "shutdown") if reveal_commands else hidden]
+        if not reveal_commands:
+            what = hidden
+        elif role == "pre-actions":
+            # This row runs the pre_shutdown_commands, not the poweroff.
+            what = "; ".join(
+                (c.command or c.action or "?")
+                for c in (getattr(s, "pre_shutdown_commands", None) or []))
+        else:
+            what = s.shutdown_command or "shutdown"
+        bits = [f"{(s.user + '@') if s.user else ''}{s.host}", what]
         if getattr(s, "command_timeout", None):
             bits.append(f"timeout {s.command_timeout}s")
         if note:
@@ -194,10 +202,11 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
     # 7) Terminal step — coordinator handoff, or the local host poweroff.
     handoff_on = False
     if coordinator_mode:
-        # The coordinator performs the single host poweroff — but that is a
-        # LOCAL-ownership action. A non-local (monitoring-only) group must NOT
-        # show a host-poweroff handoff: losing a UPS that doesn't power this host
-        # triggers nothing here. Gate it exactly like the other local phases.
+        # The coordinator performs the single host poweroff — a LOCAL-ownership
+        # action, so by default only a local group shows the handoff: losing a
+        # UPS that doesn't power this host triggers nothing here. Callers pass
+        # ``coordinator_handoff`` to override that from the runtime's real
+        # decision (e.g. local_shutdown.trigger_on: any with no local group).
         requested_handoff = (
             is_local if coordinator_handoff is None else coordinator_handoff)
         handoff_on = bool(requested_handoff and not delegated)

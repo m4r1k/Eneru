@@ -12,8 +12,9 @@ Integration contract (deliberately explicit):
 - Power for an interval = the power at its START sample, held for ``dt``
   (left-Riemann; periodic power readings are "the draw until the next poll").
   Power is ``ups.realpower`` when reported. Otherwise load is multiplied by,
-  in order, ``ups.realpower.nominal`` (W), configured nominal watts, or
-  ``ups.power.nominal`` (VA, last-resort estimate).
+  in order, configured nominal watts (the operator's override),
+  ``ups.realpower.nominal`` (W), or ``ups.power.nominal`` (VA, last-resort
+  estimate).
 - Energy(interval) = ``power_W * dt_h / 1000``. ``dt`` is capped: a gap larger
   than ``gap_factor`` x the expected sample interval means the daemon was down
   / data is missing, so that interval is skipped and the window marked partial

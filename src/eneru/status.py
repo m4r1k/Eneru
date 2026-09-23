@@ -150,6 +150,11 @@ def _energy_for_monitor(monitor: Any):
             return cached[1]
     block = _energy_block_uncached(store, cfg)
     with _energy_cache_lock:
+        # A reload changes the config part of the key; drop expired entries so
+        # superseded keys don't pile up in a long-running daemon.
+        for key in [k for k, (expires, _) in _energy_cache.items()
+                    if expires <= now_mono]:
+            del _energy_cache[key]
         _energy_cache[cache_key] = (now_mono + _ENERGY_CACHE_TTL_SECONDS, block)
     return block
 

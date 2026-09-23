@@ -2415,6 +2415,13 @@ class ConfigLoader:
             elif isinstance(ups_raw, dict):
                 # Legacy dict form: a single UPS entry keyed directly under `ups`.
                 _sweep_ups_entry("ups", ups_raw)
+                # Per-UPS energy overrides exist only in list form; the legacy
+                # parser would silently drop them, so say where it belongs.
+                if "energy" in ups_raw:
+                    messages.append(
+                        "ERROR: ups.energy is only supported in the list form "
+                        "(ups: - name: ...). In the single-UPS form, set these "
+                        "keys in the top-level energy: section instead.")
             groups_raw = raw_data.get("redundancy_groups", []) or []
             if isinstance(groups_raw, list):
                 for idx, entry in enumerate(groups_raw):

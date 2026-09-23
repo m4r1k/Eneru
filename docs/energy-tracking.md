@@ -43,9 +43,11 @@ global-only.
 A global `nominal_power` applies to every UPS that doesn't set its own, and
 it overrides each one's reported `ups.realpower.nominal`. In a mixed fleet, set
 the rating per UPS (or leave the global `null`) so a correct NUT rating isn't
-replaced by another unit's value. If a configured value is **above** the rating
-the UPS reports, Eneru logs one warning, because that is usually a VA figure or
-a typo. A lower value is treated as deliberate and accepted silently.
+replaced by another unit's value. If a configured value is **above** the UPS's
+reported `ups.realpower.nominal`, Eneru logs one warning, because that is
+usually a VA figure or a typo. A lower value is treated as deliberate and
+accepted silently. UPSes that report no watt rating (only VA, or nothing) are
+not checked.
 
 ```yaml
 energy:

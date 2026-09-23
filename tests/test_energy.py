@@ -95,10 +95,12 @@ class TestPowerSample:
 
     @pytest.mark.unit
     def test_invalid_reported_ratings_fall_through(self):
+        # Invalid ratings come first, so the valid VA rating is only reached
+        # if both earlier candidates are rejected.
         assert power_sample_w(
-            None, 50.0, float("inf"),
+            None, 50.0, 600.0,
             real_power_nominal=0.0,
-            nominal_fallback=600.0,
+            nominal_fallback=float("inf"),
         ) == (300.0, True)
 
 

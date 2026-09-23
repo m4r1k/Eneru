@@ -771,7 +771,8 @@ if ! curl -fsS "$UPS_PLAN_URL" > /tmp/test43-plan.json; then
   echo "FAIL: per-UPS shutdown plan endpoint did not respond"
   exit 1
 fi
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply.dev
+# apply_scenario blocks until upsd serves the new state (no reload race).
+apply_scenario low-battery
 UPS_PROGRESS_SEEN=false
 for _ in $(seq 1 30); do
   if curl -fsS "$UPS_PROGRESS_URL" > /tmp/test43-progress.json 2>/dev/null && \
@@ -806,9 +807,13 @@ done
 if [ "$UPS_PROGRESS_SEEN" != true ]; then
   echo "FAIL: per-UPS terminal shutdown progress was not published"
   cat /tmp/test43-progress.json /tmp/test43-daemon.log 2>/dev/null || true
+  # Don't leak the low-battery state into the next test in this group.
+  kill "$DAEMON_PID" 2>/dev/null || true
+  trap - EXIT
+  apply_scenario online-charging
   exit 1
 fi
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+apply_scenario online-charging
 
 kill "$DAEMON_PID" 2>/dev/null || true
 wait "$DAEMON_PID" 2>/dev/null || true

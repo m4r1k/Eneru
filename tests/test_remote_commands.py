@@ -1959,3 +1959,59 @@ class TestRemoteCommandOutputCapture:
             result = live_monitor._shutdown_remote_server(self._server())
         runner.assert_not_called()
         assert result.exit_code is None and result.response == ""
+
+
+class TestRemoteWorkerStartFailure:
+    """A worker thread that can't start (resource exhaustion) is recorded as
+    crashed; other workers still run and the loopback poweroff still fires."""
+
+    @pytest.fixture
+    def live_monitor(self, minimal_config, tmp_path):
+        minimal_config.logging.state_file = str(tmp_path / "state")
+        minimal_config.logging.battery_history_file = str(tmp_path / "history")
+        minimal_config.logging.shutdown_flag_file = str(tmp_path / "flag")
+        minimal_config.logging.file = None
+        minimal_config.behavior.dry_run = False
+        monitor = UPSGroupMonitor(minimal_config)
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+        monitor._notification_worker = MagicMock()
+        monitor._send_notification = MagicMock()
+        return monitor
+
+    @pytest.mark.unit
+    def test_start_failure_is_recorded_and_phase_c_still_runs(self, live_monitor):
+        from eneru.config import RemoteServerConfig
+        import threading as real_threading
+
+        nas = RemoteServerConfig(name="nas", host="10.0.0.2", user="root",
+                                 enabled=True, shutdown_command="poweroff")
+        web = RemoteServerConfig(name="web", host="10.0.0.3", user="root",
+                                 enabled=True, shutdown_command="poweroff")
+        host = RemoteServerConfig(name="host", host="127.0.0.1", user="root",
+                                  enabled=True, is_host_loopback=True,
+                                  shutdown_command="poweroff")
+        live_monitor.config.ups_groups[0].remote_servers = [nas, web, host]
+        sent = []
+
+        class FlakyThread(real_threading.Thread):
+            def start(self):
+                if self.name.endswith("nas"):
+                    raise RuntimeError("can't start new thread")
+                super().start()
+
+        def fake_run(server, command, timeout, desc, **kwargs):
+            sent.append(server.host)
+            return True, ""
+
+        with patch("eneru.shutdown.remote.threading.Thread", FlakyThread), \
+             patch.object(live_monitor, "_run_remote_command", side_effect=fake_run):
+            results = live_monitor._shutdown_remote_servers()
+
+        by_host = {r.host: r for r in results}
+        assert by_host["10.0.0.2"].crashed is True
+        assert "can't start new thread" in by_host["10.0.0.2"].error
+        assert by_host["10.0.0.3"].shutdown_sent is True
+        # The host poweroff (Phase C) still ran, after the peer that started.
+        assert by_host["127.0.0.1"].shutdown_sent is True
+        assert sent.index("10.0.0.3") < sent.index("127.0.0.1")
