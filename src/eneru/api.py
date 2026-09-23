@@ -1204,14 +1204,18 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 group = (mon.config.ups_groups[0]
                          if getattr(mon.config, "ups_groups", None) else None)
                 is_local = group.is_local if group is not None else True
-                all_groups = getattr(self.api_config, "ups_groups", []) or []
-                coordinator_handoff = (
-                    is_local
-                    or (
-                        self.api_config.local_shutdown.trigger_on == "any"
-                        and not any(item.is_local for item in all_groups)
+                # Prefer the running monitor's own flag: a reloaded api_config
+                # can drift from the restart-only local_shutdown it started with.
+                coordinator_handoff = getattr(mon, "_coordinator_handoff", None)
+                if coordinator_handoff is None:
+                    all_groups = getattr(self.api_config, "ups_groups", []) or []
+                    coordinator_handoff = (
+                        is_local
+                        or (
+                            self.api_config.local_shutdown.trigger_on == "any"
+                            and not any(item.is_local for item in all_groups)
+                        )
                     )
-                )
                 plan = build_shutdown_plan(
                     mon.config, is_local=is_local,
                     delegated=bool(getattr(mon, "_uses_loopback_delegate", False)),

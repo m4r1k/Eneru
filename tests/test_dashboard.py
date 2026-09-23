@@ -1103,6 +1103,7 @@ def test_dashboard_rc11_surfaces(minimal_config):
     assert "function shutdownPlanTargets" in js
     assert "function refreshShutdownProgress" in js
     assert 'setInterval(refreshShutdownProgress, 1000)' in js
+    assert "document.hidden || activeTab !== \"shutdown\"" in js
     assert '"/api/v1/redundancy-groups/"' in js
     assert ".sd-state-running" in css and ".sd-progress" in css
     for state, color in (("ok", "ok"), ("warn", "warn"),
@@ -1119,6 +1120,7 @@ def test_dashboard_rc11_surfaces(minimal_config):
     assert 'const SCOPE_GROUP = "redundancy:"' in js
     assert 'text: "Redundancy · " + group.name' in js
     assert 'group.name + " · group total"' in js
+    assert "en.costPartial" in js
     assert 'hintedRow("Failover load"' in js
     # Battery: per-term breakdown + score trend graph (new history endpoint).
     assert "BH_TERM_LABELS" in js and "function renderBatteryHealthGraph" in js

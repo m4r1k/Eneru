@@ -231,8 +231,8 @@ def apply_reload(primary: Config, monitor_configs: List[Config],
             # servers, ...) is captured by the shutdown path at run time and is
             # reported as restart-required.
             if replace(grp, triggers=ng.triggers, nut_control=ng.nut_control,
-                        battery_health=ng.battery_health,
-                        self_test=ng.self_test, energy=ng.energy) != ng:
+                       battery_health=ng.battery_health,
+                       self_test=ng.self_test, energy=ng.energy) != ng:
                 _add(restart, f"ups_groups:{grp.ups.name}")
 
     return {"applied": applied, "restartRequired": restart,

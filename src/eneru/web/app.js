@@ -1233,7 +1233,11 @@ function energyRows(en) {
   }
   if (energyCostConfigured(en)) {
     // Configured but no kWh yet -> "calculating…", not a blunt "unknown".
-    rows.push(detailRow("Today cost", en.todayCostFormatted || "calculating…"));
+    const todayCost = en.todayCostFormatted || "calculating…";
+    rows.push(en.costPartial
+      ? hintedRow("Today cost", todayCost,
+        "Only members with cost_per_kwh configured are included.")
+      : detailRow("Today cost", todayCost));
     if (en.monthKwh != null) {
       rows.push(detailRow("Month cost", en.monthCostFormatted || "calculating…"));
     }
@@ -4050,7 +4054,7 @@ function shutdownEndpoint(target, suffix) {
 }
 
 async function refreshShutdownProgress() {
-  if (activeTab !== "shutdown" || _sdProgressRefreshing) return;
+  if (document.hidden || activeTab !== "shutdown" || _sdProgressRefreshing) return;
   const sections = Array.from(document.querySelectorAll(".sd-plan[data-progress-url]"));
   if (!sections.length) return;
   _sdProgressRefreshing = true;

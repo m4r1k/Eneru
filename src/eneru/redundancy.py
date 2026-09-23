@@ -585,6 +585,11 @@ class RedundancyGroupExecutor(
                 progress.phase_skip("local-poweroff", "non-local group")
             progress.finish(overall_state)
         except Exception as e:
+            # Close any phase the exception interrupted so the dashboard
+            # doesn't show it "running" under a failed run.
+            for phase in progress.snapshot().get("phases", []):
+                if phase.get("state") == "running":
+                    progress.phase_finish(phase.get("id", ""), "failed")
             progress.finish("failed")
             self._log_message(
                 f"❌  Redundancy group '{self._group.name}' shutdown error: {e}"

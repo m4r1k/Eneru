@@ -1559,6 +1559,30 @@ class TestLocalShutdownCallback:
             "redundancy:rack-local", progress=ex._shutdown_progress)
 
 
+    @pytest.mark.unit
+    def test_unexpected_error_closes_running_phase(self, tmp_path: Path):
+        # An error escaping mid-phase must not leave that phase "running"
+        # under a failed run on the dashboard.
+        group = _redundancy_group(
+            name="rack-remote",
+            remote_servers=[RemoteServerConfig(
+                name="nas", host="10.0.0.2", user="root", enabled=True)],
+        )
+        ex = RedundancyGroupExecutor(
+            group, base_config=_base_config(tmp_path=tmp_path))
+        # A malformed result makes the success check raise while "remote"
+        # is still running.
+        ex._shutdown_remote_servers = lambda: [object()]
+
+        ex.shutdown(reason="quorum lost")
+
+        progress = ex._shutdown_progress.snapshot()
+        remote = next(
+            phase for phase in progress["phases"] if phase["id"] == "remote")
+        assert progress["state"] == "failed"
+        assert remote["state"] == "failed"
+
+
 class TestExecutorLogging:
     """The executor satisfies the shutdown-mixin logging contract."""
 

@@ -504,7 +504,26 @@ class TestRedundancyGroupStatus:
         assert energy["todayLabel"] == "2026-09-23"
         assert energy["estimated"] is True
         assert energy["partial"] is True
+        assert energy["costPartial"] is True
         assert row["shutdownProgress"]["reason"] == "quorum lost"
+
+    @pytest.mark.unit
+    def test_group_energy_cost_gap_is_not_kwh_partial(self):
+        from eneru.status import _aggregate_group_energy
+
+        member = {"todayKwh": 1.0, "monthKwh": 2.0, "yearKwh": 3.0,
+                  "estimated": False, "partial": False}
+        rows = [
+            {"energy": dict(member, todayCost=0.1, monthCost=0.2,
+                            yearCost=0.3)},
+            {"energy": dict(member)},  # cost_per_kwh: null on this member
+        ]
+
+        block = _aggregate_group_energy(rows, Config())
+
+        assert block["partial"] is False
+        assert block["costPartial"] is True
+        assert block["todayKwh"] == 2.0
 
     @pytest.mark.unit
     def test_redundancy_load_uses_inherited_and_per_ups_configured_watts(self):

@@ -159,10 +159,10 @@ class UPSGroupMonitor(
                  log_prefix: str = "",
                  notification_worker: Optional[NotificationWorker] = None,
                  logger: Optional[UPSLogger] = None,
-                  state_file_suffix: str = "",
-                  in_redundancy_group: bool = False,
-                  coordinator_startup_event: Optional[Tuple[str, str]] = None,
-                  *, coordinator_handoff: Optional[bool] = None):
+                 state_file_suffix: str = "",
+                 in_redundancy_group: bool = False,
+                 coordinator_startup_event: Optional[Tuple[str, str]] = None,
+                 *, coordinator_handoff: Optional[bool] = None):
         self.config = config
         self.state = MonitorState()
         self._shutdown_progress = ShutdownProgress("ups", config.ups.name)
@@ -1851,9 +1851,9 @@ class UPSGroupMonitor(
             # if a Phase-A drain crashed. Surface the partial drain failure as a
             # warning but still record completion + write the marker below.
             # An ordinary pre-shutdown command that exits non-zero increments
-            # pre_commands.failed WITHOUT setting crashed/error, so it leaves
-            # r.success True; include that counter (cubic P2) or the partial-
-            # drain signal would be lost for exactly that case.
+            # pre_commands.failed WITHOUT setting crashed/error. r.success now
+            # accounts for it too; the explicit counter check is kept (cubic
+            # P2) so the partial-drain signal never depends on that coupling.
             def _drain_detail(r):
                 if r.error:
                     return r.error

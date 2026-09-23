@@ -446,6 +446,7 @@ def _aggregate_group_energy(member_rows: List[dict], config: Config) -> Optional
         "estimated": any(bool(energy.get("estimated")) for energy in available),
         "partial": len(available) != len(member_rows)
         or any(bool(energy.get("partial")) for energy in available),
+        "costPartial": False,
     }
     from eneru.energy import format_cost
     for kwh_key, cost_key, formatted_key in (
@@ -466,7 +467,9 @@ def _aggregate_group_energy(member_rows: List[dict], config: Config) -> Optional
             block[formatted_key] = format_cost(
                 total, currency, config.energy.cost_format)
             if len(known_cost) != len(member_rows):
-                block["partial"] = True
+                # Cost gaps (e.g. a member with cost_per_kwh: null) are not kWh
+                # data gaps; keep them off the energy "partial" badge.
+                block["costPartial"] = True
     first = available[0]
     for key in ("todayLabel", "monthLabel", "yearLabel", "todayStart",
                 "monthStart", "yearStart"):

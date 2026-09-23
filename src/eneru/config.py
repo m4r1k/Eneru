@@ -1905,11 +1905,11 @@ class ConfigLoader:
     @classmethod
     def _parse_multi_ups(cls, ups_list: list,
                           global_triggers: TriggersConfig,
-                           global_nut_control: "NutControlConfig" = None,
-                           global_battery_health: "BatteryHealthConfig" = None,
-                           global_self_test: "SelfTestConfig" = None,
-                           global_energy: "EnergyConfig" = None,
-                           ) -> List[UPSGroupConfig]:
+                          global_nut_control: "NutControlConfig" = None,
+                          global_battery_health: "BatteryHealthConfig" = None,
+                          global_self_test: "SelfTestConfig" = None,
+                          global_energy: "EnergyConfig" = None,
+                          ) -> List[UPSGroupConfig]:
         """Parse multi-UPS list format into UPSGroupConfig list."""
         groups = []
         for entry in ups_list:

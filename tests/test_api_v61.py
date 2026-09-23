@@ -384,6 +384,12 @@ class TestShutdownPlanEndpoint:
         assert handoff["id"] == "local-poweroff"
         assert handoff["enabled"] is True
 
+        # The running monitor's flag wins over the (reloadable) API config.
+        mon._coordinator_handoff = False
+        status, _, payload = h._route()
+        assert status == 200
+        assert payload["plan"]["phases"][-1]["enabled"] is False
+
     @pytest.mark.unit
     def test_ups_shutdown_progress_route(self):
         from types import SimpleNamespace

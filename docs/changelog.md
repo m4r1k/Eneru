@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Group energy cost gaps no longer read as kWh gaps.** A member with
+  `cost_per_kwh: null` now sets `costPartial` on the redundancy-group energy
+  block (dashboard hint on the cost row) instead of the kWh `partial` badge.
+- **Redundancy shutdown errors close the running phase.** An unexpected
+  exception marks the interrupted phase `failed` instead of leaving it
+  `running` under a failed run.
+- **Shutdown progress polling pauses in background tabs**, and the UPS plan
+  endpoint reads the running monitor's coordinator-handoff flag.
+
 ## [6.2.0-rc3] - 2026-09-23
 
 ### Added
