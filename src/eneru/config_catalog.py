@@ -422,7 +422,10 @@ REMOTE_SERVER_SECTION = Section(
                "Default seconds each remote command may take.",
                _d(_RS, "command_timeout"), minimum=1),
         Option("ssh_options", "list",
-               "Extra ssh options such as `-o Port=2222`. Eneru already uses "
+               "Extra ssh options, one per item: `Port=2222` (sent as "
+               "`-o Port=2222`), `-o Port=2222`, or a flag with its value "
+               "such as `-i /root/.ssh/key` (split into two ssh arguments). "
+               "Eneru already uses "
                "StrictHostKeyChecking=accept-new (learn the host key once, "
                "refuse if it changes).", []),
         Option("parallel", "tristate",
@@ -591,19 +594,28 @@ UPS_LIST = ListSection(
     UPS_ENTRY_SECTION, tier=BASIC,
     new_item=(("name", "ups@localhost"), ("is_local", False)))
 
-def _without_depletion_window(triggers: Section) -> Section:
+# R2-14: per-UPS-only trigger settings. The redundancy evaluator
+# (health_model.assess_health) never reads them, so offering them under a
+# group would be a setting that silently does nothing.
+_PER_UPS_ONLY_TRIGGERS = ("voltage_sensitivity",
+                          "self_test_failure_shutdown_delay")
+
+
+def _redundancy_triggers(triggers: Section) -> Section:
     """TRIGGERS_SECTION for a redundancy group: the loader rejects
     ``redundancy_groups[].triggers.depletion.window`` (the drain rate is
-    computed per UPS), so the editor must not offer it."""
+    computed per UPS), and the group evaluator ignores the per-UPS-only
+    settings, so the editor must not offer any of them."""
     children = tuple(
         replace(c, children=tuple(
             o for o in c.children if o.key != "window"))
         if isinstance(c, Section) and c.key == "depletion" else c
-        for c in triggers.children)
+        for c in triggers.children
+        if c.key not in _PER_UPS_ONLY_TRIGGERS)
     return replace(triggers, children=children)
 
 
-REDUNDANCY_TRIGGERS_SECTION = _without_depletion_window(TRIGGERS_SECTION)
+REDUNDANCY_TRIGGERS_SECTION = _redundancy_triggers(TRIGGERS_SECTION)
 
 
 REDUNDANCY_SECTION = Section(

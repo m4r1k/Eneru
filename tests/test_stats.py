@@ -2495,6 +2495,29 @@ class TestEdgeCases:
             s2.close()
 
     @pytest.mark.unit
+    def test_non_finite_nut_values_are_not_stored(self, store):
+        """R2-05: NUT `battery.runtime: inf` (or nan / 1e400) is stored as
+        NULL, so /history stays valid JSON (no literal Infinity) and the
+        aggregates are not poisoned."""
+        import json
+        now = int(time.time())
+        for i, raw in enumerate(["100", "inf", "nan", "1e400"]):
+            store.buffer_sample({
+                "ups.status": "OL", "battery.charge": raw,
+                "battery.runtime": raw, "ups.load": "20",
+            }, ts=now - 100 + i)
+        store.flush()
+        rows = store.query_range("battery_runtime", now - 200, now)
+        values = [v for _ts, v in rows]
+        assert values[0] == 100
+        assert all(v is None for v in values[1:])
+        json.dumps(rows, allow_nan=False)  # raises on inf/nan
+        store.aggregate()
+        agg = store.query_range("battery_runtime", now - 3 * 86400, now,
+                                prefer_tier="agg_5min")
+        json.dumps(agg, allow_nan=False)
+
+    @pytest.mark.unit
     def test_text_fields_round_trip(self, store):
         """``status`` and ``connection_state`` survive flush -> read intact."""
         store.buffer_sample(

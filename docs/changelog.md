@@ -102,6 +102,26 @@ the dashboard, and self-tests that no longer look like outages.
 
 ### Fixed
 
+- **A clock correction no longer shuts down a redundancy group.** When NTP
+  stepped the clock forward after boot (a Pi without an RTC, a resumed VM),
+  every member looked stale at once, quorum was lost and the group's servers
+  were shut down on good mains power. Data age, connection grace and the
+  coordinator's join deadlines now run on the monotonic clock.
+- An `ssh_options` item holding a flag and its value (`"-i /root/.ssh/key"`,
+  `"-l admin"`) is split into two ssh arguments. Before, ssh read the key path
+  with a leading space and every remote shutdown failed.
+- A "Self-Test Started" notification is no longer sent for an API self-test
+  whose `upscmd` then fails.
+- The editor rejects `nan`/`inf` numbers and trims spaces around text values,
+  and no longer offers `voltage_sensitivity` or
+  `self_test_failure_shutdown_delay` under redundancy-group triggers (the group
+  ignores them). The loader rejects a non-finite depletion `critical_rate`.
+- Non-finite NUT readings (`inf`, `nan`) are no longer stored in statistics, so
+  `/history` stays valid JSON.
+- An on-battery UPS that doesn't report `battery.charge` or `battery.runtime`
+  logs that warning once every 5 minutes, not on every poll.
+- `eneru config check` warns about duplicate YAML keys (a second
+  `remote_servers:` silently replaces the first).
 - **Remote shutdown builds its SSH command like the health probe.** Split
   `ssh_options` such as `["-i", key]` or `["-p", port]` no longer make every real
   shutdown fail while remote health shows green.

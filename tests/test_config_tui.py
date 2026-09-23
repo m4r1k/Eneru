@@ -97,8 +97,16 @@ class TestHelpers:
         f = cat.Option("f", "float", "h")
         assert tui.parse_input(f, "1.5") == (True, 1.5, "")
         assert tui.parse_input(f, "abc")[0] is False
+        # R2-04: non-finite floats are refused.
+        for bad in ("nan", "inf", "-inf", "NaN"):
+            ok, _v, err = tui.parse_input(f, bad)
+            assert ok is False and "finite" in err
+        # R2-15: plain text is stripped; secrets are kept verbatim.
         s = cat.Option("s", "str", "h")
-        assert tui.parse_input(s, " hi ") == (True, " hi ", "")
+        assert tui.parse_input(s, " hi ") == (True, "hi", "")
+        assert tui.parse_input(s, "UPS@localhost ") == (True, "UPS@localhost", "")
+        pw = cat.Option("p", "secret", "h")
+        assert tui.parse_input(pw, " pw ") == (True, " pw ", "")
 
     def test_wrap_keeps_indent(self):
         lines = tui.wrap("    one two three four five six seven", 12)

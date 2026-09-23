@@ -160,6 +160,32 @@ class TestLoading:
         data, f = cc.load_raw(str(p))
         assert data is None and "mapping" in f[0].message
 
+    def test_duplicate_keys_warn_at_any_depth(self, tmp_path):
+        """R2-03: a second `remote_servers:` silently replaced the first
+        block (last wins) and every checker said OK. `config check` now
+        warns; the loader still accepts the file (the daemon keeps running)."""
+        p = tmp_path / "c.yaml"
+        p.write_text(
+            "ups:\n  name: UPS@localhost\n"
+            "remote_servers:\n  - name: nas\n    host: nas.lan\n"
+            "    user: root\n    user: admin\n"
+            "base: &b {a: 1}\n"
+            "merged:\n  <<: *b\n  a: 2\n"
+            "remote_servers:\n  - name: hv\n    host: hv.lan\n    user: root\n")
+        data, f = cc.load_raw(str(p))
+        assert data["remote_servers"][0]["name"] == "hv"  # last one wins
+        warns = [x for x in f if x.level == "warning"]
+        assert [w.message.split("`")[1] for w in warns] == [
+            "remote_servers[0].user", "remote_servers"]
+        assert "line 12" in warns[1].message
+        assert cc.duplicate_yaml_keys(tmp_path / "missing.yaml") == []
+
+    def test_no_duplicate_warning_for_clean_file(self, tmp_path):
+        p = tmp_path / "c.yaml"
+        p.write_text("ups:\n  name: UPS@localhost\nlist:\n  - {a: 1}\n  - {a: 2}\n")
+        _data, f = cc.load_raw(str(p))
+        assert not [x for x in f if x.level == "warning"]
+
     def test_build_structural_error(self):
         config, f = cc.build_config({"ups": "just-a-string"})
         assert config is None and f and f[0].level == "error"

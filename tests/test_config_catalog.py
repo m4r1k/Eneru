@@ -262,6 +262,12 @@ def test_has_tier():
     # F-126: the loader rejects depletion.window on a redundancy group, so
     # the editor doesn't offer (or explain) it there.
     (("redundancy_groups", 0, "triggers", "depletion", "window"), None),
+    # R2-14: the group evaluator never reads these; per-UPS triggers do.
+    (("redundancy_groups", 0, "triggers", "voltage_sensitivity"), None),
+    (("redundancy_groups", 0, "triggers",
+      "self_test_failure_shutdown_delay"), None),
+    (("triggers", "voltage_sensitivity"),
+     cat.child(cat.TRIGGERS_SECTION, "voltage_sensitivity").help),
     (("containers", "compose_files", 0, "stop_timeout"),
      cat.child(cat.COMPOSE_FILE_SECTION, "stop_timeout").help),
     (("notifications", "urls", 0), cat.child(cat.NOTIFICATIONS_SECTION, "urls").help),

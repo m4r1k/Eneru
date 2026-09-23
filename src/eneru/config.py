@@ -2699,7 +2699,9 @@ class ConfigLoader:
                     f">= 1, got {t.depletion.window!r}."
                 )
             rate = t.depletion.critical_rate
-            if (isinstance(rate, bool) or not isinstance(rate, (int, float))
+            # R2-04: `.nan` passes `rate <= 0` (every NaN comparison is
+            # False) and would silently disable T3; reject non-finite too.
+            if (not cls._is_number_nonbool_in_range(rate)
                     or rate <= 0):
                 messages.append(
                     f"ERROR: {label}.triggers.depletion.critical_rate must be a "

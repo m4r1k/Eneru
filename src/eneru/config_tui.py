@@ -19,6 +19,7 @@ Design:
 
 import curses
 import errno
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -175,8 +176,16 @@ def parse_input(opt: cat.Option, text: str) -> Tuple[bool, Any, str]:
             value = float(raw)
         except ValueError:
             return False, None, f"'{raw}' is not a number"
-    else:
+        # R2-04: float() accepts "nan"/"inf"; neither is a usable setting
+        # (a NaN threshold silently disables its trigger).
+        if not math.isfinite(value):
+            return False, None, f"'{raw}' is not a finite number"
+    elif opt.kind == "secret":
         value = text
+    else:
+        # R2-15: a pasted "UPS@localhost " would otherwise keep its stray
+        # space and every poll would fail. Secrets are kept verbatim.
+        value = raw
     if opt.kind in ("int", "float"):
         if opt.minimum is not None and opt.minimum_exclusive and value <= opt.minimum:
             return False, None, f"must be > {opt.minimum:g}"

@@ -197,7 +197,52 @@ def load_raw(path: str) -> Tuple[Optional[dict], List[Finding]]:
             LEVEL_ERROR, "file", f"Config root in {path} must be a YAML mapping."))
         return None, findings
     findings.append(Finding(LEVEL_OK, "file", f"YAML parsed: {path}"))
+    for dotted, line in duplicate_yaml_keys(p):
+        findings.append(Finding(
+            LEVEL_WARN, "file",
+            f"Duplicate key `{dotted}` (line {line}): only the last one is "
+            "used, the earlier block is silently ignored.",
+            "Merge the two blocks into one (e.g. one `remote_servers:` list "
+            "holding every server)."))
     return data, findings
+
+
+def duplicate_yaml_keys(path: Path) -> List[Tuple[str, int]]:
+    """Return ``(dotted.path, line)`` for every repeated mapping key.
+
+    R2-03: PyYAML keeps the LAST of two identical keys without a word, so a
+    second `remote_servers:` pasted from the docs silently drops the first
+    block's servers. The daemon keeps accepting such files (a hard error
+    would stop a running setup at its next restart); `config check` warns.
+    Merge keys (``<<``) are YAML's own override mechanism and are skipped.
+    """
+    import yaml
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            root = yaml.compose(fh, Loader=yaml.SafeLoader)
+    except Exception:
+        return []
+    found: List[Tuple[str, int]] = []
+
+    def walk(node, prefix):
+        if isinstance(node, yaml.MappingNode):
+            seen = set()
+            for key_node, value_node in node.value:
+                key = getattr(key_node, "value", None)
+                if not isinstance(key_node, yaml.ScalarNode) or key == "<<":
+                    walk(value_node, prefix)
+                    continue
+                dotted = f"{prefix}.{key}" if prefix else str(key)
+                if key in seen:
+                    found.append((dotted, key_node.start_mark.line + 1))
+                seen.add(key)
+                walk(value_node, dotted)
+        elif isinstance(node, yaml.SequenceNode):
+            for idx, item in enumerate(node.value):
+                walk(item, f"{prefix}[{idx}]")
+
+    walk(root, "")
+    return found
 
 
 def build_config(data: dict, *, path: Optional[str] = None
