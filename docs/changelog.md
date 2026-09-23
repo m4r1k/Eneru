@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.0-rc4] - 2026-09-23
+
 ### Fixed
 
 - **Group energy cost gaps no longer read as kWh gaps.** A member with
