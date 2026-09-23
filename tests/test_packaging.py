@@ -12,7 +12,6 @@ These tests catch that class of mistake before it ships.
 import re
 import importlib.util
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -141,7 +140,7 @@ class TestNfpmModuleListing:
 
 
 class TestPackageWrapper:
-    """The EL8 entry point must find future Python 3.x interpreters safely."""
+    """The package entry point refuses pre-3.9 interpreters with a clear hint."""
 
     @staticmethod
     def _load_wrapper():
@@ -152,92 +151,56 @@ class TestPackageWrapper:
         return module
 
     @pytest.mark.unit
-    def test_dynamic_interpreter_discovery_prefers_el8_python39(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_wrapper_loads_on_supported_interpreter(self) -> None:
         wrapper = self._load_wrapper()
-        for name in ("python3.9", "python3.14", "python3.15", "python3.8"):
-            candidate = tmp_path / name
-            candidate.touch(mode=0o755)
-        versions = {
-            "python3.15": "3.8\n",   # misleading executable: reject it
-            "python3.14": "3.14\n",
-            "python3.9": "3.9\n",
-        }
-        check = MagicMock(
-            side_effect=lambda argv, **_kw: versions[Path(argv[0]).name],
-        )
-        monkeypatch.setattr(wrapper.subprocess, "check_output", check)
-
-        selected = wrapper._compatible_python_on_path(str(tmp_path))
-
-        assert selected == str(tmp_path / "python3.9")
-        assert [Path(call.args[0][0]).name for call in check.call_args_list] == [
-            "python3.9",
-        ]
+        assert callable(wrapper._main)
 
     @pytest.mark.unit
-    def test_dynamic_interpreter_discovery_falls_back_to_future_python(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    def test_wrapper_rejects_old_python_without_reexec(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
     ) -> None:
-        wrapper = self._load_wrapper()
-        for name in ("python3.14", "python3.15"):
-            (tmp_path / name).touch(mode=0o755)
-        check = MagicMock(side_effect=["3.8\n", "3.14\n"])
-        monkeypatch.setattr(wrapper.subprocess, "check_output", check)
-
-        assert wrapper._compatible_python_on_path(str(tmp_path)) == str(
-            tmp_path / "python3.14"
-        )
+        import sys
+        monkeypatch.setattr(sys, "version_info", (3, 6, 8, "final", 0))
+        with pytest.raises(SystemExit) as exc:
+            self._load_wrapper()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "requires Python 3.9+" in err
+        assert "container image" in err
 
     @pytest.mark.unit
-    def test_same_version_candidate_without_runtime_deps_is_skipped(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        wrapper = self._load_wrapper()
-        custom = tmp_path / "custom"
-        packaged = tmp_path / "packaged"
-        custom.mkdir()
-        packaged.mkdir()
-        (custom / "python3.9").touch(mode=0o755)
-        (packaged / "python3.9").touch(mode=0o755)
-        check = MagicMock(side_effect=[
-            wrapper.subprocess.CalledProcessError(1, "python3.9"),
-            "3.9\n",
-        ])
-        monkeypatch.setattr(wrapper.subprocess, "check_output", check)
-
-        selected = wrapper._compatible_python_on_path(
-            f"{custom}{wrapper.os.pathsep}{packaged}"
-        )
-
-        assert selected == str(packaged / "python3.9")
-        assert "import sys, yaml" in check.call_args_list[0].args[0][2]
-
-    @pytest.mark.unit
-    def test_wrapper_reexec_argv_preserves_script_and_user_args(self) -> None:
+    def test_wrapper_has_no_el8_interpreter_discovery(self) -> None:
         source = WRAPPER.read_text()
-        assert "python3.13\", \"python3.12" not in source
-        assert "[_interp, os.path.realpath(__file__)] + sys.argv[1:]" in source
+        assert "python39" not in source
+        assert "os.execv" not in source
 
 
 class TestReleaseWorkflowContracts:
     """Static guards for distro routing and published-package smoke checks."""
 
     @pytest.mark.unit
-    def test_el8_uses_python39_for_dependencies_and_validation(self) -> None:
-        workflow = (REPO_ROOT / ".github/workflows/integration.yml").read_text()
-        assert "python3.9 -m pip install --no-deps paho-mqtt" in workflow
-        assert '[ "${{ matrix.version }}" = "8" ] && PYTHON_BIN=python3.9' in workflow
+    def test_rhel8_is_no_longer_built_or_tested(self) -> None:
+        integration = (REPO_ROOT / ".github/workflows/integration.yml").read_text()
+        release = (REPO_ROOT / ".github/workflows/release.yml").read_text()
+        for workflow in (integration, release):
+            assert "ubi8" not in workflow
+            assert "nfpm-el8.yaml" not in workflow
+            assert "eneru-el8.repo" not in workflow
 
     @pytest.mark.unit
-    def test_release_routes_el8_docs_and_requires_exact_code_version(self) -> None:
+    def test_release_keeps_frozen_el8_repo_out_of_default_metadata(self) -> None:
+        """Existing 6.1.x el8 RPMs stay on gh-pages but must never be indexed
+        into the RHEL 9/10 repo (they require the python39 module)."""
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text()
+        assert "createrepo_c --excludes='testing/*' --excludes='el8/*' ." in workflow
+        assert workflow.count("--excludes='el8/*'") == 2
+
+    @pytest.mark.unit
+    def test_release_routes_docs_and_requires_exact_code_version(self) -> None:
         workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text()
         for path in (
             "rpm/eneru.repo",
-            "rpm/el8/eneru-el8.repo",
             "rpm/testing/eneru-testing.repo",
-            "rpm/testing/el8/eneru-testing-el8.repo",
         ):
             assert path in workflow
         assert 'test "$ACTUAL" = "Eneru v${VERSION_FULL}"' in workflow

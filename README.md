@@ -120,6 +120,8 @@ sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru
 sudo dnf install eneru
 ```
 
+RPM packages support RHEL 9 and 10 (and compatible rebuilds). RHEL 8 packages ended with 6.1.x; on RHEL 8, run the container image (Docker/Podman) instead.
+
 ### Configuration
 
 ```bash

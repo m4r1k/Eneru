@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **RHEL 8 RPM packages are no longer built (breaking).** Starting with 6.2.0,
+  RPMs target RHEL 9 and 10 (and compatible rebuilds) only. RHEL 8 is in
+  maintenance support and has no python3.9 build of `ruamel.yaml`, which the
+  new `eneru config` editor needs. On RHEL 8, run the container image
+  (Docker/Podman) or stay on 6.1.x. The existing `rpm/el8` repository stays
+  published, frozen at 6.1.x. The package wrapper no longer re-execs onto
+  `python39`; on Python older than 3.9 it exits with a pointer to the
+  container image.
+
 ## [6.2.0-rc4] - 2026-09-23
 
 ### Added
