@@ -82,17 +82,17 @@ is a JSON object: `{"username": "<username>", "password": "<password>"}`.
 |---------|----------------------|---------------------|
 | `/health`, `/ready` | open | open (always) |
 | `/metrics`, `/api/v1/ups*`, `/api/v1/redundancy-groups/*`, `/history`, `/events`, `/remote-health` | open | open unless `require_for_reads` |
+| `/api/v1/config` | sanitized | sanitized (anonymous) / **extended** (authenticated) |
+| Audit rows in `/api/v1/events` (`CONTROL_*`, `CONFIG_RELOAD`, `EVENTS_DELETED`, `LOGIN_FAILURE`) | shown | hidden (anonymous) / shown (authenticated) |
+| Remote-check error text (`last_error` in `/remote-health` and in the `remoteHealth` rows of `/api/v1/ups` and `/api/v1/ups/{name}`, the loopback `lastError` in `/ready` and `/api/v1/ups`) | shown | `check failed; sign in for details` (anonymous) / full text (authenticated) |
+| `/api/v1/auth/state` | open | open (always) |
+| write endpoints (UPS control, config reload) | **hard-disabled (403)** | required (401 without a credential) |
 
 > **`/metrics` discloses topology.** Prometheus label values include UPS names
 > and other identifying detail. `/metrics` honors `require_for_reads` like the
 > other read endpoints, but if you scrape it through a proxy, put `/metrics`
 > behind the **same** auth boundary as the rest of the read API — don't expose
 > it unauthenticated just because a scraper is easier to wire up that way.
-| `/api/v1/config` | sanitized | sanitized (anonymous) / **extended** (authenticated) |
-| Audit rows in `/api/v1/events` (`CONTROL_*`, `CONFIG_RELOAD`, `EVENTS_DELETED`, `LOGIN_FAILURE`) | shown | hidden (anonymous) / shown (authenticated) |
-| Remote-check error text (`last_error` in `/remote-health`, the loopback `lastError` in `/ready` and `/api/v1/ups`) | shown | `check failed; sign in for details` (anonymous) / full text (authenticated) |
-| `/api/v1/auth/state` | open | open (always) |
-| write endpoints (UPS control, config reload) | **hard-disabled (403)** | required (401 without a credential) |
 
 "Auth disabled" always means read-only: write features cannot be reached, and enabling a control feature while auth is off is a startup error. If `api.auth.enabled` is left unset, auth activates automatically once the auth DB contains at least one user; if the DB file exists but cannot be read, Eneru fails closed and treats auth as active. See [Authentication](authentication.md) for the user/API-key model and the `eneru user` / `eneru apikey` CLI.
 

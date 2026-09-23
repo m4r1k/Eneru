@@ -99,11 +99,17 @@ echo ">>> Running: Test 12: CLI safety - bare eneru shows help"
 echo "=== Test 12: CLI Safety ==="
 
 # Bare `eneru` prints argparse help and exits 0 (cli.py main); it must
-# never start the daemon.
+# never start the daemon. `timeout` turns that regression into a FAIL
+# below (exit 124) instead of a hung job.
 set +e
-OUTPUT=$(eneru 2>&1)
+OUTPUT=$(timeout 30s eneru 2>&1)
 EXIT_CODE=$?
 set -e
+if [ "$EXIT_CODE" -eq 124 ]; then
+  echo "FAIL: bare 'eneru' did not return within 30s (daemon started?)"
+  echo "$OUTPUT"
+  exit 1
+fi
 if [ "$EXIT_CODE" -ne 0 ]; then
   echo "FAIL: bare 'eneru' exited $EXIT_CODE (expected 0)"
   echo "$OUTPUT"

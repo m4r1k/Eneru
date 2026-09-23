@@ -832,6 +832,7 @@ class TestShutdownSequence:
         # F-137: real (non-dry-run) poweroff so the order spy can see it.
         monitor.config.behavior.dry_run = False
         monitor.config.local_shutdown.enabled = True
+        monitor._bounded_sync = lambda _label: None  # no real `sync` binary
 
         # No raise: the sequence completes despite the VM step failing.
         with patch("eneru.monitor.run_command",
@@ -929,6 +930,8 @@ class TestShutdownSequence:
         monitor._sync_filesystems = lambda: None
         monitor._unmount_filesystems = lambda: None
         monitor._shutdown_remote_servers = lambda: []
+        # Final sync would run the real `sync` binary (dry_run is off).
+        monitor._bounded_sync = lambda _label: None
         monitor._send_notification = MagicMock()
         monitor._log_message = MagicMock()
         return monitor

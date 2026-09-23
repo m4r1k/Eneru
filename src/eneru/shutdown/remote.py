@@ -377,8 +377,10 @@ class RemoteShutdownMixin:
         # Phase B: non-loopback remotes (existing parallel phased path).
         # F-118: a crash here must not skip Phase C (the host poweroff), the
         # same "host always goes down" discipline Phases A and C already
-        # follow. The failure is remembered and re-raised AFTER Phase C.
+        # follow. The servers it never finished are reported as crashed rows
+        # AFTER Phase C, so callers still see the loopback's poweroff result.
         phase_b_error: Optional[BaseException] = None
+        finished_regulars: set = set()
         try:
             for key in sorted_regular_keys:
                 phase_idx += 1
@@ -390,6 +392,7 @@ class RemoteShutdownMixin:
                     )
                 regular_results.extend(
                     self._shutdown_servers_parallel(phase_servers))
+                finished_regulars.update(id(s) for s in phase_servers)
         except Exception as exc:
             self._log_message(
                 f"  ❌  Remote-server phase crashed: {exc}; continuing to the "
@@ -424,7 +427,15 @@ class RemoteShutdownMixin:
                         loopback_results[id(lb)], loopback_generations[id(lb)])
 
         if phase_b_error is not None:
-            raise phase_b_error
+            for server in regulars:
+                if id(server) not in finished_regulars:
+                    regular_results.append(RemoteShutdownResult(
+                        server=server.name or server.host,
+                        host=server.host,
+                        completed=False,
+                        error=f"remote-server phase crashed: {phase_b_error}",
+                        crashed=True,
+                    ))
 
         results: List[RemoteShutdownResult] = (
             list(loopback_results.values()) + regular_results

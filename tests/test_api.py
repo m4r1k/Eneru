@@ -3058,6 +3058,40 @@ def test_normal_requests_are_unaffected_by_the_header_deadline(minimal_config):
 
 
 @pytest.mark.unit
+@pytest.mark.timeout(30)
+def test_request_cut_off_mid_headers_is_never_dispatched(minimal_config):
+    """After the deadline shuts the read side, the stdlib parses the
+    truncated header block as complete. That half request must not reach
+    the handler: the client gets no response, only a closed connection."""
+    import socket as _socket
+    import time as _time
+    from eneru import api as api_mod
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    minimal_config.api.port = 0
+    server = EneruAPIServer(MagicMock(), minimal_config)
+    with patch.object(api_mod, "REQUEST_HEADER_DEADLINE_SECONDS", 0.5):
+        server.start()
+        try:
+            host, port = server._httpd.server_address[:2]
+            sock = _socket.create_connection((host, port), timeout=5)
+            sock.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\n")  # no blank line
+            _time.sleep(1.5)
+            data = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            sock.close()
+            assert data == b"", data[:80]
+        finally:
+            server.stop()
+
+
+@pytest.mark.unit
 def test_abort_slow_headers_tolerates_a_closed_socket():
     from eneru.api import EneruAPIHandler
     h = object.__new__(EneruAPIHandler)

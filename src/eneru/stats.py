@@ -2142,7 +2142,10 @@ class StatsStore:
                         "ORDER BY ts ASC",
                         (int(start_ts), int(end_ts)),
                     )
-                return [(int(r[0]), float(r[1])) for r in cur.fetchall()]
+                # Rows written before non-finite readings were dropped at
+                # ingest can still hold inf; never hand those to /history.
+                return [(int(r[0]), float(r[1])) for r in cur.fetchall()
+                        if math.isfinite(float(r[1]))]
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: query_range failed: {e}")
             return []

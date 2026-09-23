@@ -864,14 +864,24 @@ class TestExecutorShutdown:
 
         ex._current_owner_identity = stalling_identity
         results = []
-        t1 = threading.Thread(target=lambda: results.append(ex.shutdown("a")))
+        errors = []
+
+        def call(reason):
+            try:
+                results.append(ex.shutdown(reason))
+            except BaseException as exc:  # surface it in the main thread
+                errors.append(exc)
+
+        t1 = threading.Thread(target=call, args=("a",), daemon=True)
         t1.start()
         assert inside.wait(timeout=2)
-        t2 = threading.Thread(target=lambda: results.append(ex.shutdown("b")))
+        t2 = threading.Thread(target=call, args=("b",), daemon=True)
         t2.start()
         t1.join(timeout=10)
         t2.join(timeout=10)
 
+        assert not t1.is_alive() and not t2.is_alive()
+        assert errors == []
         assert sorted(results) == [False, True]
         logged = " ".join(c.args[0] for c in ex.logger.log.call_args_list)
         assert "suppressed" not in logged

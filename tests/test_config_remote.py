@@ -1457,7 +1457,11 @@ class TestReleaseReviewRemoteValidation:
         assert [c.use_sudo for c in cmds] == [False, None, "yes-please"]
         msgs = ConfigLoader.validate_config(config, raw_data=data)
         errors = [m for m in msgs if m.startswith("ERROR")]
-        assert len(errors) == 1 and "pre_shutdown_commands[2].use_sudo" in errors[0]
+        # Only the bad step is flagged (False and None are valid); other
+        # validators' errors don't matter here.
+        sudo_errors = [m for m in errors if "use_sudo" in m]
+        assert len(sudo_errors) == 1, errors
+        assert "pre_shutdown_commands[2].use_sudo" in sudo_errors[0]
         assert not [m for m in msgs if "unknown config key" in m]
 
     @pytest.mark.parametrize("field,value", [

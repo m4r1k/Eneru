@@ -23,7 +23,7 @@ if [ -f /tmp/host-authorized-keys ]; then
 fi
 
 # Reset state on startup
-rm -f /var/run/shutdown-triggered
+rm -f /var/run/shutdown-triggered /tmp/shutdown-invoked
 touch /var/run/server-alive
 : > /var/log/shutdown.log
 

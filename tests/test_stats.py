@@ -2507,15 +2507,30 @@ class TestEdgeCases:
                 "battery.runtime": raw, "ups.load": "20",
             }, ts=now - 100 + i)
         store.flush()
+        stored = store._conn.execute(
+            "SELECT battery_runtime, battery_charge FROM samples "
+            "WHERE ts >= ? ORDER BY ts", (now - 100,)).fetchall()
+        assert stored == [(100.0, 100.0)] + [(None, None)] * 3
         rows = store.query_range("battery_runtime", now - 200, now)
-        values = [v for _ts, v in rows]
-        assert values[0] == 100
-        assert all(v is None for v in values[1:])
+        assert [v for _ts, v in rows] == [100.0]
         json.dumps(rows, allow_nan=False)  # raises on inf/nan
         store.aggregate()
         agg = store.query_range("battery_runtime", now - 3 * 86400, now,
                                 prefer_tier="agg_5min")
         json.dumps(agg, allow_nan=False)
+
+    @pytest.mark.unit
+    def test_legacy_non_finite_rows_are_kept_out_of_history(self, store):
+        """An inf stored by an older version never reaches /history."""
+        import json
+        now = int(time.time())
+        with store._write() as conn:
+            conn.execute(
+                "INSERT INTO samples (ts, battery_runtime) VALUES (?, ?)",
+                (now - 10, float("inf")))
+        rows = store.query_range("battery_runtime", now - 200, now)
+        assert rows == []
+        json.dumps(rows, allow_nan=False)
 
     @pytest.mark.unit
     def test_text_fields_round_trip(self, store):

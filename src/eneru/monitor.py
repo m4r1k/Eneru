@@ -282,6 +282,10 @@ class UPSGroupMonitor(
         self._self_test_pending_id: Optional[int] = None
         self._self_test_poll_due_mono: Optional[float] = None
         self._self_test_outage_attributed = False
+        # A ticket that may no longer claim an on-battery interval: its
+        # attributed interval already ended, or an OB began before it
+        # could be attributed (that OB was alerted as a real outage).
+        self._self_test_no_attribution_id: Optional[int] = None
         # F-119: one log line per episode of polling past a busy control lock.
         self._upsc_lock_bypassed = False
         self._self_test_repair_done = False
@@ -3030,6 +3034,11 @@ class UPSGroupMonitor(
             # command may still fail, so neither announce the test nor pin an
             # OB on it until the issued marker appears.
             self._self_test_outage_attributed = already_attributed
+            if not already_attributed and status_has_token(
+                    ups_data.get("ups.status", ""), "OB"):
+                # This OB is handled (and alerted) as a real outage; do not
+                # relabel the rest of the interval once the marker lands.
+                self._self_test_no_attribution_id = pending_id
             return
         self._notify_self_test_start(pending_id, row.get("command", ""))
         on_battery = status_has_token(ups_data.get("ups.status", ""), "OB")
@@ -3042,11 +3051,15 @@ class UPSGroupMonitor(
             # SELF_TEST_ON_BATTERY and silence its alerts and the T5 trigger.
             self._self_test_outage_attributed = True
             store.set_meta("self_test_attributed_id", "")
+            # One battery interval per test: a new OB inside the 30 s window
+            # is a real outage.
+            self._self_test_no_attribution_id = pending_id
             return
         recent_issue = (
             time.time() - row["started_ts"] <= SELF_TEST_ATTRIBUTION_SECONDS)
-        self._self_test_outage_attributed = (
-            already_attributed or (on_battery and recent_issue))
+        self._self_test_outage_attributed = already_attributed or (
+            on_battery and recent_issue
+            and self._self_test_no_attribution_id != pending_id)
         if self._self_test_outage_attributed:
             store.set_meta("self_test_attributed_id", str(pending_id))
 

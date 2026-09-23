@@ -1379,7 +1379,8 @@ class TestLoopbackShutdownOrdering:
     ):
         """F-118: a crash in Phase B (regular remotes) must not skip Phase C.
         The loopback poweroff is still sent, its progress row is finished,
-        and the Phase B failure is re-raised afterwards."""
+        and the unfinished regulars come back as crashed rows next to the
+        loopback's result (callers need its shutdown_sent)."""
         loopback = RemoteServerConfig(
             name="host-loopback", enabled=True, host="127.0.0.1",
             user="root", is_host_loopback=True,
@@ -1397,14 +1398,41 @@ class TestLoopbackShutdownOrdering:
                 side_effect=RuntimeError("thread setup failed")), \
                 patch.object(remote_monitor, "_run_remote_command",
                              return_value=(True, "")) as run:
-            with pytest.raises(RuntimeError, match="thread setup failed"):
-                remote_monitor._shutdown_remote_servers()
+            results = remote_monitor._shutdown_remote_servers()
 
         sent = [c.args[1] for c in run.call_args_list]
         assert sent == ["shutdown -h now"]  # Phase C still ran
+        by_name = {r.server: r for r in results}
+        assert by_name["host-loopback"].shutdown_sent is True
+        assert by_name["NAS"].crashed is True
+        assert by_name["NAS"].success is False
+        assert "thread setup failed" in by_name["NAS"].error
         row = remote_monitor._shutdown_progress.snapshot()["remotes"][0]
         assert row["finishedAt"] is not None
         assert row["outcome"] == "command-sent"
+
+    @pytest.mark.unit
+    def test_phase_b_crash_keeps_results_of_finished_phases(
+        self, remote_monitor
+    ):
+        """Only servers of the crashed (and later) phases become crashed
+        rows; an earlier phase's real result is kept as is."""
+        first = RemoteServerConfig(
+            name="first", enabled=True, host="10.0.0.1", user="root",
+            shutdown_order=1)
+        second = RemoteServerConfig(
+            name="second", enabled=True, host="10.0.0.2", user="root",
+            shutdown_order=2)
+        remote_monitor.config.ups_groups[0].remote_servers = [first, second]
+        done = RemoteShutdownResult(
+            server="first", host="10.0.0.1", shutdown_sent=True)
+        with patch.object(
+                remote_monitor, "_shutdown_servers_parallel",
+                side_effect=[[done], RuntimeError("boom")]):
+            results = remote_monitor._shutdown_remote_servers()
+        assert results[0] is done
+        assert [r.server for r in results] == ["first", "second"]
+        assert results[1].crashed is True and not results[1].completed
 
     @pytest.mark.unit
     def test_loopback_phase_c_exception_does_not_skip_other_loopbacks(

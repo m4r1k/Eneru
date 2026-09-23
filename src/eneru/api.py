@@ -375,6 +375,34 @@ def _redact_loopback_error(payload: Dict[str, Any]) -> None:
         delegate["lastError"] = REDACTED_REMOTE_ERROR
 
 
+def _redact_remote_rows(rows: Any) -> Any:
+    """F-110: copies of remote-health rows with last_error replaced."""
+    if not isinstance(rows, list):
+        return rows
+    return [dict(r, last_error=REDACTED_REMOTE_ERROR)
+            if isinstance(r, dict) and r.get("last_error") else r
+            for r in rows]
+
+
+def _redact_ups_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """A copy of one UPS/redundancy status row with its embedded
+    remote-health errors redacted."""
+    if not row.get("remoteHealth"):
+        return row
+    return dict(row, remoteHealth=_redact_remote_rows(row["remoteHealth"]))
+
+
+def _redact_status_payload(payload: Dict[str, Any]) -> None:
+    """F-110 for /api/v1/ups: the loopback summary plus every remote-health
+    row nested under ``ups[]`` and ``redundancyGroups[]``."""
+    _redact_loopback_error(payload)
+    for key in ("ups", "redundancyGroups"):
+        rows = payload.get(key)
+        if isinstance(rows, list):
+            payload[key] = [_redact_ups_row(r) if isinstance(r, dict) else r
+                            for r in rows]
+
+
 class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
     """ThreadingHTTPServer with a hard cap on concurrent connections.
 
@@ -665,6 +693,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             timer.daemon = True
             timer.start()
         self._header_timer = timer
+        self._header_deadline_hit = False
         try:
             super().handle_one_request()
         finally:
@@ -676,9 +705,16 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         timer = getattr(self, "_header_timer", None)
         if timer is not None:
             timer.cancel()  # headers are in: the handler may take its time
+        if getattr(self, "_header_deadline_hit", False):
+            # The read side was shut down mid-headers, so the stdlib parsed
+            # a truncated header block as complete (and reset
+            # close_connection). Never dispatch that request.
+            self.close_connection = True
+            return False
         return ok
 
     def _abort_slow_headers(self) -> None:
+        self._header_deadline_hit = True
         self.close_connection = True
         try:
             self.connection.shutdown(socket.SHUT_RD)
@@ -1215,7 +1251,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/ups":
             payload = collect_status(self.api_source)
             if self._redact_for(principal):
-                _redact_loopback_error(payload)
+                _redact_status_payload(payload)
             return 200, "application/json", payload
 
         if path.startswith("/api/v1/redundancy-groups/"):
@@ -1283,6 +1319,8 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 row = find_status(payload, ups_name)
                 if row is None:
                     return 404, "application/json", self._not_found("UPS not found")
+                if self._redact_for(principal):
+                    row = _redact_ups_row(row)
                 return 200, "application/json", row
             if len(parts) == 6 and parts[5] == "history":
                 metric = (qs.get("metric") or ["charge"])[0]

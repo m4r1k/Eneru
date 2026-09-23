@@ -223,8 +223,14 @@ def duplicate_yaml_keys(path: Path) -> List[Tuple[str, int]]:
     except Exception:
         return []
     found: List[Tuple[str, int]] = []
+    visited = set()
 
     def walk(node, prefix):
+        # An alias reuses its anchor's node (a recursive anchor even points
+        # back at an ancestor): walk each collection node once.
+        if id(node) in visited:
+            return
+        visited.add(id(node))
         if isinstance(node, yaml.MappingNode):
             seen = set()
             for key_node, value_node in node.value:

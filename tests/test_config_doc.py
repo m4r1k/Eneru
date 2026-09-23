@@ -1243,8 +1243,28 @@ def test_relative_or_bogus_backup_dir_is_ignored(tmp_path):
     assert ConfigDocument._write_backup(p, 123).parent == tmp_path
 
 
-
 # --- F-107: no writing through a symlink swapped in after load -------------
+
+@pytest.mark.unit
+def test_swap_while_loading_cannot_retarget_the_save(tmp_path):
+    """The owner swaps the path for a symlink between root resolving it and
+    opening it: the load refuses (O_NOFOLLOW) instead of reading the
+    swapped-in file and adopting it as the save baseline."""
+    p = tmp_path / "config.yaml"
+    p.write_text("a: 1\n")
+    victim = tmp_path / "authorized_keys"
+    victim.write_text("keep: 1\n")
+    real_os_open = os.open
+
+    def swapping_open(file, *args, **kwargs):
+        p.unlink()
+        p.symlink_to(victim)
+        return real_os_open(file, *args, **kwargs)
+
+    with patch("os.open", swapping_open), pytest.raises(OSError):
+        ConfigDocument.load(p)
+    assert victim.read_text() == "keep: 1\n"
+
 
 @pytest.mark.unit
 def test_save_refuses_a_symlink_swapped_in_after_load(tmp_path):

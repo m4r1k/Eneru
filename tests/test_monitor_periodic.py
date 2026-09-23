@@ -45,6 +45,7 @@ def _make_monitor(cfg, store=None, *, coordinator_mode=False):
     mon._self_test_poll_due_mono = None
     mon._self_test_retry_after_mono = None
     mon._self_test_outage_attributed = False
+    mon._self_test_no_attribution_id = None
     mon._self_test_repair_done = False
     mon._self_test_monitor_only_alerted = False
     mon._self_test_failure_triggered = False
@@ -1083,13 +1084,30 @@ class TestSelfTestReviewFixes:
         assert mon._self_test_outage_attributed is True
         # ...but the attribution is released for good.
         assert store.get_meta("self_test_attributed_id") == ""
-        # Later OB while the row never reached a terminal result.
-        row = store.get_self_test(test_id)
-        store._conn.execute(
-            "UPDATE self_tests SET started_ts = ? WHERE id = ?",
-            (row["started_ts"] - 3600, test_id))
+        # A new OB while the row never reached a terminal result, still
+        # inside the 30 s issue window: one battery interval per test, so
+        # this one is a real outage.
         mon._prepare_self_test_attribution(
             {"ups.status": "OB", "ups.test.result": "In progress"})
+        assert mon._self_test_outage_attributed is False
+        assert store.get_meta("self_test_attributed_id") == ""
+
+    @pytest.mark.unit
+    def test_ob_seen_while_ticket_in_flight_is_never_relabelled(self, store):
+        """An OB polled while the API's upscmd is still running is handled
+        as a real outage (ON_BATTERY alerted). Once the issued marker lands,
+        later polls of the same interval must not switch it to the test, or
+        POWER_RESTORED would be suppressed after an ON_BATTERY alert."""
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        tid = store.record_self_test("test.battery.start", "api")
+        selftest.persist_pending_self_test(store, tid, int(time.time()) + 60)
+        mon._prepare_self_test_attribution({"ups.status": "OB DISCHRG"})
+        assert mon._self_test_outage_attributed is False
+        store.set_meta(selftest.ISSUED_ID_META, str(tid))  # upscmd returned
+        mon._prepare_self_test_attribution({"ups.status": "OB DISCHRG"})
+        assert mon._self_test_outage_attributed is False
+        assert store.get_meta("self_test_attributed_id") in (None, "")
+        mon._prepare_self_test_attribution({"ups.status": "OL"})
         assert mon._self_test_outage_attributed is False
 
     @pytest.mark.unit

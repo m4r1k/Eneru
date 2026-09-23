@@ -334,6 +334,8 @@ as in the marker-file example above.)
 | Podman default | `host.containers.internal` or `--network host` | rootless Podman: use `--network host` for simplicity. |
 | Kubernetes pod | Node IP via `hostPath` or `hostNetwork: true` | See K8s section below; not the recommended profile. |
 
+<a id="pin-the-host-key-outside-network-host"></a>
+
 !!! warning "Pin the host key outside `--network host`"
     The loopback samples turn host-key checking off
     (`StrictHostKeyChecking=no`, `UserKnownHostsFile=/dev/null`) because
@@ -444,7 +446,9 @@ remote_servers entry.
 
 The Kubernetes examples under `deploy/kubernetes/` are remote-only.
 They run as UID 10001, mount config through a ConfigMap, mount SSH
-keys through a Secret, and use HTTP probes. Unlike the `docker run`
+keys through a Secret, and probe `/health` and `/ready` with a small
+Python exec check against `127.0.0.1` (so the probes use the API's
+loopback-reserved connection slots). Unlike the `docker run`
 snippets above, these committed manifests pin an explicit image version
 (not `:latest`) because they're meant to be `kubectl apply`'d as-is —
 bump the tag deliberately on upgrade. `remote-pod.yaml` reuses the

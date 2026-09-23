@@ -357,7 +357,8 @@ class ConfigDocument:
 
     def __init__(self, path: Union[str, Path], data: CommentedMap, *,
                  existed: bool, mapping: int = 2, offset: int = 2,
-                 original_text: str = ""):
+                 original_text: str = "",
+                 loaded_realpath: Optional[str] = None):
         self.path = Path(path)
         self.data = data
         self.existed = existed
@@ -372,7 +373,8 @@ class ConfigDocument:
         # F-107: where the path resolved when loaded. A save refuses to follow
         # a symlink swapped in afterwards (e.g. by the unprivileged owner of
         # the file while root has the editor open).
-        self._loaded_realpath = os.path.realpath(self.path)
+        self._loaded_realpath = (loaded_realpath
+                                 or os.path.realpath(self.path))
 
     # -- construction ---------------------------------------------------
 
@@ -387,7 +389,12 @@ class ConfigDocument:
             data = CommentedMap()
             data.yaml_set_start_comment(NEW_FILE_HEADER)
             return cls(p, data, existed=False)
-        with open(p, "r", encoding="utf-8", newline="") as fh:
+        # F-107: resolve first, then read that resolved file without
+        # following a symlink swapped in meanwhile (O_NOFOLLOW), so the
+        # content and the save baseline always name the same file.
+        real = os.path.realpath(p)
+        fd = os.open(real, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "r", encoding="utf-8", newline="") as fh:
             raw = fh.read()
         newline = "\r\n" if "\r\n" in raw else "\n"
         text = raw.replace("\r\n", "\n")
@@ -399,7 +406,7 @@ class ConfigDocument:
         if not isinstance(data, CommentedMap):
             raise ValueError(f"{p}: the config root must be a YAML mapping")
         doc = cls(p, data, existed=True, mapping=mapping, offset=offset,
-                  original_text=raw)
+                  original_text=raw, loaded_realpath=real)
         doc.newline = newline
         return doc
 

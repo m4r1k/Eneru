@@ -166,10 +166,21 @@ stop_redundancy_nut_driver() {
     timeout --kill-after=5s 10s docker compose exec -T nut-server sh -c \
       "pkill -f '[d]ummy-ups.*-a ${ups}' || true"
   )
-  ( cd "$E2E_DIR" \
-      && timeout --kill-after=5s 10s docker compose exec -T nut-server sh -c \
-           "ps -ef | grep -E '[d]ummy-ups.*-a ${ups}' || echo '    (no ${ups} driver process)'" ) \
-      2>&1 | sed 's/^/    /' || true
+  # SIGTERM delivery is async: poll briefly, then fail at the kill boundary
+  # if the driver is still alive, instead of letting the quorum assertions
+  # fail later with a confusing log.
+  local _i
+  for _i in $(seq 1 10); do
+    if ! ( cd "$E2E_DIR" \
+        && timeout 5s docker compose exec -T nut-server sh -c \
+             "ps -ef | grep -E '[d]ummy-ups.*-a ${ups}'" ) >/dev/null 2>&1; then
+      dbg "stop_redundancy_nut_driver: ${ups} driver gone"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "ERROR: stop_redundancy_nut_driver: ${ups} dummy-ups still running after pkill" >&2
+  return 1
 }
 
 stop_redundancy_nut_drivers() {

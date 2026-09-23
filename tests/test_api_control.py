@@ -653,7 +653,7 @@ _MUTATING_ROUTES = [
 
 def _wire_mutating_backends(minimal_config, monkeypatch):
     """Enable every control feature and replace each backend with a recorder
-    that succeeds. Returns (calls, store, source)."""
+    that succeeds. Returns (calls, source)."""
     _enable(minimal_config)
     minimal_config.nut_control.allowed_commands = [
         "beeper.toggle", "test.battery.start"]

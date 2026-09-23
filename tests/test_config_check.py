@@ -180,6 +180,14 @@ class TestLoading:
         assert "line 12" in warns[1].message
         assert cc.duplicate_yaml_keys(tmp_path / "missing.yaml") == []
 
+    def test_recursive_anchor_does_not_crash_the_duplicate_scan(self, tmp_path):
+        p = tmp_path / "c.yaml"
+        p.write_text("ups:\n  name: UPS@localhost\nloop: &x\n  - *x\n"
+                     "dup: &d {k: 1, k: 2}\nagain: *d\n")
+        _data, f = cc.load_raw(str(p))
+        warns = [x.message for x in f if x.level == "warning"]
+        assert len(warns) == 1 and "`dup.k`" in warns[0]  # aliased once only
+
     def test_no_duplicate_warning_for_clean_file(self, tmp_path):
         p = tmp_path / "c.yaml"
         p.write_text("ups:\n  name: UPS@localhost\nlist:\n  - {a: 1}\n  - {a: 2}\n")

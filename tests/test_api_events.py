@@ -306,6 +306,55 @@ def test_ups_status_loopback_error_redacted_for_anonymous(
     assert got == (_SECRET if signed_in else apimod.REDACTED_REMOTE_ERROR)
 
 
+def _status_with_nested_remote_errors():
+    return {
+        "ups": [{"name": "UPS@h", "remoteHealth": [
+            {"server": "nas", "last_error": _SECRET},
+            {"server": "pi", "last_error": ""}]}],
+        "redundancyGroups": [{"name": "rg", "remoteHealth": [
+            {"server": "rack", "last_error": _SECRET}]}],
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["/api/v1/ups", "/api/v1/ups/UPS@h"])
+@pytest.mark.parametrize("signed_in", [False, True])
+def test_ups_status_nested_remote_errors_redacted_for_anonymous(
+        minimal_config, monkeypatch, path, signed_in):
+    """F-110: every UPS and redundancy row embeds its remote-health rows;
+    their last_error must not leak where /remote-health redacts it."""
+    source_payload = _status_with_nested_remote_errors()
+    original_row = source_payload["ups"][0]
+    monkeypatch.setattr(apimod, "collect_status",
+                        lambda source: source_payload)
+    minimal_config.api.auth.enabled = True
+    h = _handler(minimal_config, path=path)
+    if signed_in:
+        _authed(h)
+    status, _, payload = h._route()
+    assert status == 200
+    ups_row = payload["ups"][0] if path == "/api/v1/ups" else payload
+    want = _SECRET if signed_in else apimod.REDACTED_REMOTE_ERROR
+    assert ups_row["remoteHealth"][0]["last_error"] == want
+    assert ups_row["remoteHealth"][1]["last_error"] == ""
+    if path == "/api/v1/ups":
+        assert (payload["redundancyGroups"][0]["remoteHealth"][0]["last_error"]
+                == want)
+    # The collected rows themselves are never mutated.
+    assert original_row["remoteHealth"][0]["last_error"] == _SECRET
+
+
+@pytest.mark.unit
+def test_redact_helpers_tolerate_odd_shapes():
+    assert apimod._redact_remote_rows(None) is None
+    assert apimod._redact_remote_rows(["x"]) == ["x"]
+    row = {"name": "u"}
+    assert apimod._redact_ups_row(row) is row
+    payload = {"ups": ["odd"], "redundancyGroups": None}
+    apimod._redact_status_payload(payload)
+    assert payload == {"ups": ["odd"], "redundancyGroups": None}
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize("auth_on,signed_in,redacted", [
     (True, False, True), (True, True, False), (False, False, False)])

@@ -414,6 +414,8 @@ class TestDelegatedShutdownSequence:
 
         worker.flush.assert_called_once_with(timeout=5)
         marker.assert_called_once()
+        # The simulated reload really landed mid-sequence.
+        assert monitor._notification_worker is None
 
     @pytest.mark.unit
     def test_missing_ssh_is_fatal_when_delegating(self, tmp_path):

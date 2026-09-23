@@ -88,7 +88,8 @@ the dashboard, and self-tests that no longer look like outages.
 - **Container config is mounted writable** in the documented Docker/Podman
   samples (`chown 10001:10001`, mode 0600) so the editor can save. A `:ro`
   mount keeps working for the daemon. The Kubernetes samples add
-  `seccompProfile: RuntimeDefault` and an API `NetworkPolicy`.
+  `seccompProfile: RuntimeDefault`, an API `NetworkPolicy`, and exec health
+  probes on `127.0.0.1`.
 - `ruamel.yaml` is a new dependency for pip and the image, and a *recommended*
   package on deb (`python3-ruamel.yaml`) and rpm (`python3-ruamel-yaml`, CRB on
   RHEL 9), so installing Eneru never fails over the editor.
@@ -107,28 +108,30 @@ the dashboard, and self-tests that no longer look like outages.
   every member looked stale at once, quorum was lost and the group's servers
   were shut down on good mains power. Data age, connection grace and the
   coordinator's join deadlines now run on the monotonic clock.
-- An `ssh_options` item holding a flag and its value (`"-i /root/.ssh/key"`,
-  `"-l admin"`) is split into two ssh arguments. Before, ssh read the key path
-  with a leading space and every remote shutdown failed.
+- **Remote shutdown builds its SSH command like the health probe.** Split
+  `ssh_options` such as `["-i", key]` or `["-p", port]`, and an item holding a
+  flag and its value (`"-i /root/.ssh/key"`, `"-l admin"`, now split into two
+  ssh arguments), no longer make every real shutdown fail while remote health
+  shows green.
 - A "Self-Test Started" notification is no longer sent for an API self-test
   whose `upscmd` then fails.
 - The editor rejects `nan`/`inf` numbers and trims spaces around text values,
   and no longer offers `voltage_sensitivity` or
   `self_test_failure_shutdown_delay` under redundancy-group triggers (the group
   ignores them). The loader rejects a non-finite depletion `critical_rate`.
-- Non-finite NUT readings (`inf`, `nan`) are no longer stored in statistics, so
-  `/history` stays valid JSON.
+- Non-finite NUT readings (`inf`, `nan`) are no longer stored in statistics, and
+  `/history` skips any stored by older versions, so it stays valid JSON.
 - An on-battery UPS that doesn't report `battery.charge` or `battery.runtime`
   logs that warning once every 5 minutes, not on every poll.
 - `eneru config check` warns about duplicate YAML keys (a second
-  `remote_servers:` silently replaces the first).
-- **Remote shutdown builds its SSH command like the health probe.** Split
-  `ssh_options` such as `["-i", key]` or `["-p", port]` no longer make every real
-  shutdown fail while remote health shows green.
+  `remote_servers:` silently replaces the first). A recursive YAML anchor no
+  longer crashes that scan.
 - **An old failed self-test in the UPS's log no longer arms the failed-test
   trigger** after a fresh install or a stats DB reset.
 - **A real outage after a self-test is reported as an outage.** The test's
-  on-battery attribution ends with its own battery interval.
+  on-battery attribution ends with its own battery interval, a test claims at
+  most one battery interval, and an outage already alerted before the test's
+  command returned is never relabelled as the test.
 - **UPS battery exercises no longer look like utility outages**
   (`SELF_TEST_ON_BATTERY` / `SELF_TEST_POWER_RESTORED`), including a test that
   ends between polls. Short historical pairs are relabelled once.
@@ -136,7 +139,8 @@ the dashboard, and self-tests that no longer look like outages.
   SIGHUP or API reload that turned notifications off mid-sequence could crash
   the shutdown on the final notification flush.
 - The host poweroff is still sent when a remote worker can't start or shutting
-  down regular remotes crashes.
+  down regular remotes crashes; the remotes left unfinished are reported as
+  failed and a delegated host poweroff still completes its sequence.
 - `use_sudo` and `eneru config check` share one sudo-prefix rule: commands
   starting with `sudo<TAB>` or `/usr/bin/sudo` are no longer prefixed twice,
   and `config check` flags steps that would run a shell builtin or compound
@@ -161,14 +165,16 @@ the dashboard, and self-tests that no longer look like outages.
 
 - Remote `user`/`host` values that look like ssh options are rejected, and the
   destination is passed after `--`.
-- The API drops clients that send headers too slowly and keeps slots for
-  localhost health checks.
+- The API drops clients that send headers too slowly (their half-read request
+  is never run) and keeps slots for localhost health checks.
 - Audit events can't be deleted through the API, and anonymous readers (auth
-  on) no longer see audit events or remote-check error details.
-- The editor refuses to save through a config path swapped for a symlink after
-  it was opened, and MQTT broker credentials are masked in the editor and in
+  on) no longer see audit events or remote-check error details, including the
+  remote-health rows inside `/api/v1/ups` and `/api/v1/ups/{name}`.
+- The editor refuses to save through a config path swapped for a symlink while
+  or after it was opened, and MQTT broker credentials are masked in the editor and in
   `config check`.
-- `pypi.yml` validates the version on tag builds and drops checkout credentials.
+- `pypi.yml` validates the version on tag builds and drops checkout credentials;
+  it and `release.yml` reject a multi-line version input.
 
 ## [6.1.9] - 2026-07-13
 

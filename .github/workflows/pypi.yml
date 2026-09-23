@@ -61,7 +61,9 @@ jobs:
           # release.yml. The version is interpolated into `sed` below, so a
           # crafted tag must never reach it. PEP-440-style release or
           # pre-release (rc/alpha/beta) only.
-          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){1,2}(-(rc|alpha|beta)[0-9]+)?$'; then
+          # Whole-value match: grep would accept a multi-line input when any
+          # one line looks like a version.
+          if ! [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}(-(rc|alpha|beta)[0-9]+)?$ ]]; then
             echo "Invalid version: $VERSION" >&2
             exit 1
           fi

@@ -118,8 +118,10 @@ jobs:
               echo "::error::tests/e2e/groups/${name}.sh has no matrix entry in e2e.yml"
               missing=1
             fi
-            grep -qx "echo \"=== Group '${name}' completed successfully ===\"" "$script" || {
-              echo "::error::tests/e2e/groups/${name}.sh lacks its completion line"
+            # The completion line must be the LAST non-empty line, so no
+            # test can hide after it.
+            [ "$(sed '/^[[:space:]]*$/d' "$script" | tail -n 1)" = "echo \"=== Group '${name}' completed successfully ===\"" ] || {
+              echo "::error::tests/e2e/groups/${name}.sh must end with its completion line"
               missing=1
             }
           done
