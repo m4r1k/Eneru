@@ -140,6 +140,24 @@ class TestGracePeriodBehavior:
             mock_event.assert_not_called()
 
     @pytest.mark.unit
+    def test_wall_clock_step_does_not_expire_grace(self, monitor):
+        """R2-01: grace is timed on the monotonic clock. A +1 h NTP step
+        right after entering grace must not fire CONNECTION_LOST early."""
+        with patch.object(monitor, "_log_power_event") as mock_event:
+            monitor._handle_connection_failure("Connection refused")
+            assert monitor.state.connection_lost_mono > 0
+            real = time.time()
+            with patch("eneru.monitor.time.time", return_value=real + 3600):
+                monitor._handle_connection_failure("Connection refused")
+            mock_event.assert_not_called()
+            assert monitor.state.connection_state == "GRACE_PERIOD"
+            # Genuine expiry on the monotonic clock still fires.
+            monitor.state.connection_lost_mono = time.monotonic() - 61
+            monitor._handle_connection_failure("Connection refused")
+            assert mock_event.call_args[0][0] == "CONNECTION_LOST"
+            assert monitor.state.connection_lost_mono == 0.0
+
+    @pytest.mark.unit
     def test_no_notification_during_grace_period(self, monitor):
         """Test that no notification is sent while in grace period."""
         monitor.state.connection_state = "GRACE_PERIOD"

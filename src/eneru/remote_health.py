@@ -114,11 +114,16 @@ def build_ssh_probe_command(server: RemoteServerConfig,
     pending_arg = False
     for opt in [*eneru_utils.runtime_default_ssh_options(server.ssh_options),
                 *server.ssh_options]:
+        parts = opt.split(None, 1)
         if pending_arg:
             ssh_cmd.append(opt)
             pending_arg = False
-        elif opt.startswith("-o "):
-            ssh_cmd.extend(opt.split(None, 1))
+        elif len(parts) == 2 and parts[0] in SSH_OPTIONS_WITH_SEPARATE_ARG:
+            # R2-02: "-i /root/.ssh/key" typed as ONE list item (the natural
+            # command-line habit) becomes two argv elements. Passed whole,
+            # ssh would read the key path with a leading space and fall back
+            # to its default keys -- every remote shutdown would fail.
+            ssh_cmd.extend(parts)
         elif opt.startswith("-"):
             ssh_cmd.append(opt)
             pending_arg = opt in SSH_OPTIONS_WITH_SEPARATE_ARG

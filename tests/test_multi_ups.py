@@ -788,6 +788,31 @@ class TestMultiUPSCoordinator:
         coord._notification_worker.flush.assert_called_once()
 
     @pytest.mark.unit
+    def test_delegated_reload_nulling_worker_mid_send_still_completes(
+            self, tmp_path):
+        """F-122 (delegated site): a SIGHUP reload that disables notifications
+        lands during ``send()`` and nulls ``_notification_worker``. The
+        delegated completion must still flush and write the recovery marker."""
+        coord = self._make_delegated_coord(tmp_path)
+        worker = coord._notification_worker
+
+        def send_then_reload(*_a, **_k):
+            coord._notification_worker = None
+
+        worker.send.side_effect = send_then_reload
+
+        with patch("eneru.runtime._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.multi_ups.run_command") as run_cmd, \
+             patch("eneru.multi_ups.write_shutdown_marker") as write_marker:
+            coord._handle_local_shutdown(
+                "UPS1", loopback_results=[self._loopback_result(sent=True)])
+
+        run_cmd.assert_not_called()
+        worker.flush.assert_called_once_with(timeout=5)
+        write_marker.assert_called_once()
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("results", [
         None,                                                # never provided
         [],                                                  # no loopback rows
@@ -2252,6 +2277,30 @@ class TestCoordinatorDrainEdgeCases:
         assert live_thread.join.called
         assert any("still running after drain timeout" in m for m in logs)
 
+    @pytest.mark.unit
+    def test_drain_join_window_ignores_wall_clock_step(self, tmp_path):
+        """R2-01: an NTP step forward mid-drain must not collapse the join
+        windows to zero -- deadlines are on the monotonic clock."""
+        coord = MultiUPSCoordinator(_coord_config(tmp_path))
+        coord._log = lambda msg: None
+        coord._monitors = []
+        thread = MagicMock()
+        thread.is_alive.return_value = False
+        coord._threads = [thread]
+        wall = [1_000_000.0]
+
+        def jumping_wall():
+            wall[0] += 3600.0
+            return wall[0]
+
+        with patch("eneru.multi_ups.time.time", side_effect=jumping_wall):
+            coord._drain_all_groups(timeout=120)
+
+        timeouts = [c.kwargs["timeout"] for c in thread.join.call_args_list]
+        assert len(timeouts) == 2
+        assert timeouts[0] > 25  # ~ timeout // 4
+        assert timeouts[1] > 100  # ~ timeout
+
 
 # ==============================================================================
 # COORDINATOR WAIT-FOR-COMPLETION
@@ -3656,7 +3705,7 @@ class TestCoordinatorShutdownJoinAndAudit:
         coord._threads = [StuckThread(), StuckThread()]
         coord._evaluator_threads = [StuckThread()]
 
-        with patch("eneru.multi_ups.time.time", side_effect=lambda: clock[0]), \
+        with patch("eneru.multi_ups.time.monotonic", side_effect=lambda: clock[0]), \
              patch("eneru.multi_ups.sys.exit"):
             coord._handle_signal(signal.SIGTERM, None)
 

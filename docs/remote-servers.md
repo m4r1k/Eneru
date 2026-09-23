@@ -224,6 +224,8 @@ ssh_options:
   - "/root/.ssh/id_ups_shutdown"
 ```
 
+A flag and its value may also share one item (`- "-i /root/.ssh/id_ups_shutdown"`); Eneru splits it into two ssh arguments. A bare `KEY=VALUE` item is sent as `-o KEY=VALUE`.
+
 ## Host-key verification
 
 Accept host keys deliberately before relying on shutdown:

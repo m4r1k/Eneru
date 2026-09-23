@@ -327,6 +327,32 @@ class TestShutdownTriggers:
         assert any(warning_fragment in call for call in log_calls)
 
     @pytest.mark.unit
+    def test_missing_charge_and_runtime_warn_once_per_interval(self, tmp_path):
+        """R2-12: an on-battery UPS that never reports battery.charge /
+        battery.runtime warns once per interval, not on every poll."""
+        from eneru import monitor as monitor_mod
+        monitor = make_monitor(tmp_path)
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor.state.on_battery_start_time = int(time.time()) - 40
+        ups_data = {"ups.status": "OB DISCHRG", "ups.load": "30"}
+        clock = [1000.0]
+
+        def warnings():
+            return [str(c) for c in monitor.logger.log.call_args_list
+                    if "WARNING: Received" in str(c)]
+
+        with patch.object(monitor, "_trigger_immediate_shutdown"), \
+                patch("eneru.monitor.time.monotonic",
+                      side_effect=lambda: clock[0]):
+            for _ in range(50):
+                monitor._handle_on_battery(dict(ups_data))
+                clock[0] += 1
+            assert len(warnings()) == 2  # one charge + one runtime line
+            clock[0] += monitor_mod.NEUTRAL_STATUS_LOG_INTERVAL_SECONDS
+            monitor._handle_on_battery(dict(ups_data))
+        assert len(warnings()) == 4
+
+    @pytest.mark.unit
     def test_t4_extended_time_triggers_shutdown(self, tmp_path):
         """T4: Extended time on battery triggers shutdown."""
         monitor = make_monitor(tmp_path)
@@ -5208,6 +5234,7 @@ class TestSelfTestPowerContract:
         try:
             test_id = store.record_self_test("test.battery.start", "scheduler")
             store.set_meta("self_test_pending_id", str(test_id))
+            store.set_meta("self_test_issued_id", str(test_id))  # upscmd ok
             monitor._prepare_self_test_attribution({"ups.status": "OB DISCHRG"})
             monitor.state.previous_status = "OL"
             monitor._log_power_event = MagicMock()

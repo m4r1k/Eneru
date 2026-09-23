@@ -2176,6 +2176,42 @@ class TestGroupAReleaseReview:
                     opts[opts.index(flag) + 1]
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("item,flag,value", [
+        ("-i /root/.ssh/nas_key", "-i", "/root/.ssh/nas_key"),
+        ("-l admin", "-l", "admin"),
+        ("-J jump.example", "-J", "jump.example"),
+        ("-F /etc/eneru/ssh_config", "-F", "/etc/eneru/ssh_config"),
+        ("-p 2222", "-p", "2222"),
+    ])
+    def test_flag_and_value_in_one_item_split_the_same_everywhere(
+            self, remote_monitor, item, flag, value):
+        """R2-02: `"-i /root/.ssh/key"` as ONE list item must reach ssh as
+        two argv elements on the shutdown path, the remote-health probe and
+        `config check` alike (ssh would otherwise read " /root/..." as the
+        key path and fail BatchMode auth)."""
+        from eneru import config_check as cc
+        from eneru.config import Config
+        from eneru.remote_health import run_remote_probe
+        server = RemoteServerConfig(name="s", enabled=True, host="h",
+                                    user="u", ssh_options=[item],
+                                    shutdown_command="sudo shutdown -h now")
+        shutdown = self._shutdown_argv(remote_monitor, server, "poweroff")
+        with patch("eneru.remote_health.run_command",
+                   return_value=(0, "", "")) as run:
+            assert run_remote_probe(server, "PROBE")[0]
+        health = run.call_args[0][0]
+        with patch("eneru.remote_health.run_command",
+                   return_value=(0, "", "")), \
+                patch.object(cc, "command_exists", return_value=True), \
+                patch.object(cc, "_run", return_value=(0, "", "")) as cc_run:
+            cc.probe_remote(Config(), server)
+        check = cc_run.call_args[0][0]
+        for argv in (shutdown, health, check):
+            assert item not in argv
+            assert argv[argv.index(flag) + 1] == value
+        assert shutdown[:-1] == health[:-1] == check[:-1]
+
+    @pytest.mark.unit
     def test_destination_follows_double_dash(self, remote_monitor):
         """F-104: `--` ends ssh option parsing before user@host."""
         server = RemoteServerConfig(name="s", enabled=True, host="h", user="u")

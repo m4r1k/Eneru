@@ -8,6 +8,7 @@ rather than a live daemon.
 """
 
 import time
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -605,11 +606,21 @@ class TestObservedSelfTest:
         mon._check_observed_self_test(
             {"ups.test.result": "Done and error", "ups.test.date": "09/23/2026"})
         assert store.latest_self_test()["result_enum"] == "failed"
+        # ...and the failed-test safety latch is armed for the next outage.
+        assert store.get_meta("self_test_failure_latched")
 
     @pytest.mark.unit
     def test_failed_poll_does_not_seed_empty_baseline(self, store):
         mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
         mon._check_observed_self_test(None)
+        assert not store.get_meta("self_test_observed_key")
+
+    @pytest.mark.unit
+    def test_partial_poll_does_not_seed_empty_baseline(self, store):
+        """A poll without ups.status is incomplete: it must not seed the
+        "no result yet" baseline."""
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        mon._check_observed_self_test({"battery.charge": "100"})
         assert not store.get_meta("self_test_observed_key")
 
     @pytest.mark.unit
@@ -939,9 +950,74 @@ class TestSelfTestRuntimeContract:
         selftest.clear_pending_self_test(store)
         recent = store.record_self_test("test.battery.start", "api")
         selftest.persist_pending_self_test(store, recent, int(time.time()) + 60)
+        store.set_meta(selftest.ISSUED_ID_META, str(recent))  # upscmd ok
         mon._self_test_pending_id = recent
         mon._prepare_self_test_attribution({"ups.status": "OB DISCHRG"})
         assert mon._self_test_outage_attributed is True
+
+    @pytest.mark.unit
+    def test_in_flight_api_ticket_is_not_announced_or_attributed(
+            self, store, monkeypatch):
+        """R2-02 (round 2): a poll that bypassed the per-UPS lock reads the
+        API's ticket while upscmd is still running. It must not send "Self-Test
+        Started" nor pin an OB on it; if upscmd then fails no false start
+        notification is left behind. Once the command succeeds, the next poll
+        announces and attributes as before."""
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        mon.config.notifications.urls = ["json://example"]
+        sent = []
+        mon._send_notification = lambda msg, *a, **kw: sent.append(msg) or 1
+
+        seen = {}
+
+        def slow_failing_upscmd(*_a, **_kw):
+            # The monitor polls mid-command (lock bypass).
+            mon._prepare_self_test_attribution({"ups.status": "OB DISCHRG"})
+            seen["attributed"] = mon._self_test_outage_attributed
+            return False, "", "upscmd: timed out"
+
+        monkeypatch.setattr(selftest.nutctl, "run_instant_command",
+                            slow_failing_upscmd)
+        nc = SimpleNamespace(allowed_commands=["test.battery.start"],
+                             username="u", password="p", timeout=10)
+        result = selftest.issue_self_test(
+            "UPS@h", "test.battery.start", nc, store, source="api")
+
+        assert result["ok"] is False
+        assert seen["attributed"] is False
+        assert not any("Self-Test Started" in m for m in sent)
+        assert store.get_meta("self_test_start_notified") in (None, "")
+        assert store.get_meta("self_test_attributed_id") in (None, "")
+
+        # Success path: marker set by issue_self_test -> announce + attribute.
+        monkeypatch.setattr(selftest.nutctl, "run_instant_command",
+                            lambda *a, **kw: (True, "OK", ""))
+        ok = selftest.issue_self_test(
+            "UPS@h", "test.battery.start", nc, store, source="api")
+        assert ok["ok"] is True
+        assert store.get_meta(selftest.ISSUED_ID_META) == str(ok["test_id"])
+        mon._prepare_self_test_attribution({"ups.status": "OB DISCHRG"})
+        assert mon._self_test_outage_attributed is True
+        assert any("Self-Test Started" in m for m in sent)
+
+    @pytest.mark.unit
+    def test_unmarked_ticket_is_released_after_the_command_timeout(
+            self, store):
+        """A ticket without the issued marker (crash mid-issue, or written by
+        an older version) is only held back for the NUT command timeout."""
+        mon = _make_monitor(_cfg(_ENABLED), store)
+        tid = store.record_self_test(
+            "test.battery.start", "api", started_ts=int(time.time()) - 3600)
+        row = store.get_self_test(tid)
+        assert mon._self_test_issue_in_flight(store, tid, row) is False
+        fresh = store.record_self_test("test.battery.start", "api")
+        row = store.get_self_test(fresh)
+        assert mon._self_test_issue_in_flight(store, fresh, row) is True
+        mon._resolve_nut_control_config = lambda: SimpleNamespace(timeout="x")
+        assert mon._self_test_issue_in_flight(store, fresh, row) is True
+        device = store.record_self_test("", "device")
+        assert mon._self_test_issue_in_flight(
+            store, device, store.get_self_test(device)) is False
 
     @pytest.mark.unit
     def test_historical_repair_runs_once(self, store, monkeypatch):

@@ -12,7 +12,7 @@ import signal
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Tuple, List
+from typing import Any, Optional, Dict, Tuple, List
 
 from eneru.version import __version__
 from eneru.config import Config, RemoteServerConfig, resolve_energy_config
@@ -232,6 +232,10 @@ class UPSGroupMonitor(
         self._last_ob_status_log_mono = None
         self._last_name_diagnostic_mono = None
         self._last_unknown_status_log_mono = None
+        # R2-12: per-reading throttle for the on-battery "invalid battery
+        # charge/runtime" warning (a UPS without those variables would
+        # otherwise log one line per poll for the whole outage).
+        self._invalid_reading_log_mono: Dict[str, float] = {}
         # ISS-055: last distinct state-file persist error, so a recurring disk
         # failure is logged once per cause instead of silently swallowed.
         self._last_state_save_error: Optional[str] = None
@@ -2370,12 +2374,14 @@ class UPSGroupMonitor(
                         f"{self.config.triggers.low_battery_threshold}%"
                     )
         elif not is_numeric(battery_charge):
-            self._log_message(
+            self._log_invalid_reading(
+                "battery.charge",
                 f"⚠️  WARNING: Received non-numeric battery charge value: "
                 f"'{battery_charge}'"
             )
         else:
-            self._log_message(
+            self._log_invalid_reading(
+                "battery.charge",
                 f"⚠️  WARNING: Received invalid battery charge value: "
                 f"'{battery_charge}'"
             )
@@ -2398,7 +2404,8 @@ class UPSGroupMonitor(
                         f"{format_seconds(self.config.triggers.critical_runtime_threshold)}"
                     )
         elif not shutdown_reason:
-            self._log_message(
+            self._log_invalid_reading(
+                "battery.runtime",
                 f"⚠️  WARNING: Received invalid battery runtime value: "
                 f"'{battery_runtime}'"
             )
@@ -2642,6 +2649,7 @@ class UPSGroupMonitor(
             with self.state._lock:
                 self.state.connection_state = "GRACE_PERIOD"
                 self.state.connection_lost_time = time.time()
+                self.state.connection_lost_mono = time.monotonic()
             if "Data stale" in error_msg:
                 self._log_message(
                     f"⚠️  Connection to UPS {self.config.ups.name} lost "
@@ -2655,7 +2663,7 @@ class UPSGroupMonitor(
                 )
 
         elif self.state.connection_state == "GRACE_PERIOD":
-            elapsed = time.time() - self.state.connection_lost_time
+            elapsed = self._connection_grace_elapsed()
             if elapsed >= grace_cfg.duration:
                 # Grace period expired: fire full notification
                 if "Data stale" in error_msg:
@@ -2676,8 +2684,28 @@ class UPSGroupMonitor(
                 with self.state._lock:
                     self.state.connection_state = "FAILED"
                     self.state.connection_lost_time = 0.0
+                    self.state.connection_lost_mono = 0.0
 
         # If connection_state == "FAILED": already notified, nothing to do
+
+    def _log_invalid_reading(self, key: str, message: str) -> None:
+        """Log an invalid on-battery reading at most once per interval."""
+        now = time.monotonic()
+        last = self._invalid_reading_log_mono.get(key)
+        if last is not None and now - last < NEUTRAL_STATUS_LOG_INTERVAL_SECONDS:
+            return
+        self._invalid_reading_log_mono[key] = now
+        self._log_message(message)
+
+    def _connection_grace_elapsed(self) -> float:
+        """Seconds spent in connection grace, on the monotonic clock (R2-01).
+
+        Falls back to the wall-clock stamp only when the monotonic anchor is
+        unset, so an NTP step can't expire (or extend) the grace window.
+        """
+        if self.state.connection_lost_mono > 0:
+            return time.monotonic() - self.state.connection_lost_mono
+        return time.time() - self.state.connection_lost_time
 
     def _check_nominal_power_override(self, ups_data: Dict[str, str]) -> None:
         """Warn once when configured nominal_power exceeds the UPS's own rating.
@@ -2813,7 +2841,9 @@ class UPSGroupMonitor(
             # Seed an empty baseline on the first good poll so the first
             # result that appears later counts as news (R2 regression of
             # F-096: it was otherwise adopted as the baseline and dropped).
-            if ups_data and not stored:
+            # Only a complete poll (it carries ups.status) may seed it: a
+            # partial read that merely lacks the variable must not.
+            if ups_data and "ups.status" in ups_data and not stored:
                 store.set_meta("self_test_observed_key", _NO_TEST_RESULT_KEY)
             return  # this UPS doesn't report a test result (yet)
         date = (ups_data or {}).get("ups.test.date") or ""
@@ -2994,6 +3024,13 @@ class UPSGroupMonitor(
             # clear failed so completion can safely retry it.
             self._self_test_outage_attributed = already_attributed
             return
+        if self._self_test_issue_in_flight(store, pending_id, row):
+            # R2-02 (round 2): the API persisted this ticket but its upscmd
+            # has not returned yet (this poll bypassed the per-UPS lock). The
+            # command may still fail, so neither announce the test nor pin an
+            # OB on it until the issued marker appears.
+            self._self_test_outage_attributed = already_attributed
+            return
         self._notify_self_test_start(pending_id, row.get("command", ""))
         on_battery = status_has_token(ups_data.get("ups.status", ""), "OB")
         if already_attributed and not on_battery:
@@ -3012,6 +3049,26 @@ class UPSGroupMonitor(
             already_attributed or (on_battery and recent_issue))
         if self._self_test_outage_attributed:
             store.set_meta("self_test_attributed_id", str(pending_id))
+
+    def _self_test_issue_in_flight(self, store, test_id: int,
+                                   row: Dict[str, Any]) -> bool:
+        """True while an Eneru-issued ticket's upscmd has not succeeded yet.
+
+        Device-observed tests have no command to wait for. The window is
+        bounded by the NUT command timeout (plus slack) so a ticket left by a
+        crash mid-issue, or by a version without the issued marker, is not
+        held back forever.
+        """
+        if row.get("source") == "device":
+            return False
+        if store.get_meta(selftest.ISSUED_ID_META) == str(test_id):
+            return False
+        try:
+            bound = int(self._resolve_nut_control_config().timeout) + 5
+        except (TypeError, ValueError, AttributeError):
+            bound = 35
+        started = row.get("started_ts") or 0
+        return time.time() - float(started) <= bound
 
     def _is_monitor_only_group(self) -> bool:
         """Return whether this UPS owns no shutdown-capable resources."""
@@ -3371,6 +3428,7 @@ class UPSGroupMonitor(
                     with self.state._lock:
                         self.state.connection_state = "FAILED"
                         self.state.connection_lost_time = 0.0
+                        self.state.connection_lost_mono = 0.0
                     # ``stale_data_count`` is intentionally NOT reset here:
                     # once connection_state == "FAILED", health_model short-
                     # circuits to UNKNOWN regardless of the count, and the
@@ -3453,7 +3511,7 @@ class UPSGroupMonitor(
 
             if self.state.connection_state == "GRACE_PERIOD":
                 # Recovered during grace period: quiet recovery, no notification
-                elapsed = time.time() - self.state.connection_lost_time
+                elapsed = self._connection_grace_elapsed()
                 self._log_message(
                     f"✅  Connection to UPS {self.config.ups.name} recovered during "
                     f"grace period ({elapsed:.0f}s elapsed). No notification sent."
@@ -3461,6 +3519,7 @@ class UPSGroupMonitor(
                 with self.state._lock:
                     self.state.connection_state = "OK"
                     self.state.connection_lost_time = 0.0
+                    self.state.connection_lost_mono = 0.0
 
                 # Flap detection with 24h TTL
                 now = time.time()
@@ -3497,6 +3556,7 @@ class UPSGroupMonitor(
                 with self.state._lock:
                     self.state.connection_state = "OK"
                     self.state.connection_lost_time = 0.0
+                    self.state.connection_lost_mono = 0.0
                 self.state.connection_flap_count = 0
                 self.state.connection_first_flap_time = 0.0
                 if self._in_redundancy_group:
@@ -3647,6 +3707,7 @@ class UPSGroupMonitor(
                 else:
                     self.state.latest_time_on_battery = 0
                 self.state.latest_update_time = time.time()
+                self.state.latest_update_mono = time.monotonic()
                 self.state.previous_status = ups_status
 
             self._check_nominal_power_override(ups_data)

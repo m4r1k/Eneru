@@ -1040,11 +1040,11 @@ class MultiUPSCoordinator:
         # join with a short window so the loops exit before we run their
         # shutdown sequences.
         self._stop_event.set()
-        join_deadline = time.time() + max(1, timeout // 4)
+        join_deadline = time.monotonic() + max(1, timeout // 4)
         for thread in self._threads:
             if thread is me:
                 continue
-            remaining = max(0.0, join_deadline - time.time())
+            remaining = max(0.0, join_deadline - time.monotonic())
             thread.join(timeout=remaining)
 
         # Phase 2: run each monitor's shutdown sequence sequentially.
@@ -1061,11 +1061,11 @@ class MultiUPSCoordinator:
                     self._log(f"  ⚠️  Error during drain shutdown: {e}")
 
         # Final join window for any threads still wrapping up.
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         for thread in self._threads:
             if thread is me:
                 continue
-            remaining = max(0.0, deadline - time.time())
+            remaining = max(0.0, deadline - time.monotonic())
             thread.join(timeout=remaining)
         still_running = [t for t in self._threads if t is not me and t.is_alive()]
         if still_running:
@@ -1403,9 +1403,9 @@ class MultiUPSCoordinator:
         # Deadline-based join so the TOTAL wait is bounded by join_budget, not
         # join_budget per thread. The signal handler runs on the main thread, so
         # none of these is the current thread (no self-join hazard).
-        deadline = time.time() + join_budget
+        deadline = time.monotonic() + join_budget
         for thread in (*self._threads, *self._evaluator_threads):
-            remaining = max(0.0, deadline - time.time())
+            remaining = max(0.0, deadline - time.monotonic())
             thread.join(timeout=remaining)
 
         # v5.2.1: see UPSGroupMonitor._cleanup_and_exit for the full
