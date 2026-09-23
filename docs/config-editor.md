@@ -68,8 +68,10 @@ outage. The shutdown command and custom commands are never run by the
 checker. Eneru can't know whether an arbitrary command is safe to run, so it
 only proves the command is reachable.
 
-Every remote check runs in a single SSH session, with the same PATH
-augmentation the real shutdown uses (`/usr/sbin`, `/sbin`,
+Per remote server, the login probe (and, for a loopback, the identity probe)
+each use their own short SSH connection; every predefined-action and
+shutdown-command check then runs together in one more session, with the same
+PATH augmentation the real shutdown uses (`/usr/sbin`, `/sbin`,
 `/usr/local/sbin`, Synology's `/usr/syno/sbin`). A tool the checker finds is
 a tool the shutdown will find.
 
@@ -151,8 +153,9 @@ before you save.
   real file. A single-file bind mount (common in containers) can't be
   replaced atomically, so it is rewritten in place, and when the config's
   directory isn't writable the `.bak` goes to the state directory
-  (`statistics.db_directory`, `/var/lib/eneru` in the image). The owner, group and mode
-  of an existing file are kept. If the file changed on disk while you were
+  (`statistics.db_directory`, `/var/lib/eneru` in the image). The mode of an
+  existing file is kept; its owner and group are kept when the editor runs as
+  root (a non-root save writes the file as that user). If the file changed on disk while you were
   editing, the editor asks before overwriting it.
 - **New keys get an explanation.** When the editor adds a key (or creates a
   new file), it writes a comment above the key explaining it.
@@ -165,8 +168,10 @@ before you save.
   that powers this host, and takes its VMs, containers, filesystems and
   remote servers with it.
 
-After saving, apply the change with `sudo systemctl reload eneru` (hot
-reload) or a restart.
+After saving, apply the change with a hot reload (or a restart):
+
+- package install: `sudo systemctl reload eneru`
+- container: `docker kill -s HUP eneru` (Podman: `podman kill -s HUP eneru`)
 
 ## Requirements
 

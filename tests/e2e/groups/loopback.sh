@@ -647,13 +647,17 @@ YAML
     echo "FAIL: .bak does not hold the previous version"; exit 1; }
 
   docker kill -s HUP "$name" >/dev/null
+  # "SIGHUP received" alone is logged before the reload runs; wait for the
+  # outcome line and require a successful apply (never "reload failed").
   for _ in $(seq 1 15); do
-    docker logs "$name" 2>&1 | grep -q "SIGHUP received" && break
+    docker logs "$name" 2>&1 | grep -qE "Config reloaded|need a restart|Config reload failed" && break
     sleep 1
   done
-  docker logs "$name" 2>&1 | grep -q "SIGHUP received" || {
+  if docker logs "$name" 2>&1 | grep -q "Config reload failed" || \
+     ! docker logs "$name" 2>&1 | grep -qE "Config reloaded|need a restart"; then
     docker logs "$name" 2>&1 | tail -30
-    echo "FAIL: container did not hot-reload on SIGHUP"; exit 1; }
+    echo "FAIL: container did not apply the saved config on SIGHUP"; exit 1
+  fi
   docker rm -f "$name" >/dev/null
 
   # A read-only mount: the editor opens it, but the file stays as it was.

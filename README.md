@@ -84,7 +84,9 @@ Homelabs, virtualization hosts (Proxmox, ESXi, libvirt), Docker/Podman container
 ```bash
 docker pull ghcr.io/m4r1k/eneru:latest
 
-# No config yet? Create one with the guided editor shipped in the image
+# No config yet? Create one with the guided editor shipped in the image.
+# SELinux hosts: keep :Z here AND add :Z to the daemon's /srv/eneru mounts
+# below (see docs/install-docker.md); non-SELinux hosts can drop both.
 sudo install -d -o 10001 -g 10001 /srv/eneru
 docker run --rm -it --network host -v /srv/eneru:/srv/eneru:Z \
   ghcr.io/m4r1k/eneru:latest config --config /srv/eneru/config.yaml

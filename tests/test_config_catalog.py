@@ -166,7 +166,7 @@ def test_sections_have_titles_and_help():
         assert node.title and node.help, node.key
         for c in node.children:
             walk(c)
-    for sec in cat.ROOT_SECTIONS:
+    for sec in cat.ROOT_SECTIONS + (cat.UPS_LIST,):
         walk(sec)
 
 
@@ -303,8 +303,9 @@ def test_hand_written_bounds_match_the_loader(path, good, bad):
         config = ConfigLoader._parse_config(data)
         msgs = ConfigLoader.validate_config(config, raw_data=data)
         key = ".".join(path[-2:])
-        return [m for m in msgs if m.startswith("ERROR") and path[-1] in m
-                and (key in m or path[-1] in m)]
+        # Require the qualified `section.key`, so an unrelated error that
+        # merely mentions the same leaf can't satisfy the test.
+        return [m for m in msgs if m.startswith("ERROR") and key in m]
 
     for v in good:
         assert parse_input(opt, str(v))[0], (path, v)

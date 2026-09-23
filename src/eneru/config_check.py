@@ -182,7 +182,7 @@ def load_raw(path: str) -> Tuple[Optional[dict], List[Finding]]:
         return None, findings
     try:
         import yaml
-        with open(p, "r") as fh:
+        with open(p, "r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
     except Exception as exc:
         findings.append(Finding(
@@ -374,7 +374,12 @@ def _optional_module_findings(config: Config) -> List[Finding]:
                 "Notifications are configured but the 'apprise' package is "
                 "not installed", "Install apprise (deb: apprise, pip: "
                 "eneru[notifications]); until then nothing is delivered."))
-    if config.api.enabled and config.api.auth.enabled:
+    auth = config.api.auth
+    # Auth is a tristate: left unset, it auto-enables once the auth DB exists
+    # (a user or API key was created), and then the daemon needs bcrypt too.
+    auth_on = auth.enabled is True or (
+        not auth.enabled_explicitly_set and Path(str(auth.db_path)).exists())
+    if config.api.enabled and auth_on:
         try:
             import bcrypt  # noqa: F401
         except ImportError:
@@ -814,9 +819,37 @@ def command_binary(command: str) -> Tuple[Optional[str], bool, List[str]]:
     while i < len(tokens) and tokens[i].startswith("-"):
         opt = tokens[i]
         i += 2 if opt in _SUDO_ARG_OPTS else 1
+    # sudo also accepts VAR=value assignments before the command.
+    while i < len(tokens) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[i]):
+        i += 1
     if i >= len(tokens):
         return None, True, []
     return tokens[i], True, tokens[i + 1:]
+
+
+def sudo_target_opts(command: str) -> List[str]:
+    """The run-as options (`-u USER` / `-g GROUP`) of a sudo invocation.
+
+    `sudo -n -l` must ask about the same target user/group the real command
+    runs as, or a rule for `deploy` would be checked against root.
+    """
+    tokens, _ = first_command_tokens(command)
+    if not tokens:
+        return []
+    while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+        tokens = tokens[1:]
+    if not tokens or os.path.basename(tokens[0]) != "sudo":
+        return []
+    out: List[str] = []
+    i = 1
+    while i < len(tokens) and tokens[i].startswith("-"):
+        opt = tokens[i]
+        if opt in ("-u", "-g") and i + 1 < len(tokens):
+            out += [opt, tokens[i + 1]]
+        elif opt.startswith(("--user=", "--group=")):
+            out.append(opt)
+        i += 2 if opt in _SUDO_ARG_OPTS else 1
+    return out
 
 
 @dataclass
@@ -845,7 +878,8 @@ def _exists(binary: str, label: Optional[str] = None,
                        binary=binary)
 
 
-def _sudo_allowed(binary: str, args: Optional[List[str]] = None) -> RemoteCheck:
+def _sudo_allowed(binary: str, args: Optional[List[str]] = None,
+                  target: Optional[List[str]] = None) -> RemoteCheck:
     # `sudo -n -l <cmd> [args]` asks the policy "may I run exactly this
     # without a password?" and prints the resolved command. It NEVER executes
     # it. The arguments are passed because sudoers rules may pin them
@@ -854,7 +888,8 @@ def _sudo_allowed(binary: str, args: Optional[List[str]] = None) -> RemoteCheck:
     shown = " ".join([binary] + list(args or []))
     return RemoteCheck(
         f"sudo allows '{shown}' without a password",
-        "sudo -n -l " + " ".join(_q(a) for a in [binary] + list(args or [])),
+        " ".join(["sudo", "-n"] + [_q(t) for t in (target or [])] + ["-l"]
+                 + [_q(a) for a in [binary] + list(args or [])]),
         "sudo",
         fail_hint="Add a NOPASSWD sudoers rule for this exact command for the "
         "SSH user (if the rule pins arguments, they must match).",
@@ -998,7 +1033,7 @@ def command_checks(command: str, use_sudo: bool, *,
         "Not found on the remote PATH (Eneru adds /usr/sbin, /sbin, "
         "/usr/local/sbin and Synology's /usr/syno/sbin)."))]
     if via_sudo:
-        checks.append(_sudo_allowed(binary, args))
+        checks.append(_sudo_allowed(binary, args, sudo_target_opts(effective)))
     elif (final and user and user != "root"
           and os.path.basename(binary) in _POWER_BINARIES):
         notes.append(
@@ -1413,7 +1448,8 @@ def format_report(report: CheckReport, *, color: bool = False,
     if report.plan:
         lines.append("")
         lines.append(_paint("== What happens on power loss ==", "1", color))
-        lines.extend(f"  {line}" for line in report.plan)
+        # The plan quotes config commands verbatim: strip terminal escapes.
+        lines.extend(f"  {clean(line)}" for line in report.plan)
     lines.append("")
     errors = report.count(LEVEL_ERROR)
     warns = report.count(LEVEL_WARN)

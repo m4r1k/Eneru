@@ -64,8 +64,18 @@ The quickest path is the guided editor. It asks for the UPS, its NUT login,
 your remote servers and notifications, explains every option, tests the
 connections, and shows what happens on power loss before saving:
 
+Package install:
+
 ```bash
 sudo eneru config
+```
+
+PyPI install (sudo can't see the venv, so edit a path you can write, or
+run the venv's binary with sudo explicitly):
+
+```bash
+eneru config --config ./config.yaml
+sudo ~/.venv/eneru/bin/eneru config      # /etc/ups-monitor/config.yaml
 ```
 
 See [Config editor and checker](config-editor.md). To write the file by hand

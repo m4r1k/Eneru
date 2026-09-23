@@ -278,13 +278,18 @@ def test_set_through_list_index_in_path(tmp_path):
     assert "    # Host.\n    host: h" in d.dumps()
 
 
-def test_comment_placement_errors_are_swallowed(tmp_path):
+def test_comments_never_use_the_api_old_ruamel_ignores(tmp_path):
+    # ruamel 0.16.6 silently drops yaml_set_comment_before_after_key for
+    # appended keys, so comments are stored in the parser's own slots
+    # instead. Make that API explode: comments must still be written.
     d = _doc(tmp_path, "a: 1\n")
     with patch.object(CommentedMap, "yaml_set_comment_before_after_key",
-                      side_effect=RuntimeError("boom")):
+                      side_effect=AssertionError("must not be called")):
         d.set(("b",), 2, comment="x")
         d.set(("c", "d"), 3, comment_lookup=lambda p: "y")
     assert d.to_plain() == {"a": 1, "b": 2, "c": {"d": 3}}
+    out = d.dumps()
+    assert "# x\nb: 2" in out and "  # y\n  d: 3" in out
 
 
 def test_comment_new_key_ignores_non_map_parent(tmp_path):
@@ -1158,3 +1163,21 @@ def test_delete_then_set_does_not_resurrect_old_comments(tmp_path):
     doc.set(("s", "b"), 5)
     out = doc.dumps()
     assert "# eol b" not in out and "b: 5" in out
+
+
+@pytest.mark.unit
+def test_backup_write_loops_over_short_writes(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("abcdef\n")
+    real_write = os.write
+    calls = []
+
+    def one_byte(fd, data):
+        calls.append(1)
+        return real_write(fd, bytes(data[:1]))
+    with patch.object(cd.os, "write", side_effect=one_byte):
+        bak = ConfigDocument._write_backup(p)
+    assert bak.read_text() == "abcdef\n" and len(calls) == 7
+    with patch.object(cd.os, "write", return_value=0):
+        with pytest.raises(OSError):
+            ConfigDocument._write_backup(p)

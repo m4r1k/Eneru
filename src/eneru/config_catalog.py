@@ -366,7 +366,8 @@ PRE_SHUTDOWN_SECTION = Section(
         Option("path", "str", "Compose file path (stop_compose only).", None,
                nullable=True),
         ListSection("mounts", "Mounts (unmount_filesystems only)",
-                    "Remote mount points to unmount.", MOUNT_SECTION),
+                    "Remote mount points to unmount.", MOUNT_SECTION,
+                    tier=BASIC),
     ), label_key="action")
 
 REMOTE_SERVER_SECTION = Section(

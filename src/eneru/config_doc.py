@@ -867,7 +867,12 @@ class ConfigDocument:
             try:
                 os.fchmod(fd, 0o600)
                 with open(target, "rb") as src:
-                    os.write(fd, src.read())
+                    data = memoryview(src.read())
+                while data:  # os.write may write less than asked
+                    written = os.write(fd, data)
+                    if written <= 0:
+                        raise OSError(errno.EIO, "short write", str(bak))
+                    data = data[written:]
                 os.fsync(fd)
             finally:
                 os.close(fd)

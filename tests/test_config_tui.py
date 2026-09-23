@@ -477,13 +477,13 @@ class TestLists:
         press(m, "ntfy://topic", ENTER)
         urls = m.doc.get(("notifications", "urls"))
         assert list(urls)[-1] == "ntfy://topic"
-        select(m, "ntfy://topic")
+        select(m, lambda r: r.kind == "scalar" and m.doc.get(r.path) == "ntfy://topic")  # labels are redacted
         press(m, ENTER, 21, ENTER)
         assert "empty" in m.prompt.error
         press(m, "ntfy://other", ENTER)
         assert list(m.doc.get(("notifications", "urls")))[-1] == "ntfy://other"
         n = len(m.doc.get(("notifications", "urls")))
-        select(m, "ntfy://other")
+        select(m, lambda r: r.kind == "scalar" and m.doc.get(r.path) == "ntfy://other")  # labels are redacted
         press(m, "<")
         assert list(m.doc.get(("notifications", "urls")))[-2] == "ntfy://other"
         press(m, ">")
@@ -491,7 +491,7 @@ class TestLists:
         press(m, ">")  # already last -> no-op
         press(m, "d", "n")
         assert len(m.doc.get(("notifications", "urls"))) == n
-        select(m, "ntfy://other")
+        select(m, lambda r: r.kind == "scalar" and m.doc.get(r.path) == "ntfy://other")  # labels are redacted
         press(m, "d", "y")
         assert len(m.doc.get(("notifications", "urls"))) == n - 1
 
@@ -1528,3 +1528,30 @@ def test_secret_value_is_masked_in_the_status_bar(tmp_path):
     press(m, ENTER, "s3cret", ENTER)
     assert "s3cret" not in m.message and "password = ********" in m.message
     assert m.view["nut_control"]["password"] == "s3cret"
+
+
+def test_notification_urls_are_redacted_everywhere(tmp_path):
+    m = _model(tmp_path, "config-minimal.yaml")
+    m.doc.set(("notifications", "urls"), ["discord://id123/secret-token"])
+    m.revalidate()
+    goto(m, "notifications")
+    row = select(m, lambda r: r.label == "urls")
+    assert "secret-token" not in row.value
+    press(m, ENTER)
+    assert all("secret-token" not in r.label for r in m.rows())
+    assert not [c for c in m.changes() if "secret-token" in c]
+
+
+def test_is_local_yes_counts_as_local_like_the_daemon(tmp_path):
+    m = _text_model(tmp_path,
+                    "ups:\n  - name: a@h\n    is_local: yes\n  - name: b@h\n")
+    goto(m, "local")
+    assert [r for r in m.rows() if r.kind != "note"]
+    assert not [r for r in m.rows() if r.kind == "note" and "No UPS" in r.label]
+
+
+def test_basic_mode_offers_remote_unmount_mounts(tmp_path):
+    m = _model(tmp_path)
+    step = cat.PRE_SHUTDOWN_SECTION
+    assert [c.key for c in step.children if isinstance(c, cat.ListSection)
+            and cat.has_tier(c, tui.MODE_BASIC)] == ["mounts"]

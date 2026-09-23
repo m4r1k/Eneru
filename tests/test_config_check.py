@@ -1377,9 +1377,70 @@ class TestLoopbackKeyIsFatal:
         env.runtime = "container (Docker)"
         env.euid = 10001
         config = build({"ups": {"name": "ups@h"}})
-        with patch("eneru.cli.Path.exists", return_value=False), \
-                patch("eneru.cli.os.access", return_value=False):
+        # Synthesis probes the default key with Path.stat(); fail exactly
+        # that path (host-independent), leave every other stat() alone.
+        real_stat = Path.stat
+        key = cli._LOOPBACK_DEFAULT_SSH_KEY_PATH
+
+        def fake_stat(self, *a, **k):
+            if str(self) == key:
+                raise FileNotFoundError(2, "No such file", key)
+            return real_stat(self, *a, **k)
+        with patch.object(Path, "stat", fake_stat):
             out = cc.static_findings(config, {"ups": {"name": "ups@h"}})
         hits = [f for f in out if "SSH key for the host-loopback delegate" in f.message]
         assert hits and all(f.level == "error" for f in hits)
         assert "refuses to start" in hits[0].hint
+
+
+class TestSecondReviewRound:
+    def test_sudo_env_assignments_are_skipped(self):
+        assert cc.command_binary("sudo -n LANG=C FOO=1 shutdown -h now") == \
+            ("shutdown", True, ["-h", "now"])
+        assert cc.command_binary("sudo LANG=C") == (None, True, [])
+
+    def test_sudo_run_as_target_is_kept_in_the_probe(self):
+        checks, _ = cc.command_checks("sudo -u deploy -g ops tool --x", False)
+        assert checks[-1].script == "sudo -n -u deploy -g ops -l tool --x"
+        checks, _ = cc.command_checks("sudo --user=deploy tool", False)
+        assert checks[-1].script == "sudo -n --user=deploy -l tool"
+        assert cc.sudo_target_opts("tool") == []
+        assert cc.sudo_target_opts("") == []
+        assert cc.sudo_target_opts("A=1 sudo -u x t") == ["-u", "x"]
+
+    def test_plan_lines_are_sanitised_in_the_report(self):
+        r = cc.CheckReport(plan=["cmd \x1b[2Jevil\x07"])
+        out = cc.format_report(r)
+        assert "\x1b" not in out and "\x07" not in out and "evil" in out
+
+    def test_bcrypt_needed_when_auth_auto_enables(self, env, tmp_path):
+        db = tmp_path / "auth.db"
+        db.write_text("")
+        data = {"ups": {"name": "u@h"},
+                "api": {"enabled": True, "auth": {"db_path": str(db)}}}
+        config = build(data)
+        assert not config.api.auth.enabled_explicitly_set  # tristate: auto
+        real_import = __import__
+
+        def no_bcrypt(name, *a, **k):
+            if name == "bcrypt":
+                raise ImportError("no bcrypt")
+            return real_import(name, *a, **k)
+        with patch("builtins.__import__", side_effect=no_bcrypt):
+            out = cc._optional_module_findings(config)
+        assert any("bcrypt" in f.message for f in out)
+        db.unlink()
+        with patch("builtins.__import__", side_effect=no_bcrypt):
+            out = cc._optional_module_findings(config)
+        assert not any("bcrypt" in f.message for f in out)
+
+    def test_load_raw_reads_utf8_regardless_of_locale(self, tmp_path):
+        p = tmp_path / "c.yaml"
+        p.write_text('notifications:\n  title: "\U0001F3E2 Lab"\n', encoding="utf-8")
+        real_open = open
+
+        def latin1_default(path, mode="r", *a, encoding=None, **k):
+            return real_open(path, mode, *a, encoding=encoding or "latin-1", **k)
+        with patch("builtins.open", side_effect=latin1_default):
+            data, _ = cc.load_raw(str(p))
+        assert data["notifications"]["title"] == "\U0001F3E2 Lab"

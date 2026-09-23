@@ -248,6 +248,10 @@ sudo cp /etc/ups-monitor/config.yaml /srv/eneru/config.yaml
 # in place: hand it to the container user, private (it holds secrets).
 sudo chown 10001:10001 /srv/eneru/config.yaml
 sudo chmod 0600 /srv/eneru/config.yaml
+# Rootless Podman maps container uids to your subuid range, so host uid
+# 10001 is NOT the container's 10001. Chown through the user namespace
+# instead (run as the user that runs the container, not with sudo):
+#   podman unshare chown 10001:10001 /srv/eneru/config.yaml
 ```
 
 The Steps 4, 5, and 6 `docker run` examples below all source the config

@@ -128,7 +128,18 @@ class Prompt:
     secret: bool = False
 
 
+def _redact_urls(opt: cat.Option, value: Any) -> Any:
+    """Apprise URLs often embed tokens/passwords: never show them raw."""
+    if opt.key != "urls":
+        return value
+    from eneru.utils import redact_apprise_url
+    if isinstance(value, list):
+        return [redact_apprise_url(v) for v in value]
+    return redact_apprise_url(value) if isinstance(value, str) else value
+
+
 def _fmt_value(opt: cat.Option, value: Any) -> str:
+    value = _redact_urls(opt, value)
     if value is None:
         return "(empty)" if opt.kind != "tristate" else "auto"
     if value == "":
@@ -195,6 +206,9 @@ def _flatten(node: Any, prefix: str = "") -> Dict[str, Any]:
 def _show(path: str, value: Any) -> str:
     if any(word in path.rsplit(".", 1)[-1] for word in _SECRET_KEYS):
         return "********" if value else "(empty)"
+    if ".urls[" in f".{path}" and isinstance(value, str):
+        from eneru.utils import redact_apprise_url
+        return redact_apprise_url(value)
     if value is None:
         return "null"
     if isinstance(value, bool):
@@ -477,8 +491,8 @@ class EditorModel:
         rows: List[Row] = []
         if isinstance(items, list):
             for i, item in enumerate(items):
-                rows.append(Row("scalar", str(item), base + (i,), opt,
-                                help=opt.help))
+                rows.append(Row("scalar", str(_redact_urls(opt, item)),
+                                base + (i,), opt, help=opt.help))
         rows.append(Row("add", "+ Add value", base, opt, help=opt.help))
         return rows
 
@@ -505,7 +519,8 @@ class EditorModel:
         if not self.doc.is_multi_ups():
             return ()
         for label, base in self._group_paths():
-            if base and self.doc.get(base + ("is_local",), False) is True:
+            # The daemon's view: `is_local: yes` is True in YAML 1.1.
+            if base and self.vget(base + ("is_local",)) is True:
                 return base
         return None
 

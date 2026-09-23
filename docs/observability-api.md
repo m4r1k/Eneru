@@ -311,8 +311,11 @@ mqtt:
 # With EPEL (RHEL 9 / 10):
 sudo dnf install python3-paho-mqtt
 
-# Without EPEL (PEP 668 — system site-packages externally managed):
+# Without EPEL, RHEL 10 (PEP 668 — system site-packages externally managed):
 python3 -m pip install --break-system-packages paho-mqtt
+
+# Without EPEL, RHEL 9 (older pip, no PEP 668 marker):
+python3 -m pip install paho-mqtt
 ```
 
 For PyPI installs use the optional extra:

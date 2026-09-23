@@ -5,7 +5,7 @@ Usage: config-tui-driver.py KEYS -- eneru config -c FILE --basic
 
 KEYS is a Python string literal of keystrokes (escapes allowed, e.g.
 "2\\r" or "\\x15TestUPS\\r"); "|" pauses between chunks so the TUI can
-redraw and run its checks. Stdlib only: runs on the plain CI runner.
+redraw and run its checks (type a literal pipe as \\x7c). Stdlib only: runs on the plain CI runner.
 Exits with the editor's own exit code (124 if it never quit).
 """
 
@@ -36,7 +36,8 @@ def main() -> int:
     if len(sys.argv) < 4 or sys.argv[2] != "--":
         print(__doc__)
         return 2
-    keys = decode_keys(sys.argv[1])
+    # Split on the raw "|" first, so an escaped \x7c can type a literal pipe.
+    chunks = [decode_keys(c) for c in sys.argv[1].split("|")]
     argv = sys.argv[3:]
     pid, fd = pty.fork()
     if pid == 0:
@@ -60,8 +61,11 @@ def main() -> int:
                 sys.stdout.buffer.write(data)
 
     pump(3.0)
-    for chunk in keys.split("|"):
-        os.write(fd, chunk.encode())
+    for chunk in chunks:
+        try:
+            os.write(fd, chunk.encode())
+        except OSError:
+            break  # the program already exited; report its exit code below
         pump(2.0)
     deadline = time.time() + 15
     while time.time() < deadline:

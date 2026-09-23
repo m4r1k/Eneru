@@ -176,7 +176,7 @@ eneru validate --config /etc/ups-monitor/config.yaml
 
 Validation catches YAML errors, invalid enum values, local-resource ownership mistakes, duplicate remote-server ownership, bad redundancy-group references, and unsafe notification suppression.
 
-For a deeper, live inspection, run `eneru config check`. It also logs in to NUT, SSHes to every remote server, proves sudo permissions with `sudo -n -l` without running anything, and prints what happens on power loss. To build or change a config step by step with every option explained, use `eneru config`. See [Config editor and checker](config-editor.md).
+For a deeper, live inspection, run `eneru config check`. It also logs in to NUT, SSHes to every enabled remote server, proves sudo permissions with `sudo -n -l` without running anything, and prints what happens on power loss. To build or change a config step by step with every option explained, use `eneru config`. See [Config editor and checker](config-editor.md).
 
 ## Top-level sections
 
@@ -429,8 +429,11 @@ needs a restart.
 **MQTT on RHEL.** Debian/Ubuntu `.deb` packages install `python3-paho-mqtt` as a hard dependency. RPM packages list it as a `Recommends:` only. EPEL ships it for RHEL 9 and RHEL 10, so dnf pulls it in automatically when EPEL is enabled. Without EPEL, install it via pip after installing eneru:
 
 ```bash
-# Without EPEL (PEP 668 — system site-packages externally managed):
+# Without EPEL, RHEL 10 (PEP 668 — system site-packages externally managed):
 python3 -m pip install --break-system-packages paho-mqtt
+
+# Without EPEL, RHEL 9 (older pip, no PEP 668 marker):
+python3 -m pip install paho-mqtt
 ```
 
 If MQTT is enabled but `paho-mqtt` isn't importable, the publisher logs a warning and disables itself; the daemon keeps running. The MQTT publisher reconnects with bounded exponential backoff (1 s → 60 s) on connection failure or unexpected disconnect.
